@@ -73,7 +73,7 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }   # priority -1 so the deny lints below win
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"

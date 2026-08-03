@@ -79,11 +79,11 @@ begins once the "no engine code yet" hold is lifted.
 
 | ID | Workstream | Status | Notes |
 | --- | --- | --- | --- |
-| F-001 | Workspace skeleton (root Cargo.toml + crate dirs) | Not started | Blueprint in doc 29 |
-| F-002 | rust-toolchain.toml, workspace lints, release profile | Not started | ADR-pending MSRV |
-| F-003 | deny.toml supply-chain policy | Not started | — |
-| F-004 | CI workflow (all gate jobs) | Not started | Job names per doc 15 |
-| F-005 | CI badges wired | Not started | — |
+| F-001 | Workspace skeleton (root Cargo.toml + crate dirs) | Done | 15 crates + 2 tools; `cargo check --workspace` green (2026-08-04) |
+| F-002 | rust-toolchain.toml, workspace lints, release profile | Done | channel 1.96.0; clippy `all` priority -1 |
+| F-003 | deny.toml supply-chain policy | Done | `cargo deny check` bans/licenses/sources ok |
+| F-004 | CI workflow (gate jobs) | Done | format/lint/test/docs/wasm/dependency-policy/platform(+MSRV); benchmark/fuzz/repo/browser jobs deferred to their items |
+| F-005 | CI badge wired | Done | README badge → ci.yml |
 | F-006 | Fixture corpus + manifest.json + generator | Not started | Checksummed |
 | F-007 | Benchmark harness + baseline | Not started | Versioned JSON |
 | F-008 | Fuzz workspace (pinned nightly) | Not started | Bounded-package target |

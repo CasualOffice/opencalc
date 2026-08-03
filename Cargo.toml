@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/casual-calc-model",
+    "crates/casual-calc-formula",
+    "crates/casual-calc-package",
+    "crates/casual-calc-ooxml",
+    "crates/casual-calc-import",
+    "crates/casual-calc-export",
+    "crates/casual-calc-ods",
+    "crates/casual-calc-io",
+    "crates/casual-calc-transaction",
+    "crates/casual-calc-selection",
+    "crates/casual-calc-eval",
+    "crates/casual-calc-layout",
+    "crates/casual-calc-render",
+    "crates/casual-calc-sdk",
+    "crates/casual-calc-wasm",
+    "tools/casual-calc-benchmark",
+    "tools/casual-calc-fidelity",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/CasualOffice/opencalc"
+rust-version = "1.88.0"          # MSRV — ADR-pending, see docs/08-ADR-REGISTER.md
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

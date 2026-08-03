@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.96.0"              # dev toolchain — ADR-pending, see docs/08-ADR-REGISTER.md
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

@@ -1,5 +1,6 @@
 # OpenCalc
 
+[![CI](https://github.com/CasualOffice/opencalc/actions/workflows/ci.yml/badge.svg)](https://github.com/CasualOffice/opencalc/actions/workflows/ci.yml)
 [![Status: Pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](docs/06-ROADMAP-AND-DELIVERY.md)
 [![Rust: TBD](https://img.shields.io/badge/rust-MSRV%20TBD-black.svg?logo=rust)](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -25,10 +26,13 @@ recalculation engine**, and a **virtualized grid layout**.
 Developed by [CasualOffice](https://github.com/CasualOffice) as the spreadsheet
 engine for Casual Sheets and an SDK others can embed.
 
-> **This repository is documentation-first and pre-code.** Everything here is the
-> design record: the architecture, the phased roadmap, the format and schema
-> contracts, and the process. No engine code has been written yet. See
-> [docs/06-ROADMAP-AND-DELIVERY.md](docs/06-ROADMAP-AND-DELIVERY.md) for the plan
+> **Status: Phase 0 — Foundation (just started).** The documentation phase is
+> closed ([exit report](docs/31-PHASE-D-EXIT-REPORT.md)); the design record — the
+> architecture, phased roadmap, format/schema contracts, and process — is
+> complete and the Cargo workspace skeleton now builds. **No engine logic has
+> been written yet** beyond crate stubs. See
+> [docs/29-PHASE-0-PLAN.md](docs/29-PHASE-0-PLAN.md) for the Phase 0 work items,
+> [docs/06-ROADMAP-AND-DELIVERY.md](docs/06-ROADMAP-AND-DELIVERY.md) for the plan,
 > and [docs/14-EXECUTION-TRACKER.md](docs/14-EXECUTION-TRACKER.md) for live state.
 
 ## Why OpenCalc

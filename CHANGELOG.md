@@ -11,6 +11,21 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 0 foundation begins
+
+**Added**
+
+- Cargo workspace skeleton (F-001): 15 library crates (`casual-calc-*`) and 2
+  tool crates, with workspace-inherited manifests. `cargo check --workspace` is
+  green; `unsafe_code` is forbidden workspace-wide.
+- Toolchain and policy (F-002/003): `rust-toolchain.toml` (channel 1.96.0,
+  wasm32 target), workspace lints + release profile, and `deny.toml`
+  supply-chain policy (`cargo deny check` passes).
+- CI workflow (F-004/005): `format`, `lint`, `test`, `docs`, `wasm`,
+  `dependency-policy`, and a `platform` matrix (macOS/Windows + a 1.88.0 MSRV
+  check); README CI badge. Benchmark/fuzz/repo-policy/browser jobs are added with
+  their harnesses.
+
 ### 2026-08-04 — Documentation foundation
 
 **Added**
