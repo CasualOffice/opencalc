@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# WASM build output (added in later phases)
+/webapp/pkg/
