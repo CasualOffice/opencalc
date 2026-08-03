@@ -104,7 +104,7 @@ designed in [docs/19-WORKSPACE-SCAFFOLD-DESIGN.md](docs/19-WORKSPACE-SCAFFOLD-DE
 | `casual-calc-ods` | Security-bounded OpenDocument Spreadsheet admission and semantic import |
 | `casual-calc-import` | SpreadsheetML semantic import into the normalized model + preservation ledger |
 | `casual-calc-export` | XLSX writers: byte-identical reconstruction and the semantic model → SpreadsheetML writer |
-| `casual-calc-io` | Format-neutral identities, detection/dispatch, and built-in adapters (XLSX, ODS, CSV, normalized JSON) |
+| `casual-calc-io` | Format-neutral identities, detection/dispatch, and built-in adapters (XLSX, ODS, CSV/TSV/PSV, normalized JSON) |
 | `casual-calc-layout` | Grid geometry, column/row sizing, frozen panes, merged cells, in-cell text shaping (`parley`), viewport virtualization, and the backend-neutral display list |
 | `casual-calc-render` | CPU render backend: executes the display list on a `tiny-skia` pixmap, rasterizing glyphs from `skrifa` outlines |
 | `casual-calc-wasm` | `wasm-bindgen` bridge that drives the browser grid editor |

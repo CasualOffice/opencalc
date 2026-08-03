@@ -36,6 +36,7 @@ with a note. A code is part of the public contract once shipped.
 | `OC-PKG-0003` | Expansion ratio over limit (possible zip bomb) | limit |
 | `OC-PKG-0004` | Path traversal / unsafe path rejected | security |
 | `OC-PKG-0005` | Not a valid OPC/ZIP package | malformed |
+| `OC-PKG-0006` | Requested part not found in the package | lookup |
 | `OC-XML-0001` | Element count over limit | limit |
 | `OC-XML-0002` | Nesting depth over limit | limit |
 | `OC-XML-0003` | External entity resolution refused (XXE) | security |

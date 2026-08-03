@@ -37,8 +37,8 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | `.xlsx` (SpreadsheetML) | ○ | ○ | Primary path; byte-identical + semantic writers |
-| `.ods` (OpenDocument) | ○ | ○ | Secondary path (`casual-calc-ods`) |
-| CSV / TSV | ○ | ○ | Lossy tabular interchange |
+| `.ods` (OpenDocument) | ○ | ○ | Secondary open-format path (`casual-calc-ods`); shares the OPC substrate |
+| CSV / TSV / PSV | ○ | ○ | Delimited text (comma/tab/pipe); lossy tabular interchange; not packages |
 | Normalized JSON | ○ | ○ | The engine's own snapshot format |
 
 ## SpreadsheetML feature capability (target)

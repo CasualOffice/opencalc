@@ -30,7 +30,8 @@ Every feature follows the same eight-step arc, mirroring
 - **The calculation chain** — what `calcChain.xml` records, why it is a *hint*
   and can be rebuilt, and when Excel rejects a stale one.
 - **OpenDocument Spreadsheet (`.ods`)** — the secondary import/export path.
-- **CSV / TSV** — lossy tabular interchange and its ambiguities.
+- **CSV / TSV / PSV** — delimited text (comma/tab/pipe): lossy tabular
+  interchange, delimiter/quoting/encoding ambiguities; not OPC packages.
 - **Preservation** — the loss-aware discipline: dual-axis disposition taxonomy,
   compatibility report, retention byte-floor, opaque part side-table
   ([docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md](docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md)).

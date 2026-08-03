@@ -7,5 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+# Pure-Rust deflate (miniz_oxide) so the crate compiles to wasm32-unknown-unknown.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [lints]
 workspace = true

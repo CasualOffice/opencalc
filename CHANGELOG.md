@@ -15,6 +15,15 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-package` (F-009): bounded ZIP/OPC package admission — the
+  format-neutral substrate for `.xlsx` and `.ods`. `Package::open` enforces
+  input-size, entry-count, expansion-ratio, total-expansion, and path-safety
+  limits (`PackageLimits`); `read_part` decompresses on demand under a size cap.
+  Hostile inputs (zip bomb, path traversal, oversized, too-many-entries) are
+  rejected cleanly with stable `OC-PKG-*` codes and covered by 10 tests. Compiles
+  to `wasm32-unknown-unknown` via pure-Rust deflate. Clarified that CSV/TSV/PSV
+  are delimited-text adapters that do not pass through the package layer.
+
 - Cargo workspace skeleton (F-001): 15 library crates (`casual-calc-*`) and 2
   tool crates, with workspace-inherited manifests. `cargo check --workspace` is
   green; `unsafe_code` is forbidden workspace-wide.

@@ -11,6 +11,13 @@ cleanly, never crashed on.
 
 ## `casual-calc-package` — bounded OPC substrate
 
+> **Status: implemented (Phase 0, F-009).** `Package::open(bytes, PackageLimits)`
+> admits an archive under the limits below and exposes `read_part`, `entries`,
+> `entry_names`, and `contains`. Hostile inputs (zip bomb, path traversal,
+> oversized, too-many-entries) are covered by tests and rejected with stable
+> `OC-PKG-*` codes ([20](20-ERROR-CODE-REGISTRY.md)). Compiles to
+> `wasm32-unknown-unknown` (pure-Rust deflate).
+
 - Wraps ZIP reading with **non-bypassable limits**: max input size, max entry
   count, max total expanded size, max expansion ratio (zip-bomb defense), max
   path length, path-traversal rejection.

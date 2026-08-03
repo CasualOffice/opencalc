@@ -86,8 +86,10 @@ the semantic writer. Depends on `-import` (for retained source) and `-model`.
 OOXML path under the `-io` registry.
 
 **`casual-calc-io`** — format-neutral identity/detection/dispatch and the adapter
-registry (XLSX, ODS, CSV, JSON). The single entry point hosts call to open/save
-"a spreadsheet" without naming a format.
+registry (XLSX, ODS, CSV/TSV/PSV, JSON). The single entry point hosts call to
+open/save "a spreadsheet" without naming a format. Delimited text formats
+(CSV/TSV/PSV — comma/tab/pipe) are plain-text adapters here and do **not** pass
+through `casual-calc-package`; only OPC formats (`.xlsx`, `.ods`) do.
 
 ### Editing
 

@@ -84,10 +84,10 @@ begins once the "no engine code yet" hold is lifted.
 | F-003 | deny.toml supply-chain policy | Done | `cargo deny check` bans/licenses/sources ok |
 | F-004 | CI workflow (gate jobs) | Done | format/lint/test/docs/wasm/dependency-policy/platform(+MSRV); benchmark/fuzz/repo/browser jobs deferred to their items |
 | F-005 | CI badge wired | Done | README badge → ci.yml |
-| F-006 | Fixture corpus + manifest.json + generator | Not started | Checksummed |
+| F-006 | Fixture corpus + manifest.json + generator | In progress | Hostile cases covered by in-crate tests (in-memory zips); committed corpus + manifest still pending |
 | F-007 | Benchmark harness + baseline | Not started | Versioned JSON |
 | F-008 | Fuzz workspace (pinned nightly) | Not started | Bounded-package target |
-| F-009 | casual-calc-package: bounded OPC admission | Not started | First real logic; hostile-fixture gate |
+| F-009 | casual-calc-package: bounded OPC admission | Done | limits + path safety + capped part reads; 10 tests incl. zip-bomb/traversal; wasm-clean; codes OC-PKG-0001..0006 |
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Not started | Empty-workbook byte-stable snapshot |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Not started | Opens a trivial .xlsx |
 
