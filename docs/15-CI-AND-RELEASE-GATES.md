@@ -18,7 +18,7 @@ which gates are not yet built.
 | `test` | `cargo test --workspace --all-features --locked` (+ doc tests) | Correctness, determinism, round-trip, recalc goldens |
 | `docs` | `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings` | Doc builds; intra-doc links valid |
 | `wasm` | `cargo check --target wasm32-unknown-unknown` | The engine stays WASM-clean |
-| `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + no gross regression |
+| `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + determinism (**implemented**, F-007) |
 | `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile |
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |

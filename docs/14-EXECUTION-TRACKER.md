@@ -85,7 +85,7 @@ begins once the "no engine code yet" hold is lifted.
 | F-004 | CI workflow (gate jobs) | Done | format/lint/test/docs/wasm/dependency-policy/platform(+MSRV); benchmark/fuzz/repo/browser jobs deferred to their items |
 | F-005 | CI badge wired | Done | README badge → ci.yml |
 | F-006 | Fixture corpus + manifest.json + generator | In progress | Hostile cases covered by in-crate tests (in-memory zips); committed corpus + manifest still pending |
-| F-007 | Benchmark harness + baseline | Not started | Versioned JSON |
+| F-007 | Benchmark harness + baseline | Done | tools/casual-calc-benchmark: versioned JSON, median/p95 + determinism check; committed dev-reference baseline; CI benchmark-smoke job with jq validation |
 | F-008 | Fuzz workspace (pinned nightly) | Not started | Bounded-package target |
 | F-009 | casual-calc-package: bounded OPC admission | Done | limits + path safety + capped part reads; 10 tests incl. zip-bomb/traversal; wasm-clean; codes OC-PKG-0001..0006 |
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |

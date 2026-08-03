@@ -26,6 +26,13 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "casual-calc-benchmark"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-model",
+ "casual-calc-package",
+ "serde",
+ "serde_json",
+ "zip",
+]
 
 [[package]]
 name = "casual-calc-eval"

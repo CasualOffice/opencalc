@@ -15,6 +15,10 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-benchmark` (F-007): reproducible micro-benchmark harness emitting
+  versioned JSON (median/p95 ns, output checksum + determinism flag, per-case
+  regression tolerance), a `--smoke` mode, a committed `dev-reference` baseline,
+  and a CI `benchmark-smoke` job that validates the report shape with `jq`.
 - `casual-calc-ooxml` (F-011): SpreadsheetML package discovery — opens a
   `.xlsx`, follows the OPC graph (root rels → workbook part → `<sheets>` →
   workbook rels) to resolve the workbook part and each worksheet's part, under

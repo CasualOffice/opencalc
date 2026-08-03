@@ -52,6 +52,18 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - run: cargo check --target wasm32-unknown-unknown
 
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run benchmark smoke and validate report shape
+        run: |
+          cargo run -q -p casual-calc-benchmark -- --smoke --env ci > report.json
+          jq -e '.schemaVersion == 1
+                 and (.cases | length) >= 1
+                 and (all(.cases[]; has("id") and has("medianNs") and .deterministic == true))' \
+             report.json
+
   dependency-policy:
     runs-on: ubuntu-latest
     steps:

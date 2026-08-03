@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev-reference",
+  "smoke": false,
+  "cases": [
+    {
+      "id": "model-snapshot-roundtrip-10k",
+      "iterations": 200,
+      "medianNs": 3147167,
+      "p95Ns": 3509375,
+      "outputChecksum": 13881318137092905057,
+      "deterministic": true,
+      "maxRegressionBasisPoints": 500
+    },
+    {
+      "id": "package-open-small",
+      "iterations": 200,
+      "medianNs": 9166,
+      "p95Ns": 11000,
+      "outputChecksum": 814787628168132631,
+      "deterministic": true,
+      "maxRegressionBasisPoints": 500
+    }
+  ]
+}
