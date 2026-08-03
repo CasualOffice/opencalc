@@ -15,6 +15,14 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-model` (F-010): the normalized workbook shell — non-zero hex
+  `Id` + `IdGenerator` + typed id newtypes, `CellValue`/`ErrorValue`, a compact
+  `Cell` carrying the **reserved calc seams** (`formula` handle, cached `value`,
+  `CellFlags` spill bits), the sparse ordered `CellStore` (blank cells cost
+  nothing), `Sheet`, and `Workbook` with deterministic, byte-stable JSON
+  snapshot I/O (`deny_unknown_fields` + `skip_serializing_if`). The empty-workbook
+  byte-stable round-trip (a Phase 0 exit-gate condition) is gated by a test.
+  8 tests.
 - `casual-calc-package` (F-009): bounded ZIP/OPC package admission — the
   format-neutral substrate for `.xlsx` and `.ods`. `Package::open` enforces
   input-size, entry-count, expansion-ratio, total-expansion, and path-safety

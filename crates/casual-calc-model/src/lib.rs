@@ -1,4 +1,34 @@
-//! Normalized workbook model: sheets, sparse cell grid, styles, snapshot I/O, reserved calc seams.
+//! `casual-calc-model` — the normalized, in-memory workbook.
 //!
-//! Phase 0 skeleton — see `docs/19-WORKSPACE-SCAFFOLD-DESIGN.md` for this
-//! crate's role in the layer division. No engine logic yet.
+//! This is the authoritative representation a workbook is imported into, edited
+//! through, calculated over, laid out from, and written back from. It is
+//! deliberately sparse and compact (the 1M-cell target) and carries the
+//! **reserved calc seams** — [`cell::Cell::formula`], the cached
+//! [`cell::Cell::value`], and the [`cell::CellFlags`] spill bits — so the
+//! Phase 2 calc engine adds behavior, not schema.
+//!
+//! Snapshots serialize deterministically (fixed field order, ordered cell
+//! store) so golden files are byte-stable.
+//!
+//! See `docs/22-NORMALIZED-SCHEMA.md` and `docs/23-CELL-STORE-REPRESENTATION.md`.
+
+mod cell;
+mod error;
+mod ids;
+mod sheet;
+mod store;
+mod value;
+mod workbook;
+
+pub use cell::{Cell, CellFlags};
+pub use error::ModelError;
+pub use ids::{
+    DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
+};
+pub use sheet::Sheet;
+pub use store::{CellRef, CellStore};
+pub use value::{CellValue, ErrorValue};
+pub use workbook::{SCHEMA_VERSION, Workbook};
+
+#[cfg(test)]
+mod tests;

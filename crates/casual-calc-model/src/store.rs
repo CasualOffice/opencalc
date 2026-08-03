@@ -1,0 +1,117 @@
+//! The sparse cell grid.
+//!
+//! The public API here (point access, ordered iteration, blank-eviction) is the
+//! stable contract; the internal representation is a tuning decision. This shell
+//! uses an ordered `BTreeMap` keyed row-major, which already gives deterministic
+//! iteration and zero cost for empty cells. The row-blocked tile layout in
+//! `docs/23-CELL-STORE-REPRESENTATION.md` is a later performance implementation
+//! *behind this same API* — swapping it in is not an API change.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::cell::Cell;
+
+/// A cell address within a sheet. Ordering is row-major, matching the
+/// deterministic snapshot iteration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CellRef {
+    /// Zero-based row.
+    pub row: u32,
+    /// Zero-based column.
+    pub col: u32,
+}
+
+impl CellRef {
+    /// A reference to `(row, col)`.
+    pub fn new(row: u32, col: u32) -> Self {
+        Self { row, col }
+    }
+}
+
+/// One stored cell with its address; the on-wire form of a [`CellStore`] entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredCell {
+    row: u32,
+    col: u32,
+    cell: Cell,
+}
+
+/// The sparse grid of populated cells for one sheet.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<StoredCell>", into = "Vec<StoredCell>")]
+pub struct CellStore {
+    cells: BTreeMap<CellRef, Cell>,
+}
+
+impl CellStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of populated cells.
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Whether no cells are populated.
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// Get the cell at `at`, if populated.
+    pub fn get(&self, at: CellRef) -> Option<&Cell> {
+        self.cells.get(&at)
+    }
+
+    /// Set the cell at `at`. A blank cell is evicted rather than stored, so
+    /// empty cells never cost memory.
+    pub fn set(&mut self, at: CellRef, cell: Cell) {
+        if cell.is_blank() {
+            self.cells.remove(&at);
+        } else {
+            self.cells.insert(at, cell);
+        }
+    }
+
+    /// Remove the cell at `at`, returning it if it was populated.
+    pub fn clear(&mut self, at: CellRef) -> Option<Cell> {
+        self.cells.remove(&at)
+    }
+
+    /// Iterate populated cells in deterministic row-major order.
+    pub fn iter(&self) -> impl Iterator<Item = (CellRef, &Cell)> {
+        self.cells.iter().map(|(r, c)| (*r, c))
+    }
+}
+
+impl From<Vec<StoredCell>> for CellStore {
+    fn from(entries: Vec<StoredCell>) -> Self {
+        let mut cells = BTreeMap::new();
+        for entry in entries {
+            let at = CellRef::new(entry.row, entry.col);
+            if !entry.cell.is_blank() {
+                cells.insert(at, entry.cell);
+            }
+        }
+        Self { cells }
+    }
+}
+
+impl From<CellStore> for Vec<StoredCell> {
+    fn from(store: CellStore) -> Self {
+        store
+            .cells
+            .into_iter()
+            .map(|(at, cell)| StoredCell {
+                row: at.row,
+                col: at.col,
+                cell,
+            })
+            .collect()
+    }
+}

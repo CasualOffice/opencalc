@@ -6,6 +6,17 @@ written back from. This is a **contract** doc: the schema versions independently
 ([02](02-ARCHITECTURE.md)) and changes append-only where possible so golden
 snapshots stay byte-stable.
 
+> **Status: shell implemented (Phase 0, F-010).** `casual-calc-model` provides
+> `Id`/`IdGenerator` and typed id newtypes, `CellValue`/`ErrorValue`, `Cell` with
+> the reserved calc seams (`formula: Option<FormulaHandle>`, cached `value`,
+> `CellFlags` spill bits), the sparse `CellStore` (ordered API; block layout is a
+> later perf impl behind it — see [23](23-CELL-STORE-REPRESENTATION.md)), `Sheet`,
+> and `Workbook` with deterministic, byte-stable JSON snapshot I/O
+> (`deny_unknown_fields` + `skip_serializing_if`). The empty-workbook byte-stable
+> round-trip is gated by a test. Definition tables (styles, numbering, defined
+> names, notes, theme) and per-sheet dependency edges are still to be filled in as
+> import matures.
+
 Two properties dominate the design:
 
 1. **Sparse & compact** to meet the 1M-cell target (ADR-004, [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)).
