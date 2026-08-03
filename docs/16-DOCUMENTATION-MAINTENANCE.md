@@ -36,7 +36,7 @@ written design matches the code. This doc says when and how to keep `docs/` true
 ## Research freshness
 
 Competitive and format research goes stale. When you cite Excel/LibreOffice/
-Univer/IronCalc/Google Sheets behavior, record:
+OnlyOffice/Univer/IronCalc/Formualizer/Google Sheets behavior, record:
 
 - the **source** (doc, product version, or observed behavior),
 - the **date checked**, and

@@ -69,9 +69,11 @@ The heart of the 1M-cell target. Cells are **keyed by address**, never a dense
 array. Design intent (final representation chosen in Phase 0, then benchmarked):
 
 - Addressed by `(row: u32, col: u32)`; empty cells are simply absent.
-- Backing structure is block-partitioned (e.g. row-blocked or tiled) so both
+- Backing structure is block-partitioned (row-blocked sparse tiles) so both
   range scans (layout, calc) and point access (edit) are efficient, and so a
-  sheet with clustered data stays compact.
+  sheet with clustered data stays compact. The full internal design — block
+  layout, the per-cell byte budget, and structural-edit behavior — is
+  [23-CELL-STORE-REPRESENTATION](23-CELL-STORE-REPRESENTATION.md).
 - **Per-cell record is compact and fixed-shape** — no fat boxed enum per cell:
 
 ```
@@ -79,7 +81,7 @@ Cell
 ├── value: CellValue          // the CACHED/literal value (see below)
 ├── style: StyleId            // interned; 1M cells → 1 style costs 1
 ├── formula: Option<FormulaHandle>   // RESERVED calc seam — AST by handle
-└── flags: CellFlags          // dirty, has-spill-parent, etc. (reserved bits)
+└── flags: CellFlags          // dirty, spill-anchor, spill-child, etc. (reserved bits)
 ```
 
 ```

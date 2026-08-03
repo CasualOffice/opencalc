@@ -57,11 +57,15 @@ Use exactly these values — no ad-hoc statuses:
 | DOC-009 | SpreadsheetML fidelity & preservation (34) | Done | Loss-aware discipline |
 | DOC-010 | XLSX package reader (28) | Done | — |
 | DOC-011 | Error registry + parser limits (20, 21) | Done | Security contracts |
-| DOC-012 | Competitive analysis (12) | Done | Univer/OnlyOffice/LO Calc/Excel/Sheets/IronCalc |
+| DOC-012 | Competitive analysis (12) | Done | Univer/OnlyOffice/LO Calc/Excel/Sheets/IronCalc/Formualizer |
 | DOC-013 | Dual-host design: Tauri desktop (native) + web (WASM) | Done | Folded into 02/18/19/40; host capability trait |
 | DOC-014 | Tauri desktop shell design note (44) | Done | Native host; capability trait; command surface |
 | DOC-015 | Repo scaffolding (LICENSE, SECURITY, GOVERNANCE, CODE_OF_CONDUCT, .github templates) | Done | Apache-2.0; PR + issue templates |
 | DOC-016 | CI workflow YAML + rust-toolchain.toml + deny.toml | Not started | Deferred to Phase 0 (needs the cargo workspace); gates specified in doc 15 |
+| DOC-017 | Cell-store representation (23) | Done | Sparse row-blocked tiles; per-cell budget (ADR-004) |
+| DOC-018 | Transaction & edit semantics (24) | Done | Op set, inverses, reference rewriting, collab seam |
+| DOC-019 | Doc-set consistency audit + fixes | Done | 11 findings applied 2026-08-04 |
+| DOC-020 | Export & round-trip design (36) | Done | Byte-identical repackager + semantic writer |
 
 ## Phase rows
 

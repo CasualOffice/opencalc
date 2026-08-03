@@ -71,8 +71,8 @@ system, and it is always **counted and reported** — never silent.
 | **Inspect** | original bytes kept under stricter policy | For analysis; not for editing |
 
 Retention mode gives the **byte-identical floor**: the export byte-identical
-repackager ([export design](06-ROADMAP-AND-DELIVERY.md) Phase 1B) re-zips the
-retained parts unchanged.
+repackager ([36-EXPORT-AND-ROUNDTRIP-DESIGN](36-EXPORT-AND-ROUNDTRIP-DESIGN.md))
+re-zips the retained parts unchanged.
 
 ## The opaque side table
 

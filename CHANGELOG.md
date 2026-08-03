@@ -33,6 +33,20 @@ the design doc or ADR that motivated it.
   trait, and the command surface.
 - Repository scaffolding: `LICENSE` (Apache-2.0), `SECURITY.md`, `GOVERNANCE.md`,
   `CODE_OF_CONDUCT.md`, and `.github/` PR + issue templates.
+- Cell-store representation (`23`) — the sparse row-blocked tile design, per-cell
+  byte budget, and structural-edit behavior behind the 1M-cell / 60 fps targets.
+- Transaction & edit semantics (`24`) — the closed operation set, atomic
+  inverses, reference rewriting on structural edits, dirty-set emission, and the
+  collaboration seam.
+- Export & round-trip design (`36`) — the byte-identical repackager and the
+  deterministic semantic writer, and the Phase 1B round-trip fixed-point gate.
+
+**Changed**
+
+- Consistency audit across the whole doc set: aligned the architecture-pillar
+  index, added pending ADRs (dual-host capability trait, edit/op-schema),
+  corrected an ADR attribution, standardized spill-flag and product-name
+  terminology, and marked the MSRV provisional (pinned at Phase 0).
 
 **Notes**
 

@@ -22,8 +22,10 @@ the other way around. This index is the map.
 - Ranges are conventional, mirroring the OpenDoc layout so the two engines feel
   like siblings:
   - **00–19** — foundation, process, and top-level architecture.
-  - **20–31** — stable contracts (schemas, limits, registries, package reader).
-  - **30, 34, 40, 42** — the performance/fidelity/calc/grid architecture pillars.
+  - **20–28** — stable contracts (schemas, cell store, transactions, limits,
+    registries, package reader).
+  - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
+    desktop architecture pillars.
   - **50+** — per-construct design notes (added as phases open).
 
 ## Index
@@ -39,7 +41,7 @@ the other way around. This index is the map.
 | 07 | [Quality, Security & Compatibility](07-QUALITY-SECURITY-AND-COMPATIBILITY.md) | The non-negotiables |
 | 08 | [ADR Register](08-ADR-REGISTER.md) | Accepted architecture decisions |
 | 11 | [Design-First Process](11-DESIGN-FIRST-PROCESS.md) | How work is designed before it is built |
-| 12 | [Competitive Analysis](12-COMPETITIVE-ANALYSIS.md) | Excel, LibreOffice, OnlyOffice, Univer, IronCalc, Google Sheets |
+| 12 | [Competitive Analysis](12-COMPETITIVE-ANALYSIS.md) | Excel, LibreOffice, OnlyOffice, Univer, IronCalc, Formualizer, Google Sheets |
 | 14 | [Execution Tracker](14-EXECUTION-TRACKER.md) | Live state of all work (tracked, always) |
 | 15 | [CI & Release Gates](15-CI-AND-RELEASE-GATES.md) | The PR contract |
 | 16 | [Documentation Maintenance](16-DOCUMENTATION-MAINTENANCE.md) | Keeping docs and code in sync |
@@ -54,14 +56,17 @@ the other way around. This index is the map.
 | 20 | [Error-Code Registry](20-ERROR-CODE-REGISTRY.md) | Stable diagnostic codes |
 | 21 | [Parser Limits](21-PARSER-LIMITS.md) | Security bounds on all admission |
 | 22 | [Normalized Workbook Schema](22-NORMALIZED-SCHEMA.md) | The in-memory model + reserved calc seams |
+| 23 | [Cell-Store Representation](23-CELL-STORE-REPRESENTATION.md) | The sparse grid internals (drives T1/T2) |
+| 24 | [Transaction & Edit Semantics](24-TRANSACTION-AND-EDIT-SEMANTICS.md) | Op set, inverses, reference rewriting, collab seam |
 | 28 | [XLSX Package Reader](28-XLSX-PACKAGE-READER.md) | SpreadsheetML OPC admission |
 
-### Architecture pillars (30, 34, 40, 42)
+### Architecture pillars (30, 34, 36, 40, 42, 44)
 
 | # | Title | Purpose |
 | --- | --- | --- |
 | 30 | [Performance & Capacity Targets](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) | 1M cells, 60 fps, <50 ms recalc |
-| 34 | [SpreadsheetML Fidelity & Preservation](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md) | Loss-aware import/export |
+| 34 | [SpreadsheetML Fidelity & Preservation](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md) | Loss-aware import |
+| 36 | [Export & Round-Trip](36-EXPORT-AND-ROUNDTRIP-DESIGN.md) | Byte-identical repackager + semantic writer |
 | 40 | [Formula & Calculation Engine](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md) | Parser, dependency graph, recalc (Phase 2, designed now) |
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |

@@ -46,6 +46,8 @@ products, this doc fixes the meaning we use.
 - **Dirty propagation** — marking a cell and its transitive dependents stale.
 - **Volatile function** — one that must recompute every calc (`NOW`, `RAND`, …).
 - **Spill / dynamic array** — a formula whose result populates a range of cells.
+  The origin cell is the **spill-anchor**; the cells it fills are **spill-child**
+  cells (the `CellFlags` names used across docs 22/23/40).
 - **Iterative calculation** — bounded re-evaluation of intentional cycles.
 - **Error value** — `#REF!`, `#VALUE!`, `#DIV/0!`, `#N/A`, `#NAME?`, `#NULL!`,
   `#NUM!`, `#SPILL!`, etc.

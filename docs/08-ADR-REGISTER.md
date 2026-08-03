@@ -27,10 +27,22 @@ decision is marked `Superseded by ADR-NNN`, not edited away.
 
 ## Pending / to be written
 
+- ADR for the **dual-host capability trait** (no `#[cfg]` forks in the engine;
+  threads/clock/parallelism host-supplied) — promised by
+  [19](19-WORKSPACE-SCAFFOLD-DESIGN.md) boundary invariant 7,
+  [02](02-ARCHITECTURE.md) §Host targets, and [44](44-TAURI-DESKTOP-SHELL-DESIGN.md);
+  to be Accepted at Phase 0.
+- ADR for the **edit / operation schema** (the closed op set, inverses, and the
+  independently-versioned op wire format) — triggered by
+  [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md); to be Accepted before Phase 1A
+  editing lands.
 - ADR for the **dependency-graph representation** (cell-level vs block-level
   nodes, range handling) — proposed in [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md),
   to be Accepted before Phase 2.
 - ADR for the **recalculation ordering strategy** (topological + dirty
   propagation vs Excel's calc-chain replay).
+- ADR for the **cell-store constants** (block height, second-axis blocking,
+  `Cell` byte ceiling) — the *shape* is Accepted (ADR-004); the *constants* are
+  benchmarked and pinned at Phase 0, see [23](23-CELL-STORE-REPRESENTATION.md).
 - ADR for the **collaboration op model** (Phase 5).
 - ADR for **MSRV / toolchain pin** once the workspace is scaffolded.

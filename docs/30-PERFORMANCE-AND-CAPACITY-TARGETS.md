@@ -46,7 +46,10 @@ beyond a basis-point threshold fail CI.
   full-layout output** for the same window. This is golden-tested so
   virtualization can never silently diverge from correctness.
 
-### T3 — <50 ms recalc ⇒ an incremental dependency graph (ADR-005)
+### T3 — <50 ms recalc ⇒ an incremental dependency graph
+
+(Rests on the reserved calc seams, ADR-005; the dependency-graph *representation*
+itself is a pending ADR to be Accepted before Phase 2, [08](08-ADR-REGISTER.md).)
 
 - Recalculation is **incremental**: an edit dirties a cell and its transitive
   dependents; only the dirty sub-graph recomputes, in dependency order.

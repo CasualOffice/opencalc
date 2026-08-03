@@ -1,7 +1,7 @@
 # OpenCalc
 
 [![Status: Pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](docs/06-ROADMAP-AND-DELIVERY.md)
-[![Rust: 1.88+](https://img.shields.io/badge/rust-1.88%2B-black.svg?logo=rust)](rust-toolchain.toml)
+[![Rust: TBD](https://img.shields.io/badge/rust-MSRV%20TBD-black.svg?logo=rust)](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **A deterministic, embeddable spreadsheet engine written in Rust** — it reads and
@@ -118,7 +118,7 @@ Openly, and on the record (see
   [Formualizer](https://github.com/psu3d0/formualizer),
   [calamine](https://github.com/tafia/calamine) (reader),
   `umya-spreadsheet`, and `rust_xlsxwriter`.
-- **Grid UI/UX** — Microsoft Sheets 2026 and Google Sheets.
+- **Grid UI/UX** — MS Sheets 2026 and Google Sheets.
 - **Web-native architecture** — [Univer](https://github.com/dream-num/univer).
 
 ## Status
