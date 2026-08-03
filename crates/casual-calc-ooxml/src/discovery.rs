@@ -87,6 +87,11 @@ impl SpreadsheetPackage {
         &self.sheets
     }
 
+    /// Whether a part with the given path exists.
+    pub fn contains(&self, name: &str) -> bool {
+        self.package.contains(name)
+    }
+
     /// Read a part's bytes through the bounded package.
     pub fn read_part(&mut self, name: &str) -> Result<Vec<u8>, OoxmlError> {
         Ok(self.package.read_part(name)?)

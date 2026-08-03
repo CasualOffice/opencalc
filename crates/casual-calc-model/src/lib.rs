@@ -17,6 +17,7 @@ mod error;
 mod ids;
 mod sheet;
 mod store;
+mod strings;
 mod value;
 mod workbook;
 
@@ -27,6 +28,7 @@ pub use ids::{
 };
 pub use sheet::Sheet;
 pub use store::{CellRef, CellStore};
+pub use strings::StringTable;
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{SCHEMA_VERSION, Workbook};
 

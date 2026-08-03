@@ -11,6 +11,22 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 1A: semantic import begins
+
+**Added**
+
+- `casual-calc-model`: a `StringTable` — deterministic, deduplicated string
+  interning; `Workbook` gains `strings` and `intern_string`, and `validate()`
+  now checks that cell string references resolve. Empty-workbook snapshots stay
+  byte-identical.
+- `casual-calc-import` (P1A-001): SpreadsheetML → model for **cell values** —
+  numbers, booleans, shared strings, inline strings, and error values — plus A1
+  reference parsing and a dual-axis `CompatibilityReport` (Mapped/Degraded/
+  Omitted × Preserved/NotRetained/NotApplicable). Formula cells keep their cached
+  value and are recorded as `Omitted` pending the AST (a later increment).
+  Import is deterministic (fixed workbook id, sequential sheet ids, insertion-
+  ordered interning). 6 tests over in-memory `.xlsx`.
+
 ### 2026-08-04 — Phase 0 foundation begins
 
 **Added**

@@ -53,6 +53,12 @@ version = "0.0.0"
 [[package]]
 name = "casual-calc-import"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-model",
+ "casual-calc-ooxml",
+ "quick-xml",
+ "zip",
+]
 
 [[package]]
 name = "casual-calc-io"

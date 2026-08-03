@@ -6,8 +6,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::ids::Id;
+use crate::ids::{Id, StringId};
 use crate::sheet::Sheet;
+use crate::strings::StringTable;
+use crate::value::CellValue;
 
 /// The current workbook schema version. Snapshots record this so migrations can
 /// upgrade older ones deterministically.
@@ -23,6 +25,9 @@ pub struct Workbook {
     pub schema_version: u32,
     /// Stable workbook identity.
     pub workbook_id: Id,
+    /// The interned string table cells reference.
+    #[serde(default, skip_serializing_if = "StringTable::is_empty")]
+    pub strings: StringTable,
     /// Sheets in tab order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<Sheet>,
@@ -34,8 +39,14 @@ impl Workbook {
         Self {
             schema_version: SCHEMA_VERSION,
             workbook_id,
+            strings: StringTable::new(),
             sheets: Vec::new(),
         }
+    }
+
+    /// Intern a string into the workbook's table, returning its id.
+    pub fn intern_string(&mut self, value: &str) -> StringId {
+        self.strings.intern(value)
     }
 
     /// Validate model invariants: known schema version and unique sheet ids.
@@ -47,6 +58,13 @@ impl Workbook {
         for sheet in &self.sheets {
             if !seen.insert(sheet.id) {
                 return Err(ModelError::Invariant("duplicate sheet id"));
+            }
+            for (_, cell) in sheet.cells.iter() {
+                if let CellValue::SharedString(id) | CellValue::InlineString(id) = cell.value
+                    && !self.strings.contains(id)
+                {
+                    return Err(ModelError::Invariant("dangling string reference"));
+                }
             }
         }
         Ok(())

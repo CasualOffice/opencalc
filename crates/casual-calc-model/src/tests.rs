@@ -2,7 +2,8 @@
 //! Phase 0 exit-gate condition (`docs/06-ROADMAP-AND-DELIVERY.md`).
 
 use crate::{
-    Cell, CellRef, CellValue, Id, IdGenerator, SCHEMA_VERSION, Sheet, SheetId, StringId, Workbook,
+    Cell, CellRef, CellValue, Id, IdGenerator, SCHEMA_VERSION, Sheet, SheetId, StringId,
+    StringTable, Workbook,
 };
 
 fn wb_id() -> Id {
@@ -49,13 +50,14 @@ fn empty_workbook_snapshot_is_byte_stable() {
 #[test]
 fn populated_workbook_roundtrips_byte_stably() {
     let mut wb = Workbook::new(wb_id());
+    let hello = wb.intern_string("hello");
     let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1");
     sheet
         .cells
         .set(CellRef::new(0, 0), Cell::value(CellValue::Number(42.0)));
     sheet.cells.set(
         CellRef::new(3, 1),
-        Cell::value(CellValue::SharedString(StringId(Id::from_parts(9, 5)))),
+        Cell::value(CellValue::SharedString(hello)),
     );
     wb.sheets.push(sheet);
 
@@ -97,6 +99,38 @@ fn cells_iterate_in_row_major_order() {
         order,
         vec![CellRef::new(0, 1), CellRef::new(0, 9), CellRef::new(5, 0)]
     );
+}
+
+#[test]
+fn strings_intern_dedupe_and_resolve() {
+    let mut table = StringTable::new();
+    let a = table.intern("hello");
+    let b = table.intern("world");
+    let a2 = table.intern("hello");
+    assert_eq!(a, a2);
+    assert_ne!(a, b);
+    assert_eq!(table.len(), 2);
+    assert_eq!(table.get(a), Some("hello"));
+    assert_eq!(table.get(b), Some("world"));
+    // An id from another namespace does not resolve here.
+    assert_eq!(table.get(StringId(Id::from_parts(1, 1))), None);
+}
+
+#[test]
+fn dangling_string_reference_is_rejected() {
+    let mut wb = Workbook::new(wb_id());
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    // A shared-string id that was never interned.
+    sheet.cells.set(
+        CellRef::new(0, 0),
+        Cell::value(CellValue::SharedString(StringId(Id::from_parts(
+            0x5354_5200_0000_0000,
+            99,
+        )))),
+    );
+    wb.sheets.push(sheet);
+    let err = wb.validate().unwrap_err();
+    assert_eq!(err.code(), "OC-MDL-0001");
 }
 
 #[test]
