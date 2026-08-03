@@ -1,0 +1,46 @@
+name: Feature / capability request
+description: Propose a capability or design change for OpenCalc
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OpenCalc is design-first. A substantial capability needs a design note
+        (and possibly an ADR) before implementation — see
+        docs/11-DESIGN-FIRST-PROCESS.md. This issue is where the outcome and
+        research are captured first.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What can a host/user do afterward that they can't now?
+    validations:
+      required: true
+  - type: textarea
+    id: research
+    attributes:
+      label: Prior art
+      description: How do Excel, LibreOffice Calc, OnlyOffice, Univer, IronCalc, or Google Sheets handle this? Include source + date checked.
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Which phase does this belong to?
+      description: See docs/06-ROADMAP-AND-DELIVERY.md
+      options:
+        - "0 — Foundation"
+        - "1A — Import & model"
+        - "1B — Semantic writer"
+        - "1C — Grid layout"
+        - "1D — Render & virtualization"
+        - "1E — Browser grid editor"
+        - "2 — Formula & calc engine"
+        - "3 — Spreadsheet features"
+        - "4+ — SDK / collaboration / 1.0"
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: Correctness, fidelity loss, performance cliffs, or a lower-layer change that could force a do-over.

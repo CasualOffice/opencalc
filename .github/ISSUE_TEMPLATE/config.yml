@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/CasualOffice/opencalc/security/advisories/new
+    about: Report suspected vulnerabilities privately — never in a public issue (see SECURITY.md).
+  - name: Design discussion
+    url: https://github.com/CasualOffice/opencalc/tree/main/docs
+    about: Read the design record (docs/) before proposing substantial changes.

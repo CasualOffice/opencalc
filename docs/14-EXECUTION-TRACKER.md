@@ -59,8 +59,9 @@ Use exactly these values — no ad-hoc statuses:
 | DOC-011 | Error registry + parser limits (20, 21) | Done | Security contracts |
 | DOC-012 | Competitive analysis (12) | Done | Univer/OnlyOffice/LO Calc/Excel/Sheets/IronCalc |
 | DOC-013 | Dual-host design: Tauri desktop (native) + web (WASM) | Done | Folded into 02/18/19/40; host capability trait |
-| DOC-014 | Tauri desktop shell design note | Not started | Deferred design note; host-side glue only |
-| DOC-015 | Reference/tooling docs (GOVERNANCE, SECURITY, LICENSE, .github, rust-toolchain, deny.toml) | Not started | Non-blocking; align with OpenDoc |
+| DOC-014 | Tauri desktop shell design note (44) | Done | Native host; capability trait; command surface |
+| DOC-015 | Repo scaffolding (LICENSE, SECURITY, GOVERNANCE, CODE_OF_CONDUCT, .github templates) | Done | Apache-2.0; PR + issue templates |
+| DOC-016 | CI workflow YAML + rust-toolchain.toml + deny.toml | Not started | Deferred to Phase 0 (needs the cargo workspace); gates specified in doc 15 |
 
 ## Phase rows
 

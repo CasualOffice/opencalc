@@ -64,6 +64,7 @@ the other way around. This index is the map.
 | 34 | [SpreadsheetML Fidelity & Preservation](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md) | Loss-aware import/export |
 | 40 | [Formula & Calculation Engine](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md) | Parser, dependency graph, recalc (Phase 2, designed now) |
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
+| 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
 ## Status
 

@@ -28,6 +28,12 @@ the design doc or ADR that motivated it.
   preservation architecture (`34`), formula and calculation engine architecture
   (`40`), and grid layout/virtualization/rendering architecture (`42`).
 
+- Tauri desktop shell design note (`44`) — the native desktop host that drives
+  the engine as native Rust (calc runs native, not WASM), the host capability
+  trait, and the command surface.
+- Repository scaffolding: `LICENSE` (Apache-2.0), `SECURITY.md`, `GOVERNANCE.md`,
+  `CODE_OF_CONDUCT.md`, and `.github/` PR + issue templates.
+
 **Notes**
 
 - OpenCalc is in the **documentation phase**. No engine code exists yet. The

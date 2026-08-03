@@ -1,0 +1,56 @@
+name: Bug report
+description: A defect in OpenCalc (wrong value, corrupt file, crash, fidelity gap, perf regression)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** report suspected security vulnerabilities here — use private
+        vulnerability reporting (see SECURITY.md).
+  - type: input
+    id: revision
+    attributes:
+      label: Affected revision or release
+      placeholder: e.g. commit 0d06914 / main
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host mode
+      options:
+        - Tauri desktop (native)
+        - Web app (WASM)
+        - Headless
+        - Not applicable / unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Subsystem
+      options:
+        - Package / import (xlsx read)
+        - Export (xlsx write / round-trip)
+        - Workbook model
+        - Formula parse
+        - Calc engine (evaluation / recalc)
+        - Grid layout / render
+        - Preservation / fidelity
+        - Other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual
+      description: What you expected, and what happened. For a wrong value, name the oracle (Excel / LibreOffice Calc).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Steps and a minimal fixture WITHOUT confidential content. Note any relevant cells/formulas.
+    validations:
+      required: true
