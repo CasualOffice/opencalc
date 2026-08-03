@@ -15,6 +15,13 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-ooxml` (F-011): SpreadsheetML package discovery — opens a
+  `.xlsx`, follows the OPC graph (root rels → workbook part → `<sheets>` →
+  workbook rels) to resolve the workbook part and each worksheet's part, under
+  per-part XML element/depth limits. Reaches the Phase 0 "opens a trivial .xlsx"
+  goal. Depends on `casual-calc-package` + `quick-xml`; 7 tests.
+- `deny.toml`: `allow-wildcard-paths = true` so intra-workspace path deps aren't
+  flagged as wildcard versions.
 - `casual-calc-model` (F-010): the normalized workbook shell — non-zero hex
   `Id` + `IdGenerator` + typed id newtypes, `CellValue`/`ErrorValue`, a compact
   `Cell` carrying the **reserved calc seams** (`formula` handle, cached `value`,

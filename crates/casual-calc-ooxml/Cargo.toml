@@ -7,5 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+casual-calc-package = { path = "../casual-calc-package" }
+quick-xml = "0.37"
+
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [lints]
 workspace = true

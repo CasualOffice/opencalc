@@ -89,7 +89,7 @@ begins once the "no engine code yet" hold is lifted.
 | F-008 | Fuzz workspace (pinned nightly) | Not started | Bounded-package target |
 | F-009 | casual-calc-package: bounded OPC admission | Done | limits + path safety + capped part reads; 10 tests incl. zip-bomb/traversal; wasm-clean; codes OC-PKG-0001..0006 |
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
-| F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Not started | Opens a trivial .xlsx |
+| F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 7 tests; codes OC-XML/OC-IMP |
 
 ## Review note
 

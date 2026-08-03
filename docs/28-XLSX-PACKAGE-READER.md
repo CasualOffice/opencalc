@@ -30,6 +30,14 @@ cleanly, never crashed on.
 
 ## `casual-calc-ooxml` — SpreadsheetML shape
 
+> **Status: discovery implemented (Phase 0, F-011).** `SpreadsheetPackage::open`
+> admits the package, follows root rels → the `officeDocument` (workbook) part →
+> its `<sheets>` → the workbook rels, and exposes the resolved `workbook_part`
+> and `sheets` (name, sheetId, part path), plus bounded `read_part`. XML is
+> walked under element-count/depth limits; failures map to `OC-XML-*`/`OC-IMP-*`
+> codes. Full content-types handling, the complete relationship graph, and the
+> immutable source snapshot are filled in as import (Phase 1A) matures.
+
 Reads the OPC graph and exposes the SpreadsheetML structure without mapping to
 the model (that's `casual-calc-import`):
 

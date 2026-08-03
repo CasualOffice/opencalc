@@ -6,6 +6,8 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Intra-workspace path dependencies have no version; that is not a real wildcard.
+allow-wildcard-paths = true
 
 [licenses]
 allow = [

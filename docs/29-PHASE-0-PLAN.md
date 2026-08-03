@@ -103,6 +103,7 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true   # intra-workspace path deps are not real wildcards
 
 [licenses]
 allow = [
