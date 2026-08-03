@@ -74,8 +74,10 @@ Use exactly these values — no ad-hoc statuses:
 
 ## Phase rows — Phase 0 (Foundation)
 
-Planned in [29-PHASE-0-PLAN](29-PHASE-0-PLAN.md). **Not started** — instantiation
-begins once the "no engine code yet" hold is lifted.
+**Phase 0: CLOSED — exit gate PASSED 2026-08-04.** All items below `Done`; all 12
+CI jobs green (fmt, lint, test, docs, wasm, benchmark-smoke, fuzz-build,
+repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
+[29-PHASE-0-PLAN](29-PHASE-0-PLAN.md).
 
 | ID | Workstream | Status | Notes |
 | --- | --- | --- | --- |

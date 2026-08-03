@@ -51,6 +51,12 @@ its reserved calc seams ([22](22-NORMALIZED-SCHEMA.md)).
 nesting, oversized parts) is rejected within limits; the model round-trips an
 empty workbook snapshot byte-stably.
 
+**Status: PASSED** (2026-08-04). All 12 CI jobs green on macOS/Windows/Linux/WASM
++ the 1.88.0 MSRV check; `casual-calc-package` rejects hostile inputs within
+limits (tests + a 200k-run fuzz campaign with no crash); the empty-workbook
+snapshot round-trips byte-stably. All Phase 0 items F-001–F-012 are `Done`
+([14](14-EXECUTION-TRACKER.md)).
+
 **Plan:** the ordered `F-###` work items and the ready-to-instantiate build
 scaffolding (workspace `Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, CI
 workflow, fixtures/benchmark layout) are specified in
