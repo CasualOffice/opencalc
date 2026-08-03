@@ -32,6 +32,9 @@ pillars (layer division, virtualization) plus the finalized calc-engine design.
 consistent; the layer division and virtualization designs are finalized (ADRs
 Accepted); no open ADR trigger for the model or calc seams.
 
+**Status: PASSED** (2026-08-04) — see [31-PHASE-D-EXIT-REPORT](31-PHASE-D-EXIT-REPORT.md).
+The Phase 0 plan and scaffold specs are in [29-PHASE-0-PLAN](29-PHASE-0-PLAN.md).
+
 ---
 
 ## Phase 0 — Foundation
@@ -47,6 +50,11 @@ its reserved calc seams ([22](22-NORMALIZED-SCHEMA.md)).
 **Exit gate:** CI green on all platforms; a hostile fixture (zip bomb, deep
 nesting, oversized parts) is rejected within limits; the model round-trips an
 empty workbook snapshot byte-stably.
+
+**Plan:** the ordered `F-###` work items and the ready-to-instantiate build
+scaffolding (workspace `Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, CI
+workflow, fixtures/benchmark layout) are specified in
+[29-PHASE-0-PLAN](29-PHASE-0-PLAN.md).
 
 ---
 

@@ -40,6 +40,11 @@ the design doc or ADR that motivated it.
   collaboration seam.
 - Export & round-trip design (`36`) — the byte-identical repackager and the
   deterministic semantic writer, and the Phase 1B round-trip fixed-point gate.
+- Phase 0 plan & scaffold specs (`29`) — the ordered `F-###` work items and the
+  ready-to-instantiate build config (workspace `Cargo.toml`, `rust-toolchain.toml`,
+  `deny.toml`, CI workflow, fixtures/benchmark layout).
+- Phase D exit report (`31`) — the documentation phase closed against its
+  roadmap exit gate (**passed** 2026-08-04).
 
 **Changed**
 

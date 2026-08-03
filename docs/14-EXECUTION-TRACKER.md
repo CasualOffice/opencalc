@@ -61,16 +61,35 @@ Use exactly these values — no ad-hoc statuses:
 | DOC-013 | Dual-host design: Tauri desktop (native) + web (WASM) | Done | Folded into 02/18/19/40; host capability trait |
 | DOC-014 | Tauri desktop shell design note (44) | Done | Native host; capability trait; command surface |
 | DOC-015 | Repo scaffolding (LICENSE, SECURITY, GOVERNANCE, CODE_OF_CONDUCT, .github templates) | Done | Apache-2.0; PR + issue templates |
-| DOC-016 | CI workflow YAML + rust-toolchain.toml + deny.toml | Not started | Deferred to Phase 0 (needs the cargo workspace); gates specified in doc 15 |
+| DOC-016 | CI workflow YAML + rust-toolchain.toml + deny.toml | Ready | Specs written in doc 29; instantiated in Phase 0 (F-002/003/004) |
 | DOC-017 | Cell-store representation (23) | Done | Sparse row-blocked tiles; per-cell budget (ADR-004) |
 | DOC-018 | Transaction & edit semantics (24) | Done | Op set, inverses, reference rewriting, collab seam |
 | DOC-019 | Doc-set consistency audit + fixes | Done | 11 findings applied 2026-08-04 |
 | DOC-020 | Export & round-trip design (36) | Done | Byte-identical repackager + semantic writer |
+| DOC-021 | Phase 0 plan + scaffold specs (29) | Done | F-### breakdown + ready-to-instantiate config |
+| DOC-022 | Phase D exit report (31) | Done | Exit gate PASSED 2026-08-04 |
 
-## Phase rows
+**Documentation phase (Phase D): CLOSED — exit gate passed 2026-08-04**
+([31-PHASE-D-EXIT-REPORT](31-PHASE-D-EXIT-REPORT.md)).
 
-Populated as each phase opens. Phase 0 (`F-###`) rows are added once the
-documentation phase closes and the foundation design is finalized.
+## Phase rows — Phase 0 (Foundation)
+
+Planned in [29-PHASE-0-PLAN](29-PHASE-0-PLAN.md). **Not started** — instantiation
+begins once the "no engine code yet" hold is lifted.
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| F-001 | Workspace skeleton (root Cargo.toml + crate dirs) | Not started | Blueprint in doc 29 |
+| F-002 | rust-toolchain.toml, workspace lints, release profile | Not started | ADR-pending MSRV |
+| F-003 | deny.toml supply-chain policy | Not started | — |
+| F-004 | CI workflow (all gate jobs) | Not started | Job names per doc 15 |
+| F-005 | CI badges wired | Not started | — |
+| F-006 | Fixture corpus + manifest.json + generator | Not started | Checksummed |
+| F-007 | Benchmark harness + baseline | Not started | Versioned JSON |
+| F-008 | Fuzz workspace (pinned nightly) | Not started | Bounded-package target |
+| F-009 | casual-calc-package: bounded OPC admission | Not started | First real logic; hostile-fixture gate |
+| F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Not started | Empty-workbook byte-stable snapshot |
+| F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Not started | Opens a trivial .xlsx |
 
 ## Review note
 
