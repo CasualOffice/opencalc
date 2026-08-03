@@ -19,10 +19,10 @@ which gates are not yet built.
 | `docs` | `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings` | Doc builds; intra-doc links valid |
 | `wasm` | `cargo check --target wasm32-unknown-unknown` | The engine stays WASM-clean |
 | `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + determinism (**implemented**, F-007) |
-| `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile |
+| `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile (**implemented**, F-008) |
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
-| `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers; validate benchmark/baseline JSON | Repo integrity |
+| `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
 | `browser-smoke` | `wasm-pack` build + Playwright unit/e2e on the grid editor | The editor loads and paints |
 
 Actions are pinned to full commit SHAs; workflows run read-only where possible;

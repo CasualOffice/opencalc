@@ -1,0 +1,25 @@
+# Separate cargo workspace: nightly-only cargo-fuzz deps stay out of the product
+# graph. See docs/19-WORKSPACE-SCAFFOLD-DESIGN.md and docs/29-PHASE-0-PLAN.md.
+[package]
+name = "casual-calc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.88.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+casual-calc-package = { path = "../crates/casual-calc-package" }
+
+[[bin]]
+name = "bounded_package"
+path = "fuzz_targets/bounded_package.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace.
+[workspace]

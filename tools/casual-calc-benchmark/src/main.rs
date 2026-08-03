@@ -2,7 +2,10 @@
 //! JSON report. See `docs/29-PHASE-0-PLAN.md` and `docs/15-CI-AND-RELEASE-GATES.md`.
 //!
 //! Usage:
-//!   casual-calc-benchmark [--smoke] [--env <label>]
+//!
+//! ```text
+//! casual-calc-benchmark [--smoke] [--env <label>]
+//! ```
 //!
 //! `--smoke` runs few iterations (CI validates the report *shape* with `jq`, not
 //! absolute timings). Output is a JSON `Report` on stdout.

@@ -1,0 +1,10 @@
+{
+  "fixtures": [
+    {
+      "kind": "generated",
+      "path": "generated/minimal.xlsx",
+      "sha256": "337fa1fb161fbaf5e28979270b59825e132e2f9f47e45c5eff45c7287c81a7ce"
+    }
+  ],
+  "schemaVersion": 1
+}

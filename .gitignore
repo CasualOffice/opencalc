@@ -3,6 +3,12 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# Fuzzing artifacts (the fuzz Cargo.lock IS committed)
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
 # Editor / OS
 .DS_Store
 *.swp

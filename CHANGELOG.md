@@ -15,6 +15,19 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- Fixture corpus (F-006): a deterministic generator (`fixtures/tools/generate.py`),
+  a committed `generated/minimal.xlsx` with a SHA-256 `manifest.json`, a test that
+  the fixture parses through the real reader, and a CI `repository-policy` job
+  (checksum verification + merge-conflict-marker rejection).
+- Fuzz workspace (F-008): a separate cargo workspace with a `bounded_package`
+  target (admission never panics on arbitrary bytes — 200k runs clean) and a CI
+  `fuzz-build` job on pinned nightly that asserts `fuzz/Cargo.lock` is unchanged.
+
+**Fixed**
+
+- `docs` CI gate: the benchmark tool's usage line (`--env <label>`) tripped
+  rustdoc's "unclosed HTML tag" under `-D warnings`; wrapped it in a code fence.
+
 - `casual-calc-benchmark` (F-007): reproducible micro-benchmark harness emitting
   versioned JSON (median/p95 ns, output checksum + determinism flag, per-case
   regression tolerance), a `--smoke` mode, a committed `dev-reference` baseline,

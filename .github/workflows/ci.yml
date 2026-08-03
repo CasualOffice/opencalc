@@ -64,6 +64,35 @@ jobs:
                  and (all(.cases[]; has("id") and has("medianNs") and .deterministic == true))' \
              report.json
 
+  repository-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fixture checksums against manifest
+        run: |
+          jq -r '.fixtures[] | "\(.sha256)  fixtures/\(.path)"' fixtures/manifest.json \
+            | shasum -a 256 -c -
+      - name: Reject merge-conflict markers
+        run: |
+          if git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!*.yml' ; then
+            echo "merge-conflict markers found" >&2
+            exit 1
+          fi
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-07-20 --profile minimal
+          cargo install cargo-fuzz --locked
+      - name: Build fuzz targets and assert the lockfile is unchanged
+        working-directory: fuzz
+        run: |
+          cargo +nightly-2026-07-20 fuzz build
+          git diff --exit-code Cargo.lock
+
   dependency-policy:
     runs-on: ubuntu-latest
     steps:

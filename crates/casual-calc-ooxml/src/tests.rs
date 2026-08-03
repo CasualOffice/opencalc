@@ -79,6 +79,17 @@ fn discovers_workbook_and_sheets() {
 }
 
 #[test]
+fn committed_minimal_fixture_parses() {
+    // The checksummed corpus fixture must open through the real reader.
+    let bytes = include_bytes!("../../../fixtures/generated/minimal.xlsx").to_vec();
+    let pkg = SpreadsheetPackage::open(bytes, OoxmlLimits::default()).unwrap();
+    assert_eq!(pkg.workbook_part(), "xl/workbook.xml");
+    assert_eq!(pkg.sheets().len(), 1);
+    assert_eq!(pkg.sheets()[0].name, "Sheet1");
+    assert_eq!(pkg.sheets()[0].part, "xl/worksheets/sheet1.xml");
+}
+
+#[test]
 fn missing_workbook_relationship_is_reported() {
     // Root rels without an officeDocument relationship.
     let broken_root = br#"<?xml version="1.0"?>
