@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }
 quick-xml = "0.37"

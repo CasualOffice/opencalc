@@ -3,10 +3,11 @@
 
 use std::collections::BTreeSet;
 
+use casual_calc_formula::Expr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::ids::{Id, StringId};
+use crate::ids::{FormulaHandle, Id, StringId};
 use crate::sheet::Sheet;
 use crate::strings::StringTable;
 use crate::value::CellValue;
@@ -28,6 +29,10 @@ pub struct Workbook {
     /// The interned string table cells reference.
     #[serde(default, skip_serializing_if = "StringTable::is_empty")]
     pub strings: StringTable,
+    /// The formula AST arena; `Cell::formula` indexes into it (the reserved calc
+    /// seam). ASTs are parsed at import; the calc engine evaluates them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formulas: Vec<Expr>,
     /// Sheets in tab order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<Sheet>,
@@ -40,6 +45,7 @@ impl Workbook {
             schema_version: SCHEMA_VERSION,
             workbook_id,
             strings: StringTable::new(),
+            formulas: Vec::new(),
             sheets: Vec::new(),
         }
     }
@@ -47,6 +53,18 @@ impl Workbook {
     /// Intern a string into the workbook's table, returning its id.
     pub fn intern_string(&mut self, value: &str) -> StringId {
         self.strings.intern(value)
+    }
+
+    /// Store a formula AST in the arena, returning a handle to it.
+    pub fn store_formula(&mut self, expr: Expr) -> FormulaHandle {
+        let index = self.formulas.len() as u32;
+        self.formulas.push(expr);
+        FormulaHandle(index)
+    }
+
+    /// Resolve a formula handle to its AST.
+    pub fn formula(&self, handle: FormulaHandle) -> Option<&Expr> {
+        self.formulas.get(handle.0 as usize)
     }
 
     /// Validate model invariants: known schema version and unique sheet ids.
@@ -64,6 +82,11 @@ impl Workbook {
                     && !self.strings.contains(id)
                 {
                     return Err(ModelError::Invariant("dangling string reference"));
+                }
+                if let Some(handle) = cell.formula
+                    && self.formula(handle).is_none()
+                {
+                    return Err(ModelError::Invariant("dangling formula handle"));
                 }
             }
         }

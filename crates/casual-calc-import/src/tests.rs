@@ -113,25 +113,50 @@ fn empty_cells_are_not_stored() {
 }
 
 #[test]
-fn formula_cells_keep_cached_value_and_are_reported() {
+fn formula_cells_are_parsed_to_ast_with_cached_value() {
     let rows = r#"<row r="1"><c r="A1"><v>10</v></c><c r="A2"><f>A1*2</f><v>20</v></c></row>"#;
     let bytes = package_with_sheet(sheet_with(rows), None);
     let import = import_package(bytes).unwrap();
-    let sheet = &import.workbook.sheets[0];
+    let wb = &import.workbook;
+    let cell = wb.sheets[0].cells.get(CellRef::new(1, 0)).unwrap();
+
     // Cached value preserved.
-    assert_eq!(
-        sheet.cells.get(CellRef::new(1, 0)).unwrap().value,
-        CellValue::Number(20.0)
-    );
-    // Formula recorded as not-yet-modeled.
+    assert_eq!(cell.value, CellValue::Number(20.0));
+
+    // Formula parsed into the arena and referenced by the cell.
+    let handle = cell.formula.expect("cell has a formula handle");
+    let expr = wb.formula(handle).expect("handle resolves in the arena");
+    assert_eq!(expr.to_string(), "(A1*2)");
+
+    // Reported as mapped.
     let formula_entry = import
         .report
         .entries()
         .into_iter()
         .find(|e| e.feature == "f")
         .expect("formula disposition recorded");
-    assert_eq!(formula_entry.model, ModelOutcome::Omitted);
+    assert_eq!(formula_entry.model, ModelOutcome::Mapped);
     assert_eq!(formula_entry.count, 1);
+}
+
+#[test]
+fn unparseable_formula_is_degraded_but_keeps_value() {
+    let rows = r#"<row r="1"><c r="A1"><f>1+</f><v>5</v></c></row>"#;
+    let bytes = package_with_sheet(sheet_with(rows), None);
+    let import = import_package(bytes).unwrap();
+    let cell = import.workbook.sheets[0]
+        .cells
+        .get(CellRef::new(0, 0))
+        .unwrap();
+    assert_eq!(cell.value, CellValue::Number(5.0));
+    assert!(cell.formula.is_none());
+    let entry = import
+        .report
+        .entries()
+        .into_iter()
+        .find(|e| e.feature == "f")
+        .unwrap();
+    assert_eq!(entry.model, ModelOutcome::Degraded);
 }
 
 #[test]

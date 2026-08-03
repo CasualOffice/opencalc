@@ -1,12 +1,13 @@
 //! `casual-calc-import` — SpreadsheetML semantic import into the normalized
 //! model.
 //!
-//! Phase 1A, increment 1: shared strings and worksheet **cell values** (number,
-//! bool, shared/inline string, error) map into a [`Workbook`]; a
-//! [`CompatibilityReport`] records anything not yet modeled (notably formulas —
-//! their cached value is kept, but the AST is built in a later increment).
-//! Import is deterministic: fixed workbook id, sequential sheet ids, and
-//! insertion-ordered string interning.
+//! Phase 1A: shared strings and worksheet **cell values** (number, bool,
+//! shared/inline string, error) map into a [`Workbook`], and **formulas are
+//! parsed to an AST** (`casual-calc-formula`) stored in the workbook arena with
+//! the cell's cached value preserved. A [`CompatibilityReport`] records anything
+//! not fully mapped (a formula that fails to parse is `Degraded`, keeping its
+//! cached value). Import is deterministic: fixed workbook id, sequential sheet
+//! ids, and insertion-ordered string interning.
 //!
 //! See `docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md` and
 //! `docs/22-NORMALIZED-SCHEMA.md`.
@@ -19,6 +20,7 @@ mod report;
 pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
 
+use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
     Cell, CellValue, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
 };
@@ -77,12 +79,20 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 );
                 continue;
             };
-            if raw.has_formula {
-                // The cached value is kept; the formula AST is a later increment.
-                report.record("f", ModelOutcome::Omitted, RetentionOutcome::NotRetained);
-            }
             let value = map_value(&raw, &shared_ids, &mut workbook, &mut report);
-            let cell = Cell::value(value);
+            let mut cell = Cell::value(value);
+            if let Some(text) = &raw.formula {
+                match parse_formula(text) {
+                    Ok(expr) => {
+                        cell.formula = Some(workbook.store_formula(expr));
+                        report.record("f", ModelOutcome::Mapped, RetentionOutcome::NotApplicable);
+                    }
+                    Err(_) => {
+                        // Cached value kept; the formula text did not parse.
+                        report.record("f", ModelOutcome::Degraded, RetentionOutcome::NotRetained);
+                    }
+                }
+            }
             if !cell.is_blank() {
                 sheet.cells.set(cell_ref, cell);
             }

@@ -15,6 +15,22 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-formula` (P1A-002): the formula language — tokenizer,
+  precedence-climbing parser, a serializable `Expr` AST, A1 reference algebra
+  (`$` anchors, sheet qualification, ranges), and a canonical pretty-printer with
+  a gated `parse(print(e)) == e` round-trip. Subset per docs/40; no evaluation
+  (that is Phase 2).
+- `casual-calc-model`: a formula AST **arena** (`Workbook.formulas`,
+  `store_formula`/`formula`); `Cell.formula` now resolves to a real AST, and
+  `validate()` checks formula handles. Model now depends on `casual-calc-formula`
+  for the `Expr` type (the only upward edge; no cycle).
+- `casual-calc-import`: worksheet `<f>` formulas are parsed into the arena with
+  the cached value preserved and reported `Mapped`; a formula that fails to parse
+  is `Degraded` (cached value kept). Added a living **Fidelity Ledger**
+  (`docs/33`) tracking each construct across model/round-trip/edit/render/calc.
+
+**Existing (P1A-001)**
+
 - `casual-calc-model`: a `StringTable` — deterministic, deduplicated string
   interning; `Workbook` gains `strings` and `intern_string`, and `validate()`
   now checks that cell string references resolve. Empty-workbook snapshots stay

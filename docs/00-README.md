@@ -59,6 +59,7 @@ the other way around. This index is the map.
 | 23 | [Cell-Store Representation](23-CELL-STORE-REPRESENTATION.md) | The sparse grid internals (drives T1/T2) |
 | 24 | [Transaction & Edit Semantics](24-TRANSACTION-AND-EDIT-SEMANTICS.md) | Op set, inverses, reference rewriting, collab seam |
 | 28 | [XLSX Package Reader](28-XLSX-PACKAGE-READER.md) | SpreadsheetML OPC admission |
+| 33 | [Fidelity Ledger](33-FIDELITY-LEDGER.md) | Per-construct status across model/round-trip/edit/render/calc |
 | 29 | [Phase 0 Plan & Scaffold Specs](29-PHASE-0-PLAN.md) | Ordered F-### items + ready-to-instantiate build config |
 | 31 | [Phase D Exit Report](31-PHASE-D-EXIT-REPORT.md) | Documentation phase closure |
 

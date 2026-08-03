@@ -47,9 +47,12 @@ a dependency of the model, so the model exists and is complete without it.
 **`casual-calc-model`** — the normalized workbook. Owns: sheets, the sparse cell
 grid, shared strings, styles/number-formats, defined names, merged ranges, sheet
 views, IDs, invariants, deterministic snapshot I/O, and the **reserved calc
-seams** (formula-AST slot, cached-value slot, dependency-edge side table). Must
-**not** own: any evaluation logic, any layout geometry, any XML. It compiles with
-zero knowledge of `casual-calc-eval`. See [22](22-NORMALIZED-SCHEMA.md).
+seams** (formula-AST arena, cached-value slot, dependency-edge side table). It
+**depends on `casual-calc-formula`** for the `Expr` type stored in the arena
+(per [22](22-NORMALIZED-SCHEMA.md)) — that is the *only* upward-looking edge, and
+`casual-calc-formula` has no dependencies, so there is no cycle. Must **not** own:
+any evaluation logic, any layout geometry, any XML. It compiles with zero
+knowledge of `casual-calc-eval`.
 
 **`casual-calc-formula`** — the formula *language*: tokenizer, parser, AST,
 A1/R1C1 reference algebra, pretty-printer, reference rewriting primitives. Owns

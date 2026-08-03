@@ -34,6 +34,10 @@ separately:
 | Behavioral | Recalc order, volatility, spill, iterative calc | Phase 2 |
 | Diagnostic | Is the compatibility report accurate and complete? | Phase 1A |
 
+Per-construct status across these dimensions is tracked in the living
+[33-FIDELITY-LEDGER](33-FIDELITY-LEDGER.md), updated in the same PR that advances
+a construct.
+
 ## Security
 
 - **No macro / VBA execution.** Ever. VBA parts are preserved as opaque, never run.

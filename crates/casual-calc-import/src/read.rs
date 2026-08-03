@@ -24,8 +24,8 @@ pub struct RawCell {
     pub value: Option<String>,
     /// The `<is><t>` inline-string text.
     pub inline: Option<String>,
-    /// Whether the cell carries a `<f>` formula.
-    pub has_formula: bool,
+    /// The `<f>` formula text, if present.
+    pub formula: Option<String>,
 }
 
 fn read_attr(
@@ -159,7 +159,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                     b"f" => {
                         in_formula = true;
                         if let Some(cell) = current.as_mut() {
-                            cell.has_formula = true;
+                            cell.formula.get_or_insert_with(String::new);
                         }
                     }
                     b"is" => in_inline = true,
@@ -179,7 +179,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                     }
                     b"f" => {
                         if let Some(cell) = current.as_mut() {
-                            cell.has_formula = true;
+                            cell.formula.get_or_insert_with(String::new);
                         }
                     }
                     _ => {}
@@ -191,13 +191,16 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                         cell.value
                             .get_or_insert_with(String::new)
                             .push_str(&e.unescape().map_err(xml_err)?);
+                    } else if in_formula {
+                        cell.formula
+                            .get_or_insert_with(String::new)
+                            .push_str(&e.unescape().map_err(xml_err)?);
                     } else if in_inline_text {
                         cell.inline
                             .get_or_insert_with(String::new)
                             .push_str(&e.unescape().map_err(xml_err)?);
                     }
                 }
-                let _ = in_formula; // formula text is intentionally not captured yet
             }
             Event::End(e) => {
                 bounds.close();

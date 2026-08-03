@@ -103,7 +103,7 @@ Import SpreadsheetML → normalized model + compatibility report; formulas parse
 | ID | Workstream | Status | Notes |
 | --- | --- | --- | --- |
 | P1A-001 | Model string table + cell-value import (shared/inline strings, number, bool, error) | Done | `StringTable` in model; `casual-calc-import` maps values + dual-axis `CompatibilityReport`; A1 parsing; deterministic; 16 tests (10 model + 6 import) |
-| P1A-002 | Formula import → AST (`casual-calc-formula` tokenizer/parser) | Not started | Currently formulas keep cached value + reported `Omitted` |
+| P1A-002 | Formula import → AST (`casual-calc-formula` tokenizer/parser) | Done | Lexer + Pratt parser + serde AST + pretty-printer (round-trip gated); model gains a formula arena (model→formula dep); import parses `<f>` → AST, cached value kept; unparseable → Degraded. 26 tests (formula 9 + model 10 + import 7) |
 | P1A-003 | Styles + number formats import | Not started | — |
 | P1A-004 | Defined names, merged ranges, sheet views | Not started | — |
 | P1A-005 | Proper part discovery via content-types + all rels (not conventional paths) | Not started | sharedStrings currently found by conventional path |

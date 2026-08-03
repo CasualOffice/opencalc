@@ -43,6 +43,15 @@ Consequences the design accounts for from the start:
 
 ## `casual-calc-formula` — the language
 
+> **Status: implemented (Phase 1A, P1A-002).** Tokenizer + precedence-climbing
+> parser + serializable `Expr` AST + canonical pretty-printer. Subset: literals,
+> A1 references with `$` anchors and sheet qualification (`Sheet2!A1`,
+> `'My Sheet'!B2`), cell ranges, defined names, function calls, unary `+`/`-`/`%`,
+> and binary arithmetic/comparison/concat with correct precedence and
+> right-associative `^`. `parse(print(e)) == e` is gated. Import parses `<f>`
+> into the AST and stores it in the model's arena. Deferred: R1C1, full row/column
+> ranges (`A:A`), 3-D refs, structured (table) references, union/intersection.
+
 ### Tokenizer & parser
 
 - Tokenizes Excel formula syntax: numbers, strings, booleans, error literals,
