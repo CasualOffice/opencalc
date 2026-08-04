@@ -234,6 +234,46 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
     })
 }
 
+/// Aggregate stats over a range for the status bar, as JSON
+/// `{ count, numeric, sum, avg, min, max }` (count = non-empty cells; the rest
+/// cover numeric cells only; `avg/min/max` are null when there are none).
+#[wasm_bindgen]
+pub fn session_range_stats(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return "{\"count\":0,\"numeric\":0}".to_owned();
+        };
+        let (mut count, mut numeric, mut sum) = (0u64, 0u64, 0f64);
+        let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let Some(cell) = sh.cells.get(CellRef::new(r, c)) else {
+                    continue;
+                };
+                if cell.value.is_empty() {
+                    continue;
+                }
+                count += 1;
+                if let CellValue::Number(n) = cell.value {
+                    numeric += 1;
+                    sum += n;
+                    min = min.min(n);
+                    max = max.max(n);
+                }
+            }
+        }
+        if numeric == 0 {
+            return format!("{{\"count\":{count},\"numeric\":0}}");
+        }
+        let avg = sum / numeric as f64;
+        format!(
+            "{{\"count\":{count},\"numeric\":{numeric},\"sum\":{sum},\"avg\":{avg},\"min\":{min},\"max\":{max}}}"
+        )
+    })
+    .unwrap_or_else(|| "{\"count\":0,\"numeric\":0}".to_owned())
+}
+
 /// The sheet names as a JSON array of strings.
 #[wasm_bindgen]
 pub fn session_sheet_names() -> String {
@@ -519,6 +559,9 @@ pub fn session_cells(
             if style.is_some_and(|s| s.underline) {
                 extra.push_str(",\"u\":1");
             }
+            if style.is_some_and(|s| s.wrap) {
+                extra.push_str(",\"w\":1");
+            }
             if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
             }
@@ -709,6 +752,19 @@ pub fn session_toggle_underline(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.underline = target)
 }
 
+/// Toggle text wrapping across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_wrap(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.wrap);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.wrap = target)
+}
+
 /// Set (or clear, with empty hex) the font color across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_set_font_color(
@@ -781,6 +837,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
         }
         if st.underline {
             parts.push("\"u\":1".to_owned());
+        }
+        if st.wrap {
+            parts.push("\"w\":1".to_owned());
         }
         if let Some(al) = st.align {
             parts.push(format!("\"al\":\"{}\"", al.ooxml()));

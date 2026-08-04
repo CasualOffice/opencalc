@@ -129,6 +129,9 @@
         <button class="tb-btn tb-toggle tb-align" data-al="right" title="Align right" aria-label="Align right">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>
         </button>
+        <button id="tb-wrap" class="tb-btn tb-toggle" title="Wrap text" aria-label="Wrap text">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="3" y1="6" x2="21" y2="6"/><path d="M3 12h15a3 3 0 0 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><line x1="3" y1="18" x2="8" y2="18"/></svg>
+        </button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
@@ -178,7 +181,10 @@
       <div class="scrollbar hscroll" id="hscroll"><div class="thumb" id="hthumb"></div></div>
     </div>
 
-    <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
+    <div class="bottom-bar">
+      <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
+      <span class="sel-stats" id="sel-stats"></span>
+    </div>
 
     <script type="module" src="./editor.js"></script>
   </body>

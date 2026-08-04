@@ -240,6 +240,7 @@ fn styles_xml(workbook: &Workbook) -> String {
             num_fmt_id,
             border_id,
             align: style.align,
+            wrap: style.wrap,
         });
     }
 
@@ -316,7 +317,8 @@ fn styles_xml(workbook: &Workbook) -> String {
         } else {
             ""
         };
-        let apply_align = if ids.align.is_some() {
+        let has_align = ids.align.is_some() || ids.wrap;
+        let apply_align = if has_align {
             " applyAlignment=\"1\""
         } else {
             ""
@@ -325,12 +327,17 @@ fn styles_xml(workbook: &Workbook) -> String {
             "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}{apply_border}{apply_align}",
             ids.num_fmt_id, ids.font_id, ids.fill_id, ids.border_id
         ));
-        match ids.align {
-            Some(align) => s.push_str(&format!(
-                "><alignment horizontal=\"{}\"/></xf>",
-                align.ooxml()
-            )),
-            None => s.push_str("/>"),
+        if has_align {
+            s.push_str("><alignment");
+            if let Some(align) = ids.align {
+                s.push_str(&format!(" horizontal=\"{}\"", align.ooxml()));
+            }
+            if ids.wrap {
+                s.push_str(" wrapText=\"1\"");
+            }
+            s.push_str("/></xf>");
+        } else {
+            s.push_str("/>");
         }
     }
     s.push_str("</cellXfs></styleSheet>");
@@ -344,6 +351,7 @@ struct StyleIds {
     num_fmt_id: u32,
     border_id: usize,
     align: Option<HAlign>,
+    wrap: bool,
 }
 
 fn write_border(s: &mut String, border: &Borders) {

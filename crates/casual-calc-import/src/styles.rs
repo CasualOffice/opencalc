@@ -38,6 +38,7 @@ struct Xf {
     fill_id: usize,
     border_id: usize,
     align: Option<HAlign>,
+    wrap: bool,
 }
 
 /// The border edge currently being parsed, so a nested `<color>` attaches to it.
@@ -190,11 +191,17 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             fill_id: attr_u32(e, b"fillId")?.unwrap_or(0) as usize,
                             border_id: attr_u32(e, b"borderId")?.unwrap_or(0) as usize,
                             align: None,
+                            wrap: false,
                         });
                     }
                     b"alignment" if in_cellxfs => {
-                        if let (Some(xf), Some(h)) = (xfs.last_mut(), attr(e, b"horizontal")?) {
-                            xf.align = HAlign::from_ooxml(&h);
+                        if let Some(xf) = xfs.last_mut() {
+                            if let Some(h) = attr(e, b"horizontal")? {
+                                xf.align = HAlign::from_ooxml(&h);
+                            }
+                            if attr(e, b"wrapText")?.as_deref() == Some("1") {
+                                xf.wrap = true;
+                            }
                         }
                     }
                     _ => {}
@@ -231,6 +238,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 font_color: font.color,
                 fill_color: if fill.solid { fill.color } else { None },
                 align: xf.align,
+                wrap: xf.wrap,
                 border: (!border.is_empty()).then_some(border),
             }
         })

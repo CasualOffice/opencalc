@@ -38,6 +38,7 @@ const canvas = document.getElementById("grid");
 const ctx = canvas.getContext("2d");
 const wrap = document.getElementById("grid-wrap");
 const inline = document.getElementById("inline-edit");
+const selStats = document.getElementById("sel-stats");
 const vscroll = document.getElementById("vscroll");
 const vthumb = document.getElementById("vthumb");
 const hscroll = document.getElementById("hscroll");
@@ -85,6 +86,32 @@ const geo = {
 
 const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
+const WRAP_LINE_H = 16; // px per wrapped text line
+let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
+
+// Word-wrap a cell's text to `maxW` px (hard-breaking over-long words).
+function wrapLines(it, maxW) {
+  const weight = it.b ? "600 " : "";
+  const slant = it.i ? "italic " : "";
+  ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+  const lines = [];
+  let line = "";
+  for (const word of String(it.t).split(/\s+/)) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width <= maxW || !line) {
+      if (!line && ctx.measureText(word).width > maxW) {
+        let chunk = "";
+        for (const ch of word) {
+          if (chunk && ctx.measureText(chunk + ch).width > maxW) { lines.push(chunk); chunk = ch; }
+          else chunk += ch;
+        }
+        line = chunk;
+      } else line = test;
+    } else { lines.push(line); line = word; }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
 
 // Measure the wrap, (re)build `geo` from engine sizes at the current pixel
 // scroll, and return `{ w, h }`. Scrolling is fluid: `scrollX/scrollY` are
@@ -123,7 +150,6 @@ function measure() {
   }
 
   geo.colX = new Array(geo.colW.length);
-  geo.rowY = new Array(geo.rowH.length);
   let x = HW - subX;
   geo.cols = 0;
   for (let i = 0; i < geo.colW.length; i++) {
@@ -131,6 +157,26 @@ function measure() {
     if (x < v.w) geo.cols = i + 1;
     x += geo.colW[i] || COL_W;
   }
+
+  // Fetch the visible cells once (reused by draw) and grow rows that contain
+  // wrapped text so the whole wrapped content is shown (auto row height).
+  geoItems = wasm
+    ? JSON.parse(
+        wasm.session_cells(
+          state.sheet, state.firstRow, state.firstCol,
+          state.firstRow + geo.rowH.length, state.firstCol + geo.colW.length,
+        ),
+      )
+    : [];
+  for (const it of geoItems) {
+    if (!it.w || !it.t) continue;
+    const ci = it.c - state.firstCol, ri = it.r - state.firstRow;
+    if (ci < 0 || ci >= geo.colW.length || ri < 0 || ri >= geo.rowH.length) continue;
+    const needed = wrapLines(it, geo.colW[ci] - 8).length * WRAP_LINE_H + 6;
+    if (needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+  }
+
+  geo.rowY = new Array(geo.rowH.length);
   let y = HH - subY;
   geo.rows = 0;
   for (let i = 0; i < geo.rowH.length; i++) {
@@ -305,12 +351,9 @@ function draw() {
   }
   ctx.stroke();
 
-  // Cell fills + text (from the engine).
-  const lastRow = state.firstRow + geo.rows;
+  // Cell fills + text (fetched in measure(), reused here).
   const lastCol = state.firstCol + geo.cols;
-  const items = JSON.parse(
-    wasm.session_cells(state.sheet, state.firstRow, state.firstCol, lastRow, lastCol),
-  );
+  const items = geoItems;
   ctx.textBaseline = "middle";
   for (const it of items) {
     if (!it.bg) continue;
@@ -320,6 +363,9 @@ function draw() {
     ctx.fillStyle = "#" + it.bg;
     ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
   }
+  // Cells that hold text — these block a neighbor's overflow.
+  const occupied = new Set();
+  for (const it of items) if (it.t) occupied.add(it.r + "," + it.c);
   for (const it of items) {
     if (!it.t) continue;
     const x = colXAt(it.c);
@@ -328,31 +374,67 @@ function draw() {
     const w = colWAt(it.c);
     const h = rowHAt(it.r);
     const y = yTop + h / 2;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, yTop, w, h);
-    ctx.clip();
     const weight = it.b ? "600 " : "";
     const slant = it.i ? "italic " : "";
     ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+    const align = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
+
+    // Wrapped cells: multi-line, clipped to the (auto-grown) cell — no overflow.
+    if (it.w) {
+      const lines = wrapLines(it, w - 8);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, yTop, w, h);
+      ctx.clip();
+      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      const tx = align === "right" ? x + w - 5 : align === "center" ? x + w / 2 : x + 5;
+      ctx.textAlign = align;
+      let ly = yTop + Math.max(0, (h - lines.length * WRAP_LINE_H) / 2) + WRAP_LINE_H / 2;
+      for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += WRAP_LINE_H; }
+      ctx.restore();
+      continue;
+    }
+    const tw = ctx.measureText(it.t).width;
+
+    // Text overflows across adjacent EMPTY cells (Excel behavior). Extend the
+    // clip rectangle left/right over blank neighbours until the text fits or a
+    // non-empty cell blocks it.
+    let clipL = x, clipR = x + w;
+    if (tw > w - 8) {
+      if (align !== "right") {
+        let c = it.c;
+        while (clipR - x < tw + 8 && c + 1 < lastCol && !occupied.has(it.r + "," + (c + 1))) {
+          c += 1;
+          clipR = colXAt(c) + colWAt(c);
+        }
+      }
+      if (align !== "left") {
+        let c = it.c;
+        while (x + w - clipL < tw + 8 && c - 1 >= state.firstCol && !occupied.has(it.r + "," + (c - 1))) {
+          c -= 1;
+          clipL = colXAt(c);
+        }
+      }
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(clipL, yTop, clipR - clipL, h);
+    ctx.clip();
     ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
-    let tx, textAlign;
-    if (it.a === "r") { textAlign = "right"; tx = x + w - 5; }
-    else if (it.a === "c") { textAlign = "center"; tx = x + w / 2; }
-    else { textAlign = "left"; tx = x + 5; }
-    ctx.textAlign = textAlign;
+    let tx;
+    if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5; }
+    else if (align === "center") { ctx.textAlign = "center"; tx = x + w / 2; }
+    else { ctx.textAlign = "left"; tx = x + 5; }
     ctx.fillText(it.t, tx, y);
     if (it.u) {
-      // Underline: a line just below the text baseline, spanning the glyph run.
-      const tw = Math.min(ctx.measureText(it.t).width, w - 8);
-      let ux = tx;
-      if (textAlign === "right") ux = tx - tw;
-      else if (textAlign === "center") ux = tx - tw / 2;
+      const uw = Math.min(tw, clipR - clipL - 8);
+      let ux = align === "right" ? tx - uw : align === "center" ? tx - uw / 2 : tx;
       ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(ux, y + 7.5);
-      ctx.lineTo(ux + tw, y + 7.5);
+      ctx.lineTo(ux + uw, y + 7.5);
       ctx.stroke();
     }
     ctx.restore();
@@ -424,7 +506,28 @@ function draw() {
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
   updateScrollbars(v);
+  updateStats();
   if (wasm) refreshFormulaBar();
+}
+
+// Show Sum/Avg/Count of the selection (only for a multi-cell selection), like
+// a real spreadsheet's status bar.
+function fmtNum(n) {
+  return Number.isFinite(n) ? (Math.round(n * 1e6) / 1e6).toLocaleString() : String(n);
+}
+function updateStats() {
+  if (!wasm) return;
+  const s = effectiveRange();
+  const multi = s.r0 !== s.r1 || s.c0 !== s.c1;
+  if (!multi) { selStats.textContent = ""; return; }
+  const st = JSON.parse(wasm.session_range_stats(state.sheet, s.r0, s.c0, s.r1, s.c1));
+  const parts = [];
+  if (st.numeric > 0) {
+    parts.push(`Sum: <b>${fmtNum(st.sum)}</b>`);
+    parts.push(`Avg: <b>${fmtNum(st.avg)}</b>`);
+  }
+  parts.push(`Count: <b>${st.count}</b>`);
+  selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
 }
 
 function refreshFormulaBar() {
@@ -438,6 +541,7 @@ function refreshFormulaBar() {
   press("tb-bold", fmt.b);
   press("tb-italic", fmt.i);
   press("tb-underline", fmt.u);
+  press("tb-wrap", fmt.w);
   for (const b of document.querySelectorAll(".tb-align")) {
     b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
   }
@@ -580,6 +684,7 @@ function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(stat
 function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
+function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
 function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
 function toggleBorder() { setBorder("all"); }
@@ -991,6 +1096,7 @@ function wireEvents() {
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
+  document.getElementById("tb-wrap").addEventListener("click", () => { toggleWrap(); canvas.focus(); });
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
   for (const b of document.querySelectorAll(".tb-align")) {

@@ -20,3 +20,4 @@ Cargo.lock.orig
 /webapp/sample.xlsx
 /site/
 crates/*/pkg/
+.claude/

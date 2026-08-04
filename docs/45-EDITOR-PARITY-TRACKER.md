@@ -58,10 +58,10 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-16 | **Font family + size** controls | Todo | Needs `Style.font_name` + `font_size` in model → import/export/render. Reference the docx sister repo's font mgmt |
 | UX-17 | **Structural insert/delete rows & columns** + formula ref rewriting | Todo | Designed (AST `CellReference` shift/clamp). Ops `InsertRows/DeleteRows/InsertColumns/DeleteColumns`, invertible. Same-sheet first |
 | UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Todo | Pairs with UX-17 |
-| UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Todo | Render change; overflow when neighbor empty |
+| UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Done | Overflow across empty neighbours (align-aware); **Wrap text** toolbar toggle (`Style.wrap`, round-trips via `<alignment wrapText>`) with word-wrap + auto row height. Verified |
 | UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
 | UX-21 | Merge cells | Todo | Model has `merges`; need edit op + render + toolbar |
-| UX-22 | Status bar: sum / average / count of selection | Todo | cheap, high-signal |
+| UX-22 | Status bar: sum / average / count of selection | Done | `session_range_stats`; bottom-bar readout for multi-cell selections. Verified |
 | UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Todo | Excel nav parity |
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |
 | UX-25 | Drag-fill / autofill handle | Todo | |

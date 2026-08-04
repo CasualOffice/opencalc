@@ -111,6 +111,9 @@ pub struct Style {
     /// Horizontal alignment (defaults per value type when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<HAlign>,
+    /// Wrap text within the cell (instead of overflowing/clipping).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wrap: bool,
     /// Cell borders, if any edge is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Borders>,
@@ -130,6 +133,7 @@ impl Style {
             && self.font_color.is_none()
             && self.fill_color.is_none()
             && self.align.is_none()
+            && !self.wrap
             && self.border.is_none()
     }
 }

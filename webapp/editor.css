@@ -124,11 +124,19 @@
   background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 14px;
 }
 
+.bottom-bar {
+  display: flex; align-items: center; flex: 0 0 auto;
+  border-top: 1px solid var(--border); background: var(--card);
+}
 .sheet-tabs {
   display: flex; align-items: center; gap: 4px; padding: 4px 8px;
-  border-top: 1px solid var(--border); background: var(--card);
-  flex: 0 0 auto; overflow-x: auto;
+  flex: 0 1 auto; overflow-x: auto; min-width: 0;
 }
+.sel-stats {
+  margin-left: auto; padding: 0 16px; white-space: nowrap;
+  color: var(--muted); font-size: 12px; font-family: var(--mono);
+}
+.sel-stats b { color: var(--fg); font-weight: 600; }
 .sheet-tab {
   padding: 5px 14px; border: 1px solid transparent; border-radius: 6px 6px 0 0;
   background: transparent; color: var(--muted); font-size: 13px; font-weight: 600;
