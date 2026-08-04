@@ -778,6 +778,42 @@ function clearSelection() {
   try { wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
   draw();
 }
+// --- Find & replace -------------------------------------------------------
+const findBar = document.getElementById("find-bar");
+const findInput = document.getElementById("find-input");
+const replaceInput = document.getElementById("replace-input");
+const findCount = document.getElementById("find-count");
+const findCase = document.getElementById("find-case");
+const findState = { matches: [], idx: -1 };
+
+function openFind() { findBar.hidden = false; findInput.focus(); findInput.select(); runFind(); }
+function closeFind() { findBar.hidden = true; canvas.focus(); }
+function runFind() {
+  const q = findInput.value;
+  findState.matches = q ? JSON.parse(wasm.session_find(state.sheet, q, findCase.checked)) : [];
+  findState.idx = findState.matches.length ? 0 : -1;
+  if (findState.idx >= 0) gotoMatch();
+  else { findCount.textContent = q ? "0" : ""; draw(); }
+}
+function gotoMatch() {
+  const m = findState.matches[findState.idx];
+  if (!m) return;
+  select(m.r, m.c);
+  findCount.textContent = `${findState.idx + 1}/${findState.matches.length}`;
+}
+function findStep(dir) {
+  if (!findState.matches.length) return;
+  findState.idx = (findState.idx + dir + findState.matches.length) % findState.matches.length;
+  gotoMatch();
+}
+function replaceAll() {
+  try {
+    const n = wasm.session_replace_all(state.sheet, findInput.value, replaceInput.value, findCase.checked);
+    status.textContent = `replaced ${n}`;
+  } catch (e) { status.textContent = `error: ${e}`; }
+  runFind();
+}
+
 function doUndo() { try { wasm.session_undo(); } catch {} draw(); }
 function doRedo() { try { wasm.session_redo(); } catch {} draw(); }
 function download(data, name, type) {
@@ -1176,6 +1212,7 @@ function wireEvents() {
         setAlign(k === "l" ? "left" : k === "e" ? "center" : "right"); e.preventDefault(); return;
       }
       if (k === "a") { selectAll(); e.preventDefault(); return; }
+      if (k === "f") { openFind(); e.preventDefault(); return; }
       if (k === "z") { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
@@ -1211,6 +1248,19 @@ function wireEvents() {
   fInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { commit(fInput.value, false); canvas.focus(); e.preventDefault(); }
   });
+
+  // Find & replace bar.
+  findInput.addEventListener("input", runFind);
+  findInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { findStep(e.shiftKey ? -1 : 1); e.preventDefault(); }
+    else if (e.key === "Escape") { closeFind(); e.preventDefault(); }
+  });
+  replaceInput.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFind(); });
+  findCase.addEventListener("change", runFind);
+  document.getElementById("find-next").addEventListener("click", () => findStep(1));
+  document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
+  document.getElementById("replace-all").addEventListener("click", replaceAll);
+  document.getElementById("find-close").addEventListener("click", closeFind);
 
   document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
 

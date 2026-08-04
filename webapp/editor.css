@@ -159,6 +159,29 @@
 
 .grid-wrap { position: relative; flex: 1 1 auto; overflow: hidden; background: var(--bg); }
 
+.find-bar {
+  position: absolute; top: 6px; right: 18px; z-index: 20; display: flex; align-items: center; gap: 6px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+.find-bar[hidden] { display: none; }
+.find-field {
+  height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--fg); font-size: 13px; width: 130px;
+}
+.find-count { color: var(--muted); font-size: 12px; font-family: var(--mono); min-width: 34px; text-align: center; }
+.find-btn {
+  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--fg); cursor: pointer;
+}
+.find-btn:hover { background: var(--bg); border-color: var(--border); }
+.find-action {
+  height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--fg); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.find-action:hover { border-color: var(--accent); }
+.find-case { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 12px; cursor: pointer; }
+
 /* Custom scrollbars — identical on every OS (no native scrollbar UI). */
 .scrollbar { position: absolute; z-index: 6; }
 .scrollbar.vscroll { top: 24px; right: 0; bottom: 14px; width: 14px; }

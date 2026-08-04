@@ -1,8 +1,8 @@
 # OpenCalc
 
 [![CI](https://github.com/CasualOffice/opencalc/actions/workflows/ci.yml/badge.svg)](https://github.com/CasualOffice/opencalc/actions/workflows/ci.yml)
-[![Status: Pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](docs/06-ROADMAP-AND-DELIVERY.md)
-[![Rust: TBD](https://img.shields.io/badge/rust-MSRV%20TBD-black.svg?logo=rust)](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)](docs/06-ROADMAP-AND-DELIVERY.md)
+[![Rust: MSRV 1.88](https://img.shields.io/badge/rust-MSRV%201.88-black.svg?logo=rust)](rust-toolchain.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **A deterministic, embeddable spreadsheet engine written in Rust** — it reads and
@@ -28,14 +28,39 @@ recalculation engine**, and a **virtualized grid layout**.
 Developed by [CasualOffice](https://github.com/CasualOffice) as the spreadsheet
 engine for Casual Sheets and an SDK others can embed.
 
-> **Status: Phase 0 — Foundation (just started).** The documentation phase is
-> closed ([exit report](docs/31-PHASE-D-EXIT-REPORT.md)); the design record — the
-> architecture, phased roadmap, format/schema contracts, and process — is
-> complete and the Cargo workspace skeleton now builds. **No engine logic has
-> been written yet** beyond crate stubs. See
-> [docs/29-PHASE-0-PLAN.md](docs/29-PHASE-0-PLAN.md) for the Phase 0 work items,
-> [docs/06-ROADMAP-AND-DELIVERY.md](docs/06-ROADMAP-AND-DELIVERY.md) for the plan,
-> and [docs/14-EXECUTION-TRACKER.md](docs/14-EXECUTION-TRACKER.md) for live state.
+> **Status: Alpha — the engine and a working editor are live.** The full pipeline
+> runs end to end: read `.xlsx` → normalized model → edit → recalculate → write
+> `.xlsx` → virtualized layout → render. A **browser editor** (canvas grid over
+> the WebAssembly engine) supports real editing and formatting, and CSV/TSV/PSV
+> import & export work alongside XLSX. The formula engine is live for a growing
+> function set (full incremental recalc + the <50 ms budget are the remaining calc
+> work). Track live state in
+> [docs/14-EXECUTION-TRACKER.md](docs/14-EXECUTION-TRACKER.md),
+> [docs/33-FIDELITY-LEDGER.md](docs/33-FIDELITY-LEDGER.md), and — for the editor —
+> [docs/45-EDITOR-PARITY-TRACKER.md](docs/45-EDITOR-PARITY-TRACKER.md).
+
+## What works today
+
+- **Round-trip `.xlsx`** — import → edit → write is a *semantic fixed point* (gated
+  test). Values, formulas (as an AST), number formats, fonts (family/size/bold/
+  italic/underline/color), fills, **borders**, **horizontal + vertical alignment**,
+  **text wrap**, **merged ranges**, **column/row sizing**, frozen-pane metadata,
+  and defined names all survive.
+- **Delimited text** — open and save **CSV / TSV / PSV** with typed fields and RFC
+  4180 quoting.
+- **Formula engine** — tokenizer + Pratt parser + AST + recalculation, with a
+  library incl. `SUM/AVERAGE/COUNT/MIN/MAX/IF/IFERROR/AND/OR/NOT`, `COUNTIF/SUMIF/
+  AVERAGEIF`, text (`LEFT/RIGHT/MID/LEN/UPPER/LOWER/TRIM/CONCAT`) and math
+  (`INT/MOD/POWER/SQRT/ROUND/ABS`).
+- **Editor** (WASM canvas grid): inline + formula-bar editing, drag/shift/header
+  selection (whole row/col/sheet), fluid scrolling with **custom scrollbars**,
+  **drag-to-resize** (+ resize-all, auto-fit), a full **formatting toolbar**,
+  **merge cells**, **insert/delete rows & columns with formula-reference
+  rewriting** via a right-click menu, Excel-style **keyboard navigation**, a
+  selection **status bar** (Sum/Avg/Count), **find & replace**, multi-sheet **tabs**
+  (rename/duplicate/delete), themes, and undo/redo.
+- **Render** — deterministic PNG raster of a viewport (tiny-skia), and a live
+  in-browser canvas renderer.
 
 ## Why OpenCalc
 
@@ -71,27 +96,27 @@ preserved, written back byte-faithfully, laid out, and rendered *before* any cel
 is evaluated. Formulas are imported and preserved from Phase 1A, but they are not
 *calculated* until the dedicated calc-engine phase.
 
-| Phase | Delivers | Formula status |
+| Phase | Delivers | Status |
 | --- | --- | --- |
-| 0 — Foundation | workspace, CI, fixture corpus, bounded XLSX reader, minimal model | — |
-| 1A — Import & model | workbook → sheets → cells, shared strings, styles, number formats, merged ranges, defined names; preservation ledger + compatibility report | parsed & preserved, **not evaluated** |
-| 1B — Semantic writer | model → valid editable `.xlsx`; round-trip fixed point; opens in LibreOffice Calc | preserved verbatim on write |
-| 1C — Grid layout | column/row geometry, merged cells, frozen panes, in-cell rich text, number-format display, display list | — |
-| 1D — Grid render & virtualization | CPU raster (tiny-skia + skrifa), viewport virtualization for 1M-cell sheets, hit-testing | — |
-| 1E — Browser grid editor (WASM) | cell edit, selection, fill, undo/redo | still static values |
-| **2 — Formula & calc engine** | tokenizer/parser, dependency graph, incremental recalc, function library, spill/array semantics | **evaluated** |
-| 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | — |
-| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | — |
-| 5 — Collaboration / web | operation model for shared editing | — |
-| 6 — 1.0 | stable SDK, support guarantees | — |
+| 0 — Foundation | workspace, CI, fixture corpus, bounded XLSX reader, minimal model | ✅ done |
+| 1A — Import & model | workbook → sheets → cells, shared strings, styles, number formats, merged ranges, defined names; preservation ledger + compatibility report | ✅ done |
+| 1B — Semantic writer | model → valid editable `.xlsx`; round-trip fixed point | ✅ done |
+| 1C — Grid layout | column/row geometry, merged cells, number-format display, display list | ✅ done (frozen-pane *render* pending) |
+| 1D — Grid render & virtualization | CPU raster (tiny-skia), viewport virtualization, hit-testing | ✅ core (native glyph shaping pending) |
+| 1E — Browser grid editor (WASM) | cell edit, selection, formatting, structural ops, undo/redo | ✅ done (see the parity tracker) |
+| **2 — Formula & calc engine** | tokenizer/parser, recalc, function library; dependency graph, incremental recalc, spill/array | 🟡 recalc + core functions live; incremental graph pending |
+| 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | ⬜ next |
+| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | ⬜ |
+| 5 — Collaboration / web | operation model for shared editing | ⬜ |
+| 6 — 1.0 | stable SDK, support guarantees | ⬜ |
 
 Full detail: [docs/06-ROADMAP-AND-DELIVERY.md](docs/06-ROADMAP-AND-DELIVERY.md).
 
-## Planned workspace
+## Workspace
 
-OpenCalc will be a Cargo workspace of small, layered crates. Each layer depends
-only on those below it. (None of these exist yet — this is the target scaffold
-designed in [docs/19-WORKSPACE-SCAFFOLD-DESIGN.md](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md).)
+OpenCalc is a Cargo workspace of small, layered crates; each layer depends only on
+those below it (layer division in
+[docs/19-WORKSPACE-SCAFFOLD-DESIGN.md](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)).
 
 | Crate | Responsibility |
 | --- | --- |
@@ -127,16 +152,28 @@ Openly, and on the record (see
 - **Grid UI/UX** — MS Sheets 2026 and Google Sheets.
 - **Web-native architecture** — [Univer](https://github.com/dream-num/univer).
 
+## Try it
+
+```sh
+cargo test --workspace                 # engine test suite
+# live editor (WebAssembly):
+wasm-pack build crates/casual-calc-wasm --release --target web --out-dir "$PWD/webapp/pkg"
+python3 webapp/serve.py                 # then open http://localhost:8099/editor.html
+```
+
+A live demo is also deployed to GitHub Pages from [`webapp/`](webapp/).
+
 ## Status
 
-**Pre-code / documentation phase.** There is no runnable engine yet. This
-repository currently defines *what* OpenCalc is, *how* it will be built, and *in
-what order*. The next milestone is Phase 0: standing up the Cargo workspace, the
-CI gate matrix, the fixture corpus, and the bounded XLSX package reader.
+**Alpha.** The engine and editor are functional and improving; the API is not yet
+stable. Remaining before beta: frozen-pane rendering, the incremental dependency
+graph (<50 ms recalc), a broader function library, and the Phase 3 feature set
+(conditional formatting, data validation, tables, sort/filter, charts, pivots).
 
 Details: [architecture](docs/02-ARCHITECTURE.md) ·
 [roadmap](docs/06-ROADMAP-AND-DELIVERY.md) ·
-[support matrix](docs/18-SUPPORT-MATRIX.md) ·
+[editor parity](docs/45-EDITOR-PARITY-TRACKER.md) ·
+[fidelity ledger](docs/33-FIDELITY-LEDGER.md) ·
 [calc engine design](docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md).
 
 ## License

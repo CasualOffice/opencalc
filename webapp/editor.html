@@ -206,6 +206,22 @@
     </div>
 
     <div class="grid-wrap" id="grid-wrap">
+      <div class="find-bar" id="find-bar" hidden>
+        <input id="find-input" class="find-field" placeholder="Find" spellcheck="false" />
+        <span class="find-count" id="find-count"></span>
+        <button id="find-prev" class="find-btn" title="Previous (Shift+Enter)" aria-label="Previous">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button id="find-next" class="find-btn" title="Next (Enter)" aria-label="Next">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <input id="replace-input" class="find-field" placeholder="Replace with" spellcheck="false" />
+        <button id="replace-all" class="find-action">Replace all</button>
+        <label class="find-case"><input type="checkbox" id="find-case" /> Aa</label>
+        <button id="find-close" class="find-btn" title="Close (Esc)" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
       <canvas id="grid" tabindex="0"></canvas>
       <input id="inline-edit" class="inline-edit" spellcheck="false" />
       <div class="scrollbar vscroll" id="vscroll"><div class="thumb" id="vthumb"></div></div>

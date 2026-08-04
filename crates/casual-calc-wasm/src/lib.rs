@@ -235,6 +235,111 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
     })
 }
 
+/// Case-insensitive substring replace (used when Find & Replace isn't
+/// match-case). Replaces every occurrence, emitting the replacement verbatim.
+fn ci_replace(haystack: &str, needle: &str, repl: &str) -> String {
+    if needle.is_empty() {
+        return haystack.to_owned();
+    }
+    let (hay_l, needle_l) = (haystack.to_lowercase(), needle.to_lowercase());
+    let mut out = String::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if hay_l[i..].starts_with(&needle_l) {
+            out.push_str(repl);
+            i += needle.len();
+        } else {
+            // advance one char (UTF-8 safe)
+            let ch = haystack[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn contains_ci(hay: &str, needle: &str, match_case: bool) -> bool {
+    if match_case {
+        hay.contains(needle)
+    } else {
+        hay.to_lowercase().contains(&needle.to_lowercase())
+    }
+}
+
+/// All cells whose display text contains `query`, as JSON `[{r,c}, …]`.
+#[wasm_bindgen]
+pub fn session_find(sheet: usize, query: &str, match_case: bool) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        if query.is_empty() {
+            return "[]".to_owned();
+        }
+        let mut hits = Vec::new();
+        for (at, cell) in sh.cells.iter() {
+            if contains_ci(&display_text(wb, cell), query, match_case) {
+                hits.push(format!("{{\"r\":{},\"c\":{}}}", at.row, at.col));
+            }
+        }
+        format!("[{}]", hits.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Replace `find` with `replace` in every text cell, returning the count
+/// (one undo step). Only string cells are touched; formulas/numbers are left.
+#[wasm_bindgen]
+pub fn session_replace_all(
+    sheet: usize,
+    find: &str,
+    replace: &str,
+    match_case: bool,
+) -> Result<usize, JsError> {
+    if find.is_empty() {
+        return Ok(0);
+    }
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut edits: Vec<(CellRef, String)> = Vec::new();
+        if let Some(sh) = session.workbook().sheets.get(sheet) {
+            for (at, c) in sh.cells.iter() {
+                let text = match c.value {
+                    CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                        session.workbook().strings.get(id).unwrap_or_default()
+                    }
+                    _ => continue,
+                };
+                if !contains_ci(text, find, match_case) {
+                    continue;
+                }
+                let replaced = if match_case {
+                    text.replace(find, replace)
+                } else {
+                    ci_replace(text, find, replace)
+                };
+                edits.push((at, replaced));
+            }
+        }
+        let count = edits.len();
+        let mut ops = Vec::with_capacity(count);
+        for (at, text) in edits {
+            let id = session.workbook_mut().intern_string(&text);
+            ops.push(EditOperation::SetValue {
+                sheet,
+                at,
+                value: CellValue::SharedString(id),
+            });
+        }
+        if !ops.is_empty() {
+            session.edit(EditOperation::Batch(ops)).map_err(js)?;
+        }
+        Ok(count)
+    })
+}
+
 /// The data-edge cell reached by Ctrl+Arrow from `(row,col)` moving by
 /// `(dr,dc)` ∈ {-1,0,1}, using Excel's block-jump rule. Returns JSON `{row,col}`.
 #[wasm_bindgen]
