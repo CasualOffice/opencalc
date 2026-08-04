@@ -52,6 +52,39 @@ impl Borders {
     }
 }
 
+/// Horizontal text alignment within a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HAlign {
+    /// Left-aligned.
+    Left,
+    /// Centered.
+    Center,
+    /// Right-aligned.
+    Right,
+}
+
+impl HAlign {
+    /// The OOXML `horizontal` attribute token.
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            HAlign::Left => "left",
+            HAlign::Center => "center",
+            HAlign::Right => "right",
+        }
+    }
+
+    /// Parse an OOXML `horizontal` token.
+    pub fn from_ooxml(token: &str) -> Option<Self> {
+        match token {
+            "left" => Some(HAlign::Left),
+            "center" | "centerContinuous" => Some(HAlign::Center),
+            "right" => Some(HAlign::Right),
+            _ => None,
+        }
+    }
+}
+
 /// A cell's formatting. Extensible; equal styles are deduplicated in the table.
 /// Colors are `"RRGGBB"` hex strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -66,12 +99,18 @@ pub struct Style {
     /// Italic text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub italic: bool,
+    /// Underlined text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub underline: bool,
     /// Font color as `RRGGBB` hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_color: Option<String>,
     /// Solid fill (background) color as `RRGGBB` hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
+    /// Horizontal alignment (defaults per value type when unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<HAlign>,
     /// Cell borders, if any edge is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Borders>,
@@ -87,8 +126,10 @@ impl Style {
         self.number_format.is_none()
             && !self.bold
             && !self.italic
+            && !self.underline
             && self.font_color.is_none()
             && self.fill_color.is_none()
+            && self.align.is_none()
             && self.border.is_none()
     }
 }

@@ -281,12 +281,24 @@ function draw() {
     const slant = it.i ? "italic " : "";
     ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
     ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
-    if (it.a === "r") {
-      ctx.textAlign = "right";
-      ctx.fillText(it.t, x + w - 5, y);
-    } else {
-      ctx.textAlign = "left";
-      ctx.fillText(it.t, x + 5, y);
+    let tx, textAlign;
+    if (it.a === "r") { textAlign = "right"; tx = x + w - 5; }
+    else if (it.a === "c") { textAlign = "center"; tx = x + w / 2; }
+    else { textAlign = "left"; tx = x + 5; }
+    ctx.textAlign = textAlign;
+    ctx.fillText(it.t, tx, y);
+    if (it.u) {
+      // Underline: a line just below the text baseline, spanning the glyph run.
+      const tw = Math.min(ctx.measureText(it.t).width, w - 8);
+      let ux = tx;
+      if (textAlign === "right") ux = tx - tw;
+      else if (textAlign === "center") ux = tx - tw / 2;
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ux, y + 7.5);
+      ctx.lineTo(ux + tw, y + 7.5);
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -352,10 +364,15 @@ function refreshFormulaBar() {
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   document.getElementById("tb-undo").disabled = !wasm.session_can_undo();
   document.getElementById("tb-redo").disabled = !wasm.session_can_redo();
-  const s = selRect();
-  document
-    .getElementById("tb-bold")
-    .setAttribute("aria-pressed", wasm.session_range_bold(state.sheet, s.r0, s.c0, s.r1, s.c1) ? "true" : "false");
+  // Reflect the focus cell's formatting on the toolbar (like a real spreadsheet).
+  const fmt = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col));
+  const press = (id, on) => document.getElementById(id).setAttribute("aria-pressed", on ? "true" : "false");
+  press("tb-bold", fmt.b);
+  press("tb-italic", fmt.i);
+  press("tb-underline", fmt.u);
+  for (const b of document.querySelectorAll(".tb-align")) {
+    b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
+  }
 }
 
 function cellAt(px, py) {
@@ -417,24 +434,73 @@ function commit(value, advance) {
   draw();
 }
 
-function toggleBold() {
-  const s = selRect();
-  try { wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { status.textContent = `error: ${e}`; }
+function usedBounds() {
+  const b = JSON.parse(wasm.session_used_bounds(state.sheet));
+  return { rows: Math.max(1, b.rows), cols: Math.max(1, b.cols) };
+}
+// The visible column/row index at a canvas x/y (for header clicks).
+function colAtX(px) {
+  for (let i = 0; i < geo.colX.length; i++) if (px < geo.colX[i] + geo.colW[i]) return state.firstCol + i;
+  return state.firstCol + Math.max(0, geo.colX.length - 1);
+}
+function rowAtY(py) {
+  for (let i = 0; i < geo.rowY.length; i++) if (py < geo.rowY[i] + geo.rowH[i]) return state.firstRow + i;
+  return state.firstRow + Math.max(0, geo.rowY.length - 1);
+}
+function selectAll() {
+  const b = usedBounds();
+  state.anchor = { row: 0, col: 0 };
+  state.sel = { row: b.rows - 1, col: b.cols - 1 };
+  endInline();
   draw();
 }
-function setFill(hex) {
-  const s = selRect();
-  try { wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex); }
-  catch (e) { status.textContent = `error: ${e}`; }
+function selectRow(r) {
+  const b = usedBounds();
+  state.anchor = { row: r, col: 0 };
+  state.sel = { row: r, col: b.cols - 1 };
+  endInline();
+  ensureVisible();
   draw();
 }
-function toggleBorder() {
-  const s = selRect();
-  try { wasm.session_toggle_border(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { status.textContent = `error: ${e}`; }
+function selectColumn(c) {
+  const b = usedBounds();
+  state.anchor = { row: 0, col: c };
+  state.sel = { row: b.rows - 1, col: c };
+  endInline();
+  ensureVisible();
   draw();
 }
+// Double-click a column boundary: size the column to its widest cell.
+function autofitColumn(col) {
+  const b = usedBounds();
+  const items = JSON.parse(wasm.session_cells(state.sheet, 0, col, b.rows - 1, col));
+  let maxw = 24;
+  for (const it of items) {
+    if (!it.t) continue;
+    const weight = it.b ? "600 " : "";
+    const slant = it.i ? "italic " : "";
+    ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+    maxw = Math.max(maxw, ctx.measureText(it.t).width);
+  }
+  try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); } catch {}
+  draw();
+}
+
+// Run a formatting op over the current selection, then redraw.
+function formatSel(fn) {
+  const s = selRect();
+  try { fn(s); } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+function toggleBold() { formatSel((s) => wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function toggleItalic() { formatSel((s) => wasm.session_toggle_italic(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
+function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
+function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
+function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
+function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
+function toggleBorder() { setBorder("all"); }
 function clearSelection() {
   const s = selRect();
   try { wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
@@ -538,6 +604,8 @@ function renderTabs() {
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", i === state.sheet ? "true" : "false");
     b.addEventListener("click", () => switchSheet(i));
+    b.addEventListener("dblclick", () => renameSheet(i, b));
+    b.addEventListener("contextmenu", (e) => { e.preventDefault(); sheetMenu(i, e.clientX, e.clientY); });
     tabsEl.appendChild(b);
   });
   const add = document.createElement("button");
@@ -554,6 +622,78 @@ function renderTabs() {
     } catch (e) { status.textContent = `error: ${e}`; }
   });
   tabsEl.appendChild(add);
+}
+
+// Inline-rename a sheet tab.
+function renameSheet(i, tabEl) {
+  if (!tabEl) return;
+  const old = tabEl.textContent;
+  const input = document.createElement("input");
+  input.className = "sheet-rename";
+  input.value = old;
+  tabEl.textContent = "";
+  tabEl.appendChild(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    try { if (name && name !== old) wasm.session_rename_sheet(i, name); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    renderTabs();
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { commit(); e.preventDefault(); }
+    else if (e.key === "Escape") { done = true; renderTabs(); }
+  });
+  input.addEventListener("blur", commit);
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("dblclick", (e) => e.stopPropagation());
+}
+
+function closeSheetMenu() {
+  const m = document.getElementById("sheet-ctx");
+  if (m) m.remove();
+}
+// Right-click context menu for a sheet tab.
+function sheetMenu(i, x, y) {
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu";
+  menu.id = "sheet-ctx";
+  const item = (label, danger, fn) => {
+    const btn = document.createElement("button");
+    btn.textContent = label;
+    if (danger) btn.className = "danger";
+    btn.addEventListener("click", () => { closeSheetMenu(); fn(); });
+    menu.appendChild(btn);
+  };
+  item("Rename", false, () => renameSheet(i, tabsEl.querySelectorAll(".sheet-tab")[i]));
+  item("Duplicate", false, () => {
+    try { const n = wasm.session_duplicate_sheet(i); switchSheet(n); renderTabs(); }
+    catch (e) { status.textContent = `error: ${e}`; }
+  });
+  item("Delete", true, () => {
+    try {
+      wasm.session_delete_sheet(i);
+      if (i <= state.sheet) state.sheet = Math.max(0, state.sheet - 1);
+      renderTabs();
+      resetView();
+    } catch (e) { status.textContent = `error: ${e}`; }
+  });
+  menu.style.left = x + "px";
+  menu.style.top = "0px";
+  menu.style.visibility = "hidden";
+  document.body.appendChild(menu);
+  // Open upward if it would overflow the bottom (tabs sit at the viewport edge).
+  const h = menu.offsetHeight;
+  const top = y + h > window.innerHeight ? Math.max(4, y - h) : y;
+  menu.style.top = top + "px";
+  menu.style.visibility = "visible";
+  setTimeout(() => document.addEventListener("click", closeSheetMenu, { once: true }), 0);
 }
 
 // Live-update the previewed size of the line being dragged.
@@ -583,6 +723,10 @@ function wireEvents() {
       state.resize = { axis: hb.axis, index: hb.index, previewPx: cur };
       return;
     }
+    // Header clicks: select-all (corner), whole column, or whole row.
+    if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
+    if (py < HH && px >= HW) { selectColumn(colAtX(px)); canvas.focus(); return; }
+    if (px < HW && py >= HH) { selectRow(rowAtY(py)); canvas.focus(); return; }
     const hit = cellAt(px, py);
     if (hit) {
       endInline();
@@ -622,14 +766,12 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    // Double-clicking a boundary resets that column/row to the sheet default.
+    // Double-clicking a column boundary auto-fits it to its widest cell; a row
+    // boundary resets the row to the default height.
     const hb = boundaryAt(px, py);
     if (hb) {
-      try {
-        if (hb.axis === "col") wasm.session_clear_col_width(state.sheet, hb.index);
-        else wasm.session_clear_row_height(state.sheet, hb.index);
-      } catch (err) { status.textContent = `error: ${err}`; }
-      draw();
+      if (hb.axis === "col") autofitColumn(hb.index);
+      else { try { wasm.session_clear_row_height(state.sheet, hb.index); } catch {} draw(); }
       return;
     }
     const hit = cellAt(px, py);
@@ -659,7 +801,13 @@ function wireEvents() {
     if (mod) {
       const k = e.key.toLowerCase();
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
+      if (k === "i") { toggleItalic(); e.preventDefault(); return; }
+      if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
       if (e.shiftKey && (k === "7" || k === "&")) { toggleBorder(); e.preventDefault(); return; }
+      if (e.shiftKey && (k === "l" || k === "e" || k === "r")) {
+        setAlign(k === "l" ? "left" : k === "e" ? "center" : "right"); e.preventDefault(); return;
+      }
+      if (k === "a") { selectAll(); e.preventDefault(); return; }
       if (k === "z") { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
@@ -694,22 +842,38 @@ function wireEvents() {
   });
 
   document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
-  const saveBtn = document.getElementById("tb-save");
-  const saveMenu = document.getElementById("save-menu");
-  saveBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    saveMenu.hidden = !saveMenu.hidden;
-  });
-  document.addEventListener("click", (e) => {
-    if (!saveMenu.contains(e.target) && e.target !== saveBtn) saveMenu.hidden = true;
-  });
-  for (const b of saveMenu.querySelectorAll("button")) {
-    b.addEventListener("click", () => { saveAs(b.dataset.fmt); saveMenu.hidden = true; canvas.focus(); });
+
+  // Popover menus: click toggles, outside-click / Escape closes, only one open.
+  const menus = [];
+  function wirePopup(btnId, menuId, onItem) {
+    const btn = document.getElementById(btnId);
+    const menu = document.getElementById(menuId);
+    menus.push(menu);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      for (const m of menus) m.hidden = true;
+      menu.hidden = !open;
+    });
+    for (const item of menu.querySelectorAll("button")) {
+      item.addEventListener("click", () => { onItem(item); menu.hidden = true; canvas.focus(); });
+    }
   }
+  document.addEventListener("click", () => { for (const m of menus) m.hidden = true; });
+
+  wirePopup("tb-save", "save-menu", (b) => saveAs(b.dataset.fmt));
+  wirePopup("tb-fontcolor", "fontcolor-menu", (b) => setFontColor(b.dataset.c));
+  wirePopup("tb-fillcolor", "fillcolor-menu", (b) => setFill(b.dataset.c));
+  wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
+  wirePopup("tb-border", "border-menu", (b) => setBorder(b.dataset.bd));
+
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
-  document.getElementById("tb-border").addEventListener("click", () => { toggleBorder(); canvas.focus(); });
-  for (const b of document.querySelectorAll("#tb-fill button")) {
-    b.addEventListener("click", () => { setFill(b.dataset.c); canvas.focus(); });
+  document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
+  document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
+  document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
+  document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
+  for (const b of document.querySelectorAll(".tb-align")) {
+    b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];

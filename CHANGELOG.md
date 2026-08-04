@@ -11,6 +11,35 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Editor product pass: full formatting, alignment, sheet management
+
+A depth pass to bring the editor toward real-spreadsheet parity (not MVP stubs).
+
+**Added**
+
+- **Text formatting**, complete: bold, **italic**, **underline** (model gains
+  `Style.underline` + `<u/>` import/export), plus a **font-color** swatch picker
+  and the existing fill picker. `Ctrl+B/I/U` shortcuts.
+- **Horizontal alignment** (left/center/right): new `Style.align` (`HAlign`),
+  round-tripped through `cellXfs` `<alignment>`; toolbar buttons reflect and set
+  it; the grid renders centered text; `Ctrl+Shift+L/E/R`.
+- **Number formats** via a menu (Automatic / Number / 2-decimals / Thousands /
+  Percent / Currency / Date) plus one-click **currency** and **percent**. The
+  number-format engine now honors **literal runs** — currency symbols
+  (`$#,##0.00` → `$1,234.50`), quoted text (`0" kg"`), escapes, and `[$SYM-…]`
+  tokens — so currency shows its symbol instead of dropping it.
+- **Borders menu**: All / Outer / Clear (position-aware outer edges), replacing
+  the single all-or-nothing toggle.
+- **Sheet management**: double-click a tab to **rename** inline; right-click for a
+  context menu with **Rename / Duplicate / Delete** (`session_rename_sheet` /
+  `session_duplicate_sheet` / `session_delete_sheet`; last sheet protected;
+  duplicate deep-copies the grid).
+- **Header selection**: click a row/column header to select the whole row/column;
+  click the top-left corner (or `Ctrl+A`) to select the used range.
+- **Auto-fit**: double-click a column boundary to size it to its widest cell.
+- The toolbar reflects the **active cell's** formatting state
+  (`session_cell_format`), like a real spreadsheet.
+
 ### 2026-08-05 — Delimited text: CSV / TSV / PSV (IO-001)
 
 **Added**

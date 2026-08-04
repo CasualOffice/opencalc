@@ -32,7 +32,7 @@ pub use ids::{
 pub use sheet::{AxisSizing, Sheet, SheetView};
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
-pub use style::{BorderEdge, Borders, Style, StyleTable};
+pub use style::{BorderEdge, Borders, HAlign, Style, StyleTable};
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{SCHEMA_VERSION, Workbook};
 

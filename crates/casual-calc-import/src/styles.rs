@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use casual_calc_model::{BorderEdge, Borders, Style};
+use casual_calc_model::{BorderEdge, Borders, HAlign, Style};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -21,6 +21,7 @@ pub struct StyleSheet {
 struct Font {
     bold: bool,
     italic: bool,
+    underline: bool,
     color: Option<String>,
 }
 
@@ -36,6 +37,7 @@ struct Xf {
     font_id: usize,
     fill_id: usize,
     border_id: usize,
+    align: Option<HAlign>,
 }
 
 /// The border edge currently being parsed, so a nested `<color>` attaches to it.
@@ -160,6 +162,11 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             f.italic = true;
                         }
                     }
+                    b"u" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.underline = true;
+                        }
+                    }
                     b"color" if in_fonts => {
                         if let (Some(f), Some(c)) = (fonts.last_mut(), rgb(e)?) {
                             f.color = Some(c);
@@ -182,7 +189,13 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             font_id: attr_u32(e, b"fontId")?.unwrap_or(0) as usize,
                             fill_id: attr_u32(e, b"fillId")?.unwrap_or(0) as usize,
                             border_id: attr_u32(e, b"borderId")?.unwrap_or(0) as usize,
+                            align: None,
                         });
+                    }
+                    b"alignment" if in_cellxfs => {
+                        if let (Some(xf), Some(h)) = (xfs.last_mut(), attr(e, b"horizontal")?) {
+                            xf.align = HAlign::from_ooxml(&h);
+                        }
                     }
                     _ => {}
                 }
@@ -214,8 +227,10 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 number_format: resolve_format(xf.num_fmt_id, &custom_formats),
                 bold: font.bold,
                 italic: font.italic,
+                underline: font.underline,
                 font_color: font.color,
                 fill_color: if fill.solid { fill.color } else { None },
+                align: xf.align,
                 border: (!border.is_empty()).then_some(border),
             }
         })

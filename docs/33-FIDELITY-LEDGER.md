@@ -46,8 +46,9 @@ evidence").
 | Grid raster (PNG) | — | — | — | ● | — | P1D-001 (gridlines + content fills; glyphs pending) |
 | Formulas (AST) | ● | ● | ✗ | — | ● | P2-001 |
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
-| Number formats | ● | ● | ● | ✗ | — | E-001 (SetStyle) |
-| Styles: bold/italic/font color/fill | ● | ● | ~ | ~ | — | P1A-003b |
+| Number formats (incl. currency/literals) | ● | ● | ● | ● | — | E-001; numfmt literal runs; editor menu + $ / % |
+| Styles: bold/italic/underline/font color/fill | ● | ● | ● | ~ | — | P1A-003b/d (editor toggles + pickers) |
+| Styles: horizontal alignment | ● | ● | ● | ● | — | P1A-003d (`<alignment>`; editor renders + sets) |
 | Styles: borders | ● | ● | ● | ~ | — | P1A-003c (per-edge style+color, interned `<borders>`; editor draws + toggles; PNG borders pending) |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Column/row sizing | ● | ● | ● | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them; drag-to-resize, undoable) |

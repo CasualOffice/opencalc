@@ -18,7 +18,9 @@ use std::collections::BTreeSet;
 use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
-use casual_calc_model::{BorderEdge, Borders, Cell, CellRange, CellValue, SheetId, Workbook};
+use casual_calc_model::{
+    BorderEdge, Borders, Cell, CellRange, CellValue, HAlign, SheetId, Workbook,
+};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -182,7 +184,8 @@ fn styles_xml(workbook: &Workbook) -> String {
     // Deduplicate fonts, solid fills, and custom number formats, and record the
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
-    let mut fonts: Vec<(bool, bool, Option<String>)> = vec![(false, false, None)];
+    // Font key: (bold, italic, underline, color).
+    let mut fonts: Vec<(bool, bool, bool, Option<String>)> = vec![(false, false, false, None)];
     let mut fills: Vec<String> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
@@ -190,7 +193,12 @@ fn styles_xml(workbook: &Workbook) -> String {
     let mut per_style: Vec<StyleIds> = Vec::with_capacity(styles.len());
 
     for style in &styles {
-        let font_key = (style.bold, style.italic, style.font_color.clone());
+        let font_key = (
+            style.bold,
+            style.italic,
+            style.underline,
+            style.font_color.clone(),
+        );
         let font_id = fonts
             .iter()
             .position(|f| f == &font_key)
@@ -231,6 +239,7 @@ fn styles_xml(workbook: &Workbook) -> String {
             fill_id,
             num_fmt_id,
             border_id,
+            align: style.align,
         });
     }
 
@@ -248,13 +257,16 @@ fn styles_xml(workbook: &Workbook) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (bold, italic, color) in &fonts {
+    for (bold, italic, underline, color) in &fonts {
         s.push_str("<font>");
         if *bold {
             s.push_str("<b/>");
         }
         if *italic {
             s.push_str("<i/>");
+        }
+        if *underline {
+            s.push_str("<u/>");
         }
         if let Some(c) = color {
             s.push_str(&format!("<color rgb=\"FF{c}\"/>"));
@@ -304,10 +316,22 @@ fn styles_xml(workbook: &Workbook) -> String {
         } else {
             ""
         };
+        let apply_align = if ids.align.is_some() {
+            " applyAlignment=\"1\""
+        } else {
+            ""
+        };
         s.push_str(&format!(
-            "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}{apply_border}/>",
+            "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}{apply_border}{apply_align}",
             ids.num_fmt_id, ids.font_id, ids.fill_id, ids.border_id
         ));
+        match ids.align {
+            Some(align) => s.push_str(&format!(
+                "><alignment horizontal=\"{}\"/></xf>",
+                align.ooxml()
+            )),
+            None => s.push_str("/>"),
+        }
     }
     s.push_str("</cellXfs></styleSheet>");
     s
@@ -319,6 +343,7 @@ struct StyleIds {
     fill_id: usize,
     num_fmt_id: u32,
     border_id: usize,
+    align: Option<HAlign>,
 }
 
 fn write_border(s: &mut String, border: &Borders) {

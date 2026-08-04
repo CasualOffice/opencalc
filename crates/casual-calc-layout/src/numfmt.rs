@@ -2,10 +2,11 @@
 //! the displayed string. See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 //!
 //! Supported subset: `General`; fixed decimals (`0`, `0.00`); thousands grouping
-//! (`#,##0`); percent (`0%`, `0.00%`); and date/time formats (rendered as
-//! `YYYY-MM-DD`, `HH:MM:SS`, or both). Deferred: negative/zero/text sections,
-//! colors, currency/literal runs, fractions, scientific notation, and
-//! token-exact date layout.
+//! (`#,##0`); percent (`0%`, `0.00%`); **literal runs** around the number —
+//! currency symbols (`$#,##0.00`), quoted text (`0" kg"`), escaped characters
+//! (`0\ x`), and `[$SYM-locale]` currency tokens; and date/time formats (rendered
+//! as `YYYY-MM-DD`, `HH:MM:SS`, or both). Deferred: negative/zero/text sections,
+//! colors, fractions, scientific notation, and token-exact date layout.
 
 /// Format `value` for display using the SpreadsheetML format `code`.
 pub fn format_number(value: f64, code: &str) -> String {
@@ -60,16 +61,86 @@ fn decimal_places(section: &str) -> usize {
 fn format_numeric(value: f64, section: &str) -> String {
     let percent = section.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
-    let decimals = decimal_places(section);
 
+    let (prefix, pattern, suffix) = split_literal_runs(section);
+    let decimals = decimal_places(&pattern);
     let mut digits = format!("{:.*}", decimals, scaled.abs());
-    if section.contains(',') {
+    if pattern.contains(',') {
         digits = group_thousands(&digits);
     }
 
     let sign = if scaled < 0.0 { "-" } else { "" };
-    let suffix = if percent { "%" } else { "" };
-    format!("{sign}{digits}{suffix}")
+    format!("{sign}{prefix}{digits}{suffix}")
+}
+
+/// Split a numeric format section into `(prefix literal, digit pattern, suffix
+/// literal)`. Literal runs honor quotes (`"…"`), escapes (`\x`), and `[$SYM-…]`
+/// currency tokens; `_x` (spacing) and `*x` (fill) are skipped.
+fn split_literal_runs(section: &str) -> (String, String, String) {
+    let mut prefix = String::new();
+    let mut pattern = String::new();
+    let mut suffix = String::new();
+    let mut chars = section.chars().peekable();
+    // Phase 0 = before the number, 1 = inside it, 2 = after it.
+    let mut phase = 0u8;
+
+    while let Some(ch) = chars.next() {
+        // The digit pattern itself.
+        if matches!(ch, '0' | '#' | '.' | ',') {
+            if phase == 0 {
+                phase = 1;
+            }
+            if phase == 1 {
+                pattern.push(ch);
+                continue;
+            }
+            // A stray placeholder after the number: treat as a literal.
+        }
+        if phase == 1 {
+            phase = 2; // first non-pattern char after the number starts the suffix.
+        }
+        let out = if phase == 0 { &mut prefix } else { &mut suffix };
+        match ch {
+            '%' => out.push('%'),
+            '"' => {
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    out.push(q);
+                }
+            }
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    out.push(esc);
+                }
+            }
+            '[' => {
+                // `[$SYM-locale]` → emit SYM; other bracket tokens ([Red], …) skip.
+                let mut token = String::new();
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                    token.push(b);
+                }
+                if let Some(rest) = token.strip_prefix('$') {
+                    out.push_str(rest.split('-').next().unwrap_or(""));
+                }
+            }
+            '_' => {
+                chars.next(); // spacing: consume the next char, emit a space.
+                out.push(' ');
+            }
+            '*' => {
+                chars.next(); // fill: consume the next char, ignore.
+            }
+            ' ' => out.push(' '),
+            c if !matches!(c, '0' | '#' | '.' | ',') => out.push(c),
+            _ => {}
+        }
+    }
+    (prefix, pattern, suffix)
 }
 
 fn group_thousands(number: &str) -> String {
@@ -155,6 +226,15 @@ mod tests {
     fn percent() {
         assert_eq!(format_number(0.5, "0%"), "50%");
         assert_eq!(format_number(0.1234, "0.0%"), "12.3%");
+    }
+
+    #[test]
+    fn currency_and_literals() {
+        assert_eq!(format_number(4.5, "$#,##0.00"), "$4.50");
+        assert_eq!(format_number(1234.5, "$#,##0.00"), "$1,234.50");
+        assert_eq!(format_number(-9.99, "$#,##0.00"), "-$9.99");
+        assert_eq!(format_number(3.0, "0\" kg\""), "3 kg");
+        assert_eq!(format_number(5.0, "[$€-407]#,##0.00"), "€5.00");
     }
 
     #[test]

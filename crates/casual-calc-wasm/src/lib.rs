@@ -19,7 +19,7 @@ use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook,
+    BorderEdge, Borders, Cell, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -162,6 +162,75 @@ pub fn session_add_sheet() -> Result<usize, JsError> {
         let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
         wb.sheets.push(Sheet::new(id, format!("Sheet{}", n + 1)));
         Ok(n)
+    })
+}
+
+/// Rename a sheet (names must be unique and non-empty).
+#[wasm_bindgen]
+pub fn session_rename_sheet(index: usize, name: &str) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(JsError::new("sheet name cannot be empty"));
+        }
+        let wb = session.workbook_mut();
+        if wb
+            .sheets
+            .iter()
+            .enumerate()
+            .any(|(i, sh)| i != index && sh.name == name)
+        {
+            return Err(JsError::new("a sheet with that name already exists"));
+        }
+        if let Some(sh) = wb.sheets.get_mut(index) {
+            sh.name = name.to_owned();
+        }
+        Ok(())
+    })
+}
+
+/// Delete a sheet (never the last remaining one).
+#[wasm_bindgen]
+pub fn session_delete_sheet(index: usize) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let wb = session.workbook_mut();
+        if wb.sheets.len() <= 1 {
+            return Err(JsError::new("cannot delete the last sheet"));
+        }
+        if index < wb.sheets.len() {
+            wb.sheets.remove(index);
+        }
+        Ok(())
+    })
+}
+
+/// Duplicate a sheet (inserted right after the source), returning its index.
+#[wasm_bindgen]
+pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let wb = session.workbook_mut();
+        let Some(src) = wb.sheets.get(index) else {
+            return Err(JsError::new("no such sheet"));
+        };
+        let mut clone = src.clone();
+        clone.id = SheetId(Id::from_parts(0x5348, 2000 + wb.sheets.len() as u64));
+        let base = src.name.clone();
+        let mut n = 2;
+        let mut name = format!("{base} ({n})");
+        while wb.sheets.iter().any(|sh| sh.name == name) {
+            n += 1;
+            name = format!("{base} ({n})");
+        }
+        clone.name = name;
+        let at = index + 1;
+        wb.sheets.insert(at, clone);
+        Ok(at)
     })
 }
 
@@ -369,9 +438,15 @@ pub fn session_cells(
             if text.is_empty() && fill.is_empty() && !has_border {
                 continue;
             }
-            let align = match cell.value {
-                CellValue::Number(_) | CellValue::Bool(_) | CellValue::Error(_) => "r",
-                _ => "l",
+            // Explicit alignment wins; otherwise numbers/bools/errors go right.
+            let align = match style.and_then(|s| s.align) {
+                Some(HAlign::Left) => "l",
+                Some(HAlign::Center) => "c",
+                Some(HAlign::Right) => "r",
+                None => match cell.value {
+                    CellValue::Number(_) | CellValue::Bool(_) | CellValue::Error(_) => "r",
+                    _ => "l",
+                },
             };
             let mut extra = String::new();
             if style.is_some_and(|s| s.bold) {
@@ -379,6 +454,9 @@ pub fn session_cells(
             }
             if style.is_some_and(|s| s.italic) {
                 extra.push_str(",\"i\":1");
+            }
+            if style.is_some_and(|s| s.underline) {
+                extra.push_str(",\"u\":1");
             }
             if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
@@ -497,6 +575,40 @@ pub fn session_range_bold(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> b
     .unwrap_or(false)
 }
 
+/// Whether every cell in a range satisfies `pred` on its style.
+fn range_all(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    pred: impl Fn(&Style) -> bool,
+) -> bool {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return false;
+        };
+        let mut any = false;
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                any = true;
+                let ok = sh
+                    .cells
+                    .get(CellRef::new(r, c))
+                    .and_then(|cell| cell.style)
+                    .and_then(|id| wb.styles.get(id))
+                    .is_some_and(&pred);
+                if !ok {
+                    return false;
+                }
+            }
+        }
+        any
+    })
+    .unwrap_or(false)
+}
+
 /// Toggle bold across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_toggle_bold(
@@ -506,8 +618,124 @@ pub fn session_toggle_bold(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
-    let target = !session_range_bold(sheet, r0, c0, r1, c1);
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.bold);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.bold = target)
+}
+
+/// Toggle italic across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_italic(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.italic);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.italic = target)
+}
+
+/// Toggle underline across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_underline(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.underline);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.underline = target)
+}
+
+/// Set (or clear, with empty hex) the font color across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_set_font_color(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    hex: &str,
+) -> Result<(), JsError> {
+    let color = (!hex.is_empty()).then(|| hex.to_owned());
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.font_color = color.clone()
+    })
+}
+
+/// Set horizontal alignment across a range: `left`/`center`/`right`, or empty to
+/// clear (one undo step).
+#[wasm_bindgen]
+pub fn session_set_align(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    align: &str,
+) -> Result<(), JsError> {
+    let value = HAlign::from_ooxml(align);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.align = value)
+}
+
+/// Set (or clear, with empty code) the number format across a range (one undo
+/// step). Codes are OOXML format strings, e.g. `0.00`, `0%`, `$#,##0.00`.
+#[wasm_bindgen]
+pub fn session_set_number_format(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    code: &str,
+) -> Result<(), JsError> {
+    let format = (!code.is_empty()).then(|| code.to_owned());
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.number_format = format.clone()
+    })
+}
+
+/// The active cell's formatting as JSON (drives the toolbar's active states):
+/// `{ b, i, u, al, nf, fc, bg }` — flags present only when set.
+#[wasm_bindgen]
+pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let style = wb
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.cells.get(CellRef::new(row, col)))
+            .and_then(|cell| cell.style)
+            .and_then(|id| wb.styles.get(id));
+        let Some(st) = style else {
+            return "{}".to_owned();
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if st.bold {
+            parts.push("\"b\":1".to_owned());
+        }
+        if st.italic {
+            parts.push("\"i\":1".to_owned());
+        }
+        if st.underline {
+            parts.push("\"u\":1".to_owned());
+        }
+        if let Some(al) = st.align {
+            parts.push(format!("\"al\":\"{}\"", al.ooxml()));
+        }
+        if let Some(nf) = &st.number_format {
+            parts.push(format!("\"nf\":{}", json_string(nf)));
+        }
+        if let Some(fc) = &st.font_color {
+            parts.push(format!("\"fc\":{}", json_string(fc)));
+        }
+        if let Some(bg) = &st.fill_color {
+            parts.push(format!("\"bg\":{}", json_string(bg)));
+        }
+        format!("{{{}}}", parts.join(","))
+    })
+    .unwrap_or_else(|| "{}".to_owned())
 }
 
 /// Whether every cell in a range carries a full (four-edge) border.
@@ -556,6 +784,42 @@ pub fn session_toggle_border(
     let on = !session_range_bordered(sheet, r0, c0, r1, c1);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| {
         st.border = on.then(full_thin_border);
+    })
+}
+
+/// Apply a border preset across a range (one undo step). `kind` is one of
+/// `all`, `outer`, or `none`.
+#[wasm_bindgen]
+pub fn session_set_border(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+) -> Result<(), JsError> {
+    let kind = kind.to_owned();
+    apply_style_range_pos(sheet, r0, c0, r1, c1, move |r, c, st| {
+        st.border = match kind.as_str() {
+            "none" => None,
+            "all" => Some(full_thin_border()),
+            "outer" => {
+                let edge = || {
+                    Some(BorderEdge {
+                        style: "thin".to_owned(),
+                        color: None,
+                    })
+                };
+                let b = Borders {
+                    top: (r == r0).then(edge).flatten(),
+                    bottom: (r == r1).then(edge).flatten(),
+                    left: (c == c0).then(edge).flatten(),
+                    right: (c == c1).then(edge).flatten(),
+                };
+                (!b.is_empty()).then_some(b)
+            }
+            _ => st.border.clone(),
+        };
     })
 }
 
@@ -672,6 +936,19 @@ fn apply_style_range(
     c1: u32,
     edit: impl Fn(&mut Style),
 ) -> Result<(), JsError> {
+    apply_style_range_pos(sheet, r0, c0, r1, c1, move |_, _, st| edit(st))
+}
+
+/// Like [`apply_style_range`], but the closure also receives the cell's
+/// `(row, col)` — needed for position-dependent styling such as outer borders.
+fn apply_style_range_pos(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    edit: impl Fn(u32, u32, &mut Style),
+) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -688,7 +965,7 @@ fn apply_style_range(
                     .and_then(|id| session.workbook().styles.get(id))
                     .cloned()
                     .unwrap_or_default();
-                edit(&mut style);
+                edit(r, c, &mut style);
                 let style_id = if style.is_default() {
                     None
                 } else {
