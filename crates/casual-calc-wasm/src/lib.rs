@@ -135,6 +135,20 @@ pub fn session_open(bytes: &[u8]) -> Result<(), JsError> {
     Ok(())
 }
 
+/// Append a new blank sheet, returning its index.
+#[wasm_bindgen]
+pub fn session_add_sheet() -> Result<usize, JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let wb = session.workbook_mut();
+        let n = wb.sheets.len();
+        let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
+        wb.sheets.push(Sheet::new(id, format!("Sheet{}", n + 1)));
+        Ok(n)
+    })
+}
+
 /// The sheet names as a JSON array of strings.
 #[wasm_bindgen]
 pub fn session_sheet_names() -> String {

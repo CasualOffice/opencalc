@@ -11,6 +11,22 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Editor: sheet tab bar + SVG icon toolbar
+
+**Added**
+
+- **Sheet tab bar** along the bottom of the editor: one tab per workbook sheet
+  (from `session_sheet_names`), click to switch (viewport + selection reset to the
+  top-left), the active tab highlighted, and a **`+` to append a blank sheet**
+  (`session_add_sheet`). A multi-sheet `.xlsx` is now fully navigable instead of
+  showing only the first sheet.
+
+**Changed**
+
+- The editor toolbar uses **inline SVG icons** (new / open / save / undo / redo /
+  bold / borders, settings gear, no-fill) instead of text labels — matching how
+  real spreadsheet tools present their toolbar.
+
 ### 2026-08-05 — Cell borders + editor toolbar (P1A-003c)
 
 **Added**

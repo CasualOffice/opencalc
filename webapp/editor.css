@@ -98,6 +98,24 @@
   background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 14px;
 }
 
+.sheet-tabs {
+  display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+  border-top: 1px solid var(--border); background: var(--card);
+  flex: 0 0 auto; overflow-x: auto;
+}
+.sheet-tab {
+  padding: 5px 14px; border: 1px solid transparent; border-radius: 6px 6px 0 0;
+  background: transparent; color: var(--muted); font-size: 13px; font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.sheet-tab:hover { color: var(--fg); }
+.sheet-tab.active { background: var(--bg); color: var(--fg); border-color: var(--border); }
+.sheet-add {
+  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;
+}
+.sheet-add:hover { border-color: var(--accent); }
+
 .grid-wrap { position: relative; flex: 1 1 auto; overflow: hidden; background: var(--bg); }
 #grid { display: block; outline: none; }
 .inline-edit {

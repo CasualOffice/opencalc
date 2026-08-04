@@ -487,6 +487,54 @@ function endInline() {
   canvas.focus();
 }
 
+const tabsEl = document.getElementById("sheet-tabs");
+
+// Reset the viewport + selection to the top-left (e.g. on a sheet switch).
+function resetView() {
+  state.scrollX = state.scrollY = 0;
+  state.sel = { row: 0, col: 0 };
+  state.anchor = { row: 0, col: 0 };
+  endInline();
+  draw();
+}
+
+function switchSheet(i) {
+  if (i === state.sheet) return;
+  state.sheet = i;
+  resetView();
+  renderTabs();
+}
+
+// (Re)build the bottom sheet-tab bar from the engine's sheet list.
+function renderTabs() {
+  const names = JSON.parse(wasm.session_sheet_names());
+  if (state.sheet >= names.length) state.sheet = names.length - 1;
+  tabsEl.textContent = "";
+  names.forEach((name, i) => {
+    const b = document.createElement("button");
+    b.className = "sheet-tab" + (i === state.sheet ? " active" : "");
+    b.textContent = name;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", i === state.sheet ? "true" : "false");
+    b.addEventListener("click", () => switchSheet(i));
+    tabsEl.appendChild(b);
+  });
+  const add = document.createElement("button");
+  add.className = "sheet-add";
+  add.title = "Add sheet";
+  add.setAttribute("aria-label", "Add sheet");
+  add.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  add.addEventListener("click", () => {
+    try {
+      const i = wasm.session_add_sheet();
+      switchSheet(i);
+      renderTabs();
+    } catch (e) { status.textContent = `error: ${e}`; }
+  });
+  tabsEl.appendChild(add);
+}
+
 // Live-update the previewed size of the line being dragged.
 function updateResize(px, py) {
   if (state.resize.axis === "col") {
@@ -624,7 +672,7 @@ function wireEvents() {
     if (e.key === "Enter") { commit(fInput.value, false); canvas.focus(); e.preventDefault(); }
   });
 
-  document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); seed(); });
+  document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
   document.getElementById("tb-save").addEventListener("click", doSave);
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-border").addEventListener("click", () => { toggleBorder(); canvas.focus(); });
@@ -637,7 +685,9 @@ function wireEvents() {
     const bytes = new Uint8Array(await file.arrayBuffer());
     try { wasm.session_open(bytes); status.textContent = "opened " + file.name; }
     catch (err) { status.textContent = `error: ${err}`; }
+    state.sheet = 0;
     state.scrollX = state.scrollY = 0;
+    renderTabs();
     select(0, 0);
   });
   document.getElementById("tb-undo").addEventListener("click", doUndo);
@@ -729,6 +779,7 @@ async function main() {
   wasm.session_new();
   wireEvents();
   seed();
+  renderTabs();
   resize();
   status.textContent = `engine v${wasm.version()}`;
 }

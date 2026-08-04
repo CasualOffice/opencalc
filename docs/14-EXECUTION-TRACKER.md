@@ -102,6 +102,7 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | W-001 | WASM bridge (`casual-calc-wasm`) | Done | `wasm-bindgen` bridge: `version`, `eval_formula`, `render_xlsx` (import→recalc→layout→render PNG), `describe_xlsx`. Verified in-browser. `wasm-opt` disabled (bulk-memory) |
 | SITE-001 | Marketing site + WASM demo + Pages deploy | Done | `webapp/` (landing + formula playground + open-xlsx render); `.github/workflows/pages.yml` builds wasm-pack + deploys to GitHub Pages |
 | W-002 | Interactive canvas grid editor (demo page) | Done | `webapp/editor.html`: canvas grid, headers, **range selection** (drag + shift), inline + formula-bar editing, **formatting toolbar** (Bold + fill swatches), **keyboard shortcuts** (Ctrl+B/Z/Y/S/C/V, Delete, shift+arrows), **copy/paste TSV**, New/Open/Save/Undo/Redo. WASM range ops (`session_toggle_bold`/`set_fill`/`clear_range`/`copy_tsv`/`paste_tsv`) as atomic batches. Settings gear: theme/accent/scroll-speed. Verified in-browser |
+| W-003 | Editor UX pass: variable sizing, fluid scroll, resize, borders, sheet tabs, icon toolbar | Done | Variable column/row sizing + **fluid pixel scrolling** + **drag-to-resize** (P1C-004); **cell borders** draw + toggle (P1A-003c); **bottom sheet-tab bar** (switch + `+` add via `session_add_sheet`); chrome split into header + toolbar bars with **inline SVG icons**. Verified in-browser |
 | TAURI-001 | Tauri desktop shell (native) | Not started | `docs/44`; consumes `casual-calc-sdk` |
 
 ## Phase rows — Editing (transaction layer)
