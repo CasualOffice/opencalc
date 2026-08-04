@@ -102,6 +102,9 @@ dependencies = [
 [[package]]
 name = "casual-calc-io"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-model",
+]
 
 [[package]]
 name = "casual-calc-layout"
@@ -183,6 +186,7 @@ dependencies = [
  "casual-calc-eval",
  "casual-calc-formula",
  "casual-calc-import",
+ "casual-calc-io",
  "casual-calc-layout",
  "casual-calc-model",
  "casual-calc-render",

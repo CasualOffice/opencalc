@@ -179,6 +179,15 @@ Import SpreadsheetML → normalized model + compatibility report; formulas parse
 | P1A-005 | Proper part discovery via content-types + all rels (not conventional paths) | Not started | sharedStrings currently found by conventional path |
 | P1A-006 | Retention mode + retained-source / opaque parts | Not started | — |
 
+## Phase rows — Formats (open / text adapters)
+
+Lightweight, dependency-free text formats in `casual-calc-io`; ODS and the
+format registry follow.
+
+| ID | Work | Status | Notes / evidence |
+|----|------|--------|------------------|
+| IO-001 | Delimited text (CSV / TSV / PSV) reader + writer | Done | `casual-calc-io`: RFC 4180-style `read_delimited`/`write_delimited` (quoting, CRLF, field typing number/bool/text); `parse → write → parse` fixed point + quoting/delimiter tests (5). SDK `from_workbook`; WASM `session_open_delimited`/`session_save_delimited`; editor Open routes `.csv/.tsv/.psv` by extension. Verified in-browser (quoted comma field preserved). CSV export UI + ODS + registry pending |
+
 ## Review note
 
 Keep this file readable. When it grows large, split closed phases into an

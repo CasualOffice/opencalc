@@ -11,6 +11,21 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Delimited text: CSV / TSV / PSV (IO-001)
+
+**Added**
+
+- `casual-calc-io` delimited-text adapter: `read_delimited` / `write_delimited`
+  over the normalized `Workbook` — RFC 4180 quoting, `\n`/`\r\n` line endings, and
+  field typing (finite number → `Number`, `TRUE`/`FALSE` → `Bool`, else interned
+  text). A `parse → write → parse` round-trip is a model fixed point (5 tests
+  covering typing, quoting, and the comma/tab/pipe delimiters).
+- `WorkbookSession::from_workbook`; WASM `session_open_delimited` /
+  `session_save_delimited`. The editor's **Open** now accepts `.csv`, `.tsv`,
+  `.psv` and routes by extension. Verified in-browser: a CSV imports with numbers
+  and booleans typed and right-aligned, and a quoted `"Wes,t"` field keeps its
+  comma as one cell.
+
 ### 2026-08-05 — Editor: sheet tab bar + SVG icon toolbar
 
 **Added**

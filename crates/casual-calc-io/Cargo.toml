@@ -7,5 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+casual-calc-model = { path = "../casual-calc-model" }
+
 [lints]
 workspace = true

@@ -135,6 +135,22 @@ pub fn session_open(bytes: &[u8]) -> Result<(), JsError> {
     Ok(())
 }
 
+/// Open delimited text (CSV/TSV/PSV) into the editor session. `delimiter` is the
+/// separator byte (e.g. `,`, tab, `|`).
+#[wasm_bindgen]
+pub fn session_open_delimited(bytes: &[u8], delimiter: u8) -> Result<(), JsError> {
+    let workbook = casual_calc_io::read_delimited(bytes, delimiter).map_err(js)?;
+    set_session(WorkbookSession::from_workbook(workbook));
+    Ok(())
+}
+
+/// Serialize a sheet to delimited text (CSV/TSV/PSV) using the cached values.
+#[wasm_bindgen]
+pub fn session_save_delimited(sheet: usize, delimiter: u8) -> String {
+    with_session(|s| casual_calc_io::write_delimited(s.workbook(), sheet, delimiter))
+        .unwrap_or_default()
+}
+
 /// Append a new blank sheet, returning its index.
 #[wasm_bindgen]
 pub fn session_add_sheet() -> Result<usize, JsError> {

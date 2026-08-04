@@ -88,6 +88,16 @@ impl WorkbookSession {
         }
     }
 
+    /// A session over an already-built workbook (e.g. from a CSV import).
+    pub fn from_workbook(mut workbook: Workbook) -> Self {
+        recalculate(&mut workbook);
+        Self {
+            workbook,
+            history: History::new(),
+            report: CompatibilityReport::default(),
+        }
+    }
+
     /// Open a `.xlsx` package, importing and recalculating it.
     pub fn open(bytes: Vec<u8>) -> Result<Self, SdkError> {
         let outcome = import_package(bytes)?;

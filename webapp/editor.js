@@ -683,8 +683,15 @@ function wireEvents() {
     const file = e.target.files[0];
     if (!file) return;
     const bytes = new Uint8Array(await file.arrayBuffer());
-    try { wasm.session_open(bytes); status.textContent = "opened " + file.name; }
-    catch (err) { status.textContent = `error: ${err}`; }
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
+    const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
+    try {
+      if (delim !== null) wasm.session_open_delimited(bytes, delim);
+      else wasm.session_open(bytes);
+      status.textContent = "opened " + file.name;
+    } catch (err) { status.textContent = `error: ${err}`; }
+    e.target.value = ""; // allow re-opening the same file
     state.sheet = 0;
     state.scrollX = state.scrollY = 0;
     renderTabs();
