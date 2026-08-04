@@ -94,6 +94,17 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Phase 1D (Grid render)
+
+CPU raster backend: display list → pixels
+([42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md)).
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| P1D-001 | CPU raster: display list → PNG (`casual-calc-render`) | Done | `tiny-skia` pixmap: white ground, gridlines at visible boundaries, content-cell fills; twips→px transform; `render_png`/`render_pixmap`; deterministic; wasm-clean. Glyph text is P1D-002. 3 tests |
+| P1D-002 | Glyph text via bundled font + `skrifa` | Not started | Needs a bundled font asset; turns Render ● for cell text |
+| P1D-003 | Viewport virtualization on scroll + hit-testing (pixel→cell) | Not started | Incremental repaint; selection/editing input |
+
 ## Phase rows — Phase 1C (Grid layout)
 
 Grid geometry, viewport virtualization, and the display list

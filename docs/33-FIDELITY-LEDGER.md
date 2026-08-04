@@ -43,6 +43,7 @@ evidence").
 | Shared strings | ● | ● | ✗ | ~ | — | P1C-001 |
 | Inline strings | ● | ● | ✗ | ~ | — | P1C-001 |
 | Grid geometry / viewport | — | — | — | ● | — | P1C-001 |
+| Grid raster (PNG) | — | — | — | ● | — | P1D-001 (gridlines + content fills; glyphs pending) |
 | Formulas (AST) | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Formula cached value | ● | ● | — | ✗ | ✗ | P1B-001 |
 | Number formats | ● | ● | ✗ | ✗ | — | P1B-001 |

@@ -11,6 +11,18 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 1D: grid render (pixels)
+
+**Added**
+
+- `casual-calc-render` (P1D-001): the CPU raster backend. `render_png` /
+  `render_pixmap` execute a viewport's `DisplayList` onto a `tiny-skia` pixmap —
+  white ground, light gridlines at the visible row/column boundaries, and a
+  subtle fill per content cell — with a twips→pixel transform at a given DPI.
+  Deterministic; compiles to `wasm32-unknown-unknown`. Glyph text (bundled font +
+  `skrifa`) is the next increment; cells are shown as highlighted rectangles for
+  now. 3 tests.
+
 ### 2026-08-04 — Phase 1C: grid layout & virtualization
 
 **Added**
