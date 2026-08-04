@@ -73,6 +73,22 @@ fn round_trip_fixed_point_mixed() {
 }
 
 #[test]
+fn general_formatting_hides_float_tails() {
+    use casual_calc_model::{Cell, Id, Sheet, SheetId};
+    let mut wb = casual_calc_model::Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    sheet.cells.set(
+        CellRef::new(0, 0),
+        Cell::value(CellValue::Number(43.480000000000004)),
+    );
+    sheet
+        .cells
+        .set(CellRef::new(0, 1), Cell::value(CellValue::Number(10.0)));
+    wb.sheets.push(sheet);
+    assert_eq!(write_delimited(&wb, 0, COMMA), "43.48,10\r\n");
+}
+
+#[test]
 fn empty_input_yields_empty_sheet() {
     let wb = read_delimited(b"", COMMA).unwrap();
     assert!(wb.sheets[0].cells.is_empty());

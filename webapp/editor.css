@@ -71,6 +71,21 @@
   background: var(--card); color: var(--fg); font-weight: 600; font-size: 13px; cursor: pointer;
 }
 .toolbar button:hover, .tb-file:hover { border-color: var(--accent); }
+
+.menu-wrap { position: relative; display: inline-flex; }
+.popmenu {
+  position: absolute; top: 40px; left: 0; z-index: 30; min-width: 178px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+.popmenu[hidden] { display: none; }
+.popmenu button {
+  width: 100%; text-align: left; padding: 8px 10px; border: 1px solid transparent;
+  border-radius: 6px; background: transparent; color: var(--fg);
+  font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.popmenu button:hover { background: var(--bg); border-color: var(--border); }
 .toolbar button:disabled { opacity: 0.45; cursor: default; }
 .tb-file input { display: none; }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }

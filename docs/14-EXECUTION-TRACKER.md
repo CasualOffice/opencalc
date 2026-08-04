@@ -186,7 +186,7 @@ format registry follow.
 
 | ID | Work | Status | Notes / evidence |
 |----|------|--------|------------------|
-| IO-001 | Delimited text (CSV / TSV / PSV) reader + writer | Done | `casual-calc-io`: RFC 4180-style `read_delimited`/`write_delimited` (quoting, CRLF, field typing number/bool/text); `parse → write → parse` fixed point + quoting/delimiter tests (5). SDK `from_workbook`; WASM `session_open_delimited`/`session_save_delimited`; editor Open routes `.csv/.tsv/.psv` by extension. Verified in-browser (quoted comma field preserved). CSV export UI + ODS + registry pending |
+| IO-001 | Delimited text (CSV / TSV / PSV) reader + writer | Done | `casual-calc-io`: RFC 4180-style `read_delimited`/`write_delimited` (quoting, CRLF, field typing number/bool/text); `parse → write → parse` fixed point + quoting/delimiter tests (5). SDK `from_workbook`; WASM `session_open_delimited`/`session_save_delimited`; editor **Open** routes `.csv/.tsv/.psv` by extension and a **Download-as menu** exports xlsx/csv/tsv/psv (numbers use General formatting — no binary-float tails). Verified in-browser (quoted comma field preserved on import; clean `43.48` on export). ODS + format registry pending |
 
 ## Review note
 

@@ -54,9 +54,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <input id="tb-open" type="file" accept=".xlsx,.csv,.tsv,.psv" />
         </label>
-        <button id="tb-save" class="tb-btn" title="Save .xlsx" aria-label="Save">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
+        <div class="menu-wrap">
+          <button id="tb-save" class="tb-btn" title="Download" aria-label="Download" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <div id="save-menu" class="popmenu" hidden>
+            <button data-fmt="xlsx">Excel (.xlsx)</button>
+            <button data-fmt="csv">CSV (.csv)</button>
+            <button data-fmt="tsv">Tab-separated (.tsv)</button>
+            <button data-fmt="psv">Pipe-separated (.psv)</button>
+          </div>
+        </div>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">

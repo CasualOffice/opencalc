@@ -125,11 +125,27 @@ fn type_field(field: &str, workbook: &mut Workbook) -> CellValue {
     CellValue::SharedString(workbook.intern_string(field))
 }
 
+/// Format a number the way a spreadsheet's "General" format does: round to 15
+/// significant digits (hiding binary-float tails like `43.480000000000004`) then
+/// use the shortest exact representation.
+fn format_number(n: f64) -> String {
+    if n == 0.0 {
+        return "0".to_owned();
+    }
+    if !n.is_finite() {
+        return format!("{n}");
+    }
+    let magnitude = n.abs().log10().floor() as i32;
+    let decimals = (14 - magnitude).clamp(0, 15) as usize;
+    let rounded: f64 = format!("{n:.decimals$}").parse().unwrap_or(n);
+    format!("{rounded}")
+}
+
 /// The text form of a cell value for export.
 fn field_text(workbook: &Workbook, value: &CellValue) -> String {
     match value {
         CellValue::Empty => String::new(),
-        CellValue::Number(n) => format!("{n}"),
+        CellValue::Number(n) => format_number(*n),
         CellValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
         CellValue::SharedString(id) | CellValue::InlineString(id) => {
             workbook.strings.get(*id).unwrap_or_default().to_owned()

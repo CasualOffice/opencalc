@@ -442,13 +442,34 @@ function clearSelection() {
 }
 function doUndo() { try { wasm.session_undo(); } catch {} draw(); }
 function doRedo() { try { wasm.session_redo(); } catch {} draw(); }
-function doSave() {
-  const bytes = wasm.session_save();
-  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+function download(data, name, type) {
+  const blob = new Blob([data], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "opencalc.xlsx";
+  a.download = name;
   a.click();
+  URL.revokeObjectURL(a.href);
+}
+function doSave() {
+  download(
+    wasm.session_save(),
+    "opencalc.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+}
+// Export the active sheet as delimited text (CSV/TSV/PSV).
+function doSaveDelimited(delim, ext) {
+  const text = wasm.session_save_delimited(state.sheet, delim);
+  download(text, "opencalc." + ext, "text/plain;charset=utf-8");
+}
+function saveAs(fmt) {
+  try {
+    if (fmt === "xlsx") doSave();
+    else if (fmt === "csv") doSaveDelimited(44, "csv");
+    else if (fmt === "tsv") doSaveDelimited(9, "tsv");
+    else if (fmt === "psv") doSaveDelimited(124, "psv");
+    status.textContent = "downloaded ." + fmt;
+  } catch (e) { status.textContent = `error: ${e}`; }
 }
 async function doCopy() {
   const s = selRect();
@@ -673,7 +694,18 @@ function wireEvents() {
   });
 
   document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
-  document.getElementById("tb-save").addEventListener("click", doSave);
+  const saveBtn = document.getElementById("tb-save");
+  const saveMenu = document.getElementById("save-menu");
+  saveBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    saveMenu.hidden = !saveMenu.hidden;
+  });
+  document.addEventListener("click", (e) => {
+    if (!saveMenu.contains(e.target) && e.target !== saveBtn) saveMenu.hidden = true;
+  });
+  for (const b of saveMenu.querySelectorAll("button")) {
+    b.addEventListener("click", () => { saveAs(b.dataset.fmt); saveMenu.hidden = true; canvas.focus(); });
+  }
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-border").addEventListener("click", () => { toggleBorder(); canvas.focus(); });
   for (const b of document.querySelectorAll("#tb-fill button")) {

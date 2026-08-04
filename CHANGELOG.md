@@ -22,9 +22,12 @@ the design doc or ADR that motivated it.
   covering typing, quoting, and the comma/tab/pipe delimiters).
 - `WorkbookSession::from_workbook`; WASM `session_open_delimited` /
   `session_save_delimited`. The editor's **Open** now accepts `.csv`, `.tsv`,
-  `.psv` and routes by extension. Verified in-browser: a CSV imports with numbers
-  and booleans typed and right-aligned, and a quoted `"Wes,t"` field keeps its
-  comma as one cell.
+  `.psv` and routes by extension, and a **Download-as menu** on the toolbar's
+  download button exports the active sheet as Excel / CSV / TSV / PSV (numbers use
+  General formatting, so exported values read `43.48`, not `43.480000000000004`).
+  Verified in-browser: a CSV imports with numbers and booleans typed and
+  right-aligned, a quoted `"Wes,t"` field keeps its comma as one cell, and export
+  round-trips cleanly.
 
 ### 2026-08-05 — Editor: sheet tab bar + SVG icon toolbar
 
