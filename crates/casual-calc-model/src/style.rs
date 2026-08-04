@@ -102,6 +102,13 @@ pub struct Style {
     /// Underlined text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
+    /// Font family name (e.g. `Calibri`, `Arial`), if specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_name: Option<String>,
+    /// Font size in **half-points**, so it stays `Hash + Eq` (a float cannot).
+    /// 11pt is stored as `22`; divide by 2 for points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_hp: Option<u32>,
     /// Font color as `RRGGBB` hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_color: Option<String>,
@@ -127,6 +134,8 @@ impl Style {
             && !self.bold
             && !self.italic
             && !self.underline
+            && self.font_name.is_none()
+            && self.font_size_hp.is_none()
             && self.font_color.is_none()
             && self.fill_color.is_none()
             && self.align.is_none()

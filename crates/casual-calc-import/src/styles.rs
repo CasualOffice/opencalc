@@ -23,6 +23,9 @@ struct Font {
     italic: bool,
     underline: bool,
     color: Option<String>,
+    name: Option<String>,
+    /// Font size in half-points (`sz val` rounded to the nearest half-point).
+    size_hp: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -172,6 +175,19 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             f.color = Some(c);
                         }
                     }
+                    b"name" if in_fonts => {
+                        if let (Some(f), Some(n)) = (fonts.last_mut(), attr(e, b"val")?) {
+                            f.name = Some(n);
+                        }
+                    }
+                    b"sz" if in_fonts => {
+                        if let (Some(f), Some(v)) = (
+                            fonts.last_mut(),
+                            attr(e, b"val")?.and_then(|s| s.parse::<f64>().ok()),
+                        ) {
+                            f.size_hp = Some((v * 2.0).round() as u32);
+                        }
+                    }
                     b"fill" if in_fills => fills.push(FillInfo::default()),
                     b"patternFill" if in_fills => {
                         if let Some(fill) = fills.last_mut() {
@@ -228,6 +244,8 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 bold: font.bold,
                 italic: font.italic,
                 underline: font.underline,
+                font_name: font.name,
+                font_size_hp: font.size_hp,
                 font_color: font.color,
                 fill_color: if fill.solid { fill.color } else { None },
                 align: xf.align,

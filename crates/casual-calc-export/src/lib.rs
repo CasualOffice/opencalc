@@ -184,8 +184,8 @@ fn styles_xml(workbook: &Workbook) -> String {
     // Deduplicate fonts, solid fills, and custom number formats, and record the
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
-    // Font key: (bold, italic, underline, color).
-    let mut fonts: Vec<(bool, bool, bool, Option<String>)> = vec![(false, false, false, None)];
+    // Font key: (bold, italic, underline, color, name, size_hp).
+    let mut fonts: Vec<FontKey> = vec![(false, false, false, None, None, None)];
     let mut fills: Vec<String> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
@@ -198,6 +198,8 @@ fn styles_xml(workbook: &Workbook) -> String {
             style.italic,
             style.underline,
             style.font_color.clone(),
+            style.font_name.clone(),
+            style.font_size_hp,
         );
         let font_id = fonts
             .iter()
@@ -257,7 +259,7 @@ fn styles_xml(workbook: &Workbook) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (bold, italic, underline, color) in &fonts {
+    for (bold, italic, underline, color, name, size_hp) in &fonts {
         s.push_str("<font>");
         if *bold {
             s.push_str("<b/>");
@@ -271,7 +273,16 @@ fn styles_xml(workbook: &Workbook) -> String {
         if let Some(c) = color {
             s.push_str(&format!("<color rgb=\"FF{c}\"/>"));
         }
-        s.push_str("<sz val=\"11\"/><name val=\"Calibri\"/></font>");
+        // Default font is Calibri 11pt (22 half-points) when unset.
+        s.push_str(&format!(
+            "<sz val=\"{}\"/>",
+            fmt_half_points(size_hp.unwrap_or(22))
+        ));
+        s.push_str(&format!(
+            "<name val=\"{}\"/>",
+            escape_attr(name.as_deref().unwrap_or("Calibri"))
+        ));
+        s.push_str("</font>");
     }
     s.push_str("</fonts>");
 
@@ -337,6 +348,17 @@ fn styles_xml(workbook: &Workbook) -> String {
     s
 }
 
+/// A deduplication key for a `<font>`: (bold, italic, underline, color, name,
+/// size in half-points).
+type FontKey = (
+    bool,
+    bool,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+);
+
 /// The resolved OOXML style-collection ids a single interned style maps to.
 struct StyleIds {
     font_id: usize,
@@ -395,6 +417,16 @@ fn twips_to_row_points(twips: i64) -> f64 {
 /// Format a float for an XML attribute using the shortest round-trippable form.
 fn fmt_f64(value: f64) -> String {
     format!("{value}")
+}
+
+/// Render a half-point font size as OOXML points: an integral number of points
+/// prints with no fraction (`22` → `11`), a half-point keeps `.5` (`23` → `11.5`).
+fn fmt_half_points(size_hp: u32) -> String {
+    if size_hp.is_multiple_of(2) {
+        format!("{}", size_hp / 2)
+    } else {
+        format!("{}.5", size_hp / 2)
+    }
 }
 
 fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
