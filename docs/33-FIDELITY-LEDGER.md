@@ -48,7 +48,7 @@ evidence").
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
 | Number formats | ● | ● | ● | ✗ | — | E-001 (SetStyle) |
 | Styles: bold/italic/font color/fill | ● | ● | ~ | ~ | — | P1A-003b |
-| Styles: borders | ✗ | ✗ | ✗ | ✗ | — | later |
+| Styles: borders | ● | ● | ● | ~ | — | P1A-003c (per-edge style+color, interned `<borders>`; editor draws + toggles; PNG borders pending) |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Column/row sizing | ● | ● | ● | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them; drag-to-resize, undoable) |
 | Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |

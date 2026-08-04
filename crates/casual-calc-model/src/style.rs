@@ -14,6 +14,44 @@ use crate::ids::{Id, StyleId};
 /// Namespace for style ids (high 64 bits of the `Id`).
 const STYLE_NAMESPACE: u64 = 0x5354_5900_0000_0000; // "STY\0"
 
+/// One edge of a cell border: an OOXML line-style token (e.g. `thin`, `medium`,
+/// `dashed`, `double`) plus an optional `RRGGBB` color. The token is stored raw
+/// so any style — even ones the renderer doesn't specialize — round-trips.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BorderEdge {
+    /// The OOXML line-style token (never empty; `none` edges are `None` instead).
+    pub style: String,
+    /// The line color as `RRGGBB` hex, if specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// A cell's four borders. An absent edge means "no line".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Borders {
+    /// Left edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<BorderEdge>,
+    /// Right edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<BorderEdge>,
+    /// Top edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<BorderEdge>,
+    /// Bottom edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<BorderEdge>,
+}
+
+impl Borders {
+    /// Whether no edge carries a line.
+    pub fn is_empty(&self) -> bool {
+        self.left.is_none() && self.right.is_none() && self.top.is_none() && self.bottom.is_none()
+    }
+}
+
 /// A cell's formatting. Extensible; equal styles are deduplicated in the table.
 /// Colors are `"RRGGBB"` hex strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,6 +72,9 @@ pub struct Style {
     /// Solid fill (background) color as `RRGGBB` hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
+    /// Cell borders, if any edge is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<Borders>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -48,6 +89,7 @@ impl Style {
             && !self.italic
             && self.font_color.is_none()
             && self.fill_color.is_none()
+            && self.border.is_none()
     }
 }
 

@@ -18,7 +18,9 @@ use casual_calc_import::import_package;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
-use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook};
+use casual_calc_model::{
+    BorderEdge, Borders, Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook,
+};
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
 use wasm_bindgen::prelude::*;
@@ -333,7 +335,8 @@ pub fn session_cells(
             let text = display_text(wb, cell);
             let style = cell.style.and_then(|id| wb.styles.get(id));
             let fill = style.and_then(|s| s.fill_color.clone()).unwrap_or_default();
-            if text.is_empty() && fill.is_empty() {
+            let has_border = style.is_some_and(|s| s.border.is_some());
+            if text.is_empty() && fill.is_empty() && !has_border {
                 continue;
             }
             let align = match cell.value {
@@ -352,6 +355,9 @@ pub fn session_cells(
             }
             if !fill.is_empty() {
                 extra.push_str(&format!(",\"bg\":{}", json_string(&fill)));
+            }
+            if let Some(bd) = style.and_then(|s| s.border.as_ref()) {
+                extra.push_str(&format!(",\"bd\":{}", border_json(bd)));
             }
             items.push(format!(
                 "{{\"r\":{},\"c\":{},\"t\":{},\"a\":\"{align}\"{extra}}}",
@@ -411,21 +417,19 @@ pub fn session_set_style(
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let at = CellRef::new(row, col);
-        let number_format = session
+        // Preserve the cell's other formatting (number format, italic, font
+        // color, borders); only bold and fill are being set here.
+        let mut style = session
             .workbook()
             .sheets
             .get(sheet)
             .and_then(|s| s.cells.get(at))
             .and_then(|c| c.style)
             .and_then(|id| session.workbook().styles.get(id))
-            .and_then(|s| s.number_format.clone());
-        let style = Style {
-            number_format,
-            bold,
-            italic: false,
-            font_color: None,
-            fill_color: (!fill.is_empty()).then(|| fill.to_owned()),
-        };
+            .cloned()
+            .unwrap_or_default();
+        style.bold = bold;
+        style.fill_color = (!fill.is_empty()).then(|| fill.to_owned());
         let id = session.workbook_mut().intern_style(style);
         session
             .edit(EditOperation::SetStyle {
@@ -474,6 +478,71 @@ pub fn session_toggle_bold(
 ) -> Result<(), JsError> {
     let target = !session_range_bold(sheet, r0, c0, r1, c1);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.bold = target)
+}
+
+/// Whether every cell in a range carries a full (four-edge) border.
+#[wasm_bindgen]
+pub fn session_range_bordered(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> bool {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return false;
+        };
+        let mut any = false;
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                any = true;
+                let full = sh
+                    .cells
+                    .get(CellRef::new(r, c))
+                    .and_then(|cell| cell.style)
+                    .and_then(|id| wb.styles.get(id))
+                    .and_then(|st| st.border.as_ref())
+                    .is_some_and(|b| {
+                        b.left.is_some()
+                            && b.right.is_some()
+                            && b.top.is_some()
+                            && b.bottom.is_some()
+                    });
+                if !full {
+                    return false;
+                }
+            }
+        }
+        any
+    })
+    .unwrap_or(false)
+}
+
+/// Toggle a full thin box border across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_border(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let on = !session_range_bordered(sheet, r0, c0, r1, c1);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.border = on.then(full_thin_border);
+    })
+}
+
+/// A four-edge thin border with the default (auto) color.
+fn full_thin_border() -> Borders {
+    let edge = || {
+        Some(BorderEdge {
+            style: "thin".to_owned(),
+            color: None,
+        })
+    };
+    Borders {
+        left: edge(),
+        right: edge(),
+        top: edge(),
+        bottom: edge(),
+    }
 }
 
 /// Set (or clear, with empty hex) the solid fill across a range (one undo step).
@@ -730,6 +799,26 @@ fn px_to_twips(px: u32, dpi: u32) -> i64 {
 
 fn js<E: std::fmt::Display>(err: E) -> JsError {
     JsError::new(&err.to_string())
+}
+
+/// A cell's borders as JSON `{ "l": "style:color", ... }` — one key per present
+/// edge (l/r/t/b), value `"<line-style>:<RRGGBB or empty>"`.
+fn border_json(b: &Borders) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut edge = |key: &str, e: &Option<BorderEdge>| {
+        if let Some(e) = e {
+            let color = e.color.as_deref().unwrap_or("");
+            parts.push(format!(
+                "\"{key}\":{}",
+                json_string(&format!("{}:{color}", e.style))
+            ));
+        }
+    };
+    edge("l", &b.left);
+    edge("r", &b.right);
+    edge("t", &b.top);
+    edge("b", &b.bottom);
+    format!("{{{}}}", parts.join(","))
 }
 
 fn json_string(s: &str) -> String {

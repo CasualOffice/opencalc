@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
-use casual_calc_model::{Cell, CellRange, CellValue, SheetId, Workbook};
+use casual_calc_model::{BorderEdge, Borders, Cell, CellRange, CellValue, SheetId, Workbook};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -185,7 +185,9 @@ fn styles_xml(workbook: &Workbook) -> String {
     let mut fonts: Vec<(bool, bool, Option<String>)> = vec![(false, false, None)];
     let mut fills: Vec<String> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
-    let mut per_style: Vec<(usize, usize, u32)> = Vec::with_capacity(styles.len());
+    // Border id 0 is reserved for the empty border; interned borders start at 1.
+    let mut borders: Vec<Borders> = Vec::new();
+    let mut per_style: Vec<StyleIds> = Vec::with_capacity(styles.len());
 
     for style in &styles {
         let font_key = (style.bold, style.italic, style.font_color.clone());
@@ -215,7 +217,21 @@ fn styles_xml(workbook: &Workbook) -> String {
             }
             None => 0,
         };
-        per_style.push((font_id, fill_id, num_fmt_id));
+        let border_id = match &style.border {
+            Some(b) if !b.is_empty() => {
+                1 + borders.iter().position(|x| x == b).unwrap_or_else(|| {
+                    borders.push(b.clone());
+                    borders.len() - 1
+                })
+            }
+            _ => 0,
+        };
+        per_style.push(StyleIds {
+            font_id,
+            fill_id,
+            num_fmt_id,
+            border_id,
+        });
     }
 
     let mut s = format!("{DECL}<styleSheet xmlns=\"{NS_MAIN}\">");
@@ -257,33 +273,75 @@ fn styles_xml(workbook: &Workbook) -> String {
     }
     s.push_str("</fills>");
 
-    s.push_str("<borders count=\"1\"><border/></borders>");
+    s.push_str(&format!("<borders count=\"{}\">", borders.len() + 1));
+    s.push_str("<border><left/><right/><top/><bottom/><diagonal/></border>");
+    for border in &borders {
+        write_border(&mut s, border);
+    }
+    s.push_str("</borders>");
     s.push_str("<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>");
 
     s.push_str(&format!("<cellXfs count=\"{}\">", styles.len() + 1));
     s.push_str("<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>");
-    for (font_id, fill_id, num_fmt_id) in &per_style {
-        let apply_num = if *num_fmt_id != 0 {
+    for ids in &per_style {
+        let apply_num = if ids.num_fmt_id != 0 {
             " applyNumberFormat=\"1\""
         } else {
             ""
         };
-        let apply_font = if *font_id != 0 {
+        let apply_font = if ids.font_id != 0 {
             " applyFont=\"1\""
         } else {
             ""
         };
-        let apply_fill = if *fill_id != 0 {
+        let apply_fill = if ids.fill_id != 0 {
             " applyFill=\"1\""
         } else {
             ""
         };
+        let apply_border = if ids.border_id != 0 {
+            " applyBorder=\"1\""
+        } else {
+            ""
+        };
         s.push_str(&format!(
-            "<xf numFmtId=\"{num_fmt_id}\" fontId=\"{font_id}\" fillId=\"{fill_id}\" borderId=\"0\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}/>"
+            "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}{apply_border}/>",
+            ids.num_fmt_id, ids.font_id, ids.fill_id, ids.border_id
         ));
     }
     s.push_str("</cellXfs></styleSheet>");
     s
+}
+
+/// The resolved OOXML style-collection ids a single interned style maps to.
+struct StyleIds {
+    font_id: usize,
+    fill_id: usize,
+    num_fmt_id: u32,
+    border_id: usize,
+}
+
+fn write_border(s: &mut String, border: &Borders) {
+    s.push_str("<border>");
+    write_border_edge(s, "left", &border.left);
+    write_border_edge(s, "right", &border.right);
+    write_border_edge(s, "top", &border.top);
+    write_border_edge(s, "bottom", &border.bottom);
+    s.push_str("<diagonal/>");
+    s.push_str("</border>");
+}
+
+fn write_border_edge(s: &mut String, name: &str, edge: &Option<BorderEdge>) {
+    match edge {
+        Some(edge) => {
+            s.push_str(&format!("<{name} style=\"{}\">", escape_attr(&edge.style)));
+            if let Some(color) = &edge.color {
+                s.push_str(&format!("<color rgb=\"FF{color}\"/>"));
+            }
+            s.push_str(&format!("</{name}>"));
+        }
+        None => s.push_str(&format!("<{name}/>")),
+    }
 }
 
 fn cell_a1(row: u32, col: u32) -> String {

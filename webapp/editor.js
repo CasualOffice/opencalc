@@ -131,6 +131,32 @@ function measure() {
   return v;
 }
 
+// Pixel width for an OOXML border line-style token.
+function borderWidth(style) {
+  if (style === "thick" || style === "double") return 2;
+  if (style === "medium" || style === "mediumDashed") return 1.5;
+  return 1; // thin, hair, dashed, dotted, …
+}
+
+// Draw one cell-border edge from a "style:color" spec (color may be empty).
+function drawEdge(spec, x0, y0, x1, y1) {
+  if (!spec) return;
+  const sep = spec.indexOf(":");
+  const style = sep >= 0 ? spec.slice(0, sep) : spec;
+  const color = sep >= 0 ? spec.slice(sep + 1) : "";
+  const width = borderWidth(style);
+  ctx.strokeStyle = color ? "#" + color : colors.fg;
+  ctx.lineWidth = width;
+  // A 1px line lands crisply on a half-pixel; wider lines centre on the edge.
+  const off = width === 1 ? 0.5 : 0;
+  ctx.setLineDash(style === "dashed" || style === "mediumDashed" ? [4, 2] : style === "dotted" ? [1, 2] : []);
+  ctx.beginPath();
+  ctx.moveTo(Math.floor(x0) + off, Math.floor(y0) + off);
+  ctx.lineTo(Math.floor(x1) + off, Math.floor(y1) + off);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 // A header boundary under the pointer, if any (for resize hit-testing).
 function boundaryAt(px, py) {
   if (py < HH && px >= HW) {
@@ -265,6 +291,20 @@ function draw() {
     ctx.restore();
   }
 
+  // Cell borders (from the engine), drawn over fills/text.
+  for (const it of items) {
+    if (!it.bd) continue;
+    const x = colXAt(it.c);
+    const yTop = rowYAt(it.r);
+    if (x === undefined || yTop === undefined) continue;
+    const w = colWAt(it.c);
+    const h = rowHAt(it.r);
+    drawEdge(it.bd.l, x, yTop, x, yTop + h);
+    drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);
+    drawEdge(it.bd.t, x, yTop, x + w, yTop);
+    drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
+  }
+
   // Range border + focus-cell border.
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 2;
@@ -386,6 +426,12 @@ function toggleBold() {
 function setFill(hex) {
   const s = selRect();
   try { wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex); }
+  catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+function toggleBorder() {
+  const s = selRect();
+  try { wasm.session_toggle_border(state.sheet, s.r0, s.c0, s.r1, s.c1); }
   catch (e) { status.textContent = `error: ${e}`; }
   draw();
 }
@@ -544,6 +590,7 @@ function wireEvents() {
     if (mod) {
       const k = e.key.toLowerCase();
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
+      if (e.shiftKey && (k === "7" || k === "&")) { toggleBorder(); e.preventDefault(); return; }
       if (k === "z") { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
@@ -580,6 +627,7 @@ function wireEvents() {
   document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); seed(); });
   document.getElementById("tb-save").addEventListener("click", doSave);
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
+  document.getElementById("tb-border").addEventListener("click", () => { toggleBorder(); canvas.focus(); });
   for (const b of document.querySelectorAll("#tb-fill button")) {
     b.addEventListener("click", () => { setFill(b.dataset.c); canvas.focus(); });
   }

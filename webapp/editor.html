@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="./editor.css" />
   </head>
   <body class="editor-body">
-    <div class="toolbar">
+    <header class="app-header">
       <div class="settings">
         <button id="tb-settings" class="tb-icon" title="Settings" aria-label="Settings">⚙</button>
         <div id="settings-panel" class="settings-panel" hidden>
@@ -40,14 +40,26 @@
         </div>
       </div>
       <a class="tb-brand" href="./index.html">OpenCalc</a>
-      <button id="tb-new">New</button>
-      <label class="tb-file">Open<input id="tb-open" type="file" accept=".xlsx" /></label>
-      <button id="tb-save">Save .xlsx</button>
+      <span class="tb-status" id="tb-status">loading engine…</span>
+    </header>
+
+    <div class="toolbar" role="toolbar" aria-label="Formatting">
+      <div class="tb-group">
+        <button id="tb-new">New</button>
+        <label class="tb-file">Open<input id="tb-open" type="file" accept=".xlsx" /></label>
+        <button id="tb-save">Save .xlsx</button>
+      </div>
       <span class="tb-sep"></span>
-      <button id="tb-undo" disabled title="Undo (Ctrl+Z)">Undo</button>
-      <button id="tb-redo" disabled title="Redo (Ctrl+Y)">Redo</button>
+      <div class="tb-group">
+        <button id="tb-undo" disabled title="Undo (Ctrl+Z)">Undo</button>
+        <button id="tb-redo" disabled title="Redo (Ctrl+Y)">Redo</button>
+      </div>
       <span class="tb-sep"></span>
-      <button id="tb-bold" class="tb-bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <div class="tb-group">
+        <button id="tb-bold" class="tb-bold" title="Bold (Ctrl+B)"><b>B</b></button>
+        <button id="tb-border" title="All borders (Ctrl+Shift+7)">▦</button>
+      </div>
+      <span class="tb-sep"></span>
       <span class="fill-swatches" id="tb-fill">
         <button data-c="fff3b0" style="background:#fff3b0" title="Yellow fill"></button>
         <button data-c="d1f0d6" style="background:#d1f0d6" title="Green fill"></button>
@@ -55,7 +67,6 @@
         <button data-c="d6e4ff" style="background:#d6e4ff" title="Blue fill"></button>
         <button data-c="" class="no-fill" title="No fill">⊘</button>
       </span>
-      <span class="tb-status" id="tb-status">loading engine…</span>
     </div>
 
     <div class="formula-bar">

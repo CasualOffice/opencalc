@@ -11,6 +11,30 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Cell borders + editor toolbar (P1A-003c)
+
+**Added**
+
+- **Cell borders**, end to end. `Style` gains `border: Option<Borders>` (per-edge
+  `left/right/top/bottom`, each an OOXML line-style token plus optional `RRGGBB`
+  color). Import parses the `<borders>` collection and `cellXfs/@borderId`; export
+  writes an interned, deduplicated `<borders>` collection with `applyBorder` — so
+  borders **round-trip** through the semantic fixed point (the test now carries a
+  cell with a blue-thin/medium box border). The editor draws borders (thickness by
+  token, dashed/dotted styles) and adds an **All-borders toggle** (toolbar button ▦
+  and `Ctrl+Shift+7`), applied as one undoable edit.
+- Borders on **empty cells** now render — `session_cells` no longer skips a cell
+  that has a border but no text or fill.
+
+**Changed**
+
+- **Editor chrome split into two bars.** A slim app header (brand + settings +
+  status) sits above a dedicated **toolbar** grouping document actions
+  (New/Open/Save), history (Undo/Redo), and formatting (bold, borders, fills) —
+  instead of cramming everything into one header row.
+- `session_set_style` (bold/fill) now preserves the cell's other formatting
+  (number format, italic, font color, borders) instead of overwriting it.
+
 ### 2026-08-05 — Editor: fluid scrolling + drag-to-resize (P1C-004)
 
 **Added**
