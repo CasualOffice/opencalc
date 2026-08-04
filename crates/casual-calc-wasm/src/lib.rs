@@ -388,6 +388,67 @@ pub fn session_clear_row_height(sheet: usize, row: u32) -> Result<(), JsError> {
     )
 }
 
+/// Set every column's width to `px` (the sheet default, clearing overrides).
+#[wasm_bindgen]
+pub fn session_set_all_col_width(sheet: usize, px: u32) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.columns.default = Some(resize_px_to_twips(px));
+            sh.columns.sizes.clear();
+        }
+        Ok(())
+    })
+}
+
+/// Set every row's height to `px` (the sheet default, clearing overrides).
+#[wasm_bindgen]
+pub fn session_set_all_row_height(sheet: usize, px: u32) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.rows.default = Some(resize_px_to_twips(px));
+            sh.rows.sizes.clear();
+        }
+        Ok(())
+    })
+}
+
+/// Set the width of columns `c0..=c1` to `px` (one undo step).
+#[wasm_bindgen]
+pub fn session_set_col_width_range(sheet: usize, c0: u32, c1: u32, px: u32) -> Result<(), JsError> {
+    let width = Some(resize_px_to_twips(px));
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let ops = (c0..=c1)
+            .map(|col| EditOperation::SetColumnWidth { sheet, col, width })
+            .collect();
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Set the height of rows `r0..=r1` to `px` (one undo step).
+#[wasm_bindgen]
+pub fn session_set_row_height_range(
+    sheet: usize,
+    r0: u32,
+    r1: u32,
+    px: u32,
+) -> Result<(), JsError> {
+    let height = Some(resize_px_to_twips(px));
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let ops = (r0..=r1)
+            .map(|row| EditOperation::SetRowHeight { sheet, row, height })
+            .collect();
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 /// Convert device pixels (96 dpi) to twips, floored at a sensible minimum so a
 /// column/row can never be dragged to zero and vanish.
 fn resize_px_to_twips(px: u32) -> i64 {

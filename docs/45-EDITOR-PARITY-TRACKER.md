@@ -1,0 +1,92 @@
+# 45 — Editor Parity Tracker & Competitive UX Analysis
+
+The single source of truth for the **web editor's** journey to product-grade
+parity with Excel / Google Sheets. Every requested UX item lives here with a
+status, so work survives context resets and we stop re-deriving the backlog.
+
+Status vocabulary: **Done** · **WIP** (in progress this session) · **Todo** ·
+**Bug** (regression/known-broken). Priority: **P0** (broken basics) · **P1**
+(expected of any sheet) · **P2** (polish / advanced).
+
+Update this file the moment an item's status changes.
+
+## Competitive UX baseline (what "a real sheet" has)
+
+Reference products: Microsoft Excel (desktop + web 2026), Google Sheets,
+OnlyOffice, Univer. The non-negotiable UX every one of them ships:
+
+1. **Navigation** — visible, consistent scrollbars; smooth scroll; freeze panes;
+   name box; go-to; keyboard nav (arrows, Ctrl+arrows to edges, PgUp/PgDn, Home).
+2. **Selection** — cell / range (drag + shift); **whole row/column via header**;
+   **whole sheet via corner**; multi-range (Ctrl); selection never scroll-jumps.
+3. **Sizing** — drag resize; **double-click boundary = auto-fit**; **resize
+   applies to all selected rows/cols**; hidden rows/cols.
+4. **Structure** — insert / delete / hide rows & columns with **formula reference
+   rewriting**; move; sort/filter.
+5. **Editing** — inline + formula-bar edit; overflow of text into empty cells;
+   wrap; autofill/drag-fill; cut/copy/paste (values, formats, formulas).
+6. **Formatting** — bold/italic/underline/strike; font family + size; text +
+   fill color; alignment (H + V); number formats; borders (all sides + styles);
+   merge cells; conditional formatting.
+7. **Chrome** — icon toolbar; **right-click context menus** (cell, row/col,
+   tab); sheet tabs with rename/duplicate/delete/reorder/color; status bar with
+   sum/avg/count; find & replace.
+8. **Consistency** — same look on every OS (no native scrollbars/menus);
+   light/dark; predictable shortcuts (Excel-flavored).
+
+## Tracker
+
+### P0 — broken basics (fix immediately)
+
+| ID | Item | Status | Notes |
+|----|------|--------|-------|
+| UX-01 | Row/column header select must NOT scroll to the far end | Done | `selKind` model; focus stays at near edge, no scroll. Verified |
+| UX-02 | Corner (0,0) selects the **whole sheet** (not just used range) | Done | `selKind:"all"`; highlight + headers tint span the viewport. Verified |
+| UX-03 | Resizing a row/col while whole-sheet/row/col selected resizes **all** of them | Done | `session_set_all_col_width`/`_row_height` + `_range`; live preview honors scope; "resized all". Verified |
+| UX-04 | **Custom, OS-consistent scrollbars** (currently none visible) | WIP | Overlay DOM scrollbars (V + H), draggable, styled by our CSS; thumb from used-extent |
+
+### P1 — expected of any sheet
+
+| ID | Item | Status | Notes |
+|----|------|--------|-------|
+| UX-10 | Full text formatting: bold/italic/underline + font color + fill | Done | 2026-08-05 product pass |
+| UX-11 | Horizontal alignment L/C/R | Done | `Style.align`, round-trips |
+| UX-12 | Number formats incl. currency/percent/menu | Done | numfmt literal runs; `$`, `%` |
+| UX-13 | Borders menu (all/outer/clear) | Done | `session_set_border(kind)` |
+| UX-14 | Sheet tabs: rename / duplicate / delete + context menu | Done | last-sheet protected |
+| UX-15 | Double-click column boundary = auto-fit | Done | widest-cell measure |
+| UX-16 | **Font family + size** controls | Todo | Needs `Style.font_name` + `font_size` in model → import/export/render. Reference the docx sister repo's font mgmt |
+| UX-17 | **Structural insert/delete rows & columns** + formula ref rewriting | Todo | Designed (AST `CellReference` shift/clamp). Ops `InsertRows/DeleteRows/InsertColumns/DeleteColumns`, invertible. Same-sheet first |
+| UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Todo | Pairs with UX-17 |
+| UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Todo | Render change; overflow when neighbor empty |
+| UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
+| UX-21 | Merge cells | Todo | Model has `merges`; need edit op + render + toolbar |
+| UX-22 | Status bar: sum / average / count of selection | Todo | cheap, high-signal |
+| UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Todo | Excel nav parity |
+| UX-24 | Multi-range selection (Ctrl+click) | Todo | |
+| UX-25 | Drag-fill / autofill handle | Todo | |
+| UX-26 | Hidden rows/columns (+ from file) | Todo | model flag; import `hidden` |
+| UX-27 | Freeze panes in editor (model has `SheetView`) | Todo | render frozen bands |
+| UX-28 | Find & replace | Todo | |
+| UX-29 | Sheet tab reorder (drag) + tab color | Todo | |
+
+### P2 — polish / advanced
+
+| ID | Item | Status | Notes |
+|----|------|--------|-------|
+| UX-40 | Conditional formatting | Todo | |
+| UX-41 | Tables (structured ranges) | Todo | |
+| UX-42 | Sort & filter | Todo | |
+| UX-43 | Strikethrough, more font styles | Todo | |
+| UX-44 | Cell comments/notes | Todo | |
+| UX-45 | Data validation | Todo | |
+| UX-46 | PNG-render borders/colors (landing preview) | Todo | display-list contract change |
+
+## Now / next
+
+- **Now:** UX-01/02/03 (selection + resize-all) and UX-04 (scrollbars).
+- **Next:** UX-17 (structural insert/delete) + UX-18 (context menu) together;
+  then UX-16 (font family/size), UX-19 (overflow), UX-22 (status bar).
+
+See also [14-EXECUTION-TRACKER.md](14-EXECUTION-TRACKER.md) (engine-level) and
+[33-FIDELITY-LEDGER.md](33-FIDELITY-LEDGER.md).

@@ -16,9 +16,10 @@ const state = {
   firstCol: 0, // first visible column (derived from scrollX in measure())
   sel: { row: 0, col: 0 }, // focus cell
   anchor: { row: 0, col: 0 }, // selection anchor
+  selKind: "cells", // "cells" | "rows" | "cols" | "all"
   dragging: false,
   editing: false,
-  resize: null, // active header resize: { axis:"col"|"row", index, previewPx }
+  resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
 };
 
 // The normalized selection rectangle (inclusive) from anchor..focus.
@@ -103,13 +104,18 @@ function measure() {
   geo.colW = JSON.parse(wasm.session_col_px(state.sheet, state.firstCol, colCap));
   geo.rowH = JSON.parse(wasm.session_row_px(state.sheet, state.firstRow, rowCap));
 
-  // Live resize preview: override the dragged line's size before layout so the
-  // whole grid reflows under the cursor without committing an edit yet.
+  // Live resize preview: override the affected line sizes before layout so the
+  // grid reflows under the cursor without committing an edit yet. Scope covers a
+  // single line, the selected band, or every line (whole-sheet selection).
   if (state.resize) {
-    const arr = state.resize.axis === "col" ? geo.colW : geo.rowH;
-    const base = state.resize.axis === "col" ? state.firstCol : state.firstRow;
-    const i = state.resize.index - base;
-    if (i >= 0 && i < arr.length) arr[i] = state.resize.previewPx;
+    const rz = state.resize;
+    const arr = rz.axis === "col" ? geo.colW : geo.rowH;
+    const base = rz.axis === "col" ? state.firstCol : state.firstRow;
+    for (let i = 0; i < arr.length; i++) {
+      const idx = base + i;
+      const hit = rz.scope === "all" || (rz.scope === "band" ? idx >= rz.b0 && idx <= rz.b1 : idx === rz.index);
+      if (hit) arr[i] = rz.previewPx;
+    }
   }
 
   geo.colX = new Array(geo.colW.length);
@@ -220,8 +226,22 @@ function draw() {
   ctx.fillRect(0, 0, v.w, v.h);
 
   const rectSel = selRect();
-  const sX = spanX(rectSel.c0, rectSel.c1, v);
-  const sY = spanY(rectSel.r0, rectSel.r1, v);
+  // The highlighted rectangle spans the whole row/column/sheet for header/corner
+  // selections, and stays clamped to the visible body otherwise.
+  let sX, sY;
+  if (state.selKind === "all") {
+    sX = { x: HW, w: v.w - HW };
+    sY = { y: HH, h: v.h - HH };
+  } else if (state.selKind === "rows") {
+    sX = { x: HW, w: v.w - HW };
+    sY = spanY(rectSel.r0, rectSel.r1, v);
+  } else if (state.selKind === "cols") {
+    sX = spanX(rectSel.c0, rectSel.c1, v);
+    sY = { y: HH, h: v.h - HH };
+  } else {
+    sX = spanX(rectSel.c0, rectSel.c1, v);
+    sY = spanY(rectSel.r0, rectSel.r1, v);
+  }
 
   // Everything in the grid body is clipped so partially-scrolled first cells
   // never bleed into the header strips (which are painted on top afterwards).
@@ -317,10 +337,10 @@ function draw() {
     drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
   }
 
-  // Range border + focus-cell border.
+  // Range border (cell selections only) + focus-cell border.
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 2;
-  if (sX.w > 0 && sY.h > 0) {
+  if (state.selKind === "cells" && sX.w > 0 && sY.h > 0) {
     ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
   }
   const fx = colXAt(state.sel.col);
@@ -330,11 +350,17 @@ function draw() {
   }
   ctx.restore(); // end body clip
 
-  // Headers (painted over the body edges).
+  // Which columns/rows are covered by the current selection (for header tint).
+  const rr = selRect();
+  const colInSel = (c) => state.selKind === "all" ||
+    (state.selKind === "cols" ? c >= rr.c0 && c <= rr.c1 : state.selKind === "cells" && c >= rr.c0 && c <= rr.c1);
+  const rowInSel = (r) => state.selKind === "all" ||
+    (state.selKind === "rows" ? r >= rr.r0 && r <= rr.r1 : state.selKind === "cells" && r >= rr.r0 && r <= rr.r1);
+
+  // Headers (painted over the body edges), with the selected band tinted.
   ctx.fillStyle = colors.headerBg;
   ctx.fillRect(0, 0, v.w, HH);
   ctx.fillRect(0, 0, HW, v.h);
-  ctx.fillStyle = colors.muted;
   ctx.font = "12px system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
@@ -343,7 +369,10 @@ function draw() {
   ctx.rect(HW, 0, Math.max(0, v.w - HW), HH);
   ctx.clip();
   for (let i = 0; i < geo.cols; i++) {
-    ctx.fillText(colName(state.firstCol + i), geo.colX[i] + geo.colW[i] / 2, HH / 2);
+    const c = state.firstCol + i;
+    if (colInSel(c)) { ctx.fillStyle = colors.sel; ctx.fillRect(geo.colX[i], 0, geo.colW[i], HH); }
+    ctx.fillStyle = colInSel(c) ? colors.accent : colors.muted;
+    ctx.fillText(colName(c), geo.colX[i] + geo.colW[i] / 2, HH / 2);
   }
   ctx.restore();
   ctx.save();
@@ -351,7 +380,10 @@ function draw() {
   ctx.rect(0, HH, HW, Math.max(0, v.h - HH));
   ctx.clip();
   for (let i = 0; i < geo.rows; i++) {
-    ctx.fillText(String(state.firstRow + i + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
+    const r = state.firstRow + i;
+    if (rowInSel(r)) { ctx.fillStyle = colors.sel; ctx.fillRect(0, geo.rowY[i], HW, geo.rowH[i]); }
+    ctx.fillStyle = rowInSel(r) ? colors.accent : colors.muted;
+    ctx.fillText(String(r + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
   }
   ctx.restore();
 
@@ -393,6 +425,7 @@ function select(row, col) {
   const c = Math.max(0, col);
   state.sel = { row: r, col: c };
   state.anchor = { row: r, col: c };
+  state.selKind = "cells";
   ensureVisible();
   draw();
 }
@@ -400,6 +433,7 @@ function select(row, col) {
 // Extend the selection to (row, col), keeping the anchor.
 function extend(row, col) {
   state.sel = { row: Math.max(0, row), col: Math.max(0, col) };
+  state.selKind = "cells";
   ensureVisible();
   draw();
 }
@@ -447,28 +481,40 @@ function rowAtY(py) {
   for (let i = 0; i < geo.rowY.length; i++) if (py < geo.rowY[i] + geo.rowH[i]) return state.firstRow + i;
   return state.firstRow + Math.max(0, geo.rowY.length - 1);
 }
+// Whole-sheet selection (the top-left corner box). The viewport stays put.
 function selectAll() {
-  const b = usedBounds();
-  state.anchor = { row: 0, col: 0 };
-  state.sel = { row: b.rows - 1, col: b.cols - 1 };
+  state.selKind = "all";
+  state.anchor = { row: state.firstRow, col: state.firstCol };
+  state.sel = { row: state.firstRow, col: state.firstCol };
   endInline();
   draw();
 }
-function selectRow(r) {
-  const b = usedBounds();
-  state.anchor = { row: r, col: 0 };
-  state.sel = { row: r, col: b.cols - 1 };
+// Whole-row selection; the focus stays at column 0 so the view doesn't jump.
+function selectRow(r, exp) {
+  state.selKind = "rows";
+  if (!exp) state.anchor = { row: r, col: 0 };
+  state.sel = { row: r, col: 0 };
   endInline();
-  ensureVisible();
   draw();
 }
-function selectColumn(c) {
-  const b = usedBounds();
-  state.anchor = { row: 0, col: c };
-  state.sel = { row: b.rows - 1, col: c };
+// Whole-column selection; the focus stays at row 0.
+function selectColumn(c, exp) {
+  state.selKind = "cols";
+  if (!exp) state.anchor = { row: 0, col: c };
+  state.sel = { row: 0, col: c };
   endInline();
-  ensureVisible();
   draw();
+}
+
+// The cell range a formatting/clipboard op should touch, expanded for whole
+// row/column/sheet selections to the used extent along the spanning axis.
+function effectiveRange() {
+  const r = selRect();
+  const b = usedBounds();
+  if (state.selKind === "all") return { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+  if (state.selKind === "rows") return { r0: r.r0, c0: 0, r1: r.r1, c1: b.cols - 1 };
+  if (state.selKind === "cols") return { r0: 0, c0: r.c0, r1: b.rows - 1, c1: r.c1 };
+  return r;
 }
 // Double-click a column boundary: size the column to its widest cell.
 function autofitColumn(col) {
@@ -486,9 +532,9 @@ function autofitColumn(col) {
   draw();
 }
 
-// Run a formatting op over the current selection, then redraw.
+// Run a formatting op over the effective selection, then redraw.
 function formatSel(fn) {
-  const s = selRect();
+  const s = effectiveRange();
   try { fn(s); } catch (e) { status.textContent = `error: ${e}`; }
   draw();
 }
@@ -502,7 +548,7 @@ function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format
 function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
 function toggleBorder() { setBorder("all"); }
 function clearSelection() {
-  const s = selRect();
+  const s = effectiveRange();
   try { wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
   draw();
 }
@@ -538,7 +584,7 @@ function saveAs(fmt) {
   } catch (e) { status.textContent = `error: ${e}`; }
 }
 async function doCopy() {
-  const s = selRect();
+  const s = effectiveRange();
   const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
   try { await navigator.clipboard.writeText(tsv); status.textContent = "copied"; }
   catch { status.textContent = "copy blocked"; }
@@ -720,7 +766,13 @@ function wireEvents() {
       const cur = hb.axis === "col"
         ? JSON.parse(wasm.session_col_px(state.sheet, hb.index, 1))[0] || COL_W
         : JSON.parse(wasm.session_row_px(state.sheet, hb.index, 1))[0] || ROW_H;
-      state.resize = { axis: hb.axis, index: hb.index, previewPx: cur };
+      // Scope: whole sheet, the selected band (if the line is in it), or just one.
+      const r = selRect();
+      let scope = "one", b0 = hb.index, b1 = hb.index;
+      if (state.selKind === "all") scope = "all";
+      else if (hb.axis === "col" && state.selKind === "cols" && hb.index >= r.c0 && hb.index <= r.c1) { scope = "band"; b0 = r.c0; b1 = r.c1; }
+      else if (hb.axis === "row" && state.selKind === "rows" && hb.index >= r.r0 && hb.index <= r.r1) { scope = "band"; b0 = r.r0; b1 = r.r1; }
+      state.resize = { axis: hb.axis, index: hb.index, previewPx: cur, scope, b0, b1 };
       return;
     }
     // Header clicks: select-all (corner), whole column, or whole row.
@@ -753,10 +805,18 @@ function wireEvents() {
     if (state.resize) {
       const r = state.resize;
       state.resize = null;
+      const px = r.previewPx;
       try {
-        if (r.axis === "col") wasm.session_set_col_width(state.sheet, r.index, r.previewPx);
-        else wasm.session_set_row_height(state.sheet, r.index, r.previewPx);
-        status.textContent = "resized";
+        if (r.axis === "col") {
+          if (r.scope === "all") wasm.session_set_all_col_width(state.sheet, px);
+          else if (r.scope === "band") wasm.session_set_col_width_range(state.sheet, r.b0, r.b1, px);
+          else wasm.session_set_col_width(state.sheet, r.index, px);
+        } else {
+          if (r.scope === "all") wasm.session_set_all_row_height(state.sheet, px);
+          else if (r.scope === "band") wasm.session_set_row_height_range(state.sheet, r.b0, r.b1, px);
+          else wasm.session_set_row_height(state.sheet, r.index, px);
+        }
+        status.textContent = r.scope === "one" ? "resized" : "resized all";
       } catch (e) { status.textContent = `error: ${e}`; }
       draw();
     }
