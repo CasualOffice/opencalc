@@ -94,6 +94,17 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Editing (transaction layer)
+
+Atomic, invertible operations; all model mutation flows through here
+([24](24-TRANSACTION-AND-EDIT-SEMANTICS.md)).
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| E-001 | Cell-level op set + inverses + undo/redo (`casual-calc-transaction`) | Done | `Operation` (SetCell/SetValue/SetStyle/ClearCell/Batch); `apply` returns the inverse; atomic Batch with rollback; `History` undo/redo. Edit→recalc integration gated. 7 tests |
+| E-002 | Structural ops: insert/delete rows & columns + reference rewriting | Not started | Needs formula reference algebra; the subtle correctness surface (doc 24) |
+| E-003 | Selection model (`casual-calc-selection`) + fill/paste | Not started | — |
+
 ## Phase rows — Phase 2 (Formula & calc engine)
 
 Evaluate the formula ASTs; recompute cached values

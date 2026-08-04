@@ -11,6 +11,19 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Editing: the transaction layer
+
+**Added**
+
+- `casual-calc-transaction` (E-001): the atomic, invertible edit operation set.
+  `Operation` (`SetCell`, `SetValue`, `SetStyle`, `ClearCell`, `Batch`); `apply`
+  returns the **inverse** operation, so undo/redo is inverse replay; `Batch` is
+  all-or-nothing with rollback; a `History` provides undo/redo stacks. An
+  edit→recalc integration is gated (editing a precedent recomputes dependents).
+  This is the fifth and final fidelity dimension — the ledger's Edit column is
+  now `●` for cell content. Structural ops (row/column insert-delete with
+  reference rewriting) are the next increment. 7 tests.
+
 ### 2026-08-04 — Phase 2: the calculation engine
 
 **Added**

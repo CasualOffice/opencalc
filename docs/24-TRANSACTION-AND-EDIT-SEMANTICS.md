@@ -13,6 +13,13 @@ Owning crates: `casual-calc-transaction` (the ops + inverses) and
 `casual-calc-selection` (caret/range state), over `casual-calc-model`, using
 `casual-calc-formula` for reference rewriting.
 
+> **Status: cell-level ops implemented (E-001).** `casual-calc-transaction`
+> provides `Operation` (`SetCell`, `SetValue`, `SetStyle`, `ClearCell`, `Batch`);
+> `apply(workbook, op)` returns the inverse; `Batch` is atomic with rollback; a
+> `History` gives undo/redo. All model mutation flows through this layer. The
+> structural ops (insert/delete rows & columns) and their formula-reference
+> rewriting — the subtle part below — are the next increment (E-002).
+
 ## Core principles
 
 1. **Mutation is centralized.** No other crate mutates the model. Layout, render,

@@ -37,16 +37,16 @@ evidence").
 
 | Construct | Model | Round-trip | Edit | Render | Calc | Driving tracker |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cell: number | ● | ● | ✗ | ~ | — | P1C-001 |
-| Cell: boolean | ● | ● | ✗ | ~ | — | P1C-001 |
-| Cell: error value | ● | ● | ✗ | ~ | — | P1C-001 |
-| Shared strings | ● | ● | ✗ | ~ | — | P1C-001 |
-| Inline strings | ● | ● | ✗ | ~ | — | P1C-001 |
+| Cell: number | ● | ● | ● | ~ | — | E-001 |
+| Cell: boolean | ● | ● | ● | ~ | — | E-001 |
+| Cell: error value | ● | ● | ● | ~ | — | E-001 |
+| Shared strings | ● | ● | ● | ~ | — | E-001 |
+| Inline strings | ● | ● | ● | ~ | — | E-001 |
 | Grid geometry / viewport | — | — | — | ● | — | P1C-001 |
 | Grid raster (PNG) | — | — | — | ● | — | P1D-001 (gridlines + content fills; glyphs pending) |
 | Formulas (AST) | ● | ● | ✗ | — | ● | P2-001 |
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
-| Number formats | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Number formats | ● | ● | ● | ✗ | — | E-001 (SetStyle) |
 | Styles: font/fill/border | ✗ | ✗ | ✗ | ✗ | — | P1A-003b |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Column/row sizing | ✗ | ✗ | ✗ | ✗ | — | P1C |

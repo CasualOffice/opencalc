@@ -160,6 +160,11 @@ version = "0.0.0"
 [[package]]
 name = "casual-calc-transaction"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-eval",
+ "casual-calc-formula",
+ "casual-calc-model",
+]
 
 [[package]]
 name = "casual-calc-wasm"
