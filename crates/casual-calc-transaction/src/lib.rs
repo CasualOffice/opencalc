@@ -12,6 +12,10 @@
 
 use casual_calc_model::{AxisSizing, Cell, CellRef, CellValue, StyleId, Workbook};
 
+mod structural;
+
+use structural::Axis;
+
 /// An error applying an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -99,6 +103,48 @@ pub enum Operation {
         /// The new height (twips), or `None` to revert to the sheet default.
         height: Option<i64>,
     },
+    /// Insert `count` blank rows at row `at`, shifting rows on/after `at` down
+    /// and rewriting formula references that target this sheet.
+    InsertRows {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based row the inserted band begins at.
+        at: u32,
+        /// Number of rows to insert.
+        count: u32,
+    },
+    /// Delete `count` rows starting at row `at`, shifting rows on/after
+    /// `at + count` up and rewriting formula references that target this sheet
+    /// (references onto a deleted row become `#REF!`).
+    DeleteRows {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based row the deleted band begins at.
+        at: u32,
+        /// Number of rows to delete.
+        count: u32,
+    },
+    /// Insert `count` blank columns at column `at`, shifting columns on/after
+    /// `at` right and rewriting formula references that target this sheet.
+    InsertColumns {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based column the inserted band begins at.
+        at: u32,
+        /// Number of columns to insert.
+        count: u32,
+    },
+    /// Delete `count` columns starting at column `at`, shifting columns on/after
+    /// `at + count` left and rewriting formula references that target this sheet
+    /// (references onto a deleted column become `#REF!`).
+    DeleteColumns {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based column the deleted band begins at.
+        at: u32,
+        /// Number of columns to delete.
+        count: u32,
+    },
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -160,6 +206,18 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
                 row,
                 height: previous,
             })
+        }
+        Operation::InsertRows { sheet, at, count } => {
+            structural::insert(workbook, sheet, Axis::Row, at, count)
+        }
+        Operation::DeleteRows { sheet, at, count } => {
+            structural::delete(workbook, sheet, Axis::Row, at, count)
+        }
+        Operation::InsertColumns { sheet, at, count } => {
+            structural::insert(workbook, sheet, Axis::Col, at, count)
+        }
+        Operation::DeleteColumns { sheet, at, count } => {
+            structural::delete(workbook, sheet, Axis::Col, at, count)
         }
         Operation::Batch(ops) => {
             let mut inverses = Vec::with_capacity(ops.len());
