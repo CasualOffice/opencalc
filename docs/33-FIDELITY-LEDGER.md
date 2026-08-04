@@ -40,10 +40,10 @@ evidence").
 | Formula cached value | ● | ✗ | — | ✗ | ✗ | P1A-001 |
 | Number formats | ● | ✗ | ✗ | ✗ | — | P1A-003 |
 | Styles: font/fill/border | ✗ | ✗ | ✗ | ✗ | — | P1A-003b |
-| Merged ranges | ✗ | ✗ | ✗ | ✗ | — | P1A-004 |
+| Merged ranges | ● | ✗ | ✗ | ✗ | — | P1A-004 |
 | Column/row sizing | ✗ | ✗ | ✗ | ✗ | — | P1C |
-| Frozen panes | ✗ | ✗ | ✗ | ✗ | — | P1A-004 / P1C |
-| Defined names | ✗ | ✗ | ✗ | — | ✗ | P1A-004 |
+| Frozen panes | ● | ✗ | ✗ | ✗ | — | P1A-004 / P1C |
+| Defined names | ● | ✗ | ✗ | — | ✗ | P1A-004 |
 | Sheet structure | ● | ✗ | ✗ | ✗ | — | P1A-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B |
 | Charts | ✗ (preserve-only) | ✗ | ✗ | ✗ | — | P3 |

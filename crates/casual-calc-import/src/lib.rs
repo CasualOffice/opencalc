@@ -23,12 +23,13 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellValue, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Style, Workbook,
+    Cell, CellValue, DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, SheetView, StringId,
+    Style, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
-use a1::parse_a1;
-use read::{RawCell, parse_shared_strings, parse_worksheet};
+use a1::{parse_a1, parse_range};
+use read::{RawCell, parse_defined_names, parse_shared_strings, parse_worksheet};
 use styles::{StyleSheet, parse_styles};
 
 const WORKBOOK_NAMESPACE: u64 = 0x574b_0000_0000_0000; // "WK"
@@ -76,12 +77,15 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         .collect();
 
     let mut sheet_ids = IdGenerator::new(SHEET_NAMESPACE);
+    let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
     for (name, part) in sheet_meta {
         let xml = package.read_part(&part)?;
-        let raw_cells = parse_worksheet(&xml)?;
-        let mut sheet = Sheet::new(SheetId(sheet_ids.next_id()), name);
+        let worksheet = parse_worksheet(&xml)?;
+        let sheet_id = SheetId(sheet_ids.next_id());
+        sheet_ids_by_index.push(sheet_id);
+        let mut sheet = Sheet::new(sheet_id, name);
 
-        for raw in raw_cells {
+        for raw in worksheet.cells {
             let Some(cell_ref) = parse_a1(&raw.reference) else {
                 report.record(
                     "cellRef",
@@ -117,7 +121,50 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             }
         }
 
+        for reference in &worksheet.merges {
+            match parse_range(reference) {
+                Some(range) => sheet.merges.push(range),
+                None => report.record(
+                    "mergeCell",
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::NotRetained,
+                ),
+            }
+        }
+        if let Some((frozen_rows, frozen_cols)) = worksheet.frozen {
+            sheet.view = SheetView {
+                frozen_rows,
+                frozen_cols,
+            };
+        }
+
         workbook.sheets.push(sheet);
+    }
+
+    // Defined names, resolved against the sheet ids assigned above.
+    let workbook_part = package.workbook_part().to_owned();
+    let workbook_xml = package.read_part(&workbook_part)?;
+    for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
+        match parse_formula(&refers_to) {
+            Ok(formula) => {
+                let sheet = local_sheet.and_then(|i| sheet_ids_by_index.get(i as usize).copied());
+                workbook.defined_names.push(DefinedName {
+                    name,
+                    sheet,
+                    formula,
+                });
+                report.record(
+                    "definedName",
+                    ModelOutcome::Mapped,
+                    RetentionOutcome::NotApplicable,
+                );
+            }
+            Err(_) => report.record(
+                "definedName",
+                ModelOutcome::Degraded,
+                RetentionOutcome::NotRetained,
+            ),
+        }
     }
 
     workbook.validate()?;

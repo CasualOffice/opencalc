@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use casual_calc_formula::Expr;
 use serde::{Deserialize, Serialize};
 
+use crate::defined_name::DefinedName;
 use crate::error::ModelError;
 use crate::ids::{FormulaHandle, Id, StringId, StyleId};
 use crate::sheet::Sheet;
@@ -37,6 +38,9 @@ pub struct Workbook {
     /// seam). ASTs are parsed at import; the calc engine evaluates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub formulas: Vec<Expr>,
+    /// Defined names (workbook- or sheet-scoped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub defined_names: Vec<DefinedName>,
     /// Sheets in tab order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<Sheet>,
@@ -51,6 +55,7 @@ impl Workbook {
             strings: StringTable::new(),
             styles: StyleTable::new(),
             formulas: Vec::new(),
+            defined_names: Vec::new(),
             sheets: Vec::new(),
         }
     }

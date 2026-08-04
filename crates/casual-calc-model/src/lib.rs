@@ -13,6 +13,7 @@
 //! See `docs/22-NORMALIZED-SCHEMA.md` and `docs/23-CELL-STORE-REPRESENTATION.md`.
 
 mod cell;
+mod defined_name;
 mod error;
 mod ids;
 mod sheet;
@@ -23,12 +24,13 @@ mod value;
 mod workbook;
 
 pub use cell::{Cell, CellFlags};
+pub use defined_name::DefinedName;
 pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
-pub use sheet::Sheet;
-pub use store::{CellRef, CellStore};
+pub use sheet::{Sheet, SheetView};
+pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
 pub use style::{Style, StyleTable};
 pub use value::{CellValue, ErrorValue};

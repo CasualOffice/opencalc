@@ -15,6 +15,12 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-model` + `casual-calc-import` (P1A-004): defined names, merged
+  ranges, and frozen panes. The model gained `CellRange`, `SheetView` (frozen
+  rows/cols) with `Sheet.merges`/`view`, and `DefinedName` (a parsed `Expr` with
+  workbook/sheet scope). Import parses worksheet `mergeCells` and the
+  `sheetView` `pane`, and workbook `definedNames` (resolving `localSheetId` to the
+  assigned sheet id; unparseable refers-to is `Degraded`).
 - `casual-calc-model` + `casual-calc-import` (P1A-003): number formats. The model
   gained an interned, deduplicated `Style`/`StyleTable` (`Workbook.styles`,
   `intern_style`; `validate()` checks style references). Import parses

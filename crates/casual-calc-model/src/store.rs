@@ -31,6 +31,26 @@ impl CellRef {
     }
 }
 
+/// A rectangular range of cells (inclusive), e.g. a merged region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CellRange {
+    /// Top-left corner.
+    pub start: CellRef,
+    /// Bottom-right corner.
+    pub end: CellRef,
+}
+
+impl CellRange {
+    /// A range from `start` to `end`, normalized so `start` is the top-left.
+    pub fn new(a: CellRef, b: CellRef) -> Self {
+        Self {
+            start: CellRef::new(a.row.min(b.row), a.col.min(b.col)),
+            end: CellRef::new(a.row.max(b.row), a.col.max(b.col)),
+        }
+    }
+}
+
 /// One stored cell with its address; the on-wire form of a [`CellStore`] entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

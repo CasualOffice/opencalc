@@ -2,7 +2,7 @@
 
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
 
@@ -132,13 +132,30 @@ pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, ImportError> {
     Ok(strings)
 }
 
-/// Parse a worksheet part's `sheetData` into raw cells.
-pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
+/// A parsed worksheet: its cells, merged ranges, and frozen panes.
+#[derive(Debug, Default)]
+pub struct Worksheet {
+    /// The raw cells.
+    pub cells: Vec<RawCell>,
+    /// Merged-range references (`A1:B2`).
+    pub merges: Vec<String>,
+    /// Frozen panes as `(frozen_rows, frozen_cols)`, if any.
+    pub frozen: Option<(u32, u32)>,
+}
+
+fn parse_u32_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<u32, ImportError> {
+    Ok(read_attr(e, local)?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0))
+}
+
+/// Parse a worksheet part's `sheetData`, `mergeCells`, and `sheetView` pane.
+pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut bounds = Bounds::new();
 
-    let mut cells = Vec::new();
+    let mut result = Worksheet::default();
     let mut current: Option<RawCell> = None;
     let mut in_value = false;
     let mut in_formula = false;
@@ -167,6 +184,12 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                     }
                     b"is" => in_inline = true,
                     b"t" if in_inline => in_inline_text = true,
+                    b"mergeCell" => {
+                        if let Some(reference) = read_attr(&e, b"ref")? {
+                            result.merges.push(reference);
+                        }
+                    }
+                    b"pane" => read_pane(&e, &mut result)?,
                     _ => {}
                 }
             }
@@ -174,7 +197,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                 bounds.count()?;
                 match e.local_name().as_ref() {
                     b"c" => {
-                        cells.push(RawCell {
+                        result.cells.push(RawCell {
                             reference: read_attr(&e, b"r")?.unwrap_or_default(),
                             cell_type: read_attr(&e, b"t")?,
                             style_index: read_attr(&e, b"s")?.and_then(|s| s.parse().ok()),
@@ -186,6 +209,12 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                             cell.formula.get_or_insert_with(String::new);
                         }
                     }
+                    b"mergeCell" => {
+                        if let Some(reference) = read_attr(&e, b"ref")? {
+                            result.merges.push(reference);
+                        }
+                    }
+                    b"pane" => read_pane(&e, &mut result)?,
                     _ => {}
                 }
             }
@@ -215,7 +244,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                     b"is" => in_inline = false,
                     b"c" => {
                         if let Some(cell) = current.take() {
-                            cells.push(cell);
+                            result.cells.push(cell);
                         }
                     }
                     _ => {}
@@ -226,5 +255,58 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
         }
         buf.clear();
     }
-    Ok(cells)
+    Ok(result)
+}
+
+fn read_pane(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    let state = read_attr(e, b"state")?.unwrap_or_default();
+    if state == "frozen" || state == "frozenSplit" {
+        let cols = parse_u32_attr(e, b"xSplit")?;
+        let rows = parse_u32_attr(e, b"ySplit")?;
+        result.frozen = Some((rows, cols));
+    }
+    Ok(())
+}
+
+/// Parse `<definedName>` entries from `workbook.xml`.
+///
+/// Returns `(name, local_sheet_id, refers_to_text)` per entry; `local_sheet_id`
+/// is the 0-based sheet index for sheet-scoped names.
+pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, String)>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+
+    let mut names = Vec::new();
+    let mut current: Option<(String, Option<u32>, String)> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) => {
+                bounds.open()?;
+                if e.local_name().as_ref() == b"definedName" {
+                    let name = read_attr(&e, b"name")?.unwrap_or_default();
+                    let local = read_attr(&e, b"localSheetId")?.and_then(|s| s.parse().ok());
+                    current = Some((name, local, String::new()));
+                }
+            }
+            Event::Text(e) => {
+                if let Some((_, _, text)) = current.as_mut() {
+                    text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(e) => {
+                bounds.close();
+                if e.local_name().as_ref() == b"definedName"
+                    && let Some(entry) = current.take()
+                {
+                    names.push(entry);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(names)
 }

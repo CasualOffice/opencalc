@@ -106,7 +106,7 @@ Import SpreadsheetML → normalized model + compatibility report; formulas parse
 | P1A-002 | Formula import → AST (`casual-calc-formula` tokenizer/parser) | Done | Lexer + Pratt parser + serde AST + pretty-printer (round-trip gated); model gains a formula arena (model→formula dep); import parses `<f>` → AST, cached value kept; unparseable → Degraded. 26 tests (formula 9 + model 10 + import 7) |
 | P1A-003 | Number formats + cell-style linkage import | Done | Model `Style`/`StyleTable` (interned, deduped); import parses styles.xml numFmts + cellXfs (custom + built-in numFmtId subset); cell `s` → StyleId; number format modeled. Font/fill/border deferred to P1A-003b. 18 tests (model 10 + import 8) |
 | P1A-003b | Styles: font, fill, border, alignment | Not started | Extends `Style`; needed for render fidelity |
-| P1A-004 | Defined names, merged ranges, sheet views | Not started | — |
+| P1A-004 | Defined names, merged ranges, sheet views | Done | Model: `CellRange`, `SheetView` (frozen panes), `Sheet.merges`/`view`, `DefinedName` (parsed Expr, workbook/sheet scope). Import parses mergeCells, sheetView pane, and workbook definedNames (localSheetId resolved). 19 tests (model 10 + import 9) |
 | P1A-005 | Proper part discovery via content-types + all rels (not conventional paths) | Not started | sharedStrings currently found by conventional path |
 | P1A-006 | Retention mode + retained-source / opaque parts | Not started | — |
 

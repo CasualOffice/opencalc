@@ -32,6 +32,13 @@ fn sheet_with(rows: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn sheet_with_extra(cells: &str, merges: &str, views: &str) -> Vec<u8> {
+    format!(
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">{views}<sheetData><row r=\"1\">{cells}</row></sheetData>{merges}</worksheet>"
+    )
+    .into_bytes()
+}
+
 fn package_with_sheet(sheet_xml: Vec<u8>, shared: Option<&[u8]>) -> Vec<u8> {
     let mut parts: Vec<(&str, &[u8])> = vec![
         ("[Content_Types].xml", CONTENT_TYPES),
@@ -195,6 +202,42 @@ fn imports_number_formats_from_styles() {
         wb.styles.get(c1_style).unwrap().number_format.as_deref(),
         Some("0%")
     );
+}
+
+#[test]
+fn imports_merges_frozen_panes_and_defined_names() {
+    const WORKBOOK_DN: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="Total">Data!$A$1:$A$3</definedName><definedName name="Local" localSheetId="0">Data!$B$1</definedName></definedNames></workbook>"#;
+    let sheet_xml = sheet_with_extra(
+        r#"<c r="A1"><v>1</v></c>"#,
+        r#"<mergeCells count="1"><mergeCell ref="A1:B2"/></mergeCells>"#,
+        r#"<sheetViews><sheetView><pane xSplit="1" ySplit="2" topLeftCell="B3" state="frozen"/></sheetView></sheetViews>"#,
+    );
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK_DN),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    let wb = &import.workbook;
+    let sheet = &wb.sheets[0];
+
+    // Merged range A1:B2.
+    assert_eq!(sheet.merges.len(), 1);
+    assert_eq!(sheet.merges[0].start, CellRef::new(0, 0));
+    assert_eq!(sheet.merges[0].end, CellRef::new(1, 1));
+
+    // Frozen: ySplit=2 rows, xSplit=1 col.
+    assert_eq!(sheet.view.frozen_rows, 2);
+    assert_eq!(sheet.view.frozen_cols, 1);
+
+    // Defined names: one workbook-scoped, one sheet-scoped.
+    assert_eq!(wb.defined_names.len(), 2);
+    let total = wb.defined_names.iter().find(|d| d.name == "Total").unwrap();
+    assert!(total.sheet.is_none());
+    let local = wb.defined_names.iter().find(|d| d.name == "Local").unwrap();
+    assert_eq!(local.sheet, Some(sheet.id));
 }
 
 #[test]

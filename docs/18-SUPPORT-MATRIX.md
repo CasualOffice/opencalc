@@ -50,7 +50,8 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Inline strings | ○ | ○ | n/a | Phase 1A |
 | Number formats (built-in + custom) | ◑ | ○ | n/a | Phase 1A (P1A-003, model); render 1C |
 | Styles: fonts, fills, borders, alignment | ○ | ○ | n/a | Phase 1A (P1A-003b) / 1C |
-| Merged ranges | ○ | ○ | n/a | Phase 1A/1C |
+| Merged ranges | ◑ | ○ | n/a | Phase 1A (P1A-004, model); render 1C |
+| Frozen panes / defined names | ◑ | ○ | n/a | Phase 1A (P1A-004, model) |
 | Column/row sizing, hidden, outline | ○ | ○ | n/a | Phase 1A/1C |
 | Frozen panes / splits | ○ | ○ | n/a | Phase 1A/1C |
 | Defined names | ○ | n/a | ○ | Phase 1A / used in Phase 2 |

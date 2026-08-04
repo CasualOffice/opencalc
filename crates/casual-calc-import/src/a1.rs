@@ -1,6 +1,17 @@
 //! A1 cell-reference parsing (e.g. `B7`, `$B$7`).
 
-use casual_calc_model::CellRef;
+use casual_calc_model::{CellRange, CellRef};
+
+/// Parse an A1 range (`A1:B2`, or a single cell `A1`) into a [`CellRange`].
+pub fn parse_range(text: &str) -> Option<CellRange> {
+    match text.split_once(':') {
+        Some((a, b)) => Some(CellRange::new(parse_a1(a)?, parse_a1(b)?)),
+        None => {
+            let cell = parse_a1(text)?;
+            Some(CellRange::new(cell, cell))
+        }
+    }
+}
 
 /// Parse an A1 reference into a zero-based [`CellRef`]. Accepts `$` anchors;
 /// returns `None` if the reference is malformed.
