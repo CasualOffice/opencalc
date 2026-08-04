@@ -13,8 +13,10 @@ or a UI framework.
 
 One host-agnostic core, **two first-class hosts**: a **Tauri desktop app** where
 the engine (including the formula/calc engine) runs as **native Rust** at full
-speed, and a **web app** where the same engine compiles to WebAssembly — scroll a
-million-cell sheet at 60 fps, edit cells, and recalculate, all client-side.
+speed, and a **web app** where the same engine compiles to WebAssembly — evaluate
+formulas, open an `.xlsx`, recalculate, and render the grid, all client-side. A
+**live WebAssembly demo** is deployed to GitHub Pages from
+[`webapp/`](webapp/) via [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
 
 OpenCalc is the spreadsheet counterpart to [OpenDoc](../opendoc-fixes) (the
 `.docx` engine): it reuses OpenDoc's format-neutral spine — bounded OPC package

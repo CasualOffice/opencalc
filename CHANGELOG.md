@@ -11,6 +11,20 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — WebAssembly demo & Pages deploy
+
+**Added**
+
+- `casual-calc-wasm` (W-001): the `wasm-bindgen` bridge — a thin transport over
+  the host-agnostic engine. `version`, `eval_formula` (parse + evaluate a
+  self-contained formula), `render_xlsx` (import → recalc → layout viewport →
+  PNG), and `describe_xlsx`. The whole read→calc→render pipeline runs in the
+  browser; verified end-to-end (`=SUM(1,2,3)*IF(2>1,10,0)` → 60, sample `.xlsx`
+  renders to pixels). `wasm-opt` is disabled (bulk-memory compatibility).
+- Marketing site + demo (SITE-001): `webapp/` — a landing page, a live formula
+  playground, and an open-`.xlsx`→render demo. `.github/workflows/pages.yml`
+  builds the engine with `wasm-pack` and deploys the site to GitHub Pages.
+
 ### 2026-08-04 — Editing: the transaction layer
 
 **Added**

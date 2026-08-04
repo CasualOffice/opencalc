@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCalc — a deterministic, embeddable spreadsheet engine in Rust</title>
+    <meta
+      name="description"
+      content="OpenCalc reads and writes .xlsx, holds the workbook in a normalized model, calculates it, and renders a virtualized grid — native, WebAssembly, and headless."
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div class="wrap">
+        <div class="badge" id="version">WebAssembly demo</div>
+        <h1>OpenCalc</h1>
+        <p class="tagline">
+          A deterministic, embeddable <strong>spreadsheet engine</strong> written in Rust —
+          it reads and writes <code>.xlsx</code>, holds the workbook in a normalized
+          editable model, calculates it, and lays out and renders a virtualized grid,
+          for native, WebAssembly, and headless hosts.
+        </p>
+        <p class="tagline muted">
+          Everything below runs <strong>entirely in your browser</strong> — the same
+          engine that runs natively in a Tauri desktop app, compiled to WebAssembly.
+          Nothing is uploaded.
+        </p>
+        <div class="cta">
+          <a class="button" href="https://github.com/CasualOffice/opencalc">View on GitHub</a>
+          <a class="button ghost" href="#demo">Try the demo</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="features">
+        <div class="feature">
+          <h3>Loss-aware</h3>
+          <p>Content the model doesn't represent is preserved or reported — never silently dropped.</p>
+        </div>
+        <div class="feature">
+          <h3>Deterministic</h3>
+          <p>Same input + version ⇒ same model, values, layout, and bytes. Every layer is golden-testable.</p>
+        </div>
+        <div class="feature">
+          <h3>Embeddable</h3>
+          <p>No mandatory DOM, server, or UI framework. Rust, <code>wasm32</code>, desktop, and headless alike.</p>
+        </div>
+        <div class="feature">
+          <h3>Built for scale</h3>
+          <p>Designed for 1M+ cells, 60 fps scrolling, and sub-50 ms recalculation.</p>
+        </div>
+      </section>
+
+      <section id="demo" class="demo">
+        <h2>Live demo</h2>
+
+        <div class="card">
+          <h3>Formula evaluator</h3>
+          <p class="muted">Type a self-contained formula and evaluate it with the real engine.</p>
+          <div class="row">
+            <input id="formula" type="text" value="=SUM(1,2,3)*IF(2&gt;1,10,0)" spellcheck="false" />
+            <button id="eval">Evaluate</button>
+          </div>
+          <div class="result" id="formula-result">—</div>
+          <div class="examples">
+            Try:
+            <button class="chip" data-f="=1+2*3">=1+2*3</button>
+            <button class="chip" data-f="=AVERAGE(2,4,6)">=AVERAGE(2,4,6)</button>
+            <button class="chip" data-f='=IF(5&gt;3,"yes","no")'>=IF(5&gt;3,"yes","no")</button>
+            <button class="chip" data-f="=ROUND(3.14159,2)">=ROUND(3.14159,2)</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Open an <code>.xlsx</code></h3>
+          <p class="muted">
+            Drop a workbook (or load the sample) — the engine admits it under strict
+            limits, imports it into the model, recalculates, and renders the grid.
+          </p>
+          <div class="row">
+            <button id="sample">Load sample</button>
+            <label class="file">
+              <input id="file" type="file" accept=".xlsx" />
+              Choose file…
+            </label>
+          </div>
+          <div class="status" id="xlsx-status">No workbook loaded.</div>
+          <div class="canvas-wrap"><img id="grid" alt="rendered grid" /></div>
+        </div>
+      </section>
+
+      <section class="note">
+        <p>
+          Pre-release developer surface. Cell text is rendered as highlighted regions
+          for now (glyph shaping is in progress); the formula evaluator and the
+          import→calc→render pipeline are real.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span>OpenCalc · CasualOffice · Apache-2.0</span>
+        <a href="https://github.com/CasualOffice/opencalc">github.com/CasualOffice/opencalc</a>
+      </div>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

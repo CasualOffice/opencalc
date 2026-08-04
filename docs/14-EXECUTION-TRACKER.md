@@ -94,6 +94,15 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Host bridges & site
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| W-001 | WASM bridge (`casual-calc-wasm`) | Done | `wasm-bindgen` bridge: `version`, `eval_formula`, `render_xlsx` (import→recalc→layout→render PNG), `describe_xlsx`. Verified in-browser. `wasm-opt` disabled (bulk-memory) |
+| SITE-001 | Marketing site + WASM demo + Pages deploy | Done | `webapp/` (landing + formula playground + open-xlsx render); `.github/workflows/pages.yml` builds wasm-pack + deploys to GitHub Pages |
+| W-002 | Interactive grid editor (edit cells, scroll, hit-test) | Not started | Uses the transaction layer; needs glyph text (P1D-002) |
+| TAURI-001 | Tauri desktop shell (native) | Not started | `docs/44`; consumes `casual-calc-sdk` |
+
 ## Phase rows — Editing (transaction layer)
 
 Atomic, invertible operations; all model mutation flows through here

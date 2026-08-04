@@ -15,5 +15,8 @@ Cargo.lock.orig
 .idea/
 .vscode/
 
-# WASM build output (added in later phases)
+# WASM build output + demo assets
 /webapp/pkg/
+/webapp/sample.xlsx
+/site/
+crates/*/pkg/
