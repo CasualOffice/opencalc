@@ -19,7 +19,8 @@ use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style,
+    Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -231,6 +232,75 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
         let at = index + 1;
         wb.sheets.insert(at, clone);
         Ok(at)
+    })
+}
+
+/// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.
+#[wasm_bindgen]
+pub fn session_merges(sheet: usize) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = sh
+            .merges
+            .iter()
+            .map(|m| {
+                format!(
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}}}",
+                    m.start.row, m.start.col, m.end.row, m.end.col
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Whether a merge intersects the box `[r0,c0]..[r1,c1]`.
+fn merge_hits(m: &casual_calc_model::CellRange, r0: u32, c0: u32, r1: u32, c1: u32) -> bool {
+    !(m.end.row < r0 || m.start.row > r1 || m.end.col < c0 || m.start.col > c1)
+}
+
+/// Merge a range into one cell (drops any merges it overlaps).
+#[wasm_bindgen]
+pub fn session_merge_cells(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
+            if r0 != r1 || c0 != c1 {
+                sh.merges
+                    .push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Remove any merges intersecting a range.
+#[wasm_bindgen]
+pub fn session_unmerge_cells(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
+        }
+        Ok(())
     })
 }
 

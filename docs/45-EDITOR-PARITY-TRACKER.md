@@ -60,7 +60,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Done | Right-click cell -> Cut/Copy/Paste, Insert row/col, Delete row/col, Clear. Verified |
 | UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Done | Overflow across empty neighbours (align-aware); **Wrap text** toolbar toggle (`Style.wrap`, round-trips via `<alignment wrapText>`) with word-wrap + auto row height. Verified |
 | UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
-| UX-21 | Merge cells | Todo | Model has `merges`; need edit op + render + toolbar |
+| UX-21 | Merge cells | Done | `session_merge/unmerge_cells` + `session_merges`; editor renders a merge as one spanning cell (no internal gridlines), selection snaps to it, Merge toolbar button toggles. Verified |
 | UX-22 | Status bar: sum / average / count of selection | Done | `session_range_stats`; bottom-bar readout for multi-cell selections. Verified |
 | UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Todo | Excel nav parity |
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |

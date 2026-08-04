@@ -87,6 +87,20 @@ const geo = {
 const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
 let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
+let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
+
+// Absolute screen position of a column's left / row's top edge (any index).
+function screenX(col) { return wasm.session_col_offset_px(state.sheet, col) - state.scrollX + HW; }
+function screenY(row) { return wasm.session_row_offset_px(state.sheet, row) - state.scrollY + HH; }
+// The merge covering (row,col), if any.
+function mergeAt(row, col) {
+  return sheetMerges.find((m) => row >= m.r0 && row <= m.r1 && col >= m.c0 && col <= m.c1);
+}
+// Whether a merge intersects the current (effective) selection.
+function mergeInSel(m) {
+  const s = effectiveRange();
+  return !(m.r1 < s.r0 || m.r0 > s.r1 || m.c1 < s.c0 || m.c0 > s.c1);
+}
 
 // The canvas font string for a cell (family + size from its style, or defaults).
 function cellPx(it) { return it.fs ? Math.round((it.fs * 4) / 3) : 13; }
@@ -364,6 +378,7 @@ function draw() {
   // Cell fills + text (fetched in measure(), reused here).
   const lastCol = state.firstCol + geo.cols;
   const items = geoItems;
+  sheetMerges = wasm ? JSON.parse(wasm.session_merges(state.sheet)) : [];
   ctx.textBaseline = "middle";
   for (const it of items) {
     if (!it.bg) continue;
@@ -464,16 +479,50 @@ function draw() {
     drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
   }
 
-  // Range border (cell selections only) + focus-cell border.
+  // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
+  // top-left cell's fill + text across the span, outline it.
+  for (const m of sheetMerges) {
+    const mx = screenX(m.c0), my = screenY(m.r0);
+    const mw = screenX(m.c1 + 1) - mx, mh = screenY(m.r1 + 1) - my;
+    if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
+    const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
+    ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
+    ctx.fillRect(mx, my, mw, mh);
+    if (mergeInSel(m)) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
+    ctx.strokeStyle = colors.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.floor(mx) + 0.5, Math.floor(my) + 0.5, Math.round(mw) - 1, Math.round(mh) - 1);
+    if (it && it.t) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(mx, my, mw, mh);
+      ctx.clip();
+      ctx.font = cellFont(it);
+      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
+      ctx.textAlign = al;
+      const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
+      ctx.fillText(it.t, tx, my + mh / 2);
+      ctx.restore();
+    }
+  }
+
+  // Range border (cell selections only) + focus-cell border (spans a merge).
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 2;
   if (state.selKind === "cells" && sX.w > 0 && sY.h > 0) {
     ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
   }
-  const fx = colXAt(state.sel.col);
-  const fy = rowYAt(state.sel.row);
-  if (fx !== undefined && fy !== undefined) {
-    ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
+  const fm = mergeAt(state.sel.row, state.sel.col);
+  if (fm) {
+    const bx = screenX(fm.c0), by = screenY(fm.r0);
+    ctx.strokeRect(bx + 1, by + 1, screenX(fm.c1 + 1) - bx - 1, screenY(fm.r1 + 1) - by - 1);
+  } else {
+    const fx = colXAt(state.sel.col);
+    const fy = rowYAt(state.sel.row);
+    if (fx !== undefined && fy !== undefined) {
+      ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
+    }
   }
   ctx.restore(); // end body clip
 
@@ -573,8 +622,10 @@ function cellAt(px, py) {
 }
 
 function select(row, col) {
-  const r = Math.max(0, row);
-  const c = Math.max(0, col);
+  let r = Math.max(0, row);
+  let c = Math.max(0, col);
+  const m = mergeAt(r, c); // clicking a merged cell selects its anchor (top-left)
+  if (m) { r = m.r0; c = m.c0; }
   state.sel = { row: r, col: c };
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
@@ -697,6 +748,18 @@ function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function toggleMerge() {
+  const s = effectiveRange();
+  try {
+    const m = mergeAt(s.r0, s.c0);
+    if (m && m.r0 === s.r0 && m.c0 === s.c0 && m.r1 === s.r1 && m.c1 === s.c1) {
+      wasm.session_unmerge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    } else {
+      wasm.session_merge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    }
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
 function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
 function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, pts)); }
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
@@ -1159,6 +1222,7 @@ function wireEvents() {
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
   document.getElementById("tb-wrap").addEventListener("click", () => { toggleWrap(); canvas.focus(); });
+  document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
   for (const b of document.querySelectorAll(".tb-align")) {

@@ -50,7 +50,7 @@ evidence").
 | Styles: bold/italic/underline/font color/fill | ● | ● | ● | ~ | — | P1A-003b/d (editor toggles + pickers) |
 | Styles: horizontal alignment | ● | ● | ● | ● | — | P1A-003d (`<alignment>`; editor renders + sets) |
 | Styles: borders | ● | ● | ● | ~ | — | P1A-003c (per-edge style+color, interned `<borders>`; editor draws + toggles; PNG borders pending) |
-| Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Merged ranges | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & merge/unmerge |
 | Column/row sizing | ● | ● | ● | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them; drag-to-resize, undoable) |
 | Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
