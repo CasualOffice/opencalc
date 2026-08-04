@@ -94,6 +94,18 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Phase 1C (Grid layout)
+
+Grid geometry, viewport virtualization, and the display list
+([42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md)).
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| P1C-001 | Offset index + viewport virtualization + display list | Done | `casual-calc-layout`: `Axis` cumulative offset index (offset/line_at, inverse-gated), `GridGeometry`, backend-neutral `DisplayList`/`PaintItem`, `layout_viewport`/`layout_full`; model `CellStore::row_band` for O(visible) scans. Invariant gated: viewport == full restricted to window. Reads cached values only (no calc). 8 tests |
+| P1C-002 | Number-format-aware display text (dates/currency/…) | Not started | Currently raw value shown |
+| P1C-003 | In-cell text shaping (`parley`) + merged-cell/frozen-pane layout | Not started | Glyph runs; needed for visual fidelity |
+| P1C-004 | Import column/row sizing, hidden, outline → geometry | Not started | Currently uniform defaults |
+
 ## Phase rows — Phase 1B (Semantic writer)
 
 Model → valid `.xlsx`; the semantic fixed point `import → write → import`

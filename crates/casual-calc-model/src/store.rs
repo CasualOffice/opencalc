@@ -107,6 +107,19 @@ impl CellStore {
     pub fn iter(&self) -> impl Iterator<Item = (CellRef, &Cell)> {
         self.cells.iter().map(|(r, c)| (*r, c))
     }
+
+    /// Iterate populated cells whose row is in `[first_row, last_row]`, in
+    /// row-major order. Cost is proportional to the cells in that band, not to
+    /// the whole sheet — the basis for O(visible) viewport layout.
+    pub fn row_band(
+        &self,
+        first_row: u32,
+        last_row: u32,
+    ) -> impl Iterator<Item = (CellRef, &Cell)> {
+        let start = CellRef::new(first_row, 0);
+        let end = CellRef::new(last_row.saturating_add(1), 0);
+        self.cells.range(start..end).map(|(r, c)| (*r, c))
+    }
 }
 
 impl From<Vec<StoredCell>> for CellStore {

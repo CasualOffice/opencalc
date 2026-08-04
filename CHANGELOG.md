@@ -11,6 +11,21 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 1C: grid layout & virtualization
+
+**Added**
+
+- `casual-calc-layout` (P1C-001): the virtualization core. An `Axis` cumulative
+  offset index maps line indices ↔ twip positions (`offset`/`line_at`, gated as
+  inverses); `GridGeometry` holds the column/row axes; a serializable,
+  backend-neutral `DisplayList`/`PaintItem` is the render contract; and
+  `layout_viewport`/`layout_full` lay out the grid. The **virtualization
+  invariant** — a viewport's output equals the full layout restricted to that
+  window — is gated. Layout reads only the model's cached values (no calc
+  engine). Added `CellStore::row_band` for O(visible) row-band scans. The
+  fidelity ledger's Render column is now `~` for laid-out cell values (glyph
+  shaping + oracle come in Phase 1D).
+
 ### 2026-08-04 — Phase 1B: the semantic writer
 
 **Added**

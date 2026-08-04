@@ -28,6 +28,16 @@ All geometry is in **twips** (1/1440 inch); device pixels appear only at raster
 time (DPI applied in `casual-calc-render`). This matches OpenDoc and keeps layout
 resolution-independent and golden-testable.
 
+> **Status: virtualization core implemented (Phase 1C, P1C-001).**
+> `casual-calc-layout` provides the `Axis` cumulative offset index
+> (`offset`/`line_at`, inverse-gated), `GridGeometry`, a serializable
+> backend-neutral `DisplayList`/`PaintItem`, and `layout_viewport`/`layout_full`.
+> The invariant — viewport output equals the full-layout output restricted to the
+> window — is gated, and the model's `CellStore::row_band` gives O(visible) scans.
+> Layout reads cached values only (no calc engine). Still to come: number-format
+> display text (P1C-002), `parley` in-cell shaping + merged/frozen layout
+> (P1C-003), and importing real column/row sizing (P1C-004).
+
 ## Geometry: the cumulative offset index
 
 The core structure that makes viewport queries cheap.

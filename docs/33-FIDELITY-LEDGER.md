@@ -37,11 +37,12 @@ evidence").
 
 | Construct | Model | Round-trip | Edit | Render | Calc | Driving tracker |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cell: number | ● | ● | ✗ | ✗ | — | P1B-001 |
-| Cell: boolean | ● | ● | ✗ | ✗ | — | P1B-001 |
-| Cell: error value | ● | ● | ✗ | ✗ | — | P1B-001 |
-| Shared strings | ● | ● | ✗ | ✗ | — | P1B-001 |
-| Inline strings | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Cell: number | ● | ● | ✗ | ~ | — | P1C-001 |
+| Cell: boolean | ● | ● | ✗ | ~ | — | P1C-001 |
+| Cell: error value | ● | ● | ✗ | ~ | — | P1C-001 |
+| Shared strings | ● | ● | ✗ | ~ | — | P1C-001 |
+| Inline strings | ● | ● | ✗ | ~ | — | P1C-001 |
+| Grid geometry / viewport | — | — | — | ● | — | P1C-001 |
 | Formulas (AST) | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Formula cached value | ● | ● | — | ✗ | ✗ | P1B-001 |
 | Number formats | ● | ● | ✗ | ✗ | — | P1B-001 |
@@ -64,7 +65,10 @@ evidence").
 - **Edit** advances as `casual-calc-transaction` ops land
   ([24](24-TRANSACTION-AND-EDIT-SEMANTICS.md)).
 - **Render** advances in Phase 1C/1D
-  ([42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md)).
+  ([42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md)). `~` means the construct
+  is placed into the display list (geometry + text string) but not yet glyph-
+  shaped, and not yet checked against a visual oracle; `●` there requires the
+  render backend (Phase 1D) and an oracle diff.
 - **Calc** advances in Phase 2 ([40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)).
 
 ## Maintenance
