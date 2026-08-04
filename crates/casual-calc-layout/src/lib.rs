@@ -18,10 +18,12 @@
 mod axis;
 mod display;
 mod geometry;
+mod numfmt;
 
 pub use axis::Axis;
 pub use display::{Align, DisplayList, PaintItem, Rect};
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
+pub use numfmt::{format_general, format_number};
 
 use casual_calc_model::{Cell, CellValue, Workbook};
 
@@ -125,18 +127,26 @@ fn align_for(value: &CellValue) -> Align {
     }
 }
 
-/// The display string for a cell's cached value. Number-format interpretation
-/// (dates, currency, …) is a later increment; this shows the raw value.
+/// The display string for a cell's cached value, applying the cell's
+/// number-format code (if any) to numeric values.
 pub fn display_text(workbook: &Workbook, cell: &Cell) -> String {
     match &cell.value {
         CellValue::Empty => String::new(),
-        CellValue::Number(n) => format!("{n}"),
+        CellValue::Number(n) => match cell_number_format(workbook, cell) {
+            Some(code) => format_number(*n, code),
+            None => format_general(*n),
+        },
         CellValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
         CellValue::Error(e) => e.to_string(),
         CellValue::SharedString(id) | CellValue::InlineString(id) => {
             workbook.strings.get(*id).unwrap_or_default().to_owned()
         }
     }
+}
+
+fn cell_number_format<'a>(workbook: &'a Workbook, cell: &Cell) -> Option<&'a str> {
+    let style = workbook.styles.get(cell.style?)?;
+    style.number_format.as_deref()
 }
 
 #[cfg(test)]

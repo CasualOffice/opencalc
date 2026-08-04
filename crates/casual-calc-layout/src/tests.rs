@@ -116,6 +116,30 @@ fn cell_positions_follow_the_offset_index() {
 }
 
 #[test]
+fn display_text_applies_the_cell_number_format() {
+    use crate::{PaintItem, display_text};
+    use casual_calc_model::Style;
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let percent = wb.intern_style(Style {
+        number_format: Some("0%".to_owned()),
+    });
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    let mut cell = Cell::value(CellValue::Number(0.5));
+    cell.style = Some(percent);
+    sheet.cells.set(CellRef::new(0, 0), cell.clone());
+    wb.sheets.push(sheet);
+
+    assert_eq!(display_text(&wb, &cell), "50%");
+
+    let list = layout_full(&wb, 0, &GridGeometry::default());
+    assert!(matches!(
+        &list.items[0],
+        PaintItem::Text { content, .. } if content == "50%"
+    ));
+}
+
+#[test]
 fn layout_is_deterministic() {
     let wb = sample();
     let geo = GridGeometry::default();

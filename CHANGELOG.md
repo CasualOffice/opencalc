@@ -15,6 +15,13 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-layout` (P1C-002): number-format-aware display text. A `numfmt`
+  interpreter renders a cached numeric value + format code to its display string
+  — `General`, fixed decimals (`0.00`), thousands grouping (`#,##0`), percent
+  (`0%`), and date/time formats (Excel serial → civil `YYYY-MM-DD` / `HH:MM:SS`).
+  `display_text` applies the cell's style number format. Deferred: negative/zero/
+  text sections, currency/literal runs, and token-exact date layout.
+
 - `casual-calc-layout` (P1C-001): the virtualization core. An `Axis` cumulative
   offset index maps line indices ↔ twip positions (`offset`/`line_at`, gated as
   inverses); `GridGeometry` holds the column/row axes; a serializable,

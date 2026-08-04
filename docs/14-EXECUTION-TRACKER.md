@@ -102,7 +102,7 @@ Grid geometry, viewport virtualization, and the display list
 | ID | Workstream | Status | Notes |
 | --- | --- | --- | --- |
 | P1C-001 | Offset index + viewport virtualization + display list | Done | `casual-calc-layout`: `Axis` cumulative offset index (offset/line_at, inverse-gated), `GridGeometry`, backend-neutral `DisplayList`/`PaintItem`, `layout_viewport`/`layout_full`; model `CellStore::row_band` for O(visible) scans. Invariant gated: viewport == full restricted to window. Reads cached values only (no calc). 8 tests |
-| P1C-002 | Number-format-aware display text (dates/currency/…) | Not started | Currently raw value shown |
+| P1C-002 | Number-format-aware display text | Done | `numfmt` interpreter: General, fixed decimals, thousands grouping, percent, and date/time (serial→civil date). `display_text` applies the cell's style number format. 5 tests. Deferred: negative/zero/text sections, currency/literals, token-exact date layout |
 | P1C-003 | In-cell text shaping (`parley`) + merged-cell/frozen-pane layout | Not started | Glyph runs; needed for visual fidelity |
 | P1C-004 | Import column/row sizing, hidden, outline → geometry | Not started | Currently uniform defaults |
 
