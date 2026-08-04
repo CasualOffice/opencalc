@@ -8,7 +8,25 @@ const HH = 24; // column-header height (px)
 let COL_W = 64;
 let ROW_H = 20;
 
-const state = { sheet: 0, firstRow: 0, firstCol: 0, sel: { row: 0, col: 0 }, editing: false };
+const state = {
+  sheet: 0,
+  firstRow: 0,
+  firstCol: 0,
+  sel: { row: 0, col: 0 }, // focus cell
+  anchor: { row: 0, col: 0 }, // selection anchor
+  dragging: false,
+  editing: false,
+};
+
+// The normalized selection rectangle (inclusive) from anchor..focus.
+function selRect() {
+  return {
+    r0: Math.min(state.anchor.row, state.sel.row),
+    c0: Math.min(state.anchor.col, state.sel.col),
+    r1: Math.max(state.anchor.row, state.sel.row),
+    c1: Math.max(state.anchor.col, state.sel.col),
+  };
+}
 const DEFAULT_SCROLL_DAMP = 0.8; // rows-per-wheel factor; tunable in settings
 let scrollDamp = DEFAULT_SCROLL_DAMP;
 
@@ -72,13 +90,16 @@ function draw() {
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, v.w, v.h);
 
-  // Selection highlight (behind text).
+  // Selection highlight (behind text): the whole range, then the focus cell.
+  const rectSel = selRect();
+  const selX = HW + (rectSel.c0 - state.firstCol) * COL_W;
+  const selY = HH + (rectSel.r0 - state.firstRow) * ROW_H;
+  const selW = (rectSel.c1 - rectSel.c0 + 1) * COL_W;
+  const selH = (rectSel.r1 - rectSel.r0 + 1) * ROW_H;
+  ctx.fillStyle = colors.sel;
+  ctx.fillRect(Math.max(HW, selX), Math.max(HH, selY), selW, selH);
   const sx = HW + (state.sel.col - state.firstCol) * COL_W;
   const sy = HH + (state.sel.row - state.firstRow) * ROW_H;
-  if (sx >= HW && sy >= HH) {
-    ctx.fillStyle = colors.sel;
-    ctx.fillRect(sx, sy, COL_W, ROW_H);
-  }
 
   // Gridlines.
   ctx.strokeStyle = colors.grid;
@@ -150,15 +171,18 @@ function draw() {
     ctx.restore();
   }
 
-  // Selection border.
+  // Range border + focus-cell border.
+  ctx.strokeStyle = colors.accent;
+  ctx.lineWidth = 2;
+  if (selX + selW > HW && selY + selH > HH) {
+    ctx.strokeRect(Math.max(HW, selX) + 1, Math.max(HH, selY) + 1, selW - 1, selH - 1);
+  }
   if (sx >= HW && sy >= HH) {
-    ctx.strokeStyle = colors.accent;
-    ctx.lineWidth = 2;
     ctx.strokeRect(sx + 1, sy + 1, COL_W - 1, ROW_H - 1);
   }
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
-  wasm && refreshFormulaBar();
+  if (wasm) refreshFormulaBar();
 }
 
 function refreshFormulaBar() {
@@ -166,6 +190,10 @@ function refreshFormulaBar() {
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   document.getElementById("tb-undo").disabled = !wasm.session_can_undo();
   document.getElementById("tb-redo").disabled = !wasm.session_can_redo();
+  const s = selRect();
+  document
+    .getElementById("tb-bold")
+    .setAttribute("aria-pressed", wasm.session_range_bold(state.sheet, s.r0, s.c0, s.r1, s.c1) ? "true" : "false");
 }
 
 function cellAt(px, py) {
@@ -177,6 +205,16 @@ function cellAt(px, py) {
 }
 
 function select(row, col) {
+  const r = Math.max(0, row);
+  const c = Math.max(0, col);
+  state.sel = { row: r, col: c };
+  state.anchor = { row: r, col: c };
+  ensureVisible();
+  draw();
+}
+
+// Extend the selection to (row, col), keeping the anchor.
+function extend(row, col) {
   state.sel = { row: Math.max(0, row), col: Math.max(0, col) };
   ensureVisible();
   draw();
@@ -203,6 +241,47 @@ function commit(value, advance) {
   if (advance) state.sel.row += 1;
   ensureVisible();
   draw();
+}
+
+function toggleBold() {
+  const s = selRect();
+  try { wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+  catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+function setFill(hex) {
+  const s = selRect();
+  try { wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex); }
+  catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+function clearSelection() {
+  const s = selRect();
+  try { wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  draw();
+}
+function doUndo() { try { wasm.session_undo(); } catch {} draw(); }
+function doRedo() { try { wasm.session_redo(); } catch {} draw(); }
+function doSave() {
+  const bytes = wasm.session_save();
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "opencalc.xlsx";
+  a.click();
+}
+async function doCopy() {
+  const s = selRect();
+  const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
+  try { await navigator.clipboard.writeText(tsv); status.textContent = "copied"; }
+  catch { status.textContent = "copy blocked"; }
+}
+async function doPaste() {
+  try {
+    const tsv = await navigator.clipboard.readText();
+    wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, tsv);
+    draw();
+  } catch { status.textContent = "paste blocked"; }
 }
 
 function startInline(initial) {
@@ -234,10 +313,18 @@ function wireEvents() {
     const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
     if (hit) {
       endInline();
-      select(hit.row, hit.col);
+      if (e.shiftKey) extend(hit.row, hit.col);
+      else { select(hit.row, hit.col); state.dragging = true; }
       canvas.focus();
     }
   });
+  canvas.addEventListener("mousemove", (e) => {
+    if (!state.dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
+    if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) extend(hit.row, hit.col);
+  });
+  window.addEventListener("mouseup", () => { state.dragging = false; });
   canvas.addEventListener("dblclick", (e) => {
     const rect = canvas.getBoundingClientRect();
     const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
@@ -269,20 +356,36 @@ function wireEvents() {
     },
     { passive: false },
   );
-  canvas.addEventListener("keydown", (e) => {
+  canvas.addEventListener("keydown", async (e) => {
     if (state.editing) return;
+    const mod = e.ctrlKey || e.metaKey;
+
+    // Keyboard shortcuts.
+    if (mod) {
+      const k = e.key.toLowerCase();
+      if (k === "b") { toggleBold(); e.preventDefault(); return; }
+      if (k === "z") { doUndo(); e.preventDefault(); return; }
+      if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
+      if (k === "s") { doSave(); e.preventDefault(); return; }
+      if (k === "c") { await doCopy(); e.preventDefault(); return; }
+      if (k === "v") { await doPaste(); e.preventDefault(); return; }
+    }
+
+    const move = (dr, dc) => {
+      if (e.shiftKey) extend(state.sel.row + dr, state.sel.col + dc);
+      else select(state.sel.row + dr, state.sel.col + dc);
+    };
     switch (e.key) {
-      case "ArrowUp": select(state.sel.row - 1, state.sel.col); e.preventDefault(); break;
-      case "ArrowDown": case "Enter": select(state.sel.row + 1, state.sel.col); e.preventDefault(); break;
-      case "ArrowLeft": select(state.sel.row, state.sel.col - 1); e.preventDefault(); break;
-      case "ArrowRight": case "Tab": select(state.sel.row, state.sel.col + 1); e.preventDefault(); break;
-      case "Backspace": case "Delete": commit("", false); e.preventDefault(); break;
+      case "ArrowUp": move(-1, 0); e.preventDefault(); break;
+      case "ArrowDown": move(1, 0); e.preventDefault(); break;
+      case "Enter": select(state.sel.row + 1, state.sel.col); e.preventDefault(); break;
+      case "ArrowLeft": move(0, -1); e.preventDefault(); break;
+      case "ArrowRight": move(0, 1); e.preventDefault(); break;
+      case "Tab": select(state.sel.row, state.sel.col + (e.shiftKey ? -1 : 1)); e.preventDefault(); break;
+      case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
       case "F2": startInline(); e.preventDefault(); break;
       default:
-        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-          startInline(e.key);
-          e.preventDefault();
-        }
+        if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
   });
   inline.addEventListener("keydown", (e) => {
@@ -295,14 +398,11 @@ function wireEvents() {
   });
 
   document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); seed(); });
-  document.getElementById("tb-save").addEventListener("click", () => {
-    const bytes = wasm.session_save();
-    const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "opencalc.xlsx";
-    a.click();
-  });
+  document.getElementById("tb-save").addEventListener("click", doSave);
+  document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
+  for (const b of document.querySelectorAll("#tb-fill button")) {
+    b.addEventListener("click", () => { setFill(b.dataset.c); canvas.focus(); });
+  }
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -312,8 +412,8 @@ function wireEvents() {
     state.firstRow = state.firstCol = 0;
     select(0, 0);
   });
-  document.getElementById("tb-undo").addEventListener("click", () => { try { wasm.session_undo(); } catch {} draw(); });
-  document.getElementById("tb-redo").addEventListener("click", () => { try { wasm.session_redo(); } catch {} draw(); });
+  document.getElementById("tb-undo").addEventListener("click", doUndo);
+  document.getElementById("tb-redo").addEventListener("click", doRedo);
 
   window.addEventListener("resize", resize);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); draw(); });

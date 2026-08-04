@@ -44,8 +44,17 @@
       <label class="tb-file">Open<input id="tb-open" type="file" accept=".xlsx" /></label>
       <button id="tb-save">Save .xlsx</button>
       <span class="tb-sep"></span>
-      <button id="tb-undo" disabled>Undo</button>
-      <button id="tb-redo" disabled>Redo</button>
+      <button id="tb-undo" disabled title="Undo (Ctrl+Z)">Undo</button>
+      <button id="tb-redo" disabled title="Redo (Ctrl+Y)">Redo</button>
+      <span class="tb-sep"></span>
+      <button id="tb-bold" class="tb-bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <span class="fill-swatches" id="tb-fill">
+        <button data-c="fff3b0" style="background:#fff3b0" title="Yellow fill"></button>
+        <button data-c="d1f0d6" style="background:#d1f0d6" title="Green fill"></button>
+        <button data-c="ffd6e0" style="background:#ffd6e0" title="Pink fill"></button>
+        <button data-c="d6e4ff" style="background:#d6e4ff" title="Blue fill"></button>
+        <button data-c="" class="no-fill" title="No fill">⊘</button>
+      </span>
       <span class="tb-status" id="tb-status">loading engine…</span>
     </div>
 

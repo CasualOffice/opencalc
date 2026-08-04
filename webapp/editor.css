@@ -51,6 +51,13 @@
 .toolbar button:disabled { opacity: 0.45; cursor: default; }
 .tb-file input { display: none; }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+.tb-bold { min-width: 34px; }
+.tb-bold[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink, #fff); border-color: var(--accent); }
+.fill-swatches { display: flex; gap: 5px; align-items: center; }
+.fill-swatches button {
+  width: 20px; height: 20px; padding: 0; border-radius: 5px; border: 1px solid var(--border); cursor: pointer;
+}
+.fill-swatches .no-fill { background: var(--bg); color: var(--muted); font-size: 12px; }
 .tb-status { margin-left: auto; color: var(--muted); font-size: 13px; font-family: var(--mono); }
 
 .formula-bar {

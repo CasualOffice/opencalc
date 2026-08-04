@@ -11,6 +11,18 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Editor: toolbar, shortcuts, range selection
+
+**Added**
+
+- Editor **range selection** (click-drag and shift-click / shift-arrows), a
+  **formatting toolbar** (Bold toggle + fill-color swatches), **keyboard
+  shortcuts** (Ctrl/Cmd+B bold, Z undo, Y/Shift+Z redo, S save, C/V copy-paste,
+  Delete clear), and **copy/paste as TSV**.
+- `casual-calc-wasm` range operations as atomic batches (one undo step):
+  `session_toggle_bold`, `session_set_fill`, `session_clear_range`,
+  `session_range_bold`, `session_copy_tsv`, `session_paste_tsv`.
+
 ### 2026-08-05 — Interactive editor & fidelity fixes
 
 **Added**

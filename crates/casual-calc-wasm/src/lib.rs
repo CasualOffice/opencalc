@@ -288,6 +288,175 @@ pub fn session_set_style(
     })
 }
 
+/// Whether every cell in a range is bold (used for the toolbar toggle state).
+#[wasm_bindgen]
+pub fn session_range_bold(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> bool {
+    with_session(|s| {
+        let mut any = false;
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let bold = s
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|sh| sh.cells.get(CellRef::new(r, c)))
+                    .and_then(|cell| cell.style)
+                    .and_then(|id| s.workbook().styles.get(id))
+                    .is_some_and(|st| st.bold);
+                if !bold {
+                    return false;
+                }
+                any = true;
+            }
+        }
+        any
+    })
+    .unwrap_or(false)
+}
+
+/// Toggle bold across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_bold(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let target = !session_range_bold(sheet, r0, c0, r1, c1);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.bold = target)
+}
+
+/// Set (or clear, with empty hex) the solid fill across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_set_fill(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    hex: &str,
+) -> Result<(), JsError> {
+    let fill = (!hex.is_empty()).then(|| hex.to_owned());
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.fill_color = fill.clone()
+    })
+}
+
+/// Clear every cell in a range (one undo step).
+#[wasm_bindgen]
+pub fn session_clear_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                ops.push(EditOperation::ClearCell {
+                    sheet,
+                    at: CellRef::new(r, c),
+                });
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Copy a range as tab-separated text (for the clipboard).
+#[wasm_bindgen]
+pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if c > c0 {
+                    out.push('\t');
+                }
+                if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                    out.push_str(&display_text(wb, cell));
+                }
+            }
+            out.push('\n');
+        }
+        out
+    })
+    .unwrap_or_default()
+}
+
+/// Paste tab/newline-separated text starting at a cell (one undo step).
+#[wasm_bindgen]
+pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        for (dr, line) in tsv.split('\n').enumerate() {
+            if line.is_empty() && dr > 0 {
+                continue;
+            }
+            for (dc, field) in line.split('\t').enumerate() {
+                let at = CellRef::new(row + dr as u32, col + dc as u32);
+                ops.push(build_set_op(session, sheet, at, field));
+            }
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+fn apply_style_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    edit: impl Fn(&mut Style),
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let at = CellRef::new(r, c);
+                let mut style = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|sh| sh.cells.get(at))
+                    .and_then(|cell| cell.style)
+                    .and_then(|id| session.workbook().styles.get(id))
+                    .cloned()
+                    .unwrap_or_default();
+                edit(&mut style);
+                let style_id = if style.is_default() {
+                    None
+                } else {
+                    Some(session.workbook_mut().intern_style(style))
+                };
+                ops.push(EditOperation::SetStyle {
+                    sheet,
+                    at,
+                    style: style_id,
+                });
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 /// Undo the last edit.
 #[wasm_bindgen]
 pub fn session_undo() -> Result<(), JsError> {
