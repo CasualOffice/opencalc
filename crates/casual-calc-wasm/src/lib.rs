@@ -84,7 +84,11 @@ pub fn render_xlsx(
     let outcome = import_package(bytes.to_vec()).map_err(js)?;
     let mut workbook = outcome.workbook;
     recalculate(&mut workbook);
-    let geometry = GridGeometry::default();
+    let geometry = workbook
+        .sheets
+        .first()
+        .map(GridGeometry::for_sheet)
+        .unwrap_or_default();
     let viewport = viewport_px(width_px, height_px, dpi);
     let list = layout_viewport(&workbook, 0, &geometry, &viewport);
     render_png(&list, &geometry, &viewport, dpi).map_err(js)
@@ -159,6 +163,42 @@ pub fn session_used_bounds(sheet: usize) -> String {
         format!("{{\"rows\":{rows},\"cols\":{cols}}}")
     })
     .unwrap_or_else(|| "{\"rows\":0,\"cols\":0}".to_owned())
+}
+
+/// Column widths in device pixels (96 dpi) for `count` columns starting at
+/// `first`, as a JSON array. Lets the editor draw real `.xlsx` column widths.
+#[wasm_bindgen]
+pub fn session_col_px(sheet: usize, first: u32, count: u32) -> String {
+    axis_px(sheet, first, count, DEFAULT_COL_WIDTH, true)
+}
+
+/// Row heights in device pixels (96 dpi) for `count` rows starting at `first`.
+#[wasm_bindgen]
+pub fn session_row_px(sheet: usize, first: u32, count: u32) -> String {
+    axis_px(sheet, first, count, DEFAULT_ROW_HEIGHT, false)
+}
+
+/// Shared body of [`session_col_px`]/[`session_row_px`]: a JSON array of
+/// per-line pixel sizes, honoring the sheet's overrides and default.
+fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -> String {
+    with_session(|s| {
+        let sizing = s
+            .workbook()
+            .sheets
+            .get(sheet)
+            .map(|sh| if columns { &sh.columns } else { &sh.rows });
+        let mut out = String::from("[");
+        for i in 0..count {
+            if i > 0 {
+                out.push(',');
+            }
+            let twips = sizing.map_or(fallback, |sz| sz.size(first + i, fallback));
+            out.push_str(&(twips * 96 / 1440).to_string());
+        }
+        out.push(']');
+        out
+    })
+    .unwrap_or_else(|| "[]".to_owned())
 }
 
 /// Visible cells in `[first_row..=last_row] × [first_col..=last_col]` as a JSON

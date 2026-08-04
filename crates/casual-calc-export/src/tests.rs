@@ -29,9 +29,11 @@ const STYLES: &[u8] = br#"<styleSheet xmlns="http://schemas.openxmlformats.org/s
 fn worksheet() -> &'static [u8] {
     br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
       <sheetViews><sheetView><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView></sheetViews>
+      <sheetFormatPr defaultColWidth="10" defaultRowHeight="15"/>
+      <cols><col min="2" max="2" width="20" customWidth="1"/></cols>
       <sheetData>
         <row r="1"><c r="A1" s="2"><v>42</v></c><c r="B1" t="b"><v>1</v></c><c r="C1" t="e"><v>#DIV/0!</v></c></row>
-        <row r="2"><c r="A2" t="s"><v>0</v></c></row>
+        <row r="2" ht="30" customHeight="1"><c r="A2" t="s"><v>0</v></c></row>
         <row r="3"><c r="A3"><f>A1*2</f><v>84</v></c><c r="B3" s="1"><v>3.14</v></c></row>
       </sheetData>
       <mergeCells count="1"><mergeCell ref="D1:E2"/></mergeCells>

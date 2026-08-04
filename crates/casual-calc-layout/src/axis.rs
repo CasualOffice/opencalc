@@ -24,6 +24,14 @@ impl Axis {
         }
     }
 
+    /// An axis with a default size and per-line overrides (twips).
+    pub fn with_sizes(default_size: i64, sizes: impl IntoIterator<Item = (u32, i64)>) -> Self {
+        Self {
+            default_size,
+            overrides: sizes.into_iter().collect(),
+        }
+    }
+
     /// Set an explicit size (twips) for one line.
     pub fn set_size(&mut self, line: u32, size: i64) {
         self.overrides.insert(line, size);

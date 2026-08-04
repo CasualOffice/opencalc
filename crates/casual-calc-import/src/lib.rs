@@ -148,6 +148,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 frozen_cols,
             };
         }
+        sheet.columns.default = worksheet.col_default;
+        sheet.columns.sizes = worksheet.col_sizes;
+        sheet.rows.default = worksheet.row_default;
+        sheet.rows.sizes = worksheet.row_sizes;
 
         workbook.sheets.push(sheet);
     }

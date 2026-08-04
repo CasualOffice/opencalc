@@ -157,12 +157,21 @@ impl WorkbookSession {
         &mut self.workbook
     }
 
+    /// The grid geometry (column widths / row heights) of a sheet.
+    fn geometry(&self, sheet_index: usize) -> GridGeometry {
+        self.workbook
+            .sheets
+            .get(sheet_index)
+            .map(GridGeometry::for_sheet)
+            .unwrap_or_default()
+    }
+
     /// Lay out a viewport of a sheet into a display list.
     pub fn layout(&self, sheet_index: usize, viewport: &Viewport) -> DisplayList {
         layout_viewport(
             &self.workbook,
             sheet_index,
-            &GridGeometry::default(),
+            &self.geometry(sheet_index),
             viewport,
         )
     }
@@ -174,7 +183,7 @@ impl WorkbookSession {
         viewport: &Viewport,
         dpi: u32,
     ) -> Result<Vec<u8>, SdkError> {
-        let geometry = GridGeometry::default();
+        let geometry = self.geometry(sheet_index);
         let list = layout_viewport(&self.workbook, sheet_index, &geometry, viewport);
         Ok(render_png(&list, &geometry, viewport, dpi)?)
     }

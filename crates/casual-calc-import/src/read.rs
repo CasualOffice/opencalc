@@ -1,5 +1,7 @@
 //! Streaming parsers for `sharedStrings.xml` and worksheet `sheetData`.
 
+use std::collections::BTreeMap;
+
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -132,7 +134,7 @@ pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, ImportError> {
     Ok(strings)
 }
 
-/// A parsed worksheet: its cells, merged ranges, and frozen panes.
+/// A parsed worksheet: its cells, merged ranges, frozen panes, and axis sizing.
 #[derive(Debug, Default)]
 pub struct Worksheet {
     /// The raw cells.
@@ -141,12 +143,87 @@ pub struct Worksheet {
     pub merges: Vec<String>,
     /// Frozen panes as `(frozen_rows, frozen_cols)`, if any.
     pub frozen: Option<(u32, u32)>,
+    /// Default column width (twips), from `sheetFormatPr/@defaultColWidth`.
+    pub col_default: Option<i64>,
+    /// Default row height (twips), from `sheetFormatPr/@defaultRowHeight`.
+    pub row_default: Option<i64>,
+    /// Explicit column widths (twips), keyed by zero-based column.
+    pub col_sizes: BTreeMap<u32, i64>,
+    /// Explicit row heights (twips), keyed by zero-based row.
+    pub row_sizes: BTreeMap<u32, i64>,
+}
+
+/// Ceiling on how many columns one `<col>` span may expand into per-line
+/// overrides; a wider custom span is treated as the sheet's default width.
+const MAX_COL_SPAN: u32 = 4096;
+
+/// Convert an Excel column width (character units) to twips, matching the
+/// pixel rounding Excel uses so the value survives a write→read round-trip.
+fn col_width_to_twips(chars: f64) -> i64 {
+    let px = (chars * 7.0 + 5.0).round();
+    (px as i64) * 15
+}
+
+/// Convert an Excel row height (points) to twips.
+fn row_height_to_twips(points: f64) -> i64 {
+    (points * 20.0).round() as i64
 }
 
 fn parse_u32_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<u32, ImportError> {
     Ok(read_attr(e, local)?
         .and_then(|s| s.parse().ok())
         .unwrap_or(0))
+}
+
+fn read_f64_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<f64>, ImportError> {
+    Ok(read_attr(e, local)?.and_then(|s| s.parse().ok()))
+}
+
+/// Record a `<col min max width customWidth>` element into the width overrides.
+fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    let Some(width) = read_f64_attr(e, b"width")? else {
+        return Ok(());
+    };
+    let twips = col_width_to_twips(width);
+    let min = parse_u32_attr(e, b"min")?; // 1-based
+    let max = parse_u32_attr(e, b"max")?;
+    if min == 0 || max < min {
+        return Ok(());
+    }
+    let custom = read_attr(e, b"customWidth")?.as_deref() == Some("1");
+    // A wide span without an explicit custom flag is the sheet's default width,
+    // not a per-column override — record it as the default to stay compact.
+    if !custom || max.saturating_sub(min) >= MAX_COL_SPAN {
+        result.col_default.get_or_insert(twips);
+        return Ok(());
+    }
+    for col in min..=max {
+        result.col_sizes.insert(col - 1, twips);
+    }
+    Ok(())
+}
+
+/// Record a `<row r ht>` element's custom height into the height overrides.
+fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    if let (Some(r), Some(ht)) = (
+        read_attr(e, b"r")?.and_then(|s| s.parse::<u32>().ok()),
+        read_f64_attr(e, b"ht")?,
+    ) && r >= 1
+    {
+        result.row_sizes.insert(r - 1, row_height_to_twips(ht));
+    }
+    Ok(())
+}
+
+/// Record `<sheetFormatPr>` axis defaults.
+fn read_sheet_format(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    if let Some(w) = read_f64_attr(e, b"defaultColWidth")? {
+        result.col_default = Some(col_width_to_twips(w));
+    }
+    if let Some(h) = read_f64_attr(e, b"defaultRowHeight")? {
+        result.row_default = Some(row_height_to_twips(h));
+    }
+    Ok(())
 }
 
 /// Parse a worksheet part's `sheetData`, `mergeCells`, and `sheetView` pane.
@@ -190,6 +267,9 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                         }
                     }
                     b"pane" => read_pane(&e, &mut result)?,
+                    b"row" => read_row(&e, &mut result)?,
+                    b"col" => read_col(&e, &mut result)?,
+                    b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     _ => {}
                 }
             }
@@ -215,6 +295,9 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                         }
                     }
                     b"pane" => read_pane(&e, &mut result)?,
+                    b"row" => read_row(&e, &mut result)?,
+                    b"col" => read_col(&e, &mut result)?,
+                    b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     _ => {}
                 }
             }

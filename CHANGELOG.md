@@ -11,6 +11,26 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Column widths & row heights (P1C-004)
+
+**Added**
+
+- `AxisSizing` on `Sheet` (`columns`/`rows`): an optional default plus per-line
+  size overrides, in twips. The importer reads `<cols>`, `<row @ht>`, and
+  `<sheetFormatPr>` defaults; the exporter writes them back (coalescing equal
+  consecutive columns into one `<col>` span, emitting `ht` on custom rows). The
+  conversions are exact inverses, so sizing survives the **semantic fixed point**
+  (the round-trip test now carries a wide column, a narrow column, and a tall
+  row).
+- `GridGeometry::for_sheet` builds the layout offset index from a sheet's sizing;
+  SDK/WASM rendering now uses it, so PNG output honors real widths/heights.
+- WASM `session_col_px` / `session_row_px` expose per-line pixel sizes; the
+  canvas editor now draws **variable column widths and row heights** —
+  cumulative-offset gridlines, headers, hit-testing, selection spans, inline-edit
+  placement, and proportional wheel scrolling all follow the real geometry.
+  Verified in-browser against a crafted `.xlsx` (40-char column, 4-char column,
+  48-point row). Fidelity ledger: sizing Model/Round-trip/Render now `●`.
+
 ### 2026-08-05 — Style round-trip: export fonts & fills
 
 **Added**

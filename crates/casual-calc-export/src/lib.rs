@@ -14,6 +14,7 @@ mod xml;
 
 pub use error::ExportError;
 
+use std::collections::BTreeSet;
 use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
@@ -297,6 +298,22 @@ fn range_a1(range: &CellRange) -> String {
     )
 }
 
+/// Reverse of the importer's column-width conversion: twips → Excel character
+/// width. Chosen so `read(write(x)) == x` for import-derived widths.
+fn twips_to_col_chars(twips: i64) -> f64 {
+    ((twips as f64 / 15.0) - 5.0) / 7.0
+}
+
+/// Reverse of the importer's row-height conversion: twips → points.
+fn twips_to_row_points(twips: i64) -> f64 {
+    twips as f64 / 20.0
+}
+
+/// Format a float for an XML attribute using the shortest round-trippable form.
+fn fmt_f64(value: f64) -> String {
+    format!("{value}")
+}
+
 fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
@@ -309,19 +326,72 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         ));
     }
 
-    s.push_str("<sheetData>");
-    let mut current_row: Option<u32> = None;
-    for (at, cell) in sheet.cells.iter() {
-        if current_row != Some(at.row) {
-            if current_row.is_some() {
-                s.push_str("</row>");
-            }
-            s.push_str(&format!("<row r=\"{}\">", at.row + 1));
-            current_row = Some(at.row);
+    // Axis defaults, then per-column overrides (schema order: before sheetData).
+    if sheet.columns.default.is_some() || sheet.rows.default.is_some() {
+        s.push_str("<sheetFormatPr");
+        if let Some(w) = sheet.columns.default {
+            s.push_str(&format!(
+                " defaultColWidth=\"{}\"",
+                fmt_f64(twips_to_col_chars(w))
+            ));
         }
-        write_cell(&mut s, workbook, at.row, at.col, cell);
+        if let Some(h) = sheet.rows.default {
+            s.push_str(&format!(
+                " defaultRowHeight=\"{}\"",
+                fmt_f64(twips_to_row_points(h))
+            ));
+        }
+        s.push_str("/>");
     }
-    if current_row.is_some() {
+    if !sheet.columns.sizes.is_empty() {
+        s.push_str("<cols>");
+        let entries: Vec<(u32, i64)> = sheet.columns.sizes.iter().map(|(&k, &v)| (k, v)).collect();
+        let mut i = 0;
+        while i < entries.len() {
+            let (start, width) = entries[i];
+            let mut end = start;
+            let mut j = i + 1;
+            // Coalesce a run of consecutive equal-width columns into one span.
+            while j < entries.len() && entries[j].0 == end + 1 && entries[j].1 == width {
+                end = entries[j].0;
+                j += 1;
+            }
+            s.push_str(&format!(
+                "<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>",
+                start + 1,
+                end + 1,
+                fmt_f64(twips_to_col_chars(width))
+            ));
+            i = j;
+        }
+        s.push_str("</cols>");
+    }
+
+    s.push_str("<sheetData>");
+    // The rows to emit: every row with cells, plus any row carrying a custom
+    // height (even if it has no cells). Cells iterate in row-major order.
+    let mut rows: BTreeSet<u32> = sheet.rows.sizes.keys().copied().collect();
+    for (at, _) in sheet.cells.iter() {
+        rows.insert(at.row);
+    }
+    let mut cells = sheet.cells.iter().peekable();
+    for row in rows {
+        let ht_attr = sheet
+            .rows
+            .sizes
+            .get(&row)
+            .map(|&t| {
+                format!(
+                    " ht=\"{}\" customHeight=\"1\"",
+                    fmt_f64(twips_to_row_points(t))
+                )
+            })
+            .unwrap_or_default();
+        s.push_str(&format!("<row r=\"{}\"{ht_attr}>", row + 1));
+        while cells.peek().is_some_and(|(at, _)| at.row == row) {
+            let (at, cell) = cells.next().unwrap();
+            write_cell(&mut s, workbook, at.row, at.col, cell);
+        }
         s.push_str("</row>");
     }
     s.push_str("</sheetData>");

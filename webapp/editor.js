@@ -63,14 +63,74 @@ function colName(n) {
   return s;
 }
 
-function visible() {
+// Per-frame geometry of the visible window: the engine supplies each visible
+// column's width and row's height (real `.xlsx` sizes), and we accumulate them
+// into leading-edge offsets so drawing and hit-testing honor variable sizing.
+const geo = {
+  colW: [], // width (px) of the i-th visible column (firstCol + i)
+  colX: [], // canvas x of its leading edge (includes the HW header)
+  rowH: [],
+  rowY: [],
+  cols: 0, // columns whose leading edge is within the viewport
+  rows: 0,
+};
+
+const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
+
+// Measure the wrap, (re)build `geo` from engine sizes, and return `{ w, h }`.
+function measure() {
   const rect = wrap.getBoundingClientRect();
-  return {
-    w: rect.width,
-    h: rect.height,
-    cols: Math.ceil((rect.width - HW) / COL_W) + 1,
-    rows: Math.ceil((rect.height - HH) / ROW_H) + 1,
-  };
+  const v = { w: rect.width, h: rect.height };
+  const colCap = Math.max(4, Math.ceil((v.w - HW) / MIN_LINE) + 2);
+  const rowCap = Math.max(4, Math.ceil((v.h - HH) / MIN_LINE) + 2);
+  geo.colW = wasm ? JSON.parse(wasm.session_col_px(state.sheet, state.firstCol, colCap)) : [];
+  geo.rowH = wasm ? JSON.parse(wasm.session_row_px(state.sheet, state.firstRow, rowCap)) : [];
+  geo.colX = new Array(geo.colW.length);
+  geo.rowY = new Array(geo.rowH.length);
+  let x = HW;
+  geo.cols = 0;
+  for (let i = 0; i < geo.colW.length; i++) {
+    geo.colX[i] = x;
+    if (x < v.w) geo.cols = i + 1;
+    x += geo.colW[i] || COL_W;
+  }
+  let y = HH;
+  geo.rows = 0;
+  for (let i = 0; i < geo.rowH.length; i++) {
+    geo.rowY[i] = y;
+    if (y < v.h) geo.rows = i + 1;
+    y += geo.rowH[i] || ROW_H;
+  }
+  return v;
+}
+
+// Absolute column/row → visible-window index (or -1 if outside the fetched span).
+const colIdx = (col) => col - state.firstCol;
+const rowIdx = (row) => row - state.firstRow;
+const colWAt = (col) => geo.colW[colIdx(col)] ?? COL_W;
+const rowHAt = (row) => geo.rowH[rowIdx(row)] ?? ROW_H;
+const colXAt = (col) => geo.colX[colIdx(col)];
+const rowYAt = (row) => geo.rowY[rowIdx(row)];
+
+// The clipped [x, x+w) pixel span covering columns c0..c1 within the grid body.
+function spanX(c0, c1, v) {
+  const li = colIdx(c0);
+  const ri = colIdx(c1);
+  const left = c0 < state.firstCol ? HW : li < geo.colX.length ? geo.colX[li] : v.w;
+  const right =
+    c1 < state.firstCol ? HW : ri < geo.colX.length ? geo.colX[ri] + geo.colW[ri] : v.w;
+  const x = Math.max(HW, left);
+  return { x, w: Math.max(0, Math.min(right, v.w) - x) };
+}
+
+function spanY(r0, r1, v) {
+  const ti = rowIdx(r0);
+  const bi = rowIdx(r1);
+  const top = r0 < state.firstRow ? HH : ti < geo.rowY.length ? geo.rowY[ti] : v.h;
+  const bot =
+    r1 < state.firstRow ? HH : bi < geo.rowY.length ? geo.rowY[bi] + geo.rowH[bi] : v.h;
+  const y = Math.max(HH, top);
+  return { y, h: Math.max(0, Math.min(bot, v.h) - y) };
 }
 
 function resize() {
@@ -85,33 +145,29 @@ function resize() {
 }
 
 function draw() {
-  const v = visible();
+  const v = measure();
   ctx.clearRect(0, 0, v.w, v.h);
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, v.w, v.h);
 
   // Selection highlight (behind text): the whole range, then the focus cell.
   const rectSel = selRect();
-  const selX = HW + (rectSel.c0 - state.firstCol) * COL_W;
-  const selY = HH + (rectSel.r0 - state.firstRow) * ROW_H;
-  const selW = (rectSel.c1 - rectSel.c0 + 1) * COL_W;
-  const selH = (rectSel.r1 - rectSel.r0 + 1) * ROW_H;
+  const sX = spanX(rectSel.c0, rectSel.c1, v);
+  const sY = spanY(rectSel.r0, rectSel.r1, v);
   ctx.fillStyle = colors.sel;
-  ctx.fillRect(Math.max(HW, selX), Math.max(HH, selY), selW, selH);
-  const sx = HW + (state.sel.col - state.firstCol) * COL_W;
-  const sy = HH + (state.sel.row - state.firstRow) * ROW_H;
+  ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
 
-  // Gridlines.
+  // Gridlines (at each visible column/row leading edge).
   ctx.strokeStyle = colors.grid;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let c = 0; c <= v.cols; c++) {
-    const x = Math.floor(HW + c * COL_W) + 0.5;
+  for (let i = 0; i <= geo.cols; i++) {
+    const x = Math.floor(i < geo.colX.length ? geo.colX[i] : v.w) + 0.5;
     ctx.moveTo(x, HH);
     ctx.lineTo(x, v.h);
   }
-  for (let r = 0; r <= v.rows; r++) {
-    const y = Math.floor(HH + r * ROW_H) + 0.5;
+  for (let i = 0; i <= geo.rows; i++) {
+    const y = Math.floor(i < geo.rowY.length ? geo.rowY[i] : v.h) + 0.5;
     ctx.moveTo(HW, y);
     ctx.lineTo(v.w, y);
   }
@@ -125,18 +181,16 @@ function draw() {
   ctx.font = "12px system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
-  for (let c = 0; c < v.cols; c++) {
-    const col = state.firstCol + c;
-    ctx.fillText(colName(col), HW + c * COL_W + COL_W / 2, HH / 2);
+  for (let i = 0; i < geo.cols; i++) {
+    ctx.fillText(colName(state.firstCol + i), geo.colX[i] + geo.colW[i] / 2, HH / 2);
   }
-  for (let r = 0; r < v.rows; r++) {
-    const row = state.firstRow + r;
-    ctx.fillText(String(row + 1), HW / 2, HH + r * ROW_H + ROW_H / 2);
+  for (let i = 0; i < geo.rows; i++) {
+    ctx.fillText(String(state.firstRow + i + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
   }
 
   // Cell text (from the engine).
-  const lastRow = state.firstRow + v.rows;
-  const lastCol = state.firstCol + v.cols;
+  const lastRow = state.firstRow + geo.rows;
+  const lastCol = state.firstCol + geo.cols;
   const items = JSON.parse(
     wasm.session_cells(state.sheet, state.firstRow, state.firstCol, lastRow, lastCol),
   );
@@ -144,18 +198,23 @@ function draw() {
   // Fills first (behind text), so a colored empty cell still shows.
   for (const it of items) {
     if (!it.bg) continue;
-    const x = HW + (it.c - state.firstCol) * COL_W;
-    const y = HH + (it.r - state.firstRow) * ROW_H;
+    const x = colXAt(it.c);
+    const y = rowYAt(it.r);
+    if (x === undefined || y === undefined) continue;
     ctx.fillStyle = "#" + it.bg;
-    ctx.fillRect(x + 1, y + 1, COL_W - 1, ROW_H - 1);
+    ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
   }
   for (const it of items) {
     if (!it.t) continue;
-    const x = HW + (it.c - state.firstCol) * COL_W;
-    const y = HH + (it.r - state.firstRow) * ROW_H + ROW_H / 2;
+    const x = colXAt(it.c);
+    const yTop = rowYAt(it.r);
+    if (x === undefined || yTop === undefined) continue;
+    const w = colWAt(it.c);
+    const h = rowHAt(it.r);
+    const y = yTop + h / 2;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x, y - ROW_H / 2, COL_W, ROW_H);
+    ctx.rect(x, yTop, w, h);
     ctx.clip();
     const weight = it.b ? "600 " : "";
     const slant = it.i ? "italic " : "";
@@ -163,7 +222,7 @@ function draw() {
     ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
     if (it.a === "r") {
       ctx.textAlign = "right";
-      ctx.fillText(it.t, x + COL_W - 5, y);
+      ctx.fillText(it.t, x + w - 5, y);
     } else {
       ctx.textAlign = "left";
       ctx.fillText(it.t, x + 5, y);
@@ -174,11 +233,13 @@ function draw() {
   // Range border + focus-cell border.
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 2;
-  if (selX + selW > HW && selY + selH > HH) {
-    ctx.strokeRect(Math.max(HW, selX) + 1, Math.max(HH, selY) + 1, selW - 1, selH - 1);
+  if (sX.w > 0 && sY.h > 0) {
+    ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
   }
-  if (sx >= HW && sy >= HH) {
-    ctx.strokeRect(sx + 1, sy + 1, COL_W - 1, ROW_H - 1);
+  const fx = colXAt(state.sel.col);
+  const fy = rowYAt(state.sel.row);
+  if (fx !== undefined && fy !== undefined) {
+    ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
   }
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
@@ -198,10 +259,15 @@ function refreshFormulaBar() {
 
 function cellAt(px, py) {
   if (px < HW || py < HH) return null;
-  return {
-    col: state.firstCol + Math.floor((px - HW) / COL_W),
-    row: state.firstRow + Math.floor((py - HH) / ROW_H),
-  };
+  let col = state.firstCol + Math.max(0, geo.colX.length - 1);
+  for (let i = 0; i < geo.colX.length; i++) {
+    if (px < geo.colX[i] + geo.colW[i]) { col = state.firstCol + i; break; }
+  }
+  let row = state.firstRow + Math.max(0, geo.rowY.length - 1);
+  for (let i = 0; i < geo.rowY.length; i++) {
+    if (py < geo.rowY[i] + geo.rowH[i]) { row = state.firstRow + i; break; }
+  }
+  return { row, col };
 }
 
 function select(row, col) {
@@ -221,13 +287,20 @@ function extend(row, col) {
 }
 
 function ensureVisible() {
-  const v = visible();
-  const viewRows = Math.floor((v.h - HH) / ROW_H);
-  const viewCols = Math.floor((v.w - HW) / COL_W);
+  measure();
   if (state.sel.row < state.firstRow) state.firstRow = state.sel.row;
-  if (state.sel.row >= state.firstRow + viewRows) state.firstRow = state.sel.row - viewRows + 1;
   if (state.sel.col < state.firstCol) state.firstCol = state.sel.col;
-  if (state.sel.col >= state.firstCol + viewCols) state.firstCol = state.sel.col - viewCols + 1;
+  // Scroll down/right one line at a time (widths vary) until the focus fits.
+  let guard = 0;
+  while (state.sel.row >= state.firstRow + geo.rows && geo.rows > 0 && guard++ < 100000) {
+    state.firstRow += 1;
+    measure();
+  }
+  guard = 0;
+  while (state.sel.col >= state.firstCol + geo.cols && geo.cols > 0 && guard++ < 100000) {
+    state.firstCol += 1;
+    measure();
+  }
 }
 
 function commit(value, advance) {
@@ -286,13 +359,13 @@ async function doPaste() {
 
 function startInline(initial) {
   state.editing = true;
-  const x = HW + (state.sel.col - state.firstCol) * COL_W;
-  const y = HH + (state.sel.row - state.firstRow) * ROW_H;
+  const x = colXAt(state.sel.col) ?? HW;
+  const y = rowYAt(state.sel.row) ?? HH;
   inline.style.display = "block";
   inline.style.left = x + "px";
   inline.style.top = y + "px";
-  inline.style.width = COL_W + "px";
-  inline.style.height = ROW_H + "px";
+  inline.style.width = colWAt(state.sel.col) + "px";
+  inline.style.height = rowHAt(state.sel.row) + "px";
   inline.value =
     initial !== undefined
       ? initial
@@ -345,10 +418,13 @@ function wireEvents() {
       accY += e.deltaY * unit * scrollDamp;
       accX += e.deltaX * unit * scrollDamp;
       let changed = false;
-      while (accY >= ROW_H) { state.firstRow += 1; accY -= ROW_H; changed = true; }
-      while (accY <= -ROW_H && state.firstRow > 0) { state.firstRow -= 1; accY += ROW_H; changed = true; }
-      while (accX >= COL_W) { state.firstCol += 1; accX -= COL_W; changed = true; }
-      while (accX <= -COL_W && state.firstCol > 0) { state.firstCol -= 1; accX += COL_W; changed = true; }
+      // Step by the size of the line at the current edge (widths/heights vary).
+      let stepH = rowHAt(state.firstRow) || ROW_H;
+      while (accY >= stepH) { state.firstRow += 1; accY -= stepH; changed = true; stepH = rowHAt(state.firstRow) || ROW_H; }
+      while (accY <= -stepH && state.firstRow > 0) { state.firstRow -= 1; accY += stepH; changed = true; stepH = rowHAt(state.firstRow) || ROW_H; }
+      let stepW = colWAt(state.firstCol) || COL_W;
+      while (accX >= stepW) { state.firstCol += 1; accX -= stepW; changed = true; stepW = colWAt(state.firstCol) || COL_W; }
+      while (accX <= -stepW && state.firstCol > 0) { state.firstCol -= 1; accX += stepW; changed = true; stepW = colWAt(state.firstCol) || COL_W; }
       // Only discard over-scroll past the top/left edge; keep normal accumulation.
       if (state.firstRow === 0 && accY < 0) accY = 0;
       if (state.firstCol === 0 && accX < 0) accX = 0;
@@ -466,7 +542,7 @@ function wireSettings() {
   };
   scroll.addEventListener("input", () => setScroll(parseFloat(scroll.value), true));
 
-  // Restore saved preferences (default scroll speed is 0.40).
+  // Restore saved preferences (default scroll speed is 0.80).
   const theme = localStorage.getItem("oc-theme") || "auto";
   themeSel.value = theme;
   applyTheme(theme);

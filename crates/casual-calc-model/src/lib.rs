@@ -29,7 +29,7 @@ pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
-pub use sheet::{Sheet, SheetView};
+pub use sheet::{AxisSizing, Sheet, SheetView};
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
 pub use style::{Style, StyleTable};

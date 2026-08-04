@@ -50,7 +50,7 @@ evidence").
 | Styles: bold/italic/font color/fill | ● | ● | ~ | ~ | — | P1A-003b |
 | Styles: borders | ✗ | ✗ | ✗ | ✗ | — | later |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
-| Column/row sizing | ✗ | ✗ | ✗ | ✗ | — | P1C |
+| Column/row sizing | ● | ● | — | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them) |
 | Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
