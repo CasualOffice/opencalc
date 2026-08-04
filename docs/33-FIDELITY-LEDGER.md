@@ -44,8 +44,8 @@ evidence").
 | Inline strings | ● | ● | ✗ | ~ | — | P1C-001 |
 | Grid geometry / viewport | — | — | — | ● | — | P1C-001 |
 | Grid raster (PNG) | — | — | — | ● | — | P1D-001 (gridlines + content fills; glyphs pending) |
-| Formulas (AST) | ● | ● | ✗ | — | ✗ | P1B-001 |
-| Formula cached value | ● | ● | — | ✗ | ✗ | P1B-001 |
+| Formulas (AST) | ● | ● | ✗ | — | ● | P2-001 |
+| Formula cached value | ● | ● | — | ~ | ● | P2-001 |
 | Number formats | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Styles: font/fill/border | ✗ | ✗ | ✗ | ✗ | — | P1A-003b |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
@@ -71,6 +71,9 @@ evidence").
   shaped, and not yet checked against a visual oracle; `●` there requires the
   render backend (Phase 1D) and an oracle diff.
 - **Calc** advances in Phase 2 ([40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)).
+  `●` currently means a correct **full** recalc over the supported operator/
+  function subset; an incremental dependency graph and the <50 ms budget, plus
+  oracle-diffed function-by-function coverage, are later increments.
 
 ## Maintenance
 

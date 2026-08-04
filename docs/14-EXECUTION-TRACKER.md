@@ -94,6 +94,18 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Phase 2 (Formula & calc engine)
+
+Evaluate the formula ASTs; recompute cached values
+([40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)).
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| P2-001 | Evaluator + full recalc (`casual-calc-eval`) | Done | Memoized recursive evaluation with circular detection; arithmetic/comparison/concat, unary, cell + range refs (same/cross-sheet), defined names; functions SUM/AVERAGE/MIN/MAX/COUNT/IF/ABS/ROUND; `recalculate(workbook)` full recalc; deterministic. Nothing depends on `-eval` except (future) host bridges. 7 tests |
+| P2-002 | Incremental dependency graph + dirty propagation | Not started | Range-bucketed edges; <50 ms worst-case ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)) |
+| P2-003 | Broader function library + oracle diff (LibreOffice Calc) | Not started | Function-by-function fidelity |
+| P2-004 | Volatile functions, spill/dynamic arrays, iterative calc | Not started | — |
+
 ## Phase rows — Phase 1D (Grid render)
 
 CPU raster backend: display list → pixels

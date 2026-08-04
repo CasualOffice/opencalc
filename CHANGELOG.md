@@ -11,6 +11,22 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 2: the calculation engine
+
+**Added**
+
+- `casual-calc-eval` (P2-001): the calc engine. Evaluates the formula ASTs the
+  model stores — memoized recursive evaluation with circular-reference detection
+  — supporting arithmetic/comparison/concat/unary operators, cell and range
+  references (same- and cross-sheet), defined names, and a starter function
+  library (`SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `IF`, `ABS`, `ROUND`).
+  `recalculate(workbook)` recomputes every formula cell's cached value (a correct
+  full recalc); deterministic. Nothing depends on `-eval` except the (future)
+  host bridges, so the model/layout/render layers still build without it. The
+  fidelity ledger's Calc column is now `●` for formulas. 7 tests. Incremental
+  dependency graph + <50 ms budget and a broader oracle-diffed function library
+  are later increments.
+
 ### 2026-08-04 — Phase 1D: grid render (pixels)
 
 **Added**

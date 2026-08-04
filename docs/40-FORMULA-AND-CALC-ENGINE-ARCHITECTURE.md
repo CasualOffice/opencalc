@@ -79,6 +79,17 @@ Formulas are interned in an **AST arena** ([22](22-NORMALIZED-SCHEMA.md)): a
 filled-down column of the "same" relative formula shares one AST plus a per-cell
 origin, not N copies — essential for the 1M-cell memory budget.
 
+> **Status: evaluator implemented (Phase 2, P2-001).** `casual-calc-eval`
+> evaluates the stored formula ASTs by memoized recursive evaluation with
+> circular-reference detection, and `recalculate(workbook)` recomputes every
+> formula cell's cached value (a correct **full** recalc). Supported:
+> arithmetic/comparison/concat/unary operators, cell + range references (same-
+> and cross-sheet), defined names, and a starter function library (SUM, AVERAGE,
+> MIN, MAX, COUNT, IF, ABS, ROUND). Still to come: the **incremental dependency
+> graph** + dirty propagation and the <50 ms budget (P2-002), a broader
+> oracle-diffed function library (P2-003), and volatile/spill/iterative calc
+> (P2-004).
+
 ## `casual-calc-eval` — the engine
 
 ### The dependency graph

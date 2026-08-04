@@ -61,6 +61,11 @@ dependencies = [
 [[package]]
 name = "casual-calc-eval"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-formula",
+ "casual-calc-import",
+ "casual-calc-model",
+]
 
 [[package]]
 name = "casual-calc-export"

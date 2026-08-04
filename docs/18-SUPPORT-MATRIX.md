@@ -56,9 +56,9 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Frozen panes / splits | ○ | ○ | n/a | Phase 1A/1C |
 | Defined names | ○ | n/a | ○ | Phase 1A / used in Phase 2 |
 | Formulas: parse & preserve (AST) | ● | n/a | n/a | **Phase 1A** (P1A-002; A1 subset) |
-| Formulas: evaluate | n/a | n/a | ○ | **Phase 2** |
-| Dependency graph + incremental recalc | n/a | n/a | ○ | Phase 2 |
-| Function library (math/text/lookup/…) | n/a | n/a | ○ | Phase 2 |
+| Formulas: evaluate | n/a | n/a | ◑ | **Phase 2** (P2-001; full recalc, subset) |
+| Dependency graph + incremental recalc | n/a | n/a | ○ | Phase 2 (P2-002) |
+| Function library (math/text/lookup/…) | n/a | n/a | ◑ | Phase 2 (SUM/AVG/MIN/MAX/COUNT/IF/ABS/ROUND) |
 | Spill / dynamic arrays | ○ | ○ | ○ | Phase 2 |
 | Tables & structured references | ○ | ○ | ○ | Phase 3 |
 | Conditional formatting | ○ | ○ | ○ | Phase 3 |
