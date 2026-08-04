@@ -1,13 +1,14 @@
 //! `casual-calc-import` — SpreadsheetML semantic import into the normalized
 //! model.
 //!
-//! Phase 1A: shared strings and worksheet **cell values** (number, bool,
-//! shared/inline string, error) map into a [`Workbook`], and **formulas are
-//! parsed to an AST** (`casual-calc-formula`) stored in the workbook arena with
-//! the cell's cached value preserved. A [`CompatibilityReport`] records anything
-//! not fully mapped (a formula that fails to parse is `Degraded`, keeping its
-//! cached value). Import is deterministic: fixed workbook id, sequential sheet
-//! ids, and insertion-ordered string interning.
+//! Phase 1A: maps a SpreadsheetML package into a [`Workbook`] — cell values
+//! (number, bool, shared/inline string, error), **formulas parsed to an AST**
+//! (`casual-calc-formula`) with the cached value preserved, **number formats**
+//! (from `styles.xml` `cellXfs`), **merged ranges**, **frozen panes**, and
+//! **defined names**. A [`CompatibilityReport`] records anything not fully
+//! mapped (e.g. an unparseable formula is `Degraded`, keeping its cached value).
+//! Import is deterministic: fixed workbook id, sequential sheet ids, and
+//! insertion-ordered interning.
 //!
 //! See `docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md` and
 //! `docs/22-NORMALIZED-SCHEMA.md`.
