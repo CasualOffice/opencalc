@@ -85,6 +85,39 @@ impl HAlign {
     }
 }
 
+/// Vertical text alignment within a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VAlign {
+    /// Top-aligned.
+    Top,
+    /// Vertically centered.
+    Middle,
+    /// Bottom-aligned.
+    Bottom,
+}
+
+impl VAlign {
+    /// The OOXML `vertical` attribute token.
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            VAlign::Top => "top",
+            VAlign::Middle => "center",
+            VAlign::Bottom => "bottom",
+        }
+    }
+
+    /// Parse an OOXML `vertical` token.
+    pub fn from_ooxml(token: &str) -> Option<Self> {
+        match token {
+            "top" => Some(VAlign::Top),
+            "center" | "distributed" => Some(VAlign::Middle),
+            "bottom" | "justify" => Some(VAlign::Bottom),
+            _ => None,
+        }
+    }
+}
+
 /// A cell's formatting. Extensible; equal styles are deduplicated in the table.
 /// Colors are `"RRGGBB"` hex strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,6 +151,9 @@ pub struct Style {
     /// Horizontal alignment (defaults per value type when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<HAlign>,
+    /// Vertical alignment (defaults to bottom when unset, per OOXML).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valign: Option<VAlign>,
     /// Wrap text within the cell (instead of overflowing/clipping).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrap: bool,
@@ -142,6 +178,7 @@ impl Style {
             && self.font_color.is_none()
             && self.fill_color.is_none()
             && self.align.is_none()
+            && self.valign.is_none()
             && !self.wrap
             && self.border.is_none()
     }

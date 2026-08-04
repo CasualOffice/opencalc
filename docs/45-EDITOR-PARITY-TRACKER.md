@@ -59,7 +59,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-17 | **Structural insert/delete rows & columns** + formula ref rewriting | Done | Transaction ops (invertible, cross-sheet ref rewrite, 27 tests); wasm `session_insert/delete_rows/columns` (undoable); wired to the cell context menu. Verified: insert shifted SUM(D2:D4)->SUM(D3:D5), recalc correct |
 | UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Done | Right-click cell -> Cut/Copy/Paste, Insert row/col, Delete row/col, Clear. Verified |
 | UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Done | Overflow across empty neighbours (align-aware); **Wrap text** toolbar toggle (`Style.wrap`, round-trips via `<alignment wrapText>`) with word-wrap + auto row height. Verified |
-| UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
+| UX-20 | Vertical alignment (top/middle/bottom) | Done | `Style.valign` (VAlign, round-trips via `<alignment vertical>`); toolbar menu; canvas positions text top/middle/bottom (single + wrapped). Verified |
 | UX-21 | Merge cells | Done | `session_merge/unmerge_cells` + `session_merges`; editor renders a merge as one spanning cell (no internal gridlines), selection snaps to it, Merge toolbar button toggles. Verified |
 | UX-22 | Status bar: sum / average / count of selection | Done | `session_range_stats`; bottom-bar readout for multi-cell selections. Verified |
 | UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Done | `session_edge` block-jump; Ctrl+Arrow, Ctrl+Home/End, Home, PgUp/PgDn (+shift-extend). Verified |

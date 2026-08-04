@@ -19,7 +19,7 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, HAlign, SheetId, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, HAlign, SheetId, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -242,6 +242,7 @@ fn styles_xml(workbook: &Workbook) -> String {
             num_fmt_id,
             border_id,
             align: style.align,
+            valign: style.valign,
             wrap: style.wrap,
         });
     }
@@ -328,7 +329,7 @@ fn styles_xml(workbook: &Workbook) -> String {
         } else {
             ""
         };
-        let has_align = ids.align.is_some() || ids.wrap;
+        let has_align = ids.align.is_some() || ids.valign.is_some() || ids.wrap;
         let apply_align = if has_align {
             " applyAlignment=\"1\""
         } else {
@@ -342,6 +343,9 @@ fn styles_xml(workbook: &Workbook) -> String {
             s.push_str("><alignment");
             if let Some(align) = ids.align {
                 s.push_str(&format!(" horizontal=\"{}\"", align.ooxml()));
+            }
+            if let Some(valign) = ids.valign {
+                s.push_str(&format!(" vertical=\"{}\"", valign.ooxml()));
             }
             if ids.wrap {
                 s.push_str(" wrapText=\"1\"");
@@ -373,6 +377,7 @@ struct StyleIds {
     num_fmt_id: u32,
     border_id: usize,
     align: Option<HAlign>,
+    valign: Option<VAlign>,
     wrap: bool,
 }
 

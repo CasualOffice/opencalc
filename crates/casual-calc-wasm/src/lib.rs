@@ -20,7 +20,7 @@ use casual_calc_layout::{
 };
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style,
-    Workbook,
+    VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -425,6 +425,26 @@ pub fn session_delete_columns(sheet: usize, at: u32, count: u32) -> Result<(), J
     commit_edit(EditOperation::DeleteColumns { sheet, at, count })
 }
 
+/// Set vertical alignment across a range: `top`/`middle`/`bottom`, or empty to
+/// clear (one undo step).
+#[wasm_bindgen]
+pub fn session_set_valign(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    valign: &str,
+) -> Result<(), JsError> {
+    let value = match valign {
+        "top" => Some(VAlign::Top),
+        "middle" | "center" => Some(VAlign::Middle),
+        "bottom" => Some(VAlign::Bottom),
+        _ => None,
+    };
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.valign = value)
+}
+
 /// Set (or clear, with empty) the font family across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_set_font_name(
@@ -747,6 +767,14 @@ pub fn session_cells(
             if let Some(hp) = style.and_then(|s| s.font_size_hp) {
                 extra.push_str(&format!(",\"fs\":{}", hp as f64 / 2.0));
             }
+            if let Some(va) = style.and_then(|s| s.valign) {
+                let t = match va {
+                    VAlign::Top => "t",
+                    VAlign::Middle => "m",
+                    VAlign::Bottom => "b",
+                };
+                extra.push_str(&format!(",\"va\":\"{t}\""));
+            }
             if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
             }
@@ -1034,6 +1062,14 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
         }
         if let Some(al) = st.align {
             parts.push(format!("\"al\":\"{}\"", al.ooxml()));
+        }
+        if let Some(va) = st.valign {
+            let t = match va {
+                VAlign::Top => "t",
+                VAlign::Middle => "m",
+                VAlign::Bottom => "b",
+            };
+            parts.push(format!("\"va\":\"{t}\""));
         }
         if let Some(nf) = &st.number_format {
             parts.push(format!("\"nf\":{}", json_string(nf)));

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use casual_calc_model::{BorderEdge, Borders, HAlign, Style};
+use casual_calc_model::{BorderEdge, Borders, HAlign, Style, VAlign};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -41,6 +41,7 @@ struct Xf {
     fill_id: usize,
     border_id: usize,
     align: Option<HAlign>,
+    valign: Option<VAlign>,
     wrap: bool,
 }
 
@@ -207,6 +208,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             fill_id: attr_u32(e, b"fillId")?.unwrap_or(0) as usize,
                             border_id: attr_u32(e, b"borderId")?.unwrap_or(0) as usize,
                             align: None,
+                            valign: None,
                             wrap: false,
                         });
                     }
@@ -214,6 +216,9 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                         if let Some(xf) = xfs.last_mut() {
                             if let Some(h) = attr(e, b"horizontal")? {
                                 xf.align = HAlign::from_ooxml(&h);
+                            }
+                            if let Some(vtoken) = attr(e, b"vertical")? {
+                                xf.valign = VAlign::from_ooxml(&vtoken);
                             }
                             if attr(e, b"wrapText")?.as_deref() == Some("1") {
                                 xf.wrap = true;
@@ -256,6 +261,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 font_color: font.color,
                 fill_color: if fill.solid { fill.color } else { None },
                 align: xf.align,
+                valign: xf.valign,
                 wrap: xf.wrap,
                 border: (!border.is_empty()).then_some(border),
             }

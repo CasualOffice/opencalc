@@ -111,6 +111,12 @@ function cellFont(it) {
   return `${slant}${weight}${cellPx(it)}px ${fam}`;
 }
 function cellLineH(it) { return cellPx(it) + 4; }
+// Baseline y for a single line given the cell's vertical alignment.
+function textY(it, yTop, h, lineH) {
+  if (it.va === "t") return yTop + lineH / 2 + 2;
+  if (it.va === "b") return yTop + h - lineH / 2 - 2;
+  return yTop + h / 2;
+}
 
 // Word-wrap a cell's text to `maxW` px (hard-breaking over-long words).
 function wrapLines(it, maxW) {
@@ -398,7 +404,7 @@ function draw() {
     if (x === undefined || yTop === undefined) continue;
     const w = colWAt(it.c);
     const h = rowHAt(it.r);
-    const y = yTop + h / 2;
+    const y = textY(it, yTop, h, cellLineH(it));
     ctx.font = cellFont(it);
     const align = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
 
@@ -414,7 +420,8 @@ function draw() {
       ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
       const tx = align === "right" ? x + w - 5 : align === "center" ? x + w / 2 : x + 5;
       ctx.textAlign = align;
-      let ly = yTop + Math.max(0, (h - lines.length * lh) / 2) + lh / 2;
+      const block = lines.length * lh;
+      let ly = (it.va === "t" ? yTop + 3 : it.va === "b" ? yTop + h - block - 3 : yTop + Math.max(0, (h - block) / 2)) + lh / 2;
       for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += lh; }
       ctx.restore();
       continue;
@@ -747,6 +754,7 @@ function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(stat
 function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
+function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function toggleMerge() {
   const s = effectiveRange();
@@ -1229,6 +1237,7 @@ function wireEvents() {
   wirePopup("tb-fillcolor", "fillcolor-menu", (b) => setFill(b.dataset.c));
   wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
   wirePopup("tb-border", "border-menu", (b) => setBorder(b.dataset.bd));
+  wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
 
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
