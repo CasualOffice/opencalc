@@ -26,8 +26,18 @@
   background: var(--bg);
   flex: 0 0 auto;
 }
-.tb-group { display: flex; align-items: center; gap: 6px; }
+.tb-group { display: flex; align-items: center; gap: 4px; }
 .tb-brand { font-weight: 700; color: var(--fg); text-decoration: none; margin-right: 8px; }
+
+.icon { width: 18px; height: 18px; display: block; }
+.icon-sm { width: 13px; height: 13px; display: block; }
+.tb-icon { display: inline-flex; align-items: center; justify-content: center; }
+.toolbar .tb-btn {
+  width: 34px; height: 34px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--fg);
+}
+.toolbar .tb-btn:disabled { color: var(--muted); }
 
 .settings { position: relative; }
 .tb-icon {
@@ -68,9 +78,11 @@
 .tb-bold[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink, #fff); border-color: var(--accent); }
 .fill-swatches { display: flex; gap: 5px; align-items: center; }
 .fill-swatches button {
-  width: 20px; height: 20px; padding: 0; border-radius: 5px; border: 1px solid var(--border); cursor: pointer;
+  width: 22px; height: 22px; padding: 0; border-radius: 5px; border: 1px solid var(--border); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
 }
-.fill-swatches .no-fill { background: var(--bg); color: var(--muted); font-size: 12px; }
+.fill-swatches button:hover { border-color: var(--accent); }
+.fill-swatches .no-fill { background: var(--bg); color: var(--muted); }
 .tb-status { margin-left: auto; color: var(--muted); font-size: 13px; font-family: var(--mono); }
 
 .formula-bar {
