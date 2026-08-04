@@ -16,22 +16,25 @@ mod a1;
 mod error;
 mod read;
 mod report;
+mod styles;
 
 pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellValue, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
+    Cell, CellValue, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Style, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
 use a1::parse_a1;
 use read::{RawCell, parse_shared_strings, parse_worksheet};
+use styles::{StyleSheet, parse_styles};
 
 const WORKBOOK_NAMESPACE: u64 = 0x574b_0000_0000_0000; // "WK"
 const SHEET_NAMESPACE: u64 = 0x5348_0000_0000_0000; // "SH"
 const SHARED_STRINGS_PART: &str = "xl/sharedStrings.xml";
+const STYLES_PART: &str = "xl/styles.xml";
 
 /// The result of importing a package: the model plus its compatibility report.
 #[derive(Debug)]
@@ -57,6 +60,14 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         }
     }
 
+    // Styles: the number-format code per cellXfs index.
+    let stylesheet = if package.contains(STYLES_PART) {
+        let xml = package.read_part(STYLES_PART)?;
+        parse_styles(&xml)?
+    } else {
+        StyleSheet::default()
+    };
+
     // Own the sheet metadata so the package can be mutated (read) while looping.
     let sheet_meta: Vec<(String, String)> = package
         .sheets()
@@ -81,6 +92,14 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             };
             let value = map_value(&raw, &shared_ids, &mut workbook, &mut report);
             let mut cell = Cell::value(value);
+            if let Some(index) = raw.style_index
+                && let Some(Some(code)) = stylesheet.xf_number_formats.get(index as usize)
+            {
+                let style = Style {
+                    number_format: Some(code.clone()),
+                };
+                cell.style = Some(workbook.intern_style(style));
+            }
             if let Some(text) = &raw.formula {
                 match parse_formula(text) {
                     Ok(expr) => {

@@ -48,8 +48,8 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Cells: number / string / bool / error | ○ | ○ | n/a | Phase 1A/1C |
 | Shared strings | ○ | ○ | n/a | Phase 1A |
 | Inline strings | ○ | ○ | n/a | Phase 1A |
-| Number formats (built-in + custom) | ○ | ○ | n/a | Phase 1A/1C |
-| Styles: fonts, fills, borders, alignment | ○ | ○ | n/a | Phase 1A/1C |
+| Number formats (built-in + custom) | ◑ | ○ | n/a | Phase 1A (P1A-003, model); render 1C |
+| Styles: fonts, fills, borders, alignment | ○ | ○ | n/a | Phase 1A (P1A-003b) / 1C |
 | Merged ranges | ○ | ○ | n/a | Phase 1A/1C |
 | Column/row sizing, hidden, outline | ○ | ○ | n/a | Phase 1A/1C |
 | Frozen panes / splits | ○ | ○ | n/a | Phase 1A/1C |

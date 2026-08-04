@@ -160,6 +160,44 @@ fn unparseable_formula_is_degraded_but_keeps_value() {
 }
 
 #[test]
+fn imports_number_formats_from_styles() {
+    const STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <numFmts count="1"><numFmt numFmtId="164" formatCode="0.00"/></numFmts>
+        <cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="9"/></cellXfs>
+    </styleSheet>"#;
+    let sheet_xml = sheet_with(
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>3.14</v></c><c r="C1" s="2"><v>0.5</v></c></row>"#,
+    );
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    let wb = &import.workbook;
+    let sheet = &wb.sheets[0];
+
+    // s=0 → General → no style.
+    assert!(sheet.cells.get(CellRef::new(0, 0)).unwrap().style.is_none());
+    // s=1 → custom 164 → "0.00".
+    let b1_style = sheet.cells.get(CellRef::new(0, 1)).unwrap().style.unwrap();
+    assert_eq!(
+        wb.styles.get(b1_style).unwrap().number_format.as_deref(),
+        Some("0.00")
+    );
+    // s=2 → built-in 9 → "0%".
+    let c1_style = sheet.cells.get(CellRef::new(0, 2)).unwrap().style.unwrap();
+    assert_eq!(
+        wb.styles.get(c1_style).unwrap().number_format.as_deref(),
+        Some("0%")
+    );
+}
+
+#[test]
 fn import_is_deterministic() {
     let rows = r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>"#;
     let bytes = package_with_sheet(sheet_with(rows), Some(SHARED));

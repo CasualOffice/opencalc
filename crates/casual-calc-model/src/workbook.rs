@@ -7,9 +7,10 @@ use casual_calc_formula::Expr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::ids::{FormulaHandle, Id, StringId};
+use crate::ids::{FormulaHandle, Id, StringId, StyleId};
 use crate::sheet::Sheet;
 use crate::strings::StringTable;
+use crate::style::{Style, StyleTable};
 use crate::value::CellValue;
 
 /// The current workbook schema version. Snapshots record this so migrations can
@@ -29,6 +30,9 @@ pub struct Workbook {
     /// The interned string table cells reference.
     #[serde(default, skip_serializing_if = "StringTable::is_empty")]
     pub strings: StringTable,
+    /// The interned style table cells reference.
+    #[serde(default, skip_serializing_if = "StyleTable::is_empty")]
+    pub styles: StyleTable,
     /// The formula AST arena; `Cell::formula` indexes into it (the reserved calc
     /// seam). ASTs are parsed at import; the calc engine evaluates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -45,6 +49,7 @@ impl Workbook {
             schema_version: SCHEMA_VERSION,
             workbook_id,
             strings: StringTable::new(),
+            styles: StyleTable::new(),
             formulas: Vec::new(),
             sheets: Vec::new(),
         }
@@ -53,6 +58,11 @@ impl Workbook {
     /// Intern a string into the workbook's table, returning its id.
     pub fn intern_string(&mut self, value: &str) -> StringId {
         self.strings.intern(value)
+    }
+
+    /// Intern a style into the workbook's table, returning its id.
+    pub fn intern_style(&mut self, style: Style) -> StyleId {
+        self.styles.intern(style)
     }
 
     /// Store a formula AST in the arena, returning a handle to it.
@@ -87,6 +97,11 @@ impl Workbook {
                     && self.formula(handle).is_none()
                 {
                     return Err(ModelError::Invariant("dangling formula handle"));
+                }
+                if let Some(style) = cell.style
+                    && !self.styles.contains(style)
+                {
+                    return Err(ModelError::Invariant("dangling style reference"));
                 }
             }
         }

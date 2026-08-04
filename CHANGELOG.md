@@ -15,6 +15,12 @@ the design doc or ADR that motivated it.
 
 **Added**
 
+- `casual-calc-model` + `casual-calc-import` (P1A-003): number formats. The model
+  gained an interned, deduplicated `Style`/`StyleTable` (`Workbook.styles`,
+  `intern_style`; `validate()` checks style references). Import parses
+  `styles.xml` — custom `numFmts` and `cellXfs` — resolves each `xf`'s number
+  format (custom code or a built-in `numFmtId` from the ECMA-376 subset), and maps
+  a cell's `s` index to a `StyleId`. Font/fill/border are deferred to P1A-003b.
 - `casual-calc-formula` (P1A-002): the formula language — tokenizer,
   precedence-climbing parser, a serializable `Expr` AST, A1 reference algebra
   (`$` anchors, sheet qualification, ranges), and a canonical pretty-printer with

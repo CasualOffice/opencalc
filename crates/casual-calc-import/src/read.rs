@@ -20,6 +20,8 @@ pub struct RawCell {
     pub reference: String,
     /// The cell type (`t` attribute): `n`/`b`/`s`/`str`/`inlineStr`/`e`.
     pub cell_type: Option<String>,
+    /// The style index (`s` attribute) into `cellXfs`.
+    pub style_index: Option<u32>,
     /// The `<v>` value text.
     pub value: Option<String>,
     /// The `<is><t>` inline-string text.
@@ -152,6 +154,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                         current = Some(RawCell {
                             reference: read_attr(&e, b"r")?.unwrap_or_default(),
                             cell_type: read_attr(&e, b"t")?,
+                            style_index: read_attr(&e, b"s")?.and_then(|s| s.parse().ok()),
                             ..RawCell::default()
                         });
                     }
@@ -174,6 +177,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Vec<RawCell>, ImportError> {
                         cells.push(RawCell {
                             reference: read_attr(&e, b"r")?.unwrap_or_default(),
                             cell_type: read_attr(&e, b"t")?,
+                            style_index: read_attr(&e, b"s")?.and_then(|s| s.parse().ok()),
                             ..RawCell::default()
                         });
                     }
