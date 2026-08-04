@@ -43,7 +43,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-01 | Row/column header select must NOT scroll to the far end | Done | `selKind` model; focus stays at near edge, no scroll. Verified |
 | UX-02 | Corner (0,0) selects the **whole sheet** (not just used range) | Done | `selKind:"all"`; highlight + headers tint span the viewport. Verified |
 | UX-03 | Resizing a row/col while whole-sheet/row/col selected resizes **all** of them | Done | `session_set_all_col_width`/`_row_height` + `_range`; live preview honors scope; "resized all". Verified |
-| UX-04 | **Custom, OS-consistent scrollbars** (currently none visible) | WIP | Overlay DOM scrollbars (V + H), draggable, styled by our CSS; thumb from used-extent |
+| UX-04 | **Custom, OS-consistent scrollbars** (currently none visible) | Done | Overlay DOM scrollbars (V + H), draggable thumbs styled by our CSS, sized from used-extent + buffer; hidden when nothing to scroll. Verified |
 
 ### P1 — expected of any sheet
 
@@ -88,5 +88,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 - **Next:** UX-17 (structural insert/delete) + UX-18 (context menu) together;
   then UX-16 (font family/size), UX-19 (overflow), UX-22 (status bar).
 
-See also [14-EXECUTION-TRACKER.md](14-EXECUTION-TRACKER.md) (engine-level) and
+See also [46-COMPETITIVE-PARITY-ANALYSIS.md](46-COMPETITIVE-PARITY-ANALYSIS.md)
+(the exhaustive 141-item competitive inventory, CP-001..CP-141, that this tracker
+distills), [14-EXECUTION-TRACKER.md](14-EXECUTION-TRACKER.md) (engine-level), and
 [33-FIDELITY-LEDGER.md](33-FIDELITY-LEDGER.md).

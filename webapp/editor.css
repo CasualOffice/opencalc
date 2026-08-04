@@ -143,6 +143,15 @@
 .sheet-add:hover { border-color: var(--accent); }
 
 .grid-wrap { position: relative; flex: 1 1 auto; overflow: hidden; background: var(--bg); }
+
+/* Custom scrollbars — identical on every OS (no native scrollbar UI). */
+.scrollbar { position: absolute; z-index: 6; }
+.scrollbar.vscroll { top: 24px; right: 0; bottom: 14px; width: 14px; }
+.scrollbar.hscroll { left: 46px; bottom: 0; right: 14px; height: 14px; }
+.scrollbar .thumb { position: absolute; background: var(--muted); opacity: 0.35; border-radius: 7px; transition: opacity 0.12s; }
+.scrollbar .thumb:hover, .scrollbar .thumb.drag { opacity: 0.62; }
+.scrollbar.vscroll .thumb { left: 3px; width: 8px; min-height: 28px; }
+.scrollbar.hscroll .thumb { top: 3px; height: 8px; min-width: 28px; }
 #grid { display: block; outline: none; }
 .inline-edit {
   position: absolute; display: none; box-sizing: border-box;

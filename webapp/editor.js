@@ -38,6 +38,10 @@ const canvas = document.getElementById("grid");
 const ctx = canvas.getContext("2d");
 const wrap = document.getElementById("grid-wrap");
 const inline = document.getElementById("inline-edit");
+const vscroll = document.getElementById("vscroll");
+const vthumb = document.getElementById("vthumb");
+const hscroll = document.getElementById("hscroll");
+const hthumb = document.getElementById("hthumb");
 const fInput = document.getElementById("formula-input");
 const cellRef = document.getElementById("cell-ref");
 const status = document.getElementById("tb-status");
@@ -161,6 +165,37 @@ function drawEdge(spec, x0, y0, x1, y1) {
   ctx.lineTo(Math.floor(x1) + off, Math.floor(y1) + off);
   ctx.stroke();
   ctx.setLineDash([]);
+}
+
+// Size + position the custom scrollbar thumbs from the current scroll and the
+// used extent (plus a buffer so you can always scroll a little past the data).
+let scrollMeta = { maxScrollY: 1, maxScrollX: 1, vSpan: 1, hSpan: 1 };
+function updateScrollbars(v) {
+  if (!wasm) return;
+  const b = usedBounds();
+  const viewH = v.h - HH, viewW = v.w - HW;
+  const contentH = Math.max(
+    wasm.session_row_offset_px(state.sheet, b.rows + 30),
+    state.scrollY + viewH + 1,
+  );
+  const contentW = Math.max(
+    wasm.session_col_offset_px(state.sheet, b.cols + 8),
+    state.scrollX + viewW + 1,
+  );
+  const trackH = vscroll.clientHeight, trackW = hscroll.clientWidth;
+  const thumbH = Math.max(28, trackH * Math.min(1, viewH / contentH));
+  const thumbW = Math.max(28, trackW * Math.min(1, viewW / contentW));
+  const maxScrollY = Math.max(1, contentH - viewH);
+  const maxScrollX = Math.max(1, contentW - viewW);
+  const vSpan = Math.max(1, trackH - thumbH), hSpan = Math.max(1, trackW - thumbW);
+  vthumb.style.height = thumbH + "px";
+  vthumb.style.top = Math.min(vSpan, (state.scrollY / maxScrollY) * vSpan) + "px";
+  hthumb.style.width = thumbW + "px";
+  hthumb.style.left = Math.min(hSpan, (state.scrollX / maxScrollX) * hSpan) + "px";
+  // Hide a scrollbar when there's nothing to scroll on that axis.
+  vscroll.style.display = contentH > viewH + 1 ? "block" : "none";
+  hscroll.style.display = contentW > viewW + 1 ? "block" : "none";
+  scrollMeta = { maxScrollY, maxScrollX, vSpan, hSpan };
 }
 
 // A header boundary under the pointer, if any (for resize hit-testing).
@@ -388,6 +423,7 @@ function draw() {
   ctx.restore();
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
+  updateScrollbars(v);
   if (wasm) refreshFormulaBar();
 }
 
@@ -821,6 +857,31 @@ function wireEvents() {
       draw();
     }
     state.dragging = false;
+  });
+
+  // Custom scrollbar thumb dragging.
+  let sbDrag = null;
+  const startThumb = (axis, el) => (e) => {
+    e.preventDefault();
+    const start = axis === "v" ? e.clientY : e.clientX;
+    sbDrag = { axis, start, scroll0: axis === "v" ? state.scrollY : state.scrollX };
+    el.classList.add("drag");
+  };
+  vthumb.addEventListener("mousedown", startThumb("v", vthumb));
+  hthumb.addEventListener("mousedown", startThumb("h", hthumb));
+  window.addEventListener("mousemove", (e) => {
+    if (!sbDrag) return;
+    if (sbDrag.axis === "v") {
+      const d = e.clientY - sbDrag.start;
+      state.scrollY = Math.max(0, sbDrag.scroll0 + (d / scrollMeta.vSpan) * scrollMeta.maxScrollY);
+    } else {
+      const d = e.clientX - sbDrag.start;
+      state.scrollX = Math.max(0, sbDrag.scroll0 + (d / scrollMeta.hSpan) * scrollMeta.maxScrollX);
+    }
+    draw();
+  });
+  window.addEventListener("mouseup", () => {
+    if (sbDrag) { vthumb.classList.remove("drag"); hthumb.classList.remove("drag"); sbDrag = null; }
   });
   canvas.addEventListener("dblclick", (e) => {
     const rect = canvas.getBoundingClientRect();
