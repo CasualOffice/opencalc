@@ -1150,7 +1150,16 @@ function wireEvents() {
 
     // Keyboard shortcuts.
     if (mod) {
+      // Ctrl+Arrow: jump to the data-edge (Excel block-jump).
+      const arrow = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+      if (arrow) {
+        const to = JSON.parse(wasm.session_edge(state.sheet, state.sel.row, state.sel.col, arrow[0], arrow[1]));
+        if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
+        e.preventDefault(); return;
+      }
       const k = e.key.toLowerCase();
+      if (k === "home") { select(0, 0); e.preventDefault(); return; }
+      if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
@@ -1177,6 +1186,9 @@ function wireEvents() {
       case "ArrowLeft": move(0, -1); e.preventDefault(); break;
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
       case "Tab": select(state.sel.row, state.sel.col + (e.shiftKey ? -1 : 1)); e.preventDefault(); break;
+      case "Home": if (e.shiftKey) extend(state.sel.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
+      case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
+      case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
       case "F2": startInline(); e.preventDefault(); break;
       default:

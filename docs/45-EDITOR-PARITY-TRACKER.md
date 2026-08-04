@@ -62,7 +62,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
 | UX-21 | Merge cells | Done | `session_merge/unmerge_cells` + `session_merges`; editor renders a merge as one spanning cell (no internal gridlines), selection snaps to it, Merge toolbar button toggles. Verified |
 | UX-22 | Status bar: sum / average / count of selection | Done | `session_range_stats`; bottom-bar readout for multi-cell selections. Verified |
-| UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Todo | Excel nav parity |
+| UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Done | `session_edge` block-jump; Ctrl+Arrow, Ctrl+Home/End, Home, PgUp/PgDn (+shift-extend). Verified |
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |
 | UX-25 | Drag-fill / autofill handle | Todo | |
 | UX-26 | Hidden rows/columns (+ from file) | Todo | model flag; import `hidden` |

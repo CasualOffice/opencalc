@@ -235,6 +235,55 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
     })
 }
 
+/// The data-edge cell reached by Ctrl+Arrow from `(row,col)` moving by
+/// `(dr,dc)` ∈ {-1,0,1}, using Excel's block-jump rule. Returns JSON `{row,col}`.
+#[wasm_bindgen]
+pub fn session_edge(sheet: usize, row: u32, col: u32, dr: i32, dc: i32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return format!("{{\"row\":{row},\"col\":{col}}}");
+        };
+        let (mut max_r, mut max_c) = (0u32, 0u32);
+        for (at, _) in sh.cells.iter() {
+            max_r = max_r.max(at.row);
+            max_c = max_c.max(at.col);
+        }
+        let occ = |r: i64, c: i64| -> bool {
+            r >= 0
+                && c >= 0
+                && r <= max_r as i64
+                && c <= max_c as i64
+                && sh
+                    .cells
+                    .get(CellRef::new(r as u32, c as u32))
+                    .is_some_and(|cell| !cell.value.is_empty() || cell.formula.is_some())
+        };
+        let in_range = |r: i64, c: i64| r >= 0 && c >= 0 && r <= max_r as i64 && c <= max_c as i64;
+        let (dr, dc) = (dr as i64, dc as i64);
+        let (mut r, mut c) = (row as i64, col as i64);
+        if in_range(r + dr, c + dc) {
+            if occ(r, c) && occ(r + dr, c + dc) {
+                // In a filled run: stop at the last filled cell before a gap.
+                while in_range(r + dr, c + dc) && occ(r + dr, c + dc) {
+                    r += dr;
+                    c += dc;
+                }
+            } else {
+                // Skip blanks to the next filled cell (or the used edge).
+                r += dr;
+                c += dc;
+                while in_range(r + dr, c + dc) && !occ(r, c) {
+                    r += dr;
+                    c += dc;
+                }
+            }
+        }
+        format!("{{\"row\":{},\"col\":{}}}", r.max(0), c.max(0))
+    })
+    .unwrap_or_else(|| format!("{{\"row\":{row},\"col\":{col}}}"))
+}
+
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.
 #[wasm_bindgen]
 pub fn session_merges(sheet: usize) -> String {
