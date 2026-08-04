@@ -86,14 +86,21 @@ const geo = {
 
 const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
-const WRAP_LINE_H = 16; // px per wrapped text line
 let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
+
+// The canvas font string for a cell (family + size from its style, or defaults).
+function cellPx(it) { return it.fs ? Math.round((it.fs * 4) / 3) : 13; }
+function cellFont(it) {
+  const weight = it.b ? "600 " : "";
+  const slant = it.i ? "italic " : "";
+  const fam = it.fn ? `"${it.fn}", system-ui, sans-serif` : "system-ui, sans-serif";
+  return `${slant}${weight}${cellPx(it)}px ${fam}`;
+}
+function cellLineH(it) { return cellPx(it) + 4; }
 
 // Word-wrap a cell's text to `maxW` px (hard-breaking over-long words).
 function wrapLines(it, maxW) {
-  const weight = it.b ? "600 " : "";
-  const slant = it.i ? "italic " : "";
-  ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+  ctx.font = cellFont(it);
   const lines = [];
   let line = "";
   for (const word of String(it.t).split(/\s+/)) {
@@ -169,10 +176,13 @@ function measure() {
       )
     : [];
   for (const it of geoItems) {
-    if (!it.w || !it.t) continue;
+    if (!it.t) continue;
     const ci = it.c - state.firstCol, ri = it.r - state.firstRow;
     if (ci < 0 || ci >= geo.colW.length || ri < 0 || ri >= geo.rowH.length) continue;
-    const needed = wrapLines(it, geo.colW[ci] - 8).length * WRAP_LINE_H + 6;
+    let needed;
+    if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
+    else if (it.fs) needed = cellLineH(it) + 6; // tall font grows the row too
+    else continue;
     if (needed > geo.rowH[ri]) geo.rowH[ri] = needed;
   }
 
@@ -374,23 +384,23 @@ function draw() {
     const w = colWAt(it.c);
     const h = rowHAt(it.r);
     const y = yTop + h / 2;
-    const weight = it.b ? "600 " : "";
-    const slant = it.i ? "italic " : "";
-    ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+    ctx.font = cellFont(it);
     const align = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
 
     // Wrapped cells: multi-line, clipped to the (auto-grown) cell — no overflow.
     if (it.w) {
+      const lh = cellLineH(it);
       const lines = wrapLines(it, w - 8);
       ctx.save();
       ctx.beginPath();
       ctx.rect(x, yTop, w, h);
       ctx.clip();
+      ctx.font = cellFont(it);
       ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
       const tx = align === "right" ? x + w - 5 : align === "center" ? x + w / 2 : x + 5;
       ctx.textAlign = align;
-      let ly = yTop + Math.max(0, (h - lines.length * WRAP_LINE_H) / 2) + WRAP_LINE_H / 2;
-      for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += WRAP_LINE_H; }
+      let ly = yTop + Math.max(0, (h - lines.length * lh) / 2) + lh / 2;
+      for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += lh; }
       ctx.restore();
       continue;
     }
@@ -545,6 +555,8 @@ function refreshFormulaBar() {
   for (const b of document.querySelectorAll(".tb-align")) {
     b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
   }
+  document.getElementById("tb-font").value = fmt.fn || "";
+  document.getElementById("tb-size").value = fmt.fs ? String(fmt.fs) : "";
 }
 
 function cellAt(px, py) {
@@ -685,6 +697,8 @@ function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
+function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, pts)); }
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
 function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
 function toggleBorder() { setBorder("all"); }
@@ -871,16 +885,53 @@ function sheetMenu(i, x, y) {
       resetView();
     } catch (e) { status.textContent = `error: ${e}`; }
   });
-  menu.style.left = x + "px";
+  positionMenu(menu, x, y);
+}
+
+// Append a context menu at (x,y), flipping up/left if it would overflow.
+function positionMenu(menu, x, y) {
+  menu.style.left = "0px";
   menu.style.top = "0px";
   menu.style.visibility = "hidden";
   document.body.appendChild(menu);
-  // Open upward if it would overflow the bottom (tabs sit at the viewport edge).
-  const h = menu.offsetHeight;
-  const top = y + h > window.innerHeight ? Math.max(4, y - h) : y;
-  menu.style.top = top + "px";
+  const h = menu.offsetHeight, w = menu.offsetWidth;
+  menu.style.top = (y + h > window.innerHeight ? Math.max(4, y - h) : y) + "px";
+  menu.style.left = (x + w > window.innerWidth ? Math.max(4, x - w) : x) + "px";
   menu.style.visibility = "visible";
   setTimeout(() => document.addEventListener("click", closeSheetMenu, { once: true }), 0);
+}
+
+function tryEdit(fn) {
+  try { fn(); } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+
+// Right-click menu on a cell: clipboard + structural row/column edits.
+function cellMenu(x, y) {
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu";
+  menu.id = "sheet-ctx";
+  const sep = () => { const d = document.createElement("div"); d.className = "menu-sep"; menu.appendChild(d); };
+  const item = (label, danger, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    if (danger) b.className = "danger";
+    b.addEventListener("click", () => { closeSheetMenu(); fn(); });
+    menu.appendChild(b);
+  };
+  item("Cut", false, async () => { await doCopy(); clearSelection(); });
+  item("Copy", false, () => doCopy());
+  item("Paste", false, () => doPaste());
+  sep();
+  item("Insert row above", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
+  item("Insert column left", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
+  sep();
+  item("Delete row", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
+  item("Delete column", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
+  sep();
+  item("Clear contents", false, () => clearSelection());
+  positionMenu(menu, x, y);
 }
 
 // Live-update the previewed size of the line being dragged.
@@ -987,6 +1038,17 @@ function wireEvents() {
   });
   window.addEventListener("mouseup", () => {
     if (sbDrag) { vthumb.classList.remove("drag"); hthumb.classList.remove("drag"); sbDrag = null; }
+  });
+  canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
+    if (hit && state.selKind === "cells") {
+      const r = selRect();
+      const inside = hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1;
+      if (!inside) select(hit.row, hit.col);
+    }
+    cellMenu(e.clientX, e.clientY);
   });
   canvas.addEventListener("dblclick", (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -1102,6 +1164,8 @@ function wireEvents() {
   for (const b of document.querySelectorAll(".tb-align")) {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
+  document.getElementById("tb-font").addEventListener("change", (e) => { setFontName(e.target.value); canvas.focus(); });
+  document.getElementById("tb-size").addEventListener("change", (e) => { setFontSize(parseFloat(e.target.value) || 0); canvas.focus(); });
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;

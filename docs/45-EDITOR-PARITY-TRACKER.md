@@ -55,9 +55,9 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-13 | Borders menu (all/outer/clear) | Done | `session_set_border(kind)` |
 | UX-14 | Sheet tabs: rename / duplicate / delete + context menu | Done | last-sheet protected |
 | UX-15 | Double-click column boundary = auto-fit | Done | widest-cell measure |
-| UX-16 | **Font family + size** controls | Todo | Needs `Style.font_name` + `font_size` in model → import/export/render. Reference the docx sister repo's font mgmt |
-| UX-17 | **Structural insert/delete rows & columns** + formula ref rewriting | Todo | Designed (AST `CellReference` shift/clamp). Ops `InsertRows/DeleteRows/InsertColumns/DeleteColumns`, invertible. Same-sheet first |
-| UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Todo | Pairs with UX-17 |
+| UX-16 | **Font family + size** controls | Done | `Style.font_name` + `font_size_hp` (round-trip); toolbar font + size dropdowns; canvas renders family/size; rows auto-grow for tall fonts. Verified |
+| UX-17 | **Structural insert/delete rows & columns** + formula ref rewriting | Done | Transaction ops (invertible, cross-sheet ref rewrite, 27 tests); wasm `session_insert/delete_rows/columns` (undoable); wired to the cell context menu. Verified: insert shifted SUM(D2:D4)->SUM(D3:D5), recalc correct |
+| UX-18 | **Cell right-click context menu** (cut/copy/paste/clear + insert/delete row-col) | Done | Right-click cell -> Cut/Copy/Paste, Insert row/col, Delete row/col, Clear. Verified |
 | UX-19 | **Text overflow** into adjacent empty cells (+ wrap toggle) | Done | Overflow across empty neighbours (align-aware); **Wrap text** toolbar toggle (`Style.wrap`, round-trips via `<alignment wrapText>`) with word-wrap + auto row height. Verified |
 | UX-20 | Vertical alignment (top/middle/bottom) | Todo | `Style.valign` |
 | UX-21 | Merge cells | Todo | Model has `merges`; need edit op + render + toolbar |
@@ -84,9 +84,13 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 
 ## Now / next
 
-- **Now:** UX-01/02/03 (selection + resize-all) and UX-04 (scrollbars).
-- **Next:** UX-17 (structural insert/delete) + UX-18 (context menu) together;
-  then UX-16 (font family/size), UX-19 (overflow), UX-22 (status bar).
+- **Shipped:** UX-01..04, 10..19, 22 — plus a big calc-engine expansion (IFERROR,
+  AND/OR/NOT, COUNTIF/SUMIF/AVERAGEIF, CONCAT/text/INT/MOD/POWER/SQRT).
+- **Next (dependency order):** UX-21 merge cells (+ render) → UX-27 freeze panes
+  render → UX-20 vertical align → UX-23 keyboard nav (Ctrl+arrow/Home/PgUp) →
+  UX-25 drag-fill → UX-28 find & replace → UX-46 PNG borders. Merged-cells and
+  frozen-panes are the current fidelity trap (modelled + round-trip, editor
+  ignores them).
 
 See also [46-COMPETITIVE-PARITY-ANALYSIS.md](46-COMPETITIVE-PARITY-ANALYSIS.md)
 (the exhaustive 141-item competitive inventory, CP-001..CP-141, that this tracker

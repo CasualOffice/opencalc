@@ -274,6 +274,66 @@ pub fn session_range_stats(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> 
     .unwrap_or_else(|| "{\"count\":0,\"numeric\":0}".to_owned())
 }
 
+fn commit_edit(op: EditOperation) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session.edit(op).map_err(js)
+    })
+}
+
+/// Insert `count` blank rows before `at` (undoable; rewrites formula refs).
+#[wasm_bindgen]
+pub fn session_insert_rows(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    commit_edit(EditOperation::InsertRows { sheet, at, count })
+}
+
+/// Delete `count` rows starting at `at` (undoable; rewrites formula refs).
+#[wasm_bindgen]
+pub fn session_delete_rows(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    commit_edit(EditOperation::DeleteRows { sheet, at, count })
+}
+
+/// Insert `count` blank columns before `at` (undoable; rewrites formula refs).
+#[wasm_bindgen]
+pub fn session_insert_columns(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    commit_edit(EditOperation::InsertColumns { sheet, at, count })
+}
+
+/// Delete `count` columns starting at `at` (undoable; rewrites formula refs).
+#[wasm_bindgen]
+pub fn session_delete_columns(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    commit_edit(EditOperation::DeleteColumns { sheet, at, count })
+}
+
+/// Set (or clear, with empty) the font family across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_set_font_name(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    name: &str,
+) -> Result<(), JsError> {
+    let font = (!name.is_empty()).then(|| name.to_owned());
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.font_name = font.clone())
+}
+
+/// Set (or clear, with 0) the font size in points across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_set_font_size(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    points: f64,
+) -> Result<(), JsError> {
+    let hp = (points > 0.0).then(|| (points * 2.0).round() as u32);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.font_size_hp = hp)
+}
+
 /// The sheet names as a JSON array of strings.
 #[wasm_bindgen]
 pub fn session_sheet_names() -> String {
@@ -562,6 +622,12 @@ pub fn session_cells(
             if style.is_some_and(|s| s.wrap) {
                 extra.push_str(",\"w\":1");
             }
+            if let Some(fname) = style.and_then(|s| s.font_name.as_deref()) {
+                extra.push_str(&format!(",\"fn\":{}", json_string(fname)));
+            }
+            if let Some(hp) = style.and_then(|s| s.font_size_hp) {
+                extra.push_str(&format!(",\"fs\":{}", hp as f64 / 2.0));
+            }
             if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
             }
@@ -840,6 +906,12 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
         }
         if st.wrap {
             parts.push("\"w\":1".to_owned());
+        }
+        if let Some(fname) = &st.font_name {
+            parts.push(format!("\"fn\":{}", json_string(fname)));
+        }
+        if let Some(hp) = st.font_size_hp {
+            parts.push(format!("\"fs\":{}", hp as f64 / 2.0));
         }
         if let Some(al) = st.align {
             parts.push(format!("\"al\":\"{}\"", al.ooxml()));
