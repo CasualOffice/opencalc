@@ -47,7 +47,8 @@ evidence").
 | Formulas (AST) | ● | ● | ✗ | — | ● | P2-001 |
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
 | Number formats | ● | ● | ● | ✗ | — | E-001 (SetStyle) |
-| Styles: font/fill/border | ✗ | ✗ | ✗ | ✗ | — | P1A-003b |
+| Styles: bold/italic/font color/fill | ● | ✗ | ~ | ~ | — | P1A-003b |
+| Styles: borders | ✗ | ✗ | ✗ | ✗ | — | later |
 | Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Column/row sizing | ✗ | ✗ | ✗ | ✗ | — | P1C |
 | Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |

@@ -15,18 +15,39 @@ use crate::ids::{Id, StyleId};
 const STYLE_NAMESPACE: u64 = 0x5354_5900_0000_0000; // "STY\0"
 
 /// A cell's formatting. Extensible; equal styles are deduplicated in the table.
+/// Colors are `"RRGGBB"` hex strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Style {
     /// The number-format code (e.g. `0.00`, `mm-dd-yy`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    /// Bold text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    /// Italic text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    /// Font color as `RRGGBB` hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    /// Solid fill (background) color as `RRGGBB` hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Style {
     /// Whether this style carries no formatting.
     pub fn is_default(&self) -> bool {
         self.number_format.is_none()
+            && !self.bold
+            && !self.italic
+            && self.font_color.is_none()
+            && self.fill_color.is_none()
     }
 }
 

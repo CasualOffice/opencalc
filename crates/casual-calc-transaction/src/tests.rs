@@ -46,6 +46,7 @@ fn set_style_preserves_value() {
     let at = CellRef::new(0, 0);
     let style = wb.intern_style(Style {
         number_format: Some("0.00".to_owned()),
+        ..Style::default()
     });
     apply(
         &mut wb,

@@ -18,7 +18,7 @@ use casual_calc_import::import_package;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
-use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook};
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
 use wasm_bindgen::prelude::*;
@@ -182,15 +182,30 @@ pub fn session_cells(
                 continue;
             }
             let text = display_text(wb, cell);
-            if text.is_empty() {
+            let style = cell.style.and_then(|id| wb.styles.get(id));
+            let fill = style.and_then(|s| s.fill_color.clone()).unwrap_or_default();
+            if text.is_empty() && fill.is_empty() {
                 continue;
             }
             let align = match cell.value {
                 CellValue::Number(_) | CellValue::Bool(_) | CellValue::Error(_) => "r",
                 _ => "l",
             };
+            let mut extra = String::new();
+            if style.is_some_and(|s| s.bold) {
+                extra.push_str(",\"b\":1");
+            }
+            if style.is_some_and(|s| s.italic) {
+                extra.push_str(",\"i\":1");
+            }
+            if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
+                extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
+            }
+            if !fill.is_empty() {
+                extra.push_str(&format!(",\"bg\":{}", json_string(&fill)));
+            }
             items.push(format!(
-                "{{\"r\":{},\"c\":{},\"t\":{},\"a\":\"{align}\"}}",
+                "{{\"r\":{},\"c\":{},\"t\":{},\"a\":\"{align}\"{extra}}}",
                 at.row,
                 at.col,
                 json_string(&text)
@@ -230,6 +245,46 @@ pub fn session_set_cell(sheet: usize, row: u32, col: u32, input: &str) -> Result
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let op = build_set_op(session, sheet, CellRef::new(row, col), input);
         session.edit(op).map_err(js)
+    })
+}
+
+/// Apply bold + an optional solid fill (`RRGGBB` hex, empty for none) to a cell,
+/// preserving its value/formula and number format.
+#[wasm_bindgen]
+pub fn session_set_style(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    bold: bool,
+    fill: &str,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let at = CellRef::new(row, col);
+        let number_format = session
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cells.get(at))
+            .and_then(|c| c.style)
+            .and_then(|id| session.workbook().styles.get(id))
+            .and_then(|s| s.number_format.clone());
+        let style = Style {
+            number_format,
+            bold,
+            italic: false,
+            font_color: None,
+            fill_color: (!fill.is_empty()).then(|| fill.to_owned()),
+        };
+        let id = session.workbook_mut().intern_style(style);
+        session
+            .edit(EditOperation::SetStyle {
+                sheet,
+                at,
+                style: Some(id),
+            })
+            .map_err(js)
     })
 }
 

@@ -9,7 +9,7 @@ let COL_W = 64;
 let ROW_H = 20;
 
 const state = { sheet: 0, firstRow: 0, firstCol: 0, sel: { row: 0, col: 0 }, editing: false };
-const DEFAULT_SCROLL_DAMP = 0.4; // rows-per-wheel factor; tunable in settings
+const DEFAULT_SCROLL_DAMP = 0.8; // rows-per-wheel factor; tunable in settings
 let scrollDamp = DEFAULT_SCROLL_DAMP;
 
 const canvas = document.getElementById("grid");
@@ -119,16 +119,27 @@ function draw() {
   const items = JSON.parse(
     wasm.session_cells(state.sheet, state.firstRow, state.firstCol, lastRow, lastCol),
   );
-  ctx.fillStyle = colors.fg;
-  ctx.font = "13px system-ui, sans-serif";
   ctx.textBaseline = "middle";
+  // Fills first (behind text), so a colored empty cell still shows.
   for (const it of items) {
+    if (!it.bg) continue;
+    const x = HW + (it.c - state.firstCol) * COL_W;
+    const y = HH + (it.r - state.firstRow) * ROW_H;
+    ctx.fillStyle = "#" + it.bg;
+    ctx.fillRect(x + 1, y + 1, COL_W - 1, ROW_H - 1);
+  }
+  for (const it of items) {
+    if (!it.t) continue;
     const x = HW + (it.c - state.firstCol) * COL_W;
     const y = HH + (it.r - state.firstRow) * ROW_H + ROW_H / 2;
     ctx.save();
     ctx.beginPath();
     ctx.rect(x, y - ROW_H / 2, COL_W, ROW_H);
     ctx.clip();
+    const weight = it.b ? "600 " : "";
+    const slant = it.i ? "italic " : "";
+    ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
+    ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
     if (it.a === "r") {
       ctx.textAlign = "right";
       ctx.fillText(it.t, x + COL_W - 5, y);
@@ -372,7 +383,13 @@ function seed() {
   set(1, 0, "Widget"); set(1, 1, "3"); set(1, 2, "4.50"); set(1, 3, "=B2*C2");
   set(2, 0, "Gadget"); set(2, 1, "5"); set(2, 2, "2"); set(2, 3, "=B3*C3");
   set(3, 0, "Gizmo"); set(3, 1, "2"); set(3, 2, "9.99"); set(3, 3, "=B4*C4");
-  set(4, 3, "=SUM(D2:D4)"); set(4, 0, "Total");
+  set(4, 0, "Total"); set(4, 3, "=SUM(D2:D4)");
+  // A styled header row + a highlighted total.
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const headerFill = dark ? "24303f" : "e8eef7";
+  for (let c = 0; c < 4; c++) wasm.session_set_style(0, 0, c, true, headerFill);
+  wasm.session_set_style(0, 4, 3, true, "");
+  wasm.session_set_style(0, 4, 0, true, "");
   select(0, 0);
 }
 

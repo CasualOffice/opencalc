@@ -26,6 +26,13 @@ the design doc or ADR that motivated it.
   `session_cells`, `session_cell_input`, `session_set_cell`, `session_undo`/`redo`,
   `session_save`) over a thread-local `WorkbookSession`.
 
+- Cell styling (P1A-003b): `casual-calc-model` `Style` gains `bold`, `italic`,
+  `font_color`, and `fill_color`; `casual-calc-import` parses `styles.xml` fonts
+  and solid fills and links them through `cellXfs`; the editor renders bold/
+  italic, font color, and cell fill; a `session_set_style` WASM edit applies
+  bold + fill (used to style the demo's header row). Borders and export of
+  fonts/fills are follow-ups. The editor's default scroll speed is 0.80.
+
 **Fixed**
 
 - `casual-calc-layout` number display: `General` format now rounds to 15

@@ -25,7 +25,7 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
     Cell, CellValue, DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, SheetView, StringId,
-    Style, Workbook,
+    Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -72,14 +72,14 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         StyleSheet::default()
     };
     let xf_style_ids: Vec<Option<_>> = stylesheet
-        .xf_number_formats
+        .xf_styles
         .iter()
-        .map(|code| {
-            code.clone().map(|number_format| {
-                workbook.intern_style(Style {
-                    number_format: Some(number_format),
-                })
-            })
+        .map(|style| {
+            if style.is_default() {
+                None
+            } else {
+                Some(workbook.intern_style(style.clone()))
+            }
         })
         .collect();
 

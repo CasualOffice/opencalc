@@ -123,6 +123,7 @@ fn display_text_applies_the_cell_number_format() {
     let mut wb = Workbook::new(Id::from_parts(1, 1));
     let percent = wb.intern_style(Style {
         number_format: Some("0%".to_owned()),
+        ..Style::default()
     });
     let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
     let mut cell = Cell::value(CellValue::Number(0.5));
