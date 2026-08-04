@@ -11,6 +11,16 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Style round-trip: export fonts & fills
+
+**Added**
+
+- `casual-calc-export` now emits `<fonts>`, `<fills>`, and the full `cellXfs`
+  (fontId/fillId/numFmtId) — deduplicating fonts, solid fills, and number-format
+  codes — so **bold/italic/font-color/fill round-trip** through save→reopen. The
+  semantic fixed-point test now includes a bold + red-font + yellow-fill cell.
+  The fidelity ledger's Round-trip column for styling is now `●`.
+
 ### 2026-08-05 — Editor: toolbar, shortcuts, range selection
 
 **Added**

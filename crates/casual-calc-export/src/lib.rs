@@ -177,25 +177,108 @@ fn shared_strings_xml(workbook: &Workbook) -> String {
 
 fn styles_xml(workbook: &Workbook) -> String {
     let styles: Vec<_> = workbook.styles.iter().collect();
+
+    // Deduplicate fonts, solid fills, and custom number formats, and record the
+    // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
+    // 1 are reserved (none / gray125); font id 0 is the default font.
+    let mut fonts: Vec<(bool, bool, Option<String>)> = vec![(false, false, None)];
+    let mut fills: Vec<String> = Vec::new();
+    let mut num_codes: Vec<String> = Vec::new();
+    let mut per_style: Vec<(usize, usize, u32)> = Vec::with_capacity(styles.len());
+
+    for style in &styles {
+        let font_key = (style.bold, style.italic, style.font_color.clone());
+        let font_id = fonts
+            .iter()
+            .position(|f| f == &font_key)
+            .unwrap_or_else(|| {
+                fonts.push(font_key.clone());
+                fonts.len() - 1
+            });
+        let fill_id = match &style.fill_color {
+            Some(color) => {
+                2 + fills.iter().position(|f| f == color).unwrap_or_else(|| {
+                    fills.push(color.clone());
+                    fills.len() - 1
+                })
+            }
+            None => 0,
+        };
+        let num_fmt_id = match &style.number_format {
+            Some(code) => {
+                let idx = num_codes.iter().position(|c| c == code).unwrap_or_else(|| {
+                    num_codes.push(code.clone());
+                    num_codes.len() - 1
+                });
+                FIRST_CUSTOM_NUM_FMT + idx as u32
+            }
+            None => 0,
+        };
+        per_style.push((font_id, fill_id, num_fmt_id));
+    }
+
     let mut s = format!("{DECL}<styleSheet xmlns=\"{NS_MAIN}\">");
-    s.push_str(&format!("<numFmts count=\"{}\">", styles.len()));
-    for (j, style) in styles.iter().enumerate() {
-        if let Some(code) = &style.number_format {
+    if !num_codes.is_empty() {
+        s.push_str(&format!("<numFmts count=\"{}\">", num_codes.len()));
+        for (i, code) in num_codes.iter().enumerate() {
             s.push_str(&format!(
                 "<numFmt numFmtId=\"{}\" formatCode=\"{}\"/>",
-                FIRST_CUSTOM_NUM_FMT + j as u32,
+                FIRST_CUSTOM_NUM_FMT + i as u32,
                 escape_attr(code)
             ));
         }
+        s.push_str("</numFmts>");
     }
-    s.push_str("</numFmts>");
-    // cellXfs: index 0 = General, then one xf per interned style (index j+1).
-    s.push_str(&format!("<cellXfs count=\"{}\">", styles.len() + 1));
-    s.push_str("<xf numFmtId=\"0\"/>");
-    for j in 0..styles.len() {
+
+    s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
+    for (bold, italic, color) in &fonts {
+        s.push_str("<font>");
+        if *bold {
+            s.push_str("<b/>");
+        }
+        if *italic {
+            s.push_str("<i/>");
+        }
+        if let Some(c) = color {
+            s.push_str(&format!("<color rgb=\"FF{c}\"/>"));
+        }
+        s.push_str("<sz val=\"11\"/><name val=\"Calibri\"/></font>");
+    }
+    s.push_str("</fonts>");
+
+    s.push_str(&format!("<fills count=\"{}\">", fills.len() + 2));
+    s.push_str("<fill><patternFill patternType=\"none\"/></fill>");
+    s.push_str("<fill><patternFill patternType=\"gray125\"/></fill>");
+    for color in &fills {
         s.push_str(&format!(
-            "<xf numFmtId=\"{}\" applyNumberFormat=\"1\"/>",
-            FIRST_CUSTOM_NUM_FMT + j as u32
+            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF{color}\"/></patternFill></fill>"
+        ));
+    }
+    s.push_str("</fills>");
+
+    s.push_str("<borders count=\"1\"><border/></borders>");
+    s.push_str("<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>");
+
+    s.push_str(&format!("<cellXfs count=\"{}\">", styles.len() + 1));
+    s.push_str("<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>");
+    for (font_id, fill_id, num_fmt_id) in &per_style {
+        let apply_num = if *num_fmt_id != 0 {
+            " applyNumberFormat=\"1\""
+        } else {
+            ""
+        };
+        let apply_font = if *font_id != 0 {
+            " applyFont=\"1\""
+        } else {
+            ""
+        };
+        let apply_fill = if *fill_id != 0 {
+            " applyFill=\"1\""
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "<xf numFmtId=\"{num_fmt_id}\" fontId=\"{font_id}\" fillId=\"{fill_id}\" borderId=\"0\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}/>"
         ));
     }
     s.push_str("</cellXfs></styleSheet>");
