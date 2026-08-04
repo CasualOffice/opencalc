@@ -5,8 +5,12 @@
 //! evaluation with circular-reference detection, and recomputes each formula
 //! cell's **cached value**. Supported: arithmetic/comparison/concat operators,
 //! unary `+`/`-`/`%`, cell and range references (same- and cross-sheet), defined
-//! names, and a starter function library (`SUM`, `AVERAGE`, `MIN`, `MAX`,
-//! `COUNT`, `IF`, `ABS`, `ROUND`).
+//! names, and a function library: math/stats (`SUM`, `AVERAGE`, `COUNT`,
+//! `COUNTA`, `MIN`, `MAX`, `ABS`, `INT`, `MOD`, `POWER`, `SQRT`, `ROUND`),
+//! logical (`IF`, `IFERROR`, `AND`, `OR`, `NOT`), criteria aggregates
+//! (`COUNTIF`, `SUMIF`, `AVERAGEIF`), and text
+//! (`CONCATENATE`/`CONCAT`, `LEN`, `LEFT`, `RIGHT`, `MID`, `UPPER`, `LOWER`,
+//! `TRIM`).
 //!
 //! Nothing depends on this crate except the host bridges — the model, layout,
 //! and render layers build without it (they read cached values). A full

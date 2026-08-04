@@ -1,6 +1,7 @@
 //! Transaction tests: inverses, atomic batches, undo/redo, and edit→recalc.
 
-use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook};
+use casual_calc_formula::parse;
+use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook};
 
 use crate::{History, Operation, apply};
 
@@ -252,4 +253,490 @@ fn edit_then_recalc_updates_dependents() {
     casual_calc_eval::recalculate(&mut wb);
 
     assert_eq!(value_at(&wb, CellRef::new(1, 0)), CellValue::Number(60.0));
+}
+
+// ---------------------------------------------------------------------------
+// Structural operations: insert/delete rows & columns with ref rewriting.
+// ---------------------------------------------------------------------------
+
+/// A two-sheet workbook, tabs `S` then `T`.
+fn workbook_two() -> Workbook {
+    let mut wb = workbook();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 2)), "T"));
+    wb
+}
+
+/// Put a literal number cell at `(row, col)` on sheet `sheet`.
+fn set_num(wb: &mut Workbook, sheet: usize, row: u32, col: u32, n: f64) {
+    wb.sheets[sheet]
+        .cells
+        .set(CellRef::new(row, col), Cell::value(CellValue::Number(n)));
+}
+
+/// Put a formula cell (parsed from `text`) at `(row, col)` on sheet `sheet`.
+fn set_formula(wb: &mut Workbook, sheet: usize, row: u32, col: u32, text: &str) {
+    let handle = wb.store_formula(parse(text).unwrap());
+    let mut cell = Cell::value(CellValue::Empty);
+    cell.formula = Some(handle);
+    wb.sheets[sheet].cells.set(CellRef::new(row, col), cell);
+}
+
+/// The canonical text of the formula at `(row, col)` on sheet `sheet`, if any.
+fn formula_text(wb: &Workbook, sheet: usize, row: u32, col: u32) -> Option<String> {
+    let handle = wb.sheets[sheet]
+        .cells
+        .get(CellRef::new(row, col))?
+        .formula?;
+    Some(wb.formula(handle).unwrap().to_string())
+}
+
+/// The observable, arena-independent state of a workbook: per sheet, the name
+/// and every populated cell as (address, value, style, formula-text). Two
+/// workbooks with this equal are indistinguishable to any reader; only the
+/// (append-only, harmless) formula arena may differ, which round-trips must
+/// ignore.
+#[derive(Debug, PartialEq)]
+struct CellSnap {
+    value: CellValue,
+    style: Option<StyleId>,
+    formula: Option<String>,
+}
+
+fn observable(wb: &Workbook) -> Vec<(String, Vec<(CellRef, CellSnap)>)> {
+    wb.sheets
+        .iter()
+        .map(|s| {
+            let cells = s
+                .cells
+                .iter()
+                .map(|(addr, cell)| {
+                    (
+                        addr,
+                        CellSnap {
+                            value: cell.value.clone(),
+                            style: cell.style,
+                            formula: cell.formula.map(|h| wb.formula(h).unwrap().to_string()),
+                        },
+                    )
+                })
+                .collect();
+            (s.name.clone(), cells)
+        })
+        .collect()
+}
+
+/// Round trip via observable equivalence (tolerates harmless arena growth).
+fn assert_round_trip(mut wb: Workbook, op: Operation) {
+    let before = observable(&wb);
+    let inverse = apply(&mut wb, op).unwrap();
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(observable(&wb), before);
+}
+
+/// Round trip via strict `Workbook` equality (valid only when no formula is
+/// rewritten, so the arena never grows).
+fn assert_round_trip_strict(mut wb: Workbook, op: Operation) {
+    let before = wb.clone();
+    let inverse = apply(&mut wb, op).unwrap();
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb, before);
+}
+
+#[test]
+fn insert_rows_shifts_cells_down() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 2, 0, 3.0); // A3
+
+    let inverse = apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0)); // A1 stays
+    assert!(wb.sheets[0].cells.get(CellRef::new(2, 0)).is_none()); // old A3 empty
+    assert_eq!(value_at(&wb, CellRef::new(4, 0)), CellValue::Number(3.0)); // A3 -> A5
+    assert_eq!(
+        inverse,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 1,
+            count: 2
+        }
+    );
+}
+
+#[test]
+fn delete_rows_shifts_cells_up_and_drops_band() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 1, 0, 2.0); // A2 (deleted)
+    set_num(&mut wb, 0, 3, 0, 4.0); // A4
+
+    let inverse = apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0)); // A1 stays
+    assert_eq!(value_at(&wb, CellRef::new(1, 0)), CellValue::Empty); // A2 gone
+    assert_eq!(value_at(&wb, CellRef::new(2, 0)), CellValue::Number(4.0)); // A4 -> A3
+    // Delete's inverse is a Batch that begins with the re-insert.
+    match inverse {
+        Operation::Batch(ops) => assert_eq!(
+            ops[0],
+            Operation::InsertRows {
+                sheet: 0,
+                at: 1,
+                count: 1
+            }
+        ),
+        other => panic!("expected Batch, got {other:?}"),
+    }
+}
+
+#[test]
+fn insert_columns_shifts_cells_right() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 0, 2, 3.0); // C1
+
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0)); // A1 stays
+    assert_eq!(value_at(&wb, CellRef::new(0, 4)), CellValue::Number(3.0)); // C1 -> E1
+}
+
+#[test]
+fn delete_columns_shifts_cells_left_and_drops_band() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 0, 1, 2.0); // B1 (deleted)
+    set_num(&mut wb, 0, 0, 3, 4.0); // D1
+
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0)); // A1 stays
+    assert_eq!(value_at(&wb, CellRef::new(0, 1)), CellValue::Empty); // B1 gone
+    assert_eq!(value_at(&wb, CellRef::new(0, 2)), CellValue::Number(4.0)); // D1 -> C1
+}
+
+#[test]
+fn relative_and_absolute_refs_both_shift() {
+    let mut wb = workbook();
+    set_formula(&mut wb, 0, 0, 0, "A5+$A$5");
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    // The formula cell itself moved A1 -> A3; both refs shifted A5 -> A7.
+    assert_eq!(
+        formula_text(&wb, 0, 2, 0).as_deref(),
+        Some("(A7+$A$7)"),
+        "relative and absolute row refs both shift on insert"
+    );
+}
+
+#[test]
+fn ref_onto_deleted_row_becomes_ref_error() {
+    let mut wb = workbook();
+    set_formula(&mut wb, 0, 0, 0, "A5+B1");
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    // A5 sat on the deleted row -> #REF!; B1 (row 0) is untouched.
+    assert_eq!(formula_text(&wb, 0, 0, 0).as_deref(), Some("(#REF!+B1)"));
+}
+
+#[test]
+fn range_partial_overlap_shrinks() {
+    let mut wb = workbook();
+    set_formula(&mut wb, 0, 0, 5, "A1:A5"); // rows 0..=4
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 3,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    // Row 3 removed from the tail: A1:A5 -> A1:A4.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("A1:A4"));
+}
+
+#[test]
+fn range_deleted_low_endpoint_clamps() {
+    let mut wb = workbook();
+    set_formula(&mut wb, 0, 0, 5, "A3:A6"); // rows 2..=5
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    // Rows 2,3 deleted; surviving rows 4,5 collapse to rows 2,3: A3:A4.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("A3:A4"));
+}
+
+#[test]
+fn range_full_overlap_becomes_ref_error() {
+    let mut wb = workbook();
+    set_formula(&mut wb, 0, 0, 5, "A3:A4"); // rows 2..=3
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    // The whole range lay inside the deleted band -> #REF!.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("#REF!"));
+}
+
+#[test]
+fn cross_sheet_refs_rewrite_and_others_are_left_alone() {
+    let mut wb = workbook_two();
+    // On S (sheet 0): an unqualified ref targeting S's own grid.
+    set_formula(&mut wb, 0, 0, 0, "A5");
+    // On T (sheet 1): a qualified ref into S, plus an unqualified local ref.
+    set_formula(&mut wb, 1, 0, 0, "S!A5");
+    set_formula(&mut wb, 1, 0, 1, "A5");
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    // S's own formula moved A1 -> A2 and its ref shifted A5 -> A6.
+    assert_eq!(formula_text(&wb, 0, 1, 0).as_deref(), Some("A6"));
+    // T's cross-sheet ref into S shifted; T is not moved geometrically.
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("S!A6"));
+    // T's local unqualified ref targets T, not S -> untouched.
+    assert_eq!(formula_text(&wb, 1, 0, 1).as_deref(), Some("A5"));
+}
+
+#[test]
+fn insert_rows_round_trips() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    set_num(&mut wb, 0, 3, 1, 4.0);
+    set_num(&mut wb, 0, 7, 2, 8.0);
+    assert_round_trip_strict(
+        wb.clone(),
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    );
+    assert_round_trip(
+        wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    );
+}
+
+#[test]
+fn delete_rows_round_trips() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    set_num(&mut wb, 0, 3, 1, 4.0); // inside the deleted band
+    set_num(&mut wb, 0, 7, 2, 8.0);
+    let op = Operation::DeleteRows {
+        sheet: 0,
+        at: 2,
+        count: 3,
+    };
+    assert_round_trip_strict(wb.clone(), op.clone());
+    assert_round_trip(wb, op);
+}
+
+#[test]
+fn insert_columns_round_trips() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    set_num(&mut wb, 0, 1, 3, 4.0);
+    set_num(&mut wb, 0, 2, 7, 8.0);
+    let op = Operation::InsertColumns {
+        sheet: 0,
+        at: 2,
+        count: 3,
+    };
+    assert_round_trip_strict(wb.clone(), op.clone());
+    assert_round_trip(wb, op);
+}
+
+#[test]
+fn delete_columns_round_trips() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    set_num(&mut wb, 0, 1, 3, 4.0); // inside the deleted band
+    set_num(&mut wb, 0, 2, 7, 8.0);
+    let op = Operation::DeleteColumns {
+        sheet: 0,
+        at: 2,
+        count: 3,
+    };
+    assert_round_trip_strict(wb.clone(), op.clone());
+    assert_round_trip(wb, op);
+}
+
+#[test]
+fn insert_rows_round_trips_with_formulas() {
+    let mut wb = workbook_two();
+    set_num(&mut wb, 0, 0, 0, 10.0);
+    set_formula(&mut wb, 0, 6, 0, "A1+A5"); // A1 stays, A5 shifts
+    set_formula(&mut wb, 0, 6, 1, "A3:A8"); // range straddling the insert
+    set_formula(&mut wb, 1, 0, 0, "S!A5"); // cross-sheet ref into S
+    assert_round_trip(
+        wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    );
+}
+
+#[test]
+fn delete_rows_round_trips_with_formulas_even_through_ref_errors() {
+    let mut wb = workbook_two();
+    set_num(&mut wb, 0, 0, 0, 10.0); // A1 (kept, no formula)
+    set_num(&mut wb, 0, 4, 0, 50.0); // A5 (deleted)
+    set_formula(&mut wb, 0, 0, 1, "A5"); // B1 -> #REF! after delete
+    set_formula(&mut wb, 0, 6, 0, "A1:A9"); // range shrinks
+    set_formula(&mut wb, 1, 0, 0, "S!A5"); // cross-sheet -> #REF! after delete
+    // The delete makes references collapse to #REF!, yet the snapshot-based
+    // inverse restores every original formula exactly.
+    assert_round_trip(
+        wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 1,
+        },
+    );
+}
+
+#[test]
+fn insert_columns_round_trips_with_formulas() {
+    let mut wb = workbook_two();
+    set_num(&mut wb, 0, 0, 0, 10.0);
+    set_formula(&mut wb, 0, 0, 6, "A1+E1"); // A1 stays, E1 shifts
+    set_formula(&mut wb, 1, 0, 0, "S!E1"); // cross-sheet ref into S
+    assert_round_trip(
+        wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    );
+}
+
+#[test]
+fn delete_columns_round_trips_with_formulas() {
+    let mut wb = workbook_two();
+    set_num(&mut wb, 0, 0, 0, 10.0);
+    set_num(&mut wb, 0, 0, 4, 50.0); // E1 (deleted)
+    set_formula(&mut wb, 0, 1, 0, "E1"); // -> #REF! after delete
+    set_formula(&mut wb, 0, 2, 0, "A1:I1"); // range shrinks
+    set_formula(&mut wb, 1, 0, 0, "S!E1"); // cross-sheet -> #REF!
+    assert_round_trip(
+        wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 4,
+            count: 1,
+        },
+    );
+}
+
+#[test]
+fn structural_op_on_missing_sheet_errors() {
+    let mut wb = workbook();
+    assert!(
+        apply(
+            &mut wb,
+            Operation::InsertRows {
+                sheet: 9,
+                at: 0,
+                count: 1
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        apply(
+            &mut wb,
+            Operation::DeleteColumns {
+                sheet: 9,
+                at: 0,
+                count: 1
+            }
+        )
+        .is_err()
+    );
 }

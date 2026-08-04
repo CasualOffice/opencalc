@@ -9,10 +9,10 @@ publish = false
 
 [dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
+casual-calc-formula = { path = "../casual-calc-formula" }
 
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
-casual-calc-formula = { path = "../casual-calc-formula" }
 
 [lints]
 workspace = true
