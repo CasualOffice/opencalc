@@ -201,6 +201,115 @@ fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -
     .unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Absolute pixel offset (96 dpi) of a column's left edge from column 0.
+#[wasm_bindgen]
+pub fn session_col_offset_px(sheet: usize, col: u32) -> i32 {
+    with_session(|s| geometry_of(s, sheet).columns.offset(col) as i32 * 96 / 1440).unwrap_or(0)
+}
+
+/// Absolute pixel offset (96 dpi) of a row's top edge from row 0.
+#[wasm_bindgen]
+pub fn session_row_offset_px(sheet: usize, row: u32) -> i32 {
+    with_session(|s| geometry_of(s, sheet).rows.offset(row) as i32 * 96 / 1440).unwrap_or(0)
+}
+
+/// The column containing absolute pixel position `px` (clamped at 0).
+#[wasm_bindgen]
+pub fn session_col_at_px(sheet: usize, px: i32) -> u32 {
+    with_session(|s| {
+        geometry_of(s, sheet)
+            .columns
+            .line_at(px.max(0) as i64 * 1440 / 96)
+    })
+    .unwrap_or(0)
+}
+
+/// The row containing absolute pixel position `px` (clamped at 0).
+#[wasm_bindgen]
+pub fn session_row_at_px(sheet: usize, px: i32) -> u32 {
+    with_session(|s| {
+        geometry_of(s, sheet)
+            .rows
+            .line_at(px.max(0) as i64 * 1440 / 96)
+    })
+    .unwrap_or(0)
+}
+
+/// Set a column's width to `px` device pixels (undoable).
+#[wasm_bindgen]
+pub fn session_set_col_width(sheet: usize, col: u32, px: u32) -> Result<(), JsError> {
+    edit_axis(
+        sheet,
+        EditOperation::SetColumnWidth {
+            sheet,
+            col,
+            width: Some(resize_px_to_twips(px)),
+        },
+    )
+}
+
+/// Set a row's height to `px` device pixels (undoable).
+#[wasm_bindgen]
+pub fn session_set_row_height(sheet: usize, row: u32, px: u32) -> Result<(), JsError> {
+    edit_axis(
+        sheet,
+        EditOperation::SetRowHeight {
+            sheet,
+            row,
+            height: Some(resize_px_to_twips(px)),
+        },
+    )
+}
+
+/// Clear a column's explicit width, reverting it to the sheet default (undoable).
+#[wasm_bindgen]
+pub fn session_clear_col_width(sheet: usize, col: u32) -> Result<(), JsError> {
+    edit_axis(
+        sheet,
+        EditOperation::SetColumnWidth {
+            sheet,
+            col,
+            width: None,
+        },
+    )
+}
+
+/// Clear a row's explicit height, reverting it to the sheet default (undoable).
+#[wasm_bindgen]
+pub fn session_clear_row_height(sheet: usize, row: u32) -> Result<(), JsError> {
+    edit_axis(
+        sheet,
+        EditOperation::SetRowHeight {
+            sheet,
+            row,
+            height: None,
+        },
+    )
+}
+
+/// Convert device pixels (96 dpi) to twips, floored at a sensible minimum so a
+/// column/row can never be dragged to zero and vanish.
+fn resize_px_to_twips(px: u32) -> i64 {
+    (px.max(8) as i64) * 1440 / 96
+}
+
+/// The grid geometry (column widths / row heights) of a sheet.
+fn geometry_of(s: &WorkbookSession, sheet: usize) -> GridGeometry {
+    s.workbook()
+        .sheets
+        .get(sheet)
+        .map(GridGeometry::for_sheet)
+        .unwrap_or_default()
+}
+
+fn edit_axis(_sheet: usize, op: EditOperation) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session.edit(op).map_err(js)
+    })
+}
+
 /// Visible cells in `[first_row..=last_row] × [first_col..=last_col]` as a JSON
 /// array of `{ r, c, t, a }` (row, col, display text, align: "l"|"r").
 #[wasm_bindgen]

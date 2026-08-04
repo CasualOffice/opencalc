@@ -11,6 +11,27 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Editor: fluid scrolling + drag-to-resize (P1C-004)
+
+**Added**
+
+- **Interactive column/row resize.** Two new undoable operations,
+  `Operation::SetColumnWidth` and `SetRowHeight` (each with `None` = revert to
+  default), with inverse-preserving `apply`. WASM exposes
+  `session_set_col_width`/`session_set_row_height` (+ `_clear_` variants) plus
+  `session_col_offset_px`/`session_row_offset_px`/`session_col_at_px`/
+  `session_row_at_px`. The editor arms a `col-resize`/`row-resize` cursor when the
+  pointer nears a header boundary, previews the new size live under the cursor,
+  commits one undoable edit on release, and resets to default on double-click.
+
+**Changed**
+
+- **Fluid pixel scrolling.** The editor now scrolls by an absolute content pixel
+  offset (`scrollX/scrollY`) instead of snapping a whole row/column per wheel
+  step, so the grid glides smoothly and the first visible line can be partially
+  clipped. Grid body and header labels are clipped so partial first cells never
+  bleed into the header strips.
+
 ### 2026-08-05 — Column widths & row heights (P1C-004)
 
 **Added**

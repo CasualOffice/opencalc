@@ -10,12 +10,15 @@ let ROW_H = 20;
 
 const state = {
   sheet: 0,
-  firstRow: 0,
-  firstCol: 0,
+  scrollX: 0, // absolute content pixel offset (left of the viewport)
+  scrollY: 0, // absolute content pixel offset (top of the viewport)
+  firstRow: 0, // first visible row (derived from scrollY in measure())
+  firstCol: 0, // first visible column (derived from scrollX in measure())
   sel: { row: 0, col: 0 }, // focus cell
   anchor: { row: 0, col: 0 }, // selection anchor
   dragging: false,
   editing: false,
+  resize: null, // active header resize: { axis:"col"|"row", index, previewPx }
 };
 
 // The normalized selection rectangle (inclusive) from anchor..focus.
@@ -76,25 +79,49 @@ const geo = {
 };
 
 const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
+const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
 
-// Measure the wrap, (re)build `geo` from engine sizes, and return `{ w, h }`.
+// Measure the wrap, (re)build `geo` from engine sizes at the current pixel
+// scroll, and return `{ w, h }`. Scrolling is fluid: `scrollX/scrollY` are
+// absolute content offsets, so the first visible line can be partially clipped.
 function measure() {
   const rect = wrap.getBoundingClientRect();
   const v = { w: rect.width, h: rect.height };
+  if (!wasm) {
+    geo.colW = geo.colX = geo.rowH = geo.rowY = [];
+    geo.cols = geo.rows = 0;
+    return v;
+  }
+  // Which line sits at the viewport edge, and by how many pixels it's clipped.
+  state.firstCol = wasm.session_col_at_px(state.sheet, Math.round(state.scrollX));
+  state.firstRow = wasm.session_row_at_px(state.sheet, Math.round(state.scrollY));
+  const subX = state.scrollX - wasm.session_col_offset_px(state.sheet, state.firstCol);
+  const subY = state.scrollY - wasm.session_row_offset_px(state.sheet, state.firstRow);
+
   const colCap = Math.max(4, Math.ceil((v.w - HW) / MIN_LINE) + 2);
   const rowCap = Math.max(4, Math.ceil((v.h - HH) / MIN_LINE) + 2);
-  geo.colW = wasm ? JSON.parse(wasm.session_col_px(state.sheet, state.firstCol, colCap)) : [];
-  geo.rowH = wasm ? JSON.parse(wasm.session_row_px(state.sheet, state.firstRow, rowCap)) : [];
+  geo.colW = JSON.parse(wasm.session_col_px(state.sheet, state.firstCol, colCap));
+  geo.rowH = JSON.parse(wasm.session_row_px(state.sheet, state.firstRow, rowCap));
+
+  // Live resize preview: override the dragged line's size before layout so the
+  // whole grid reflows under the cursor without committing an edit yet.
+  if (state.resize) {
+    const arr = state.resize.axis === "col" ? geo.colW : geo.rowH;
+    const base = state.resize.axis === "col" ? state.firstCol : state.firstRow;
+    const i = state.resize.index - base;
+    if (i >= 0 && i < arr.length) arr[i] = state.resize.previewPx;
+  }
+
   geo.colX = new Array(geo.colW.length);
   geo.rowY = new Array(geo.rowH.length);
-  let x = HW;
+  let x = HW - subX;
   geo.cols = 0;
   for (let i = 0; i < geo.colW.length; i++) {
     geo.colX[i] = x;
     if (x < v.w) geo.cols = i + 1;
     x += geo.colW[i] || COL_W;
   }
-  let y = HH;
+  let y = HH - subY;
   geo.rows = 0;
   for (let i = 0; i < geo.rowH.length; i++) {
     geo.rowY[i] = y;
@@ -102,6 +129,22 @@ function measure() {
     y += geo.rowH[i] || ROW_H;
   }
   return v;
+}
+
+// A header boundary under the pointer, if any (for resize hit-testing).
+function boundaryAt(px, py) {
+  if (py < HH && px >= HW) {
+    for (let i = 0; i < geo.colX.length; i++) {
+      if (Math.abs(px - (geo.colX[i] + geo.colW[i])) <= RESIZE_GRAB)
+        return { axis: "col", index: state.firstCol + i };
+    }
+  } else if (px < HW && py >= HH) {
+    for (let i = 0; i < geo.rowY.length; i++) {
+      if (Math.abs(py - (geo.rowY[i] + geo.rowH[i])) <= RESIZE_GRAB)
+        return { axis: "row", index: state.firstRow + i };
+    }
+  }
+  return null;
 }
 
 // Absolute column/row → visible-window index (or -1 if outside the fetched span).
@@ -150,10 +193,18 @@ function draw() {
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, v.w, v.h);
 
-  // Selection highlight (behind text): the whole range, then the focus cell.
   const rectSel = selRect();
   const sX = spanX(rectSel.c0, rectSel.c1, v);
   const sY = spanY(rectSel.r0, rectSel.r1, v);
+
+  // Everything in the grid body is clipped so partially-scrolled first cells
+  // never bleed into the header strips (which are painted on top afterwards).
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(HW, HH, Math.max(0, v.w - HW), Math.max(0, v.h - HH));
+  ctx.clip();
+
+  // Selection highlight (behind text).
   ctx.fillStyle = colors.sel;
   ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
 
@@ -173,29 +224,13 @@ function draw() {
   }
   ctx.stroke();
 
-  // Headers.
-  ctx.fillStyle = colors.headerBg;
-  ctx.fillRect(0, 0, v.w, HH);
-  ctx.fillRect(0, 0, HW, v.h);
-  ctx.fillStyle = colors.muted;
-  ctx.font = "12px system-ui, sans-serif";
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "center";
-  for (let i = 0; i < geo.cols; i++) {
-    ctx.fillText(colName(state.firstCol + i), geo.colX[i] + geo.colW[i] / 2, HH / 2);
-  }
-  for (let i = 0; i < geo.rows; i++) {
-    ctx.fillText(String(state.firstRow + i + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
-  }
-
-  // Cell text (from the engine).
+  // Cell fills + text (from the engine).
   const lastRow = state.firstRow + geo.rows;
   const lastCol = state.firstCol + geo.cols;
   const items = JSON.parse(
     wasm.session_cells(state.sheet, state.firstRow, state.firstCol, lastRow, lastCol),
   );
   ctx.textBaseline = "middle";
-  // Fills first (behind text), so a colored empty cell still shows.
   for (const it of items) {
     if (!it.bg) continue;
     const x = colXAt(it.c);
@@ -241,6 +276,32 @@ function draw() {
   if (fx !== undefined && fy !== undefined) {
     ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
   }
+  ctx.restore(); // end body clip
+
+  // Headers (painted over the body edges).
+  ctx.fillStyle = colors.headerBg;
+  ctx.fillRect(0, 0, v.w, HH);
+  ctx.fillRect(0, 0, HW, v.h);
+  ctx.fillStyle = colors.muted;
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(HW, 0, Math.max(0, v.w - HW), HH);
+  ctx.clip();
+  for (let i = 0; i < geo.cols; i++) {
+    ctx.fillText(colName(state.firstCol + i), geo.colX[i] + geo.colW[i] / 2, HH / 2);
+  }
+  ctx.restore();
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, HH, HW, Math.max(0, v.h - HH));
+  ctx.clip();
+  for (let i = 0; i < geo.rows; i++) {
+    ctx.fillText(String(state.firstRow + i + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
+  }
+  ctx.restore();
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
   if (wasm) refreshFormulaBar();
@@ -287,20 +348,20 @@ function extend(row, col) {
 }
 
 function ensureVisible() {
-  measure();
-  if (state.sel.row < state.firstRow) state.firstRow = state.sel.row;
-  if (state.sel.col < state.firstCol) state.firstCol = state.sel.col;
-  // Scroll down/right one line at a time (widths vary) until the focus fits.
-  let guard = 0;
-  while (state.sel.row >= state.firstRow + geo.rows && geo.rows > 0 && guard++ < 100000) {
-    state.firstRow += 1;
-    measure();
-  }
-  guard = 0;
-  while (state.sel.col >= state.firstCol + geo.cols && geo.cols > 0 && guard++ < 100000) {
-    state.firstCol += 1;
-    measure();
-  }
+  if (!wasm) return;
+  const rect = wrap.getBoundingClientRect();
+  const viewW = rect.width - HW;
+  const viewH = rect.height - HH;
+  const cL = wasm.session_col_offset_px(state.sheet, state.sel.col);
+  const cW = JSON.parse(wasm.session_col_px(state.sheet, state.sel.col, 1))[0] || COL_W;
+  const rT = wasm.session_row_offset_px(state.sheet, state.sel.row);
+  const rH = JSON.parse(wasm.session_row_px(state.sheet, state.sel.row, 1))[0] || ROW_H;
+  if (cL < state.scrollX) state.scrollX = cL;
+  else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
+  if (rT < state.scrollY) state.scrollY = rT;
+  else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
+  state.scrollX = Math.max(0, state.scrollX);
+  state.scrollY = Math.max(0, state.scrollY);
 }
 
 function commit(value, advance) {
@@ -380,10 +441,34 @@ function endInline() {
   canvas.focus();
 }
 
+// Live-update the previewed size of the line being dragged.
+function updateResize(px, py) {
+  if (state.resize.axis === "col") {
+    const left = wasm.session_col_offset_px(state.sheet, state.resize.index) - state.scrollX + HW;
+    state.resize.previewPx = Math.max(MIN_LINE, Math.round(px - left));
+  } else {
+    const top = wasm.session_row_offset_px(state.sheet, state.resize.index) - state.scrollY + HH;
+    state.resize.previewPx = Math.max(MIN_LINE, Math.round(py - top));
+  }
+  draw();
+}
+
 function wireEvents() {
   canvas.addEventListener("mousedown", (e) => {
     const rect = canvas.getBoundingClientRect();
-    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    // A header boundary starts a column/row resize instead of a selection.
+    const hb = boundaryAt(px, py);
+    if (hb) {
+      endInline();
+      const cur = hb.axis === "col"
+        ? JSON.parse(wasm.session_col_px(state.sheet, hb.index, 1))[0] || COL_W
+        : JSON.parse(wasm.session_row_px(state.sheet, hb.index, 1))[0] || ROW_H;
+      state.resize = { axis: hb.axis, index: hb.index, previewPx: cur };
+      return;
+    }
+    const hit = cellAt(px, py);
     if (hit) {
       endInline();
       if (e.shiftKey) extend(hit.row, hit.col);
@@ -392,43 +477,62 @@ function wireEvents() {
     }
   });
   canvas.addEventListener("mousemove", (e) => {
-    if (!state.dragging) return;
     const rect = canvas.getBoundingClientRect();
-    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
-    if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) extend(hit.row, hit.col);
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (state.resize) { updateResize(px, py); return; }
+    if (state.dragging) {
+      const hit = cellAt(px, py);
+      if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) extend(hit.row, hit.col);
+      return;
+    }
+    // Idle hover: show the resize cursor when over a header boundary.
+    const hb = boundaryAt(px, py);
+    canvas.style.cursor = hb ? (hb.axis === "col" ? "col-resize" : "row-resize") : "cell";
   });
-  window.addEventListener("mouseup", () => { state.dragging = false; });
+  window.addEventListener("mouseup", () => {
+    if (state.resize) {
+      const r = state.resize;
+      state.resize = null;
+      try {
+        if (r.axis === "col") wasm.session_set_col_width(state.sheet, r.index, r.previewPx);
+        else wasm.session_set_row_height(state.sheet, r.index, r.previewPx);
+        status.textContent = "resized";
+      } catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    }
+    state.dragging = false;
+  });
   canvas.addEventListener("dblclick", (e) => {
     const rect = canvas.getBoundingClientRect();
-    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    // Double-clicking a boundary resets that column/row to the sheet default.
+    const hb = boundaryAt(px, py);
+    if (hb) {
+      try {
+        if (hb.axis === "col") wasm.session_clear_col_width(state.sheet, hb.index);
+        else wasm.session_clear_row_height(state.sheet, hb.index);
+      } catch (err) { status.textContent = `error: ${err}`; }
+      draw();
+      return;
+    }
+    const hit = cellAt(px, py);
     if (hit) {
       select(hit.row, hit.col);
       startInline();
     }
   });
-  let accY = 0;
-  let accX = 0;
   wrap.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
-      // Normalize line/page wheel modes to pixels, accumulate, and step one
-      // row/column per row-height/col-width so scrolling is smooth & proportional.
+      // Fluid pixel scrolling: move the absolute content offset directly, so the
+      // grid glides smoothly instead of snapping a whole row/column at a time.
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? wrap.clientHeight : 1;
-      accY += e.deltaY * unit * scrollDamp;
-      accX += e.deltaX * unit * scrollDamp;
-      let changed = false;
-      // Step by the size of the line at the current edge (widths/heights vary).
-      let stepH = rowHAt(state.firstRow) || ROW_H;
-      while (accY >= stepH) { state.firstRow += 1; accY -= stepH; changed = true; stepH = rowHAt(state.firstRow) || ROW_H; }
-      while (accY <= -stepH && state.firstRow > 0) { state.firstRow -= 1; accY += stepH; changed = true; stepH = rowHAt(state.firstRow) || ROW_H; }
-      let stepW = colWAt(state.firstCol) || COL_W;
-      while (accX >= stepW) { state.firstCol += 1; accX -= stepW; changed = true; stepW = colWAt(state.firstCol) || COL_W; }
-      while (accX <= -stepW && state.firstCol > 0) { state.firstCol -= 1; accX += stepW; changed = true; stepW = colWAt(state.firstCol) || COL_W; }
-      // Only discard over-scroll past the top/left edge; keep normal accumulation.
-      if (state.firstRow === 0 && accY < 0) accY = 0;
-      if (state.firstCol === 0 && accX < 0) accX = 0;
-      if (changed) draw();
+      state.scrollY = Math.max(0, state.scrollY + e.deltaY * unit * scrollDamp);
+      state.scrollX = Math.max(0, state.scrollX + e.deltaX * unit * scrollDamp);
+      draw();
     },
     { passive: false },
   );
@@ -485,7 +589,7 @@ function wireEvents() {
     const bytes = new Uint8Array(await file.arrayBuffer());
     try { wasm.session_open(bytes); status.textContent = "opened " + file.name; }
     catch (err) { status.textContent = `error: ${err}`; }
-    state.firstRow = state.firstCol = 0;
+    state.scrollX = state.scrollY = 0;
     select(0, 0);
   });
   document.getElementById("tb-undo").addEventListener("click", doUndo);

@@ -10,7 +10,7 @@
 //! atomic [`Operation::Batch`]. Structural ops (insert/delete rows & columns with
 //! formula-reference rewriting) are the next increment.
 
-use casual_calc_model::{Cell, CellRef, CellValue, StyleId, Workbook};
+use casual_calc_model::{AxisSizing, Cell, CellRef, CellValue, StyleId, Workbook};
 
 /// An error applying an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +81,24 @@ pub enum Operation {
         /// Cell address.
         at: CellRef,
     },
+    /// Set (or clear, with `None`) a column's explicit width in twips.
+    SetColumnWidth {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based column.
+        col: u32,
+        /// The new width (twips), or `None` to revert to the sheet default.
+        width: Option<i64>,
+    },
+    /// Set (or clear, with `None`) a row's explicit height in twips.
+    SetRowHeight {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based row.
+        row: u32,
+        /// The new height (twips), or `None` to revert to the sheet default.
+        height: Option<i64>,
+    },
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -119,6 +137,30 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             let previous = replace_cell(workbook, sheet, at, None)?;
             Ok(inverse_of(sheet, at, previous))
         }
+        Operation::SetColumnWidth { sheet, col, width } => {
+            let target = workbook
+                .sheets
+                .get_mut(sheet)
+                .ok_or(TxnError::SheetNotFound { index: sheet })?;
+            let previous = set_axis_override(&mut target.columns, col, width);
+            Ok(Operation::SetColumnWidth {
+                sheet,
+                col,
+                width: previous,
+            })
+        }
+        Operation::SetRowHeight { sheet, row, height } => {
+            let target = workbook
+                .sheets
+                .get_mut(sheet)
+                .ok_or(TxnError::SheetNotFound { index: sheet })?;
+            let previous = set_axis_override(&mut target.rows, row, height);
+            Ok(Operation::SetRowHeight {
+                sheet,
+                row,
+                height: previous,
+            })
+        }
         Operation::Batch(ops) => {
             let mut inverses = Vec::with_capacity(ops.len());
             for member in ops {
@@ -136,6 +178,20 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             Ok(Operation::Batch(inverses))
         }
     }
+}
+
+/// Set or clear one axis override, returning the previous value (for the inverse).
+fn set_axis_override(axis: &mut AxisSizing, index: u32, size: Option<i64>) -> Option<i64> {
+    let previous = axis.sizes.get(&index).copied();
+    match size {
+        Some(value) => {
+            axis.sizes.insert(index, value);
+        }
+        None => {
+            axis.sizes.remove(&index);
+        }
+    }
+    previous
 }
 
 fn inverse_of(sheet: usize, at: CellRef, previous: Option<Cell>) -> Operation {

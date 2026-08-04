@@ -41,6 +41,56 @@ fn set_value_and_inverse_restores() {
 }
 
 #[test]
+fn resize_ops_are_invertible() {
+    let mut wb = workbook();
+
+    // Set an explicit width; the inverse should clear it back to the default.
+    let inverse = apply(
+        &mut wb,
+        Operation::SetColumnWidth {
+            sheet: 0,
+            col: 2,
+            width: Some(2400),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].columns.sizes.get(&2), Some(&2400));
+    assert_eq!(
+        inverse,
+        Operation::SetColumnWidth {
+            sheet: 0,
+            col: 2,
+            width: None
+        }
+    );
+    apply(&mut wb, inverse).unwrap();
+    assert!(!wb.sheets[0].columns.sizes.contains_key(&2));
+
+    // Overwriting an existing height: the inverse restores the prior value.
+    apply(
+        &mut wb,
+        Operation::SetRowHeight {
+            sheet: 0,
+            row: 1,
+            height: Some(300),
+        },
+    )
+    .unwrap();
+    let inverse = apply(
+        &mut wb,
+        Operation::SetRowHeight {
+            sheet: 0,
+            row: 1,
+            height: Some(900),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].rows.sizes.get(&1), Some(&900));
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].rows.sizes.get(&1), Some(&300));
+}
+
+#[test]
 fn set_style_preserves_value() {
     let mut wb = workbook();
     let at = CellRef::new(0, 0);
