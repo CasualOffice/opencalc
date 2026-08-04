@@ -29,7 +29,8 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir -p site/pkg
-          cp webapp/index.html webapp/app.js webapp/style.css site/
+          cp webapp/index.html webapp/editor.html webapp/app.js webapp/editor.js site/
+          cp webapp/style.css webapp/editor.css site/
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm.js site/pkg/
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm_bg.wasm site/pkg/
           cp fixtures/generated/minimal.xlsx site/sample.xlsx

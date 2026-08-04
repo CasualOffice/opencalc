@@ -186,6 +186,7 @@ dependencies = [
  "casual-calc-layout",
  "casual-calc-model",
  "casual-calc-render",
+ "casual-calc-sdk",
  "wasm-bindgen",
 ]
 

@@ -101,7 +101,7 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | SDK-001 | Host facade (`casual-calc-sdk`) | Done | `WorkbookSession`: open/blank, `edit` (op→recalc), undo/redo, `recalculate`, `layout`, `render_png`, `save`, `compatibility_report`. Composes all layers into one surface; re-exports the host vocabulary. Full lifecycle gated. 4 tests |
 | W-001 | WASM bridge (`casual-calc-wasm`) | Done | `wasm-bindgen` bridge: `version`, `eval_formula`, `render_xlsx` (import→recalc→layout→render PNG), `describe_xlsx`. Verified in-browser. `wasm-opt` disabled (bulk-memory) |
 | SITE-001 | Marketing site + WASM demo + Pages deploy | Done | `webapp/` (landing + formula playground + open-xlsx render); `.github/workflows/pages.yml` builds wasm-pack + deploys to GitHub Pages |
-| W-002 | Interactive grid editor (edit cells, scroll, hit-test) | Not started | Uses the transaction layer; needs glyph text (P1D-002) |
+| W-002 | Interactive canvas grid editor (demo page) | Done | `webapp/editor.html`: canvas grid with row/col headers, click-select, keyboard nav, inline + formula-bar editing, wheel virtualization (tunable), New/Open/Save/Undo/Redo. WASM session API (`session_*`); text drawn by the browser canvas from engine-supplied layout. Settings gear: theme (auto/light/dark), accent, scroll speed. Verified in-browser |
 | TAURI-001 | Tauri desktop shell (native) | Not started | `docs/44`; consumes `casual-calc-sdk` |
 
 ## Phase rows — Editing (transaction layer)

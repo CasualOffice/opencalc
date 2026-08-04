@@ -19,6 +19,22 @@
   }
 }
 
+/* Manual theme overrides (the settings toggle) win over the OS preference. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --fg: #1a1c20;
+  --muted: #5a6472;
+  --card: #f6f8fb;
+  --border: #e2e8f0;
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216;
+  --fg: #e7ebf0;
+  --muted: #9aa6b4;
+  --card: #171b21;
+  --border: #262c34;
+}
+
 * { box-sizing: border-box; }
 body {
   margin: 0;

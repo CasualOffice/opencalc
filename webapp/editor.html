@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCalc — editor demo</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./editor.css" />
+  </head>
+  <body class="editor-body">
+    <div class="toolbar">
+      <div class="settings">
+        <button id="tb-settings" class="tb-icon" title="Settings" aria-label="Settings">⚙</button>
+        <div id="settings-panel" class="settings-panel" hidden>
+          <label class="set-row">
+            <span>Theme</span>
+            <select id="set-theme">
+              <option value="auto">Auto</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+          <label class="set-row">
+            <span>Scroll speed</span>
+            <span class="range-wrap">
+              <input id="set-scroll" type="range" min="0.1" max="1.5" step="0.05" value="0.4" />
+              <span class="range-val" id="set-scroll-val">0.40</span>
+            </span>
+          </label>
+          <div class="set-row">
+            <span>Accent</span>
+            <span class="swatches" id="set-accent">
+              <button data-c="#2f6df6" style="background:#2f6df6" aria-label="Blue"></button>
+              <button data-c="#16a34a" style="background:#16a34a" aria-label="Green"></button>
+              <button data-c="#db2777" style="background:#db2777" aria-label="Pink"></button>
+              <button data-c="#f59e0b" style="background:#f59e0b" aria-label="Amber"></button>
+              <button data-c="#8b5cf6" style="background:#8b5cf6" aria-label="Violet"></button>
+            </span>
+          </div>
+        </div>
+      </div>
+      <a class="tb-brand" href="./index.html">OpenCalc</a>
+      <button id="tb-new">New</button>
+      <label class="tb-file">Open<input id="tb-open" type="file" accept=".xlsx" /></label>
+      <button id="tb-save">Save .xlsx</button>
+      <span class="tb-sep"></span>
+      <button id="tb-undo" disabled>Undo</button>
+      <button id="tb-redo" disabled>Redo</button>
+      <span class="tb-status" id="tb-status">loading engine…</span>
+    </div>
+
+    <div class="formula-bar">
+      <span class="cell-ref" id="cell-ref">A1</span>
+      <input id="formula-input" type="text" spellcheck="false" placeholder="value or =formula" />
+    </div>
+
+    <div class="grid-wrap" id="grid-wrap">
+      <canvas id="grid" tabindex="0"></canvas>
+      <input id="inline-edit" class="inline-edit" spellcheck="false" />
+    </div>
+
+    <script type="module" src="./editor.js"></script>
+  </body>
+</html>

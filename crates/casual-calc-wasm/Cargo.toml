@@ -22,6 +22,7 @@ casual-calc-import = { path = "../casual-calc-import" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-render = { path = "../casual-calc-render" }
+casual-calc-sdk = { path = "../casual-calc-sdk" }
 wasm-bindgen = "0.2"
 
 [lints]

@@ -11,6 +11,27 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-05 — Interactive editor & fidelity fixes
+
+**Added**
+
+- Interactive **canvas grid editor** (`webapp/editor.html`, W-002): a real
+  spreadsheet editor on the demo page — row/column headers, click-to-select,
+  keyboard navigation, inline + formula-bar editing, `New`/`Open`/`Save`/`Undo`/
+  `Redo`, and wheel virtualization. The WASM engine owns the workbook and supplies
+  layout + display text; the browser canvas draws the grid and text (crisp,
+  font-free). A settings gear (top-left) tunes theme (auto/light/dark), accent
+  color, and scroll speed (default 0.40), persisted to `localStorage`.
+- `casual-calc-wasm`: a session-based editor API (`session_open`/`session_new`,
+  `session_cells`, `session_cell_input`, `session_set_cell`, `session_undo`/`redo`,
+  `session_save`) over a thread-local `WorkbookSession`.
+
+**Fixed**
+
+- `casual-calc-layout` number display: `General` format now rounds to 15
+  significant digits (Excel precision), so a `SUM` of `13.5 + 10 + 19.98` shows
+  `43.48` instead of the floating-point tail `43.480000000000004`.
+
 ### 2026-08-05 — Host facade & WebAssembly demo
 
 **Added**

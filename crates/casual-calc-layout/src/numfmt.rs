@@ -23,8 +23,21 @@ pub fn format_number(value: f64, code: &str) -> String {
 }
 
 /// Default (`General`) formatting for a number.
+///
+/// Rounds to 15 significant digits (Excel's precision) so floating-point tails
+/// like `43.480000000000004` display as `43.48`, then prints the shortest form.
 pub fn format_general(value: f64) -> String {
-    format!("{value}")
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    let magnitude = value.abs().log10().floor() as i32;
+    // Keep 15 significant digits; clamp the decimal count to a sane range.
+    let decimals = (14 - magnitude).clamp(0, 30) as usize;
+    let rounded: f64 = format!("{value:.decimals$}").parse().unwrap_or(value);
+    format!("{rounded}")
 }
 
 fn has_digit_placeholder(section: &str) -> bool {
