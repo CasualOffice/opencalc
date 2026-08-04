@@ -62,13 +62,26 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         }
     }
 
-    // Styles: the number-format code per cellXfs index.
+    // Styles: the number-format code per cellXfs index. Pre-intern every xf in
+    // order so the style-table order is canonical (cellXfs order) — this is what
+    // lets the writer round-trip styles deterministically.
     let stylesheet = if package.contains(STYLES_PART) {
         let xml = package.read_part(STYLES_PART)?;
         parse_styles(&xml)?
     } else {
         StyleSheet::default()
     };
+    let xf_style_ids: Vec<Option<_>> = stylesheet
+        .xf_number_formats
+        .iter()
+        .map(|code| {
+            code.clone().map(|number_format| {
+                workbook.intern_style(Style {
+                    number_format: Some(number_format),
+                })
+            })
+        })
+        .collect();
 
     // Own the sheet metadata so the package can be mutated (read) while looping.
     let sheet_meta: Vec<(String, String)> = package
@@ -98,12 +111,9 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             let value = map_value(&raw, &shared_ids, &mut workbook, &mut report);
             let mut cell = Cell::value(value);
             if let Some(index) = raw.style_index
-                && let Some(Some(code)) = stylesheet.xf_number_formats.get(index as usize)
+                && let Some(Some(style_id)) = xf_style_ids.get(index as usize)
             {
-                let style = Style {
-                    number_format: Some(code.clone()),
-                };
-                cell.style = Some(workbook.intern_style(style));
+                cell.style = Some(*style_id);
             }
             if let Some(text) = &raw.formula {
                 match parse_formula(text) {

@@ -23,6 +23,12 @@ moves a construct — like the execution tracker
 - `~` partial (in the model / partially handled; not yet gated)
 - `●` implemented **and gated** (tests + oracle where applicable)
 
+> **Round-trip note:** `●` in the Round-trip column currently means the
+> **semantic fixed point** `import → write → import` yields an equal model
+> (gated in `casual-calc-export`). The stronger **byte-identical** guarantee for
+> unedited packages (the retention-mode repackager) is separate and still `✗`
+> (the "Whole-package (unedited)" row).
+
 A cell moves to `●` only when its gate is green (see
 [15](15-CI-AND-RELEASE-GATES.md), [18](18-SUPPORT-MATRIX.md) "Required release
 evidence").
@@ -31,21 +37,21 @@ evidence").
 
 | Construct | Model | Round-trip | Edit | Render | Calc | Driving tracker |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cell: number | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Cell: boolean | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Cell: error value | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Shared strings | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Inline strings | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Formulas (AST) | ● | ✗ | ✗ | — | ✗ | P1A-002 |
-| Formula cached value | ● | ✗ | — | ✗ | ✗ | P1A-001 |
-| Number formats | ● | ✗ | ✗ | ✗ | — | P1A-003 |
+| Cell: number | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Cell: boolean | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Cell: error value | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Shared strings | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Inline strings | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Formulas (AST) | ● | ● | ✗ | — | ✗ | P1B-001 |
+| Formula cached value | ● | ● | — | ✗ | ✗ | P1B-001 |
+| Number formats | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Styles: font/fill/border | ✗ | ✗ | ✗ | ✗ | — | P1A-003b |
-| Merged ranges | ● | ✗ | ✗ | ✗ | — | P1A-004 |
+| Merged ranges | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Column/row sizing | ✗ | ✗ | ✗ | ✗ | — | P1C |
-| Frozen panes | ● | ✗ | ✗ | ✗ | — | P1A-004 / P1C |
-| Defined names | ● | ✗ | ✗ | — | ✗ | P1A-004 |
-| Sheet structure | ● | ✗ | ✗ | ✗ | — | P1A-001 |
-| Whole-package (unedited) | — | ✗ | — | — | — | P1B |
+| Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
+| Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |
 | Charts | ✗ (preserve-only) | ✗ | ✗ | ✗ | — | P3 |
 | Pivot tables | ✗ (preserve-only) | ✗ | ✗ | ✗ | ✗ | P3 |
 | VBA / macros | preserve-only | ✗ | — | — | never | — |

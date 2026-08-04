@@ -17,6 +17,14 @@ There are **two writers**, chosen by whether the workbook was edited:
   and a fixed compression method — reproducible bytes regardless of host or run.
 - This is the "exact no-op return": `open → save` with no edits changes nothing.
 
+> **Status: semantic writer implemented (Phase 1B, P1B-001).**
+> `casual-calc-export::write_workbook` emits a deterministic `.xlsx` from the
+> model — values, formulas (from the AST via the pretty-printer), number formats
+> (`cellXfs`), merges, frozen panes, and defined names. The **semantic fixed
+> point** `import → write → import` is gated by tests. The byte-identical
+> repackager (retention mode) and LibreOffice-Calc differential validation are
+> the next increments.
+
 ## 2. Semantic writer (edited workbooks)
 
 - Input: the normalized `Workbook` model (possibly edited).

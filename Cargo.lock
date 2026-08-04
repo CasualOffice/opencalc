@@ -41,6 +41,12 @@ version = "0.0.0"
 [[package]]
 name = "casual-calc-export"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-formula",
+ "casual-calc-import",
+ "casual-calc-model",
+ "zip",
+]
 
 [[package]]
 name = "casual-calc-fidelity"

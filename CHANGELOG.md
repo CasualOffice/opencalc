@@ -11,6 +11,19 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-04 — Phase 1B: the semantic writer
+
+**Added**
+
+- `casual-calc-export` (P1B-001): the semantic SpreadsheetML writer.
+  `write_workbook` serializes a `Workbook` to a deterministic `.xlsx` — cell
+  values, formulas (from the AST via the pretty-printer), number formats
+  (`cellXfs` + custom `numFmts`), merged ranges, frozen panes, and defined names.
+  The **semantic fixed point** `import → write → import` yields an equal model
+  (gated). `casual-calc-import` now pre-interns `cellXfs` in order so the style
+  table is canonical, letting styles round-trip deterministically. The fidelity
+  ledger's Round-trip column is now `●` (semantic) for the covered constructs.
+
 ### 2026-08-04 — Phase 1A: semantic import begins
 
 **Added**

@@ -68,12 +68,22 @@ impl StyleTable {
 
     /// Resolve an id to its style, or `None` if it is not from this table.
     pub fn get(&self, id: StyleId) -> Option<&Style> {
+        let index = self.index_of(id)? as usize;
+        self.entries.get(index)
+    }
+
+    /// The zero-based index encoded by `id`, if it is from this table.
+    pub fn index_of(&self, id: StyleId) -> Option<u32> {
         let raw = id.0.get();
         if (raw >> 64) as u64 != STYLE_NAMESPACE {
             return None;
         }
-        let index = (raw as u64).checked_sub(1)? as usize;
-        self.entries.get(index)
+        u32::try_from((raw as u64).checked_sub(1)?).ok()
+    }
+
+    /// Iterate the interned styles in index order.
+    pub fn iter(&self) -> impl Iterator<Item = &Style> {
+        self.entries.iter()
     }
 
     /// Whether `id` resolves within this table.

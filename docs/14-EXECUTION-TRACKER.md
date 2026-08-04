@@ -94,6 +94,17 @@ repository-policy, dependency-policy, platform ×3 incl. MSRV). Detailed in
 | F-010 | casual-calc-model shell + snapshot I/O + reserved seams | Done | Ids, CellValue, Cell (reserved seams), sparse CellStore, Sheet, Workbook; deterministic snapshots; empty-workbook byte-stable round-trip gated; 8 tests |
 | F-011 | Minimal casual-calc-ooxml (open + discover workbook) | Done | Opens a trivial .xlsx; resolves workbook + sheet parts via OPC rels; bounded XML; 8 tests; codes OC-XML/OC-IMP |
 
+## Phase rows — Phase 1B (Semantic writer)
+
+Model → valid `.xlsx`; the semantic fixed point `import → write → import`
+([36](36-EXPORT-AND-ROUNDTRIP-DESIGN.md)).
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| P1B-001 | Semantic writer (`casual-calc-export`) | Done | Deterministic model → .xlsx: values, formulas (from AST), number formats, merges, frozen panes, defined names. Semantic fixed-point gated (import→write→import equal); import pre-interns cellXfs in order for canonical style round-trip. 3 round-trip tests |
+| P1B-002 | Byte-identical repackager (retention mode) | Not started | Needs P1A-006 retained source; whole-package byte floor |
+| P1B-003 | Opens without repair in LibreOffice Calc | Not started | Differential validation (`tools/casual-calc-fidelity`) |
+
 ## Phase rows — Phase 1A (Semantic import & modeling)
 
 Import SpreadsheetML → normalized model + compatibility report; formulas parsed

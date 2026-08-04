@@ -49,12 +49,22 @@ impl StringTable {
 
     /// Resolve an id to its string, or `None` if it is not from this table.
     pub fn get(&self, id: StringId) -> Option<&str> {
+        let index = self.index_of(id)? as usize;
+        self.entries.get(index).map(String::as_str)
+    }
+
+    /// The zero-based index encoded by `id`, if it is from this table.
+    pub fn index_of(&self, id: StringId) -> Option<u32> {
         let raw = id.0.get();
         if (raw >> 64) as u64 != STRING_NAMESPACE {
             return None;
         }
-        let index = (raw as u64).checked_sub(1)? as usize;
-        self.entries.get(index).map(String::as_str)
+        u32::try_from((raw as u64).checked_sub(1)?).ok()
+    }
+
+    /// Iterate the interned strings in index order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(String::as_str)
     }
 
     /// Whether `id` resolves within this table.
