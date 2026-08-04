@@ -26,7 +26,7 @@ Tier 1 = full test matrix in CI. Tier 2 = build + smoke.
 | **Web app (WASM)** | Browser demo via `casual-calc-wasm`; calc + import + render run in WASM | ◑ (W-001: formula eval + open-xlsx render; interactive editor pending) |
 | Headless native | Read/model/calc/write, no rendering surface | ○ |
 | Headless render | + display list → PNG via CPU raster | ◑ (P1D-001: grid raster; glyphs pending) |
-| Embedded SDK | `casual-calc-sdk` in any Rust host app | ○ |
+| Embedded SDK | `casual-calc-sdk` in any Rust host app | ◑ (SDK-001: WorkbookSession open/edit/recalc/render/save) |
 
 Both the Tauri and web hosts compose the same host-agnostic core; the calc engine
 runs **native** on desktop and **WASM** in the browser, producing identical

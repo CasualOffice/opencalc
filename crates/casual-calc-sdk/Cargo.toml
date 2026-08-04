@@ -7,5 +7,17 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+casual-calc-eval = { path = "../casual-calc-eval" }
+casual-calc-export = { path = "../casual-calc-export" }
+casual-calc-import = { path = "../casual-calc-import" }
+casual-calc-layout = { path = "../casual-calc-layout" }
+casual-calc-model = { path = "../casual-calc-model" }
+casual-calc-render = { path = "../casual-calc-render" }
+casual-calc-transaction = { path = "../casual-calc-transaction" }
+
+[dev-dependencies]
+casual-calc-formula = { path = "../casual-calc-formula" }
+
 [lints]
 workspace = true

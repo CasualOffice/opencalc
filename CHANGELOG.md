@@ -11,9 +11,17 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
-### 2026-08-05 — WebAssembly demo & Pages deploy
+### 2026-08-05 — Host facade & WebAssembly demo
 
 **Added**
+
+- `casual-calc-sdk` (SDK-001): the host-facing engine facade. `WorkbookSession`
+  composes the whole pipeline into one surface — `open`/`blank`, `edit` (apply an
+  op then recalc, with undo/redo history), `recalculate`, `layout`, `render_png`,
+  `save`, and `compatibility_report` — and re-exports the vocabulary a host needs
+  so embedders depend on one crate. This is what the Tauri desktop shell and
+  headless services embed. Full open→edit→recalc→save→reopen→render lifecycle
+  gated. 4 tests.
 
 - `casual-calc-wasm` (W-001): the `wasm-bindgen` bridge — a thin transport over
   the host-agnostic engine. `version`, `eval_formula` (parse + evaluate a
