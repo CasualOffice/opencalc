@@ -20,8 +20,9 @@ use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
-    DataValidation, HAlign, Id, Sheet, SheetId, Style, StyleId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
+    ConditionalFormat, DataValidation, HAlign, Id, Sheet, SheetId, Style, StyleId, VAlign,
+    Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -614,6 +615,65 @@ pub fn session_clear_cf(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Res
         }
         Ok(())
     })
+}
+
+/// Set (or, with empty text, remove) a cell's comment/note.
+#[wasm_bindgen]
+pub fn session_set_comment(sheet: usize, row: u32, col: u32, text: &str) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.comments
+                .retain(|c| !(c.at.row == row && c.at.col == col));
+            let text = text.trim();
+            if !text.is_empty() {
+                sh.comments.push(CellComment {
+                    at: CellRef::new(row, col),
+                    text: text.to_owned(),
+                    author: None,
+                });
+            }
+        }
+        Ok(())
+    })
+}
+
+/// A cell's comment text, or `""` if it has none.
+#[wasm_bindgen]
+pub fn session_comment_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| {
+                sh.comments
+                    .iter()
+                    .find(|c| c.at.row == row && c.at.col == col)
+            })
+            .map(|c| c.text.clone())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// The commented cells within a range as JSON `[{r,c}, …]` — the editor draws a
+/// note indicator on each.
+#[wasm_bindgen]
+pub fn session_comments(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = sh
+            .comments
+            .iter()
+            .filter(|c| c.at.row >= r0 && c.at.row <= r1 && c.at.col >= c0 && c.at.col <= c1)
+            .map(|c| format!("{{\"r\":{},\"c\":{}}}", c.at.row, c.at.col))
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
 }
 
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.

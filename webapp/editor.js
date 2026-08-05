@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "13";
+const BUILD = "14";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -29,6 +29,7 @@ const state = {
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
 let validationChevron = null; // {x,y,w,h,values} of the active cell's list-dropdown button
+let commentCells = new Set(); // "r,c" of cells with a note in view (for hover tooltip)
 let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
 
@@ -55,6 +56,7 @@ const hscroll = document.getElementById("hscroll");
 const hthumb = document.getElementById("hthumb");
 const fInput = document.getElementById("formula-input");
 const cellRef = document.getElementById("cell-ref");
+const commentTip = document.getElementById("comment-tip");
 const status = document.getElementById("tb-status");
 
 const css = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
@@ -713,6 +715,27 @@ function draw() {
       validationChevron = { x: bx, y: by, w: bw, h: ch, values: vals };
     }
   }
+
+  // Comment indicators — a small red triangle in each commented cell's corner.
+  commentCells = new Set();
+  if (wasm) {
+    const r0 = geo.rowIdx[0] ?? state.firstRow, c0 = geo.colIdx[0] ?? state.firstCol;
+    const r1 = geo.rowIdx[geo.rowIdx.length - 1] ?? r0, c1 = geo.colIdx[geo.colIdx.length - 1] ?? c0;
+    let cmts = [];
+    try { cmts = JSON.parse(wasm.session_comments(state.sheet, r0, c0, r1, c1)); } catch {}
+    for (const cm of cmts) {
+      commentCells.add(cm.r + "," + cm.c);
+      const cx = colXAt(cm.c), cy = rowYAt(cm.r);
+      if (cx === undefined || cy === undefined) continue;
+      const cw = colWAt(cm.c);
+      withQuad(cm.r, cm.c, () => {
+        ctx.fillStyle = "#e5484d";
+        ctx.beginPath();
+        ctx.moveTo(cx + cw - 7, cy); ctx.lineTo(cx + cw, cy); ctx.lineTo(cx + cw, cy + 7);
+        ctx.closePath(); ctx.fill();
+      });
+    }
+  }
   ctx.restore(); // end body clip
 
   // Freeze divider lines (a touch darker than gridlines).
@@ -1360,6 +1383,42 @@ function openConditionalFormatMenu(x, y) {
   setTimeout(() => a.focus(), 0);
 }
 
+// --- Cell comments --------------------------------------------------------
+function openCommentEditor(x, y) {
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu cmt-set";
+  menu.id = "sheet-ctx";
+  menu.addEventListener("click", (e) => e.stopPropagation());
+  const lbl = document.createElement("div");
+  lbl.className = "menu-label";
+  lbl.textContent = `Note on ${A1(state.sel.row, state.sel.col)}`;
+  menu.appendChild(lbl);
+  const ta = document.createElement("textarea");
+  ta.className = "cmt-input";
+  ta.rows = 3;
+  ta.spellcheck = false;
+  try { ta.value = wasm.session_comment_at(state.sheet, state.sel.row, state.sel.col); } catch {}
+  menu.appendChild(ta);
+  const foot = document.createElement("div");
+  foot.className = "filter-foot";
+  const del = document.createElement("button");
+  del.className = "filter-clear"; del.textContent = "Delete";
+  del.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ""); } catch {} draw(); });
+  const save = document.createElement("button");
+  save.className = "filter-apply"; save.textContent = "Save";
+  save.addEventListener("click", () => {
+    closeSheetMenu();
+    try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ta.value); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+  });
+  foot.appendChild(del); foot.appendChild(save);
+  menu.appendChild(foot);
+  positionMenu(menu, x, y);
+  setTimeout(() => ta.focus(), 0);
+}
+
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1900,6 +1959,7 @@ function cellMenu(x, y) {
   sep();
   item("Data validation (list)…", false, () => openSetValidationMenu(x, y));
   item("Conditional format…", false, () => openConditionalFormatMenu(x, y));
+  item("Insert / edit note…", false, () => openCommentEditor(x, y));
   positionMenu(menu, x, y);
 }
 
@@ -2038,6 +2098,20 @@ function wireEvents() {
     }
     const hb = boundaryAt(px, py);
     canvas.style.cursor = hb ? (hb.axis === "col" ? "col-resize" : "row-resize") : "cell";
+    // Comment tooltip on hover.
+    const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
+    if (hit && commentCells.has(hit.row + "," + hit.col)) {
+      let text = "";
+      try { text = wasm.session_comment_at(state.sheet, hit.row, hit.col); } catch {}
+      if (text) {
+        commentTip.textContent = text;
+        commentTip.style.left = (px + 14) + "px";
+        commentTip.style.top = (py + 8) + "px";
+        commentTip.hidden = false;
+      } else commentTip.hidden = true;
+    } else {
+      commentTip.hidden = true;
+    }
   });
   window.addEventListener("mouseup", () => {
     if (formulaRefDrag) {
@@ -2207,7 +2281,13 @@ function wireEvents() {
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
-      case "F2": startInline(); e.preventDefault(); break;
+      case "F2": {
+        if (e.shiftKey) {
+          const rct = canvas.getBoundingClientRect();
+          openCommentEditor(rct.left + (colXAt(state.sel.col) ?? HW) + 20, rct.top + (rowYAt(state.sel.row) ?? HH) + 12);
+        } else startInline();
+        e.preventDefault(); break;
+      }
       case "F5": cellRef.focus(); e.preventDefault(); break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }

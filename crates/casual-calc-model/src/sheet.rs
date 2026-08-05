@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::SheetId;
-use crate::store::{CellRange, CellStore};
+use crate::store::{CellRange, CellRef, CellStore};
 
 /// Per-axis sizing (column widths or row heights), in twips: an optional default
 /// plus per-line overrides. Empty means "use the engine default".
@@ -154,6 +154,22 @@ pub struct Sheet {
     /// Conditional-formatting rules (highlight-cells with a fill color).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditional_formats: Vec<ConditionalFormat>,
+    /// Cell comments / notes, keyed by cell address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CellComment>,
+}
+
+/// A note attached to a cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CellComment {
+    /// The cell the note is anchored to.
+    pub at: CellRef,
+    /// The note text.
+    pub text: String,
+    /// The author, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 /// A conditional-formatting rule: cells in `range` whose value satisfies `rule`
@@ -228,6 +244,7 @@ impl Sheet {
             tab_color: None,
             validations: Vec::new(),
             conditional_formats: Vec::new(),
+            comments: Vec::new(),
         }
     }
 }

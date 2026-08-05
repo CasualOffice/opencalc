@@ -30,7 +30,7 @@ pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
 pub use sheet::{
-    AxisSizing, CfRule, ConditionalFormat, DataValidation, OutlinePr, Sheet, SheetView,
+    AxisSizing, CellComment, CfRule, ConditionalFormat, DataValidation, OutlinePr, Sheet, SheetView,
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
