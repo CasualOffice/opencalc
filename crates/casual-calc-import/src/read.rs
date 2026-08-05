@@ -155,6 +155,8 @@ pub struct Worksheet {
     pub hidden_rows: BTreeSet<u32>,
     /// Hidden columns, by zero-based index.
     pub hidden_cols: BTreeSet<u32>,
+    /// Tab color as `RRGGBB` (from `sheetPr/tabColor/@rgb`), if any.
+    pub tab_color: Option<String>,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -287,6 +289,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"row" => read_row(&e, &mut result)?,
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
+                    b"tabColor" => read_tab_color(&e, &mut result)?,
                     _ => {}
                 }
             }
@@ -315,6 +318,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"row" => read_row(&e, &mut result)?,
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
+                    b"tabColor" => read_tab_color(&e, &mut result)?,
                     _ => {}
                 }
             }
@@ -364,6 +368,19 @@ fn read_pane(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErr
         let cols = parse_u32_attr(e, b"xSplit")?;
         let rows = parse_u32_attr(e, b"ySplit")?;
         result.frozen = Some((rows, cols));
+    }
+    Ok(())
+}
+
+/// Parse `<sheetPr><tabColor rgb="AARRGGBB"/>`. Excel stores an 8-hex ARGB
+/// value; we keep the last six (`RRGGBB`) and drop the alpha. Indexed/theme
+/// colors (no `@rgb`) are ignored — they'd need the theme part to resolve.
+fn read_tab_color(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    if let Some(rgb) = read_attr(e, b"rgb")? {
+        let hex = rgb.trim();
+        if hex.len() >= 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            result.tab_color = Some(hex[hex.len() - 6..].to_ascii_uppercase());
+        }
     }
     Ok(())
 }

@@ -91,6 +91,9 @@ pub struct Sheet {
     /// Hidden columns, by zero-based index.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub hidden_cols: BTreeSet<u32>,
+    /// Tab color as an `RRGGBB` hex string (no `#`), if the tab is colored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<String>,
 }
 
 impl Sheet {
@@ -106,6 +109,7 @@ impl Sheet {
             rows: AxisSizing::default(),
             hidden_rows: BTreeSet::new(),
             hidden_cols: BTreeSet::new(),
+            tab_color: None,
         }
     }
 }

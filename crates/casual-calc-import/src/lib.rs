@@ -154,6 +154,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         sheet.rows.sizes = worksheet.row_sizes;
         sheet.hidden_rows = worksheet.hidden_rows;
         sheet.hidden_cols = worksheet.hidden_cols;
+        sheet.tab_color = worksheet.tab_color;
 
         workbook.sheets.push(sheet);
     }

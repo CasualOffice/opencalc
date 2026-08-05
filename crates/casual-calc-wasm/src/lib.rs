@@ -430,6 +430,39 @@ pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsEr
     })
 }
 
+/// A sheet's tab color as an `RRGGBB` hex string, or `""` if uncolored.
+#[wasm_bindgen]
+pub fn session_tab_color(sheet: usize) -> String {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.tab_color.clone())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// Set (or, with an empty/invalid string, clear) a sheet's tab color. Accepts
+/// `RRGGBB` or `#RRGGBB`; stored uppercased without the `#`.
+#[wasm_bindgen]
+pub fn session_set_tab_color(sheet: usize, hex: &str) -> Result<(), JsError> {
+    let cleaned = hex.trim().trim_start_matches('#');
+    let color = if cleaned.len() == 6 && cleaned.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(cleaned.to_ascii_uppercase())
+    } else {
+        None
+    };
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.tab_color = color;
+        }
+        Ok(())
+    })
+}
+
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.
 #[wasm_bindgen]
 pub fn session_merges(sheet: usize) -> String {

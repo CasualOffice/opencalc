@@ -1051,6 +1051,12 @@ function renderTabs() {
     const b = document.createElement("button");
     b.className = "sheet-tab" + (i === state.sheet ? " active" : "");
     b.textContent = name;
+    let tc = "";
+    try { tc = wasm.session_tab_color(i); } catch (_) {}
+    if (tc) {
+      b.style.setProperty("--tab-color", "#" + tc);
+      b.classList.add("colored");
+    }
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", i === state.sheet ? "true" : "false");
     b.addEventListener("click", () => switchSheet(i));
@@ -1146,6 +1152,36 @@ function sheetMenu(i, x, y) {
     try { const n = wasm.session_duplicate_sheet(i); switchSheet(n); renderTabs(); }
     catch (e) { status.textContent = `error: ${e}`; }
   });
+  // Tab-color swatch strip.
+  const sep = document.createElement("div");
+  sep.className = "menu-sep";
+  menu.appendChild(sep);
+  const lbl = document.createElement("div");
+  lbl.className = "menu-label";
+  lbl.textContent = "Tab color";
+  menu.appendChild(lbl);
+  const strip = document.createElement("div");
+  strip.className = "swatch-row";
+  const setTabColor = (hex) => {
+    closeSheetMenu();
+    try { wasm.session_set_tab_color(i, hex); renderTabs(); }
+    catch (e) { status.textContent = `error: ${e}`; }
+  };
+  ["E53935", "FB8C00", "FDD835", "43A047", "1E88E5", "5E35B1", "8E24AA", "546E7A"].forEach((hex) => {
+    const sw = document.createElement("button");
+    sw.className = "swatch";
+    sw.style.background = "#" + hex;
+    sw.title = "#" + hex;
+    sw.addEventListener("click", (e) => { e.stopPropagation(); setTabColor(hex); });
+    strip.appendChild(sw);
+  });
+  const none = document.createElement("button");
+  none.className = "swatch swatch-none";
+  none.title = "No color";
+  none.addEventListener("click", (e) => { e.stopPropagation(); setTabColor(""); });
+  strip.appendChild(none);
+  menu.appendChild(strip);
+  menu.appendChild(document.createElement("div")).className = "menu-sep";
   item("Delete", true, () => {
     try {
       wasm.session_delete_sheet(i);

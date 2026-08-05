@@ -68,7 +68,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-26 | Hidden rows/columns (+ from file) | Done | `Sheet.hidden_rows/cols` (import/export `hidden="1"`); layout + editor treat hidden as 0px; Hide/Unhide in the cell context menu. Verified |
 | UX-27 | Freeze panes in editor | Done | Editor geometry reworked to an explicit line-index list + per-cell quadrant clipping; 4-pane render (corner fixed, frozen row scrolls-x, frozen col scrolls-y, body both); divider lines; freeze toolbar menu (top row / first col / to selection / unfreeze); ensureVisible + clicks freeze-aware. No-freeze path unchanged. Verified |
 | UX-28 | Find & replace | Done | `session_find` / `session_replace_all` (case toggle, undoable); Ctrl+F bar with next/prev, count, replace-all. Verified |
-| UX-29 | Sheet tab reorder (drag) + tab color | Partial | `session_move_sheet` + HTML5 drag-reorder (active sheet re-tracked). Verified. Tab color pending |
+| UX-29 | Sheet tab reorder (drag) + tab color | Done | `session_move_sheet` + HTML5 drag-reorder (active sheet re-tracked). Tab color: model `Sheet.tab_color`, `<sheetPr><tabColor>` import/export (round-trip test), `session_tab_color`/`session_set_tab_color`, swatch strip in the tab context menu, colored underline stripe on the tab. Verified in-browser |
 
 ### P2 — polish / advanced
 

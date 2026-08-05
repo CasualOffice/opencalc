@@ -103,3 +103,17 @@ fn written_package_reopens_and_preserves_data() {
         Some("0.00")
     );
 }
+
+#[test]
+fn tab_color_round_trips() {
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].tab_color = Some("1E88E5".to_owned());
+
+    let written = write_workbook(&workbook).unwrap();
+    let wb = import_package(written).unwrap().workbook;
+    assert_eq!(wb.sheets[0].tab_color.as_deref(), Some("1E88E5"));
+    // A sheet with no color stays uncolored (no phantom <tabColor>).
+    if wb.sheets.len() > 1 {
+        assert_eq!(wb.sheets[1].tab_color, None);
+    }
+}

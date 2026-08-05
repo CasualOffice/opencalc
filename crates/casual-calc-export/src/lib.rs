@@ -451,6 +451,16 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
 
+    // `<sheetPr>` is first in the CT_Worksheet sequence. Excel stores the tab
+    // color as 8-hex ARGB; the model keeps `RRGGBB`, so we prepend an opaque
+    // `FF` alpha on the way out.
+    if let Some(rgb) = &sheet.tab_color {
+        s.push_str(&format!(
+            "<sheetPr><tabColor rgb=\"FF{}\"/></sheetPr>",
+            rgb.to_ascii_uppercase()
+        ));
+    }
+
     if !sheet.view.is_default() {
         let top_left = cell_a1(sheet.view.frozen_rows, sheet.view.frozen_cols);
         s.push_str(&format!(
