@@ -181,8 +181,10 @@ body {
 .swatches button[aria-current="true"] { border-color: var(--fg); }
 
 .menu-wrap { position: relative; display: inline-flex; }
+/* Fixed-positioned so it escapes the toolbar's `overflow-x` scroll clip; the
+   host computes `left`/`top` from the trigger button on open. */
 .popmenu {
-  position: absolute; top: 38px; left: 0; z-index: 30; min-width: 178px;
+  position: fixed; z-index: 60; min-width: 178px;
   background: var(--card); border: 1px solid var(--border-2); border-radius: 12px;
   padding: 5px; display: flex; flex-direction: column; gap: 2px;
   box-shadow: var(--shadow-pop);

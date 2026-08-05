@@ -2390,6 +2390,21 @@ function wireEvents() {
 
   // Popover menus: click toggles, outside-click / Escape closes, only one open.
   const menus = [];
+  // The menus are `position: fixed` (to escape the toolbar's overflow clip), so
+  // anchor each under its trigger button in viewport coordinates, flipping to
+  // stay on-screen at the right and bottom edges.
+  function anchorMenu(menu, btn) {
+    const r = btn.getBoundingClientRect();
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    let left = r.left;
+    let top = r.bottom + 4;
+    if (left + mw > window.innerWidth - 4) left = Math.max(4, window.innerWidth - 4 - mw);
+    if (top + mh > window.innerHeight - 4) top = Math.max(4, r.top - 4 - mh);
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
   function wirePopup(btnId, menuId, onItem) {
     const btn = document.getElementById(btnId);
     const menu = document.getElementById(menuId);
@@ -2399,6 +2414,7 @@ function wireEvents() {
       const open = menu.hidden;
       for (const m of menus) m.hidden = true;
       menu.hidden = !open;
+      if (!menu.hidden) anchorMenu(menu, btn);
     });
     for (const item of menu.querySelectorAll("button")) {
       item.addEventListener("click", () => { onItem(item); menu.hidden = true; canvas.focus(); });
