@@ -923,6 +923,18 @@ function fzOffset(_line, columns, count) {
     : wasm.session_row_offset_px(state.sheet, count);
 }
 
+// Turn an engine parse error ("[OC-FML-0001] unexpected token: Star") into a
+// message a spreadsheet user can act on.
+function friendlyFormulaError(err) {
+  const m = err.replace(/^\[OC-[A-Z0-9-]+\]\s*/, ""); // drop the internal code
+  if (/end of input/i.test(m)) return "the formula looks incomplete — check for a missing value or a closing ‘)’.";
+  const t = m.match(/unexpected token:\s*(.+)$/i);
+  if (t) {
+    const sym = { Star: "*", Plus: "+", Minus: "-", Slash: "/", Caret: "^", RParen: "‘)’", LParen: "‘(’", Comma: "‘,’", Percent: "‘%’" }[t[1].trim()] || t[1].trim();
+    return `unexpected ${sym} — check the formula syntax.`;
+  }
+  return m;
+}
 function commit(value, advance) {
   // Reject an unparseable formula instead of silently storing it as text —
   // keep the editor open with the error, like Excel's formula guard.
@@ -933,7 +945,7 @@ function commit(value, advance) {
       // Refuse the commit whether the edit came from the grid or the formula
       // bar — never silently store an unparseable formula as literal text. Only
       // the in-cell affordance (red outline + refocus) is gated on editing.
-      status.innerHTML = `<span class="err">Formula error: ${err}</span>`;
+      status.innerHTML = `<span class="err">Formula error: ${friendlyFormulaError(err)}</span>`;
       if (state.editing) { inline.classList.add("invalid"); inline.focus(); }
       return false;
     }
