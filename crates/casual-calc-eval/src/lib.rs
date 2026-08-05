@@ -29,6 +29,7 @@ mod graph;
 mod value;
 
 pub use eval::Evaluator;
+pub use functions::FUNCTIONS;
 pub use value::Value;
 
 use casual_calc_model::{CellRef, CellValue, Workbook};

@@ -13,6 +13,100 @@ use crate::value::Value;
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
 const MAX_RANGE_CELLS: u64 = 2_000_000;
 
+/// The catalog of built-in functions as `(name, signature)`, kept alphabetical.
+/// This is the **single source of truth** for the function list — the host UI
+/// (autocomplete / signature help) reads it via the SDK/WASM instead of keeping
+/// its own copy, and a test asserts every entry has a dispatch arm in
+/// [`call_function`] so the two never drift. Add a function in both places.
+pub const FUNCTIONS: &[(&str, &str)] = &[
+    ("ABS", "ABS(number)"),
+    ("AND", "AND(logical1, …)"),
+    ("AVERAGE", "AVERAGE(number1, …)"),
+    ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
+    ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
+    ("CEILING", "CEILING(number, significance)"),
+    ("CHOOSE", "CHOOSE(index, value1, …)"),
+    ("COLUMNS", "COLUMNS(array)"),
+    ("CONCAT", "CONCAT(text1, …)"),
+    ("CONCATENATE", "CONCATENATE(text1, …)"),
+    ("COUNT", "COUNT(value1, …)"),
+    ("COUNTA", "COUNTA(value1, …)"),
+    ("COUNTIF", "COUNTIF(range, criteria)"),
+    ("COUNTIFS", "COUNTIFS(range1, criteria1, …)"),
+    ("DATE", "DATE(year, month, day)"),
+    ("DAY", "DAY(serial_number)"),
+    ("EDATE", "EDATE(start_date, months)"),
+    ("EOMONTH", "EOMONTH(start_date, months)"),
+    ("EXACT", "EXACT(text1, text2)"),
+    ("FIND", "FIND(find_text, within_text, [start])"),
+    ("FLOOR", "FLOOR(number, significance)"),
+    ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
+    ("IF", "IF(logical_test, value_if_true, value_if_false)"),
+    ("IFERROR", "IFERROR(value, value_if_error)"),
+    ("IFNA", "IFNA(value, value_if_na)"),
+    ("IFS", "IFS(test1, value1, …)"),
+    ("INDEX", "INDEX(array, row_num, [col_num])"),
+    ("INT", "INT(number)"),
+    ("ISBLANK", "ISBLANK(value)"),
+    ("ISERR", "ISERR(value)"),
+    ("ISERROR", "ISERROR(value)"),
+    ("ISEVEN", "ISEVEN(number)"),
+    ("ISLOGICAL", "ISLOGICAL(value)"),
+    ("ISNA", "ISNA(value)"),
+    ("ISNONTEXT", "ISNONTEXT(value)"),
+    ("ISNUMBER", "ISNUMBER(value)"),
+    ("ISODD", "ISODD(number)"),
+    ("ISTEXT", "ISTEXT(value)"),
+    ("LARGE", "LARGE(array, k)"),
+    ("LEFT", "LEFT(text, [num_chars])"),
+    ("LEN", "LEN(text)"),
+    ("LOWER", "LOWER(text)"),
+    ("MATCH", "MATCH(lookup, array, [match_type])"),
+    ("MAX", "MAX(number1, …)"),
+    ("MEDIAN", "MEDIAN(number1, …)"),
+    ("MID", "MID(text, start_num, num_chars)"),
+    ("MIN", "MIN(number1, …)"),
+    ("MOD", "MOD(number, divisor)"),
+    ("MONTH", "MONTH(serial_number)"),
+    ("NA", "NA()"),
+    ("NOT", "NOT(logical)"),
+    ("OR", "OR(logical1, …)"),
+    ("POWER", "POWER(number, power)"),
+    ("PRODUCT", "PRODUCT(number1, …)"),
+    ("PROPER", "PROPER(text)"),
+    ("RANK", "RANK(number, ref, [order])"),
+    ("REPLACE", "REPLACE(old, start, num_chars, new)"),
+    ("REPT", "REPT(text, number_times)"),
+    ("RIGHT", "RIGHT(text, [num_chars])"),
+    ("ROUND", "ROUND(number, num_digits)"),
+    ("ROUNDDOWN", "ROUNDDOWN(number, num_digits)"),
+    ("ROUNDUP", "ROUNDUP(number, num_digits)"),
+    ("ROWS", "ROWS(array)"),
+    ("SEARCH", "SEARCH(find_text, within_text, [start])"),
+    ("SIGN", "SIGN(number)"),
+    ("SMALL", "SMALL(array, k)"),
+    ("SQRT", "SQRT(number)"),
+    ("STDEV", "STDEV(number1, …)"),
+    ("STDEVP", "STDEVP(number1, …)"),
+    ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
+    ("SUM", "SUM(number1, …)"),
+    ("SUMIF", "SUMIF(range, criteria, [sum_range])"),
+    ("SUMIFS", "SUMIFS(sum_range, range1, criteria1, …)"),
+    ("SUMPRODUCT", "SUMPRODUCT(array1, …)"),
+    (
+        "SWITCH",
+        "SWITCH(expression, value1, result1, …, [default])",
+    ),
+    ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
+    ("TRIM", "TRIM(text)"),
+    ("TRUNC", "TRUNC(number, [num_digits])"),
+    ("UPPER", "UPPER(text)"),
+    ("VALUE", "VALUE(text)"),
+    ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
+    ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
+    ("YEAR", "YEAR(serial_number)"),
+];
+
 /// Dispatch a function call by (upper-cased) name.
 pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
     match name {
@@ -81,6 +175,44 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "WEEKDAY" => eval_weekday(ev, sheet, args),
         "EDATE" => eval_edate(ev, sheet, args, false),
         "EOMONTH" => eval_edate(ev, sheet, args, true),
+        // --- Logical / info (M6-2) ---
+        "IFS" => eval_ifs(ev, sheet, args),
+        "SWITCH" => eval_switch(ev, sheet, args),
+        "IFNA" => eval_ifna(ev, sheet, args),
+        "NA" => Value::Error(ErrorValue::Na),
+        "ISBLANK" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Empty)),
+        "ISNUMBER" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Number(_))),
+        "ISTEXT" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Text(_))),
+        "ISNONTEXT" => is_predicate(ev, sheet, args, |v| !matches!(v, Value::Text(_))),
+        "ISLOGICAL" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Bool(_))),
+        "ISERROR" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Error(_))),
+        "ISERR" => is_predicate(
+            ev,
+            sheet,
+            args,
+            |v| matches!(v, Value::Error(e) if *e != ErrorValue::Na),
+        ),
+        "ISNA" => is_predicate(ev, sheet, args, |v| {
+            matches!(v, Value::Error(ErrorValue::Na))
+        }),
+        "ISEVEN" => eval_parity(ev, sheet, args, true),
+        "ISODD" => eval_parity(ev, sheet, args, false),
+        // --- Statistics (M6-2) ---
+        "MEDIAN" => eval_median(ev, sheet, args),
+        "LARGE" => eval_large_small(ev, sheet, args, true),
+        "SMALL" => eval_large_small(ev, sheet, args, false),
+        "RANK" => eval_rank(ev, sheet, args),
+        "STDEV" => eval_stdev(ev, sheet, args, true),
+        "STDEVP" => eval_stdev(ev, sheet, args, false),
+        "SUMPRODUCT" => eval_sumproduct(ev, sheet, args),
+        // --- Multi-criteria aggregates (M6-2) ---
+        "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
+        "AVERAGEIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Average),
+        "COUNTIFS" => eval_countifs(ev, sheet, args),
+        // --- Shape / text (M6-2) ---
+        "ROWS" => eval_dim(ev, sheet, args, true),
+        "COLUMNS" => eval_dim(ev, sheet, args, false),
+        "TEXTJOIN" => eval_textjoin(ev, sheet, args),
         _ => Value::Error(ErrorValue::Name),
     }
 }
@@ -1254,4 +1386,328 @@ fn eval_edate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], eomonth: bool
         return Value::Error(ErrorValue::Num);
     }
     Value::Number(out as f64)
+}
+
+// --- M6-2 built-ins --------------------------------------------------------
+
+/// The IS-family: evaluate the single argument and test the resulting value.
+fn is_predicate(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    test: fn(&Value) -> bool,
+) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    Value::Bool(test(&ev.eval_expr(sheet, arg)))
+}
+
+/// ISEVEN / ISODD: truncate toward zero, then test parity.
+fn eval_parity(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], even: bool) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => Value::Bool(((n.trunc() as i64).rem_euclid(2) == 0) == even),
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// IFS(test1, value1, test2, value2, …): first TRUE test's value, else #N/A.
+fn eval_ifs(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || !args.len().is_multiple_of(2) {
+        return Value::Error(ErrorValue::Value);
+    }
+    for pair in args.chunks(2) {
+        match ev.eval_expr(sheet, &pair[0]).as_bool() {
+            Ok(true) => return ev.eval_expr(sheet, &pair[1]),
+            Ok(false) => {}
+            Err(e) => return Value::Error(e),
+        }
+    }
+    Value::Error(ErrorValue::Na)
+}
+
+/// SWITCH(expr, v1, r1, …, [default]).
+fn eval_switch(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let subject = ev.eval_expr(sheet, &args[0]);
+    let rest = &args[1..];
+    let mut i = 0;
+    while i + 1 < rest.len() {
+        let candidate = ev.eval_expr(sheet, &rest[i]);
+        if values_equal(&subject, &candidate) {
+            return ev.eval_expr(sheet, &rest[i + 1]);
+        }
+        i += 2;
+    }
+    // A trailing odd argument is the default.
+    if rest.len() % 2 == 1 {
+        return ev.eval_expr(sheet, &rest[rest.len() - 1]);
+    }
+    Value::Error(ErrorValue::Na)
+}
+
+/// Excel equality for SWITCH: numeric when both numeric, else case-insensitive text.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y,
+        _ => a
+            .as_text()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(&b.as_text().unwrap_or_default()),
+    }
+}
+
+/// IFNA(value, value_if_na): substitute only on #N/A.
+fn eval_ifna(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    match ev.eval_expr(sheet, &args[0]) {
+        Value::Error(ErrorValue::Na) => ev.eval_expr(sheet, &args[1]),
+        v => v,
+    }
+}
+
+/// MEDIAN over all numeric arguments.
+fn eval_median(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    match flatten_numbers(ev, sheet, args) {
+        Ok(mut ns) if !ns.is_empty() => {
+            ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            let m = ns.len() / 2;
+            let med = if ns.len() % 2 == 1 {
+                ns[m]
+            } else {
+                (ns[m - 1] + ns[m]) / 2.0
+            };
+            Value::Number(med)
+        }
+        Ok(_) => Value::Error(ErrorValue::Num),
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// LARGE(array, k) / SMALL(array, k): k-th largest/smallest (1-based).
+fn eval_large_small(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], large: bool) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let k = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    if k < 1 || k as usize > ns.len() {
+        return Value::Error(ErrorValue::Num);
+    }
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let idx = if large {
+        ns.len() - k as usize
+    } else {
+        k as usize - 1
+    };
+    Value::Number(ns[idx])
+}
+
+/// RANK(number, ref, [order]): position of `number` within `ref` (1-based).
+/// `order` 0/omitted = descending, non-zero = ascending. Ties share a rank.
+fn eval_rank(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let target = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let ns = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let ascending = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n != 0.0,
+            Err(e) => return Value::Error(e),
+        },
+        None => false,
+    };
+    if !ns.contains(&target) {
+        return Value::Error(ErrorValue::Na);
+    }
+    let rank = if ascending {
+        1 + ns.iter().filter(|&&n| n < target).count()
+    } else {
+        1 + ns.iter().filter(|&&n| n > target).count()
+    };
+    Value::Number(rank as f64)
+}
+
+/// STDEV (sample, n-1) / STDEVP (population, n).
+fn eval_stdev(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], sample: bool) -> Value {
+    match flatten_numbers(ev, sheet, args) {
+        Ok(ns) => {
+            let n = ns.len();
+            if n < if sample { 2 } else { 1 } {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let mean = ns.iter().sum::<f64>() / n as f64;
+            let ss: f64 = ns.iter().map(|x| (x - mean).powi(2)).sum();
+            let denom = if sample { (n - 1) as f64 } else { n as f64 };
+            Value::Number((ss / denom).sqrt())
+        }
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// SUMPRODUCT: element-wise product of equal-length arrays, then summed.
+fn eval_sumproduct(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    for arg in args {
+        let mut nums = Vec::new();
+        for v in flatten_values(ev, sheet, arg) {
+            match v {
+                Value::Number(n) => nums.push(n),
+                Value::Bool(b) => nums.push(if b { 1.0 } else { 0.0 }),
+                Value::Error(e) => return Value::Error(e),
+                _ => nums.push(0.0), // text/empty contribute 0, per Excel
+            }
+        }
+        cols.push(nums);
+    }
+    let len = cols[0].len();
+    if cols.iter().any(|c| c.len() != len) {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut total = 0.0;
+    for i in 0..len {
+        total += cols.iter().map(|c| c[i]).product::<f64>();
+    }
+    Value::Number(total)
+}
+
+/// ROWS / COLUMNS: the row/column count of a range (a lone cell ref is 1×1).
+fn eval_dim(_ev: &mut Evaluator<'_>, _sheet: usize, args: &[Expr], rows: bool) -> Value {
+    match args.first() {
+        Some(Expr::Range(a, b)) => {
+            let n = if rows {
+                a.row.max(b.row) - a.row.min(b.row) + 1
+            } else {
+                a.col.max(b.col) - a.col.min(b.col) + 1
+            };
+            Value::Number(n as f64)
+        }
+        Some(Expr::Reference(_)) => Value::Number(1.0),
+        _ => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// TEXTJOIN(delimiter, ignore_empty, text1, …).
+fn eval_textjoin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let delim = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let ignore_empty = match ev.eval_expr(sheet, &args[1]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    let mut parts = Vec::new();
+    for arg in &args[2..] {
+        for v in flatten_values(ev, sheet, arg) {
+            if let Value::Error(e) = v {
+                return Value::Error(e);
+            }
+            let s = v.as_text().unwrap_or_default();
+            if ignore_empty && s.is_empty() {
+                continue;
+            }
+            parts.push(s);
+        }
+    }
+    Value::Text(parts.join(&delim))
+}
+
+/// Which aggregate a `*IFS` call computes over the matched positions.
+enum IfsKind {
+    Sum,
+    Average,
+}
+
+/// SUMIFS / AVERAGEIFS: an aggregate range followed by (range, criteria) pairs.
+fn eval_ifs_aggregate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], kind: IfsKind) -> Value {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Value::Error(ErrorValue::Value);
+    }
+    let agg = flatten_values(ev, sheet, &args[0]);
+    let keep = match ifs_matches(ev, sheet, &args[1..], agg.len()) {
+        Ok(m) => m,
+        Err(e) => return Value::Error(e),
+    };
+    let mut picked = Vec::new();
+    for (i, &k) in keep.iter().enumerate() {
+        if !k {
+            continue;
+        }
+        match agg.get(i) {
+            Some(Value::Number(n)) => picked.push(*n),
+            Some(Value::Bool(b)) => picked.push(if *b { 1.0 } else { 0.0 }),
+            Some(Value::Error(e)) => return Value::Error(*e),
+            _ => {}
+        }
+    }
+    match kind {
+        IfsKind::Sum => Value::Number(picked.iter().sum()),
+        IfsKind::Average if picked.is_empty() => Value::Error(ErrorValue::Div0),
+        IfsKind::Average => Value::Number(picked.iter().sum::<f64>() / picked.len() as f64),
+    }
+}
+
+/// COUNTIFS: count positions satisfying every (range, criteria) pair.
+fn eval_countifs(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || !args.len().is_multiple_of(2) {
+        return Value::Error(ErrorValue::Value);
+    }
+    let first = flatten_values(ev, sheet, &args[0]);
+    match ifs_matches(ev, sheet, args, first.len()) {
+        Ok(m) => Value::Number(m.iter().filter(|&&k| k).count() as f64),
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// Fold consecutive (range, criteria) pairs into a per-position keep mask of
+/// length `len` (logical AND across pairs). Ranges must all match `len`.
+fn ifs_matches(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    pairs: &[Expr],
+    len: usize,
+) -> Result<Vec<bool>, ErrorValue> {
+    let mut keep = vec![true; len];
+    let mut i = 0;
+    while i + 1 < pairs.len() {
+        let (op, operand) = parse_criteria(&ev.eval_expr(sheet, &pairs[i + 1]));
+        let range = flatten_values(ev, sheet, &pairs[i]);
+        if range.len() != len {
+            return Err(ErrorValue::Value);
+        }
+        for (j, cell) in range.iter().enumerate() {
+            if matches!(cell, Value::Empty) || !criterion_matches(cell, op, &operand) {
+                keep[j] = false;
+            }
+        }
+        i += 2;
+    }
+    Ok(keep)
 }

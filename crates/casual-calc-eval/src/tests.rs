@@ -717,3 +717,98 @@ fn incremental_tracks_case_insensitive_cross_sheet_ref() {
         "cross-sheet dependent stayed stale — graph missed the case-insensitive ref"
     );
 }
+
+#[test]
+fn every_cataloged_function_dispatches() {
+    use casual_calc_model::ErrorValue;
+    // Each catalog entry must have a dispatch arm: evaluating `NAME()` must not
+    // fall through to #NAME? (the unknown-function sentinel). This is what keeps
+    // the catalog and the dispatch table from drifting apart.
+    for (name, _) in crate::FUNCTIONS {
+        let mut b = Builder::new();
+        b.formula((0, 0), &format!("{name}()"));
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        assert_ne!(
+            value_at(&wb, 0, 0),
+            CellValue::Error(ErrorValue::Name),
+            "catalog function {name} has no dispatch arm"
+        );
+    }
+}
+
+#[test]
+fn catalog_is_sorted_and_unique() {
+    let names: Vec<&str> = crate::FUNCTIONS.iter().map(|(n, _)| *n).collect();
+    for w in names.windows(2) {
+        assert!(w[0] < w[1], "catalog not sorted/unique at {:?}", w);
+    }
+}
+
+#[test]
+fn m6_2_math_logic_and_aggregates() {
+    let mut b = Builder::new();
+    for (i, v) in [10.0, 20.0, 30.0, 40.0, 50.0].iter().enumerate() {
+        b.number((i as u32, 0), *v); // A1:A5
+    }
+    b.number((0, 1), 2.0)
+        .number((1, 1), 3.0)
+        .number((2, 1), 4.0); // B1:B3
+    b.formula((0, 3), "SUMIFS(A1:A5,A1:A5,\">25\")"); // 120
+    b.formula((1, 3), "COUNTIFS(A1:A5,\">25\")"); // 3
+    b.formula((2, 3), "AVERAGEIFS(A1:A5,A1:A5,\">25\")"); // 40
+    b.formula((3, 3), "MEDIAN(A1:A5)"); // 30
+    b.formula((4, 3), "LARGE(A1:A5,2)"); // 40
+    b.formula((5, 3), "SMALL(A1:A5,2)"); // 20
+    b.formula((6, 3), "RANK(30,A1:A5)"); // 3 (descending)
+    b.formula((7, 3), "STDEVP(A1:A5)"); // sqrt(200) ≈ 14.142
+    b.formula((8, 3), "SUMPRODUCT(A1:A3,B1:B3)"); // 10*2+20*3+30*4 = 200
+    b.formula((9, 3), "IFS(A1>100,1,A1>5,2)"); // 2
+    b.formula((10, 3), "SWITCH(A1,10,100,999)"); // 100
+    b.formula((11, 3), "IFNA(NA(),7)"); // 7
+    b.formula((12, 3), "ROWS(A1:A5)"); // 5
+    b.formula((13, 3), "COLUMNS(A1:B3)"); // 2
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let num = |r| match value_at(&wb, r, 3) {
+        CellValue::Number(n) => n,
+        v => panic!("row {r}: {v:?}"),
+    };
+    assert_eq!(num(0), 120.0);
+    assert_eq!(num(1), 3.0);
+    assert_eq!(num(2), 40.0);
+    assert_eq!(num(3), 30.0);
+    assert_eq!(num(4), 40.0);
+    assert_eq!(num(5), 20.0);
+    assert_eq!(num(6), 3.0);
+    assert!((num(7) - 200f64.sqrt()).abs() < 1e-9);
+    assert_eq!(num(8), 200.0);
+    assert_eq!(num(9), 2.0);
+    assert_eq!(num(10), 100.0);
+    assert_eq!(num(11), 7.0);
+    assert_eq!(num(12), 5.0);
+    assert_eq!(num(13), 2.0);
+}
+
+#[test]
+fn m6_2_is_family_and_textjoin() {
+    let mut b = Builder::new();
+    b.number((0, 0), 5.0); // A1
+    b.formula((0, 1), "ISNUMBER(A1)"); // true
+    b.formula((1, 1), "ISBLANK(Z9)"); // true
+    b.formula((2, 1), "ISEVEN(A1)"); // false
+    b.formula((3, 1), "ISODD(A1)"); // true
+    b.formula((4, 1), "ISNA(NA())"); // true
+    b.formula((5, 1), "ISERROR(1/0)"); // true
+    b.formula((6, 1), "ISTEXT(A1)"); // false
+    b.formula((0, 2), "TEXTJOIN(\"-\",TRUE,\"a\",\"\",\"b\")"); // "a-b"
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let boo = |r| match value_at(&wb, r, 1) {
+        CellValue::Bool(x) => x,
+        v => panic!("row {r}: {v:?}"),
+    };
+    assert!(boo(0) && boo(1) && boo(3) && boo(4) && boo(5));
+    assert!(!boo(2) && !boo(6));
+    assert_eq!(text_at(&wb, 0, 2), "a-b");
+}
