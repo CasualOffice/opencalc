@@ -205,6 +205,15 @@
 .cmt-set { min-width: 240px; padding: 8px; }
 .cmt-input { width: 100%; margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; resize: vertical; }
 .cmt-input:focus { outline: none; border-color: var(--accent); }
+/* Name manager. */
+.nm-menu { min-width: 260px; max-width: 360px; max-height: 320px; overflow-y: auto; }
+.nm-row { display: flex; align-items: stretch; gap: 4px; }
+.nm-go { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 10px; background: none; border: 0; border-radius: 6px; cursor: pointer; text-align: left; }
+.nm-go:hover { background: var(--card); }
+.nm-go b { font-size: 13px; color: var(--fg); }
+.nm-go span { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.nm-del { width: 30px; border: 0; background: none; color: var(--muted); font-size: 18px; cursor: pointer; border-radius: 6px; }
+.nm-del:hover { background: color-mix(in srgb, #e5484d 18%, transparent); color: #e5484d; }
 /* Formula function autocomplete. */
 .ac-menu {
   position: absolute; z-index: 40; min-width: 260px; max-width: 360px;

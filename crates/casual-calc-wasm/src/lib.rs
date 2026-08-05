@@ -21,8 +21,8 @@ use casual_calc_layout::{
 };
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
-    ConditionalFormat, DataValidation, HAlign, Id, Sheet, SheetId, Style, StyleId, VAlign,
-    Workbook,
+    ConditionalFormat, DataValidation, DefinedName, HAlign, Id, Sheet, SheetId, Style, StyleId,
+    VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -674,6 +674,101 @@ pub fn session_comments(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Define (or replace) a workbook-scoped named range. `refers_to` is a formula
+/// such as `Sheet1!A1:B2` or `A1`. Rejects empty names and names that collide
+/// with a cell reference. Recalculates so name-using formulas update.
+#[wasm_bindgen]
+pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(JsError::new("name cannot be empty"));
+    }
+    if casual_calc_formula::parse_a1(name).is_some() {
+        return Err(JsError::new("that name looks like a cell reference"));
+    }
+    let expr = parse(refers_to.trim().trim_start_matches('='))
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        {
+            let wb = session.workbook_mut();
+            wb.defined_names.retain(|d| d.name != name);
+            wb.defined_names.push(DefinedName {
+                name: name.to_owned(),
+                sheet: None,
+                formula: expr,
+            });
+        }
+        session.recalculate();
+        Ok(())
+    })
+}
+
+/// Delete a defined name; recalculates so dependents become `#NAME?`.
+#[wasm_bindgen]
+pub fn session_delete_name(name: &str) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session
+            .workbook_mut()
+            .defined_names
+            .retain(|d| d.name != name);
+        session.recalculate();
+        Ok(())
+    })
+}
+
+/// All defined names as JSON `[{name, refersTo}, …]`.
+#[wasm_bindgen]
+pub fn session_names() -> String {
+    with_session(|s| {
+        let items: Vec<String> = s
+            .workbook()
+            .defined_names
+            .iter()
+            .map(|d| {
+                format!(
+                    "{{\"name\":{},\"refersTo\":{}}}",
+                    json_string(&d.name),
+                    json_string(&d.formula.to_string())
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The target range of a defined name as JSON `{r0,c0,r1,c1}`, or `null` if the
+/// name is unknown or refers to something other than a cell/range.
+#[wasm_bindgen]
+pub fn session_name_target(name: &str) -> String {
+    with_session(|s| {
+        let Some(d) = s.workbook().defined_names.iter().find(|d| d.name == name) else {
+            return "null".to_owned();
+        };
+        match &d.formula {
+            Expr::Reference(r) => {
+                format!(
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}}}",
+                    r.row, r.col, r.row, r.col
+                )
+            }
+            Expr::Range(a, b) => format!(
+                "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}}}",
+                a.row.min(b.row),
+                a.col.min(b.col),
+                a.row.max(b.row),
+                a.col.max(b.col)
+            ),
+            _ => "null".to_owned(),
+        }
+    })
+    .unwrap_or_else(|| "null".to_owned())
 }
 
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.

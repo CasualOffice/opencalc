@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "14";
+const BUILD = "15";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1635,8 +1635,63 @@ function gotoName(v) {
     const c = parseA1Cell(s);
     if (c) { select(c.row, c.col); return; }
   }
-  status.textContent = `Can't go to “${s}” — type a cell like B12 or a range like A1:C5`;
+  // An existing defined name → jump to its target range.
+  try {
+    const t = wasm.session_name_target(s);
+    if (t !== "null") {
+      const r = JSON.parse(t);
+      state.anchor = { row: r.r0, col: r.c0 };
+      state.sel = { row: r.r1, col: r.c1 };
+      state.selKind = "cells";
+      state.ranges = [];
+      ensureVisible();
+      draw();
+      return;
+    }
+  } catch {}
+  // A valid new name → define it for the current selection (Excel's name box).
+  if (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(s)) {
+    const r = effectiveRange();
+    const names = JSON.parse(wasm.session_sheet_names());
+    const sn = names[state.sheet] || "Sheet1";
+    const q = /[^A-Za-z0-9_]/.test(sn) ? `'${sn.replace(/'/g, "''")}'` : sn;
+    const refers = `${q}!${A1(r.r0, r.c0)}:${A1(r.r1, r.c1)}`;
+    try { wasm.session_define_name(s, refers); status.textContent = `defined name “${s}”`; }
+    catch (e) { status.textContent = `error: ${e}`; }
+    updateNameBox();
+    return;
+  }
+  status.textContent = `Can't go to “${s}” — type a cell (B12), range (A1:C5), or a name`;
   updateNameBox();
+}
+// Ctrl+F3 Name Manager: list defined names to navigate to or delete.
+function openNameManager(x, y) {
+  closeSheetMenu();
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()); } catch {}
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu nm-menu";
+  menu.id = "sheet-ctx";
+  const head = document.createElement("div");
+  head.className = "menu-label";
+  head.textContent = names.length ? "Named ranges" : "No named ranges yet";
+  menu.appendChild(head);
+  names.forEach((n) => {
+    const row = document.createElement("div");
+    row.className = "nm-row";
+    const go = document.createElement("button");
+    go.className = "nm-go";
+    go.innerHTML = `<b>${n.name}</b><span>${n.refersTo}</span>`;
+    go.addEventListener("click", () => { closeSheetMenu(); gotoName(n.name); });
+    const del = document.createElement("button");
+    del.className = "nm-del";
+    del.textContent = "×";
+    del.title = "Delete";
+    del.addEventListener("click", (e) => { e.stopPropagation(); try { wasm.session_delete_name(n.name); } catch {} row.remove(); draw(); });
+    row.appendChild(go); row.appendChild(del);
+    menu.appendChild(row);
+  });
+  positionMenu(menu, x, y);
 }
 // Whether the caret (end of `before`) sits inside a "..." string literal, so we
 // must not inject a cell reference or a function name there. Treats "" as an
@@ -2256,6 +2311,7 @@ function wireEvents() {
       if (k === "a") { ctrlA(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
       if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
+      if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
       if (k === "z") { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
