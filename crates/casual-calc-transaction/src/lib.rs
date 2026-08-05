@@ -12,6 +12,7 @@
 
 use std::collections::BTreeSet;
 
+use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AxisSizing, Cell, CellRange, CellRef, CellValue, Sheet, SheetView, StyleId, Workbook,
 };
@@ -323,11 +324,19 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             })
         }
         Operation::RenameSheet { index, name } => {
-            let target = workbook
-                .sheets
-                .get_mut(index)
-                .ok_or(TxnError::SheetNotFound { index })?;
-            let previous = std::mem::replace(&mut target.name, name);
+            let previous = {
+                let target = workbook
+                    .sheets
+                    .get_mut(index)
+                    .ok_or(TxnError::SheetNotFound { index })?;
+                std::mem::replace(&mut target.name, name.clone())
+            };
+            // Follow the rename in every cross-sheet reference (`Old!A1` ->
+            // `New!A1`) so a referenced sheet's formulas don't silently break.
+            // The inverse renames back and this same pass reverses the rewrite.
+            if previous != name {
+                rename_sheet_in_formulas(workbook, &previous, &name);
+            }
             Ok(Operation::RenameSheet {
                 index,
                 name: previous,
@@ -389,6 +398,34 @@ fn set_axis_override(axis: &mut AxisSizing, index: u32, size: Option<i64>) -> Op
         }
     }
     previous
+}
+
+/// Rewrite every workbook formula that references sheet `old` (by name) so it
+/// points at `new`. Only formulas that actually change are re-stored, mirroring
+/// the structural row/column rewrite pass.
+fn rename_sheet_in_formulas(workbook: &mut Workbook, old: &str, new: &str) {
+    let mut jobs: Vec<(usize, CellRef, Expr)> = Vec::new();
+    for (idx, sheet) in workbook.sheets.iter().enumerate() {
+        for (addr, cell) in sheet.cells.iter() {
+            if let Some(handle) = cell.formula
+                && let Some(expr) = workbook.formula(handle)
+            {
+                let mut rewritten = expr.clone();
+                if rename_sheet_references(&mut rewritten, old, new) {
+                    jobs.push((idx, addr, rewritten));
+                }
+            }
+        }
+    }
+    for (idx, addr, expr) in jobs {
+        let handle = workbook.store_formula(expr);
+        let store = &mut workbook.sheets[idx].cells;
+        if let Some(existing) = store.get(addr) {
+            let mut updated = existing.clone();
+            updated.formula = Some(handle);
+            store.set(addr, updated);
+        }
+    }
 }
 
 fn inverse_of(sheet: usize, at: CellRef, previous: Option<Cell>) -> Operation {

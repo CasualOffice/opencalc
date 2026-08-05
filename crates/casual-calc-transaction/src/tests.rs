@@ -1207,3 +1207,32 @@ fn sheet_ops_undo_redo_through_history() {
     history.redo(&mut wb).unwrap(); // redo rename
     assert_eq!(wb.sheets[1].name, "Data");
 }
+
+#[test]
+fn rename_sheet_rewrites_cross_sheet_refs_and_undoes() {
+    // Two sheets; a formula on "Report" reads from "Data".
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "Data"));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 2)), "Report"));
+    set_formula(&mut wb, 1, 0, 0, "Data!A1+1");
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Data!A1+1)"));
+
+    // Rename Data -> Facts: the cross-sheet reference must follow.
+    let inverse = apply(
+        &mut wb,
+        Operation::RenameSheet {
+            index: 0,
+            name: "Facts".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].name, "Facts");
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Facts!A1+1)"));
+
+    // Undo: both the name and the reference revert.
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].name, "Data");
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Data!A1+1)"));
+}

@@ -28,7 +28,7 @@ pub use ast::{BinaryOp, Expr, UnaryOp};
 pub use error::FormulaError;
 pub use parse::parse;
 pub use reference::{CellReference, column_to_letters, parse_a1};
-pub use rewrite::shift_references;
+pub use rewrite::{rename_sheet_references, shift_references};
 
 #[cfg(test)]
 mod tests;

@@ -40,6 +40,48 @@ fn shift_ref(r: &CellReference, dr: i64, dc: i64) -> CellReference {
     out
 }
 
+/// Rewrite every reference whose sheet qualifier is `old` (matched
+/// case-insensitively, as Excel resolves sheet names) to `new`, so a formula
+/// like `=Old!A1` follows the sheet when it is renamed. Bare (unqualified)
+/// references are untouched. Returns `true` if anything changed.
+pub fn rename_sheet_references(expr: &mut Expr, old: &str, new: &str) -> bool {
+    match expr {
+        Expr::Reference(r) => rename_ref(r, old, new),
+        Expr::Range(a, b) => {
+            // Evaluate both so neither endpoint is skipped by short-circuiting.
+            let left = rename_ref(a, old, new);
+            let right = rename_ref(b, old, new);
+            left || right
+        }
+        Expr::Unary { operand, .. } => rename_sheet_references(operand, old, new),
+        Expr::Binary { left, right, .. } => {
+            let l = rename_sheet_references(left, old, new);
+            let r = rename_sheet_references(right, old, new);
+            l || r
+        }
+        Expr::Function { args, .. } => {
+            let mut changed = false;
+            for arg in args {
+                changed |= rename_sheet_references(arg, old, new);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+fn rename_ref(r: &mut CellReference, old: &str, new: &str) -> bool {
+    if r.sheet
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case(old))
+    {
+        r.sheet = Some(new.to_owned());
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::shift_references;
@@ -63,5 +105,40 @@ mod tests {
     #[test]
     fn clamps_at_zero() {
         assert_eq!(shifted("B2", -5, -5), "A1");
+    }
+
+    use super::rename_sheet_references;
+
+    fn renamed(src: &str, old: &str, new: &str) -> (String, bool) {
+        let mut expr = parse(src).unwrap();
+        let changed = rename_sheet_references(&mut expr, old, new);
+        (expr.to_string(), changed)
+    }
+
+    #[test]
+    fn renames_qualified_refs_leaving_bare_ones() {
+        // A qualified ref follows the rename; a bare ref is untouched.
+        assert_eq!(renamed("Old!A1", "Old", "New"), ("New!A1".into(), true));
+        assert_eq!(renamed("A1", "Old", "New"), ("A1".into(), false));
+        // A cross-sheet range (qualified at its first endpoint) is rewritten.
+        assert_eq!(
+            renamed("SUM(Old!A1:A3)", "Old", "New"),
+            ("SUM(New!A1:A3)".into(), true)
+        );
+        // Only the matching sheet is touched inside a larger expression.
+        assert_eq!(
+            renamed("Old!A1+Other!B2", "Old", "New"),
+            ("(New!A1+Other!B2)".into(), true)
+        );
+    }
+
+    #[test]
+    fn rename_is_case_insensitive_and_quotes_when_needed() {
+        assert_eq!(renamed("OLD!A1", "Old", "New"), ("New!A1".into(), true));
+        // A new name with a space must round-trip through quoting.
+        assert_eq!(
+            renamed("Old!A1", "Old", "My Data"),
+            ("'My Data'!A1".into(), true)
+        );
     }
 }
