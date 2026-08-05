@@ -245,6 +245,7 @@ fn styles_xml(workbook: &Workbook) -> String {
             align: style.align,
             valign: style.valign,
             wrap: style.wrap,
+            indent: style.indent,
         });
     }
 
@@ -333,7 +334,7 @@ fn styles_xml(workbook: &Workbook) -> String {
         } else {
             ""
         };
-        let has_align = ids.align.is_some() || ids.valign.is_some() || ids.wrap;
+        let has_align = ids.align.is_some() || ids.valign.is_some() || ids.wrap || ids.indent != 0;
         let apply_align = if has_align {
             " applyAlignment=\"1\""
         } else {
@@ -353,6 +354,9 @@ fn styles_xml(workbook: &Workbook) -> String {
             }
             if ids.wrap {
                 s.push_str(" wrapText=\"1\"");
+            }
+            if ids.indent != 0 {
+                s.push_str(&format!(" indent=\"{}\"", ids.indent));
             }
             s.push_str("/></xf>");
         } else {
@@ -384,6 +388,17 @@ struct StyleIds {
     align: Option<HAlign>,
     valign: Option<VAlign>,
     wrap: bool,
+    indent: u8,
+}
+
+/// The per-column attributes coalesced into one `<col>` span: a custom width
+/// (twips), a hidden flag, an outline nesting level, and a collapsed flag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ColAttrs {
+    width: Option<i64>,
+    hidden: bool,
+    outline_level: u8,
+    collapsed: bool,
 }
 
 fn write_border(s: &mut String, border: &Borders) {
@@ -451,22 +466,51 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
 
-    // `<sheetPr>` is first in the CT_Worksheet sequence. Excel stores the tab
-    // color as 8-hex ARGB; the model keeps `RRGGBB`, so we prepend an opaque
-    // `FF` alpha on the way out.
-    if let Some(rgb) = &sheet.tab_color {
-        s.push_str(&format!(
-            "<sheetPr><tabColor rgb=\"FF{}\"/></sheetPr>",
-            rgb.to_ascii_uppercase()
-        ));
+    // `<sheetPr>` is first in the CT_Worksheet sequence, and within it the schema
+    // order is `tabColor` then `outlinePr`. Excel stores the tab color as 8-hex
+    // ARGB; the model keeps `RRGGBB`, so we prepend an opaque `FF` alpha on the
+    // way out. `<outlinePr>` is emitted only for non-default summary positions.
+    let has_outline_pr = !sheet.outline.is_default();
+    if sheet.tab_color.is_some() || has_outline_pr {
+        s.push_str("<sheetPr>");
+        if let Some(rgb) = &sheet.tab_color {
+            s.push_str(&format!(
+                "<tabColor rgb=\"FF{}\"/>",
+                rgb.to_ascii_uppercase()
+            ));
+        }
+        if has_outline_pr {
+            s.push_str("<outlinePr");
+            if !sheet.outline.summary_below {
+                s.push_str(" summaryBelow=\"0\"");
+            }
+            if !sheet.outline.summary_right {
+                s.push_str(" summaryRight=\"0\"");
+            }
+            s.push_str("/>");
+        }
+        s.push_str("</sheetPr>");
     }
 
+    // `<sheetView>` carries the zoom scale (an attribute) and the frozen `<pane>`
+    // (a child); either alone is enough to emit the element.
     if !sheet.view.is_default() {
-        let top_left = cell_a1(sheet.view.frozen_rows, sheet.view.frozen_cols);
+        let zoom_attr = if sheet.view.zoom != 0 {
+            format!(" zoomScale=\"{}\"", sheet.view.zoom)
+        } else {
+            String::new()
+        };
         s.push_str(&format!(
-            "<sheetViews><sheetView workbookViewId=\"0\"><pane xSplit=\"{}\" ySplit=\"{}\" topLeftCell=\"{}\" state=\"frozen\" activePane=\"bottomRight\"/></sheetView></sheetViews>",
-            sheet.view.frozen_cols, sheet.view.frozen_rows, top_left
+            "<sheetViews><sheetView{zoom_attr} workbookViewId=\"0\">"
         ));
+        if sheet.view.frozen_rows != 0 || sheet.view.frozen_cols != 0 {
+            let top_left = cell_a1(sheet.view.frozen_rows, sheet.view.frozen_cols);
+            s.push_str(&format!(
+                "<pane xSplit=\"{}\" ySplit=\"{}\" topLeftCell=\"{}\" state=\"frozen\" activePane=\"bottomRight\"/>",
+                sheet.view.frozen_cols, sheet.view.frozen_rows, top_left
+            ));
+        }
+        s.push_str("</sheetView></sheetViews>");
     }
 
     // Axis defaults, then per-column overrides (schema order: before sheetData).
@@ -486,19 +530,28 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         }
         s.push_str("/>");
     }
-    if !sheet.columns.sizes.is_empty() || !sheet.hidden_cols.is_empty() {
-        // Union the width overrides and hidden flags, keyed by zero-based column,
-        // so a column can carry a custom width, a hidden flag, or both.
-        let mut columns: BTreeMap<u32, (Option<i64>, bool)> = BTreeMap::new();
+    if !sheet.columns.sizes.is_empty()
+        || !sheet.hidden_cols.is_empty()
+        || !sheet.col_outline_levels.is_empty()
+        || !sheet.collapsed_cols.is_empty()
+    {
+        // Union the width overrides, hidden flags, outline levels, and collapsed
+        // flags, keyed by zero-based column, so a column can carry any mix.
+        let mut columns: BTreeMap<u32, ColAttrs> = BTreeMap::new();
         for (&col, &width) in &sheet.columns.sizes {
-            columns.entry(col).or_default().0 = Some(width);
+            columns.entry(col).or_default().width = Some(width);
         }
         for &col in &sheet.hidden_cols {
-            columns.entry(col).or_default().1 = true;
+            columns.entry(col).or_default().hidden = true;
+        }
+        for (&col, &level) in &sheet.col_outline_levels {
+            columns.entry(col).or_default().outline_level = level;
+        }
+        for &col in &sheet.collapsed_cols {
+            columns.entry(col).or_default().collapsed = true;
         }
         s.push_str("<cols>");
-        let entries: Vec<(u32, (Option<i64>, bool))> =
-            columns.iter().map(|(&k, &v)| (k, v)).collect();
+        let entries: Vec<(u32, ColAttrs)> = columns.iter().map(|(&k, &v)| (k, v)).collect();
         let mut i = 0;
         while i < entries.len() {
             let (start, attrs) = entries[i];
@@ -509,8 +562,8 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
                 end = entries[j].0;
                 j += 1;
             }
-            let (width, hidden) = attrs;
-            let width_attr = width
+            let width_attr = attrs
+                .width
                 .map(|w| {
                     format!(
                         " width=\"{}\" customWidth=\"1\"",
@@ -518,9 +571,19 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
                     )
                 })
                 .unwrap_or_default();
-            let hidden_attr = if hidden { " hidden=\"1\"" } else { "" };
+            let hidden_attr = if attrs.hidden { " hidden=\"1\"" } else { "" };
+            let outline_attr = if attrs.outline_level != 0 {
+                format!(" outlineLevel=\"{}\"", attrs.outline_level)
+            } else {
+                String::new()
+            };
+            let collapsed_attr = if attrs.collapsed {
+                " collapsed=\"1\""
+            } else {
+                ""
+            };
             s.push_str(&format!(
-                "<col min=\"{}\" max=\"{}\"{width_attr}{hidden_attr}/>",
+                "<col min=\"{}\" max=\"{}\"{width_attr}{hidden_attr}{outline_attr}{collapsed_attr}/>",
                 start + 1,
                 end + 1,
             ));
@@ -531,10 +594,12 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
 
     s.push_str("<sheetData>");
     // The rows to emit: every row with cells, plus any row carrying a custom
-    // height or hidden flag (even if it has no cells). Cells iterate in
-    // row-major order.
+    // height, hidden flag, outline level, or collapsed flag (even if it has no
+    // cells). Cells iterate in row-major order.
     let mut rows: BTreeSet<u32> = sheet.rows.sizes.keys().copied().collect();
     rows.extend(sheet.hidden_rows.iter().copied());
+    rows.extend(sheet.row_outline_levels.keys().copied());
+    rows.extend(sheet.collapsed_rows.iter().copied());
     for (at, _) in sheet.cells.iter() {
         rows.insert(at.row);
     }
@@ -556,7 +621,21 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         } else {
             ""
         };
-        s.push_str(&format!("<row r=\"{}\"{ht_attr}{hidden_attr}>", row + 1));
+        let outline_attr = sheet
+            .row_outline_levels
+            .get(&row)
+            .filter(|&&l| l != 0)
+            .map(|&l| format!(" outlineLevel=\"{l}\""))
+            .unwrap_or_default();
+        let collapsed_attr = if sheet.collapsed_rows.contains(&row) {
+            " collapsed=\"1\""
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "<row r=\"{}\"{ht_attr}{hidden_attr}{outline_attr}{collapsed_attr}>",
+            row + 1
+        ));
         while cells.peek().is_some_and(|(at, _)| at.row == row) {
             let (at, cell) = cells.next().unwrap();
             write_cell(&mut s, workbook, at.row, at.col, cell);

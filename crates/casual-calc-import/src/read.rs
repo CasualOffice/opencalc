@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use casual_calc_model::OutlinePr;
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -155,6 +156,18 @@ pub struct Worksheet {
     pub hidden_rows: BTreeSet<u32>,
     /// Hidden columns, by zero-based index.
     pub hidden_cols: BTreeSet<u32>,
+    /// Outline nesting level per row (`<row outlineLevel>`), zero-based index.
+    pub row_outline_levels: BTreeMap<u32, u8>,
+    /// Outline nesting level per column (`<col outlineLevel>`), zero-based index.
+    pub col_outline_levels: BTreeMap<u32, u8>,
+    /// Rows with a collapsed outline group (`<row collapsed="1">`).
+    pub collapsed_rows: BTreeSet<u32>,
+    /// Columns with a collapsed outline group (`<col collapsed="1">`).
+    pub collapsed_cols: BTreeSet<u32>,
+    /// Outline summary-position flags from `<sheetPr><outlinePr/>`, if present.
+    pub outline: Option<OutlinePr>,
+    /// View zoom percentage from `<sheetView zoomScale>`, if set and non-default.
+    pub zoom: Option<u16>,
     /// Tab color as `RRGGBB` (from `sheetPr/tabColor/@rgb`), if any.
     pub tab_color: Option<String>,
 }
@@ -193,10 +206,27 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     if min == 0 || max < min {
         return Ok(());
     }
-    // A hidden span is recorded per zero-based column regardless of width.
-    if read_attr(e, b"hidden")?.as_deref() == Some("1") && max.saturating_sub(min) < MAX_COL_SPAN {
+    // A hidden span is recorded per zero-based column regardless of width. The
+    // same span rules apply to the outline level and collapsed flag, which — like
+    // hidden — are meaningful even when the column carries no custom width, so
+    // they are parsed before the width-driven early return below.
+    let narrow = max.saturating_sub(min) < MAX_COL_SPAN;
+    if read_attr(e, b"hidden")?.as_deref() == Some("1") && narrow {
         for col in min..=max {
             result.hidden_cols.insert(col - 1);
+        }
+    }
+    if let Some(level) = read_attr(e, b"outlineLevel")?.and_then(|s| s.parse::<u8>().ok())
+        && level != 0
+        && narrow
+    {
+        for col in min..=max {
+            result.col_outline_levels.insert(col - 1, level);
+        }
+    }
+    if read_attr(e, b"collapsed")?.as_deref() == Some("1") && narrow {
+        for col in min..=max {
+            result.collapsed_cols.insert(col - 1);
         }
     }
     let Some(width) = read_f64_attr(e, b"width")? else {
@@ -230,6 +260,14 @@ fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     }
     if read_attr(e, b"hidden")?.as_deref() == Some("1") {
         result.hidden_rows.insert(r - 1);
+    }
+    if let Some(level) = read_attr(e, b"outlineLevel")?.and_then(|s| s.parse::<u8>().ok())
+        && level != 0
+    {
+        result.row_outline_levels.insert(r - 1, level);
+    }
+    if read_attr(e, b"collapsed")?.as_deref() == Some("1") {
+        result.collapsed_rows.insert(r - 1);
     }
     Ok(())
 }
@@ -286,9 +324,11 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                         }
                     }
                     b"pane" => read_pane(&e, &mut result)?,
+                    b"sheetView" => read_sheet_view(&e, &mut result)?,
                     b"row" => read_row(&e, &mut result)?,
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
+                    b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result)?,
                     _ => {}
                 }
@@ -315,9 +355,11 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                         }
                     }
                     b"pane" => read_pane(&e, &mut result)?,
+                    b"sheetView" => read_sheet_view(&e, &mut result)?,
                     b"row" => read_row(&e, &mut result)?,
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
+                    b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result)?,
                     _ => {}
                 }
@@ -370,6 +412,34 @@ fn read_pane(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErr
         result.frozen = Some((rows, cols));
     }
     Ok(())
+}
+
+/// Parse the `zoomScale` attribute of a `<sheetView>`. A zoom of 0 or 100 is the
+/// application default and is not retained, so no phantom `zoomScale` is written.
+fn read_sheet_view(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    if let Some(zoom) = read_attr(e, b"zoomScale")?.and_then(|s| s.parse::<u16>().ok())
+        && zoom != 0
+        && zoom != 100
+    {
+        result.zoom = Some(zoom);
+    }
+    Ok(())
+}
+
+/// Parse `<sheetPr><outlinePr summaryBelow= summaryRight=/>`. Both flags default
+/// to `true` (the OOXML default) when the attribute is absent.
+fn read_outline_pr(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    result.outline = Some(OutlinePr {
+        summary_below: read_bool_attr(e, b"summaryBelow")?.unwrap_or(true),
+        summary_right: read_bool_attr(e, b"summaryRight")?.unwrap_or(true),
+    });
+    Ok(())
+}
+
+/// Read an OOXML boolean attribute (`"1"`/`"true"` → `true`, `"0"`/`"false"` →
+/// `false`), returning `None` when the attribute is absent.
+fn read_bool_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<bool>, ImportError> {
+    Ok(read_attr(e, local)?.map(|v| v == "1" || v.eq_ignore_ascii_case("true")))
 }
 
 /// Parse `<sheetPr><tabColor rgb="AARRGGBB"/>`. Excel stores an 8-hex ARGB

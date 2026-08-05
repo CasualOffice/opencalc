@@ -241,6 +241,67 @@ fn imports_merges_frozen_panes_and_defined_names() {
 }
 
 #[test]
+fn imports_outline_levels_collapsed_and_zoom() {
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetPr><outlinePr summaryBelow="0"/></sheetPr>
+        <sheetViews><sheetView zoomScale="150"><pane xSplit="0" ySplit="0" state="split"/></sheetView></sheetViews>
+        <cols><col min="3" max="4" outlineLevel="1"/><col min="5" max="5" outlineLevel="2" collapsed="1"/></cols>
+        <sheetData>
+          <row r="1" outlineLevel="1"><c r="A1"><v>1</v></c></row>
+          <row r="2" outlineLevel="2" collapsed="1"><c r="A2"><v>2</v></c></row>
+        </sheetData>
+    </worksheet>"#
+        .to_vec();
+    let bytes = package_with_sheet(sheet_xml, None);
+    let import = import_package(bytes).unwrap();
+    let sheet = &import.workbook.sheets[0];
+
+    // Rows: outline levels and the collapsed flag (zero-based).
+    assert_eq!(sheet.row_outline_levels.get(&0), Some(&1));
+    assert_eq!(sheet.row_outline_levels.get(&1), Some(&2));
+    assert!(sheet.collapsed_rows.contains(&1));
+    assert!(!sheet.collapsed_rows.contains(&0));
+
+    // Columns: the span 3..4 (zero-based 2..3) is level 1; column 5 (index 4) is
+    // level 2 and collapsed.
+    assert_eq!(sheet.col_outline_levels.get(&2), Some(&1));
+    assert_eq!(sheet.col_outline_levels.get(&3), Some(&1));
+    assert_eq!(sheet.col_outline_levels.get(&4), Some(&2));
+    assert!(sheet.collapsed_cols.contains(&4));
+
+    // outlinePr summary flag and the view zoom.
+    assert!(!sheet.outline.summary_below);
+    assert!(sheet.outline.summary_right);
+    assert_eq!(sheet.view.zoom, 150);
+}
+
+#[test]
+fn imports_cell_indent_from_alignment() {
+    const STYLES: &[u8] = br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="0" applyAlignment="1"><alignment horizontal="left" indent="2"/></xf></cellXfs>
+    </styleSheet>"#;
+    let sheet_xml = sheet_with(r#"<row r="1"><c r="A1" s="1"><v>7</v></c></row>"#);
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    let wb = &import.workbook;
+    let style_id = wb.sheets[0]
+        .cells
+        .get(CellRef::new(0, 0))
+        .unwrap()
+        .style
+        .unwrap();
+    let style = wb.styles.get(style_id).unwrap();
+    assert_eq!(style.indent, 2);
+}
+
+#[test]
 fn imports_fonts_and_fills_from_styles() {
     const STYLES: &[u8] = br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
         <fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts>

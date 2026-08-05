@@ -160,6 +160,10 @@ pub struct Style {
     /// Wrap text within the cell (instead of overflowing/clipping).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrap: bool,
+    /// Indent level (in indent units, ~3 space-widths each) from the alignment's
+    /// leading edge. `0` (the default) writes no `indent` attribute.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub indent: u8,
     /// Cell borders, if any edge is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Borders>,
@@ -167,6 +171,10 @@ pub struct Style {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 impl Style {
@@ -184,6 +192,7 @@ impl Style {
             && self.align.is_none()
             && self.valign.is_none()
             && !self.wrap
+            && self.indent == 0
             && self.border.is_none()
     }
 }

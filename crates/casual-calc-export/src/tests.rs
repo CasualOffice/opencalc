@@ -117,3 +117,76 @@ fn tab_color_round_trips() {
         assert_eq!(wb.sheets[1].tab_color, None);
     }
 }
+
+#[test]
+fn outline_levels_and_collapsed_round_trip() {
+    use casual_calc_model::OutlinePr;
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    {
+        let sheet = &mut workbook.sheets[0];
+        sheet.row_outline_levels.insert(1, 1);
+        sheet.row_outline_levels.insert(2, 2);
+        sheet.collapsed_rows.insert(2);
+        sheet.col_outline_levels.insert(3, 1);
+        sheet.col_outline_levels.insert(4, 1);
+        sheet.collapsed_cols.insert(4);
+        sheet.outline = OutlinePr {
+            summary_below: false,
+            summary_right: true,
+        };
+    }
+
+    let written = write_workbook(&workbook).unwrap();
+    let wb = import_package(written).unwrap().workbook;
+    let sheet = &wb.sheets[0];
+
+    assert_eq!(sheet.row_outline_levels.get(&1), Some(&1));
+    assert_eq!(sheet.row_outline_levels.get(&2), Some(&2));
+    assert!(sheet.collapsed_rows.contains(&2));
+    assert_eq!(sheet.col_outline_levels.get(&3), Some(&1));
+    assert_eq!(sheet.col_outline_levels.get(&4), Some(&1));
+    assert!(sheet.collapsed_cols.contains(&4));
+    assert!(!sheet.outline.summary_below);
+    assert!(sheet.outline.summary_right);
+
+    // A sheet left at the outline default writes no <outlinePr>, so a re-import
+    // sees the default again (no phantom flag flip).
+    let plain = import_package(sample_xlsx()).unwrap().workbook;
+    assert!(plain.sheets[0].outline.is_default());
+}
+
+#[test]
+fn zoom_scale_round_trips() {
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].view.zoom = 150;
+
+    let written = write_workbook(&workbook).unwrap();
+    let wb = import_package(written).unwrap().workbook;
+    assert_eq!(wb.sheets[0].view.zoom, 150);
+    // The frozen pane still round-trips alongside the zoom scale.
+    assert_eq!(wb.sheets[0].view.frozen_rows, 1);
+    assert_eq!(wb.sheets[0].view.frozen_cols, 1);
+}
+
+#[test]
+fn indent_round_trips() {
+    use casual_calc_model::{Cell, CellRef, CellValue, HAlign, Style};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let style = workbook.intern_style(Style {
+        align: Some(HAlign::Left),
+        indent: 3,
+        ..Style::default()
+    });
+    let mut cell = Cell::value(CellValue::Number(1.0));
+    cell.style = Some(style);
+    workbook.sheets[0].cells.set(CellRef::new(5, 0), cell);
+
+    let written = write_workbook(&workbook).unwrap();
+    let wb = import_package(written).unwrap().workbook;
+    let cell = wb.sheets[0].cells.get(CellRef::new(5, 0)).unwrap();
+    let style = wb.styles.get(cell.style.unwrap()).unwrap();
+    assert_eq!(style.indent, 3);
+    assert_eq!(style.align, Some(HAlign::Left));
+}

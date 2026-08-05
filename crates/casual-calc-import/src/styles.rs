@@ -44,6 +44,7 @@ struct Xf {
     align: Option<HAlign>,
     valign: Option<VAlign>,
     wrap: bool,
+    indent: u8,
 }
 
 /// The border edge currently being parsed, so a nested `<color>` attaches to it.
@@ -216,6 +217,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             align: None,
                             valign: None,
                             wrap: false,
+                            indent: 0,
                         });
                     }
                     b"alignment" if in_cellxfs => {
@@ -228,6 +230,9 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             }
                             if attr(e, b"wrapText")?.as_deref() == Some("1") {
                                 xf.wrap = true;
+                            }
+                            if let Some(indent) = attr_u32(e, b"indent")? {
+                                xf.indent = indent.min(u8::MAX as u32) as u8;
                             }
                         }
                     }
@@ -270,6 +275,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 align: xf.align,
                 valign: xf.valign,
                 wrap: xf.wrap,
+                indent: xf.indent,
                 border: (!border.is_empty()).then_some(border),
             }
         })

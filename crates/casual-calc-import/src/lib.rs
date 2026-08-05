@@ -24,8 +24,7 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellValue, DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, SheetView, StringId,
-    Workbook,
+    Cell, CellValue, DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -143,10 +142,11 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             }
         }
         if let Some((frozen_rows, frozen_cols)) = worksheet.frozen {
-            sheet.view = SheetView {
-                frozen_rows,
-                frozen_cols,
-            };
+            sheet.view.frozen_rows = frozen_rows;
+            sheet.view.frozen_cols = frozen_cols;
+        }
+        if let Some(zoom) = worksheet.zoom {
+            sheet.view.zoom = zoom;
         }
         sheet.columns.default = worksheet.col_default;
         sheet.columns.sizes = worksheet.col_sizes;
@@ -154,6 +154,13 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         sheet.rows.sizes = worksheet.row_sizes;
         sheet.hidden_rows = worksheet.hidden_rows;
         sheet.hidden_cols = worksheet.hidden_cols;
+        sheet.row_outline_levels = worksheet.row_outline_levels;
+        sheet.col_outline_levels = worksheet.col_outline_levels;
+        sheet.collapsed_rows = worksheet.collapsed_rows;
+        sheet.collapsed_cols = worksheet.collapsed_cols;
+        if let Some(outline) = worksheet.outline {
+            sheet.outline = outline;
+        }
         sheet.tab_color = worksheet.tab_color;
 
         workbook.sheets.push(sheet);
