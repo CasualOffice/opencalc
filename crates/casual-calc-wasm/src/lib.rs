@@ -1298,6 +1298,49 @@ pub fn session_fill(
         let mut pending: Vec<Pending> = Vec::new();
         if let Some(sh) = session.workbook().sheets.get(sheet) {
             let wb = session.workbook();
+            // A numeric literal (no formula) at (r,c), for series detection.
+            let num_lit = |r: u32, c: u32| -> Option<f64> {
+                sh.cells
+                    .get(CellRef::new(r, c))
+                    .and_then(|cell| match cell.value {
+                        CellValue::Number(n) if cell.formula.is_none() => Some(n),
+                        _ => None,
+                    })
+            };
+            // If the fill grows along exactly one axis and each line of the
+            // source is a numeric arithmetic sequence (>=2 cells, constant
+            // step), extend the sequence instead of tiling — Excel's autofill.
+            let vertical = dc0 == sc0 && dc1 == sc1 && (dr1 > sr1 || dr0 < sr0);
+            let horizontal = dr0 == sr0 && dr1 == sr1 && (dc1 > sc1 || dc0 < sc0);
+            let arithmetic = |vals: &[Option<f64>]| -> Option<(f64, f64)> {
+                if vals.len() < 2 || vals.iter().any(|v| v.is_none()) {
+                    return None;
+                }
+                let step = vals[1].unwrap() - vals[0].unwrap();
+                for w in vals.windows(2) {
+                    if (w[1].unwrap() - w[0].unwrap() - step).abs() > 1e-9 {
+                        return None;
+                    }
+                }
+                Some((vals[0].unwrap(), step))
+            };
+            // Per-line (v0, step): by column for a vertical fill, by row for a
+            // horizontal one.
+            let col_series: Vec<Option<(f64, f64)>> = if vertical {
+                (sc0..=sc1)
+                    .map(|c| arithmetic(&(sr0..=sr1).map(|r| num_lit(r, c)).collect::<Vec<_>>()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let row_series: Vec<Option<(f64, f64)>> = if horizontal {
+                (sr0..=sr1)
+                    .map(|r| arithmetic(&(sc0..=sc1).map(|c| num_lit(r, c)).collect::<Vec<_>>()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             for dr in dr0..=dr1 {
                 for dc in dc0..=dc1 {
                     if dr >= sr0 && dr <= sr1 && dc >= sc0 && dc <= sc1 {
@@ -1306,6 +1349,30 @@ pub fn session_fill(
                     let sr = sr0 as i64 + (dr as i64 - sr0 as i64).rem_euclid(src_rows);
                     let sc = sc0 as i64 + (dc as i64 - sc0 as i64).rem_euclid(src_cols);
                     let at = CellRef::new(dr, dc);
+                    // Series value along the fill axis, if one was detected.
+                    let series_value = if vertical {
+                        col_series[(dc - sc0) as usize]
+                            .map(|(v0, step)| v0 + step * (dr as i64 - sr0 as i64) as f64)
+                    } else if horizontal {
+                        row_series[(dr - sr0) as usize]
+                            .map(|(v0, step)| v0 + step * (dc as i64 - sc0 as i64) as f64)
+                    } else {
+                        None
+                    };
+                    if let Some(v) = series_value {
+                        // Numeric series: extend the value, tile the source style.
+                        let style = sh
+                            .cells
+                            .get(CellRef::new(sr as u32, sc as u32))
+                            .and_then(|c| c.style);
+                        pending.push(Pending {
+                            at,
+                            value: CellValue::Number(v),
+                            style,
+                            formula: None,
+                        });
+                        continue;
+                    }
                     match sh.cells.get(CellRef::new(sr as u32, sc as u32)) {
                         Some(c) => {
                             let formula = c
