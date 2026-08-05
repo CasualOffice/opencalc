@@ -192,7 +192,7 @@ Effort | Priority | Model/API changes needed.**
 
 | ID | Area | Item | Reference behavior | Status | Fidelity dims | Effort | Priority | Model/API changes |
 |----|------|------|--------------------|--------|---------------|--------|----------|-------------------|
-| CP-086 | Data | Sort (range / by column, multi-key) | Reorder rows by key(s) | **Todo** | Edit, Calc | M | P1 | Sort op (row permutation) + ref rewrite; `casual-calc-selection` |
+| CP-086 | Data | Sort (range / by column, multi-key) | Reorder rows by key(s) | **Done (single-key)** | Edit, Calc | M | P1 | `session_sort_range`: row permutation moving values+styles+flags, relative formula refs shifted by row delta (per-row formulas re-anchor); blanks last, numbers<text. Toolbar + context-menu controls. Multi-key sort still open |
 | CP-087 | Data | Filter / autofilter | Header dropdowns hide non-matching rows | **Todo** | Model, Round-trip, Edit, Render | L | P1 | `AutoFilter` model; import `<autoFilter>`; hidden-row render (CP-025) |
 | CP-088 | Data | Tables (structured ranges + refs) | Named table, banded rows, `Table[Col]` refs | **Todo** | Model, Round-trip, Edit, Render, Calc | L | P2 | Table model; import `<table>`; structured-ref parsing (UX-41) |
 | CP-089 | Data | Data validation (dropdowns, ranges, rules) | Restrict input; in-cell dropdown | **Todo** | Model, Round-trip, Edit, Render | L | P2 | `DataValidation` model; import `<dataValidation>` (UX-45) |

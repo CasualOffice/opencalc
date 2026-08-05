@@ -931,6 +931,24 @@ function setFreeze(kind) {
   } catch (e) { status.textContent = `error: ${e}`; }
   draw();
 }
+// Sort the current selection's rows by the active cell's column. A single-cell
+// selection sorts the whole used data region (rows 1..end, keeping a header row
+// out only if the caller selected a body range). Ascending unless `desc`.
+function sortRange(desc) {
+  let s = effectiveRange();
+  // A lone cell: sort every used row by that column (Excel's "sort this column").
+  if (s.r0 === s.r1 && s.c0 === s.c1) {
+    const b = usedBounds();
+    s = { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+  }
+  // Key column is the active cell's column, clamped into the range.
+  const key = Math.min(Math.max(state.sel.col, s.c0), s.c1);
+  try {
+    wasm.session_sort_range(state.sheet, s.r0, s.c0, s.r1, s.c1, key, !desc);
+    status.textContent = `sorted by ${colName(key)} ${desc ? "Z→A" : "A→Z"}`;
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1261,6 +1279,9 @@ function cellMenu(x, y) {
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
   sep();
+  item(`Sort ${colName(state.sel.col)} A → Z`, false, () => sortRange(false));
+  item(`Sort ${colName(state.sel.col)} Z → A`, false, () => sortRange(true));
+  sep();
   item("Insert row above", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
   item("Insert column left", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
   sep();
@@ -1567,6 +1588,7 @@ function wireEvents() {
   wirePopup("tb-border", "border-menu", (b) => setBorder(b.dataset.bd));
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
+  wirePopup("tb-sort", "sort-menu", (b) => sortRange(b.dataset.sort === "desc"));
 
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });

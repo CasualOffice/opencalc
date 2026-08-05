@@ -11,6 +11,7 @@
 //!   supplies positions + display strings). See `docs/02-ARCHITECTURE.md`.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 
 use casual_calc_eval::recalculate;
 use casual_calc_formula::{Expr, parse, shift_references};
@@ -1249,6 +1250,120 @@ pub fn session_fill(
                 at: p.at,
                 cell,
             });
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Sort the rows of a range `[r0..=r1] × [c0..=c1]` by the values in column
+/// `key_col`, moving each whole row (values + styles + formula handles) as a
+/// unit — one undo step. Blanks sort last in both directions; otherwise numbers
+/// order before text, text case-insensitively. Formula handles move verbatim
+/// (their references are not re-anchored — sorting a data range is the intent).
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_sort_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    key_col: u32,
+    ascending: bool,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+
+        // Pass 1 (immutable): snapshot each row's cells, its owned sort key, and
+        // each formula cell's resolved AST (so we can re-anchor it on the move).
+        struct RowCell {
+            cell: Cell,
+            formula: Option<Expr>,
+        }
+        struct Row {
+            src_row: u32,
+            key: (u8, f64, String),
+            blank: bool,
+            cells: Vec<Option<RowCell>>,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        if let Some(sh) = session.workbook().sheets.get(sheet) {
+            let wb = session.workbook();
+            for r in r0..=r1 {
+                let kv = sh
+                    .cells
+                    .get(CellRef::new(r, key_col))
+                    .map(|c| c.value.clone())
+                    .unwrap_or(CellValue::Empty);
+                let key = match &kv {
+                    CellValue::Number(n) => (0u8, *n, String::new()),
+                    CellValue::Bool(b) => (0, if *b { 1.0 } else { 0.0 }, String::new()),
+                    CellValue::SharedString(id) | CellValue::InlineString(id) => (
+                        1,
+                        0.0,
+                        wb.strings.get(*id).unwrap_or_default().to_lowercase(),
+                    ),
+                    CellValue::Error(_) => (2, 0.0, String::new()),
+                    CellValue::Empty => (3, 0.0, String::new()),
+                };
+                let cells = (c0..=c1)
+                    .map(|c| {
+                        sh.cells.get(CellRef::new(r, c)).map(|cell| RowCell {
+                            cell: cell.clone(),
+                            formula: cell.formula.and_then(|h| wb.formula(h)).cloned(),
+                        })
+                    })
+                    .collect();
+                rows.push(Row {
+                    src_row: r,
+                    key,
+                    blank: kv.is_empty(),
+                    cells,
+                });
+            }
+        } else {
+            return Ok(());
+        }
+
+        // Keep blanks pinned to the end (Excel behavior), sort the rest by key.
+        let (mut filled, empties): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| !r.blank);
+        filled.sort_by(|a, b| {
+            let ord = a
+                .key
+                .0
+                .cmp(&b.key.0)
+                .then_with(|| a.key.1.partial_cmp(&b.key.1).unwrap_or(Ordering::Equal))
+                .then_with(|| a.key.2.cmp(&b.key.2));
+            if ascending { ord } else { ord.reverse() }
+        });
+        filled.extend(empties);
+
+        // Pass 2 (mutable): write each row back to its sorted position, shifting
+        // relative references by the row delta so per-row formulas (e.g. =B2*C2)
+        // keep pointing at their own row. Absolute (`$`) anchors are held.
+        let mut ops = Vec::with_capacity(filled.len() * (c1 - c0 + 1) as usize);
+        for (i, row) in filled.into_iter().enumerate() {
+            let r = r0 + i as u32;
+            let dr = r as i64 - row.src_row as i64;
+            for (j, c) in (c0..=c1).enumerate() {
+                let cell = row.cells[j].as_ref().map(|rc| {
+                    let mut out = rc.cell.clone();
+                    if let Some(expr) = &rc.formula {
+                        let shifted = shift_references(expr, dr, 0);
+                        out.formula = Some(session.workbook_mut().store_formula(shifted));
+                    }
+                    out
+                });
+                ops.push(EditOperation::SetCell {
+                    sheet,
+                    at: CellRef::new(r, c),
+                    cell,
+                });
+            }
         }
         if ops.is_empty() {
             return Ok(());
