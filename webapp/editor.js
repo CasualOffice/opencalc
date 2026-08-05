@@ -666,6 +666,21 @@ function draw() {
     }
   });
 
+  // Marching-ants outline around the copy/cut source (animated dash offset).
+  if (clipMarch && clipMarch.sheet === state.sheet) {
+    const mx = spanX(clipMarch.c0, clipMarch.c1, v), my = spanY(clipMarch.r0, clipMarch.r1, v);
+    if (mx.w > 1 && my.h > 1) {
+      ctx.save();
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.lineDashOffset = -marchOffset;
+      ctx.strokeRect(mx.x + 0.75, my.y + 0.75, mx.w - 1.5, my.h - 1.5);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+
   // Drag-fill preview outline.
   if (state.fill && state.fill.dst) {
     const d = state.fill.dst;
@@ -1578,8 +1593,32 @@ function saveAs(fmt) {
 // authoritative (formulas + styles); otherwise the user copied from elsewhere
 // and we fall back to plain TSV.
 let lastClipTsv = null;
+
+// Marching-ants outline around the copy/cut source, animated by a dash offset.
+let clipMarch = null;      // { sheet, r0, c0, r1, c1, cut } or null
+let marchOffset = 0;
+let marchRaf = 0;
+let marchLast = 0;
+function marchTick(t) {
+  if (!clipMarch) { marchRaf = 0; return; }
+  if (t - marchLast > 80) { marchOffset = (marchOffset + 1) % 8; marchLast = t; draw(); }
+  marchRaf = requestAnimationFrame(marchTick);
+}
+function startMarch(s, cut) {
+  clipMarch = { sheet: state.sheet, r0: s.r0, c0: s.c0, r1: s.r1, c1: s.c1, cut };
+  if (!marchRaf) marchRaf = requestAnimationFrame(marchTick);
+  draw();
+}
+function stopMarch() {
+  if (!clipMarch) return;
+  clipMarch = null;
+  if (marchRaf) { cancelAnimationFrame(marchRaf); marchRaf = 0; }
+  draw();
+}
+
 async function clipToOS(s, cut) {
   wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
+  startMarch(s, cut);
   const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
   lastClipTsv = tsv;
   // Write a formatted HTML table alongside the plain-text TSV so external apps
@@ -1610,6 +1649,7 @@ function doPasteMode(mode) {
   try {
     if (!wasm.session_clip_has()) { status.textContent = "clipboard is empty"; return; }
     wasm.session_clip_paste_mode(state.sheet, state.sel.row, state.sel.col, mode);
+    if (!wasm.session_clip_has()) stopMarch(); // a cut was consumed
     draw();
     status.textContent = `pasted ${mode}`;
   } catch { status.textContent = "paste blocked"; }
@@ -1625,6 +1665,7 @@ async function doPaste() {
     } else {
       wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, osText);
     }
+    if (!wasm.session_clip_has()) stopMarch(); // a cut was consumed
     draw();
     status.textContent = "pasted";
   } catch { status.textContent = "paste blocked"; }
@@ -2455,6 +2496,7 @@ function wireEvents() {
         e.preventDefault(); break;
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
+      case "Escape": if (clipMarch) { stopMarch(); e.preventDefault(); } break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
@@ -2496,7 +2538,7 @@ function wireEvents() {
   document.getElementById("replace-all").addEventListener("click", replaceAll);
   document.getElementById("find-close").addEventListener("click", closeFind);
 
-  document.getElementById("tb-new").addEventListener("click", () => { wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
+  document.getElementById("tb-new").addEventListener("click", () => { stopMarch(); wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
 
   // Popover menus: click toggles, outside-click / Escape closes, only one open.
   const menus = [];
@@ -2572,6 +2614,7 @@ function wireEvents() {
     // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
     const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
     try {
+      stopMarch();
       if (delim !== null) wasm.session_open_delimited(bytes, delim);
       else wasm.session_open(bytes);
       status.textContent = "opened " + file.name;
