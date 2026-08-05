@@ -17,6 +17,7 @@ const state = {
   sel: { row: 0, col: 0 }, // focus cell
   anchor: { row: 0, col: 0 }, // selection anchor
   selKind: "cells", // "cells" | "rows" | "cols" | "all"
+  ranges: [], // committed extra rectangles for a multi-range (Ctrl+click) selection
   dragging: false,
   editing: false,
   resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
@@ -405,6 +406,11 @@ function draw() {
     ctx.clip();
     ctx.fillStyle = colors.sel;
     ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
+    // Extra banked ranges of a multi-range selection get the same tint.
+    for (const rg of state.ranges) {
+      const ex = spanX(rg.c0, rg.c1, v), ey = spanY(rg.r0, rg.r1, v);
+      ctx.fillRect(ex.x, ey.y, ex.w, ey.h);
+    }
     ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -704,16 +710,23 @@ function fmtNum(n) {
 }
 function updateStats() {
   if (!wasm) return;
-  const s = effectiveRange();
-  const multi = s.r0 !== s.r1 || s.c0 !== s.c1;
-  if (!multi) { selStats.textContent = ""; return; }
-  const st = JSON.parse(wasm.session_range_stats(state.sheet, s.r0, s.c0, s.r1, s.c1));
-  const parts = [];
-  if (st.numeric > 0) {
-    parts.push(`Sum: <b>${fmtNum(st.sum)}</b>`);
-    parts.push(`Avg: <b>${fmtNum(st.avg)}</b>`);
+  const rs = allRanges();
+  const single = rs.length === 1;
+  const s = rs[0];
+  if (single && s.r0 === s.r1 && s.c0 === s.c1) { selStats.textContent = ""; return; }
+  // Fold the per-range stats together (disjoint Ctrl+click ranges; overlaps,
+  // which Excel also double-counts, are rare).
+  let sum = 0, numeric = 0, count = 0;
+  for (const r of rs) {
+    const st = JSON.parse(wasm.session_range_stats(state.sheet, r.r0, r.c0, r.r1, r.c1));
+    sum += st.sum || 0; numeric += st.numeric || 0; count += st.count || 0;
   }
-  parts.push(`Count: <b>${st.count}</b>`);
+  const parts = [];
+  if (numeric > 0) {
+    parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
+    parts.push(`Avg: <b>${fmtNum(sum / numeric)}</b>`);
+  }
+  parts.push(`Count: <b>${count}</b>`);
   selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
 }
 
@@ -750,7 +763,21 @@ function select(row, col) {
   state.sel = { row: r, col: c };
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
+  state.ranges = [];
   ensureVisible();
+  draw();
+}
+
+// Ctrl/Cmd+click: bank the current range and start a fresh active range at
+// (row, col) without clearing the banked ones — builds a multi-range selection.
+function addRange(row, col) {
+  state.ranges = state.ranges.concat([effectiveRange()]);
+  let r = Math.max(0, row), c = Math.max(0, col);
+  const m = mergeAt(r, c);
+  if (m) { r = m.r0; c = m.c0; }
+  state.sel = { row: r, col: c };
+  state.anchor = { row: r, col: c };
+  state.selKind = "cells";
   draw();
 }
 
@@ -824,6 +851,7 @@ function rowAtY(py) {
 // Whole-sheet selection (the top-left corner box). The viewport stays put.
 function selectAll() {
   state.selKind = "all";
+  state.ranges = [];
   state.anchor = { row: state.firstRow, col: state.firstCol };
   state.sel = { row: state.firstRow, col: state.firstCol };
   endInline();
@@ -832,7 +860,7 @@ function selectAll() {
 // Whole-row selection; the focus stays at column 0 so the view doesn't jump.
 function selectRow(r, exp) {
   state.selKind = "rows";
-  if (!exp) state.anchor = { row: r, col: 0 };
+  if (!exp) { state.anchor = { row: r, col: 0 }; state.ranges = []; }
   state.sel = { row: r, col: 0 };
   endInline();
   draw();
@@ -840,7 +868,7 @@ function selectRow(r, exp) {
 // Whole-column selection; the focus stays at row 0.
 function selectColumn(c, exp) {
   state.selKind = "cols";
-  if (!exp) state.anchor = { row: 0, col: c };
+  if (!exp) { state.anchor = { row: 0, col: c }; state.ranges = []; }
   state.sel = { row: 0, col: c };
   endInline();
   draw();
@@ -855,6 +883,12 @@ function effectiveRange() {
   if (state.selKind === "rows") return { r0: r.r0, c0: 0, r1: r.r1, c1: b.cols - 1 };
   if (state.selKind === "cols") return { r0: 0, c0: r.c0, r1: b.rows - 1, c1: r.c1 };
   return r;
+}
+// Every rectangle in the selection: the committed extra ranges plus the active
+// one. Formatting and stats fold over this so a Ctrl+click multi-range behaves
+// as one selection.
+function allRanges() {
+  return state.ranges.concat([effectiveRange()]);
 }
 // Double-click a column boundary: size the column to its widest cell.
 function autofitColumn(col) {
@@ -872,10 +906,9 @@ function autofitColumn(col) {
   draw();
 }
 
-// Run a formatting op over the effective selection, then redraw.
+// Run a formatting op over the whole selection (every range), then redraw.
 function formatSel(fn) {
-  const s = effectiveRange();
-  try { fn(s); } catch (e) { status.textContent = `error: ${e}`; }
+  try { for (const s of allRanges()) fn(s); } catch (e) { status.textContent = `error: ${e}`; }
   draw();
 }
 function toggleBold() { formatSel((s) => wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
@@ -916,8 +949,7 @@ function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format
 function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
 function toggleBorder() { setBorder("all"); }
 function clearSelection() {
-  const s = effectiveRange();
-  try { wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
   draw();
 }
 // --- Find & replace -------------------------------------------------------
@@ -1306,7 +1338,8 @@ function wireEvents() {
     const hit = cellAt(px, py);
     if (hit) {
       endInline();
-      if (e.shiftKey) extend(hit.row, hit.col);
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { addRange(hit.row, hit.col); state.dragging = true; }
+      else if (e.shiftKey) extend(hit.row, hit.col);
       else { select(hit.row, hit.col); state.dragging = true; }
       canvas.focus();
     }
