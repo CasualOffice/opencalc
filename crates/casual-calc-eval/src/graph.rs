@@ -164,10 +164,18 @@ fn collect_precedents(
 }
 
 /// Resolve a reference's sheet (its explicit qualifier, else the context sheet)
-/// to a workbook index, or `None` if the named sheet does not exist.
+/// to a workbook index, or `None` if the named sheet does not exist. Matching is
+/// **case-insensitive**, identical to the evaluator's `sheet_index_by_name`, so
+/// the dependency graph and evaluation always resolve a qualifier to the same
+/// sheet — otherwise a differently-cased qualifier (e.g. `=sheet1!A1`) would be
+/// evaluated against Sheet1 but recorded as depending on nothing, leaving the
+/// dependent stale after an incremental recalc.
 fn resolve_sheet(r: &CellReference, ctx_sheet: usize, workbook: &Workbook) -> Option<usize> {
     match &r.sheet {
-        Some(name) => workbook.sheets.iter().position(|s| s.name == *name),
+        Some(name) => workbook
+            .sheets
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(name)),
         None => Some(ctx_sheet),
     }
 }

@@ -585,11 +585,18 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
         .map(|i| format!(" s=\"{}\"", i + 1))
         .unwrap_or_default();
 
-    let type_attr = match cell.value {
+    let has_formula = cell.formula.is_some();
+    // A formula cell whose cached result is a string is a `str` type with the
+    // text in `<v>` — OOXML does not allow `<is>`/shared-string on a formula
+    // cell (Excel would drop the formula or repair the file). Only a *literal*
+    // inline string (no formula) uses `t="inlineStr"` with `<is>`.
+    let type_attr = match &cell.value {
         CellValue::Bool(_) => " t=\"b\"",
+        CellValue::Error(_) => " t=\"e\"",
+        CellValue::SharedString(_) if has_formula => " t=\"str\"",
+        CellValue::InlineString(_) if has_formula => " t=\"str\"",
         CellValue::SharedString(_) => " t=\"s\"",
         CellValue::InlineString(_) => " t=\"inlineStr\"",
-        CellValue::Error(_) => " t=\"e\"",
         _ => "",
     };
 
@@ -606,16 +613,26 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
         CellValue::Number(n) => s.push_str(&format!("<v>{n}</v>")),
         CellValue::Bool(b) => s.push_str(&format!("<v>{}</v>", if *b { 1 } else { 0 })),
         CellValue::Error(e) => s.push_str(&format!("<v>{e}</v>")),
+        // Formula string result: emit the text in <v> (t="str"); otherwise a
+        // literal shared string is emitted as its shared-table index.
+        CellValue::SharedString(id) if has_formula => {
+            let text = workbook.strings.get(*id).unwrap_or("");
+            s.push_str(&format!("<v>{}</v>", escape_text(text)));
+        }
         CellValue::SharedString(id) => {
             let index = workbook.strings.index_of(*id).unwrap_or(0);
             s.push_str(&format!("<v>{index}</v>"));
         }
         CellValue::InlineString(id) => {
             let text = workbook.strings.get(*id).unwrap_or("");
-            s.push_str(&format!(
-                "<is><t xml:space=\"preserve\">{}</t></is>",
-                escape_text(text)
-            ));
+            if has_formula {
+                s.push_str(&format!("<v>{}</v>", escape_text(text)));
+            } else {
+                s.push_str(&format!(
+                    "<is><t xml:space=\"preserve\">{}</t></is>",
+                    escape_text(text)
+                ));
+            }
         }
     }
 

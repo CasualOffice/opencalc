@@ -679,3 +679,41 @@ fn incremental_matches_full_under_random_edits() {
         assert_same_values(&incr, &full);
     }
 }
+
+/// Cross-sheet reference with a differently-cased qualifier must be tracked by
+/// the incremental dependency graph exactly as the evaluator resolves it, so an
+/// edit on the referenced sheet updates the dependent (regression for the graph
+/// resolving sheet names case-sensitively while eval is case-insensitive).
+#[test]
+fn incremental_tracks_case_insensitive_cross_sheet_ref() {
+    use casual_calc_formula::parse;
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut s1 = Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1");
+    s1.cells
+        .set(CellRef::new(0, 0), Cell::value(CellValue::Number(7.0))); // Sheet1!A1 = 7
+    let mut s2 = Sheet::new(SheetId(Id::from_parts(2, 2)), "Sheet2");
+    // Lowercase qualifier, as a user might type / an import might preserve.
+    let handle = wb.store_formula(parse("sheet1!A1*2").unwrap());
+    let mut c = Cell::value(CellValue::Empty);
+    c.formula = Some(handle);
+    s2.cells.set(CellRef::new(0, 0), c); // Sheet2!A1 = sheet1!A1 * 2
+    wb.sheets.push(s1);
+    wb.sheets.push(s2);
+    recalculate(&mut wb);
+    assert_eq!(
+        wb.sheets[1].cells.get(CellRef::new(0, 0)).unwrap().value,
+        CellValue::Number(14.0)
+    );
+
+    // Edit Sheet1!A1 -> 10, then incremental. Sheet2!A1 must recompute to 20.
+    let at = CellRef::new(0, 0);
+    let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+    cell.value = CellValue::Number(10.0);
+    wb.sheets[0].cells.set(at, cell);
+    recalculate_incremental(&mut wb, &[(0, at)]);
+    assert_eq!(
+        wb.sheets[1].cells.get(CellRef::new(0, 0)).unwrap().value,
+        CellValue::Number(20.0),
+        "cross-sheet dependent stayed stale — graph missed the case-insensitive ref"
+    );
+}

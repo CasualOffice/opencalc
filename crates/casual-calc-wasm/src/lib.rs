@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 
 use casual_calc_eval::recalculate;
-use casual_calc_formula::{Expr, parse, shift_references};
+use casual_calc_formula::{CellReference, Expr, parse, shift_references};
 use casual_calc_import::import_package;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
@@ -159,10 +159,15 @@ pub fn session_add_sheet() -> Result<usize, JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let wb = session.workbook_mut();
-        let n = wb.sheets.len();
-        let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
-        wb.sheets.push(Sheet::new(id, format!("Sheet{}", n + 1)));
+        let n = {
+            let wb = session.workbook_mut();
+            let n = wb.sheets.len();
+            let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
+            wb.sheets.push(Sheet::new(id, format!("Sheet{}", n + 1)));
+            n
+        };
+        // A new sheet name can resolve a previously-#REF cross-sheet reference.
+        session.recalculate();
         Ok(n)
     })
 }
@@ -189,6 +194,9 @@ pub fn session_rename_sheet(index: usize, name: &str) -> Result<(), JsError> {
         if let Some(sh) = wb.sheets.get_mut(index) {
             sh.name = name.to_owned();
         }
+        // References resolve sheets by name; recompute so cross-sheet formulas
+        // pick up (or lose) the renamed target.
+        session.recalculate();
         Ok(())
     })
 }
@@ -206,6 +214,8 @@ pub fn session_delete_sheet(index: usize) -> Result<(), JsError> {
         if index < wb.sheets.len() {
             wb.sheets.remove(index);
         }
+        // A cross-sheet reference onto the deleted sheet must become #REF!.
+        session.recalculate();
         Ok(())
     })
 }
@@ -248,6 +258,8 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
         clone.name = name;
         let at = index + 1;
         wb.sheets.insert(at, clone);
+        // The new sheet name may resolve references elsewhere; recompute.
+        session.recalculate();
         Ok(at)
     })
 }
@@ -1427,9 +1439,12 @@ pub fn session_sort_range(
         });
         filled.extend(empties);
 
-        // Pass 2 (mutable): write each row back to its sorted position, shifting
-        // relative references by the row delta so per-row formulas (e.g. =B2*C2)
-        // keep pointing at their own row. Absolute (`$`) anchors are held.
+        // Pass 2 (mutable): write each row back to its sorted position. A
+        // per-row formula's references are re-anchored by the row delta ONLY
+        // when they point at a cell that moves with this row — i.e. a same-row,
+        // relative, same-sheet reference inside the sorted columns (e.g. =B2*C2
+        // -> =B5*C5). References outside the block (a header, a constant one row
+        // up, another sheet) are pinned, exactly as Excel keeps them.
         let mut ops = Vec::with_capacity(filled.len() * (c1 - c0 + 1) as usize);
         for (i, row) in filled.into_iter().enumerate() {
             let r = r0 + i as u32;
@@ -1438,7 +1453,7 @@ pub fn session_sort_range(
                 let cell = row.cells[j].as_ref().map(|rc| {
                     let mut out = rc.cell.clone();
                     if let Some(expr) = &rc.formula {
-                        let shifted = shift_references(expr, dr, 0);
+                        let shifted = sort_reanchor(expr, dr, row.src_row, c0, c1);
                         out.formula = Some(session.workbook_mut().store_formula(shifted));
                     }
                     out
@@ -1455,6 +1470,51 @@ pub fn session_sort_range(
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
     })
+}
+
+/// Whether a reference moves with a sorted row: relative, unqualified, on the
+/// source row, and inside the sorted columns.
+fn ref_moves_with_row(r: &CellReference, src_row: u32, c0: u32, c1: u32) -> bool {
+    !r.row_absolute && r.sheet.is_none() && r.row == src_row && r.col >= c0 && r.col <= c1
+}
+
+fn shifted_row(r: &CellReference, dr: i64) -> CellReference {
+    let mut out = r.clone();
+    out.row = (r.row as i64 + dr).max(0) as u32;
+    out
+}
+
+/// Re-anchor a formula for a row moved by `dr` during a sort: shift only the
+/// references that travel with the row (see [`ref_moves_with_row`]); a range is
+/// shifted only when both endpoints do, so a multi-row range is never split.
+fn sort_reanchor(expr: &Expr, dr: i64, src_row: u32, c0: u32, c1: u32) -> Expr {
+    match expr {
+        Expr::Reference(r) if ref_moves_with_row(r, src_row, c0, c1) => {
+            Expr::Reference(shifted_row(r, dr))
+        }
+        Expr::Range(a, b)
+            if ref_moves_with_row(a, src_row, c0, c1) && ref_moves_with_row(b, src_row, c0, c1) =>
+        {
+            Expr::Range(shifted_row(a, dr), shifted_row(b, dr))
+        }
+        Expr::Unary { op, operand } => Expr::Unary {
+            op: *op,
+            operand: Box::new(sort_reanchor(operand, dr, src_row, c0, c1)),
+        },
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op: *op,
+            left: Box::new(sort_reanchor(left, dr, src_row, c0, c1)),
+            right: Box::new(sort_reanchor(right, dr, src_row, c0, c1)),
+        },
+        Expr::Function { name, args } => Expr::Function {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| sort_reanchor(a, dr, src_row, c0, c1))
+                .collect(),
+        },
+        other => other.clone(),
+    }
 }
 
 /// Toggle strikethrough across a range (one undo step).
