@@ -5,13 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc — editor demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./editor.css?v=2" />
+    <link rel="stylesheet" href="./editor.css?v=4" />
   </head>
   <body class="editor-body">
     <header class="app-header">
+      <span class="brand-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
+      </span>
+      <a class="tb-brand" href="./index.html">OpenCalc</a>
+      <span class="badge"><span class="dot"></span>Alpha</span>
+      <div class="header-right">
+      <span class="tb-status" id="tb-status">loading engine…</span>
       <div class="settings">
         <button id="tb-settings" class="tb-icon" title="Settings" aria-label="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
         <div id="settings-panel" class="settings-panel" hidden>
           <label class="set-row">
@@ -41,8 +48,7 @@
           </div>
         </div>
       </div>
-      <a class="tb-brand" href="./index.html">OpenCalc</a>
-      <span class="tb-status" id="tb-status">loading engine…</span>
+      </div>
     </header>
 
     <div class="toolbar" role="toolbar" aria-label="Formatting">
@@ -76,7 +82,7 @@
         </button>
       </div>
       <span class="tb-sep"></span>
-      <div class="tb-group">
+      <div class="tb-group controls">
         <select id="tb-font" class="tb-select" title="Font">
           <option value="">Default</option>
           <option value="Calibri">Calibri</option>
@@ -189,46 +195,48 @@
             <button data-nf="mm-dd-yy">Date</button>
           </div>
         </div>
-      </div>
-      <span class="tb-sep"></span>
-      <div class="menu-wrap">
-        <button id="tb-border" class="tb-btn" title="Borders" aria-label="Borders" aria-haspopup="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="1"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
-        </button>
-        <div id="border-menu" class="popmenu" hidden>
-          <button data-bd="all">All borders</button>
-          <button data-bd="outer">Outer border</button>
-          <button data-bd="none">Clear borders</button>
+        <div class="menu-wrap">
+          <button id="tb-border" class="tb-btn" title="Borders" aria-label="Borders" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="1"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
+          </button>
+          <div id="border-menu" class="popmenu" hidden>
+            <button data-bd="all">All borders</button>
+            <button data-bd="outer">Outer border</button>
+            <button data-bd="none">Clear borders</button>
+          </div>
         </div>
       </div>
       <span class="tb-sep"></span>
-      <div class="menu-wrap">
-        <button id="tb-freeze" class="tb-btn" title="Freeze panes" aria-label="Freeze panes" aria-haspopup="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="1"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
-        </button>
-        <div id="freeze-menu" class="popmenu" hidden>
-          <button data-fz="sel">Freeze up to selection</button>
-          <button data-fz="row">Freeze top row</button>
-          <button data-fz="col">Freeze first column</button>
-          <button data-fz="none">Unfreeze</button>
+      <div class="tb-group">
+        <div class="menu-wrap">
+          <button id="tb-freeze" class="tb-btn" title="Freeze panes" aria-label="Freeze panes" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="1"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          </button>
+          <div id="freeze-menu" class="popmenu" hidden>
+            <button data-fz="sel">Freeze up to selection</button>
+            <button data-fz="row">Freeze top row</button>
+            <button data-fz="col">Freeze first column</button>
+            <button data-fz="none">Unfreeze</button>
+          </div>
         </div>
-      </div>
-      <div class="menu-wrap">
-        <button id="tb-sort" class="tb-btn" title="Sort range" aria-label="Sort range" aria-haspopup="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="4" y1="6" x2="13" y2="6"/><line x1="4" y1="12" x2="11" y2="12"/><line x1="4" y1="18" x2="9" y2="18"/><polyline points="17 8 20 5 23 8"/><line x1="20" y1="5" x2="20" y2="19"/></svg>
-        </button>
-        <div id="sort-menu" class="popmenu" hidden>
-          <button data-sort="asc">Sort range A → Z</button>
-          <button data-sort="desc">Sort range Z → A</button>
+        <div class="menu-wrap">
+          <button id="tb-sort" class="tb-btn" title="Sort range" aria-label="Sort range" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="4" y1="6" x2="13" y2="6"/><line x1="4" y1="12" x2="11" y2="12"/><line x1="4" y1="18" x2="9" y2="18"/><polyline points="17 8 20 5 23 8"/><line x1="20" y1="5" x2="20" y2="19"/></svg>
+          </button>
+          <div id="sort-menu" class="popmenu" hidden>
+            <button data-sort="asc">Sort range A → Z</button>
+            <button data-sort="desc">Sort range Z → A</button>
+          </div>
         </div>
+        <button id="tb-filter" class="tb-btn" title="Filter column" aria-label="Filter column" aria-haspopup="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+        </button>
       </div>
-      <button id="tb-filter" class="tb-btn" title="Filter column" aria-label="Filter column" aria-haspopup="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
-      </button>
     </div>
 
     <div class="formula-bar">
       <input class="cell-ref" id="cell-ref" spellcheck="false" title="Name box — type a cell (B12) or range (A1:C5) and press Enter" aria-label="Name box" value="A1" />
+      <span class="fx" aria-hidden="true">fx</span>
       <input id="formula-input" type="text" spellcheck="false" placeholder="value or =formula" />
     </div>
 
@@ -253,13 +261,14 @@
       <input id="inline-edit" class="inline-edit" spellcheck="false" />
       <div id="ac-menu" class="ac-menu" hidden></div>
       <div id="comment-tip" class="comment-tip" hidden></div>
+      <span class="sel-stats" id="sel-stats"></span>
       <div class="scrollbar vscroll" id="vscroll"><div class="thumb" id="vthumb"></div></div>
       <div class="scrollbar hscroll" id="hscroll"><div class="thumb" id="hthumb"></div></div>
     </div>
 
     <div class="bottom-bar">
       <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
-      <span class="sel-stats" id="sel-stats"></span>
+      <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
     <script type="module" src="./editor.js"></script>

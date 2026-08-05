@@ -1,33 +1,83 @@
-/* Design tokens — the editor is self-contained and does NOT depend on the
-   marketing site's style.css. `--card` is the chrome surface (toolbar, header,
-   menus) and reads a touch off the grid's `--bg`. */
+/* Design tokens — self-contained editor chrome, implementing the "OpenCalc
+   Editor" design system. The editor never depends on the marketing style.css.
+   `--surface` is the grouped-pill background; `--card` is popovers/panels. */
 :root {
   --bg: #ffffff;
-  --fg: #1a1c20;
-  --muted: #5a6472;
-  --border: #e2e8f0;
-  --card: #f6f8fb;
+  --fg: #0b0d12;
+  --icon: #454b57;        /* default toolbar icon */
+  --muted: #7b8391;       /* secondary text */
+  --faint: #9aa1ad;       /* tertiary / shortcuts */
+  --disabled: #b6bcc7;
+  --border: #e8eaee;      /* dividers, gridlines */
+  --border-2: #dfe2e8;    /* control outlines */
+  --border-hover: #c9cfd9;
+  --surface: #f6f7f9;     /* toolbar pill groups, name box */
+  --card: #ffffff;        /* popovers, panels */
+  --grid: #f0f1f4;        /* light interior gridlines */
   --accent: #2f6df6;
+  --accent-hover: #1f56cf;
   --accent-ink: #ffffff;
+  --sel-tint: rgba(47, 109, 246, .10);
+  --ok: #16a34a;
+  --shadow-btn: 0 1px 2px rgba(11, 13, 18, .08);
+  --shadow-pop: 0 1px 2px rgba(11, 13, 18, .06), 0 14px 34px rgba(11, 13, 18, .14);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+/* Dark tokens — applied both by the manual theme toggle (data-theme="dark",
+   which must win over the OS setting) and by the OS preference when the user
+   hasn't forced light. Duplicated because CSS can't share a declaration block
+   across a media query and an attribute selector. */
+:root[data-theme="dark"] {
+  --bg: #0f1216;
+  --fg: #e7ebf0;
+  --icon: #b3bccb;
+  --muted: #9aa6b4;
+  --faint: #6b7686;
+  --disabled: #454e5c;
+  --border: #262c34;
+  --border-2: #2c333d;
+  --border-hover: #3a434f;
+  --surface: #1a1f27;
+  --card: #171b21;
+  --grid: #20262f;
+  --accent: #5b8bff;
+  --accent-hover: #7aa0ff;
+  --accent-ink: #0b0d12;
+  --sel-tint: rgba(91, 139, 255, .16);
+  --shadow-btn: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0f1216;
     --fg: #e7ebf0;
+    --icon: #b3bccb;
     --muted: #9aa6b4;
+    --faint: #6b7686;
+    --disabled: #454e5c;
     --border: #262c34;
+    --border-2: #2c333d;
+    --border-hover: #3a434f;
+    --surface: #1a1f27;
     --card: #171b21;
+    --grid: #20262f;
     --accent: #5b8bff;
-    --accent-ink: #ffffff;
+    --accent-hover: #7aa0ff;
+    --accent-ink: #0b0d12;
+    --sel-tint: rgba(91, 139, 255, .16);
+    --shadow-btn: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-pop: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
   }
 }
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
   color: var(--fg);
   background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
+::selection { background: rgba(47, 109, 246, .18); }
 .editor-body {
   margin: 0;
   height: 100vh;
@@ -39,51 +89,79 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
-  flex: 0 0 auto;
-}
-.app-header .tb-brand { font-size: 15px; }
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
+  gap: 12px;
+  height: 52px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex: 0 0 auto;
 }
-.tb-group { display: flex; align-items: center; gap: 4px; }
-.tb-select {
-  height: 34px; padding: 0 6px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--card); color: var(--fg); font-size: 13px; cursor: pointer; max-width: 140px;
+.brand-logo { display: inline-flex; width: 22px; height: 22px; color: var(--accent); flex: 0 0 auto; }
+.brand-logo .icon { width: 100%; height: 100%; }
+.tb-brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; color: var(--fg); text-decoration: none; }
+/* Alpha badge — pill with a status dot. */
+.badge {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px;
+  border-radius: 999px; border: 1px solid var(--border-2); background: var(--surface);
+  font-size: 11.5px; font-weight: 600; color: #454b57; letter-spacing: .01em; white-space: nowrap;
 }
-.tb-select:hover { border-color: var(--accent); }
-.tb-size { width: 58px; }
-.tb-brand { font-weight: 700; color: var(--fg); text-decoration: none; margin-right: 8px; }
+.badge .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
-.icon { width: 18px; height: 18px; display: block; }
-.icon-sm { width: 13px; height: 13px; display: block; }
-.tb-icon { display: inline-flex; align-items: center; justify-content: center; }
-.toolbar .tb-btn {
-  width: 34px; height: 34px; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--fg);
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex: 0 0 auto;
+  overflow-x: auto;
 }
-.toolbar .tb-btn:disabled { color: var(--muted); }
+/* A grouped-pill cluster of icon buttons. */
+.tb-group {
+  display: flex; align-items: center; gap: 2px; padding: 2px;
+  border-radius: 10px; background: var(--surface);
+}
+/* Bordered controls (font / size) sit directly on the bar, not in a pill. */
+.tb-group.controls { background: transparent; padding: 0; gap: 6px; }
+.tb-select {
+  height: 30px; padding: 0 9px; border: 1px solid var(--border-2); border-radius: 8px;
+  background: var(--bg); color: var(--fg); font-size: 12.5px; cursor: pointer; max-width: 132px;
+}
+.tb-select:hover { border-color: var(--border-hover); }
+.tb-size { width: 62px; }
+
+.icon { width: 16px; height: 16px; display: block; }
+.icon-sm { width: 13px; height: 13px; display: block; }
+
+/* Pill icon buttons: transparent, lift to white on hover, white+accent when on. */
+.toolbar .tb-btn, .tb-file {
+  width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--icon); cursor: pointer; transition: background .1s, color .1s, box-shadow .1s;
+}
+.toolbar .tb-btn:hover, .tb-file:hover { background: var(--bg); color: var(--fg); box-shadow: var(--shadow-btn); }
+.toolbar .tb-btn:disabled { color: var(--disabled); background: transparent; box-shadow: none; cursor: default; }
+.toolbar .tb-btn.on, .toolbar .tb-btn[aria-pressed="true"], .tb-toggle[aria-pressed="true"] {
+  background: var(--bg); color: var(--accent); box-shadow: var(--shadow-btn);
+}
+/* Text-glyph buttons ($ % .00) in a pill. */
+.toolbar .tb-btn.glyph { font-size: 13px; font-weight: 600; color: var(--icon); }
+.toolbar .tb-btn.glyph.mono { font-family: var(--mono); font-size: 12px; }
 
 .settings { position: relative; }
 .tb-icon {
-  width: 34px; height: 34px; padding: 0; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--fg); font-size: 16px; cursor: pointer; line-height: 1;
+  width: 32px; height: 32px; padding: 0; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--bg); color: var(--icon); font-size: 16px; cursor: pointer; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.tb-icon:hover { border-color: var(--border-hover); background: var(--surface); color: var(--fg); }
 .settings-panel {
-  position: absolute; top: 42px; left: 0; z-index: 20; width: 220px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-  padding: 14px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+  position: absolute; top: 40px; right: 0; z-index: 20; width: 230px;
+  background: var(--card); border: 1px solid var(--border-2); border-radius: 12px;
+  padding: 14px; box-shadow: var(--shadow-pop);
   display: flex; flex-direction: column; gap: 14px;
 }
 .settings-panel[hidden] { display: none; }
@@ -101,19 +179,13 @@ body {
   cursor: pointer;
 }
 .swatches button[aria-current="true"] { border-color: var(--fg); }
-.toolbar button,
-.tb-file {
-  padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--card); color: var(--fg); font-weight: 600; font-size: 13px; cursor: pointer;
-}
-.toolbar button:hover, .tb-file:hover { border-color: var(--accent); }
 
 .menu-wrap { position: relative; display: inline-flex; }
 .popmenu {
-  position: absolute; top: 40px; left: 0; z-index: 30; min-width: 178px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 6px; display: flex; flex-direction: column; gap: 2px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  position: absolute; top: 38px; left: 0; z-index: 30; min-width: 178px;
+  background: var(--card); border: 1px solid var(--border-2); border-radius: 12px;
+  padding: 5px; display: flex; flex-direction: column; gap: 2px;
+  box-shadow: var(--shadow-pop);
 }
 .popmenu[hidden] { display: none; }
 .popmenu button {
@@ -121,14 +193,9 @@ body {
   border-radius: 6px; background: transparent; color: var(--fg);
   font-size: 13px; font-weight: 500; cursor: pointer;
 }
-.popmenu button:hover { background: var(--bg); border-color: var(--border); }
-.toolbar button:disabled { opacity: 0.45; cursor: default; }
+.popmenu button:hover { background: var(--surface); }
 .tb-file input { display: none; }
-.tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 2px; }
-.tb-toggle[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent); border-color: var(--accent);
-}
+.tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 2px; flex: 0 0 auto; }
 
 /* Swatch popover (font color, fill color). */
 .swatch-menu { flex-direction: row; flex-wrap: wrap; width: 152px; gap: 6px; padding: 8px; }
@@ -146,48 +213,65 @@ body {
   width: 90px; padding: 3px 6px; border: 1px solid var(--accent); border-radius: 5px;
   background: var(--bg); color: var(--fg); font-size: 13px; font-weight: 600; outline: none;
 }
-.tb-status { margin-left: auto; color: var(--muted); font-size: 13px; font-family: var(--mono); }
+.tb-status { color: var(--faint); font-size: 12px; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 
 .formula-bar {
-  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px;
   border-bottom: 1px solid var(--border); background: var(--bg); flex: 0 0 auto;
 }
 /* Name box (higher specificity than `.formula-bar input` so it stays narrow). */
 .formula-bar .cell-ref {
-  flex: 0 0 auto; width: 92px; text-align: center; font-family: var(--mono); font-weight: 600;
-  font-size: 13px; color: var(--fg); padding: 6px 8px; border: 1px solid var(--border);
-  border-radius: 8px; background: var(--card);
+  flex: 0 0 auto; width: 84px; height: 28px; text-align: center; font-family: var(--mono); font-weight: 600;
+  font-size: 12.5px; color: var(--fg); padding: 0 6px; border: 1px solid var(--border-2);
+  border-radius: 8px; background: var(--bg);
 }
-.formula-bar .cell-ref:focus { outline: none; border-color: var(--accent); background: var(--bg); }
-.formula-bar input {
-  flex: 1; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 14px;
+.formula-bar .cell-ref:focus { outline: none; border-color: var(--accent); }
+.formula-bar .fx { font-family: Georgia, serif; font-style: italic; font-size: 14px; color: var(--muted); padding: 0 2px; flex: 0 0 auto; }
+.formula-bar input#formula-input {
+  flex: 1; height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+}
+.formula-bar input#formula-input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 109, 246, .12);
 }
 
 .bottom-bar {
-  display: flex; align-items: center; flex: 0 0 auto;
-  border-top: 1px solid var(--border); background: var(--card);
+  display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; flex: 0 0 auto;
+  border-top: 1px solid var(--border); background: var(--bg);
 }
+/* Sheet tabs live in a grouped pill (like the toolbar clusters). */
 .sheet-tabs {
-  display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+  display: flex; align-items: center; gap: 2px; padding: 2px;
+  border-radius: 9px; background: var(--surface);
   flex: 0 1 auto; overflow-x: auto; min-width: 0;
 }
-.sel-stats {
-  margin-left: auto; padding: 0 16px; white-space: nowrap;
-  color: var(--muted); font-size: 12px; font-family: var(--mono);
-}
-.sel-stats b { color: var(--fg); font-weight: 600; }
 .sheet-tab {
-  padding: 5px 14px; border: 1px solid transparent; border-radius: 6px 6px 0 0;
-  background: transparent; color: var(--muted); font-size: 13px; font-weight: 600;
-  cursor: pointer; white-space: nowrap;
+  height: 26px; padding: 0 12px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 7px;
 }
+.sheet-tab::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--tab-color, transparent); flex: 0 0 auto; display: none; }
+.sheet-tab.colored::before { display: inline-block; }
 .sheet-tab:hover { color: var(--fg); }
-.sheet-tab.active { background: var(--bg); color: var(--fg); border-color: var(--border); }
+.sheet-tab.active { background: var(--bg); color: var(--fg); box-shadow: var(--shadow-btn); }
+.sheet-tab.active::before { display: inline-block; background: var(--tab-color, var(--accent)); }
 .sheet-tab.dragging { opacity: 0.45; }
-/* Colored tabs carry a bottom accent stripe in their assigned color. */
-.sheet-tab.colored { border-bottom: 3px solid var(--tab-color); border-radius: 6px 6px 0 0; }
-.sheet-tab.colored.active { box-shadow: inset 0 -3px 0 var(--tab-color); border-bottom-color: var(--tab-color); }
+/* Floating glass selection summary (Sum / Avg / Count), bottom-right of grid. */
+.sel-stats {
+  position: absolute; bottom: 16px; right: 24px; z-index: 8; white-space: nowrap;
+  display: none; align-items: center; gap: 14px; padding: 8px 15px;
+  border-radius: 11px; border: 1px solid var(--border-2);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: saturate(1.5) blur(14px); box-shadow: var(--shadow-pop);
+  color: var(--muted); font-size: 12px;
+}
+.sel-stats:not(:empty) { display: inline-flex; }
+.sel-stats b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bottom-status {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--faint); white-space: nowrap;
+}
+.bottom-status .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
 /* Tab-color picker inside the sheet context menu. */
 .menu-label { font-size: 11px; color: var(--muted); padding: 2px 10px; text-transform: uppercase; letter-spacing: .04em; }
 .swatch-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 8px; max-width: 176px; }
@@ -259,10 +343,10 @@ body {
 .inline-edit.invalid { outline: 2px solid #e53935; box-shadow: 0 0 0 2px rgba(229,57,53,.25); }
 #tb-status .err, .err { color: #e53935; font-weight: 600; }
 .sheet-add {
-  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;
+  width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; flex: 0 0 auto;
 }
-.sheet-add:hover { border-color: var(--accent); }
+.sheet-add:hover { background: var(--bg); color: var(--fg); box-shadow: var(--shadow-btn); }
 
 .grid-wrap { position: relative; flex: 1 1 auto; overflow: hidden; background: var(--bg); }
 

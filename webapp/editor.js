@@ -64,12 +64,12 @@ let colors = {};
 function readColors() {
   colors = {
     bg: css("--bg") || "#fff",
-    fg: css("--fg") || "#111",
-    muted: css("--muted") || "#666",
-    grid: css("--border") || "#e2e8f0",
-    headerBg: css("--card") || "#f6f8fb",
+    fg: css("--fg") || "#0b0d12",
+    muted: css("--muted") || "#7b8391",
+    grid: css("--grid") || "#f0f1f4",
+    headerBg: css("--surface") || "#f6f7f9",
     accent: css("--accent") || "#2f6df6",
-    sel: (css("--accent") || "#2f6df6") + "22",
+    sel: css("--sel-tint") || "rgba(47,109,246,.10)",
   };
 }
 
