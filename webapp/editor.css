@@ -218,6 +218,25 @@ body {
 }
 .ctx-submenu { min-width: 168px; }
 
+/* Border palette: placement grid + line-style select + color swatches. */
+.border-menu { width: 200px; gap: 8px; }
+.border-menu .bd-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; }
+.border-menu .bd-cell {
+  width: 34px; height: 30px; padding: 0; border: 0; border-radius: 7px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--icon);
+}
+.border-menu .bd-cell:hover { background: var(--surface); color: var(--fg); }
+.border-menu .bd-cell .icon { width: 20px; height: 20px; }
+.border-menu .bd-style { width: 100%; box-sizing: border-box; text-align: left; }
+.border-menu .bd-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.border-menu .bd-color {
+  width: 20px; height: 20px; padding: 0; border-radius: 5px; border: 1px solid var(--border-2);
+  cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.border-menu .bd-color.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .sheet-rename {
   width: 90px; padding: 3px 6px; border: 1px solid var(--accent); border-radius: 5px;
   background: var(--bg); color: var(--fg); font-size: 13px; font-weight: 600; outline: none;

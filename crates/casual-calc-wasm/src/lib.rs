@@ -2105,9 +2105,14 @@ pub fn session_toggle_border(
     })
 }
 
-/// Apply a border preset across a range (one undo step). `kind` is one of
-/// `all`, `outer`, or `none`.
+/// Apply a border placement across a range (one undo step) with a chosen line
+/// `style` and `color`. `kind` is one of `all`, `inner`, `outer`, `horizontal`,
+/// `vertical`, `top`, `bottom`, `left`, `right`, or `none` (clear). `style` is
+/// an OOXML line style (`thin`/`medium`/`thick`/`dashed`/`dotted`/`double`);
+/// `color` is an `RRGGBB` hex or empty for automatic. Placements other than
+/// `none` are additive — they set only the edges they name, leaving the rest.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn session_set_border(
     sheet: usize,
     r0: u32,
@@ -2115,30 +2120,64 @@ pub fn session_set_border(
     r1: u32,
     c1: u32,
     kind: &str,
+    style: &str,
+    color: &str,
 ) -> Result<(), JsError> {
     let kind = kind.to_owned();
+    let style = if style.is_empty() { "thin" } else { style }.to_owned();
+    let color = (!color.is_empty()).then(|| color.trim_start_matches('#').to_ascii_uppercase());
     apply_style_range_pos(sheet, r0, c0, r1, c1, move |r, c, st| {
-        st.border = match kind.as_str() {
-            "none" => None,
-            "all" => Some(full_thin_border()),
-            "outer" => {
-                let edge = || {
-                    Some(BorderEdge {
-                        style: "thin".to_owned(),
-                        color: None,
-                    })
-                };
-                let b = Borders {
-                    top: (r == r0).then(edge).flatten(),
-                    bottom: (r == r1).then(edge).flatten(),
-                    left: (c == c0).then(edge).flatten(),
-                    right: (c == c1).then(edge).flatten(),
-                };
-                (!b.is_empty()).then_some(b)
-            }
-            _ => st.border.clone(),
+        if kind == "none" {
+            st.border = None;
+            return;
+        }
+        let (top, bottom, left, right) = border_edges(&kind, r, c, r0, c0, r1, c1);
+        let mut borders = st.border.clone().unwrap_or_default();
+        let edge = || {
+            Some(BorderEdge {
+                style: style.clone(),
+                color: color.clone(),
+            })
         };
+        if top {
+            borders.top = edge();
+        }
+        if bottom {
+            borders.bottom = edge();
+        }
+        if left {
+            borders.left = edge();
+        }
+        if right {
+            borders.right = edge();
+        }
+        st.border = (!borders.is_empty()).then_some(borders);
     })
+}
+
+/// Which edges `(top, bottom, left, right)` of cell `(r, c)` a placement sets,
+/// within the selected range `r0..=r1 × c0..=c1`.
+fn border_edges(
+    kind: &str,
+    r: u32,
+    c: u32,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> (bool, bool, bool, bool) {
+    match kind {
+        "all" => (true, true, true, true),
+        "outer" => (r == r0, r == r1, c == c0, c == c1),
+        "top" => (r == r0, false, false, false),
+        "bottom" => (false, r == r1, false, false),
+        "left" => (false, false, c == c0, false),
+        "right" => (false, false, false, c == c1),
+        "inner" => (r > r0, r < r1, c > c0, c < c1),
+        "horizontal" => (r > r0, r < r1, false, false),
+        "vertical" => (false, false, c > c0, c < c1),
+        _ => (false, false, false, false),
+    }
 }
 
 /// A four-edge thin border with the default (auto) color.

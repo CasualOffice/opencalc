@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "22";
+const BUILD = "23";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1522,8 +1522,75 @@ function toggleMerge() {
 function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
 function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, pts)); }
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
-function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
+// Current border palette state (chosen line style + color, "" = automatic).
+let borderStyle = "thin";
+let borderColor = "";
+function setBorder(kind) {
+  formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, borderStyle, borderColor));
+}
 function toggleBorder() { setBorder("all"); }
+
+// A 20×20 icon sketching a cell with the placement's edges emphasized.
+function bdIcon(kind) {
+  const seg = {
+    top: "M3 3H17", bottom: "M3 17H17", left: "M3 3V17", right: "M17 3V17",
+    midH: "M3 10H17", midV: "M10 3V17",
+  };
+  const bold = {
+    all: ["top", "bottom", "left", "right", "midH", "midV"],
+    outer: ["top", "bottom", "left", "right"],
+    inner: ["midH", "midV"], horizontal: ["midH"], vertical: ["midV"],
+    top: ["top"], bottom: ["bottom"], left: ["left"], right: ["right"], none: [],
+  }[kind] || [];
+  let faint = "";
+  for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--border)" stroke-width="1"/>`;
+  let strong = "";
+  for (const k of bold) strong += `<path d="${seg[k]}" stroke="currentColor" stroke-width="2"/>`;
+  const clear = kind === "none" ? `<path d="M5 15L15 5" stroke="#e5484d" stroke-width="1.6"/>` : "";
+  return `<svg viewBox="0 0 20 20" fill="none" class="icon">${faint}${strong}${clear}</svg>`;
+}
+const BD_TITLES = {
+  all: "All borders", inner: "Inner borders", outer: "Outer border",
+  horizontal: "Inside horizontal", vertical: "Inside vertical", none: "Clear borders",
+  top: "Top border", bottom: "Bottom border", left: "Left border", right: "Right border",
+};
+// Build the border palette into #border-menu (once).
+function buildBorderMenu() {
+  const menu = document.getElementById("border-menu");
+  menu.textContent = "";
+  const grid = el("div", "bd-grid");
+  for (const kind of ["all", "inner", "outer", "horizontal", "vertical", "none", "top", "bottom", "left", "right"]) {
+    const b = el("button", "bd-cell");
+    b.title = BD_TITLES[kind];
+    b.setAttribute("aria-label", BD_TITLES[kind]);
+    b.innerHTML = bdIcon(kind);
+    b.addEventListener("click", (e) => { e.stopPropagation(); setBorder(kind); menu.hidden = true; canvas.focus(); });
+    grid.appendChild(b);
+  }
+  menu.appendChild(grid);
+  const sty = el("select", "tb-select bd-style");
+  for (const [v, t] of [["thin", "Thin"], ["medium", "Medium"], ["thick", "Thick"], ["dashed", "Dashed"], ["dotted", "Dotted"], ["double", "Double"]]) {
+    const o = el("option", null, t); o.value = v; sty.appendChild(o);
+  }
+  sty.value = borderStyle;
+  sty.addEventListener("click", (e) => e.stopPropagation());
+  sty.addEventListener("change", () => { borderStyle = sty.value; });
+  menu.appendChild(sty);
+  const sw = el("div", "bd-swatches");
+  for (const c of ["", "000000", "2f6df6", "e5484d", "16a34a", "f59e0b", "8b5cf6", "64748b"]) {
+    const b = el("button", "bd-color" + (c === borderColor ? " on" : ""));
+    if (c) { b.style.background = "#" + c; b.title = "#" + c; }
+    else { b.textContent = "A"; b.title = "Automatic color"; }
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      borderColor = c;
+      sw.querySelectorAll(".bd-color").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+    });
+    sw.appendChild(b);
+  }
+  menu.appendChild(sw);
+}
 // Delete key / "Clear contents": clear values + formulas, keep formatting.
 function clearSelection() {
   try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
@@ -2600,7 +2667,21 @@ function wireEvents() {
   wirePopup("tb-fontcolor", "fontcolor-menu", (b) => setFontColor(b.dataset.c));
   wirePopup("tb-fillcolor", "fillcolor-menu", (b) => setFill(b.dataset.c));
   wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
-  wirePopup("tb-border", "border-menu", (b) => setBorder(b.dataset.bd));
+  // Border palette: custom toggle (its placement buttons apply and close, but
+  // the style select and color swatches must not), built once here.
+  buildBorderMenu();
+  {
+    const btn = document.getElementById("tb-border");
+    const menu = document.getElementById("border-menu");
+    menus.push(menu);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      for (const m of menus) m.hidden = true;
+      menu.hidden = !open;
+      if (!menu.hidden) anchorMenu(menu, btn);
+    });
+  }
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) => sortRange(b.dataset.sort === "desc"));
