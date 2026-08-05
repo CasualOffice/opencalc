@@ -405,14 +405,22 @@ function draw() {
   // gridlines and cells are each drawn clipped to their quadrant so frozen and
   // scrolling panes never bleed into one another.
   const F = state.freeze;
+  // geo index where body lines begin: the first `fc`/`fr` entries of colIdx/
+  // rowIdx are the frozen lines, the rest are the scrolling body.
+  const nCol = geo.colX.length, nRow = geo.rowY.length;
+  const splitC = Math.min(F.fc, nCol), splitR = Math.min(F.fr, nRow);
+  // Each quadrant carries the geo line-index ranges it owns, so gridlines are
+  // drawn per pane. This matters because with fractional scroll the first body
+  // line sits at bodyX0/Y0 − sub (just inside the frozen band's clip); gating
+  // by index keeps that stray line out of the frozen panes.
   const quads = F.fc || F.fr
     ? [
-        { x: HW, y: HH, w: F.bodyX0 - HW, h: F.bodyY0 - HH },
-        { x: F.bodyX0, y: HH, w: v.w - F.bodyX0, h: F.bodyY0 - HH },
-        { x: HW, y: F.bodyY0, w: F.bodyX0 - HW, h: v.h - F.bodyY0 },
-        { x: F.bodyX0, y: F.bodyY0, w: v.w - F.bodyX0, h: v.h - F.bodyY0 },
+        { x: HW, y: HH, w: F.bodyX0 - HW, h: F.bodyY0 - HH, ci0: 0, ci1: splitC, ri0: 0, ri1: splitR },
+        { x: F.bodyX0, y: HH, w: v.w - F.bodyX0, h: F.bodyY0 - HH, ci0: splitC, ci1: nCol, ri0: 0, ri1: splitR },
+        { x: HW, y: F.bodyY0, w: F.bodyX0 - HW, h: v.h - F.bodyY0, ci0: 0, ci1: splitC, ri0: splitR, ri1: nRow },
+        { x: F.bodyX0, y: F.bodyY0, w: v.w - F.bodyX0, h: v.h - F.bodyY0, ci0: splitC, ci1: nCol, ri0: splitR, ri1: nRow },
       ].filter((q) => q.w > 0 && q.h > 0)
-    : [{ x: HW, y: HH, w: Math.max(0, v.w - HW), h: Math.max(0, v.h - HH) }];
+    : [{ x: HW, y: HH, w: Math.max(0, v.w - HW), h: Math.max(0, v.h - HH), ci0: 0, ci1: nCol, ri0: 0, ri1: nRow }];
 
   // Selection tint + gridlines, per quadrant.
   for (const q of quads) {
@@ -430,15 +438,21 @@ function draw() {
     ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let i = 0; i <= geo.cols; i++) {
+    // Vertical lines: the columns this quadrant owns, spanning its height. Skip
+    // the trailing line when it is the body's fractional left edge (ci1===fc),
+    // which the freeze divider covers instead — this is what stopped the stray
+    // gridline bleeding into a frozen pane.
+    for (let i = q.ci0; i <= q.ci1; i++) {
+      if (i === q.ci1 && q.ci1 === splitC && (F.fc || F.fr)) continue;
       const x = Math.floor(i < geo.colX.length ? geo.colX[i] : v.w) + 0.5;
-      ctx.moveTo(x, HH);
-      ctx.lineTo(x, v.h);
+      ctx.moveTo(x, q.y);
+      ctx.lineTo(x, q.y + q.h);
     }
-    for (let i = 0; i <= geo.rows; i++) {
+    for (let i = q.ri0; i <= q.ri1; i++) {
+      if (i === q.ri1 && q.ri1 === splitR && (F.fc || F.fr)) continue;
       const y = Math.floor(i < geo.rowY.length ? geo.rowY[i] : v.h) + 0.5;
-      ctx.moveTo(HW, y);
-      ctx.lineTo(v.w, y);
+      ctx.moveTo(q.x, y);
+      ctx.lineTo(q.x + q.w, y);
     }
     ctx.stroke();
     ctx.restore();
