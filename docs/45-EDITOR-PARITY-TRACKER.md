@@ -12,6 +12,13 @@ Update this file the moment an item's status changes.
 
 ## Competitive UX baseline (what "a real sheet" has)
 
+> **See also (generated 2026-08-06 by a parallel multi-agent audit):**
+> [47 — UX & Feature Map](47-UX-AND-FEATURE-MAP.md) (every feature's status + UX
+> grade + parity gap), [48 — Feature Pipeline](48-FEATURE-PIPELINE.md)
+> (dependency-ordered roadmap), [49 — Design System](49-DESIGN-SYSTEM.md). Those
+> supersede this hand-kept tracker as the authoritative map; this file remains
+> the changelog of shipped editor work.
+
 Reference products: Microsoft Excel (desktop + web 2026), Google Sheets,
 OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 
