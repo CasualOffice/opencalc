@@ -122,10 +122,13 @@
   display: flex; align-items: center; gap: 8px; padding: 6px 12px;
   border-bottom: 1px solid var(--border); background: var(--bg); flex: 0 0 auto;
 }
-.cell-ref {
-  min-width: 56px; text-align: center; font-family: var(--mono); font-weight: 600;
-  padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+/* Name box (higher specificity than `.formula-bar input` so it stays narrow). */
+.formula-bar .cell-ref {
+  flex: 0 0 auto; width: 92px; text-align: center; font-family: var(--mono); font-weight: 600;
+  font-size: 13px; color: var(--fg); padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--card);
 }
+.formula-bar .cell-ref:focus { outline: none; border-color: var(--accent); background: var(--bg); }
 .formula-bar input {
   flex: 1; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 14px;

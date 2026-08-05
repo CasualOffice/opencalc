@@ -750,7 +750,7 @@ function draw() {
   if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
   drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
 
-  cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
+  updateNameBox();
   updateScrollbars(v);
   updateStats();
   if (wasm) refreshFormulaBar();
@@ -1325,6 +1325,60 @@ function endInline() {
 
 // --- Formula editing UX: autocomplete, reference insertion, validation -----
 const A1 = (row, col) => colName(col) + (row + 1);
+
+// --- Name box (cell-ref input): show address / drag size, jump on Enter -----
+// Reflect the selection into the name box unless the user is typing in it. While
+// drag-selecting a block, show Excel's "3R x 2C" size readout.
+function updateNameBox() {
+  if (document.activeElement === cellRef) return;
+  const r = selRect();
+  const rows = r.r1 - r.r0 + 1, cols = r.c1 - r.c0 + 1;
+  if ((state.dragging || formulaRefDrag) && (rows > 1 || cols > 1)) {
+    cellRef.value = `${rows}R x ${cols}C`;
+  } else {
+    cellRef.value = A1(state.sel.row, state.sel.col);
+  }
+}
+// "AB" -> zero-based column index, or null.
+function colFromLetters(s) {
+  let n = 0;
+  for (const ch of s.toUpperCase()) {
+    if (ch < "A" || ch > "Z") return null;
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n > 0 ? n - 1 : null;
+}
+// "B12" -> {row,col}, or null.
+function parseA1Cell(s) {
+  const m = /^([A-Za-z]+)([0-9]+)$/.exec(s.trim());
+  if (!m) return null;
+  const col = colFromLetters(m[1]);
+  const row = parseInt(m[2], 10) - 1;
+  return col === null || row < 0 || !Number.isFinite(row) ? null : { row, col };
+}
+// Jump to a typed cell (B12) or range (A1:C5). Unknown names report to status.
+function gotoName(v) {
+  const s = (v || "").trim();
+  if (!s) { updateNameBox(); return; }
+  const parts = s.split(":");
+  if (parts.length === 2) {
+    const a = parseA1Cell(parts[0]), b = parseA1Cell(parts[1]);
+    if (a && b) {
+      state.anchor = { row: a.row, col: a.col };
+      state.sel = { row: b.row, col: b.col };
+      state.selKind = "cells";
+      state.ranges = [];
+      ensureVisible();
+      draw();
+      return;
+    }
+  } else {
+    const c = parseA1Cell(s);
+    if (c) { select(c.row, c.col); return; }
+  }
+  status.textContent = `Can't go to “${s}” — type a cell like B12 or a range like A1:C5`;
+  updateNameBox();
+}
 // Whether the caret (end of `before`) sits inside a "..." string literal, so we
 // must not inject a cell reference or a function name there. Treats "" as an
 // escaped quote within a string.
@@ -1909,6 +1963,7 @@ function wireEvents() {
       }
       if (k === "a") { selectAll(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
+      if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
       if (k === "z") { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
@@ -1932,6 +1987,7 @@ function wireEvents() {
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
       case "F2": startInline(); e.preventDefault(); break;
+      case "F5": cellRef.focus(); e.preventDefault(); break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
@@ -1951,6 +2007,13 @@ function wireEvents() {
   });
   fInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { commit(fInput.value, false); canvas.focus(); e.preventDefault(); }
+  });
+  // Name box: Enter jumps to the typed cell/range; Escape reverts. Focus selects
+  // all so it's ready to retype.
+  cellRef.addEventListener("focus", () => cellRef.select());
+  cellRef.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { gotoName(cellRef.value); canvas.focus(); updateNameBox(); e.preventDefault(); }
+    else if (e.key === "Escape") { canvas.focus(); updateNameBox(); e.preventDefault(); }
   });
 
   // Find & replace bar.
