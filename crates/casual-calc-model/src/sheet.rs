@@ -2,7 +2,7 @@
 //! theme) live on the workbook; the sheet holds its grid, merges, and view.
 //! See `docs/22-NORMALIZED-SCHEMA.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -85,6 +85,12 @@ pub struct Sheet {
     /// Row heights (twips).
     #[serde(default, skip_serializing_if = "AxisSizing::is_empty")]
     pub rows: AxisSizing,
+    /// Hidden rows, by zero-based index.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub hidden_rows: BTreeSet<u32>,
+    /// Hidden columns, by zero-based index.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub hidden_cols: BTreeSet<u32>,
 }
 
 impl Sheet {
@@ -98,6 +104,8 @@ impl Sheet {
             view: SheetView::default(),
             columns: AxisSizing::default(),
             rows: AxisSizing::default(),
+            hidden_rows: BTreeSet::new(),
+            hidden_cols: BTreeSet::new(),
         }
     }
 }

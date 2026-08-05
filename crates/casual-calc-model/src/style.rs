@@ -135,6 +135,9 @@ pub struct Style {
     /// Underlined text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
+    /// Strikethrough text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strike: bool,
     /// Font family name (e.g. `Calibri`, `Arial`), if specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_name: Option<String>,
@@ -173,6 +176,7 @@ impl Style {
             && !self.bold
             && !self.italic
             && !self.underline
+            && !self.strike
             && self.font_name.is_none()
             && self.font_size_hp.is_none()
             && self.font_color.is_none()
