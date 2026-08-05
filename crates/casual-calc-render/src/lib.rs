@@ -2,16 +2,29 @@
 //!
 //! Phase 1D, increment 1: executes a [`DisplayList`] for a viewport onto a
 //! `tiny-skia` pixmap and encodes a PNG. It draws the grid — a white ground,
-//! light gridlines at the visible row/column boundaries, and a subtle fill for
-//! each cell that carries content. **Glyph text is not yet rendered** (that
-//! needs a bundled font + `skrifa`, the next increment); content cells are shown
-//! as highlighted rectangles so the geometry and virtualization are inspectable.
+//! light gridlines at the visible row/column boundaries, solid cell fills, and
+//! cell border edges — from the display list's paint items, in painter's order.
+//! **Glyph text is not yet rendered** (that needs a bundled font + `skrifa`, the
+//! next increment); each text cell is marked by an inset bar painted in its font
+//! color so geometry, color, and virtualization stay inspectable.
 //!
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 use casual_calc_layout::visible_range;
-use casual_calc_layout::{DisplayList, GridGeometry, PaintItem, Rect as LayoutRect, Viewport};
+use casual_calc_layout::{
+    BorderLine, DisplayList, GridGeometry, PaintItem, Rect as LayoutRect, Viewport,
+};
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+
+/// The neutral color used for a text placeholder when the cell sets no font
+/// color (glyphs are not yet rendered; a bar marks laid-out text).
+fn neutral_text() -> Color {
+    Color::from_rgba8(210, 224, 246, 255)
+}
+/// The default border color when an edge specifies none.
+fn default_border() -> Color {
+    Color::BLACK
+}
 
 /// An error rendering to pixels.
 #[derive(Debug)]
@@ -76,19 +89,145 @@ pub fn render_pixmap(
 
     draw_gridlines(&mut pixmap, geometry, viewport, dpi);
 
-    // Content cells: a subtle fill so laid-out cells are visible before glyphs.
-    let mut fill = Paint::default();
-    fill.set_color(Color::from_rgba8(210, 224, 246, 255));
-    fill.anti_alias = false;
+    // The display list is in deterministic painter's order (fills behind text,
+    // borders on top). Execute it in that order.
     for item in &display_list.items {
-        if let PaintItem::Text { rect, .. } = item
-            && let Some(screen) = to_screen(rect, viewport, dpi)
-        {
-            pixmap.fill_rect(screen, &fill, Transform::identity(), None);
-        }
+        draw_item(&mut pixmap, item, viewport, dpi);
     }
 
     Ok(pixmap)
+}
+
+fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u32) {
+    match item {
+        PaintItem::CellBackground { rect, fill } => {
+            let Some(color) = fill.as_deref().and_then(parse_hex_color) else {
+                return;
+            };
+            if let Some(screen) = to_screen(rect, viewport, dpi) {
+                let mut paint = Paint::default();
+                paint.set_color(color);
+                paint.anti_alias = false;
+                pixmap.fill_rect(screen, &paint, Transform::identity(), None);
+            }
+        }
+        PaintItem::GridLine { rect } => {
+            if let Some(screen) = to_screen(rect, viewport, dpi) {
+                let mut paint = Paint::default();
+                paint.set_color(Color::from_rgba8(224, 224, 224, 255));
+                paint.anti_alias = false;
+                pixmap.fill_rect(screen, &paint, Transform::identity(), None);
+            }
+        }
+        PaintItem::Text { rect, color, .. } => {
+            // Glyphs are not yet rendered; paint an inset bar in the font color
+            // (neutral when unset) to mark laid-out text without hiding fills.
+            let color = color
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or_else(neutral_text);
+            draw_text_marker(pixmap, rect, viewport, dpi, color);
+        }
+        PaintItem::CellBorder {
+            rect,
+            left,
+            right,
+            top,
+            bottom,
+        } => {
+            draw_borders(pixmap, rect, viewport, dpi, left, right, top, bottom);
+        }
+    }
+}
+
+/// Paint the inset bar that stands in for a line of cell text.
+fn draw_text_marker(
+    pixmap: &mut Pixmap,
+    rect: &LayoutRect,
+    viewport: &Viewport,
+    dpi: u32,
+    color: Color,
+) {
+    let x = twips_to_px(rect.x - viewport.x, dpi);
+    let y = twips_to_px(rect.y - viewport.y, dpi);
+    let w = twips_to_px(rect.w, dpi);
+    let h = twips_to_px(rect.h, dpi);
+    let bar_w = w * 0.8;
+    let bar_h = (h * 0.25).max(2.0);
+    let bar_x = x + (w - bar_w) / 2.0;
+    let bar_y = y + (h - bar_h) / 2.0;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = false;
+    fill_thin(pixmap, &paint, bar_x, bar_y, bar_w, bar_h);
+}
+
+/// Paint the present border edges as thin rects along the cell rectangle.
+#[allow(clippy::too_many_arguments)]
+fn draw_borders(
+    pixmap: &mut Pixmap,
+    rect: &LayoutRect,
+    viewport: &Viewport,
+    dpi: u32,
+    left: &Option<BorderLine>,
+    right: &Option<BorderLine>,
+    top: &Option<BorderLine>,
+    bottom: &Option<BorderLine>,
+) {
+    let x = twips_to_px(rect.x - viewport.x, dpi);
+    let y = twips_to_px(rect.y - viewport.y, dpi);
+    let w = twips_to_px(rect.w, dpi);
+    let h = twips_to_px(rect.h, dpi);
+
+    let mut stroke = |bx: f32, by: f32, bw: f32, bh: f32, line: &BorderLine| {
+        let color = line
+            .color
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or_else(default_border);
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = false;
+        fill_thin(pixmap, &paint, bx, by, bw, bh);
+    };
+
+    if let Some(line) = left {
+        stroke(x, y, line.width as f32, h, line);
+    }
+    if let Some(line) = right {
+        let px = line.width as f32;
+        stroke(x + w - px, y, px, h, line);
+    }
+    if let Some(line) = top {
+        stroke(x, y, w, line.width as f32, line);
+    }
+    if let Some(line) = bottom {
+        let px = line.width as f32;
+        stroke(x, y + h - px, w, px, line);
+    }
+}
+
+/// Parse an `RRGGBB` or `AARRGGBB` (or `#`-prefixed) hex color, or `None` if it
+/// is not valid hex.
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    let (r, g, b, a) = match hex.len() {
+        6 => (
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            255,
+        ),
+        8 => (
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            u8::from_str_radix(&hex[6..8], 16).ok()?,
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+        ),
+        _ => return None,
+    };
+    Some(Color::from_rgba8(r, g, b, a))
 }
 
 /// Render a viewport to a PNG byte buffer.

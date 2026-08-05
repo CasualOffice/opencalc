@@ -22,6 +22,7 @@ struct Font {
     bold: bool,
     italic: bool,
     underline: bool,
+    strike: bool,
     color: Option<String>,
     name: Option<String>,
     /// Font size in half-points (`sz val` rounded to the nearest half-point).
@@ -172,6 +173,11 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             f.underline = true;
                         }
                     }
+                    b"strike" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.strike = true;
+                        }
+                    }
                     b"color" if in_fonts => {
                         if let (Some(f), Some(c)) = (fonts.last_mut(), rgb(e)?) {
                             f.color = Some(c);
@@ -256,6 +262,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 bold: font.bold,
                 italic: font.italic,
                 underline: font.underline,
+                strike: font.strike,
                 font_name: font.name,
                 font_size_hp: font.size_hp,
                 font_color: font.color,

@@ -11,5 +11,8 @@ publish = false
 casual-calc-model = { path = "../casual-calc-model" }
 serde = { version = "1", features = ["derive"] }
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

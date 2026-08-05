@@ -319,6 +319,215 @@ fn math_int_mod_power_sqrt() {
     assert_eq!(value_at(&wb, 7, 0), CellValue::Error(ErrorValue::Div0));
 }
 
+// --- Lookup / reference ---------------------------------------------------
+
+/// Build a small vertical lookup table: A1:B3 = {1:"a", 2:"b", 3:"c"}.
+fn lookup_table(b: &mut Builder) {
+    b.number((0, 0), 1.0)
+        .formula((0, 1), "\"a\"")
+        .number((1, 0), 2.0)
+        .formula((1, 1), "\"b\"")
+        .number((2, 0), 3.0)
+        .formula((2, 1), "\"c\"");
+}
+
+#[test]
+fn vlookup_exact_and_approximate() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    lookup_table(&mut b);
+    b.formula((0, 3), "VLOOKUP(2,A1:B3,2,FALSE)") // exact -> "b"
+        .formula((1, 3), "VLOOKUP(2.5,A1:B3,2,TRUE)") // approx -> "b"
+        .formula((2, 3), "VLOOKUP(0,A1:B3,2,FALSE)"); // not found -> #N/A
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 3), "b");
+    assert_eq!(text_at(&wb, 1, 3), "b");
+    assert_eq!(value_at(&wb, 2, 3), CellValue::Error(ErrorValue::Na));
+}
+
+#[test]
+fn hlookup_exact() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0) // A1
+        .number((0, 1), 2.0) // B1
+        .number((0, 2), 3.0) // C1
+        .formula((1, 0), "\"x\"") // A2
+        .formula((1, 1), "\"y\"") // B2
+        .formula((1, 2), "\"z\"") // C2
+        .formula((2, 0), "HLOOKUP(2,A1:C2,2,FALSE)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 2, 0), "y");
+}
+
+#[test]
+fn index_row_col_and_out_of_bounds() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    lookup_table(&mut b);
+    b.formula((0, 3), "INDEX(A1:B3,2,2)") // "b"
+        .formula((1, 3), "INDEX(A1:A3,3)") // 3 (single column)
+        .formula((2, 3), "INDEX(A1:B3,9,1)"); // out of range -> #REF!
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 3), "b");
+    assert_eq!(number_at(&wb, 1, 3), 3.0);
+    assert_eq!(value_at(&wb, 2, 3), CellValue::Error(ErrorValue::Ref));
+}
+
+#[test]
+fn match_types() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    lookup_table(&mut b);
+    b.formula((0, 3), "MATCH(3,A1:A3,0)") // exact -> 3
+        .formula((1, 3), "MATCH(2.5,A1:A3,1)") // largest <= -> 2
+        .formula((2, 3), "MATCH(9,A1:A3,0)"); // not found -> #N/A
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 3), 3.0);
+    assert_eq!(number_at(&wb, 1, 3), 2.0);
+    assert_eq!(value_at(&wb, 2, 3), CellValue::Error(ErrorValue::Na));
+}
+
+#[test]
+fn choose_selects_argument() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "CHOOSE(2,\"x\",\"y\",\"z\")") // "y"
+        .formula((1, 0), "CHOOSE(5,\"x\",\"y\")"); // out of range -> #VALUE!
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 0), "y");
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Error(ErrorValue::Value));
+}
+
+// --- Extra math -----------------------------------------------------------
+
+#[test]
+fn product_and_rounding_directions() {
+    let mut b = Builder::new();
+    b.number((0, 0), 2.0)
+        .number((1, 0), 3.0)
+        .number((2, 0), 4.0)
+        .formula((0, 1), "PRODUCT(A1:A3)") // 24
+        .formula((1, 1), "ROUNDUP(3.14159,2)") // 3.15
+        .formula((2, 1), "ROUNDDOWN(3.19,1)") // 3.1
+        .formula((3, 1), "TRUNC(-3.99)"); // -3
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 1), 24.0);
+    assert_eq!(number_at(&wb, 1, 1), 3.15);
+    assert_eq!(number_at(&wb, 2, 1), 3.1);
+    assert_eq!(number_at(&wb, 3, 1), -3.0);
+}
+
+#[test]
+fn ceiling_floor_and_sign() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "CEILING(2.1,0.5)") // 2.5
+        .formula((1, 0), "FLOOR(2.6,0.5)") // 2.5
+        .formula((2, 0), "SIGN(-5)") // -1
+        .formula((3, 0), "SIGN(0)") // 0
+        .formula((4, 0), "CEILING(-2.5,1)"); // sign mismatch -> #NUM!
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 0), 2.5);
+    assert_eq!(number_at(&wb, 1, 0), 2.5);
+    assert_eq!(number_at(&wb, 2, 0), -1.0);
+    assert_eq!(number_at(&wb, 3, 0), 0.0);
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Error(ErrorValue::Num));
+}
+
+// --- Extra text -----------------------------------------------------------
+
+#[test]
+fn substitute_and_replace() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "SUBSTITUTE(\"a-b-c\",\"-\",\"+\")") // a+b+c
+        .formula((1, 0), "SUBSTITUTE(\"a-b-c\",\"-\",\"+\",2)") // a-b+c
+        .formula((2, 0), "REPLACE(\"abcdef\",2,3,\"XY\")"); // aXYef
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 0), "a+b+c");
+    assert_eq!(text_at(&wb, 1, 0), "a-b+c");
+    assert_eq!(text_at(&wb, 2, 0), "aXYef");
+}
+
+#[test]
+fn find_search_case_and_range() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "SEARCH(\"B\",\"aBc\")") // case-insensitive -> 2
+        .formula((1, 0), "FIND(\"b\",\"aBc\")") // case-sensitive miss -> #VALUE!
+        .formula((2, 0), "FIND(\"x\",\"abc\",5)"); // start out of range -> #VALUE!
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 0), 2.0);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Error(ErrorValue::Value));
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Error(ErrorValue::Value));
+}
+
+#[test]
+fn value_proper_rept_exact() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "VALUE(\"123.5\")") // 123.5
+        .formula((1, 0), "VALUE(\"abc\")") // #VALUE!
+        .formula((2, 0), "PROPER(\"hello WORLD\")") // Hello World
+        .formula((3, 0), "REPT(\"ab\",3)") // ababab
+        .formula((4, 0), "REPT(\"a\",-1)") // #VALUE!
+        .formula((5, 0), "EXACT(\"abc\",\"abc\")") // true
+        .formula((6, 0), "EXACT(\"abc\",\"Abc\")"); // false
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 0), 123.5);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Error(ErrorValue::Value));
+    assert_eq!(text_at(&wb, 2, 0), "Hello World");
+    assert_eq!(text_at(&wb, 3, 0), "ababab");
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Error(ErrorValue::Value));
+    assert!(bool_at(&wb, 5, 0));
+    assert!(!bool_at(&wb, 6, 0));
+}
+
+// --- Dates ----------------------------------------------------------------
+
+#[test]
+fn date_year_month_day_round_trip() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "YEAR(DATE(2024,3,15))") // 2024
+        .formula((1, 0), "MONTH(DATE(2024,3,15))") // 3
+        .formula((2, 0), "DAY(DATE(2024,3,15))") // 15
+        .formula((3, 0), "YEAR(DATE(2008,14,2))") // month overflow -> 2009
+        .formula((4, 0), "MONTH(DATE(2008,14,2))"); // -> 2
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 0), 2024.0);
+    assert_eq!(number_at(&wb, 1, 0), 3.0);
+    assert_eq!(number_at(&wb, 2, 0), 15.0);
+    assert_eq!(number_at(&wb, 3, 0), 2009.0);
+    assert_eq!(number_at(&wb, 4, 0), 2.0);
+}
+
+#[test]
+fn weekday_edate_eomonth() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "WEEKDAY(DATE(2024,3,15))") // Friday, type 1 -> 6
+        .formula((1, 0), "WEEKDAY(DATE(2024,3,15),2)") // Mon=1 -> 5
+        .formula((2, 0), "DAY(EDATE(DATE(2024,1,31),1))") // clamp to Feb 29
+        .formula((3, 0), "MONTH(EDATE(DATE(2024,1,31),1))") // 2
+        .formula((4, 0), "DAY(EOMONTH(DATE(2024,2,10),0))"); // 29 (leap Feb)
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 0), 6.0);
+    assert_eq!(number_at(&wb, 1, 0), 5.0);
+    assert_eq!(number_at(&wb, 2, 0), 29.0);
+    assert_eq!(number_at(&wb, 3, 0), 2.0);
+    assert_eq!(number_at(&wb, 4, 0), 29.0);
+}
+
 #[test]
 fn recalc_is_deterministic() {
     let mut b = Builder::new();

@@ -1,6 +1,6 @@
 //! Streaming parsers for `sharedStrings.xml` and worksheet `sheetData`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
@@ -151,6 +151,10 @@ pub struct Worksheet {
     pub col_sizes: BTreeMap<u32, i64>,
     /// Explicit row heights (twips), keyed by zero-based row.
     pub row_sizes: BTreeMap<u32, i64>,
+    /// Hidden rows, by zero-based index.
+    pub hidden_rows: BTreeSet<u32>,
+    /// Hidden columns, by zero-based index.
+    pub hidden_cols: BTreeSet<u32>,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -179,17 +183,24 @@ fn read_f64_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<f64>, Import
     Ok(read_attr(e, local)?.and_then(|s| s.parse().ok()))
 }
 
-/// Record a `<col min max width customWidth>` element into the width overrides.
+/// Record a `<col min max width customWidth hidden>` element into the width
+/// overrides and the hidden-column set.
 fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
-    let Some(width) = read_f64_attr(e, b"width")? else {
-        return Ok(());
-    };
-    let twips = col_width_to_twips(width);
     let min = parse_u32_attr(e, b"min")?; // 1-based
     let max = parse_u32_attr(e, b"max")?;
     if min == 0 || max < min {
         return Ok(());
     }
+    // A hidden span is recorded per zero-based column regardless of width.
+    if read_attr(e, b"hidden")?.as_deref() == Some("1") && max.saturating_sub(min) < MAX_COL_SPAN {
+        for col in min..=max {
+            result.hidden_cols.insert(col - 1);
+        }
+    }
+    let Some(width) = read_f64_attr(e, b"width")? else {
+        return Ok(());
+    };
+    let twips = col_width_to_twips(width);
     let custom = read_attr(e, b"customWidth")?.as_deref() == Some("1");
     // A wide span without an explicit custom flag is the sheet's default width,
     // not a per-column override — record it as the default to stay compact.
@@ -203,14 +214,20 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     Ok(())
 }
 
-/// Record a `<row r ht>` element's custom height into the height overrides.
+/// Record a `<row r ht hidden>` element's custom height into the height
+/// overrides and its hidden flag into the hidden-row set.
 fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
-    if let (Some(r), Some(ht)) = (
-        read_attr(e, b"r")?.and_then(|s| s.parse::<u32>().ok()),
-        read_f64_attr(e, b"ht")?,
-    ) && r >= 1
-    {
+    let Some(r) = read_attr(e, b"r")?.and_then(|s| s.parse::<u32>().ok()) else {
+        return Ok(());
+    };
+    if r < 1 {
+        return Ok(());
+    }
+    if let Some(ht) = read_f64_attr(e, b"ht")? {
         result.row_sizes.insert(r - 1, row_height_to_twips(ht));
+    }
+    if read_attr(e, b"hidden")?.as_deref() == Some("1") {
+        result.hidden_rows.insert(r - 1);
     }
     Ok(())
 }

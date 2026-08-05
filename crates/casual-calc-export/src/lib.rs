@@ -14,7 +14,7 @@ mod xml;
 
 pub use error::ExportError;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
@@ -184,8 +184,8 @@ fn styles_xml(workbook: &Workbook) -> String {
     // Deduplicate fonts, solid fills, and custom number formats, and record the
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
-    // Font key: (bold, italic, underline, color, name, size_hp).
-    let mut fonts: Vec<FontKey> = vec![(false, false, false, None, None, None)];
+    // Font key: (bold, italic, underline, strike, color, name, size_hp).
+    let mut fonts: Vec<FontKey> = vec![(false, false, false, false, None, None, None)];
     let mut fills: Vec<String> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
@@ -197,6 +197,7 @@ fn styles_xml(workbook: &Workbook) -> String {
             style.bold,
             style.italic,
             style.underline,
+            style.strike,
             style.font_color.clone(),
             style.font_name.clone(),
             style.font_size_hp,
@@ -261,7 +262,7 @@ fn styles_xml(workbook: &Workbook) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (bold, italic, underline, color, name, size_hp) in &fonts {
+    for (bold, italic, underline, strike, color, name, size_hp) in &fonts {
         s.push_str("<font>");
         if *bold {
             s.push_str("<b/>");
@@ -271,6 +272,9 @@ fn styles_xml(workbook: &Workbook) -> String {
         }
         if *underline {
             s.push_str("<u/>");
+        }
+        if *strike {
+            s.push_str("<strike/>");
         }
         if let Some(c) = color {
             s.push_str(&format!("<color rgb=\"FF{c}\"/>"));
@@ -359,9 +363,10 @@ fn styles_xml(workbook: &Workbook) -> String {
     s
 }
 
-/// A deduplication key for a `<font>`: (bold, italic, underline, color, name,
-/// size in half-points).
+/// A deduplication key for a `<font>`: (bold, italic, underline, strike, color,
+/// name, size in half-points).
 type FontKey = (
+    bool,
     bool,
     bool,
     bool,
@@ -471,24 +476,43 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         }
         s.push_str("/>");
     }
-    if !sheet.columns.sizes.is_empty() {
+    if !sheet.columns.sizes.is_empty() || !sheet.hidden_cols.is_empty() {
+        // Union the width overrides and hidden flags, keyed by zero-based column,
+        // so a column can carry a custom width, a hidden flag, or both.
+        let mut columns: BTreeMap<u32, (Option<i64>, bool)> = BTreeMap::new();
+        for (&col, &width) in &sheet.columns.sizes {
+            columns.entry(col).or_default().0 = Some(width);
+        }
+        for &col in &sheet.hidden_cols {
+            columns.entry(col).or_default().1 = true;
+        }
         s.push_str("<cols>");
-        let entries: Vec<(u32, i64)> = sheet.columns.sizes.iter().map(|(&k, &v)| (k, v)).collect();
+        let entries: Vec<(u32, (Option<i64>, bool))> =
+            columns.iter().map(|(&k, &v)| (k, v)).collect();
         let mut i = 0;
         while i < entries.len() {
-            let (start, width) = entries[i];
+            let (start, attrs) = entries[i];
             let mut end = start;
             let mut j = i + 1;
-            // Coalesce a run of consecutive equal-width columns into one span.
-            while j < entries.len() && entries[j].0 == end + 1 && entries[j].1 == width {
+            // Coalesce a run of consecutive columns with identical attributes.
+            while j < entries.len() && entries[j].0 == end + 1 && entries[j].1 == attrs {
                 end = entries[j].0;
                 j += 1;
             }
+            let (width, hidden) = attrs;
+            let width_attr = width
+                .map(|w| {
+                    format!(
+                        " width=\"{}\" customWidth=\"1\"",
+                        fmt_f64(twips_to_col_chars(w))
+                    )
+                })
+                .unwrap_or_default();
+            let hidden_attr = if hidden { " hidden=\"1\"" } else { "" };
             s.push_str(&format!(
-                "<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>",
+                "<col min=\"{}\" max=\"{}\"{width_attr}{hidden_attr}/>",
                 start + 1,
                 end + 1,
-                fmt_f64(twips_to_col_chars(width))
             ));
             i = j;
         }
@@ -497,8 +521,10 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
 
     s.push_str("<sheetData>");
     // The rows to emit: every row with cells, plus any row carrying a custom
-    // height (even if it has no cells). Cells iterate in row-major order.
+    // height or hidden flag (even if it has no cells). Cells iterate in
+    // row-major order.
     let mut rows: BTreeSet<u32> = sheet.rows.sizes.keys().copied().collect();
+    rows.extend(sheet.hidden_rows.iter().copied());
     for (at, _) in sheet.cells.iter() {
         rows.insert(at.row);
     }
@@ -515,7 +541,12 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
                 )
             })
             .unwrap_or_default();
-        s.push_str(&format!("<row r=\"{}\"{ht_attr}>", row + 1));
+        let hidden_attr = if sheet.hidden_rows.contains(&row) {
+            " hidden=\"1\""
+        } else {
+            ""
+        };
+        s.push_str(&format!("<row r=\"{}\"{ht_attr}{hidden_attr}>", row + 1));
         while cells.peek().is_some_and(|(at, _)| at.row == row) {
             let (at, cell) = cells.next().unwrap();
             write_cell(&mut s, workbook, at.row, at.col, cell);

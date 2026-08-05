@@ -141,6 +141,104 @@ fn display_text_applies_the_cell_number_format() {
 }
 
 #[test]
+fn style_populates_fill_font_and_border_paint_items() {
+    use crate::{BorderLine, PaintItem};
+    use casual_calc_model::{BorderEdge, Borders, Style};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let styled = wb.intern_style(Style {
+        fill_color: Some("FFEE00".to_owned()),
+        font_color: Some("112233".to_owned()),
+        bold: true,
+        italic: true,
+        border: Some(Borders {
+            top: Some(BorderEdge {
+                style: "thin".to_owned(),
+                color: Some("FF0000".to_owned()),
+            }),
+            bottom: Some(BorderEdge {
+                style: "thick".to_owned(),
+                color: None,
+            }),
+            ..Borders::default()
+        }),
+        ..Style::default()
+    });
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    let mut cell = Cell::value(CellValue::Number(7.0));
+    cell.style = Some(styled);
+    sheet.cells.set(CellRef::new(0, 0), cell);
+    wb.sheets.push(sheet);
+
+    let list = layout_full(&wb, 0, &GridGeometry::default());
+
+    // Painter's order for the one cell: fill, then text, then border.
+    assert_eq!(list.items.len(), 3);
+    assert!(matches!(
+        &list.items[0],
+        PaintItem::CellBackground { fill: Some(c), .. } if c == "FFEE00"
+    ));
+    assert!(matches!(
+        &list.items[1],
+        PaintItem::Text { color: Some(c), bold: true, italic: true, .. } if c == "112233"
+    ));
+    assert!(matches!(
+        &list.items[2],
+        PaintItem::CellBorder {
+            top: Some(BorderLine { width: 1, color: Some(tc) }),
+            bottom: Some(BorderLine { width: 3, color: None }),
+            left: None,
+            right: None,
+            ..
+        } if tc == "FF0000"
+    ));
+}
+
+#[test]
+fn unstyled_cell_emits_a_plain_text_item() {
+    use crate::PaintItem;
+    let wb = sample();
+    let list = layout_full(&wb, 0, &GridGeometry::default());
+    assert!(list.items.iter().all(|i| matches!(
+        i,
+        PaintItem::Text {
+            color: None,
+            bold: false,
+            italic: false,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn display_list_json_round_trips_with_style() {
+    use casual_calc_model::{BorderEdge, Borders, Style};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let styled = wb.intern_style(Style {
+        fill_color: Some("00FF00".to_owned()),
+        border: Some(Borders {
+            left: Some(BorderEdge {
+                style: "medium".to_owned(),
+                color: None,
+            }),
+            ..Borders::default()
+        }),
+        ..Style::default()
+    });
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    let mut cell = Cell::value(CellValue::Number(1.0));
+    cell.style = Some(styled);
+    sheet.cells.set(CellRef::new(0, 0), cell);
+    wb.sheets.push(sheet);
+
+    let list = layout_full(&wb, 0, &GridGeometry::default());
+    let json = serde_json::to_string(&list).unwrap();
+    let back: crate::DisplayList = serde_json::from_str(&json).unwrap();
+    assert_eq!(list, back);
+}
+
+#[test]
 fn layout_is_deterministic() {
     let wb = sample();
     let geo = GridGeometry::default();
