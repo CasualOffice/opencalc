@@ -13,14 +13,14 @@
 use std::cell::RefCell;
 
 use casual_calc_eval::recalculate;
-use casual_calc_formula::parse;
+use casual_calc_formula::{Expr, parse, shift_references};
 use casual_calc_import::import_package;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style,
-    VAlign, Workbook,
+    StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -1135,6 +1135,93 @@ pub fn session_toggle_wrap(
 ) -> Result<(), JsError> {
     let target = !range_all(sheet, r0, c0, r1, c1, |st| st.wrap);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.wrap = target)
+}
+
+/// Drag-fill: fill the destination box from the source box, tiling the source
+/// pattern and shifting relative formula references by each cell's offset
+/// (one undo step). Cells inside the source box are left untouched.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_fill(
+    sheet: usize,
+    sr0: u32,
+    sc0: u32,
+    sr1: u32,
+    sc1: u32,
+    dr0: u32,
+    dc0: u32,
+    dr1: u32,
+    dc1: u32,
+) -> Result<(), JsError> {
+    let (src_rows, src_cols) = ((sr1 - sr0 + 1) as i64, (sc1 - sc0 + 1) as i64);
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        // Pass 1 (immutable): resolve each destination cell's source + shifted formula.
+        struct Pending {
+            at: CellRef,
+            value: CellValue,
+            style: Option<StyleId>,
+            formula: Option<Expr>,
+        }
+        let mut pending: Vec<Pending> = Vec::new();
+        if let Some(sh) = session.workbook().sheets.get(sheet) {
+            let wb = session.workbook();
+            for dr in dr0..=dr1 {
+                for dc in dc0..=dc1 {
+                    if dr >= sr0 && dr <= sr1 && dc >= sc0 && dc <= sc1 {
+                        continue; // don't overwrite the source
+                    }
+                    let sr = sr0 as i64 + (dr as i64 - sr0 as i64).rem_euclid(src_rows);
+                    let sc = sc0 as i64 + (dc as i64 - sc0 as i64).rem_euclid(src_cols);
+                    let at = CellRef::new(dr, dc);
+                    match sh.cells.get(CellRef::new(sr as u32, sc as u32)) {
+                        Some(c) => {
+                            let formula = c
+                                .formula
+                                .and_then(|h| wb.formula(h))
+                                .map(|e| shift_references(e, dr as i64 - sr, dc as i64 - sc));
+                            pending.push(Pending {
+                                at,
+                                value: c.value.clone(),
+                                style: c.style,
+                                formula,
+                            });
+                        }
+                        None => pending.push(Pending {
+                            at,
+                            value: CellValue::Empty,
+                            style: None,
+                            formula: None,
+                        }),
+                    }
+                }
+            }
+        }
+        // Pass 2 (mutable): store shifted formulas and build the edit batch.
+        let mut ops = Vec::with_capacity(pending.len());
+        for p in pending {
+            let cell = if p.value.is_empty() && p.style.is_none() && p.formula.is_none() {
+                None
+            } else {
+                let mut c = Cell::value(p.value);
+                c.style = p.style;
+                if let Some(expr) = p.formula {
+                    c.formula = Some(session.workbook_mut().store_formula(expr));
+                }
+                Some(c)
+            };
+            ops.push(EditOperation::SetCell {
+                sheet,
+                at: p.at,
+                cell,
+            });
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
 }
 
 /// Toggle strikethrough across a range (one undo step).

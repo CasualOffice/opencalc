@@ -20,7 +20,9 @@ const state = {
   dragging: false,
   editing: false,
   resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
+  fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
+let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
 
 // The normalized selection rectangle (inclusive) from anchor..focus.
 function selRect() {
@@ -528,6 +530,32 @@ function draw() {
     const fy = rowYAt(state.sel.row);
     if (fx !== undefined && fy !== undefined) {
       ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
+    }
+  }
+
+  // Drag-fill preview outline.
+  if (state.fill && state.fill.dst) {
+    const d = state.fill.dst;
+    const dx = spanX(d.c0, d.c1, v), dy = spanY(d.r0, d.r1, v);
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(dx.x + 0.5, dy.y + 0.5, dx.w - 1, dy.h - 1);
+    ctx.setLineDash([]);
+  }
+
+  // Fill handle at the selection's bottom-right corner (cell selections only).
+  fillHandleRect = null;
+  if (state.selKind === "cells" && !state.fill) {
+    const hc = colXAt(rectSel.c1), hr = rowYAt(rectSel.r1);
+    if (hc !== undefined && hr !== undefined) {
+      const hx = hc + colWAt(rectSel.c1), hy = hr + rowHAt(rectSel.r1);
+      ctx.fillStyle = colors.accent;
+      ctx.fillRect(hx - 3, hy - 3, 6, 6);
+      ctx.strokeStyle = colors.bg;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
+      fillHandleRect = { x: hx, y: hy };
     }
   }
   ctx.restore(); // end body clip
@@ -1069,6 +1097,19 @@ function cellMenu(x, y) {
   positionMenu(menu, x, y);
 }
 
+// Live-update the drag-fill target box (extends the source in the dominant axis).
+function updateFill(px, py) {
+  const hit = cellAt(px, py);
+  if (!hit) return;
+  const s = state.fill.src;
+  const vRows = hit.row > s.r1 ? hit.row - s.r1 : hit.row < s.r0 ? s.r0 - hit.row : 0;
+  const hCols = hit.col > s.c1 ? hit.col - s.c1 : hit.col < s.c0 ? s.c0 - hit.col : 0;
+  state.fill.dst = vRows >= hCols
+    ? { r0: Math.min(s.r0, hit.row), c0: s.c0, r1: Math.max(s.r1, hit.row), c1: s.c1 }
+    : { r0: s.r0, c0: Math.min(s.c0, hit.col), r1: s.r1, c1: Math.max(s.c1, hit.col) };
+  draw();
+}
+
 // Live-update the previewed size of the line being dragged.
 function updateResize(px, py) {
   if (state.resize.axis === "col") {
@@ -1086,6 +1127,13 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    // The fill handle (bottom-right of the selection) starts a drag-fill.
+    if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
+      endInline();
+      state.fill = { src: selRect(), dst: null };
+      canvas.focus();
+      return;
+    }
     // A header boundary starts a column/row resize instead of a selection.
     const hb = boundaryAt(px, py);
     if (hb) {
@@ -1119,12 +1167,17 @@ function wireEvents() {
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     if (state.resize) { updateResize(px, py); return; }
+    if (state.fill) { updateFill(px, py); return; }
     if (state.dragging) {
       const hit = cellAt(px, py);
       if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) extend(hit.row, hit.col);
       return;
     }
-    // Idle hover: show the resize cursor when over a header boundary.
+    // Idle hover: fill cursor over the handle, resize cursor over a boundary.
+    if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
+      canvas.style.cursor = "crosshair";
+      return;
+    }
     const hb = boundaryAt(px, py);
     canvas.style.cursor = hb ? (hb.axis === "col" ? "col-resize" : "row-resize") : "cell";
   });
@@ -1145,6 +1198,21 @@ function wireEvents() {
         }
         status.textContent = r.scope === "one" ? "resized" : "resized all";
       } catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    }
+    if (state.fill) {
+      const f = state.fill;
+      state.fill = null;
+      const d = f.dst;
+      if (d && (d.r0 !== f.src.r0 || d.c0 !== f.src.c0 || d.r1 !== f.src.r1 || d.c1 !== f.src.c1)) {
+        try {
+          wasm.session_fill(state.sheet, f.src.r0, f.src.c0, f.src.r1, f.src.c1, d.r0, d.c0, d.r1, d.c1);
+          status.textContent = "filled";
+        } catch (e) { status.textContent = `error: ${e}`; }
+        state.anchor = { row: d.r0, col: d.c0 };
+        state.sel = { row: d.r1, col: d.c1 };
+        state.selKind = "cells";
+      }
       draw();
     }
     state.dragging = false;

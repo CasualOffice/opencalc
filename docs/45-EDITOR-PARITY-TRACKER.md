@@ -64,7 +64,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-22 | Status bar: sum / average / count of selection | Done | `session_range_stats`; bottom-bar readout for multi-cell selections. Verified |
 | UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Done | `session_edge` block-jump; Ctrl+Arrow, Ctrl+Home/End, Home, PgUp/PgDn (+shift-extend). Verified |
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |
-| UX-25 | Drag-fill / autofill handle | Todo | |
+| UX-25 | Drag-fill / autofill handle | Done | Fill handle at the selection corner; drag to extend; `session_fill` tiles the source (value+style) and **shifts relative formula refs** (`shift_references`, absolute `$` held). Verified: fill of =(B2+C2) -> =(B3+C3)/=(B4+C4). |
 | UX-26 | Hidden rows/columns (+ from file) | Done | `Sheet.hidden_rows/cols` (import/export `hidden="1"`); layout + editor treat hidden as 0px; Hide/Unhide in the cell context menu. Verified |
 | UX-27 | Freeze panes in editor (model has `SheetView`) | Todo | render frozen bands |
 | UX-28 | Find & replace | Done | `session_find` / `session_replace_all` (case toggle, undoable); Ctrl+F bar with next/prev, count, replace-all. Verified |
