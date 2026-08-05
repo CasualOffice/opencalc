@@ -17,7 +17,7 @@ const MAX_RANGE_CELLS: u64 = 2_000_000;
 /// This is the **single source of truth** for the function list — the host UI
 /// (autocomplete / signature help) reads it via the SDK/WASM instead of keeping
 /// its own copy, and a test asserts every entry has a dispatch arm in
-/// [`call_function`] so the two never drift. Add a function in both places.
+/// `call_function` so the two never drift. Add a function in both places.
 pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ABS", "ABS(number)"),
     ("AND", "AND(logical1, …)"),
