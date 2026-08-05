@@ -188,6 +188,13 @@
 .dv-set { min-width: 240px; padding: 8px; }
 .dv-input { width: 100%; margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 13px; }
 .dv-input:focus { outline: none; border-color: var(--accent); }
+/* Conditional-format form. */
+.cf-set { min-width: 288px; padding: 8px; }
+.cf-row { display: flex; gap: 6px; margin: 4px 0 8px; }
+.cf-op { flex: 1; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 13px; }
+.cf-a, .cf-b { width: 70px; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 13px; }
+.cf-a:focus, .cf-b:focus { outline: none; border-color: var(--accent); }
+.swatch-row .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Formula function autocomplete. */
 .ac-menu {
   position: absolute; z-index: 40; min-width: 260px; max-width: 360px;

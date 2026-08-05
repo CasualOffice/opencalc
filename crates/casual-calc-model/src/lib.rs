@@ -29,7 +29,9 @@ pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
-pub use sheet::{AxisSizing, DataValidation, OutlinePr, Sheet, SheetView};
+pub use sheet::{
+    AxisSizing, CfRule, ConditionalFormat, DataValidation, OutlinePr, Sheet, SheetView,
+};
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
 pub use style::{BorderEdge, Borders, HAlign, Style, StyleTable, VAlign};

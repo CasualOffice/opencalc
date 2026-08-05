@@ -20,8 +20,8 @@ use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, DataValidation, HAlign, Id, Sheet,
-    SheetId, Style, StyleId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
+    DataValidation, HAlign, Id, Sheet, SheetId, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -557,6 +557,65 @@ pub fn session_clear_validation(
     })
 }
 
+/// Add a highlight-cells conditional-format rule over a range. `kind` is one of
+/// `gt`/`lt`/`eq`/`between`/`contains`; `a`/`b` are numeric operands (b only for
+/// `between`), `text` the substring for `contains`, `fill` the `RRGGBB` color.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_add_cf(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+    a: f64,
+    b: f64,
+    text: &str,
+    fill: &str,
+) -> Result<(), JsError> {
+    let rule = match kind {
+        "gt" => CfRule::GreaterThan(a),
+        "lt" => CfRule::LessThan(a),
+        "eq" => CfRule::EqualTo(a),
+        "between" => CfRule::Between(a.min(b), a.max(b)),
+        "contains" => CfRule::TextContains(text.to_owned()),
+        _ => return Err(JsError::new("unknown conditional-format rule")),
+    };
+    let fill = fill.trim().trim_start_matches('#').to_ascii_uppercase();
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+            sh.conditional_formats.push(ConditionalFormat {
+                range: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+                rule,
+                fill,
+            });
+        }
+        Ok(())
+    })
+}
+
+/// Remove every conditional-format rule intersecting a range.
+#[wasm_bindgen]
+pub fn session_clear_cf(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.conditional_formats.retain(|cf| {
+                !(cf.range.start.row <= r1
+                    && cf.range.end.row >= r0
+                    && cf.range.start.col <= c1
+                    && cf.range.end.col >= c0)
+            });
+        }
+        Ok(())
+    })
+}
+
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.
 #[wasm_bindgen]
 pub fn session_merges(sheet: usize) -> String {
@@ -1016,7 +1075,22 @@ pub fn session_cells(
             }
             let text = display_text(wb, cell);
             let style = cell.style.and_then(|id| wb.styles.get(id));
-            let fill = style.and_then(|s| s.fill_color.clone()).unwrap_or_default();
+            // Conditional formatting overrides the cell's own fill when a rule
+            // matches (first match wins). Numeric rules test the cell's number;
+            // text rules test its display text.
+            let cf_fill = sheet.conditional_formats.iter().find_map(|cf| {
+                if !cf.covers(at.row, at.col) {
+                    return None;
+                }
+                let hit = match cell.value {
+                    CellValue::Number(n) => cf.rule.matches_number(n),
+                    _ => cf.rule.matches_text(&text),
+                };
+                hit.then(|| cf.fill.clone())
+            });
+            let fill = cf_fill
+                .or_else(|| style.and_then(|s| s.fill_color.clone()))
+                .unwrap_or_default();
             let has_border = style.is_some_and(|s| s.border.is_some());
             if text.is_empty() && fill.is_empty() && !has_border {
                 continue;

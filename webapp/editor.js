@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "12";
+const BUILD = "13";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1299,6 +1299,67 @@ function openSetValidationMenu(x, y) {
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") apply.click(); e.stopPropagation(); });
 }
 
+// --- Conditional formatting (highlight-cells rules) -----------------------
+function openConditionalFormatMenu(x, y) {
+  closeSheetMenu();
+  const s = effectiveRange();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu cf-set";
+  menu.id = "sheet-ctx";
+  menu.addEventListener("click", (e) => e.stopPropagation());
+  const lbl = document.createElement("div");
+  lbl.className = "menu-label";
+  lbl.textContent = "Highlight cells where the value…";
+  menu.appendChild(lbl);
+  const row = document.createElement("div");
+  row.className = "cf-row";
+  const op = document.createElement("select");
+  op.className = "cf-op";
+  [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"], ["contains", "text contains"]]
+    .forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; op.appendChild(o); });
+  const a = document.createElement("input");
+  a.className = "cf-a"; a.placeholder = "value"; a.spellcheck = false;
+  const b = document.createElement("input");
+  b.className = "cf-b"; b.placeholder = "and"; b.spellcheck = false; b.style.display = "none";
+  op.addEventListener("change", () => {
+    b.style.display = op.value === "between" ? "" : "none";
+    a.placeholder = op.value === "contains" ? "text" : "value";
+  });
+  row.appendChild(op); row.appendChild(a); row.appendChild(b);
+  menu.appendChild(row);
+  const strip = document.createElement("div");
+  strip.className = "swatch-row";
+  let fill = "ffd166";
+  ["ffd166", "d1f0d6", "ffd6e0", "d6e4ff", "fed7aa", "e9d5ff", "fca5a5", "a7f3d0"].forEach((hx, i) => {
+    const sw = document.createElement("button");
+    sw.className = "swatch" + (i === 0 ? " on" : "");
+    sw.style.background = "#" + hx;
+    sw.addEventListener("click", (e) => { e.stopPropagation(); fill = hx; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); sw.classList.add("on"); });
+    strip.appendChild(sw);
+  });
+  menu.appendChild(strip);
+  const foot = document.createElement("div");
+  foot.className = "filter-foot";
+  const clr = document.createElement("button");
+  clr.className = "filter-clear"; clr.textContent = "Clear";
+  clr.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {} draw(); });
+  const apply = document.createElement("button");
+  apply.className = "filter-apply"; apply.textContent = "Apply";
+  apply.addEventListener("click", () => {
+    const kind = op.value;
+    const av = parseFloat(a.value) || 0, bv = parseFloat(b.value) || 0;
+    const txt = kind === "contains" ? a.value : "";
+    closeSheetMenu();
+    try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, av, bv, txt, fill); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+  });
+  foot.appendChild(clr); foot.appendChild(apply);
+  menu.appendChild(foot);
+  positionMenu(menu, x, y);
+  setTimeout(() => a.focus(), 0);
+}
+
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1838,6 +1899,7 @@ function cellMenu(x, y) {
   item("Clear all (incl. formats)", false, () => clearAll());
   sep();
   item("Data validation (list)…", false, () => openSetValidationMenu(x, y));
+  item("Conditional format…", false, () => openConditionalFormatMenu(x, y));
   positionMenu(menu, x, y);
 }
 

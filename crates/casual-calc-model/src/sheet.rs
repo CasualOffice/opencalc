@@ -151,6 +151,39 @@ pub struct Sheet {
     /// Data-validation rules (currently in-cell dropdown lists).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validations: Vec<DataValidation>,
+    /// Conditional-formatting rules (highlight-cells with a fill color).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_formats: Vec<ConditionalFormat>,
+}
+
+/// A conditional-formatting rule: cells in `range` whose value satisfies `rule`
+/// are painted with `fill` (an `RRGGBB` hex). First matching rule wins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConditionalFormat {
+    /// The range the rule applies to.
+    pub range: CellRange,
+    /// The predicate on a cell's value.
+    pub rule: CfRule,
+    /// Fill color (`RRGGBB`, no `#`) applied when the rule matches.
+    pub fill: String,
+}
+
+/// A conditional-format predicate. Numeric comparisons act on a cell's numeric
+/// value; `TextContains` acts on its display text (case-insensitive).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CfRule {
+    /// Value strictly greater than the operand.
+    GreaterThan(f64),
+    /// Value strictly less than the operand.
+    LessThan(f64),
+    /// Value equal to the operand.
+    EqualTo(f64),
+    /// Value within `[low, high]` inclusive.
+    Between(f64, f64),
+    /// Display text contains the substring (case-insensitive).
+    TextContains(String),
 }
 
 /// A data-validation rule over a range. Only the explicit-list dropdown kind is
@@ -194,6 +227,37 @@ impl Sheet {
             outline: OutlinePr::default(),
             tab_color: None,
             validations: Vec::new(),
+            conditional_formats: Vec::new(),
+        }
+    }
+}
+
+impl ConditionalFormat {
+    /// Whether the rule's range covers `(row, col)`.
+    pub fn covers(&self, row: u32, col: u32) -> bool {
+        row >= self.range.start.row
+            && row <= self.range.end.row
+            && col >= self.range.start.col
+            && col <= self.range.end.col
+    }
+}
+
+impl CfRule {
+    /// Whether this rule matches a numeric value.
+    pub fn matches_number(&self, n: f64) -> bool {
+        match self {
+            CfRule::GreaterThan(x) => n > *x,
+            CfRule::LessThan(x) => n < *x,
+            CfRule::EqualTo(x) => (n - *x).abs() < 1e-9,
+            CfRule::Between(lo, hi) => n >= *lo && n <= *hi,
+            CfRule::TextContains(_) => false,
+        }
+    }
+    /// Whether this rule matches display text (only `TextContains` does).
+    pub fn matches_text(&self, text: &str) -> bool {
+        match self {
+            CfRule::TextContains(s) => text.to_lowercase().contains(&s.to_lowercase()),
+            _ => false,
         }
     }
 }
