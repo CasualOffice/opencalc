@@ -987,6 +987,21 @@ function selectAll() {
   endInline();
   draw();
 }
+// Progressive Ctrl+A (Excel): first press selects the used data region, a
+// second press (already covering it) selects the whole sheet.
+function ctrlA() {
+  const b = usedBounds();
+  const r = selRect();
+  const coversData = state.selKind === "cells" &&
+    r.r0 === 0 && r.c0 === 0 && r.r1 === b.rows - 1 && r.c1 === b.cols - 1;
+  if (coversData) { selectAll(); return; }
+  state.selKind = "cells";
+  state.ranges = [];
+  state.anchor = { row: 0, col: 0 };
+  state.sel = { row: b.rows - 1, col: b.cols - 1 };
+  endInline();
+  draw();
+}
 // Whole-row selection; the focus stays at column 0 so the view doesn't jump.
 function selectRow(r, exp) {
   state.selKind = "rows";
@@ -2002,7 +2017,7 @@ function wireEvents() {
       if (e.shiftKey && (k === "l" || k === "e" || k === "r")) {
         setAlign(k === "l" ? "left" : k === "e" ? "center" : "right"); e.preventDefault(); return;
       }
-      if (k === "a") { selectAll(); e.preventDefault(); return; }
+      if (k === "a") { ctrlA(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
       if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
       if (k === "z") { doUndo(); e.preventDefault(); return; }
@@ -2026,6 +2041,7 @@ function wireEvents() {
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
       case "Tab": select(state.sel.row, state.sel.col + (e.shiftKey ? -1 : 1)); e.preventDefault(); break;
       case "Home": if (e.shiftKey) extend(state.sel.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
+      case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.sel.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
