@@ -2365,6 +2365,92 @@ pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
     .unwrap_or_default()
 }
 
+/// Copy a range as an HTML `<table>` so external apps (Excel, Sheets, mail,
+/// docs) receive formatted cells. Paired with the plain-text TSV payload on the
+/// OS clipboard; the in-app rich paste still uses the internal clipboard.
+#[wasm_bindgen]
+pub fn session_copy_html(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return String::new();
+        };
+        let mut out = String::from("<table>");
+        for r in r0..=r1 {
+            out.push_str("<tr>");
+            for c in c0..=c1 {
+                let cell = sh.cells.get(CellRef::new(r, c));
+                let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
+                let css = cell
+                    .and_then(|cl| cl.style)
+                    .and_then(|id| wb.styles.get(id))
+                    .map(html_cell_css)
+                    .unwrap_or_default();
+                if css.is_empty() {
+                    out.push_str("<td>");
+                } else {
+                    out.push_str(&format!("<td style=\"{css}\">"));
+                }
+                push_html_escaped(&mut out, &text);
+                out.push_str("</td>");
+            }
+            out.push_str("</tr>");
+        }
+        out.push_str("</table>");
+        out
+    })
+    .unwrap_or_default()
+}
+
+/// Inline CSS for one cell's style, for the HTML clipboard payload.
+fn html_cell_css(style: &Style) -> String {
+    let mut css = String::new();
+    if style.bold {
+        css.push_str("font-weight:bold;");
+    }
+    if style.italic {
+        css.push_str("font-style:italic;");
+    }
+    let mut deco = String::new();
+    if style.underline {
+        deco.push_str("underline ");
+    }
+    if style.strike {
+        deco.push_str("line-through");
+    }
+    let deco = deco.trim();
+    if !deco.is_empty() {
+        css.push_str(&format!("text-decoration:{deco};"));
+    }
+    if let Some(c) = &style.font_color {
+        css.push_str(&format!("color:#{c};"));
+    }
+    if let Some(c) = &style.fill_color {
+        css.push_str(&format!("background-color:#{c};"));
+    }
+    if let Some(a) = style.align {
+        let ta = match a {
+            HAlign::Left => "left",
+            HAlign::Center => "center",
+            HAlign::Right => "right",
+        };
+        css.push_str(&format!("text-align:{ta};"));
+    }
+    css
+}
+
+fn push_html_escaped(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
 /// Paste tab/newline-separated text starting at a cell (one undo step).
 #[wasm_bindgen]
 pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<(), JsError> {
@@ -2747,4 +2833,42 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{html_cell_css, push_html_escaped};
+    use casual_calc_model::{HAlign, Style};
+
+    #[test]
+    fn html_escape_covers_markup_chars() {
+        let mut out = String::new();
+        push_html_escaped(&mut out, r#"a<b>&"c"#);
+        assert_eq!(out, "a&lt;b&gt;&amp;&quot;c");
+    }
+
+    #[test]
+    fn cell_css_maps_style_to_inline_css() {
+        let style = Style {
+            bold: true,
+            italic: true,
+            strike: true,
+            font_color: Some("FF0000".to_owned()),
+            fill_color: Some("FFFF00".to_owned()),
+            align: Some(HAlign::Center),
+            ..Style::default()
+        };
+        let css = html_cell_css(&style);
+        assert!(css.contains("font-weight:bold;"));
+        assert!(css.contains("font-style:italic;"));
+        assert!(css.contains("text-decoration:line-through;"));
+        assert!(css.contains("color:#FF0000;"));
+        assert!(css.contains("background-color:#FFFF00;"));
+        assert!(css.contains("text-align:center;"));
+    }
+
+    #[test]
+    fn cell_css_is_empty_for_default_style() {
+        assert_eq!(html_cell_css(&Style::default()), "");
+    }
 }

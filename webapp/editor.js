@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "18";
+const BUILD = "19";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1582,6 +1582,20 @@ async function clipToOS(s, cut) {
   wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
   const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
   lastClipTsv = tsv;
+  // Write a formatted HTML table alongside the plain-text TSV so external apps
+  // (Excel, Sheets, mail, docs) receive styling; fall back to text-only when
+  // ClipboardItem isn't available or is blocked.
+  try {
+    const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    if (navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
+      const item = new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([tsv], { type: "text/plain" }),
+      });
+      await navigator.clipboard.write([item]);
+      return true;
+    }
+  } catch { /* fall through to text-only */ }
   try { await navigator.clipboard.writeText(tsv); return true; }
   catch { return false; }
 }
