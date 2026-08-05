@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "5";
+const BUILD = "6";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -486,6 +486,22 @@ function draw() {
     fn();
     ctx.restore();
   };
+  // Clip covering every quadrant a merge spans — a merge straddling the freeze
+  // boundary must not be clipped to only its top-left cell's pane (which would
+  // hide the body half). Falls back to the whole grid when nothing is frozen.
+  const withMergeQuad = (m, fn) => {
+    if (!frozen) { fn(); return; }
+    const x0 = m.c0 < F.fc ? HW : F.bodyX0;
+    const x1 = m.c1 < F.fc ? F.bodyX0 : v.w;
+    const y0 = m.r0 < F.fr ? HH : F.bodyY0;
+    const y1 = m.r1 < F.fr ? F.bodyY0 : v.h;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.clip();
+    fn();
+    ctx.restore();
+  };
 
   ctx.textBaseline = "middle";
   for (const it of items) {
@@ -540,14 +556,17 @@ function draw() {
     if (tw > w - 8) {
       if (align !== "right") {
         let c = it.c;
-        while (clipR - x < tw + 8 && c + 1 < lastCol && !occupied.has(it.r + "," + (c + 1))) {
+        // Stop at a non-empty cell OR a column that isn't drawn (e.g. the gap
+        // between a frozen band and the scrolling body) — colXAt is undefined
+        // there and would make the clip NaN.
+        while (clipR - x < tw + 8 && c + 1 < lastCol && geo.colOf.has(c + 1) && !occupied.has(it.r + "," + (c + 1))) {
           c += 1;
           clipR = colXAt(c) + colWAt(c);
         }
       }
       if (align !== "left") {
         let c = it.c;
-        while (x + w - clipL < tw + 8 && c - 1 >= state.firstCol && !occupied.has(it.r + "," + (c - 1))) {
+        while (x + w - clipL < tw + 8 && c - 1 >= state.firstCol && geo.colOf.has(c - 1) && !occupied.has(it.r + "," + (c - 1))) {
           c -= 1;
           clipL = colXAt(c);
         }
@@ -599,7 +618,7 @@ function draw() {
     const mw = fscreenX(m.c1 + 1) - mx, mh = fscreenY(m.r1 + 1) - my;
     if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
     const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
-    withQuad(m.r0, m.c0, () => {
+    withMergeQuad(m, () => {
       ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
       ctx.fillRect(mx, my, mw, mh);
       if (mergeInSel(m)) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
@@ -875,8 +894,12 @@ function autoScrollTick() {
   const { sx, sy, cx, cy } = edgeVelocity();
   if (sx === 0 && sy === 0) return; // pointer back inside — stop
   const SPEED = 0.5;
+  const x0 = state.scrollX, y0 = state.scrollY;
   state.scrollX = Math.max(0, state.scrollX + sx * SPEED);
   state.scrollY = Math.max(0, state.scrollY + sy * SPEED);
+  // If the scroll is pinned at 0 against the edge (velocity points off-sheet
+  // but nothing can move), idle instead of redrawing every frame forever.
+  if (state.scrollX === x0 && state.scrollY === y0) return;
   const hit = cellAt(cx, cy);
   if (hit) { state.sel = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
   draw();
@@ -907,8 +930,12 @@ function commit(value, advance) {
     let err = "";
     try { err = wasm.validate_formula(value); } catch {}
     if (err) {
+      // Refuse the commit whether the edit came from the grid or the formula
+      // bar — never silently store an unparseable formula as literal text. Only
+      // the in-cell affordance (red outline + refocus) is gated on editing.
       status.innerHTML = `<span class="err">Formula error: ${err}</span>`;
-      if (state.editing) { inline.classList.add("invalid"); inline.focus(); return false; }
+      if (state.editing) { inline.classList.add("invalid"); inline.focus(); }
+      return false;
     }
   }
   try {
@@ -918,9 +945,11 @@ function commit(value, advance) {
     status.textContent = `error: ${e}`;
   }
   endInline();
-  if (advance) state.sel.row += 1;
-  ensureVisible();
-  draw();
+  // Move to the next row on Enter as a fresh single-cell selection (reset the
+  // anchor + clear any multi-range, else anchor stays put and paints a ghost
+  // 2-cell range).
+  if (advance) select(state.sel.row + 1, state.sel.col);
+  else { ensureVisible(); draw(); }
   return true;
 }
 
@@ -1284,6 +1313,19 @@ function endInline() {
 
 // --- Formula editing UX: autocomplete, reference insertion, validation -----
 const A1 = (row, col) => colName(col) + (row + 1);
+// Whether the caret (end of `before`) sits inside a "..." string literal, so we
+// must not inject a cell reference or a function name there. Treats "" as an
+// escaped quote within a string.
+function inStringLiteral(before) {
+  let inStr = false;
+  for (let i = 0; i < before.length; i++) {
+    if (before[i] === '"') {
+      if (inStr && before[i + 1] === '"') { i++; continue; }
+      inStr = !inStr;
+    }
+  }
+  return inStr;
+}
 let fnCatalog = null;            // lazily-loaded function catalog
 let acState = null;             // active autocomplete: {matches, idx, start}
 let formulaRefDrag = null;      // click/drag ref insertion: {anchor, start, end}
@@ -1295,6 +1337,7 @@ function currentFnToken() {
   const val = inline.value, pos = inline.selectionStart;
   if (!val.startsWith("=")) return null;
   const before = val.slice(0, pos);
+  if (inStringLiteral(before)) return null; // don't autocomplete inside "text"
   const m = before.match(/([A-Za-z][A-Za-z0-9.]*)$/);
   if (!m) return null;
   const prev = before[before.length - m[1].length - 1];
@@ -1345,7 +1388,9 @@ function acceptAutocomplete() {
 // Whether the caret sits where a cell reference may be inserted by clicking.
 function refAcceptable() {
   if (!state.editing || !inline.value.startsWith("=")) return false;
-  const before = inline.value.slice(0, inline.selectionStart).trimEnd();
+  const raw = inline.value.slice(0, inline.selectionStart);
+  if (inStringLiteral(raw)) return false; // caret inside a "text" literal
+  const before = raw.trimEnd();
   if (before === "=") return true;
   return "=+-*/^(,:&<>% ".includes(before[before.length - 1]);
 }
@@ -1601,11 +1646,15 @@ function updateFill(px, py) {
 
 // Live-update the previewed size of the line being dragged.
 function updateResize(px, py) {
+  const f = state.freeze || { fc: 0, fr: 0 };
   if (state.resize.axis === "col") {
-    const left = wasm.session_col_offset_px(state.sheet, state.resize.index) - state.scrollX + HW;
+    // A frozen column's left edge ignores the scroll offset (mirror fscreenX).
+    const off = wasm.session_col_offset_px(state.sheet, state.resize.index);
+    const left = HW + off - (state.resize.index < f.fc ? 0 : state.scrollX);
     state.resize.previewPx = Math.max(MIN_LINE, Math.round(px - left));
   } else {
-    const top = wasm.session_row_offset_px(state.sheet, state.resize.index) - state.scrollY + HH;
+    const off = wasm.session_row_offset_px(state.sheet, state.resize.index);
+    const top = HH + off - (state.resize.index < f.fr ? 0 : state.scrollY);
     state.resize.previewPx = Math.max(MIN_LINE, Math.round(py - top));
   }
   draw();
@@ -1629,6 +1678,10 @@ function wireEvents() {
         return;
       }
     }
+    // Any other click while editing first commits the in-progress edit (like
+    // Excel) rather than discarding it. If the value is an invalid formula the
+    // commit is refused and the click is swallowed so the user stays in the cell.
+    if (state.editing && !commit(inline.value, false)) return;
     // The fill handle (bottom-right of the selection) starts a drag-fill.
     if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
       endInline();
