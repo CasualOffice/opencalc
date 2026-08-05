@@ -989,6 +989,91 @@ pub fn session_cells(
     .unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Validate a formula string (with or without the leading `=`). Returns `""`
+/// when it parses, otherwise a human-readable parse error. Non-formula input
+/// (no leading `=`) is always valid.
+#[wasm_bindgen]
+pub fn validate_formula(text: &str) -> String {
+    let trimmed = text.trim();
+    match trimmed.strip_prefix('=') {
+        Some(body) => match parse(body) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        },
+        None => String::new(),
+    }
+}
+
+/// The catalog of supported worksheet functions as JSON `[{n,sig}, …]`, sorted
+/// by name — drives the editor's formula autocomplete. Kept in step with the
+/// dispatch table in `casual-calc-eval::functions`.
+#[wasm_bindgen]
+pub fn function_catalog() -> String {
+    const FUNCS: &[(&str, &str)] = &[
+        ("ABS", "ABS(number)"),
+        ("AND", "AND(logical1, …)"),
+        ("AVERAGE", "AVERAGE(number1, …)"),
+        ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
+        ("CEILING", "CEILING(number, significance)"),
+        ("CHOOSE", "CHOOSE(index, value1, …)"),
+        ("CONCAT", "CONCAT(text1, …)"),
+        ("CONCATENATE", "CONCATENATE(text1, …)"),
+        ("COUNT", "COUNT(value1, …)"),
+        ("COUNTA", "COUNTA(value1, …)"),
+        ("COUNTIF", "COUNTIF(range, criteria)"),
+        ("DATE", "DATE(year, month, day)"),
+        ("DAY", "DAY(serial_number)"),
+        ("EDATE", "EDATE(start_date, months)"),
+        ("EOMONTH", "EOMONTH(start_date, months)"),
+        ("EXACT", "EXACT(text1, text2)"),
+        ("FIND", "FIND(find_text, within_text, [start])"),
+        ("FLOOR", "FLOOR(number, significance)"),
+        ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
+        ("IF", "IF(logical_test, value_if_true, value_if_false)"),
+        ("IFERROR", "IFERROR(value, value_if_error)"),
+        ("INDEX", "INDEX(array, row_num, [col_num])"),
+        ("INT", "INT(number)"),
+        ("LEFT", "LEFT(text, [num_chars])"),
+        ("LEN", "LEN(text)"),
+        ("LOWER", "LOWER(text)"),
+        ("MATCH", "MATCH(lookup, array, [match_type])"),
+        ("MAX", "MAX(number1, …)"),
+        ("MID", "MID(text, start_num, num_chars)"),
+        ("MIN", "MIN(number1, …)"),
+        ("MOD", "MOD(number, divisor)"),
+        ("MONTH", "MONTH(serial_number)"),
+        ("NOT", "NOT(logical)"),
+        ("OR", "OR(logical1, …)"),
+        ("POWER", "POWER(number, power)"),
+        ("PRODUCT", "PRODUCT(number1, …)"),
+        ("PROPER", "PROPER(text)"),
+        ("REPLACE", "REPLACE(old, start, num_chars, new)"),
+        ("REPT", "REPT(text, number_times)"),
+        ("RIGHT", "RIGHT(text, [num_chars])"),
+        ("ROUND", "ROUND(number, num_digits)"),
+        ("ROUNDDOWN", "ROUNDDOWN(number, num_digits)"),
+        ("ROUNDUP", "ROUNDUP(number, num_digits)"),
+        ("SEARCH", "SEARCH(find_text, within_text, [start])"),
+        ("SIGN", "SIGN(number)"),
+        ("SQRT", "SQRT(number)"),
+        ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
+        ("SUM", "SUM(number1, …)"),
+        ("SUMIF", "SUMIF(range, criteria, [sum_range])"),
+        ("TRIM", "TRIM(text)"),
+        ("TRUNC", "TRUNC(number, [num_digits])"),
+        ("UPPER", "UPPER(text)"),
+        ("VALUE", "VALUE(text)"),
+        ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
+        ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
+        ("YEAR", "YEAR(serial_number)"),
+    ];
+    let items: Vec<String> = FUNCS
+        .iter()
+        .map(|(n, sig)| format!("{{\"n\":{},\"sig\":{}}}", json_string(n), json_string(sig)))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 /// The editable input for a cell (formula text with `=`, or the raw value).
 #[wasm_bindgen]
 pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {

@@ -180,6 +180,20 @@
 .filter-foot button { padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); }
 .filter-clear { background: var(--bg); color: var(--muted); }
 .filter-apply { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Formula function autocomplete. */
+.ac-menu {
+  position: absolute; z-index: 40; min-width: 260px; max-width: 360px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; overflow: hidden;
+}
+.ac-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; border-radius: 5px; cursor: pointer; }
+.ac-item.active { background: var(--accent); }
+.ac-item.active .ac-name, .ac-item.active .ac-sig { color: #fff; }
+.ac-name { font-weight: 700; font-size: 13px; color: var(--fg); font-family: ui-monospace, monospace; }
+.ac-sig { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Invalid-formula editor outline + status error text. */
+.inline-edit.invalid { outline: 2px solid #e53935; box-shadow: 0 0 0 2px rgba(229,57,53,.25); }
+#tb-status .err, .err { color: #e53935; font-weight: 600; }
 .sheet-add {
   width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;

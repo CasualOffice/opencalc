@@ -1,7 +1,11 @@
 // OpenCalc canvas grid editor. The WASM engine owns the workbook, computes the
 // layout + display text, and recalculates; this file draws the grid and text on
 // a canvas and routes edits back to the engine.
-import init, * as wasm from "./pkg/casual_calc_wasm.js";
+// The glue + wasm binary are loaded in main() with a build tag on the URL so a
+// rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
+// the dev server send no-store) to force a fresh fetch.
+const BUILD = "5";
+let init, wasm;
 
 const HW = 46; // row-header width (px)
 const HH = 24; // column-header height (px)
@@ -897,6 +901,16 @@ function fzOffset(_line, columns, count) {
 }
 
 function commit(value, advance) {
+  // Reject an unparseable formula instead of silently storing it as text —
+  // keep the editor open with the error, like Excel's formula guard.
+  if (value.trim().startsWith("=")) {
+    let err = "";
+    try { err = wasm.validate_formula(value); } catch {}
+    if (err) {
+      status.innerHTML = `<span class="err">Formula error: ${err}</span>`;
+      if (state.editing) { inline.classList.add("invalid"); inline.focus(); return false; }
+    }
+  }
   try {
     wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, value);
     status.textContent = "ok";
@@ -907,6 +921,7 @@ function commit(value, advance) {
   if (advance) state.sel.row += 1;
   ensureVisible();
   draw();
+  return true;
 }
 
 function usedBounds() {
@@ -1261,7 +1276,89 @@ function startInline(initial) {
 function endInline() {
   state.editing = false;
   inline.style.display = "none";
+  hideAutocomplete();
+  formulaRefDrag = null;
+  inline.classList.remove("invalid");
   canvas.focus();
+}
+
+// --- Formula editing UX: autocomplete, reference insertion, validation -----
+const A1 = (row, col) => colName(col) + (row + 1);
+let fnCatalog = null;            // lazily-loaded function catalog
+let acState = null;             // active autocomplete: {matches, idx, start}
+let formulaRefDrag = null;      // click/drag ref insertion: {anchor, start, end}
+const acEl = document.getElementById("ac-menu");
+
+// The function-name token being typed just before the caret, if the caret sits
+// somewhere a function name is valid (after =, an operator, "(", or ",").
+function currentFnToken() {
+  const val = inline.value, pos = inline.selectionStart;
+  if (!val.startsWith("=")) return null;
+  const before = val.slice(0, pos);
+  const m = before.match(/([A-Za-z][A-Za-z0-9.]*)$/);
+  if (!m) return null;
+  const prev = before[before.length - m[1].length - 1];
+  if (prev !== undefined && !"=+-*/^(,:&<>% ".includes(prev)) return null;
+  return { start: pos - m[1].length, text: m[1] };
+}
+
+function showAutocomplete() {
+  const tok = currentFnToken();
+  if (!tok) { hideAutocomplete(); return; }
+  if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
+  const up = tok.text.toUpperCase();
+  const matches = fnCatalog.filter((f) => f.n.startsWith(up)).slice(0, 8);
+  if (!matches.length) { hideAutocomplete(); return; }
+  acState = { matches, idx: 0, start: tok.start };
+  renderAutocomplete();
+}
+
+function renderAutocomplete() {
+  if (!acState) return;
+  acEl.textContent = "";
+  acState.matches.forEach((f, i) => {
+    const row = document.createElement("div");
+    row.className = "ac-item" + (i === acState.idx ? " active" : "");
+    row.innerHTML = `<span class="ac-name">${f.n}</span><span class="ac-sig">${f.sig.replace(/^[A-Z0-9]+/, "")}</span>`;
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); acState.idx = i; acceptAutocomplete(); });
+    acEl.appendChild(row);
+  });
+  // Position under the inline editor.
+  acEl.style.left = inline.offsetLeft + "px";
+  acEl.style.top = (inline.offsetTop + inline.offsetHeight) + "px";
+  acEl.hidden = false;
+}
+
+function hideAutocomplete() { acState = null; if (acEl) acEl.hidden = true; }
+
+function acceptAutocomplete() {
+  if (!acState) return;
+  const name = acState.matches[acState.idx].n;
+  const val = inline.value, pos = inline.selectionStart;
+  inline.value = val.slice(0, acState.start) + name + "(" + val.slice(pos);
+  const caret = acState.start + name.length + 1;
+  inline.setSelectionRange(caret, caret);
+  hideAutocomplete();
+  inline.focus();
+}
+
+// Whether the caret sits where a cell reference may be inserted by clicking.
+function refAcceptable() {
+  if (!state.editing || !inline.value.startsWith("=")) return false;
+  const before = inline.value.slice(0, inline.selectionStart).trimEnd();
+  if (before === "=") return true;
+  return "=+-*/^(,:&<>% ".includes(before[before.length - 1]);
+}
+
+// Insert (or, during a drag, replace) a reference at the caret while editing.
+function insertRef(text) {
+  const val = inline.value;
+  const start = formulaRefDrag ? formulaRefDrag.start : inline.selectionStart;
+  const end = formulaRefDrag ? formulaRefDrag.end : inline.selectionStart;
+  inline.value = val.slice(0, start) + text + val.slice(end);
+  const caret = start + text.length;
+  if (formulaRefDrag) formulaRefDrag.end = caret;
+  else inline.setSelectionRange(caret, caret);
 }
 
 const tabsEl = document.getElementById("sheet-tabs");
@@ -1519,6 +1616,19 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    // While editing a formula at a reference position, clicking a cell inserts
+    // its reference instead of moving the selection. preventDefault keeps the
+    // inline input focused (no blur/commit); a drag turns it into a range.
+    if (refAcceptable()) {
+      const hit = cellAt(px, py);
+      if (hit) {
+        e.preventDefault();
+        formulaRefDrag = { anchor: hit, start: inline.selectionStart, end: inline.selectionStart };
+        insertRef(A1(hit.row, hit.col));
+        hideAutocomplete();
+        return;
+      }
+    }
     // The fill handle (bottom-right of the selection) starts a drag-fill.
     if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
       endInline();
@@ -1561,6 +1671,17 @@ function wireEvents() {
     const py = e.clientY - rect.top;
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
+    if (formulaRefDrag) {
+      const hit = cellAt(px, py);
+      if (hit) {
+        const a = formulaRefDrag.anchor;
+        const r0 = Math.min(a.row, hit.row), r1 = Math.max(a.row, hit.row);
+        const c0 = Math.min(a.col, hit.col), c1 = Math.max(a.col, hit.col);
+        const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
+        insertRef(ref);
+      }
+      return;
+    }
     if (state.dragging) {
       dragPos = { px, py };
       const f = state.freeze || { bodyX0: HW, bodyY0: HH };
@@ -1587,6 +1708,13 @@ function wireEvents() {
     canvas.style.cursor = hb ? (hb.axis === "col" ? "col-resize" : "row-resize") : "cell";
   });
   window.addEventListener("mouseup", () => {
+    if (formulaRefDrag) {
+      const caret = formulaRefDrag.end;
+      formulaRefDrag = null;
+      inline.focus();
+      inline.setSelectionRange(caret, caret);
+      return;
+    }
     if (state.resize) {
       const r = state.resize;
       state.resize = null;
@@ -1743,10 +1871,18 @@ function wireEvents() {
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
   });
+  inline.addEventListener("input", () => { inline.classList.remove("invalid"); showAutocomplete(); });
   inline.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { commit(inline.value, true); canvas.focus(); e.preventDefault(); }
+    // Autocomplete navigation takes priority when its menu is open.
+    if (acState) {
+      if (e.key === "ArrowDown") { acState.idx = (acState.idx + 1) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
+      if (e.key === "ArrowUp") { acState.idx = (acState.idx - 1 + acState.matches.length) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
+      if (e.key === "Enter" || e.key === "Tab") { acceptAutocomplete(); e.preventDefault(); return; }
+      if (e.key === "Escape") { hideAutocomplete(); e.preventDefault(); return; }
+    }
+    if (e.key === "Enter") { commit(inline.value, true); e.preventDefault(); }
     else if (e.key === "Escape") { endInline(); e.preventDefault(); }
-    else if (e.key === "Tab") { commit(inline.value, false); select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
+    else if (e.key === "Tab") { if (commit(inline.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
   });
   fInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { commit(fInput.value, false); canvas.focus(); e.preventDefault(); }
@@ -1912,7 +2048,10 @@ function seed() {
 }
 
 async function main() {
-  await init();
+  const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}`);
+  init = mod.default;
+  wasm = mod;
+  await init(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`);
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();
   readColors();
