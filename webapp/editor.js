@@ -24,6 +24,8 @@ const state = {
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
+let dragPos = null; // latest pointer {px,py} during a selection/fill drag
+let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
 
 // The normalized selection rectangle (inclusive) from anchor..focus.
 function selRect() {
@@ -96,6 +98,20 @@ let dragTab = -1; // index of the sheet tab being dragged (reorder)
 // Absolute screen position of a column's left / row's top edge (any index).
 function screenX(col) { return wasm.session_col_offset_px(state.sheet, col) - state.scrollX + HW; }
 function screenY(row) { return wasm.session_row_offset_px(state.sheet, row) - state.scrollY + HH; }
+// Freeze-aware screen position: frozen lines (index < fc/fr) are pinned and
+// ignore the scroll offset; body lines subtract it. In the no-freeze case this
+// equals screenX/screenY. Used where geometry must line up under frozen panes
+// (merged-cell painting spans across cells, so it can't use per-cell geo).
+function fscreenX(col) {
+  const f = state.freeze || { fc: 0 };
+  const o = wasm.session_col_offset_px(state.sheet, col);
+  return HW + (col < f.fc ? o : o - state.scrollX);
+}
+function fscreenY(row) {
+  const f = state.freeze || { fr: 0 };
+  const o = wasm.session_row_offset_px(state.sheet, row);
+  return HH + (row < f.fr ? o : o - state.scrollY);
+}
 // The merge covering (row,col), if any.
 function mergeAt(row, col) {
   return sheetMerges.find((m) => row >= m.r0 && row <= m.r1 && col >= m.c0 && col <= m.c1);
@@ -561,8 +577,8 @@ function draw() {
   // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
   // top-left cell's fill + text across the span, outline it.
   for (const m of sheetMerges) {
-    const mx = screenX(m.c0), my = screenY(m.r0);
-    const mw = screenX(m.c1 + 1) - mx, mh = screenY(m.r1 + 1) - my;
+    const mx = fscreenX(m.c0), my = fscreenY(m.r0);
+    const mw = fscreenX(m.c1 + 1) - mx, mh = fscreenY(m.r1 + 1) - my;
     if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
     const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
     withQuad(m.r0, m.c0, () => {
@@ -599,8 +615,8 @@ function draw() {
     ctx.strokeStyle = colors.accent;
     ctx.lineWidth = 2;
     if (fm) {
-      const bx = screenX(fm.c0), by = screenY(fm.r0);
-      ctx.strokeRect(bx + 1, by + 1, screenX(fm.c1 + 1) - bx - 1, screenY(fm.r1 + 1) - by - 1);
+      const bx = fscreenX(fm.c0), by = fscreenY(fm.r0);
+      ctx.strokeRect(bx + 1, by + 1, fscreenX(fm.c1 + 1) - bx - 1, fscreenY(fm.r1 + 1) - by - 1);
     } else {
       const fx = colXAt(state.sel.col);
       const fy = rowYAt(state.sel.row);
@@ -814,6 +830,50 @@ function ensureVisible() {
   state.scrollX = Math.max(0, state.scrollX);
   state.scrollY = Math.max(0, state.scrollY);
 }
+// --- Edge auto-scroll while drag-selecting --------------------------------
+// When the pointer is dragged into the 28px band at a viewport edge (or past
+// it), scroll the body toward the pointer and keep extending the selection —
+// like every real spreadsheet. Runs on rAF until the pointer leaves the band
+// or the drag ends.
+const AUTOSCROLL_EDGE = 28;
+function edgeVelocity() {
+  if (!dragPos) return { sx: 0, sy: 0, cx: 0, cy: 0 };
+  const r = canvas.getBoundingClientRect();
+  const f = state.freeze || { bodyX0: HW, bodyY0: HH };
+  const { px, py } = dragPos;
+  const lo_x = f.bodyX0 + AUTOSCROLL_EDGE, hi_x = r.width - AUTOSCROLL_EDGE;
+  const lo_y = f.bodyY0 + AUTOSCROLL_EDGE, hi_y = r.height - AUTOSCROLL_EDGE;
+  let sx = 0, sy = 0;
+  if (px > hi_x) sx = px - hi_x; else if (px < lo_x) sx = px - lo_x;
+  if (py > hi_y) sy = py - hi_y; else if (py < lo_y) sy = py - lo_y;
+  // The cell to extend to: pointer clamped into the body region.
+  const cx = Math.min(Math.max(px, f.bodyX0 + 1), r.width - 2);
+  const cy = Math.min(Math.max(py, f.bodyY0 + 1), r.height - 2);
+  return { sx, sy, cx, cy };
+}
+function autoScrollTick() {
+  autoRaf = 0;
+  if (!state.dragging || !dragPos) return;
+  const { sx, sy, cx, cy } = edgeVelocity();
+  if (sx === 0 && sy === 0) return; // pointer back inside — stop
+  const SPEED = 0.5;
+  state.scrollX = Math.max(0, state.scrollX + sx * SPEED);
+  state.scrollY = Math.max(0, state.scrollY + sy * SPEED);
+  const hit = cellAt(cx, cy);
+  if (hit) { state.sel = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
+  draw();
+  autoRaf = requestAnimationFrame(autoScrollTick);
+}
+function maybeAutoScroll() {
+  const { sx, sy } = edgeVelocity();
+  if (state.dragging && dragPos && (sx !== 0 || sy !== 0)) {
+    if (!autoRaf) autoRaf = requestAnimationFrame(autoScrollTick);
+  } else {
+    stopAutoScroll();
+  }
+}
+function stopAutoScroll() { if (autoRaf) { cancelAnimationFrame(autoRaf); autoRaf = 0; } }
+
 // Absolute px of the frozen band before `count` lines on this axis.
 function fzOffset(_line, columns, count) {
   if (count <= 0) return 0;
@@ -1488,8 +1548,20 @@ function wireEvents() {
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
     if (state.dragging) {
-      const hit = cellAt(px, py);
-      if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) extend(hit.row, hit.col);
+      dragPos = { px, py };
+      const f = state.freeze || { bodyX0: HW, bodyY0: HH };
+      // Clamp into the body so a pointer over a header still maps to a cell.
+      const cx = Math.min(Math.max(px, f.bodyX0 + 1), rect.width - 2);
+      const cy = Math.min(Math.max(py, f.bodyY0 + 1), rect.height - 2);
+      const hit = cellAt(cx, cy);
+      // Set the focus directly (no ensureVisible — it would fight auto-scroll
+      // and make the selection flicker/vanish). Anchor stays put.
+      if (hit && (hit.row !== state.sel.row || hit.col !== state.sel.col)) {
+        state.sel = { row: hit.row, col: hit.col };
+        state.selKind = "cells";
+        draw();
+      }
+      maybeAutoScroll();
       return;
     }
     // Idle hover: fill cursor over the handle, resize cursor over a boundary.
@@ -1535,6 +1607,8 @@ function wireEvents() {
       draw();
     }
     state.dragging = false;
+    dragPos = null;
+    stopAutoScroll();
   });
 
   // Custom scrollbar thumb dragging.
