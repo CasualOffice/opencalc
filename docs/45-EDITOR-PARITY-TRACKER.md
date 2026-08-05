@@ -65,7 +65,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-23 | Ctrl+arrow to data edge, Home/End, PgUp/PgDn | Done | `session_edge` block-jump; Ctrl+Arrow, Ctrl+Home/End, Home, PgUp/PgDn (+shift-extend). Verified |
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |
 | UX-25 | Drag-fill / autofill handle | Todo | |
-| UX-26 | Hidden rows/columns (+ from file) | Todo | model flag; import `hidden` |
+| UX-26 | Hidden rows/columns (+ from file) | Done | `Sheet.hidden_rows/cols` (import/export `hidden="1"`); layout + editor treat hidden as 0px; Hide/Unhide in the cell context menu. Verified |
 | UX-27 | Freeze panes in editor (model has `SheetView`) | Todo | render frozen bands |
 | UX-28 | Find & replace | Done | `session_find` / `session_replace_all` (case toggle, undoable); Ctrl+F bar with next/prev, count, replace-all. Verified |
 | UX-29 | Sheet tab reorder (drag) + tab color | Partial | `session_move_sheet` + HTML5 drag-reorder (active sheet re-tracked). Verified. Tab color pending |
@@ -77,10 +77,10 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-40 | Conditional formatting | Todo | |
 | UX-41 | Tables (structured ranges) | Todo | |
 | UX-42 | Sort & filter | Todo | |
-| UX-43 | Strikethrough, more font styles | Todo | |
+| UX-43 | Strikethrough | Done | `Style.strike` (round-trips `<strike/>`); toolbar toggle + strike-line render. Verified |
 | UX-44 | Cell comments/notes | Todo | |
 | UX-45 | Data validation | Todo | |
-| UX-46 | PNG-render borders/colors (landing preview) | Todo | display-list contract change |
+| UX-46 | PNG-render fills/font-colors/borders | Done | display list extended (CellBackground.fill, Text color/bold/italic, CellBorder); render paints them. Gated |
 
 ## Now / next
 

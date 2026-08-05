@@ -33,12 +33,23 @@ impl GridGeometry {
     pub fn for_sheet(sheet: &Sheet) -> Self {
         let col_default = sheet.columns.default.unwrap_or(DEFAULT_COL_WIDTH);
         let row_default = sheet.rows.default.unwrap_or(DEFAULT_ROW_HEIGHT);
+        // Hidden lines collapse to zero size (listed after explicit sizes so a
+        // hidden line always wins over any width/height it may also carry).
+        let cols = sheet
+            .columns
+            .sizes
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .chain(sheet.hidden_cols.iter().map(|&c| (c, 0)));
+        let rows = sheet
+            .rows
+            .sizes
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .chain(sheet.hidden_rows.iter().map(|&r| (r, 0)));
         Self {
-            columns: Axis::with_sizes(
-                col_default,
-                sheet.columns.sizes.iter().map(|(&k, &v)| (k, v)),
-            ),
-            rows: Axis::with_sizes(row_default, sheet.rows.sizes.iter().map(|(&k, &v)| (k, v))),
+            columns: Axis::with_sizes(col_default, cols),
+            rows: Axis::with_sizes(row_default, rows),
         }
     }
 }

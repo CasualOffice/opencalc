@@ -460,15 +460,13 @@ function draw() {
     else if (align === "center") { ctx.textAlign = "center"; tx = x + w / 2; }
     else { ctx.textAlign = "left"; tx = x + 5; }
     ctx.fillText(it.t, tx, y);
-    if (it.u) {
-      const uw = Math.min(tw, clipR - clipL - 8);
-      let ux = align === "right" ? tx - uw : align === "center" ? tx - uw / 2 : tx;
+    if (it.u || it.st) {
+      const lw = Math.min(tw, clipR - clipL - 8);
+      const lx = align === "right" ? tx - lw : align === "center" ? tx - lw / 2 : tx;
       ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(ux, y + 7.5);
-      ctx.lineTo(ux + uw, y + 7.5);
-      ctx.stroke();
+      if (it.u) { ctx.beginPath(); ctx.moveTo(lx, y + 7.5); ctx.lineTo(lx + lw, y + 7.5); ctx.stroke(); }
+      if (it.st) { ctx.beginPath(); ctx.moveTo(lx, y); ctx.lineTo(lx + lw, y); ctx.stroke(); }
     }
     ctx.restore();
   }
@@ -608,6 +606,7 @@ function refreshFormulaBar() {
   press("tb-bold", fmt.b);
   press("tb-italic", fmt.i);
   press("tb-underline", fmt.u);
+  press("tb-strike", fmt.st);
   press("tb-wrap", fmt.w);
   for (const b of document.querySelectorAll(".tb-align")) {
     b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
@@ -752,6 +751,7 @@ function formatSel(fn) {
 function toggleBold() { formatSel((s) => wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function toggleItalic() { formatSel((s) => wasm.session_toggle_italic(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function toggleStrike() { formatSel((s) => wasm.session_toggle_strike(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
@@ -1058,6 +1058,13 @@ function cellMenu(x, y) {
   item("Delete row", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
   item("Delete column", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
   sep();
+  item("Hide row", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_hide_rows(state.sheet, r.r0, r.r1)); });
+  item("Hide column", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_hide_cols(state.sheet, r.c0, r.c1)); });
+  item("Unhide rows/cols", false, () => {
+    const r = effectiveRange();
+    tryEdit(() => { wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); });
+  });
+  sep();
   item("Clear contents", false, () => clearSelection());
   positionMenu(menu, x, y);
 }
@@ -1313,6 +1320,7 @@ function wireEvents() {
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
+  document.getElementById("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
   document.getElementById("tb-wrap").addEventListener("click", () => { toggleWrap(); canvas.focus(); });
   document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });

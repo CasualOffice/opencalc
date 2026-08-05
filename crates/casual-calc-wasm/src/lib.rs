@@ -668,17 +668,27 @@ pub fn session_row_px(sheet: usize, first: u32, count: u32) -> String {
 /// per-line pixel sizes, honoring the sheet's overrides and default.
 fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -> String {
     with_session(|s| {
-        let sizing = s
-            .workbook()
-            .sheets
-            .get(sheet)
-            .map(|sh| if columns { &sh.columns } else { &sh.rows });
+        let sh = s.workbook().sheets.get(sheet);
+        let sizing = sh.map(|sh| if columns { &sh.columns } else { &sh.rows });
         let mut out = String::from("[");
         for i in 0..count {
             if i > 0 {
                 out.push(',');
             }
-            let twips = sizing.map_or(fallback, |sz| sz.size(first + i, fallback));
+            let line = first + i;
+            // Hidden lines collapse to 0 px so the editor skips them.
+            let hidden = sh.is_some_and(|sh| {
+                if columns {
+                    sh.hidden_cols.contains(&line)
+                } else {
+                    sh.hidden_rows.contains(&line)
+                }
+            });
+            let twips = if hidden {
+                0
+            } else {
+                sizing.map_or(fallback, |sz| sz.size(line, fallback))
+            };
             out.push_str(&(twips * 96 / 1440).to_string());
         }
         out.push(']');
@@ -907,6 +917,9 @@ pub fn session_cells(
             if style.is_some_and(|s| s.wrap) {
                 extra.push_str(",\"w\":1");
             }
+            if style.is_some_and(|s| s.strike) {
+                extra.push_str(",\"st\":1");
+            }
             if let Some(fname) = style.and_then(|s| s.font_name.as_deref()) {
                 extra.push_str(&format!(",\"fn\":{}", json_string(fname)));
             }
@@ -1124,6 +1137,62 @@ pub fn session_toggle_wrap(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.wrap = target)
 }
 
+/// Toggle strikethrough across a range (one undo step).
+#[wasm_bindgen]
+pub fn session_toggle_strike(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.strike);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.strike = target)
+}
+
+/// Hide rows `r0..=r1` on a sheet.
+#[wasm_bindgen]
+pub fn session_hide_rows(sheet: usize, r0: u32, r1: u32) -> Result<(), JsError> {
+    hidden_edit(sheet, r0, r1, false, true)
+}
+/// Hide columns `c0..=c1` on a sheet.
+#[wasm_bindgen]
+pub fn session_hide_cols(sheet: usize, c0: u32, c1: u32) -> Result<(), JsError> {
+    hidden_edit(sheet, c0, c1, true, true)
+}
+/// Unhide any hidden rows in `r0..=r1`.
+#[wasm_bindgen]
+pub fn session_unhide_rows(sheet: usize, r0: u32, r1: u32) -> Result<(), JsError> {
+    hidden_edit(sheet, r0, r1, false, false)
+}
+/// Unhide any hidden columns in `c0..=c1`.
+#[wasm_bindgen]
+pub fn session_unhide_cols(sheet: usize, c0: u32, c1: u32) -> Result<(), JsError> {
+    hidden_edit(sheet, c0, c1, true, false)
+}
+
+fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            let set = if columns {
+                &mut sh.hidden_cols
+            } else {
+                &mut sh.hidden_rows
+            };
+            for i in a..=b {
+                if hide {
+                    set.insert(i);
+                } else {
+                    set.remove(&i);
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Set (or clear, with empty hex) the font color across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_set_font_color(
@@ -1196,6 +1265,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
         }
         if st.underline {
             parts.push("\"u\":1".to_owned());
+        }
+        if st.strike {
+            parts.push("\"st\":1".to_owned());
         }
         if st.wrap {
             parts.push("\"w\":1".to_owned());
