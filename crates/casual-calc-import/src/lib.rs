@@ -24,7 +24,8 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellValue, DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
+    Cell, CellRange, CellValue, DataValidation, DefinedName, ErrorValue, Id, IdGenerator, Sheet,
+    SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -162,6 +163,31 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             sheet.outline = outline;
         }
         sheet.tab_color = worksheet.tab_color;
+
+        // Data-validation dropdown lists: only an inline quoted CSV in formula1
+        // is modeled (a range-reference list is left for later).
+        for (sqref, formula1) in worksheet.validations {
+            let trimmed = formula1.trim();
+            if !(trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"')) {
+                continue;
+            }
+            let values: Vec<String> = trimmed[1..trimmed.len() - 1]
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if values.is_empty() {
+                continue;
+            }
+            let Some(first) = sqref.split_whitespace().next() else {
+                continue;
+            };
+            let range =
+                parse_range(first).or_else(|| parse_a1(first).map(|c| CellRange::new(c, c)));
+            if let Some(range) = range {
+                sheet.validations.push(DataValidation { range, values });
+            }
+        }
 
         workbook.sheets.push(sheet);
     }

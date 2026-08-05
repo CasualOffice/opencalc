@@ -20,8 +20,8 @@ use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, HAlign, Id, Sheet, SheetId, Style,
-    StyleId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, DataValidation, HAlign, Id, Sheet,
+    SheetId, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -471,6 +471,87 @@ pub fn session_set_tab_color(sheet: usize, hex: &str) -> Result<(), JsError> {
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
             sh.tab_color = color;
+        }
+        Ok(())
+    })
+}
+
+/// Add a dropdown-list data-validation rule over a range. Any existing rule
+/// intersecting the range is dropped first so a cell has at most one list.
+#[wasm_bindgen]
+pub fn session_set_list_validation(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    values: Vec<String>,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+            sh.validations.retain(|v| {
+                !(v.range.start.row <= rr1
+                    && v.range.end.row >= rr0
+                    && v.range.start.col <= cc1
+                    && v.range.end.col >= cc0)
+            });
+            let clean: Vec<String> = values
+                .into_iter()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !clean.is_empty() {
+                sh.validations.push(DataValidation {
+                    range: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+                    values: clean,
+                });
+            }
+        }
+        Ok(())
+    })
+}
+
+/// The dropdown values for the validation covering `(row, col)` as a JSON array,
+/// or `null` if the cell has no list validation.
+#[wasm_bindgen]
+pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "null".to_owned();
+        };
+        match sh.validations.iter().find(|v| v.covers(row, col)) {
+            Some(v) => {
+                let items: Vec<String> = v.values.iter().map(|x| json_string(x)).collect();
+                format!("[{}]", items.join(","))
+            }
+            None => "null".to_owned(),
+        }
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Remove any validation intersecting a range.
+#[wasm_bindgen]
+pub fn session_clear_validation(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.validations.retain(|v| {
+                !(v.range.start.row <= r1
+                    && v.range.end.row >= r0
+                    && v.range.start.col <= c1
+                    && v.range.end.col >= c0)
+            });
         }
         Ok(())
     })

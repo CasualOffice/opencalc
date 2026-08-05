@@ -148,6 +148,30 @@ pub struct Sheet {
     /// Tab color as an `RRGGBB` hex string (no `#`), if the tab is colored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
+    /// Data-validation rules (currently in-cell dropdown lists).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validations: Vec<DataValidation>,
+}
+
+/// A data-validation rule over a range. Only the explicit-list dropdown kind is
+/// modeled today (`<dataValidation type="list">` with an inline value list).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataValidation {
+    /// The range the rule applies to.
+    pub range: CellRange,
+    /// The allowed values shown in the dropdown.
+    pub values: Vec<String>,
+}
+
+impl DataValidation {
+    /// Whether this rule's range covers `(row, col)`.
+    pub fn covers(&self, row: u32, col: u32) -> bool {
+        row >= self.range.start.row
+            && row <= self.range.end.row
+            && col >= self.range.start.col
+            && col <= self.range.end.col
+    }
 }
 
 impl Sheet {
@@ -169,6 +193,7 @@ impl Sheet {
             collapsed_cols: BTreeSet::new(),
             outline: OutlinePr::default(),
             tab_color: None,
+            validations: Vec::new(),
         }
     }
 }

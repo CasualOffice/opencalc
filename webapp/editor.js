@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "11";
+const BUILD = "12";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -28,6 +28,7 @@ const state = {
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
+let validationChevron = null; // {x,y,w,h,values} of the active cell's list-dropdown button
 let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
 
@@ -690,6 +691,28 @@ function draw() {
       fillHandleRect = { x: hx, y: hy };
     }
   }
+
+  // Data-validation dropdown button on the active cell (if it has a list rule).
+  validationChevron = null;
+  if (wasm && state.selKind === "cells" && !state.fill) {
+    let vals = null;
+    try { const vj = wasm.session_validation_at(state.sheet, state.sel.row, state.sel.col); if (vj !== "null") vals = JSON.parse(vj); } catch {}
+    const cx = colXAt(state.sel.col), cy = rowYAt(state.sel.row);
+    if (vals && cx !== undefined && cy !== undefined) {
+      const cw = colWAt(state.sel.col), ch = rowHAt(state.sel.row);
+      const bw = 17, bx = cx + cw, by = cy;
+      withQuad(state.sel.row, state.sel.col, () => {
+        ctx.fillStyle = colors.accent;
+        ctx.fillRect(bx, by, bw, ch);
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.6; ctx.lineJoin = "round";
+        const mx = bx + bw / 2, my = by + ch / 2;
+        ctx.beginPath();
+        ctx.moveTo(mx - 4, my - 2); ctx.lineTo(mx, my + 2.5); ctx.lineTo(mx + 4, my - 2);
+        ctx.stroke();
+      });
+      validationChevron = { x: bx, y: by, w: bw, h: ch, values: vals };
+    }
+  }
   ctx.restore(); // end body clip
 
   // Freeze divider lines (a touch darker than gridlines).
@@ -1210,6 +1233,72 @@ function openFilterMenu(x, y) {
 
   positionMenu(menu, x, y);
 }
+// --- Data validation (dropdown lists) -------------------------------------
+// Open the value picker for the active cell's list validation.
+function openValidationMenu() {
+  if (!validationChevron) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = rect.left + validationChevron.x;
+  const y = rect.top + validationChevron.y + validationChevron.h;
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu dv-menu";
+  menu.id = "sheet-ctx";
+  validationChevron.values.forEach((val) => {
+    const b = document.createElement("button");
+    b.textContent = val;
+    b.addEventListener("click", () => {
+      closeSheetMenu();
+      try { wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, val); }
+      catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    });
+    menu.appendChild(b);
+  });
+  positionMenu(menu, x, y);
+}
+
+// Define (or edit) a dropdown-list validation over the selection.
+function openSetValidationMenu(x, y) {
+  closeSheetMenu();
+  const s = effectiveRange();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu dv-set";
+  menu.id = "sheet-ctx";
+  menu.addEventListener("click", (e) => e.stopPropagation());
+  const lbl = document.createElement("div");
+  lbl.className = "menu-label";
+  lbl.textContent = "Dropdown list — comma-separated";
+  menu.appendChild(lbl);
+  const inp = document.createElement("input");
+  inp.className = "dv-input";
+  inp.placeholder = "Yes, No, Maybe";
+  inp.spellcheck = false;
+  try { const vj = wasm.session_validation_at(state.sheet, s.r0, s.c0); if (vj !== "null") inp.value = JSON.parse(vj).join(", "); } catch {}
+  menu.appendChild(inp);
+  const foot = document.createElement("div");
+  foot.className = "filter-foot";
+  const clr = document.createElement("button");
+  clr.className = "filter-clear";
+  clr.textContent = "Remove";
+  clr.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_clear_validation(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {} draw(); });
+  const apply = document.createElement("button");
+  apply.className = "filter-apply";
+  apply.textContent = "Apply";
+  apply.addEventListener("click", () => {
+    const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
+    closeSheetMenu();
+    try { wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+  });
+  foot.appendChild(clr); foot.appendChild(apply);
+  menu.appendChild(foot);
+  positionMenu(menu, x, y);
+  setTimeout(() => inp.focus(), 0);
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") apply.click(); e.stopPropagation(); });
+}
+
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1747,6 +1836,8 @@ function cellMenu(x, y) {
   sep();
   item("Clear contents", false, () => clearSelection());
   item("Clear all (incl. formats)", false, () => clearAll());
+  sep();
+  item("Data validation (list)…", false, () => openSetValidationMenu(x, y));
   positionMenu(menu, x, y);
 }
 
@@ -1795,6 +1886,13 @@ function wireEvents() {
         insertRef(A1(hit.row, hit.col));
         hideAutocomplete();
         return;
+      }
+    }
+    // The active cell's data-validation dropdown button.
+    if (validationChevron) {
+      const c = validationChevron;
+      if (px >= c.x && px <= c.x + c.w && py >= c.y && py <= c.y + c.h) {
+        openValidationMenu(); canvas.focus(); return;
       }
     }
     // Any other click while editing first commits the in-progress edit (like
@@ -1993,6 +2091,8 @@ function wireEvents() {
   );
   canvas.addEventListener("keydown", async (e) => {
     if (state.editing) return;
+    // Alt+Down opens the active cell's validation dropdown (Excel parity).
+    if (e.altKey && e.key === "ArrowDown" && validationChevron) { openValidationMenu(); e.preventDefault(); return; }
     const mod = e.ctrlKey || e.metaKey;
 
     // Keyboard shortcuts.

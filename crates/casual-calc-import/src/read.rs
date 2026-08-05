@@ -170,6 +170,9 @@ pub struct Worksheet {
     pub zoom: Option<u16>,
     /// Tab color as `RRGGBB` (from `sheetPr/tabColor/@rgb`), if any.
     pub tab_color: Option<String>,
+    /// List data-validations as `(sqref, formula1)`, where `formula1` is the
+    /// raw inline list text (e.g. `"a,b,c"`) or a range reference (skipped).
+    pub validations: Vec<(String, String)>,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -295,6 +298,9 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
     let mut in_formula = false;
     let mut in_inline = false;
     let mut in_inline_text = false;
+    // Active `<dataValidation>` being parsed: (sqref, accumulated formula1).
+    let mut dv: Option<(String, String)> = None;
+    let mut in_dv_formula1 = false;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -330,6 +336,14 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result)?,
+                    b"dataValidation" => {
+                        // Only explicit-list dropdowns are modeled.
+                        if read_attr(&e, b"type")?.as_deref() == Some("list") {
+                            let sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
+                            dv = Some((sqref, String::new()));
+                        }
+                    }
+                    b"formula1" if dv.is_some() => in_dv_formula1 = true,
                     _ => {}
                 }
             }
@@ -365,7 +379,9 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                 }
             }
             Event::Text(e) => {
-                if let Some(cell) = current.as_mut() {
+                if in_dv_formula1 && let Some((_, f1)) = dv.as_mut() {
+                    f1.push_str(&e.unescape().map_err(xml_err)?);
+                } else if let Some(cell) = current.as_mut() {
                     if in_value {
                         cell.value
                             .get_or_insert_with(String::new)
@@ -386,6 +402,12 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                 match e.local_name().as_ref() {
                     b"v" => in_value = false,
                     b"f" => in_formula = false,
+                    b"formula1" => in_dv_formula1 = false,
+                    b"dataValidation" => {
+                        if let Some((sqref, f1)) = dv.take() {
+                            result.validations.push((sqref, f1));
+                        }
+                    }
                     b"t" if in_inline => in_inline_text = false,
                     b"is" => in_inline = false,
                     b"c" => {

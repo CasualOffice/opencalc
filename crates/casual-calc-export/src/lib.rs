@@ -652,6 +652,24 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         s.push_str("</mergeCells>");
     }
 
+    // Data validations (dropdown lists) follow mergeCells in the CT_Worksheet
+    // sequence. A list's allowed values are an inline quoted CSV in <formula1>.
+    if !sheet.validations.is_empty() {
+        s.push_str(&format!(
+            "<dataValidations count=\"{}\">",
+            sheet.validations.len()
+        ));
+        for v in &sheet.validations {
+            let list = v.values.join(",");
+            s.push_str(&format!(
+                "<dataValidation type=\"list\" allowBlank=\"1\" showInputMessage=\"1\" showErrorMessage=\"1\" sqref=\"{}\"><formula1>{}</formula1></dataValidation>",
+                range_a1(&v.range),
+                escape_text(&format!("\"{list}\""))
+            ));
+        }
+        s.push_str("</dataValidations>");
+    }
+
     s.push_str("</worksheet>");
     s
 }

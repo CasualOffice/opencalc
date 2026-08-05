@@ -190,3 +190,20 @@ fn indent_round_trips() {
     assert_eq!(style.indent, 3);
     assert_eq!(style.align, Some(HAlign::Left));
 }
+
+#[test]
+fn data_validation_list_round_trips() {
+    use casual_calc_model::{CellRange, CellRef, DataValidation};
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].validations.push(DataValidation {
+        range: CellRange::new(CellRef::new(0, 0), CellRef::new(4, 0)),
+        values: vec!["Yes".to_owned(), "No".to_owned(), "Maybe".to_owned()],
+    });
+    let written = write_workbook(&workbook).unwrap();
+    let wb = import_package(written).unwrap().workbook;
+    let v = &wb.sheets[0].validations;
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].values, vec!["Yes", "No", "Maybe"]);
+    assert_eq!(v[0].range.start, CellRef::new(0, 0));
+    assert_eq!(v[0].range.end, CellRef::new(4, 0));
+}

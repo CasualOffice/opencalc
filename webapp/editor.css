@@ -183,6 +183,11 @@
 .filter-foot button { padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); }
 .filter-clear { background: var(--bg); color: var(--muted); }
 .filter-apply { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Data-validation dropdown + editor. */
+.dv-menu { max-height: 280px; overflow-y: auto; min-width: 120px; }
+.dv-set { min-width: 240px; padding: 8px; }
+.dv-input { width: 100%; margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 13px; }
+.dv-input:focus { outline: none; border-color: var(--accent); }
 /* Formula function autocomplete. */
 .ac-menu {
   position: absolute; z-index: 40; min-width: 260px; max-width: 360px;
