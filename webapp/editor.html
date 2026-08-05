@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc — editor demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./editor.css?v=5" />
+    <link rel="stylesheet" href="./editor.css?v=6" />
   </head>
   <body class="editor-body">
     <header class="app-header">
@@ -232,6 +232,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
         </button>
       </div>
+      <div class="tb-group">
+        <button id="tb-dv" class="tb-btn" title="Data validation" aria-label="Data validation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l3 3 5-6"/></svg>
+        </button>
+        <button id="tb-cf" class="tb-btn" title="Conditional formatting" aria-label="Conditional formatting">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 2.5 6 9a8 8 0 1 0 12 0z"/><line x1="4.5" y1="15.5" x2="19.5" y2="15.5"/></svg>
+        </button>
+        <button id="tb-note" class="tb-btn" title="Insert / edit note" aria-label="Insert or edit note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/></svg>
+        </button>
+      </div>
     </div>
 
     <div class="formula-bar">
@@ -240,6 +251,7 @@
       <input id="formula-input" type="text" spellcheck="false" placeholder="value or =formula" />
     </div>
 
+    <div class="work-area">
     <div class="grid-wrap" id="grid-wrap">
       <div class="find-bar" id="find-bar" hidden>
         <input id="find-input" class="find-field" placeholder="Find" spellcheck="false" />
@@ -266,11 +278,22 @@
       <div class="scrollbar hscroll" id="hscroll"><div class="thumb" id="hthumb"></div></div>
     </div>
 
+    <aside class="side-panel" id="side-panel" hidden aria-label="Tool panel">
+      <div class="side-panel-head">
+        <span class="side-panel-title" id="side-panel-title">Panel</span>
+        <button class="side-panel-close" id="side-panel-close" title="Close (Esc)" aria-label="Close panel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="side-panel-body" id="side-panel-body"></div>
+    </aside>
+    </div>
+
     <div class="bottom-bar">
       <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
-    <script type="module" src="./editor.js?v=3"></script>
+    <script type="module" src="./editor.js?v=4"></script>
   </body>
 </html>

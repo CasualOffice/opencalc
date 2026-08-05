@@ -800,6 +800,7 @@ function draw() {
   updateScrollbars(v);
   updateStats();
   if (wasm) refreshFormulaBar();
+  if (wasm && activePanel) refreshPanel();
 }
 
 // Show Sum/Avg/Count of the selection (only for a multi-cell selection), like
@@ -1281,141 +1282,193 @@ function openValidationMenu() {
   positionMenu(menu, x, y);
 }
 
-// Define (or edit) a dropdown-list validation over the selection.
-function openSetValidationMenu(x, y) {
-  closeSheetMenu();
-  const s = effectiveRange();
-  const menu = document.createElement("div");
-  menu.className = "popmenu ctx-menu dv-set";
-  menu.id = "sheet-ctx";
-  menu.addEventListener("click", (e) => e.stopPropagation());
-  const lbl = document.createElement("div");
-  lbl.className = "menu-label";
-  lbl.textContent = "Dropdown list — comma-separated";
-  menu.appendChild(lbl);
-  const inp = document.createElement("input");
-  inp.className = "dv-input";
-  inp.placeholder = "Yes, No, Maybe";
-  inp.spellcheck = false;
-  try { const vj = wasm.session_validation_at(state.sheet, s.r0, s.c0); if (vj !== "null") inp.value = JSON.parse(vj).join(", "); } catch {}
-  menu.appendChild(inp);
-  const foot = document.createElement("div");
-  foot.className = "filter-foot";
-  const clr = document.createElement("button");
-  clr.className = "filter-clear";
-  clr.textContent = "Remove";
-  clr.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_clear_validation(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {} draw(); });
-  const apply = document.createElement("button");
-  apply.className = "filter-apply";
-  apply.textContent = "Apply";
-  apply.addEventListener("click", () => {
-    const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
-    closeSheetMenu();
-    try { wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals); }
-    catch (e) { status.textContent = `error: ${e}`; }
-    draw();
-  });
-  foot.appendChild(clr); foot.appendChild(apply);
-  menu.appendChild(foot);
-  positionMenu(menu, x, y);
-  setTimeout(() => inp.focus(), 0);
-  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") apply.click(); e.stopPropagation(); });
+// --- Tool side panel (data validation / conditional formatting / notes) ---
+// One right-docked panel, tool-switched. It stays open while you keep selecting
+// cells; the "Apply to range" readout tracks the live selection, and Apply acts
+// on whatever is selected at click time.
+let activePanel = null;        // 'dv' | 'cf' | 'note' | null
+let panelRangeEls = [];        // range readouts to keep in sync on selection change
+let panelNote = null;          // { ta, addrEl, cell } while the note panel is open
+
+const A1range = (s) =>
+  (s.r0 === s.r1 && s.c0 === s.c1) ? A1(s.r0, s.c0) : `${A1(s.r0, s.c0)}:${A1(s.r1, s.c1)}`;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function panelLabel(body, text) { body.appendChild(el("div", "panel-section-label", text)); }
+function panelRangeReadout(body) {
+  panelLabel(body, "Apply to range");
+  const r = el("div", "panel-range", A1range(effectiveRange()));
+  body.appendChild(r);
+  panelRangeEls.push(r);
+}
+function panelActions(body, primaryText, onPrimary, ghostText, onGhost) {
+  const row = el("div", "panel-actions");
+  const ghost = el("button", "panel-btn-ghost", ghostText);
+  ghost.addEventListener("click", onGhost);
+  const primary = el("button", "panel-btn-primary", primaryText);
+  primary.addEventListener("click", onPrimary);
+  row.appendChild(ghost);
+  row.appendChild(primary);
+  body.appendChild(row);
+  return primary;
 }
 
-// --- Conditional formatting (highlight-cells rules) -----------------------
-function openConditionalFormatMenu(x, y) {
-  closeSheetMenu();
-  const s = effectiveRange();
-  const menu = document.createElement("div");
-  menu.className = "popmenu ctx-menu cf-set";
-  menu.id = "sheet-ctx";
-  menu.addEventListener("click", (e) => e.stopPropagation());
-  const lbl = document.createElement("div");
-  lbl.className = "menu-label";
-  lbl.textContent = "Highlight cells where the value…";
-  menu.appendChild(lbl);
-  const row = document.createElement("div");
-  row.className = "cf-row";
-  const op = document.createElement("select");
-  op.className = "cf-op";
+function openPanel(tool) {
+  const panel = document.getElementById("side-panel");
+  activePanel = tool;
+  panelRangeEls = [];
+  panelNote = null;
+  document.getElementById("side-panel-title").textContent =
+    tool === "dv" ? "Data validation" : tool === "cf" ? "Conditional formatting" : "Note";
+  const body = document.getElementById("side-panel-body");
+  body.textContent = "";
+  if (tool === "dv") buildDvPanel(body);
+  else if (tool === "cf") buildCfPanel(body);
+  else buildNotePanel(body);
+  panel.hidden = false;
+  resize(); // the grid narrows — refit the canvas to its new width
+}
+
+function closePanel() {
+  const panel = document.getElementById("side-panel");
+  if (panel.hidden) return;
+  panel.hidden = true;
+  activePanel = null;
+  panelRangeEls = [];
+  panelNote = null;
+  resize();
+  canvas.focus();
+}
+
+// Toggle a tool: clicking its button again (or a different tool) re-targets.
+function togglePanel(tool) {
+  if (activePanel === tool) closePanel();
+  else openPanel(tool);
+}
+
+// Keep the panel in step with the selection (called from draw()).
+function refreshPanel() {
+  if (activePanel === "dv" || activePanel === "cf") {
+    const t = A1range(effectiveRange());
+    for (const r of panelRangeEls) r.textContent = t;
+  } else if (activePanel === "note" && panelNote) {
+    const addr = A1(state.sel.row, state.sel.col);
+    if (addr !== panelNote.cell) {
+      panelNote.cell = addr;
+      panelNote.addrEl.textContent = addr;
+      try { panelNote.ta.value = wasm.session_comment_at(state.sheet, state.sel.row, state.sel.col); } catch {}
+    }
+  }
+}
+
+function buildDvPanel(body) {
+  panelRangeReadout(body);
+  panelLabel(body, "Dropdown values");
+  const inp = el("input", "panel-field");
+  inp.placeholder = "Yes, No, Maybe";
+  inp.spellcheck = false;
+  const s0 = effectiveRange();
+  try { const vj = wasm.session_validation_at(state.sheet, s0.r0, s0.c0); if (vj !== "null") inp.value = JSON.parse(vj).join(", "); } catch {}
+  body.appendChild(inp);
+  body.appendChild(el("div", "panel-hint", "Comma-separated. Cells in the range show a dropdown to pick from these values."));
+  const apply = panelActions(
+    body,
+    "Apply",
+    () => {
+      const s = effectiveRange();
+      const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
+      try { wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals); }
+      catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    },
+    "Remove",
+    () => {
+      const s = effectiveRange();
+      try { wasm.session_clear_validation(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+      draw();
+    }
+  );
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") apply.click(); });
+  setTimeout(() => inp.focus(), 0);
+}
+
+function buildCfPanel(body) {
+  panelRangeReadout(body);
+  panelLabel(body, "Highlight cells where the value…");
+  const op = el("select", "panel-select");
   [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"], ["contains", "text contains"]]
-    .forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; op.appendChild(o); });
-  const a = document.createElement("input");
-  a.className = "cf-a"; a.placeholder = "value"; a.spellcheck = false;
-  const b = document.createElement("input");
-  b.className = "cf-b"; b.placeholder = "and"; b.spellcheck = false; b.style.display = "none";
+    .forEach(([v, t]) => { const o = el("option", null, t); o.value = v; op.appendChild(o); });
+  body.appendChild(op);
+  const a = el("input", "panel-field"); a.placeholder = "value"; a.spellcheck = false;
+  const b = el("input", "panel-field"); b.placeholder = "and"; b.spellcheck = false; b.style.display = "none";
+  body.appendChild(a); body.appendChild(b);
   op.addEventListener("change", () => {
     b.style.display = op.value === "between" ? "" : "none";
     a.placeholder = op.value === "contains" ? "text" : "value";
   });
-  row.appendChild(op); row.appendChild(a); row.appendChild(b);
-  menu.appendChild(row);
-  const strip = document.createElement("div");
-  strip.className = "swatch-row";
+  panelLabel(body, "Fill color");
+  const strip = el("div", "panel-swatches");
   let fill = "ffd166";
   ["ffd166", "d1f0d6", "ffd6e0", "d6e4ff", "fed7aa", "e9d5ff", "fca5a5", "a7f3d0"].forEach((hx, i) => {
-    const sw = document.createElement("button");
-    sw.className = "swatch" + (i === 0 ? " on" : "");
+    const sw = el("button", "swatch" + (i === 0 ? " on" : ""));
     sw.style.background = "#" + hx;
-    sw.addEventListener("click", (e) => { e.stopPropagation(); fill = hx; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); sw.classList.add("on"); });
+    sw.title = "#" + hx;
+    sw.addEventListener("click", () => { fill = hx; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); sw.classList.add("on"); });
     strip.appendChild(sw);
   });
-  menu.appendChild(strip);
-  const foot = document.createElement("div");
-  foot.className = "filter-foot";
-  const clr = document.createElement("button");
-  clr.className = "filter-clear"; clr.textContent = "Clear";
-  clr.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {} draw(); });
-  const apply = document.createElement("button");
-  apply.className = "filter-apply"; apply.textContent = "Apply";
-  apply.addEventListener("click", () => {
-    const kind = op.value;
-    const av = parseFloat(a.value) || 0, bv = parseFloat(b.value) || 0;
-    const txt = kind === "contains" ? a.value : "";
-    closeSheetMenu();
-    try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, av, bv, txt, fill); }
-    catch (e) { status.textContent = `error: ${e}`; }
-    draw();
-  });
-  foot.appendChild(clr); foot.appendChild(apply);
-  menu.appendChild(foot);
-  positionMenu(menu, x, y);
+  body.appendChild(strip);
+  panelActions(
+    body,
+    "Apply",
+    () => {
+      const s = effectiveRange();
+      const kind = op.value;
+      const av = parseFloat(a.value) || 0, bv = parseFloat(b.value) || 0;
+      const txt = kind === "contains" ? a.value : "";
+      try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, av, bv, txt, fill); }
+      catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    },
+    "Clear",
+    () => {
+      const s = effectiveRange();
+      try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+      draw();
+    }
+  );
   setTimeout(() => a.focus(), 0);
 }
 
-// --- Cell comments --------------------------------------------------------
-function openCommentEditor(x, y) {
-  closeSheetMenu();
-  const menu = document.createElement("div");
-  menu.className = "popmenu ctx-menu cmt-set";
-  menu.id = "sheet-ctx";
-  menu.addEventListener("click", (e) => e.stopPropagation());
-  const lbl = document.createElement("div");
-  lbl.className = "menu-label";
-  lbl.textContent = `Note on ${A1(state.sel.row, state.sel.col)}`;
-  menu.appendChild(lbl);
-  const ta = document.createElement("textarea");
-  ta.className = "cmt-input";
-  ta.rows = 3;
-  ta.spellcheck = false;
+function buildNotePanel(body) {
+  panelLabel(body, "Note on cell");
+  const addrEl = el("div", "panel-range", A1(state.sel.row, state.sel.col));
+  body.appendChild(addrEl);
+  const ta = el("textarea", "panel-field");
+  ta.rows = 4; ta.spellcheck = false; ta.placeholder = "Type a note…";
   try { ta.value = wasm.session_comment_at(state.sheet, state.sel.row, state.sel.col); } catch {}
-  menu.appendChild(ta);
-  const foot = document.createElement("div");
-  foot.className = "filter-foot";
-  const del = document.createElement("button");
-  del.className = "filter-clear"; del.textContent = "Delete";
-  del.addEventListener("click", () => { closeSheetMenu(); try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ""); } catch {} draw(); });
-  const save = document.createElement("button");
-  save.className = "filter-apply"; save.textContent = "Save";
-  save.addEventListener("click", () => {
-    closeSheetMenu();
-    try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ta.value); }
-    catch (e) { status.textContent = `error: ${e}`; }
-    draw();
-  });
-  foot.appendChild(del); foot.appendChild(save);
-  menu.appendChild(foot);
-  positionMenu(menu, x, y);
+  body.appendChild(ta);
+  body.appendChild(el("div", "panel-hint", "Notes attach to the active cell. Select another cell to edit its note."));
+  panelNote = { ta, addrEl, cell: A1(state.sel.row, state.sel.col) };
+  panelActions(
+    body,
+    "Save",
+    () => {
+      try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ta.value); }
+      catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    },
+    "Delete",
+    () => {
+      try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ""); } catch {}
+      ta.value = "";
+      draw();
+    }
+  );
   setTimeout(() => ta.focus(), 0);
 }
 
@@ -1981,48 +2034,85 @@ function tryEdit(fn) {
 }
 
 // Right-click menu on a cell: clipboard + structural row/column edits.
+// Trimmed right-click menu: fast verbs only. Multi-option groups (Paste
+// special, Insert, Delete, Hide, Clear, Sort) fold into submenus so the menu
+// stays short; the heavier editors (validation / conditional format / notes)
+// live in the side panel, reached from the toolbar.
 function cellMenu(x, y) {
   closeSheetMenu();
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu";
   menu.id = "sheet-ctx";
-  const sep = () => { const d = document.createElement("div"); d.className = "menu-sep"; menu.appendChild(d); };
+  const hideSubs = () => menu.querySelectorAll(".ctx-submenu").forEach((s) => (s.hidden = true));
+  const sep = () => menu.appendChild(el("div", "menu-sep"));
   const item = (label, danger, fn) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    if (danger) b.className = "danger";
+    const b = el("button", danger ? "danger" : null, label);
+    b.addEventListener("mouseenter", hideSubs);
     b.addEventListener("click", () => { closeSheetMenu(); fn(); });
     menu.appendChild(b);
   };
+  // A submenu row (label + ›); its child popmenu is nested so it is removed
+  // with the parent, and fixed-positioned to the parent row's right edge.
+  const submenu = (label, entries) => {
+    const b = el("button", "has-sub", label);
+    b.setAttribute("aria-haspopup", "true");
+    const sub = el("div", "popmenu ctx-submenu");
+    sub.hidden = true;
+    for (const [lbl, danger, fn] of entries) {
+      const c = el("button", danger ? "danger" : null, lbl);
+      c.addEventListener("click", (e) => { e.stopPropagation(); closeSheetMenu(); fn(); });
+      sub.appendChild(c);
+    }
+    const openSub = () => {
+      hideSubs();
+      sub.hidden = false;
+      const r = b.getBoundingClientRect();
+      const sw = sub.offsetWidth, sh = sub.offsetHeight;
+      let left = r.right - 2;
+      if (left + sw > window.innerWidth - 4) left = Math.max(4, r.left - sw + 2);
+      let top = r.top - 4;
+      if (top + sh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - 4 - sh);
+      sub.style.left = left + "px";
+      sub.style.top = top + "px";
+    };
+    b.addEventListener("mouseenter", openSub);
+    b.addEventListener("click", (e) => { e.stopPropagation(); sub.hidden ? openSub() : (sub.hidden = true); });
+    menu.appendChild(b);
+    menu.appendChild(sub);
+  };
+  const span = () => { const r = effectiveRange(); return { r, rows: r.r1 - r.r0 + 1, cols: r.c1 - r.c0 + 1 }; };
+
   item("Cut", false, () => doCut());
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
-  item("Paste values only", false, () => doPasteMode("values"));
-  item("Paste formats only", false, () => doPasteMode("formats"));
+  submenu("Paste special", [
+    ["Values only", false, () => doPasteMode("values")],
+    ["Formats only", false, () => doPasteMode("formats")],
+  ]);
   sep();
-  item(`Sort ${colName(state.sel.col)} A → Z`, false, () => sortRange(false));
-  item(`Sort ${colName(state.sel.col)} Z → A`, false, () => sortRange(true));
+  submenu("Insert", [
+    ["Row above", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, rows)); }],
+    ["Column left", false, () => { const { r, cols } = span(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, cols)); }],
+  ]);
+  submenu("Delete", [
+    ["Row", true, () => { const { r, rows } = span(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, rows)); }],
+    ["Column", true, () => { const { r, cols } = span(); tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, cols)); }],
+  ]);
+  submenu("Hide", [
+    ["Row", false, () => { const { r } = span(); tryEdit(() => wasm.session_hide_rows(state.sheet, r.r0, r.r1)); }],
+    ["Column", false, () => { const { r } = span(); tryEdit(() => wasm.session_hide_cols(state.sheet, r.c0, r.c1)); }],
+    ["Unhide rows/cols", false, () => { const { r } = span(); tryEdit(() => { wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); }); }],
+  ]);
   sep();
-  item("Insert row above", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
-  item("Insert column left", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
-  sep();
-  item("Delete row", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1)); });
-  item("Delete column", true, () => { const r = effectiveRange(); tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1)); });
-  sep();
-  item("Hide row", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_hide_rows(state.sheet, r.r0, r.r1)); });
-  item("Hide column", false, () => { const r = effectiveRange(); tryEdit(() => wasm.session_hide_cols(state.sheet, r.c0, r.c1)); });
-  item("Unhide rows/cols", false, () => {
-    const r = effectiveRange();
-    tryEdit(() => { wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); });
-  });
-  sep();
-  item("Clear contents", false, () => clearSelection());
-  item("Clear formats", false, () => clearFormats());
-  item("Clear all (incl. formats)", false, () => clearAll());
-  sep();
-  item("Data validation (list)…", false, () => openSetValidationMenu(x, y));
-  item("Conditional format…", false, () => openConditionalFormatMenu(x, y));
-  item("Insert / edit note…", false, () => openCommentEditor(x, y));
+  submenu("Clear", [
+    ["Contents", false, () => clearSelection()],
+    ["Formats", false, () => clearFormats()],
+    ["All (incl. formats)", true, () => clearAll()],
+  ]);
+  submenu("Sort", [
+    [`${colName(state.sel.col)} A → Z`, false, () => sortRange(false)],
+    [`${colName(state.sel.col)} Z → A`, false, () => sortRange(true)],
+  ]);
   positionMenu(menu, x, y);
 }
 
@@ -2346,10 +2436,8 @@ function wireEvents() {
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
       case "F2": {
-        if (e.shiftKey) {
-          const rct = canvas.getBoundingClientRect();
-          openCommentEditor(rct.left + (colXAt(state.sel.col) ?? HW) + 20, rct.top + (rowYAt(state.sel.row) ?? HH) + 12);
-        } else startInline();
+        if (e.shiftKey) openPanel("note"); // Shift+F2 → note (Excel parity)
+        else startInline();
         e.preventDefault(); break;
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
@@ -2443,6 +2531,11 @@ function wireEvents() {
     const r = e.currentTarget.getBoundingClientRect();
     openFilterMenu(r.left, r.bottom + 4);
   });
+  // Tool side panel: toolbar buttons toggle it; the header ✕ and Esc close it.
+  document.getElementById("tb-dv").addEventListener("click", () => togglePanel("dv"));
+  document.getElementById("tb-cf").addEventListener("click", () => togglePanel("cf"));
+  document.getElementById("tb-note").addEventListener("click", () => togglePanel("note"));
+  document.getElementById("side-panel-close").addEventListener("click", () => closePanel());
 
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
@@ -2479,6 +2572,12 @@ function wireEvents() {
   document.getElementById("tb-redo").addEventListener("click", doRedo);
 
   window.addEventListener("resize", resize);
+  // Esc closes the tool panel (when no context menu is open and not editing).
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && activePanel && !state.editing && !document.getElementById("sheet-ctx")) {
+      closePanel();
+    }
+  });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); draw(); });
 
   wireSettings();
