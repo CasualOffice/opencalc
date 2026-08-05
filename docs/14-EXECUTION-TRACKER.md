@@ -124,7 +124,7 @@ Evaluate the formula ASTs; recompute cached values
 | ID | Workstream | Status | Notes |
 | --- | --- | --- | --- |
 | P2-001 | Evaluator + full recalc (`casual-calc-eval`) | Done | Memoized recursive evaluation with circular detection; arithmetic/comparison/concat, unary, cell + range refs (same/cross-sheet), defined names; functions SUM/AVERAGE/MIN/MAX/COUNT/IF/ABS/ROUND; `recalculate(workbook)` full recalc; deterministic. Nothing depends on `-eval` except (future) host bridges. 7 tests |
-| P2-002 | Incremental dependency graph + dirty propagation | Not started | Range-bucketed edges; <50 ms worst-case ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)) |
+| P2-002 | Incremental dependency graph + dirty propagation | In progress | First increment landed: `casual-calc-eval::recalculate_incremental` builds a per-pass precedent graph (cell + range edges; defined-name users conservatively always-dirty), BFS the changed cells' transitive dependents, and re-evaluates only those (Evaluator dirty-set mode reads clean cells from cache). `casual-calc-sdk::edit` routes value edits here, skips recalc for pure style/geometry edits, and keeps full recalc for structural (ref-shifting) edits and undo/redo. Correctness pinned by differential tests (incremental == full over chains/ranges + 40 pseudo-random edits). **Remaining:** persistent cross-edit graph + range-bucketed edges to hit the <50 ms / 1M-cell worst-case ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)) |
 | P2-003 | Broader function library + oracle diff (LibreOffice Calc) | Not started | Function-by-function fidelity |
 | P2-004 | Volatile functions, spill/dynamic arrays, iterative calc | Not started | — |
 
