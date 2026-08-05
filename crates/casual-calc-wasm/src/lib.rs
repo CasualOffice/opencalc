@@ -1985,10 +1985,24 @@ pub fn session_clip_has() -> bool {
 /// step. The clipboard is consumed on a cut, retained on a copy.
 #[wasm_bindgen]
 pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsError> {
+    session_clip_paste_mode(sheet, row, col, "all")
+}
+
+/// Paste-special: `mode` selects what is reproduced —
+/// `"all"` (value + formula + style, and honors a cut),
+/// `"values"` (the cached value only, keeping the target's formatting),
+/// `"formats"` (the source style only, keeping the target's value).
+/// A cut only takes effect for `"all"` (Excel disables cut with paste-special).
+#[wasm_bindgen]
+pub fn session_clip_paste_mode(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    mode: &str,
+) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        // Build the edit under a short clipboard borrow, then act on the result.
         let (ops, was_cut, empty) = CLIP.with(|cl| {
             let borrow = cl.borrow();
             let Some(clip) = borrow.as_ref() else {
@@ -1996,9 +2010,9 @@ pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsErro
             };
             let dr = row as i64 - clip.r0 as i64;
             let dc = col as i64 - clip.c0 as i64;
+            let cut = clip.cut && mode == "all";
             let mut ops = Vec::new();
-            // A cut clears the source first (values are snapshotted, so order is safe).
-            if clip.cut {
+            if cut {
                 for cc in &clip.cells {
                     ops.push(EditOperation::ClearCell {
                         sheet: clip.sheet,
@@ -2008,18 +2022,32 @@ pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsErro
             }
             for cc in &clip.cells {
                 let at = CellRef::new(row + cc.dr, col + cc.dc);
-                let mut out = cc.cell.clone();
-                if let Some(expr) = &cc.formula {
-                    let shifted = shift_references(expr, dr, dc);
-                    out.formula = Some(session.workbook_mut().store_formula(shifted));
+                match mode {
+                    "values" => ops.push(EditOperation::SetValue {
+                        sheet,
+                        at,
+                        value: cc.cell.value.clone(),
+                    }),
+                    "formats" => ops.push(EditOperation::SetStyle {
+                        sheet,
+                        at,
+                        style: cc.cell.style,
+                    }),
+                    _ => {
+                        let mut out = cc.cell.clone();
+                        if let Some(expr) = &cc.formula {
+                            let shifted = shift_references(expr, dr, dc);
+                            out.formula = Some(session.workbook_mut().store_formula(shifted));
+                        }
+                        ops.push(EditOperation::SetCell {
+                            sheet,
+                            at,
+                            cell: Some(out),
+                        });
+                    }
                 }
-                ops.push(EditOperation::SetCell {
-                    sheet,
-                    at,
-                    cell: Some(out),
-                });
             }
-            (ops, clip.cut, false)
+            (ops, cut, false)
         });
         if empty {
             return Ok(());

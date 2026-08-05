@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "9";
+const BUILD = "10";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1307,6 +1307,15 @@ async function doCopy() {
 async function doCut() {
   status.textContent = (await clipToOS(effectiveRange(), true)) ? "cut" : "cut blocked";
 }
+// Paste-special: reproduce only part of the internal clipboard.
+function doPasteMode(mode) {
+  try {
+    if (!wasm.session_clip_has()) { status.textContent = "clipboard is empty"; return; }
+    wasm.session_clip_paste_mode(state.sheet, state.sel.row, state.sel.col, mode);
+    draw();
+    status.textContent = `pasted ${mode}`;
+  } catch { status.textContent = "paste blocked"; }
+}
 async function doPaste() {
   try {
     let osText = "";
@@ -1702,6 +1711,8 @@ function cellMenu(x, y) {
   item("Cut", false, () => doCut());
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
+  item("Paste values only", false, () => doPasteMode("values"));
+  item("Paste formats only", false, () => doPasteMode("formats"));
   sep();
   item(`Sort ${colName(state.sel.col)} A → Z`, false, () => sortRange(false));
   item(`Sort ${colName(state.sel.col)} Z → A`, false, () => sortRange(true));
@@ -1999,6 +2010,7 @@ function wireEvents() {
       if (k === "s") { doSave(); e.preventDefault(); return; }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
       if (k === "x") { await doCut(); e.preventDefault(); return; }
+      if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }
       if (k === "v") { await doPaste(); e.preventDefault(); return; }
     }
 
