@@ -26,6 +26,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
     ("CEILING", "CEILING(number, significance)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
+    ("COLUMN", "COLUMN([reference])"),
     ("COLUMNS", "COLUMNS(array)"),
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
@@ -81,6 +82,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ROUND", "ROUND(number, num_digits)"),
     ("ROUNDDOWN", "ROUNDDOWN(number, num_digits)"),
     ("ROUNDUP", "ROUNDUP(number, num_digits)"),
+    ("ROW", "ROW([reference])"),
     ("ROWS", "ROWS(array)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
     ("SIGN", "SIGN(number)"),
@@ -212,6 +214,8 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         // --- Shape / text (M6-2) ---
         "ROWS" => eval_dim(ev, sheet, args, true),
         "COLUMNS" => eval_dim(ev, sheet, args, false),
+        "ROW" => eval_row_col(ev, args, true),
+        "COLUMN" => eval_row_col(ev, args, false),
         "TEXTJOIN" => eval_textjoin(ev, sheet, args),
         _ => Value::Error(ErrorValue::Name),
     }
@@ -1710,4 +1714,37 @@ fn ifs_matches(
         i += 2;
     }
     Ok(keep)
+}
+
+/// ROW / COLUMN: the 1-based row/column of a reference (top-left of a range),
+/// or of the calling cell when no argument is given.
+fn eval_row_col(ev: &mut Evaluator<'_>, args: &[Expr], row: bool) -> Value {
+    let index = match args.first() {
+        None => match ev.current_cell() {
+            Some((_, at)) => {
+                if row {
+                    at.row
+                } else {
+                    at.col
+                }
+            }
+            None => return Value::Error(ErrorValue::Value),
+        },
+        Some(Expr::Reference(r)) => {
+            if row {
+                r.row
+            } else {
+                r.col
+            }
+        }
+        Some(Expr::Range(a, _)) => {
+            if row {
+                a.row
+            } else {
+                a.col
+            }
+        }
+        Some(_) => return Value::Error(ErrorValue::Value),
+    };
+    Value::Number((index + 1) as f64)
 }

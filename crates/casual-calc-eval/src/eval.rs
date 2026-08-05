@@ -27,6 +27,10 @@ pub struct Evaluator<'a> {
     memo: HashMap<CellKey, Value>,
     in_progress: HashSet<CellKey>,
     dirty: Option<&'a HashSet<CellKey>>,
+    /// The cell whose formula is currently being evaluated — what `ROW()` /
+    /// `COLUMN()` with no argument report. Saved and restored around each
+    /// formula so a referenced cell's own formula sees its own address.
+    current: Option<(usize, CellRef)>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -37,6 +41,7 @@ impl<'a> Evaluator<'a> {
             memo: HashMap::new(),
             in_progress: HashSet::new(),
             dirty: None,
+            current: None,
         }
     }
 
@@ -48,6 +53,7 @@ impl<'a> Evaluator<'a> {
             memo: HashMap::new(),
             in_progress: HashSet::new(),
             dirty: Some(dirty),
+            current: None,
         }
     }
 
@@ -88,11 +94,23 @@ impl<'a> Evaluator<'a> {
                 return value_from_cell(&cell.value, &self.workbook.strings);
             }
             return match self.workbook.formula(handle) {
-                Some(expr) => self.eval_expr(sheet_index, expr),
+                Some(expr) => {
+                    let previous = self.current;
+                    self.current = Some((sheet_index, at));
+                    let value = self.eval_expr(sheet_index, expr);
+                    self.current = previous;
+                    value
+                }
                 None => Value::Empty,
             };
         }
         value_from_cell(&cell.value, &self.workbook.strings)
+    }
+
+    /// The cell whose formula is currently being evaluated (for `ROW`/`COLUMN`
+    /// with no argument), or `None` at the top level.
+    pub fn current_cell(&self) -> Option<(usize, CellRef)> {
+        self.current
     }
 
     /// Evaluate an expression in the context of `sheet_index`.

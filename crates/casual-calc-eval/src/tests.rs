@@ -812,3 +812,28 @@ fn m6_2_is_family_and_textjoin() {
     assert!(!boo(2) && !boo(6));
     assert_eq!(text_at(&wb, 0, 2), "a-b");
 }
+
+#[test]
+fn row_and_column_functions() {
+    let mut b = Builder::new();
+    b.formula((4, 2), "ROW()"); // C5 → 5
+    b.formula((4, 3), "COLUMN()"); // D5 → 4
+    b.formula((0, 0), "ROW(B10)"); // 10
+    b.formula((1, 0), "COLUMN(B10)"); // 2 (B)
+    b.formula((2, 0), "ROW(D2:D9)"); // 2 (top-left)
+    // A6 sums the value of C5's ROW() cell — C5 must still report its OWN row
+    // (5) while evaluated as A6's precedent, proving current-cell save/restore.
+    b.formula((5, 0), "C5+100"); // 5 + 100 = 105
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let num = |r, c| match value_at(&wb, r, c) {
+        CellValue::Number(n) => n,
+        v => panic!("({r},{c}): {v:?}"),
+    };
+    assert_eq!(num(4, 2), 5.0);
+    assert_eq!(num(4, 3), 4.0);
+    assert_eq!(num(0, 0), 10.0);
+    assert_eq!(num(1, 0), 2.0);
+    assert_eq!(num(2, 0), 2.0);
+    assert_eq!(num(5, 0), 105.0);
+}
