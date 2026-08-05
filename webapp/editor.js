@@ -1080,6 +1080,26 @@ function selectColumn(c, exp) {
   endInline();
   draw();
 }
+// Shift+Space: promote the current selection to its full rows.
+function selectRowsSpan() {
+  const r = selRect();
+  state.selKind = "rows";
+  state.anchor = { row: r.r0, col: 0 };
+  state.sel = { row: r.r1, col: 0 };
+  state.ranges = [];
+  endInline();
+  draw();
+}
+// Ctrl+Space: promote the current selection to its full columns.
+function selectColsSpan() {
+  const r = selRect();
+  state.selKind = "cols";
+  state.anchor = { row: 0, col: r.c0 };
+  state.sel = { row: 0, col: r.c1 };
+  state.ranges = [];
+  endInline();
+  draw();
+}
 
 // The cell range a formatting/clipboard op should touch, expanded for whole
 // row/column/sheet selections to the used extent along the spanning axis.
@@ -2461,6 +2481,7 @@ function wireEvents() {
       if (e.shiftKey && (k === "l" || k === "e" || k === "r")) {
         setAlign(k === "l" ? "left" : k === "e" ? "center" : "right"); e.preventDefault(); return;
       }
+      if (e.key === " ") { if (e.shiftKey) ctrlA(); else selectColsSpan(); e.preventDefault(); return; } // Ctrl+Space cols; Ctrl+Shift+Space all
       if (k === "a") { ctrlA(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
       if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
@@ -2496,6 +2517,7 @@ function wireEvents() {
         e.preventDefault(); break;
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
+      case " ": if (e.shiftKey) selectRowsSpan(); else startInline(" "); e.preventDefault(); break; // Shift+Space → whole rows
       case "Escape": if (clipMarch) { stopMarch(); e.preventDefault(); } break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
