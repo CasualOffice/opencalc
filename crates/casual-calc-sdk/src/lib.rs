@@ -243,11 +243,20 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         | Operation::SetRowHeight { .. }
         // Swaps sheet metadata (merges / sizes / hidden / freeze) — no cell
         // value changes, so nothing to recompute.
-        | Operation::SetSheetMetadata { .. } => RecalcPlan::Skip,
+        | Operation::SetSheetMetadata { .. }
+        // Reordering tabs and recoloring one don't change any value or which
+        // sheet name a reference resolves to.
+        | Operation::MoveSheet { .. }
+        | Operation::SetTabColor { .. } => RecalcPlan::Skip,
         Operation::InsertRows { .. }
         | Operation::DeleteRows { .. }
         | Operation::InsertColumns { .. }
-        | Operation::DeleteColumns { .. } => RecalcPlan::Full,
+        | Operation::DeleteColumns { .. }
+        // Adding, removing, or renaming a sheet changes which name a cross-sheet
+        // reference resolves to (or turns it into #REF!), so recompute fully.
+        | Operation::InsertSheet { .. }
+        | Operation::RemoveSheet { .. }
+        | Operation::RenameSheet { .. } => RecalcPlan::Full,
         Operation::Batch(ops) => {
             let mut cells = Vec::new();
             for o in ops {

@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "15";
+const BUILD = "16";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1482,8 +1482,10 @@ function replaceAll() {
   runFind();
 }
 
-function doUndo() { try { wasm.session_undo(); } catch {} draw(); }
-function doRedo() { try { wasm.session_redo(); } catch {} draw(); }
+// Undo/redo can add, remove, or reorder sheets, so rebuild the tab bar (which
+// also re-clamps the active sheet if it vanished) before redrawing the grid.
+function doUndo() { try { wasm.session_undo(); } catch {} renderTabs(); draw(); }
+function doRedo() { try { wasm.session_redo(); } catch {} renderTabs(); draw(); }
 function download(data, name, type) {
   const blob = new Blob([data], { type });
   const a = document.createElement("a");

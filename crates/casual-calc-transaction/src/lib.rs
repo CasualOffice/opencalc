@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use casual_calc_model::{
-    AxisSizing, Cell, CellRange, CellRef, CellValue, SheetView, StyleId, Workbook,
+    AxisSizing, Cell, CellRange, CellRef, CellValue, Sheet, SheetView, StyleId, Workbook,
 };
 
 mod structural;
@@ -171,6 +171,44 @@ pub enum Operation {
         /// View state (frozen panes) to install.
         view: SheetView,
     },
+    /// Insert a fully-formed sheet at position `index`, shifting later sheets
+    /// right. The caller assigns the sheet's id and name; the inverse removes it.
+    /// `index` is clamped to the end, so appending is `index == sheets.len()`.
+    InsertSheet {
+        /// Position to insert at (clamped to the current sheet count).
+        index: usize,
+        /// The sheet to insert.
+        sheet: Box<Sheet>,
+    },
+    /// Remove the sheet at `index`. The inverse re-inserts the removed sheet at
+    /// the same position, so a delete is fully recoverable.
+    RemoveSheet {
+        /// Position of the sheet to remove.
+        index: usize,
+    },
+    /// Rename the sheet at `index`. The inverse restores the prior name.
+    RenameSheet {
+        /// Position of the sheet to rename.
+        index: usize,
+        /// The new name.
+        name: String,
+    },
+    /// Move the sheet at `from` to position `to` (tab reorder). The inverse
+    /// moves it back.
+    MoveSheet {
+        /// Current position.
+        from: usize,
+        /// Destination position.
+        to: usize,
+    },
+    /// Set (or clear, with `None`) a sheet's tab color. The inverse restores the
+    /// prior color.
+    SetTabColor {
+        /// Sheet index.
+        sheet: usize,
+        /// The new tab color (`RRGGBB`), or `None` to clear.
+        color: Option<String>,
+    },
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -267,6 +305,57 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
                 hidden_rows: std::mem::replace(&mut target.hidden_rows, hidden_rows),
                 hidden_cols: std::mem::replace(&mut target.hidden_cols, hidden_cols),
                 view: std::mem::replace(&mut target.view, view),
+            })
+        }
+        Operation::InsertSheet { index, sheet } => {
+            let at = index.min(workbook.sheets.len());
+            workbook.sheets.insert(at, *sheet);
+            Ok(Operation::RemoveSheet { index: at })
+        }
+        Operation::RemoveSheet { index } => {
+            if index >= workbook.sheets.len() {
+                return Err(TxnError::SheetNotFound { index });
+            }
+            let removed = workbook.sheets.remove(index);
+            Ok(Operation::InsertSheet {
+                index,
+                sheet: Box::new(removed),
+            })
+        }
+        Operation::RenameSheet { index, name } => {
+            let target = workbook
+                .sheets
+                .get_mut(index)
+                .ok_or(TxnError::SheetNotFound { index })?;
+            let previous = std::mem::replace(&mut target.name, name);
+            Ok(Operation::RenameSheet {
+                index,
+                name: previous,
+            })
+        }
+        Operation::MoveSheet { from, to } => {
+            let count = workbook.sheets.len();
+            if from >= count {
+                return Err(TxnError::SheetNotFound { index: from });
+            }
+            if to >= count {
+                return Err(TxnError::SheetNotFound { index: to });
+            }
+            let sheet = workbook.sheets.remove(from);
+            workbook.sheets.insert(to, sheet);
+            // Removing `from` then inserting at `to` is undone by removing `to`
+            // then inserting at `from`.
+            Ok(Operation::MoveSheet { from: to, to: from })
+        }
+        Operation::SetTabColor { sheet, color } => {
+            let target = workbook
+                .sheets
+                .get_mut(sheet)
+                .ok_or(TxnError::SheetNotFound { index: sheet })?;
+            let previous = std::mem::replace(&mut target.tab_color, color);
+            Ok(Operation::SetTabColor {
+                sheet,
+                color: previous,
             })
         }
         Operation::Batch(ops) => {

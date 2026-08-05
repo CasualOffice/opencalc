@@ -160,15 +160,17 @@ pub fn session_add_sheet() -> Result<usize, JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let n = {
-            let wb = session.workbook_mut();
-            let n = wb.sheets.len();
-            let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
-            wb.sheets.push(Sheet::new(id, format!("Sheet{}", n + 1)));
-            n
-        };
-        // A new sheet name can resolve a previously-#REF cross-sheet reference.
-        session.recalculate();
+        let n = session.workbook().sheets.len();
+        let id = SheetId(Id::from_parts(0x5348, 1000 + n as u64));
+        let sheet = Sheet::new(id, format!("Sheet{}", n + 1));
+        // Undoable, dirties the doc, and recalculates (a new name can resolve a
+        // previously-#REF cross-sheet reference).
+        session
+            .edit(EditOperation::InsertSheet {
+                index: n,
+                sheet: Box::new(sheet),
+            })
+            .map_err(js)?;
         Ok(n)
     })
 }
@@ -183,7 +185,7 @@ pub fn session_rename_sheet(index: usize, name: &str) -> Result<(), JsError> {
         if name.is_empty() {
             return Err(JsError::new("sheet name cannot be empty"));
         }
-        let wb = session.workbook_mut();
+        let wb = session.workbook();
         if wb
             .sheets
             .iter()
@@ -192,12 +194,17 @@ pub fn session_rename_sheet(index: usize, name: &str) -> Result<(), JsError> {
         {
             return Err(JsError::new("a sheet with that name already exists"));
         }
-        if let Some(sh) = wb.sheets.get_mut(index) {
-            sh.name = name.to_owned();
+        if index >= wb.sheets.len() {
+            return Ok(());
         }
-        // References resolve sheets by name; recompute so cross-sheet formulas
-        // pick up (or lose) the renamed target.
-        session.recalculate();
+        // Undoable + dirties the doc; the edit recalculates so cross-sheet
+        // formulas pick up (or lose) the renamed target (refs resolve by name).
+        session
+            .edit(EditOperation::RenameSheet {
+                index,
+                name: name.to_owned(),
+            })
+            .map_err(js)?;
         Ok(())
     })
 }
@@ -208,15 +215,17 @@ pub fn session_delete_sheet(index: usize) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let wb = session.workbook_mut();
-        if wb.sheets.len() <= 1 {
+        if session.workbook().sheets.len() <= 1 {
             return Err(JsError::new("cannot delete the last sheet"));
         }
-        if index < wb.sheets.len() {
-            wb.sheets.remove(index);
+        if index >= session.workbook().sheets.len() {
+            return Ok(());
         }
-        // A cross-sheet reference onto the deleted sheet must become #REF!.
-        session.recalculate();
+        // Undoable (restores the whole sheet) + dirties + recalculates so a
+        // cross-sheet reference onto the deleted sheet becomes #REF!.
+        session
+            .edit(EditOperation::RemoveSheet { index })
+            .map_err(js)?;
         Ok(())
     })
 }
@@ -227,12 +236,13 @@ pub fn session_move_sheet(from: usize, to: usize) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let sheets = &mut session.workbook_mut().sheets;
-        if from >= sheets.len() || to >= sheets.len() || from == to {
+        let len = session.workbook().sheets.len();
+        if from >= len || to >= len || from == to {
             return Ok(());
         }
-        let sheet = sheets.remove(from);
-        sheets.insert(to, sheet);
+        session
+            .edit(EditOperation::MoveSheet { from, to })
+            .map_err(js)?;
         Ok(())
     })
 }
@@ -243,24 +253,28 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let wb = session.workbook_mut();
-        let Some(src) = wb.sheets.get(index) else {
-            return Err(JsError::new("no such sheet"));
+        let len = session.workbook().sheets.len();
+        let mut clone = match session.workbook().sheets.get(index) {
+            Some(src) => src.clone(),
+            None => return Err(JsError::new("no such sheet")),
         };
-        let mut clone = src.clone();
-        clone.id = SheetId(Id::from_parts(0x5348, 2000 + wb.sheets.len() as u64));
-        let base = src.name.clone();
+        clone.id = SheetId(Id::from_parts(0x5348, 2000 + len as u64));
+        let base = clone.name.clone();
         let mut n = 2;
         let mut name = format!("{base} ({n})");
-        while wb.sheets.iter().any(|sh| sh.name == name) {
+        while session.workbook().sheets.iter().any(|sh| sh.name == name) {
             n += 1;
             name = format!("{base} ({n})");
         }
         clone.name = name;
         let at = index + 1;
-        wb.sheets.insert(at, clone);
-        // The new sheet name may resolve references elsewhere; recompute.
-        session.recalculate();
+        // Undoable + dirties + recalculates (the new name may resolve refs).
+        session
+            .edit(EditOperation::InsertSheet {
+                index: at,
+                sheet: Box::new(clone),
+            })
+            .map_err(js)?;
         Ok(at)
     })
 }
@@ -436,11 +450,14 @@ pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsEr
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.view.frozen_rows = rows;
-            sh.view.frozen_cols = cols;
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+            view.frozen_rows = rows;
+            view.frozen_cols = cols;
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 
@@ -470,10 +487,12 @@ pub fn session_set_tab_color(sheet: usize, hex: &str) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.tab_color = color;
+        if session.workbook().sheets.get(sheet).is_none() {
+            return Ok(());
         }
-        Ok(())
+        session
+            .edit(EditOperation::SetTabColor { sheet, color })
+            .map_err(js)
     })
 }
 
@@ -810,14 +829,16 @@ pub fn session_merge_cells(
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { merges, .. } = &mut op {
+            merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
             if r0 != r1 || c0 != c1 {
-                sh.merges
-                    .push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
+                merges.push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
             }
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 
@@ -833,10 +854,13 @@ pub fn session_unmerge_cells(
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { merges, .. } = &mut op {
+            merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 
@@ -885,6 +909,23 @@ fn commit_edit(op: EditOperation) -> Result<(), JsError> {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         session.edit(op).map_err(js)
+    })
+}
+
+/// A `SetSheetMetadata` op carrying the sheet's *current* metadata bundle
+/// (merges, axis sizing, hidden sets, view). Callers tweak one field and submit
+/// it so freeze / merge / resize-all become single undoable edits that dirty
+/// the document. `None` if the sheet index is out of range.
+fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<EditOperation> {
+    let sh = session.workbook().sheets.get(sheet)?;
+    Some(EditOperation::SetSheetMetadata {
+        sheet,
+        merges: sh.merges.clone(),
+        columns: sh.columns.clone(),
+        rows: sh.rows.clone(),
+        hidden_rows: sh.hidden_rows.clone(),
+        hidden_cols: sh.hidden_cols.clone(),
+        view: sh.view,
     })
 }
 
@@ -1130,11 +1171,14 @@ pub fn session_set_all_col_width(sheet: usize, px: u32) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.columns.default = Some(resize_px_to_twips(px));
-            sh.columns.sizes.clear();
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { columns, .. } = &mut op {
+            columns.default = Some(resize_px_to_twips(px));
+            columns.sizes.clear();
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 
@@ -1144,11 +1188,14 @@ pub fn session_set_all_row_height(sheet: usize, px: u32) -> Result<(), JsError> 
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.rows.default = Some(resize_px_to_twips(px));
-            sh.rows.sizes.clear();
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { rows, .. } = &mut op {
+            rows.default = Some(resize_px_to_twips(px));
+            rows.sizes.clear();
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 

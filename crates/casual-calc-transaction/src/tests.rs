@@ -1001,3 +1001,209 @@ fn structural_op_on_missing_sheet_errors() {
         .is_err()
     );
 }
+
+// ---- Sheet-collection ops (M1-1): insert / remove / rename / move / tab color
+
+fn named_sheet(ns: u64, name: &str) -> Sheet {
+    Sheet::new(SheetId(Id::from_parts(ns, 1)), name)
+}
+
+#[test]
+fn insert_and_remove_sheet_are_inverse() {
+    let mut wb = workbook(); // one sheet: "S"
+    let inverse = apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 1,
+            sheet: Box::new(named_sheet(3, "Two")),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    assert_eq!(wb.sheets[1].name, "Two");
+    assert_eq!(inverse, Operation::RemoveSheet { index: 1 });
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets.len(), 1);
+    assert_eq!(wb.sheets[0].name, "S");
+}
+
+#[test]
+fn insert_index_clamps_to_end() {
+    let mut wb = workbook();
+    let inverse = apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 99,
+            sheet: Box::new(named_sheet(3, "End")),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[1].name, "End");
+    // The inverse targets the clamped position, not the requested 99.
+    assert_eq!(inverse, Operation::RemoveSheet { index: 1 });
+}
+
+#[test]
+fn remove_sheet_restores_full_contents_on_undo() {
+    let mut wb = workbook();
+    // Give the sheet a cell so we prove the whole sheet round-trips, not a stub.
+    let at = CellRef::new(2, 1);
+    wb.sheets[0]
+        .cells
+        .set(at, Cell::value(CellValue::Number(7.0)));
+
+    let inverse = apply(&mut wb, Operation::RemoveSheet { index: 0 }).unwrap();
+    assert!(wb.sheets.is_empty());
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets.len(), 1);
+    assert_eq!(
+        wb.sheets[0].cells.get(at).map(|c| c.value.clone()),
+        Some(CellValue::Number(7.0))
+    );
+}
+
+#[test]
+fn remove_missing_sheet_errors() {
+    let mut wb = workbook();
+    assert!(apply(&mut wb, Operation::RemoveSheet { index: 5 }).is_err());
+}
+
+#[test]
+fn rename_sheet_inverse_restores_name() {
+    let mut wb = workbook();
+    let inverse = apply(
+        &mut wb,
+        Operation::RenameSheet {
+            index: 0,
+            name: "Renamed".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].name, "Renamed");
+    assert_eq!(
+        inverse,
+        Operation::RenameSheet {
+            index: 0,
+            name: "S".to_owned()
+        }
+    );
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].name, "S");
+}
+
+#[test]
+fn move_sheet_is_invertible() {
+    let mut wb = workbook(); // "S"
+    apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 1,
+            sheet: Box::new(named_sheet(3, "B")),
+        },
+    )
+    .unwrap();
+    apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 2,
+            sheet: Box::new(named_sheet(4, "C")),
+        },
+    )
+    .unwrap();
+    // Order: S, B, C. Move index 0 to the end.
+    let inverse = apply(&mut wb, Operation::MoveSheet { from: 0, to: 2 }).unwrap();
+    assert_eq!(
+        wb.sheets
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["B", "C", "S"]
+    );
+    assert_eq!(inverse, Operation::MoveSheet { from: 2, to: 0 });
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(
+        wb.sheets
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["S", "B", "C"]
+    );
+}
+
+#[test]
+fn move_sheet_out_of_range_errors() {
+    let mut wb = workbook();
+    assert!(apply(&mut wb, Operation::MoveSheet { from: 0, to: 9 }).is_err());
+    assert!(apply(&mut wb, Operation::MoveSheet { from: 9, to: 0 }).is_err());
+}
+
+#[test]
+fn set_tab_color_inverse_restores_prior() {
+    let mut wb = workbook();
+    // First set: prior was None.
+    let inverse = apply(
+        &mut wb,
+        Operation::SetTabColor {
+            sheet: 0,
+            color: Some("FF0000".to_owned()),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].tab_color.as_deref(), Some("FF0000"));
+    assert_eq!(
+        inverse,
+        Operation::SetTabColor {
+            sheet: 0,
+            color: None
+        }
+    );
+    // Overwrite, then undo restores the red.
+    apply(
+        &mut wb,
+        Operation::SetTabColor {
+            sheet: 0,
+            color: Some("00FF00".to_owned()),
+        },
+    )
+    .unwrap();
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].tab_color, None);
+}
+
+#[test]
+fn sheet_ops_undo_redo_through_history() {
+    let mut wb = workbook();
+    let mut history = History::new();
+
+    history
+        .apply(
+            &mut wb,
+            Operation::InsertSheet {
+                index: 1,
+                sheet: Box::new(named_sheet(3, "Extra")),
+            },
+        )
+        .unwrap();
+    history
+        .apply(
+            &mut wb,
+            Operation::RenameSheet {
+                index: 1,
+                name: "Data".to_owned(),
+            },
+        )
+        .unwrap();
+    assert_eq!(wb.sheets[1].name, "Data");
+
+    history.undo(&mut wb).unwrap(); // undo rename
+    assert_eq!(wb.sheets[1].name, "Extra");
+    history.undo(&mut wb).unwrap(); // undo insert
+    assert_eq!(wb.sheets.len(), 1);
+
+    history.redo(&mut wb).unwrap(); // redo insert
+    assert_eq!(wb.sheets[1].name, "Extra");
+    history.redo(&mut wb).unwrap(); // redo rename
+    assert_eq!(wb.sheets[1].name, "Data");
+}

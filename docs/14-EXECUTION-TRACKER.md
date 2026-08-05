@@ -188,6 +188,18 @@ format registry follow.
 |----|------|--------|------------------|
 | IO-001 | Delimited text (CSV / TSV / PSV) reader + writer | Done | `casual-calc-io`: RFC 4180-style `read_delimited`/`write_delimited` (quoting, CRLF, field typing number/bool/text); `parse → write → parse` fixed point + quoting/delimiter tests (5). SDK `from_workbook`; WASM `session_open_delimited`/`session_save_delimited`; editor **Open** routes `.csv/.tsv/.psv` by extension and a **Download-as menu** exports xlsx/csv/tsv/psv (numbers use General formatting — no binary-float tails). Verified in-browser (quoted comma field preserved on import; clean `43.48` on export). ODS + format registry pending |
 
+## Phase rows — Feature pipeline (docs/48)
+
+The dependency-ordered parity roadmap synthesized in
+[48](48-FEATURE-PIPELINE.md). Earlier milestone work (data validation,
+conditional formatting, cell comments, named ranges, rich clipboard, autofill,
+sort) landed ahead of this tracker section; rows below are added as each item
+is (re)started under the pipeline.
+
+| ID | Workstream | Status | Notes |
+| --- | --- | --- | --- |
+| M1-1 | Route all sheet & structural mutations through commit_edit (undoable + dirties doc) | Done | Keystone. Transaction crate gains InsertSheet/RemoveSheet/RenameSheet/MoveSheet/SetTabColor invertible ops (8 new tests, self-inverse + History undo/redo); sdk `recalc_plan` classifies them (sheet add/remove/rename → Full recalc for name resolution, move/tab-color → Skip). WASM sheet ops (add/rename/delete/move/duplicate), freeze, tab-color, merge/unmerge, and resize-all moved off direct `workbook_mut()` onto `session.edit` (freeze/merge/resize-all reuse SetSheetMetadata via a metadata-snapshot helper). editor.js `doUndo`/`doRedo` now `renderTabs()` (re-clamps the active sheet). Verified in-browser: add→undo removes the sheet, redo restores it. Single/range/clear col-row width were already routed. Hide/unhide has no WASM op yet (deferred to M9-2). Data-feature ops (validation/CF/comments/names) undoability is a follow-up. |
+
 ## Review note
 
 Keep this file readable. When it grows large, split closed phases into an
