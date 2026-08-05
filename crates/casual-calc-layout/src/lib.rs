@@ -21,11 +21,11 @@ mod geometry;
 mod numfmt;
 
 pub use axis::Axis;
-pub use display::{Align, DisplayList, PaintItem, Rect};
+pub use display::{Align, BorderLine, DisplayList, PaintItem, Rect};
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
 pub use numfmt::{format_general, format_number};
 
-use casual_calc_model::{Cell, CellValue, Workbook};
+use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
 
 /// A scrolled viewport rectangle, in twips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,17 +107,69 @@ fn layout_range(
             w: geometry.columns.size(at.col),
             h: geometry.rows.size(at.row),
         };
-        let content = display_text(workbook, cell);
-        if content.is_empty() {
-            continue;
+        let style = cell.style.and_then(|id| workbook.styles.get(id));
+
+        // Painter's order per cell: fill behind, then text, then border on top.
+        if let Some(fill) = style.and_then(|s| s.fill_color.clone()) {
+            list.items.push(PaintItem::CellBackground {
+                rect,
+                fill: Some(fill),
+            });
         }
-        list.items.push(PaintItem::Text {
-            rect,
-            content,
-            align: align_for(&cell.value),
-        });
+
+        let content = display_text(workbook, cell);
+        if !content.is_empty() {
+            list.items.push(PaintItem::Text {
+                rect,
+                content,
+                align: align_for(&cell.value),
+                color: style.and_then(|s| s.font_color.clone()),
+                bold: style.is_some_and(|s| s.bold),
+                italic: style.is_some_and(|s| s.italic),
+            });
+        }
+
+        if let Some(border) = style.and_then(|s| border_item(rect, s)) {
+            list.items.push(border);
+        }
     }
     list
+}
+
+/// Build a [`PaintItem::CellBorder`] from a style's borders, or `None` if the
+/// style carries no border edges.
+fn border_item(rect: Rect, style: &Style) -> Option<PaintItem> {
+    let borders: &Borders = style.border.as_ref()?;
+    if borders.is_empty() {
+        return None;
+    }
+    Some(PaintItem::CellBorder {
+        rect,
+        left: borders.left.as_ref().map(border_line),
+        right: borders.right.as_ref().map(border_line),
+        top: borders.top.as_ref().map(border_line),
+        bottom: borders.bottom.as_ref().map(border_line),
+    })
+}
+
+/// Resolve a model [`BorderEdge`] to a paint-ready [`BorderLine`], mapping the
+/// raw OOXML line-style token to a deterministic pixel width.
+fn border_line(edge: &BorderEdge) -> BorderLine {
+    BorderLine {
+        width: border_width(&edge.style),
+        color: edge.color.clone(),
+    }
+}
+
+/// The pixel width for an OOXML border line-style token. Unknown tokens fall
+/// back to a thin (1px) line so any style still paints.
+fn border_width(token: &str) -> u32 {
+    match token {
+        "hair" | "thin" | "dashed" | "dotted" | "dashDot" | "dashDotDot" => 1,
+        "medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" | "slantDashDot" => 2,
+        "thick" | "double" => 3,
+        _ => 1,
+    }
 }
 
 fn align_for(value: &CellValue) -> Align {

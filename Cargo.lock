@@ -112,6 +112,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
