@@ -6,11 +6,15 @@
 //! cell's **cached value**. Supported: arithmetic/comparison/concat operators,
 //! unary `+`/`-`/`%`, cell and range references (same- and cross-sheet), defined
 //! names, and a function library: math/stats (`SUM`, `AVERAGE`, `COUNT`,
-//! `COUNTA`, `MIN`, `MAX`, `ABS`, `INT`, `MOD`, `POWER`, `SQRT`, `ROUND`),
+//! `COUNTA`, `MIN`, `MAX`, `ABS`, `INT`, `MOD`, `POWER`, `SQRT`, `ROUND`,
+//! `ROUNDUP`, `ROUNDDOWN`, `CEILING`, `FLOOR`, `TRUNC`, `SIGN`, `PRODUCT`),
 //! logical (`IF`, `IFERROR`, `AND`, `OR`, `NOT`), criteria aggregates
-//! (`COUNTIF`, `SUMIF`, `AVERAGEIF`), and text
-//! (`CONCATENATE`/`CONCAT`, `LEN`, `LEFT`, `RIGHT`, `MID`, `UPPER`, `LOWER`,
-//! `TRIM`).
+//! (`COUNTIF`, `SUMIF`, `AVERAGEIF`), lookup/reference (`VLOOKUP`, `HLOOKUP`,
+//! `INDEX`, `MATCH`, `CHOOSE`), text (`CONCATENATE`/`CONCAT`, `LEN`, `LEFT`,
+//! `RIGHT`, `MID`, `UPPER`, `LOWER`, `TRIM`, `SUBSTITUTE`, `REPLACE`, `FIND`,
+//! `SEARCH`, `VALUE`, `PROPER`, `REPT`, `EXACT`), and deterministic dates on the
+//! 1900 serial system (`DATE`, `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `EDATE`,
+//! `EOMONTH`).
 //!
 //! Nothing depends on this crate except the host bridges — the model, layout,
 //! and render layers build without it (they read cached values). A full

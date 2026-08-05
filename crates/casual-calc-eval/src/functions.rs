@@ -54,6 +54,33 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "UPPER" => text_op(ev, sheet, args, |s| s.to_uppercase()),
         "LOWER" => text_op(ev, sheet, args, |s| s.to_lowercase()),
         "TRIM" => text_op(ev, sheet, args, trim_excel),
+        "PRODUCT" => eval_product(ev, sheet, args),
+        "ROUNDUP" => eval_round_dir(ev, sheet, args, RoundDir::Up),
+        "ROUNDDOWN" => eval_round_dir(ev, sheet, args, RoundDir::Down),
+        "TRUNC" => eval_trunc(ev, sheet, args),
+        "CEILING" => eval_ceiling_floor(ev, sheet, args, true),
+        "FLOOR" => eval_ceiling_floor(ev, sheet, args, false),
+        "SIGN" => eval_sign(ev, sheet, args),
+        "VLOOKUP" => eval_vlookup(ev, sheet, args, true),
+        "HLOOKUP" => eval_vlookup(ev, sheet, args, false),
+        "INDEX" => eval_index(ev, sheet, args),
+        "MATCH" => eval_match(ev, sheet, args),
+        "CHOOSE" => eval_choose(ev, sheet, args),
+        "SUBSTITUTE" => eval_substitute(ev, sheet, args),
+        "REPLACE" => eval_replace(ev, sheet, args),
+        "FIND" => eval_find_search(ev, sheet, args, true),
+        "SEARCH" => eval_find_search(ev, sheet, args, false),
+        "VALUE" => eval_value(ev, sheet, args),
+        "PROPER" => text_op(ev, sheet, args, proper_case),
+        "REPT" => eval_rept(ev, sheet, args),
+        "EXACT" => eval_exact(ev, sheet, args),
+        "DATE" => eval_date(ev, sheet, args),
+        "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
+        "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
+        "DAY" => eval_date_part(ev, sheet, args, DatePart::Day),
+        "WEEKDAY" => eval_weekday(ev, sheet, args),
+        "EDATE" => eval_edate(ev, sheet, args, false),
+        "EOMONTH" => eval_edate(ev, sheet, args, true),
         _ => Value::Error(ErrorValue::Name),
     }
 }
@@ -520,4 +547,711 @@ fn flatten_numbers(
         }
     }
     Ok(out)
+}
+
+// --- Extra math -----------------------------------------------------------
+
+fn eval_product(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    match flatten_numbers(ev, sheet, args) {
+        Ok(ns) if ns.is_empty() => Value::Number(0.0),
+        Ok(ns) => Value::Number(ns.iter().product()),
+        Err(e) => Value::Error(e),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RoundDir {
+    Up,
+    Down,
+}
+
+/// `ROUNDUP`/`ROUNDDOWN`: round away from / toward zero to `digits` places.
+fn eval_round_dir(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], dir: RoundDir) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let value = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let digits = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i32,
+        Err(e) => return Value::Error(e),
+    };
+    let factor = 10f64.powi(digits);
+    let scaled = (value * factor).abs();
+    let rounded = match dir {
+        RoundDir::Up => scaled.ceil(),
+        RoundDir::Down => scaled.floor(),
+    };
+    Value::Number(value.signum() * rounded / factor)
+}
+
+/// `TRUNC(number, [digits])`: truncate toward zero (digits default 0).
+fn eval_trunc(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let value = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let digits = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i32,
+            Err(e) => return Value::Error(e),
+        },
+        None => 0,
+    };
+    let factor = 10f64.powi(digits);
+    Value::Number((value * factor).trunc() / factor)
+}
+
+/// `CEILING`/`FLOOR`: round to the nearest multiple of `significance`.
+/// Excel requires number and significance to share a sign (else `#NUM!`).
+fn eval_ceiling_floor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], up: bool) -> Value {
+    let Some((num, sig)) = two_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let (num, sig) = match (num, sig) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Value::Error(e),
+    };
+    if sig == 0.0 {
+        return Value::Number(0.0);
+    }
+    if num != 0.0 && num.signum() != sig.signum() {
+        return Value::Error(ErrorValue::Num);
+    }
+    let quotient = num / sig;
+    let rounded = if up {
+        quotient.ceil()
+    } else {
+        quotient.floor()
+    };
+    Value::Number(rounded * sig)
+}
+
+fn eval_sign(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) if n > 0.0 => Value::Number(1.0),
+        Ok(n) if n < 0.0 => Value::Number(-1.0),
+        Ok(_) => Value::Number(0.0),
+        Err(e) => Value::Error(e),
+    }
+}
+
+// --- Lookup / reference ---------------------------------------------------
+
+/// A materialized rectangular block of cell values (row-major).
+struct Grid {
+    rows: usize,
+    cols: usize,
+    cells: Vec<Value>,
+}
+
+impl Grid {
+    fn get(&self, row: usize, col: usize) -> &Value {
+        &self.cells[row * self.cols + col]
+    }
+}
+
+/// Evaluate one argument into a [`Grid`]; a scalar becomes a 1x1 block.
+fn eval_range_2d(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -> Result<Grid, ErrorValue> {
+    if let Expr::Range(a, b) = arg {
+        let target = ev.resolve_sheet(&a.sheet, sheet).ok_or(ErrorValue::Ref)?;
+        let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
+        let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+        let area = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
+        if area > MAX_RANGE_CELLS {
+            return Err(ErrorValue::Num);
+        }
+        let rows = (r1 - r0 + 1) as usize;
+        let cols = (c1 - c0 + 1) as usize;
+        let mut cells = Vec::with_capacity(rows * cols);
+        for row in r0..=r1 {
+            for col in c0..=c1 {
+                cells.push(ev.eval_cell(target, CellRef::new(row, col)));
+            }
+        }
+        Ok(Grid { rows, cols, cells })
+    } else {
+        Ok(Grid {
+            rows: 1,
+            cols: 1,
+            cells: vec![ev.eval_expr(sheet, arg)],
+        })
+    }
+}
+
+/// Order two values the way lookups compare: numerically when both are numeric,
+/// otherwise by case-insensitive text (matches the engine's comparison rules).
+fn loose_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    match (numeric_of(a), numeric_of(b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y),
+        _ => {
+            let sa = a.as_text().unwrap_or_default().to_uppercase();
+            let sb = b.as_text().unwrap_or_default().to_uppercase();
+            Some(sa.cmp(&sb))
+        }
+    }
+}
+
+fn numeric_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => Some(*n),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// `VLOOKUP` (`vertical` true) / `HLOOKUP` (false).
+fn eval_vlookup(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], vertical: bool) -> Value {
+    if args.len() < 3 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let key = ev.eval_expr(sheet, &args[0]);
+    if let Some(e) = key.as_error() {
+        return Value::Error(e);
+    }
+    let grid = match eval_range_2d(ev, sheet, &args[1]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let index = match ev.eval_expr(sheet, &args[2]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let approximate = match args.get(3) {
+        Some(a) => match ev.eval_expr(sheet, a).as_bool() {
+            Ok(b) => b,
+            Err(e) => return Value::Error(e),
+        },
+        None => true,
+    };
+    if index < 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let index = index as usize;
+    // Length along the search axis, and bound for the return index.
+    let (search_len, index_bound) = if vertical {
+        (grid.rows, grid.cols)
+    } else {
+        (grid.cols, grid.rows)
+    };
+    if index > index_bound {
+        return Value::Error(ErrorValue::Ref);
+    }
+    // Value in the search line at position `i`.
+    let at = |g: &Grid, i: usize| -> Value {
+        if vertical {
+            g.get(i, 0).clone()
+        } else {
+            g.get(0, i).clone()
+        }
+    };
+    let found = if approximate {
+        // Largest entry <= key, assuming the line is sorted ascending.
+        let mut best: Option<usize> = None;
+        for i in 0..search_len {
+            match loose_cmp(&at(&grid, i), &key) {
+                Some(Ordering::Less) | Some(Ordering::Equal) => best = Some(i),
+                _ => break,
+            }
+        }
+        best
+    } else {
+        (0..search_len).find(|&i| loose_cmp(&at(&grid, i), &key) == Some(Ordering::Equal))
+    };
+    match found {
+        Some(i) if vertical => grid.get(i, index - 1).clone(),
+        Some(i) => grid.get(index - 1, i).clone(),
+        None => Value::Error(ErrorValue::Na),
+    }
+}
+
+/// `INDEX(range, row, [col])`. Row/col are 1-based; a single index selects
+/// along the sole axis of a one-dimensional range.
+fn eval_index(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let grid = match eval_range_2d(ev, sheet, &args[0]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let first = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let second = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => Some(n as i64),
+            Err(e) => return Value::Error(e),
+        },
+        None => None,
+    };
+    let (row, col) = match second {
+        Some(c) => (first, c),
+        None => {
+            // One index: pick the axis that has more than one line.
+            if grid.rows == 1 {
+                (1, first)
+            } else if grid.cols == 1 {
+                (first, 1)
+            } else {
+                return Value::Error(ErrorValue::Ref);
+            }
+        }
+    };
+    if row < 1 || col < 1 || row as usize > grid.rows || col as usize > grid.cols {
+        return Value::Error(ErrorValue::Ref);
+    }
+    grid.get(row as usize - 1, col as usize - 1).clone()
+}
+
+/// `MATCH(lookup, range, [type])`. Type 1 (default) ascending, 0 exact,
+/// -1 descending. Returns the 1-based position, or `#N/A`.
+fn eval_match(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let key = ev.eval_expr(sheet, &args[0]);
+    if let Some(e) = key.as_error() {
+        return Value::Error(e);
+    }
+    let grid = match eval_range_2d(ev, sheet, &args[1]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let match_type = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i64,
+            Err(e) => return Value::Error(e),
+        },
+        None => 1,
+    };
+    // MATCH operates on a single row or column.
+    let line: Vec<&Value> = grid.cells.iter().collect();
+    let found = match match_type {
+        0 => line
+            .iter()
+            .position(|v| loose_cmp(v, &key) == Some(Ordering::Equal)),
+        1 => {
+            // Largest value <= key (ascending order assumed).
+            let mut best = None;
+            for (i, v) in line.iter().enumerate() {
+                match loose_cmp(v, &key) {
+                    Some(Ordering::Less) | Some(Ordering::Equal) => best = Some(i),
+                    _ => break,
+                }
+            }
+            best
+        }
+        _ => {
+            // -1: smallest value >= key (descending order assumed).
+            let mut best = None;
+            for (i, v) in line.iter().enumerate() {
+                match loose_cmp(v, &key) {
+                    Some(Ordering::Greater) | Some(Ordering::Equal) => best = Some(i),
+                    _ => break,
+                }
+            }
+            best
+        }
+    };
+    match found {
+        Some(i) => Value::Number(i as f64 + 1.0),
+        None => Value::Error(ErrorValue::Na),
+    }
+}
+
+/// `CHOOSE(index, value1, value2, ...)`. Only the selected value is evaluated.
+fn eval_choose(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let index = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let choices = &args[1..];
+    if index < 1 || index as usize > choices.len() {
+        return Value::Error(ErrorValue::Value);
+    }
+    ev.eval_expr(sheet, &choices[index as usize - 1])
+}
+
+// --- Extra text -----------------------------------------------------------
+
+/// `SUBSTITUTE(text, old, new, [instance])`.
+fn eval_substitute(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let old = match ev.eval_expr(sheet, &args[1]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let new = match ev.eval_expr(sheet, &args[2]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    if old.is_empty() {
+        return Value::Text(text);
+    }
+    let instance = match args.get(3) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) if n < 1.0 => return Value::Error(ErrorValue::Value),
+            Ok(n) => Some(n as usize),
+            Err(e) => return Value::Error(e),
+        },
+        None => None,
+    };
+    match instance {
+        None => Value::Text(text.replace(&old, &new)),
+        Some(target) => {
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            let mut seen = 0usize;
+            while let Some(pos) = rest.find(&old) {
+                seen += 1;
+                if seen == target {
+                    out.push_str(&rest[..pos]);
+                    out.push_str(&new);
+                    out.push_str(&rest[pos + old.len()..]);
+                    return Value::Text(out);
+                }
+                out.push_str(&rest[..pos + old.len()]);
+                rest = &rest[pos + old.len()..];
+            }
+            out.push_str(rest);
+            Value::Text(out)
+        }
+    }
+}
+
+/// `REPLACE(old_text, start, num_chars, new_text)` (1-based, over characters).
+fn eval_replace(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let start = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let count = match ev.eval_expr(sheet, &args[2]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let new = match ev.eval_expr(sheet, &args[3]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    if start < 1 || count < 0 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let begin = (start as usize - 1).min(chars.len());
+    let end = (begin + count as usize).min(chars.len());
+    let mut out: String = chars[..begin].iter().collect();
+    out.push_str(&new);
+    out.extend(chars[end..].iter());
+    Value::Text(out)
+}
+
+/// `FIND` (case-sensitive) / `SEARCH` (case-insensitive). 1-based; `#VALUE!`
+/// when not found or `start` is out of range.
+fn eval_find_search(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    case_sensitive: bool,
+) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let needle = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let haystack = match ev.eval_expr(sheet, &args[1]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let start = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i64,
+            Err(e) => return Value::Error(e),
+        },
+        None => 1,
+    };
+    let hay_chars: Vec<char> = haystack.chars().collect();
+    if start < 1 || start as usize > hay_chars.len() + 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let skip = start as usize - 1;
+    let (needle, tail): (String, String) = if case_sensitive {
+        (needle, hay_chars[skip..].iter().collect())
+    } else {
+        (
+            needle.to_uppercase(),
+            hay_chars[skip..].iter().collect::<String>().to_uppercase(),
+        )
+    };
+    match tail.find(&needle) {
+        Some(byte_pos) => {
+            // Convert the byte offset within `tail` to a character offset.
+            let char_off = tail[..byte_pos].chars().count();
+            Value::Number((skip + char_off + 1) as f64)
+        }
+        None => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `VALUE(text)`: parse text as a number.
+fn eval_value(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, arg).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    match text.trim().parse::<f64>() {
+        Ok(n) => Value::Number(n),
+        Err(_) => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `PROPER`: capitalize the first letter of each word, lowercase the rest.
+fn proper_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at_word_start = true;
+    for ch in s.chars() {
+        if ch.is_alphabetic() {
+            if at_word_start {
+                out.extend(ch.to_uppercase());
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+            at_word_start = false;
+        } else {
+            out.push(ch);
+            at_word_start = true;
+        }
+    }
+    out
+}
+
+/// `REPT(text, count)`.
+fn eval_rept(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let count = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    if count < 0 {
+        return Value::Error(ErrorValue::Value);
+    }
+    Value::Text(text.repeat(count as usize))
+}
+
+/// `EXACT(a, b)`: case-sensitive text equality.
+fn eval_exact(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let a = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    let b = match ev.eval_expr(sheet, &args[1]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    Value::Bool(a == b)
+}
+
+// --- Dates (deterministic, 1900 serial system) ----------------------------
+
+/// Days from the civil date `(y, m, d)` to 1970-01-01 (Howard Hinnant's
+/// algorithm). Proleptic Gregorian; the inverse of [`serial_to_ymd`].
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Convert a civil date to an Excel (1900-system) serial day number.
+fn ymd_to_serial(y: i64, m: i64, d: i64) -> i64 {
+    days_from_civil(y, m, d) + 25_569
+}
+
+/// Convert an Excel serial day number to `(year, month, day)`.
+fn serial_to_ymd(serial_days: i64) -> (i64, i64, i64) {
+    let mut z = serial_days - 25_569 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    z -= era * 146_097;
+    let doe = z;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    // Normalize so month 13 rolls to January of the next year, etc.
+    let ny = y + (m - 1).div_euclid(12);
+    let nm = (m - 1).rem_euclid(12) + 1;
+    let next = if nm == 12 {
+        ymd_to_serial(ny + 1, 1, 1)
+    } else {
+        ymd_to_serial(ny, nm + 1, 1)
+    };
+    next - ymd_to_serial(ny, nm, 1)
+}
+
+/// `DATE(year, month, day)`. Month/day overflow rolls into adjacent months
+/// (Excel semantics); years 0-1899 are offset by 1900.
+fn eval_date(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut year = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let month = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let day = match ev.eval_expr(sheet, &args[2]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    if (0..1900).contains(&year) {
+        year += 1900;
+    }
+    // Normalize the month into 1..=12, carrying into the year, then add the
+    // day offset (which itself may push across month boundaries).
+    let ny = year + (month - 1).div_euclid(12);
+    let nm = (month - 1).rem_euclid(12) + 1;
+    let serial = ymd_to_serial(ny, nm, 1) + (day - 1);
+    if serial < 0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(serial as f64)
+}
+
+#[derive(Clone, Copy)]
+enum DatePart {
+    Year,
+    Month,
+    Day,
+}
+
+fn eval_date_part(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], part: DatePart) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let serial = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    if serial < 0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (y, m, d) = serial_to_ymd(serial);
+    let out = match part {
+        DatePart::Year => y,
+        DatePart::Month => m,
+        DatePart::Day => d,
+    };
+    Value::Number(out as f64)
+}
+
+/// `WEEKDAY(serial, [type])`. Type 1 (default) Sun=1..Sat=7, type 2
+/// Mon=1..Sun=7, type 3 Mon=0..Sun=6.
+fn eval_weekday(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let serial = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let kind = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i64,
+            Err(e) => return Value::Error(e),
+        },
+        None => 1,
+    };
+    if serial < 0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Days since the Unix epoch; 1970-01-01 was a Thursday.
+    let unix = serial - 25_569;
+    let dow_sun0 = (unix + 4).rem_euclid(7); // 0 = Sunday .. 6 = Saturday
+    let out = match kind {
+        1 => dow_sun0 + 1,
+        2 => (dow_sun0 + 6).rem_euclid(7) + 1,
+        3 => (dow_sun0 + 6).rem_euclid(7),
+        _ => return Value::Error(ErrorValue::Num),
+    };
+    Value::Number(out as f64)
+}
+
+/// `EDATE` (`eomonth` false) advances by whole months keeping the day (clamped
+/// to the month length). `EOMONTH` (true) returns the last day of that month.
+fn eval_edate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], eomonth: bool) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let serial = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let months = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n as i64,
+        Err(e) => return Value::Error(e),
+    };
+    if serial < 0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (y, m, d) = serial_to_ymd(serial);
+    let total = m - 1 + months;
+    let ny = y + total.div_euclid(12);
+    let nm = total.rem_euclid(12) + 1;
+    let last = days_in_month(ny, nm);
+    let day = if eomonth { last } else { d.min(last) };
+    let out = ymd_to_serial(ny, nm, day);
+    if out < 0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(out as f64)
 }
