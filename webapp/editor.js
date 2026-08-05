@@ -1530,6 +1530,56 @@ function setBorder(kind) {
 }
 function toggleBorder() { setBorder("all"); }
 
+// Custom tooltips: convert native `title`s on the chrome to styled, faster
+// tooltips (keeping an aria-label for a11y), shown on hover after a short delay.
+let tipEl = null;
+let tipTimer = 0;
+function initTooltips() {
+  tipEl = document.createElement("div");
+  tipEl.className = "tooltip";
+  tipEl.hidden = true;
+  document.body.appendChild(tipEl);
+  // Promote existing titles to data-tip so the native bubble doesn't also show.
+  for (const node of document.querySelectorAll(".toolbar [title], .app-header [title], .formula-bar [title], .side-panel [title]")) {
+    tipify(node);
+  }
+  document.addEventListener("mouseover", (e) => {
+    const node = e.target.closest("[data-tip]");
+    if (!node) return;
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => showTip(node), 380);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (e.target.closest("[data-tip]")) hideTip();
+  });
+  document.addEventListener("mousedown", hideTip);
+}
+// Move an element's `title` to `data-tip` (+ aria-label), suppressing the native tip.
+function tipify(node) {
+  const t = node.getAttribute("title");
+  if (!t) return;
+  node.dataset.tip = t;
+  if (!node.getAttribute("aria-label")) node.setAttribute("aria-label", t);
+  node.removeAttribute("title");
+}
+function showTip(node) {
+  if (!tipEl || !node.dataset.tip) return;
+  tipEl.textContent = node.dataset.tip;
+  tipEl.hidden = false;
+  const r = node.getBoundingClientRect();
+  const tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+  let left = Math.max(6, Math.min(r.left + r.width / 2 - tw / 2, window.innerWidth - tw - 6));
+  let top = r.bottom + 6;
+  if (top + th > window.innerHeight - 6) top = r.top - th - 6;
+  tipEl.style.left = left + "px";
+  tipEl.style.top = top + "px";
+  tipEl.classList.add("show");
+}
+function hideTip() {
+  clearTimeout(tipTimer);
+  if (tipEl) { tipEl.classList.remove("show"); tipEl.hidden = true; }
+}
+
 // A 20×20 icon sketching a cell with the placement's edges emphasized.
 function bdIcon(kind) {
   const seg = {
@@ -2682,6 +2732,9 @@ function wireEvents() {
       if (!menu.hidden) anchorMenu(menu, btn);
     });
   }
+  // Styled tooltips over the chrome (converts native titles, incl. the border
+  // palette just built above).
+  initTooltips();
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) => sortRange(b.dataset.sort === "desc"));

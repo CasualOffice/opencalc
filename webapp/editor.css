@@ -237,6 +237,17 @@ body {
 }
 .border-menu .bd-color.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* Custom tooltip — faster and styled vs. the native title bubble. */
+.tooltip {
+  position: fixed; z-index: 200; pointer-events: none;
+  background: var(--tooltip-bg, #1f2430); color: var(--tooltip-fg, #fff);
+  padding: 4px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 500;
+  line-height: 1.3; white-space: nowrap; box-shadow: var(--shadow-pop);
+  opacity: 0; transition: opacity .08s ease;
+}
+.tooltip.show { opacity: 1; }
+.tooltip[hidden] { display: none; }
+
 .sheet-rename {
   width: 90px; padding: 3px 6px; border: 1px solid var(--accent); border-radius: 5px;
   background: var(--bg); color: var(--fg); font-size: 13px; font-weight: 600; outline: none;
