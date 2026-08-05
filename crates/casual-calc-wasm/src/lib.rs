@@ -2348,10 +2348,14 @@ pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
         let Some(sh) = wb.sheets.get(sheet) else {
             return String::new();
         };
+        let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
         let mut out = String::new();
         for r in r0..=r1 {
-            for c in c0..=c1 {
-                if c > c0 {
+            if sh.hidden_rows.contains(&r) {
+                continue; // visible cells only
+            }
+            for (i, &c) in vis_cols.iter().enumerate() {
+                if i > 0 {
                     out.push('\t');
                 }
                 if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
@@ -2375,10 +2379,14 @@ pub fn session_copy_html(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> St
         let Some(sh) = wb.sheets.get(sheet) else {
             return String::new();
         };
+        let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
         let mut out = String::from("<table>");
         for r in r0..=r1 {
+            if sh.hidden_rows.contains(&r) {
+                continue; // visible cells only
+            }
             out.push_str("<tr>");
-            for c in c0..=c1 {
+            for &c in &vis_cols {
                 let cell = sh.cells.get(CellRef::new(r, c));
                 let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
                 let css = cell
@@ -2474,10 +2482,16 @@ pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<
     })
 }
 
-/// A cell captured on the internal clipboard, relative to the copy origin.
+/// A cell captured on the internal clipboard. `dr`/`dc` are the cell's offset
+/// among the **visible** cells of the copied range (hidden rows/columns are
+/// skipped and the rest compressed), so a paste lands them contiguously.
+/// `sr`/`sc` keep the original address for cut-clearing and per-cell formula
+/// reference shifting.
 struct ClipCell {
     dr: u32,
     dc: u32,
+    sr: u32,
+    sc: u32,
     cell: Cell,
     formula: Option<Expr>,
 }
@@ -2486,8 +2500,6 @@ struct ClipCell {
 /// unlike the text-only OS clipboard.
 struct Clip {
     sheet: usize,
-    r0: u32,
-    c0: u32,
     cut: bool,
     cells: Vec<ClipCell>,
 }
@@ -2498,6 +2510,39 @@ thread_local! {
 /// Snapshot a range onto the internal clipboard (value + style + formula AST).
 /// `cut` marks the source to be cleared on the next paste. The OS clipboard TSV
 /// is produced separately by [`session_copy_tsv`].
+/// Capture the **visible** cells of a range onto clipboard cells: hidden rows
+/// and columns are skipped and the survivors compressed to contiguous offsets,
+/// so a paste reproduces them with no gaps (the Excel/Sheets default). Pure so
+/// it can be unit-tested without a session.
+fn clip_capture(
+    wb: &Workbook,
+    sh: &casual_calc_model::Sheet,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Vec<ClipCell> {
+    let vis_rows: Vec<u32> = (r0..=r1).filter(|r| !sh.hidden_rows.contains(r)).collect();
+    let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
+    let mut cells = Vec::new();
+    for (dr, &r) in vis_rows.iter().enumerate() {
+        for (dc, &c) in vis_cols.iter().enumerate() {
+            if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                let formula = cell.formula.and_then(|h| wb.formula(h)).cloned();
+                cells.push(ClipCell {
+                    dr: dr as u32,
+                    dc: dc as u32,
+                    sr: r,
+                    sc: c,
+                    cell: cell.clone(),
+                    formula,
+                });
+            }
+        }
+    }
+    cells
+}
+
 #[wasm_bindgen]
 pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: bool) {
     let _ = with_session(|s| {
@@ -2505,29 +2550,8 @@ pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: 
         let Some(sh) = wb.sheets.get(sheet) else {
             return;
         };
-        let mut cells = Vec::new();
-        for r in r0..=r1 {
-            for c in c0..=c1 {
-                if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
-                    let formula = cell.formula.and_then(|h| wb.formula(h)).cloned();
-                    cells.push(ClipCell {
-                        dr: r - r0,
-                        dc: c - c0,
-                        cell: cell.clone(),
-                        formula,
-                    });
-                }
-            }
-        }
-        CLIP.with(|cl| {
-            *cl.borrow_mut() = Some(Clip {
-                sheet,
-                r0,
-                c0,
-                cut,
-                cells,
-            })
-        });
+        let cells = clip_capture(wb, sh, r0, c0, r1, c1);
+        CLIP.with(|cl| *cl.borrow_mut() = Some(Clip { sheet, cut, cells }));
     });
 }
 
@@ -2566,15 +2590,13 @@ pub fn session_clip_paste_mode(
             let Some(clip) = borrow.as_ref() else {
                 return (Vec::new(), false, true);
             };
-            let dr = row as i64 - clip.r0 as i64;
-            let dc = col as i64 - clip.c0 as i64;
             let cut = clip.cut && mode == "all";
             let mut ops = Vec::new();
             if cut {
                 for cc in &clip.cells {
                     ops.push(EditOperation::ClearCell {
                         sheet: clip.sheet,
-                        at: CellRef::new(clip.r0 + cc.dr, clip.c0 + cc.dc),
+                        at: CellRef::new(cc.sr, cc.sc),
                     });
                 }
             }
@@ -2594,6 +2616,11 @@ pub fn session_clip_paste_mode(
                     _ => {
                         let mut out = cc.cell.clone();
                         if let Some(expr) = &cc.formula {
+                            // Each cell moved from (sr,sc) to `at`; shift its
+                            // references by that per-cell delta (uniform when
+                            // nothing was compressed away).
+                            let dr = at.row as i64 - cc.sr as i64;
+                            let dc = at.col as i64 - cc.sc as i64;
                             let shifted = shift_references(expr, dr, dc);
                             out.formula = Some(session.workbook_mut().store_formula(shifted));
                         }
@@ -2870,5 +2897,28 @@ mod tests {
     #[test]
     fn cell_css_is_empty_for_default_style() {
         assert_eq!(html_cell_css(&Style::default()), "");
+    }
+
+    #[test]
+    fn clip_capture_skips_hidden_rows_and_compresses() {
+        use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+        let wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for r in 0..4u32 {
+            sheet.cells.set(
+                CellRef::new(r, 0),
+                Cell::value(CellValue::Number((r + 1) as f64)),
+            );
+        }
+        sheet.hidden_rows.insert(1); // hide the second row
+
+        let clip = super::clip_capture(&wb, &sheet, 0, 0, 3, 0);
+        // Row 1 is skipped; the three survivors compress to dr 0,1,2 while
+        // keeping their true source rows for cut/formula math.
+        assert_eq!(clip.len(), 3);
+        assert_eq!((clip[0].sr, clip[0].dr), (0, 0));
+        assert_eq!((clip[1].sr, clip[1].dr), (2, 1));
+        assert_eq!((clip[2].sr, clip[2].dr), (3, 2));
+        assert_eq!(clip[1].cell.value, CellValue::Number(3.0));
     }
 }
