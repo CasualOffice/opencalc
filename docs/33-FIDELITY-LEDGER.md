@@ -52,7 +52,7 @@ evidence").
 | Styles: borders | ● | ● | ● | ~ | — | P1A-003c (per-edge style+color, interned `<borders>`; editor draws + toggles; PNG borders pending) |
 | Merged ranges | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & merge/unmerge |
 | Column/row sizing | ● | ● | ● | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them; drag-to-resize, undoable) |
-| Frozen panes | ● | ● | ✗ | ✗ | — | P1B-001 |
+| Frozen panes | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & freeze control (UX-27) |
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |

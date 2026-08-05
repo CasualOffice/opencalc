@@ -66,7 +66,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-24 | Multi-range selection (Ctrl+click) | Todo | |
 | UX-25 | Drag-fill / autofill handle | Done | Fill handle at the selection corner; drag to extend; `session_fill` tiles the source (value+style) and **shifts relative formula refs** (`shift_references`, absolute `$` held). Verified: fill of =(B2+C2) -> =(B3+C3)/=(B4+C4). |
 | UX-26 | Hidden rows/columns (+ from file) | Done | `Sheet.hidden_rows/cols` (import/export `hidden="1"`); layout + editor treat hidden as 0px; Hide/Unhide in the cell context menu. Verified |
-| UX-27 | Freeze panes in editor (model has `SheetView`) | Todo | render frozen bands |
+| UX-27 | Freeze panes in editor | Done | Editor geometry reworked to an explicit line-index list + per-cell quadrant clipping; 4-pane render (corner fixed, frozen row scrolls-x, frozen col scrolls-y, body both); divider lines; freeze toolbar menu (top row / first col / to selection / unfreeze); ensureVisible + clicks freeze-aware. No-freeze path unchanged. Verified |
 | UX-28 | Find & replace | Done | `session_find` / `session_replace_all` (case toggle, undoable); Ctrl+F bar with next/prev, count, replace-all. Verified |
 | UX-29 | Sheet tab reorder (drag) + tab color | Partial | `session_move_sheet` + HTML5 drag-reorder (active sheet re-tracked). Verified. Tab color pending |
 

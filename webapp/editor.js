@@ -150,69 +150,92 @@ function measure() {
   const rect = wrap.getBoundingClientRect();
   const v = { w: rect.width, h: rect.height };
   if (!wasm) {
-    geo.colW = geo.colX = geo.rowH = geo.rowY = [];
+    geo.colW = geo.colX = geo.colIdx = geo.rowH = geo.rowY = geo.rowIdx = [];
+    geo.colOf = new Map(); geo.rowOf = new Map();
     geo.cols = geo.rows = 0;
+    state.freeze = { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
     return v;
   }
-  // Which line sits at the viewport edge, and by how many pixels it's clipped.
-  state.firstCol = wasm.session_col_at_px(state.sheet, Math.round(state.scrollX));
-  state.firstRow = wasm.session_row_at_px(state.sheet, Math.round(state.scrollY));
-  const subX = state.scrollX - wasm.session_col_offset_px(state.sheet, state.firstCol);
-  const subY = state.scrollY - wasm.session_row_offset_px(state.sheet, state.firstRow);
+  // Frozen panes: the top `fr` rows and left `fc` columns stay pinned; the rest
+  // scroll. The drawn line list is [frozen 0..fc-1 at fixed x] + [scrolling fsc..].
+  const fz = JSON.parse(wasm.session_frozen(state.sheet));
+  const fc = fz.cols, fr = fz.rows;
+  const frozenW = fc > 0 ? wasm.session_col_offset_px(state.sheet, fc) : 0;
+  const frozenH = fr > 0 ? wasm.session_row_offset_px(state.sheet, fr) : 0;
+  const bodyX0 = HW + frozenW, bodyY0 = HH + frozenH;
+  state.freeze = { fc, fr, bodyX0, bodyY0 };
 
-  const colCap = Math.max(4, Math.ceil((v.w - HW) / MIN_LINE) + 2);
-  const rowCap = Math.max(4, Math.ceil((v.h - HH) / MIN_LINE) + 2);
-  geo.colW = JSON.parse(wasm.session_col_px(state.sheet, state.firstCol, colCap));
-  geo.rowH = JSON.parse(wasm.session_row_px(state.sheet, state.firstRow, rowCap));
+  // First scrolling line + its sub-pixel clip. scrollX/Y move the scrolling
+  // region, whose content origin is column `fc` / row `fr`.
+  const absX = frozenW + state.scrollX;
+  const fsc = Math.max(fc, wasm.session_col_at_px(state.sheet, Math.round(absX)));
+  const subX = absX - wasm.session_col_offset_px(state.sheet, fsc);
+  const absY = frozenH + state.scrollY;
+  const fsr = Math.max(fr, wasm.session_row_at_px(state.sheet, Math.round(absY)));
+  const subY = absY - wasm.session_row_offset_px(state.sheet, fsr);
+  state.firstCol = fsc;
+  state.firstRow = fsr;
 
-  // Live resize preview: override the affected line sizes before layout so the
-  // grid reflows under the cursor without committing an edit yet. Scope covers a
-  // single line, the selected band, or every line (whole-sheet selection).
+  const colCap = Math.max(4, Math.ceil((v.w - bodyX0) / MIN_LINE) + 2);
+  const rowCap = Math.max(4, Math.ceil((v.h - bodyY0) / MIN_LINE) + 2);
+  const frozenColW = fc > 0 ? JSON.parse(wasm.session_col_px(state.sheet, 0, fc)) : [];
+  const scrollColW = JSON.parse(wasm.session_col_px(state.sheet, fsc, colCap));
+  geo.colIdx = []; geo.colW = [];
+  for (let c = 0; c < fc; c++) { geo.colIdx.push(c); geo.colW.push(frozenColW[c]); }
+  for (let i = 0; i < scrollColW.length; i++) { geo.colIdx.push(fsc + i); geo.colW.push(scrollColW[i]); }
+  const frozenRowH = fr > 0 ? JSON.parse(wasm.session_row_px(state.sheet, 0, fr)) : [];
+  const scrollRowH = JSON.parse(wasm.session_row_px(state.sheet, fsr, rowCap));
+  geo.rowIdx = []; geo.rowH = [];
+  for (let r = 0; r < fr; r++) { geo.rowIdx.push(r); geo.rowH.push(frozenRowH[r]); }
+  for (let i = 0; i < scrollRowH.length; i++) { geo.rowIdx.push(fsr + i); geo.rowH.push(scrollRowH[i]); }
+
+  // Live resize preview: override affected line sizes (matched by real index).
   if (state.resize) {
     const rz = state.resize;
-    const arr = rz.axis === "col" ? geo.colW : geo.rowH;
-    const base = rz.axis === "col" ? state.firstCol : state.firstRow;
-    for (let i = 0; i < arr.length; i++) {
-      const idx = base + i;
+    const idxArr = rz.axis === "col" ? geo.colIdx : geo.rowIdx;
+    const wArr = rz.axis === "col" ? geo.colW : geo.rowH;
+    for (let i = 0; i < idxArr.length; i++) {
+      const idx = idxArr[i];
       const hit = rz.scope === "all" || (rz.scope === "band" ? idx >= rz.b0 && idx <= rz.b1 : idx === rz.index);
-      if (hit) arr[i] = rz.previewPx;
+      if (hit) wArr[i] = rz.previewPx;
     }
   }
 
-  geo.colX = new Array(geo.colW.length);
-  let x = HW - subX;
-  geo.cols = 0;
-  for (let i = 0; i < geo.colW.length; i++) {
-    geo.colX[i] = x;
-    if (x < v.w) geo.cols = i + 1;
-    x += geo.colW[i] || COL_W;
-  }
+  // Index → slot maps (needed by the accessors and auto-height below).
+  geo.colOf = new Map(); geo.colIdx.forEach((c, i) => geo.colOf.set(c, i));
+  geo.rowOf = new Map(); geo.rowIdx.forEach((r, i) => geo.rowOf.set(r, i));
 
-  // Fetch the visible cells once (reused by draw) and grow rows that contain
-  // wrapped text so the whole wrapped content is shown (auto row height).
-  geoItems = wasm
-    ? JSON.parse(
-        wasm.session_cells(
-          state.sheet, state.firstRow, state.firstCol,
-          state.firstRow + geo.rowH.length, state.firstCol + geo.colW.length,
-        ),
-      )
-    : [];
+  // Fetch the visible cells once (covering the frozen bands), reused by draw,
+  // and grow rows that contain wrapped text / tall fonts (auto row height).
+  const lastRowIdx = geo.rowIdx[geo.rowIdx.length - 1] ?? fsr;
+  const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
+  geoItems = JSON.parse(
+    wasm.session_cells(state.sheet, fr > 0 ? 0 : fsr, fc > 0 ? 0 : fsc, lastRowIdx, lastColIdx),
+  );
   for (const it of geoItems) {
     if (!it.t) continue;
-    const ci = it.c - state.firstCol, ri = it.r - state.firstRow;
-    if (ci < 0 || ci >= geo.colW.length || ri < 0 || ri >= geo.rowH.length) continue;
+    const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
+    if (ci === undefined || ri === undefined) continue;
     let needed;
     if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
-    else if (it.fs) needed = cellLineH(it) + 6; // tall font grows the row too
+    else if (it.fs) needed = cellLineH(it) + 6;
     else continue;
     if (needed > geo.rowH[ri]) geo.rowH[ri] = needed;
   }
 
-  geo.rowY = new Array(geo.rowH.length);
-  let y = HH - subY;
-  geo.rows = 0;
-  for (let i = 0; i < geo.rowH.length; i++) {
+  // Positions: frozen lines from HW/HH, scrolling lines from bodyX0/Y0 − sub.
+  geo.colX = new Array(geo.colIdx.length);
+  let x = HW; geo.cols = 0;
+  for (let i = 0; i < geo.colIdx.length; i++) {
+    if (i === fc) x = bodyX0 - subX;
+    geo.colX[i] = x;
+    if (x < v.w) geo.cols = i + 1;
+    x += geo.colW[i] || COL_W;
+  }
+  geo.rowY = new Array(geo.rowIdx.length);
+  let y = HH; geo.rows = 0;
+  for (let i = 0; i < geo.rowIdx.length; i++) {
+    if (i === fr) y = bodyY0 - subY;
     geo.rowY[i] = y;
     if (y < v.h) geo.rows = i + 1;
     y += geo.rowH[i] || ROW_H;
@@ -282,44 +305,48 @@ function boundaryAt(px, py) {
   if (py < HH && px >= HW) {
     for (let i = 0; i < geo.colX.length; i++) {
       if (Math.abs(px - (geo.colX[i] + geo.colW[i])) <= RESIZE_GRAB)
-        return { axis: "col", index: state.firstCol + i };
+        return { axis: "col", index: geo.colIdx[i] };
     }
   } else if (px < HW && py >= HH) {
     for (let i = 0; i < geo.rowY.length; i++) {
       if (Math.abs(py - (geo.rowY[i] + geo.rowH[i])) <= RESIZE_GRAB)
-        return { axis: "row", index: state.firstRow + i };
+        return { axis: "row", index: geo.rowIdx[i] };
     }
   }
   return null;
 }
 
-// Absolute column/row → visible-window index (or -1 if outside the fetched span).
-const colIdx = (col) => col - state.firstCol;
-const rowIdx = (row) => row - state.firstRow;
-const colWAt = (col) => geo.colW[colIdx(col)] ?? COL_W;
-const rowHAt = (row) => geo.rowH[rowIdx(row)] ?? ROW_H;
-const colXAt = (col) => geo.colX[colIdx(col)];
-const rowYAt = (row) => geo.rowY[rowIdx(row)];
+// Screen position/size of a drawn column/row (or default/undefined if not drawn).
+const colWAt = (col) => (geo.colOf.has(col) ? geo.colW[geo.colOf.get(col)] : COL_W);
+const rowHAt = (row) => (geo.rowOf.has(row) ? geo.rowH[geo.rowOf.get(row)] : ROW_H);
+const colXAt = (col) => (geo.colOf.has(col) ? geo.colX[geo.colOf.get(col)] : undefined);
+const rowYAt = (row) => (geo.rowOf.has(row) ? geo.rowY[geo.rowOf.get(row)] : undefined);
+const firstDrawnCol = () => geo.colIdx[0] ?? 0;
+const firstDrawnRow = () => geo.rowIdx[0] ?? 0;
 
 // The clipped [x, x+w) pixel span covering columns c0..c1 within the grid body.
 function spanX(c0, c1, v) {
-  const li = colIdx(c0);
-  const ri = colIdx(c1);
-  const left = c0 < state.firstCol ? HW : li < geo.colX.length ? geo.colX[li] : v.w;
-  const right =
-    c1 < state.firstCol ? HW : ri < geo.colX.length ? geo.colX[ri] + geo.colW[ri] : v.w;
+  const xa = colXAt(c0), xb = colXAt(c1);
+  const left = xa !== undefined ? xa : c0 < firstDrawnCol() ? HW : v.w;
+  const right = xb !== undefined ? xb + colWAt(c1) : c1 < firstDrawnCol() ? HW : v.w;
   const x = Math.max(HW, left);
   return { x, w: Math.max(0, Math.min(right, v.w) - x) };
 }
 
 function spanY(r0, r1, v) {
-  const ti = rowIdx(r0);
-  const bi = rowIdx(r1);
-  const top = r0 < state.firstRow ? HH : ti < geo.rowY.length ? geo.rowY[ti] : v.h;
-  const bot =
-    r1 < state.firstRow ? HH : bi < geo.rowY.length ? geo.rowY[bi] + geo.rowH[bi] : v.h;
+  const ya = rowYAt(r0), yb = rowYAt(r1);
+  const top = ya !== undefined ? ya : r0 < firstDrawnRow() ? HH : v.h;
+  const bot = yb !== undefined ? yb + rowHAt(r1) : r1 < firstDrawnRow() ? HH : v.h;
   const y = Math.max(HH, top);
   return { y, h: Math.max(0, Math.min(bot, v.h) - y) };
+}
+
+// The clip rect of the quadrant a cell belongs to (whole body when no freeze).
+function quadClip(row, col, v) {
+  const f = state.freeze;
+  const x0 = col < f.fc ? HW : f.bodyX0, x1 = col < f.fc ? f.bodyX0 : v.w;
+  const y0 = row < f.fr ? HH : f.bodyY0, y1 = row < f.fr ? f.bodyY0 : v.h;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
 function resize() {
@@ -357,45 +384,79 @@ function draw() {
     sY = spanY(rectSel.r0, rectSel.r1, v);
   }
 
-  // Everything in the grid body is clipped so partially-scrolled first cells
-  // never bleed into the header strips (which are painted on top afterwards).
+  // The pane quadrants (one whole body when nothing is frozen). Selection tint,
+  // gridlines and cells are each drawn clipped to their quadrant so frozen and
+  // scrolling panes never bleed into one another.
+  const F = state.freeze;
+  const quads = F.fc || F.fr
+    ? [
+        { x: HW, y: HH, w: F.bodyX0 - HW, h: F.bodyY0 - HH },
+        { x: F.bodyX0, y: HH, w: v.w - F.bodyX0, h: F.bodyY0 - HH },
+        { x: HW, y: F.bodyY0, w: F.bodyX0 - HW, h: v.h - F.bodyY0 },
+        { x: F.bodyX0, y: F.bodyY0, w: v.w - F.bodyX0, h: v.h - F.bodyY0 },
+      ].filter((q) => q.w > 0 && q.h > 0)
+    : [{ x: HW, y: HH, w: Math.max(0, v.w - HW), h: Math.max(0, v.h - HH) }];
+
+  // Selection tint + gridlines, per quadrant.
+  for (const q of quads) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(q.x, q.y, q.w, q.h);
+    ctx.clip();
+    ctx.fillStyle = colors.sel;
+    ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
+    ctx.strokeStyle = colors.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= geo.cols; i++) {
+      const x = Math.floor(i < geo.colX.length ? geo.colX[i] : v.w) + 0.5;
+      ctx.moveTo(x, HH);
+      ctx.lineTo(x, v.h);
+    }
+    for (let i = 0; i <= geo.rows; i++) {
+      const y = Math.floor(i < geo.rowY.length ? geo.rowY[i] : v.h) + 0.5;
+      ctx.moveTo(HW, y);
+      ctx.lineTo(v.w, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Outer body clip (keeps content out of the header strips). Cells additionally
+  // clip to their own quadrant below.
   ctx.save();
   ctx.beginPath();
   ctx.rect(HW, HH, Math.max(0, v.w - HW), Math.max(0, v.h - HH));
   ctx.clip();
 
-  // Selection highlight (behind text).
-  ctx.fillStyle = colors.sel;
-  ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
-
-  // Gridlines (at each visible column/row leading edge).
-  ctx.strokeStyle = colors.grid;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 0; i <= geo.cols; i++) {
-    const x = Math.floor(i < geo.colX.length ? geo.colX[i] : v.w) + 0.5;
-    ctx.moveTo(x, HH);
-    ctx.lineTo(x, v.h);
-  }
-  for (let i = 0; i <= geo.rows; i++) {
-    const y = Math.floor(i < geo.rowY.length ? geo.rowY[i] : v.h) + 0.5;
-    ctx.moveTo(HW, y);
-    ctx.lineTo(v.w, y);
-  }
-  ctx.stroke();
-
   // Cell fills + text (fetched in measure(), reused here).
-  const lastCol = state.firstCol + geo.cols;
+  const lastCol = (geo.colIdx[geo.colIdx.length - 1] ?? state.firstCol) + 1;
   const items = geoItems;
   sheetMerges = wasm ? JSON.parse(wasm.session_merges(state.sheet)) : [];
+
+  // Clip a cell's drawing to its pane quadrant (a no-op when nothing is frozen).
+  const frozen = F.fc || F.fr;
+  const withQuad = (row, col, fn) => {
+    if (!frozen) { fn(); return; }
+    const q = quadClip(row, col, v);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(q.x, q.y, q.w, q.h);
+    ctx.clip();
+    fn();
+    ctx.restore();
+  };
+
   ctx.textBaseline = "middle";
   for (const it of items) {
     if (!it.bg) continue;
     const x = colXAt(it.c);
     const y = rowYAt(it.r);
     if (x === undefined || y === undefined) continue;
-    ctx.fillStyle = "#" + it.bg;
-    ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
+    withQuad(it.r, it.c, () => {
+      ctx.fillStyle = "#" + it.bg;
+      ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
+    });
   }
   // Cells that hold text — these block a neighbor's overflow.
   const occupied = new Set();
@@ -416,6 +477,7 @@ function draw() {
       const lh = cellLineH(it);
       const lines = wrapLines(it, w - 8);
       ctx.save();
+      if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
       ctx.beginPath();
       ctx.rect(x, yTop, w, h);
       ctx.clip();
@@ -453,6 +515,7 @@ function draw() {
     }
 
     ctx.save();
+    if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
     ctx.beginPath();
     ctx.rect(clipL, yTop, clipR - clipL, h);
     ctx.clip();
@@ -481,10 +544,12 @@ function draw() {
     if (x === undefined || yTop === undefined) continue;
     const w = colWAt(it.c);
     const h = rowHAt(it.r);
-    drawEdge(it.bd.l, x, yTop, x, yTop + h);
-    drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);
-    drawEdge(it.bd.t, x, yTop, x + w, yTop);
-    drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
+    withQuad(it.r, it.c, () => {
+      drawEdge(it.bd.l, x, yTop, x, yTop + h);
+      drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);
+      drawEdge(it.bd.t, x, yTop, x + w, yTop);
+      drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
+    });
   }
 
   // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
@@ -494,25 +559,27 @@ function draw() {
     const mw = screenX(m.c1 + 1) - mx, mh = screenY(m.r1 + 1) - my;
     if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
     const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
-    ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
-    ctx.fillRect(mx, my, mw, mh);
-    if (mergeInSel(m)) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
-    ctx.strokeStyle = colors.grid;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(Math.floor(mx) + 0.5, Math.floor(my) + 0.5, Math.round(mw) - 1, Math.round(mh) - 1);
-    if (it && it.t) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(mx, my, mw, mh);
-      ctx.clip();
-      ctx.font = cellFont(it);
-      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
-      const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
-      ctx.textAlign = al;
-      const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
-      ctx.fillText(it.t, tx, my + mh / 2);
-      ctx.restore();
-    }
+    withQuad(m.r0, m.c0, () => {
+      ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
+      ctx.fillRect(mx, my, mw, mh);
+      if (mergeInSel(m)) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
+      ctx.strokeStyle = colors.grid;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.floor(mx) + 0.5, Math.floor(my) + 0.5, Math.round(mw) - 1, Math.round(mh) - 1);
+      if (it && it.t) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(mx, my, mw, mh);
+        ctx.clip();
+        ctx.font = cellFont(it);
+        ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+        const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
+        ctx.textAlign = al;
+        const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
+        ctx.fillText(it.t, tx, my + mh / 2);
+        ctx.restore();
+      }
+    });
   }
 
   // Range border (cell selections only) + focus-cell border (spans a merge).
@@ -522,16 +589,20 @@ function draw() {
     ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
   }
   const fm = mergeAt(state.sel.row, state.sel.col);
-  if (fm) {
-    const bx = screenX(fm.c0), by = screenY(fm.r0);
-    ctx.strokeRect(bx + 1, by + 1, screenX(fm.c1 + 1) - bx - 1, screenY(fm.r1 + 1) - by - 1);
-  } else {
-    const fx = colXAt(state.sel.col);
-    const fy = rowYAt(state.sel.row);
-    if (fx !== undefined && fy !== undefined) {
-      ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
+  withQuad(state.sel.row, state.sel.col, () => {
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = 2;
+    if (fm) {
+      const bx = screenX(fm.c0), by = screenY(fm.r0);
+      ctx.strokeRect(bx + 1, by + 1, screenX(fm.c1 + 1) - bx - 1, screenY(fm.r1 + 1) - by - 1);
+    } else {
+      const fx = colXAt(state.sel.col);
+      const fy = rowYAt(state.sel.row);
+      if (fx !== undefined && fy !== undefined) {
+        ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
+      }
     }
-  }
+  });
 
   // Drag-fill preview outline.
   if (state.fill && state.fill.dst) {
@@ -550,15 +621,27 @@ function draw() {
     const hc = colXAt(rectSel.c1), hr = rowYAt(rectSel.r1);
     if (hc !== undefined && hr !== undefined) {
       const hx = hc + colWAt(rectSel.c1), hy = hr + rowHAt(rectSel.r1);
-      ctx.fillStyle = colors.accent;
-      ctx.fillRect(hx - 3, hy - 3, 6, 6);
-      ctx.strokeStyle = colors.bg;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
+      withQuad(rectSel.r1, rectSel.c1, () => {
+        ctx.fillStyle = colors.accent;
+        ctx.fillRect(hx - 3, hy - 3, 6, 6);
+        ctx.strokeStyle = colors.bg;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
+      });
       fillHandleRect = { x: hx, y: hy };
     }
   }
   ctx.restore(); // end body clip
+
+  // Freeze divider lines (a touch darker than gridlines).
+  if (frozen) {
+    ctx.strokeStyle = colors.muted;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (F.fc) { ctx.moveTo(F.bodyX0 - 0.5, HH); ctx.lineTo(F.bodyX0 - 0.5, v.h); }
+    if (F.fr) { ctx.moveTo(HW, F.bodyY0 - 0.5); ctx.lineTo(v.w, F.bodyY0 - 0.5); }
+    ctx.stroke();
+  }
 
   // Which columns/rows are covered by the current selection (for header tint).
   const rr = selRect();
@@ -574,28 +657,39 @@ function draw() {
   ctx.font = "12px system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(HW, 0, Math.max(0, v.w - HW), HH);
-  ctx.clip();
-  for (let i = 0; i < geo.cols; i++) {
-    const c = state.firstCol + i;
-    if (colInSel(c)) { ctx.fillStyle = colors.sel; ctx.fillRect(geo.colX[i], 0, geo.colW[i], HH); }
-    ctx.fillStyle = colInSel(c) ? colors.accent : colors.muted;
-    ctx.fillText(colName(c), geo.colX[i] + geo.colW[i] / 2, HH / 2);
-  }
-  ctx.restore();
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, HH, HW, Math.max(0, v.h - HH));
-  ctx.clip();
-  for (let i = 0; i < geo.rows; i++) {
-    const r = state.firstRow + i;
-    if (rowInSel(r)) { ctx.fillStyle = colors.sel; ctx.fillRect(0, geo.rowY[i], HW, geo.rowH[i]); }
-    ctx.fillStyle = rowInSel(r) ? colors.accent : colors.muted;
-    ctx.fillText(String(r + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
-  }
-  ctx.restore();
+  // Column headers, frozen segment then scrolling segment (each clipped so the
+  // scrolling headers can't bleed into the frozen band).
+  const drawColHeaders = (clipX, clipW, wantFrozen) => {
+    if (clipW <= 0) return;
+    ctx.save(); ctx.beginPath(); ctx.rect(clipX, 0, clipW, HH); ctx.clip();
+    for (let i = 0; i < geo.cols; i++) {
+      if (geo.colW[i] <= 0) continue;
+      if ((geo.colIdx[i] < F.fc) !== wantFrozen) continue;
+      const c = geo.colIdx[i];
+      if (colInSel(c)) { ctx.fillStyle = colors.sel; ctx.fillRect(geo.colX[i], 0, geo.colW[i], HH); }
+      ctx.fillStyle = colInSel(c) ? colors.accent : colors.muted;
+      ctx.fillText(colName(c), geo.colX[i] + geo.colW[i] / 2, HH / 2);
+    }
+    ctx.restore();
+  };
+  if (F.fc) drawColHeaders(HW, F.bodyX0 - HW, true);
+  drawColHeaders(F.bodyX0, v.w - F.bodyX0, false);
+
+  const drawRowHeaders = (clipY, clipH, wantFrozen) => {
+    if (clipH <= 0) return;
+    ctx.save(); ctx.beginPath(); ctx.rect(0, clipY, HW, clipH); ctx.clip();
+    for (let i = 0; i < geo.rows; i++) {
+      if (geo.rowH[i] <= 0) continue;
+      if ((geo.rowIdx[i] < F.fr) !== wantFrozen) continue;
+      const r = geo.rowIdx[i];
+      if (rowInSel(r)) { ctx.fillStyle = colors.sel; ctx.fillRect(0, geo.rowY[i], HW, geo.rowH[i]); }
+      ctx.fillStyle = rowInSel(r) ? colors.accent : colors.muted;
+      ctx.fillText(String(r + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
+    }
+    ctx.restore();
+  };
+  if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
+  drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
 
   cellRef.textContent = colName(state.sel.col) + (state.sel.row + 1);
   updateScrollbars(v);
@@ -645,15 +739,7 @@ function refreshFormulaBar() {
 
 function cellAt(px, py) {
   if (px < HW || py < HH) return null;
-  let col = state.firstCol + Math.max(0, geo.colX.length - 1);
-  for (let i = 0; i < geo.colX.length; i++) {
-    if (px < geo.colX[i] + geo.colW[i]) { col = state.firstCol + i; break; }
-  }
-  let row = state.firstRow + Math.max(0, geo.rowY.length - 1);
-  for (let i = 0; i < geo.rowY.length; i++) {
-    if (py < geo.rowY[i] + geo.rowH[i]) { row = state.firstRow + i; break; }
-  }
-  return { row, col };
+  return { row: rowAtY(py), col: colAtX(px) };
 }
 
 function select(row, col) {
@@ -679,18 +765,34 @@ function extend(row, col) {
 function ensureVisible() {
   if (!wasm) return;
   const rect = wrap.getBoundingClientRect();
-  const viewW = rect.width - HW;
-  const viewH = rect.height - HH;
-  const cL = wasm.session_col_offset_px(state.sheet, state.sel.col);
-  const cW = JSON.parse(wasm.session_col_px(state.sheet, state.sel.col, 1))[0] || COL_W;
-  const rT = wasm.session_row_offset_px(state.sheet, state.sel.row);
-  const rH = JSON.parse(wasm.session_row_px(state.sheet, state.sel.row, 1))[0] || ROW_H;
-  if (cL < state.scrollX) state.scrollX = cL;
-  else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
-  if (rT < state.scrollY) state.scrollY = rT;
-  else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  // The scrolling viewport is what remains right of / below the frozen bands.
+  const viewW = rect.width - f.bodyX0;
+  const viewH = rect.height - f.bodyY0;
+  const frozenW = fzOffset(state.sel.col, true, f.fc);
+  const frozenH = fzOffset(state.sel.row, false, f.fr);
+  // Frozen cells are always visible; only scroll for cells in the body region.
+  if (state.sel.col >= f.fc) {
+    const cL = wasm.session_col_offset_px(state.sheet, state.sel.col) - frozenW;
+    const cW = JSON.parse(wasm.session_col_px(state.sheet, state.sel.col, 1))[0] || COL_W;
+    if (cL < state.scrollX) state.scrollX = cL;
+    else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
+  }
+  if (state.sel.row >= f.fr) {
+    const rT = wasm.session_row_offset_px(state.sheet, state.sel.row) - frozenH;
+    const rH = JSON.parse(wasm.session_row_px(state.sheet, state.sel.row, 1))[0] || ROW_H;
+    if (rT < state.scrollY) state.scrollY = rT;
+    else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
+  }
   state.scrollX = Math.max(0, state.scrollX);
   state.scrollY = Math.max(0, state.scrollY);
+}
+// Absolute px of the frozen band before `count` lines on this axis.
+function fzOffset(_line, columns, count) {
+  if (count <= 0) return 0;
+  return columns
+    ? wasm.session_col_offset_px(state.sheet, count)
+    : wasm.session_row_offset_px(state.sheet, count);
 }
 
 function commit(value, advance) {
@@ -710,14 +812,14 @@ function usedBounds() {
   const b = JSON.parse(wasm.session_used_bounds(state.sheet));
   return { rows: Math.max(1, b.rows), cols: Math.max(1, b.cols) };
 }
-// The visible column/row index at a canvas x/y (for header clicks).
+// The column/row index at a canvas x/y (for header clicks + hit-testing).
 function colAtX(px) {
-  for (let i = 0; i < geo.colX.length; i++) if (px < geo.colX[i] + geo.colW[i]) return state.firstCol + i;
-  return state.firstCol + Math.max(0, geo.colX.length - 1);
+  for (let i = 0; i < geo.colX.length; i++) if (px < geo.colX[i] + geo.colW[i]) return geo.colIdx[i];
+  return geo.colIdx[geo.colIdx.length - 1] ?? state.firstCol;
 }
 function rowAtY(py) {
-  for (let i = 0; i < geo.rowY.length; i++) if (py < geo.rowY[i] + geo.rowH[i]) return state.firstRow + i;
-  return state.firstRow + Math.max(0, geo.rowY.length - 1);
+  for (let i = 0; i < geo.rowY.length; i++) if (py < geo.rowY[i] + geo.rowH[i]) return geo.rowIdx[i];
+  return geo.rowIdx[geo.rowIdx.length - 1] ?? state.firstRow;
 }
 // Whole-sheet selection (the top-left corner box). The viewport stays put.
 function selectAll() {
@@ -785,6 +887,17 @@ function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+function setFreeze(kind) {
+  let rows = 0, cols = 0;
+  if (kind === "sel") { rows = state.sel.row; cols = state.sel.col; }
+  else if (kind === "row") rows = 1;
+  else if (kind === "col") cols = 1;
+  try {
+    wasm.session_set_freeze(state.sheet, rows, cols);
+    state.scrollX = state.scrollY = 0;
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1384,6 +1497,7 @@ function wireEvents() {
   wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
   wirePopup("tb-border", "border-menu", (b) => setBorder(b.dataset.bd));
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
+  wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
 
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
