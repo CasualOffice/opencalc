@@ -1825,6 +1825,49 @@ pub fn session_clear_range(
     })
 }
 
+/// Clear the *contents* of a range (value + formula) while keeping each cell's
+/// style — what the Delete key does in every spreadsheet. A cell with no style
+/// is removed entirely; a styled cell is reset to an empty value so its fill,
+/// borders and number format survive.
+#[wasm_bindgen]
+pub fn session_clear_contents(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let at = CellRef::new(r, c);
+                let style = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|s| s.cells.get(at))
+                    .and_then(|cl| cl.style);
+                match style {
+                    Some(sid) => {
+                        let mut cleared = Cell::value(CellValue::Empty);
+                        cleared.style = Some(sid);
+                        ops.push(EditOperation::SetCell {
+                            sheet,
+                            at,
+                            cell: Some(cleared),
+                        });
+                    }
+                    None => ops.push(EditOperation::ClearCell { sheet, at }),
+                }
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 /// Copy a range as tab-separated text (for the clipboard).
 #[wasm_bindgen]
 pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {

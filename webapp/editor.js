@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "6";
+const BUILD = "7";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1212,7 +1212,13 @@ function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sh
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
 function setBorder(kind) { formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind)); }
 function toggleBorder() { setBorder("all"); }
+// Delete key / "Clear contents": clear values + formulas, keep formatting.
 function clearSelection() {
+  try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  draw();
+}
+// "Clear all": also drop styles.
+function clearAll() {
   try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
   draw();
 }
@@ -1694,6 +1700,7 @@ function cellMenu(x, y) {
   });
   sep();
   item("Clear contents", false, () => clearSelection());
+  item("Clear all (incl. formats)", false, () => clearAll());
   positionMenu(menu, x, y);
 }
 
