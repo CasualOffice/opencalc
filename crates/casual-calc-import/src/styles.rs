@@ -15,6 +15,9 @@ use crate::error::ImportError;
 pub struct StyleSheet {
     /// One `Style` per `xf` in `cellXfs`, in order.
     pub xf_styles: Vec<Style>,
+    /// Differential-format fill color (`RRGGBB`) per `<dxf>`, by dxfId — used by
+    /// conditional formatting. `None` if the dxf carries no solid fill.
+    pub dxf_fills: Vec<Option<String>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -101,6 +104,8 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
 
     let (mut in_fonts, mut in_fills, mut in_cellxfs) = (false, false, false);
     let mut in_borders = false;
+    let mut in_dxfs = false;
+    let mut dxfs: Vec<Option<String>> = Vec::new();
     let mut cur_edge: Option<Edge> = None;
     let mut depth = 0usize;
     let mut elements = 0usize;
@@ -133,6 +138,19 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                     b"fills" => in_fills = true,
                     b"borders" => in_borders = true,
                     b"cellXfs" => in_cellxfs = true,
+                    b"dxfs" => in_dxfs = true,
+                    b"dxf" if in_dxfs => dxfs.push(None),
+                    b"bgColor" if in_dxfs => {
+                        if let Some(rgb) = attr(e, b"rgb")? {
+                            let hex = rgb.trim();
+                            if hex.len() >= 6
+                                && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                                && let Some(last) = dxfs.last_mut()
+                            {
+                                *last = Some(hex[hex.len() - 6..].to_ascii_uppercase());
+                            }
+                        }
+                    }
                     b"border" if in_borders => borders.push(Borders::default()),
                     b"left" | b"right" | b"top" | b"bottom" if in_borders => {
                         let edge = match e.local_name().as_ref() {
@@ -244,6 +262,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                 match e.local_name().as_ref() {
                     b"fonts" => in_fonts = false,
                     b"fills" => in_fills = false,
+                    b"dxfs" => in_dxfs = false,
                     b"borders" => in_borders = false,
                     b"cellXfs" => in_cellxfs = false,
                     b"left" | b"right" | b"top" | b"bottom" if in_borders => cur_edge = None,
@@ -281,7 +300,10 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
         })
         .collect();
 
-    Ok(StyleSheet { xf_styles })
+    Ok(StyleSheet {
+        xf_styles,
+        dxf_fills: dxfs,
+    })
 }
 
 fn resolve_format(id: u32, custom: &HashMap<u32, String>) -> Option<String> {

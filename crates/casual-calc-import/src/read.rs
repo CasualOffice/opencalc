@@ -173,6 +173,25 @@ pub struct Worksheet {
     /// List data-validations as `(sqref, formula1)`, where `formula1` is the
     /// raw inline list text (e.g. `"a,b,c"`) or a range reference (skipped).
     pub validations: Vec<(String, String)>,
+    /// Raw conditional-formatting rules, mapped to the model in `lib.rs`.
+    pub conditional_formats: Vec<RawCf>,
+}
+
+/// A raw `<cfRule>` with its enclosing `sqref`, before mapping to the model.
+#[derive(Debug, Default)]
+pub struct RawCf {
+    /// The range the rule applies to (`<conditionalFormatting sqref>`).
+    pub sqref: String,
+    /// The `type` attribute (`cellIs`, `containsText`, …).
+    pub kind: String,
+    /// The `operator` attribute (`greaterThan`, `between`, …).
+    pub operator: String,
+    /// The `dxfId` — index into the styles `<dxfs>` for the fill.
+    pub dxf_id: Option<usize>,
+    /// The `text` attribute (for `containsText`).
+    pub text: Option<String>,
+    /// The `<formula>` operand texts, in order.
+    pub formulas: Vec<String>,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -301,6 +320,10 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
     // Active `<dataValidation>` being parsed: (sqref, accumulated formula1).
     let mut dv: Option<(String, String)> = None;
     let mut in_dv_formula1 = false;
+    // Active `<conditionalFormatting>` sqref + `<cfRule>` being parsed.
+    let mut cf_sqref = String::new();
+    let mut cur_cf: Option<RawCf> = None;
+    let mut in_cf_formula = false;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -344,6 +367,25 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                         }
                     }
                     b"formula1" if dv.is_some() => in_dv_formula1 = true,
+                    b"conditionalFormatting" => {
+                        cf_sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
+                    }
+                    b"cfRule" => {
+                        cur_cf = Some(RawCf {
+                            sqref: cf_sqref.clone(),
+                            kind: read_attr(&e, b"type")?.unwrap_or_default(),
+                            operator: read_attr(&e, b"operator")?.unwrap_or_default(),
+                            dxf_id: read_attr(&e, b"dxfId")?.and_then(|s| s.parse().ok()),
+                            text: read_attr(&e, b"text")?,
+                            formulas: Vec::new(),
+                        });
+                    }
+                    b"formula" if cur_cf.is_some() => {
+                        in_cf_formula = true;
+                        if let Some(cf) = cur_cf.as_mut() {
+                            cf.formulas.push(String::new());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -381,6 +423,11 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
             Event::Text(e) => {
                 if in_dv_formula1 && let Some((_, f1)) = dv.as_mut() {
                     f1.push_str(&e.unescape().map_err(xml_err)?);
+                } else if in_cf_formula
+                    && let Some(cf) = cur_cf.as_mut()
+                    && let Some(last) = cf.formulas.last_mut()
+                {
+                    last.push_str(&e.unescape().map_err(xml_err)?);
                 } else if let Some(cell) = current.as_mut() {
                     if in_value {
                         cell.value
@@ -408,6 +455,13 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                             result.validations.push((sqref, f1));
                         }
                     }
+                    b"formula" => in_cf_formula = false,
+                    b"cfRule" => {
+                        if let Some(cf) = cur_cf.take() {
+                            result.conditional_formats.push(cf);
+                        }
+                    }
+                    b"conditionalFormatting" => cf_sqref.clear(),
                     b"t" if in_inline => in_inline_text = false,
                     b"is" => in_inline = false,
                     b"c" => {

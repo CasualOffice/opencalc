@@ -24,8 +24,8 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellRange, CellValue, DataValidation, DefinedName, ErrorValue, Id, IdGenerator, Sheet,
-    SheetId, StringId, Workbook,
+    Cell, CellRange, CellValue, CfRule, ConditionalFormat, DataValidation, DefinedName, ErrorValue,
+    Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -186,6 +186,47 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 parse_range(first).or_else(|| parse_a1(first).map(|c| CellRange::new(c, c)));
             if let Some(range) = range {
                 sheet.validations.push(DataValidation { range, values });
+            }
+        }
+
+        // Conditional formatting: resolve each cfRule's fill via its dxfId, its
+        // range via the sqref, and its predicate via type/operator/formulas.
+        // Rules without a solid fill (the only kind modeled) are skipped.
+        for raw in worksheet.conditional_formats {
+            let Some(fill) = raw
+                .dxf_id
+                .and_then(|id| stylesheet.dxf_fills.get(id).cloned().flatten())
+            else {
+                continue;
+            };
+            let Some(first) = raw.sqref.split_whitespace().next() else {
+                continue;
+            };
+            let Some(range) =
+                parse_range(first).or_else(|| parse_a1(first).map(|c| CellRange::new(c, c)))
+            else {
+                continue;
+            };
+            let num = |i: usize| {
+                raw.formulas
+                    .get(i)
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+            };
+            let rule = match (raw.kind.as_str(), raw.operator.as_str()) {
+                ("cellIs", "greaterThan") => num(0).map(CfRule::GreaterThan),
+                ("cellIs", "lessThan") => num(0).map(CfRule::LessThan),
+                ("cellIs", "equal") => num(0).map(CfRule::EqualTo),
+                ("cellIs", "between") => match (num(0), num(1)) {
+                    (Some(a), Some(b)) => Some(CfRule::Between(a, b)),
+                    _ => None,
+                },
+                ("containsText", _) => raw.text.clone().map(CfRule::TextContains),
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                sheet
+                    .conditional_formats
+                    .push(ConditionalFormat { range, rule, fill });
             }
         }
 

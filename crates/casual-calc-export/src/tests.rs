@@ -207,3 +207,39 @@ fn data_validation_list_round_trips() {
     assert_eq!(v[0].range.start, CellRef::new(0, 0));
     assert_eq!(v[0].range.end, CellRef::new(4, 0));
 }
+
+#[test]
+fn conditional_formatting_round_trips() {
+    use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = |r0, c0, r1, c1| CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1));
+    workbook.sheets[0].conditional_formats = vec![
+        ConditionalFormat {
+            range: r(0, 0, 4, 3),
+            rule: CfRule::GreaterThan(5.0),
+            fill: "FFD166".into(),
+        },
+        ConditionalFormat {
+            range: r(1, 1, 1, 1),
+            rule: CfRule::Between(2.0, 10.0),
+            fill: "D1F0D6".into(),
+        },
+        ConditionalFormat {
+            range: r(0, 0, 0, 0),
+            rule: CfRule::TextContains("total".into()),
+            fill: "FFD6E0".into(),
+        },
+    ];
+    let written = write_workbook(&workbook).unwrap();
+    let cfs = import_package(written).unwrap().workbook.sheets[0]
+        .conditional_formats
+        .clone();
+    assert_eq!(cfs.len(), 3);
+    assert_eq!(cfs[0].rule, CfRule::GreaterThan(5.0));
+    assert_eq!(cfs[0].fill, "FFD166");
+    assert_eq!(cfs[0].range.end, CellRef::new(4, 3));
+    assert_eq!(cfs[1].rule, CfRule::Between(2.0, 10.0));
+    assert_eq!(cfs[1].fill, "D1F0D6");
+    assert_eq!(cfs[2].rule, CfRule::TextContains("total".into()));
+    assert_eq!(cfs[2].fill, "FFD6E0");
+}

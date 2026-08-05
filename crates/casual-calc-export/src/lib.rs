@@ -19,7 +19,8 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, HAlign, SheetId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, HAlign, SheetId,
+    VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -36,7 +37,11 @@ const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?
 /// Serialize a workbook to a deterministic `.xlsx` package.
 pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     let has_strings = !workbook.strings.is_empty();
-    let has_styles = !workbook.styles.is_empty();
+    // Conditional-format fills become `<dxfs>` in styles.xml, shared by dxfId
+    // with the worksheet `<cfRule>`s — so styles.xml is written when there are
+    // dxfs even if no cell carries a style.
+    let dxfs = collect_dxfs(workbook);
+    let has_styles = !workbook.styles.is_empty() || !dxfs.is_empty();
 
     let mut parts: Vec<(String, String)> = vec![
         (
@@ -57,12 +62,12 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         ));
     }
     if has_styles {
-        parts.push(("xl/styles.xml".to_owned(), styles_xml(workbook)));
+        parts.push(("xl/styles.xml".to_owned(), styles_xml(workbook, &dxfs)));
     }
     for i in 0..workbook.sheets.len() {
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml(workbook, i),
+            worksheet_xml(workbook, i, &dxfs),
         ));
     }
 
@@ -178,7 +183,21 @@ fn shared_strings_xml(workbook: &Workbook) -> String {
     s
 }
 
-fn styles_xml(workbook: &Workbook) -> String {
+/// The deduplicated conditional-format fill colors across the workbook — each
+/// becomes one `<dxf>` (differential format), indexed by position (the dxfId).
+fn collect_dxfs(workbook: &Workbook) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sheet in &workbook.sheets {
+        for cf in &sheet.conditional_formats {
+            if !out.contains(&cf.fill) {
+                out.push(cf.fill.clone());
+            }
+        }
+    }
+    out
+}
+
+fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     let styles: Vec<_> = workbook.styles.iter().collect();
 
     // Deduplicate fonts, solid fills, and custom number formats, and record the
@@ -363,7 +382,18 @@ fn styles_xml(workbook: &Workbook) -> String {
             s.push_str("/>");
         }
     }
-    s.push_str("</cellXfs></styleSheet>");
+    s.push_str("</cellXfs>");
+    // Differential formats (conditional-format fills), after cellXfs.
+    if !dxfs.is_empty() {
+        s.push_str(&format!("<dxfs count=\"{}\">", dxfs.len()));
+        for fill in dxfs {
+            s.push_str(&format!(
+                "<dxf><fill><patternFill><bgColor rgb=\"FF{fill}\"/></patternFill></fill></dxf>"
+            ));
+        }
+        s.push_str("</dxfs>");
+    }
+    s.push_str("</styleSheet>");
     s
 }
 
@@ -462,7 +492,7 @@ fn fmt_half_points(size_hp: u32) -> String {
     }
 }
 
-fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
+fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
 
@@ -670,8 +700,51 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize) -> String {
         s.push_str("</dataValidations>");
     }
 
+    // Conditional formatting — one <conditionalFormatting> per rule, its <dxf>
+    // referenced by the fill's index in the workbook dxfs list.
+    for (i, cf) in sheet.conditional_formats.iter().enumerate() {
+        let dxf_id = dxfs.iter().position(|f| *f == cf.fill).unwrap_or(0);
+        s.push_str(&format!(
+            "<conditionalFormatting sqref=\"{}\">",
+            range_a1(&cf.range)
+        ));
+        s.push_str(&cf_rule_xml(cf, dxf_id, i + 1));
+        s.push_str("</conditionalFormatting>");
+    }
+
     s.push_str("</worksheet>");
     s
+}
+
+/// A single `<cfRule>` for a highlight-cells rule.
+fn cf_rule_xml(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> String {
+    match &cf.rule {
+        CfRule::GreaterThan(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"greaterThan\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::LessThan(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"lessThan\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::EqualTo(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"equal\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::Between(lo, hi) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"between\"><formula>{}</formula><formula>{}</formula></cfRule>",
+            fmt_f64(*lo),
+            fmt_f64(*hi)
+        ),
+        CfRule::TextContains(text) => {
+            let top = cell_a1(cf.range.start.row, cf.range.start.col);
+            format!(
+                "<cfRule type=\"containsText\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"containsText\" text=\"{}\"><formula>NOT(ISERROR(SEARCH(\"{}\",{top})))</formula></cfRule>",
+                escape_attr(text),
+                escape_text(text)
+            )
+        }
+    }
 }
 
 fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Cell) {
