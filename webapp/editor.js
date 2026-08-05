@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "17";
+const BUILD = "18";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1441,6 +1441,11 @@ function clearSelection() {
   try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
   draw();
 }
+// "Clear formats": drop styling, keep values + formulas.
+function clearFormats() {
+  try { for (const s of allRanges()) wasm.session_clear_formats(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  draw();
+}
 // "Clear all": also drop styles.
 function clearAll() {
   try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
@@ -2012,6 +2017,7 @@ function cellMenu(x, y) {
   });
   sep();
   item("Clear contents", false, () => clearSelection());
+  item("Clear formats", false, () => clearFormats());
   item("Clear all (incl. formats)", false, () => clearAll());
   sep();
   item("Data validation (list)…", false, () => openSetValidationMenu(x, y));

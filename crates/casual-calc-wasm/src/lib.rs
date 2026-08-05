@@ -1979,12 +1979,18 @@ fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Resul
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            let set = if columns {
-                &mut sh.hidden_cols
-            } else {
-                &mut sh.hidden_rows
-            };
+        // Route through SetSheetMetadata so hide/unhide is one undoable edit that
+        // dirties the document (recalc-skipped: hiding changes no values).
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata {
+            hidden_rows,
+            hidden_cols,
+            ..
+        } = &mut op
+        {
+            let set = if columns { hidden_cols } else { hidden_rows };
             for i in a..=b {
                 if hide {
                     set.insert(i);
@@ -1993,7 +1999,7 @@ fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Resul
                 }
             }
         }
-        Ok(())
+        session.edit(op).map_err(js)
     })
 }
 
@@ -2287,6 +2293,48 @@ pub fn session_clear_contents(
                     None => ops.push(EditOperation::ClearCell { sheet, at }),
                 }
             }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Clear the *formats* of a range (fill, borders, number format, font) while
+/// keeping each cell's value and formula — the complement of Clear Contents.
+/// Cells that carry no style are left untouched, so the op is a no-op when the
+/// range has nothing to strip.
+#[wasm_bindgen]
+pub fn session_clear_formats(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let at = CellRef::new(r, c);
+                let has_style = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|s| s.cells.get(at))
+                    .is_some_and(|cl| cl.style.is_some());
+                if has_style {
+                    // SetStyle preserves the cell's value and formula.
+                    ops.push(EditOperation::SetStyle {
+                        sheet,
+                        at,
+                        style: None,
+                    });
+                }
+            }
+        }
+        if ops.is_empty() {
+            return Ok(());
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
     })
