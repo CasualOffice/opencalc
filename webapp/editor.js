@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "8";
+const BUILD = "9";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1289,17 +1289,37 @@ function saveAs(fmt) {
     status.textContent = "downloaded ." + fmt;
   } catch (e) { status.textContent = `error: ${e}`; }
 }
-async function doCopy() {
-  const s = effectiveRange();
+// The TSV we last wrote to the OS clipboard. On paste we compare the OS
+// clipboard to this: if it still matches, our richer internal snapshot is
+// authoritative (formulas + styles); otherwise the user copied from elsewhere
+// and we fall back to plain TSV.
+let lastClipTsv = null;
+async function clipToOS(s, cut) {
+  wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
   const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
-  try { await navigator.clipboard.writeText(tsv); status.textContent = "copied"; }
-  catch { status.textContent = "copy blocked"; }
+  lastClipTsv = tsv;
+  try { await navigator.clipboard.writeText(tsv); return true; }
+  catch { return false; }
+}
+async function doCopy() {
+  status.textContent = (await clipToOS(effectiveRange(), false)) ? "copied" : "copy blocked";
+}
+async function doCut() {
+  status.textContent = (await clipToOS(effectiveRange(), true)) ? "cut" : "cut blocked";
 }
 async function doPaste() {
   try {
-    const tsv = await navigator.clipboard.readText();
-    wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, tsv);
+    let osText = "";
+    try { osText = await navigator.clipboard.readText(); } catch {}
+    // Internal rich paste when the OS clipboard is unchanged from our copy (or
+    // unreadable but we hold a snapshot); else paste the external text.
+    if (wasm.session_clip_has() && (osText === lastClipTsv || osText === "")) {
+      wasm.session_clip_paste(state.sheet, state.sel.row, state.sel.col);
+    } else {
+      wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, osText);
+    }
     draw();
+    status.textContent = "pasted";
   } catch { status.textContent = "paste blocked"; }
 }
 
@@ -1679,7 +1699,7 @@ function cellMenu(x, y) {
     b.addEventListener("click", () => { closeSheetMenu(); fn(); });
     menu.appendChild(b);
   };
-  item("Cut", false, async () => { await doCopy(); clearSelection(); });
+  item("Cut", false, () => doCut());
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
   sep();
@@ -1978,6 +1998,7 @@ function wireEvents() {
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
+      if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v") { await doPaste(); e.preventDefault(); return; }
     }
 

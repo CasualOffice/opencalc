@@ -1916,6 +1916,121 @@ pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<
     })
 }
 
+/// A cell captured on the internal clipboard, relative to the copy origin.
+struct ClipCell {
+    dr: u32,
+    dc: u32,
+    cell: Cell,
+    formula: Option<Expr>,
+}
+/// The internal (rich) clipboard: keeps values, styles, and resolved formula
+/// ASTs so a paste can reproduce formulas (reference-shifted) and formatting —
+/// unlike the text-only OS clipboard.
+struct Clip {
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    cut: bool,
+    cells: Vec<ClipCell>,
+}
+thread_local! {
+    static CLIP: RefCell<Option<Clip>> = const { RefCell::new(None) };
+}
+
+/// Snapshot a range onto the internal clipboard (value + style + formula AST).
+/// `cut` marks the source to be cleared on the next paste. The OS clipboard TSV
+/// is produced separately by [`session_copy_tsv`].
+#[wasm_bindgen]
+pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: bool) {
+    let _ = with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return;
+        };
+        let mut cells = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                    let formula = cell.formula.and_then(|h| wb.formula(h)).cloned();
+                    cells.push(ClipCell {
+                        dr: r - r0,
+                        dc: c - c0,
+                        cell: cell.clone(),
+                        formula,
+                    });
+                }
+            }
+        }
+        CLIP.with(|cl| {
+            *cl.borrow_mut() = Some(Clip {
+                sheet,
+                r0,
+                c0,
+                cut,
+                cells,
+            })
+        });
+    });
+}
+
+/// Whether the internal clipboard currently holds a snapshot.
+#[wasm_bindgen]
+pub fn session_clip_has() -> bool {
+    CLIP.with(|cl| cl.borrow().is_some())
+}
+
+/// Paste the internal clipboard with its top-left at `(row, col)`: formulas are
+/// reference-shifted by the paste delta (absolute `$` anchors held), styles are
+/// reproduced, and — for a cut — the source cells are cleared in the same undo
+/// step. The clipboard is consumed on a cut, retained on a copy.
+#[wasm_bindgen]
+pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        // Build the edit under a short clipboard borrow, then act on the result.
+        let (ops, was_cut, empty) = CLIP.with(|cl| {
+            let borrow = cl.borrow();
+            let Some(clip) = borrow.as_ref() else {
+                return (Vec::new(), false, true);
+            };
+            let dr = row as i64 - clip.r0 as i64;
+            let dc = col as i64 - clip.c0 as i64;
+            let mut ops = Vec::new();
+            // A cut clears the source first (values are snapshotted, so order is safe).
+            if clip.cut {
+                for cc in &clip.cells {
+                    ops.push(EditOperation::ClearCell {
+                        sheet: clip.sheet,
+                        at: CellRef::new(clip.r0 + cc.dr, clip.c0 + cc.dc),
+                    });
+                }
+            }
+            for cc in &clip.cells {
+                let at = CellRef::new(row + cc.dr, col + cc.dc);
+                let mut out = cc.cell.clone();
+                if let Some(expr) = &cc.formula {
+                    let shifted = shift_references(expr, dr, dc);
+                    out.formula = Some(session.workbook_mut().store_formula(shifted));
+                }
+                ops.push(EditOperation::SetCell {
+                    sheet,
+                    at,
+                    cell: Some(out),
+                });
+            }
+            (ops, clip.cut, false)
+        });
+        if empty {
+            return Ok(());
+        }
+        if was_cut {
+            CLIP.with(|cl| *cl.borrow_mut() = None); // a cut is one-shot
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 fn apply_style_range(
     sheet: usize,
     r0: u32,
