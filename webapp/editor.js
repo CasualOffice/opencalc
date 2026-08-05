@@ -88,6 +88,7 @@ const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
 let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
 let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
+let dragTab = -1; // index of the sheet tab being dragged (reorder)
 
 // Absolute screen position of a column's left / row's top edge (any index).
 function screenX(col) { return wasm.session_col_offset_px(state.sheet, col) - state.scrollX + HW; }
@@ -914,6 +915,12 @@ function renderTabs() {
     b.addEventListener("click", () => switchSheet(i));
     b.addEventListener("dblclick", () => renameSheet(i, b));
     b.addEventListener("contextmenu", (e) => { e.preventDefault(); sheetMenu(i, e.clientX, e.clientY); });
+    // Drag to reorder.
+    b.draggable = true;
+    b.addEventListener("dragstart", (e) => { dragTab = i; e.dataTransfer.effectAllowed = "move"; b.classList.add("dragging"); });
+    b.addEventListener("dragend", () => { dragTab = -1; b.classList.remove("dragging"); });
+    b.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
+    b.addEventListener("drop", (e) => { e.preventDefault(); moveTab(dragTab, i); });
     tabsEl.appendChild(b);
   });
   const add = document.createElement("button");
@@ -930,6 +937,20 @@ function renderTabs() {
     } catch (e) { status.textContent = `error: ${e}`; }
   });
   tabsEl.appendChild(add);
+}
+
+// Reorder sheet tabs, keeping the active sheet tracked through the shift.
+function moveTab(from, to) {
+  if (from < 0 || from === to) return;
+  try { wasm.session_move_sheet(from, to); } catch (e) { status.textContent = `error: ${e}`; return; }
+  if (state.sheet === from) state.sheet = to;
+  else {
+    let a = state.sheet > from ? state.sheet - 1 : state.sheet;
+    if (a >= to) a += 1;
+    state.sheet = a;
+  }
+  renderTabs();
+  draw();
 }
 
 // Inline-rename a sheet tab.

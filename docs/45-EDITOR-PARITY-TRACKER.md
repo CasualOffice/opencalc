@@ -68,7 +68,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 | UX-26 | Hidden rows/columns (+ from file) | Todo | model flag; import `hidden` |
 | UX-27 | Freeze panes in editor (model has `SheetView`) | Todo | render frozen bands |
 | UX-28 | Find & replace | Done | `session_find` / `session_replace_all` (case toggle, undoable); Ctrl+F bar with next/prev, count, replace-all. Verified |
-| UX-29 | Sheet tab reorder (drag) + tab color | Todo | |
+| UX-29 | Sheet tab reorder (drag) + tab color | Partial | `session_move_sheet` + HTML5 drag-reorder (active sheet re-tracked). Verified. Tab color pending |
 
 ### P2 — polish / advanced
 

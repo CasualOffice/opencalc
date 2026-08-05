@@ -151,6 +151,7 @@
 }
 .sheet-tab:hover { color: var(--fg); }
 .sheet-tab.active { background: var(--bg); color: var(--fg); border-color: var(--border); }
+.sheet-tab.dragging { opacity: 0.45; }
 .sheet-add {
   width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;

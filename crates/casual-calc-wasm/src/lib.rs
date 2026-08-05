@@ -209,6 +209,22 @@ pub fn session_delete_sheet(index: usize) -> Result<(), JsError> {
     })
 }
 
+/// Move a sheet from index `from` to index `to` (tab reorder).
+#[wasm_bindgen]
+pub fn session_move_sheet(from: usize, to: usize) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let sheets = &mut session.workbook_mut().sheets;
+        if from >= sheets.len() || to >= sheets.len() || from == to {
+            return Ok(());
+        }
+        let sheet = sheets.remove(from);
+        sheets.insert(to, sheet);
+        Ok(())
+    })
+}
+
 /// Duplicate a sheet (inserted right after the source), returning its index.
 #[wasm_bindgen]
 pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
@@ -387,6 +403,31 @@ pub fn session_edge(sheet: usize, row: u32, col: u32, dr: i32, dc: i32) -> Strin
         format!("{{\"row\":{},\"col\":{}}}", r.max(0), c.max(0))
     })
     .unwrap_or_else(|| format!("{{\"row\":{row},\"col\":{col}}}"))
+}
+
+/// The frozen-pane counts of a sheet as JSON `{ rows, cols }`.
+#[wasm_bindgen]
+pub fn session_frozen(sheet: usize) -> String {
+    with_session(|s| {
+        let v = s.workbook().sheets.get(sheet).map(|sh| sh.view);
+        let (r, c) = v.map_or((0, 0), |v| (v.frozen_rows, v.frozen_cols));
+        format!("{{\"rows\":{r},\"cols\":{c}}}")
+    })
+    .unwrap_or_else(|| "{\"rows\":0,\"cols\":0}".to_owned())
+}
+
+/// Set the number of frozen rows/columns on a sheet.
+#[wasm_bindgen]
+pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
+            sh.view.frozen_rows = rows;
+            sh.view.frozen_cols = cols;
+        }
+        Ok(())
+    })
 }
 
 /// The merged ranges of a sheet as JSON `[{r0,c0,r1,c1}, …]`.
