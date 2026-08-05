@@ -19,8 +19,8 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, HAlign, SheetId,
-    VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, HAlign, Sheet,
+    SheetId, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -70,6 +70,20 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             worksheet_xml(workbook, i, &dxfs),
         ));
     }
+    // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
+    // note markers), and the per-sheet rels that tie them to the worksheet.
+    for (i, sheet) in workbook.sheets.iter().enumerate() {
+        if sheet.comments.is_empty() {
+            continue;
+        }
+        let n = i + 1;
+        parts.push((format!("xl/comments{n}.xml"), comments_xml(sheet)));
+        parts.push((format!("xl/drawings/vmlDrawing{n}.vml"), vml_drawing(sheet)));
+        parts.push((
+            format!("xl/worksheets/_rels/sheet{n}.xml.rels"),
+            sheet_rels(n),
+        ));
+    }
 
     package(&parts)
 }
@@ -87,9 +101,13 @@ fn package(parts: &[(String, String)]) -> Result<Vec<u8>, ExportError> {
 }
 
 fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> String {
+    let any_comments = workbook.sheets.iter().any(|s| !s.comments.is_empty());
     let mut s = format!("{DECL}<Types xmlns=\"{NS_CT}\">");
     s.push_str("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>");
     s.push_str("<Default Extension=\"xml\" ContentType=\"application/xml\"/>");
+    if any_comments {
+        s.push_str("<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/>");
+    }
     s.push_str("<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>");
     for i in 0..workbook.sheets.len() {
         s.push_str(&format!(
@@ -103,8 +121,80 @@ fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
     if has_strings {
         s.push_str("<Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/>");
     }
+    for (i, sheet) in workbook.sheets.iter().enumerate() {
+        if !sheet.comments.is_empty() {
+            s.push_str(&format!(
+                "<Override PartName=\"/xl/comments{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml\"/>",
+                i + 1
+            ));
+        }
+    }
     s.push_str("</Types>");
     s
+}
+
+/// The `xl/comments{n}.xml` part: authors + one `<comment>` per note.
+fn comments_xml(sheet: &Sheet) -> String {
+    let mut authors: Vec<String> = Vec::new();
+    for c in &sheet.comments {
+        let a = c.author.clone().unwrap_or_else(|| "OpenCalc".to_owned());
+        if !authors.contains(&a) {
+            authors.push(a);
+        }
+    }
+    if authors.is_empty() {
+        authors.push("OpenCalc".to_owned());
+    }
+    let mut s = format!("{DECL}<comments xmlns=\"{NS_MAIN}\"><authors>");
+    for a in &authors {
+        s.push_str(&format!("<author>{}</author>", escape_text(a)));
+    }
+    s.push_str("</authors><commentList>");
+    for c in &sheet.comments {
+        let a = c.author.clone().unwrap_or_else(|| "OpenCalc".to_owned());
+        let aid = authors.iter().position(|x| *x == a).unwrap_or(0);
+        s.push_str(&format!(
+            "<comment ref=\"{}\" authorId=\"{aid}\"><text><r><t xml:space=\"preserve\">{}</t></r></text></comment>",
+            cell_a1(c.at.row, c.at.col),
+            escape_text(&c.text)
+        ));
+    }
+    s.push_str("</commentList></comments>");
+    s
+}
+
+/// A minimal legacy VML drawing anchoring a note marker at each commented cell,
+/// so Excel shows the red indicator. The comment text lives in comments{n}.xml.
+fn vml_drawing(sheet: &Sheet) -> String {
+    let mut s = String::from(
+        "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\">\
+<o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"1\"/></o:shapelayout>\
+<v:shapetype id=\"_x0000_t202\" coordsize=\"21600,21600\" o:spt=\"202\" path=\"m,l,21600r21600,l21600,xe\"><v:stroke joinstyle=\"miter\"/><v:path gradientshapeok=\"t\" o:connecttype=\"rect\"/></v:shapetype>",
+    );
+    for (idx, c) in sheet.comments.iter().enumerate() {
+        s.push_str(&format!(
+            "<v:shape id=\"_x0000_s{}\" type=\"#_x0000_t202\" style=\"position:absolute;visibility:hidden\" fillcolor=\"#ffffe1\" o:insetmode=\"auto\">\
+<v:fill color2=\"#ffffe1\"/><v:shadow on=\"t\" color=\"black\" obscured=\"t\"/><v:path o:connecttype=\"none\"/>\
+<x:ClientData ObjectType=\"Note\"><x:MoveWithCells/><x:SizeWithCells/><x:AutoFill>False</x:AutoFill><x:Row>{}</x:Row><x:Column>{}</x:Column></x:ClientData>\
+</v:shape>",
+            1025 + idx,
+            c.at.row,
+            c.at.col
+        ));
+    }
+    s.push_str("</xml>");
+    s
+}
+
+/// The `xl/worksheets/_rels/sheet{n}.xml.rels`: links the VML drawing and the
+/// comments part to the worksheet.
+fn sheet_rels(n: usize) -> String {
+    format!(
+        "{DECL}<Relationships xmlns=\"{NS_REL}\">\
+<Relationship Id=\"rId1\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
+<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>\
+</Relationships>"
+    )
 }
 
 fn root_rels() -> String {
@@ -710,6 +800,11 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         ));
         s.push_str(&cf_rule_xml(cf, dxf_id, i + 1));
         s.push_str("</conditionalFormatting>");
+    }
+
+    // Legacy drawing ref (the VML holding note markers) — last in the sequence.
+    if !sheet.comments.is_empty() {
+        s.push_str("<legacyDrawing r:id=\"rId1\"/>");
     }
 
     s.push_str("</worksheet>");

@@ -243,3 +243,34 @@ fn conditional_formatting_round_trips() {
     assert_eq!(cfs[2].rule, CfRule::TextContains("total".into()));
     assert_eq!(cfs[2].fill, "FFD6E0");
 }
+
+#[test]
+fn cell_comments_round_trip() {
+    use casual_calc_model::{CellComment, CellRef};
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].comments = vec![
+        CellComment {
+            at: CellRef::new(0, 0),
+            text: "First note".to_owned(),
+            author: Some("sachin".to_owned()),
+        },
+        CellComment {
+            at: CellRef::new(3, 2),
+            text: "Needs <review> & sign-off".to_owned(),
+            author: None,
+        },
+    ];
+    let written = write_workbook(&workbook).unwrap();
+    let comments = import_package(written).unwrap().workbook.sheets[0]
+        .comments
+        .clone();
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0].at, CellRef::new(0, 0));
+    assert_eq!(comments[0].text, "First note");
+    assert_eq!(comments[0].author.as_deref(), Some("sachin"));
+    assert_eq!(comments[1].at, CellRef::new(3, 2));
+    assert_eq!(comments[1].text, "Needs <review> & sign-off");
+    // OOXML requires every note to carry an author; a `None` author is written
+    // as our sentinel and comes back attributed to it.
+    assert_eq!(comments[1].author.as_deref(), Some("OpenCalc"));
+}

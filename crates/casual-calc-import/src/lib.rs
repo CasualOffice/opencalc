@@ -24,13 +24,13 @@ pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, Retentio
 
 use casual_calc_formula::parse as parse_formula;
 use casual_calc_model::{
-    Cell, CellRange, CellValue, CfRule, ConditionalFormat, DataValidation, DefinedName, ErrorValue,
-    Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
+    Cell, CellComment, CellRange, CellValue, CfRule, ConditionalFormat, DataValidation,
+    DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
 use a1::{parse_a1, parse_range};
-use read::{RawCell, parse_defined_names, parse_shared_strings, parse_worksheet};
+use read::{RawCell, parse_comments, parse_defined_names, parse_shared_strings, parse_worksheet};
 use styles::{StyleSheet, parse_styles};
 
 const WORKBOOK_NAMESPACE: u64 = 0x574b_0000_0000_0000; // "WK"
@@ -92,7 +92,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
 
     let mut sheet_ids = IdGenerator::new(SHEET_NAMESPACE);
     let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
-    for (name, part) in sheet_meta {
+    for (idx, (name, part)) in sheet_meta.into_iter().enumerate() {
         let xml = package.read_part(&part)?;
         let worksheet = parse_worksheet(&xml)?;
         let sheet_id = SheetId(sheet_ids.next_id());
@@ -227,6 +227,20 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 sheet
                     .conditional_formats
                     .push(ConditionalFormat { range, rule, fill });
+            }
+        }
+
+        // Cell comments live in a sibling `xl/comments{n}.xml` part, matching the
+        // one-based sheet index our writer uses.
+        let comments_part = format!("xl/comments{}.xml", idx + 1);
+        if package.contains(&comments_part) {
+            let cxml = package.read_part(&comments_part)?;
+            for (reference, author, text) in parse_comments(&cxml)? {
+                if !text.is_empty()
+                    && let Some(at) = parse_a1(&reference)
+                {
+                    sheet.comments.push(CellComment { at, text, author });
+                }
             }
         }
 

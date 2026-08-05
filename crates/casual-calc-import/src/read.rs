@@ -135,6 +135,77 @@ pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, ImportError> {
     Ok(strings)
 }
 
+/// A parsed cell comment: `(cell reference, author, text)`.
+pub type RawComment = (String, Option<String>, String);
+
+/// Parse an `xl/comments{n}.xml` part into `(ref, author, text)` per note.
+pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+
+    let mut authors: Vec<String> = Vec::new();
+    let mut out: Vec<RawComment> = Vec::new();
+    let mut in_author = false;
+    let mut cur_author = String::new();
+    let mut cur_ref = String::new();
+    let mut cur_aid: usize = 0;
+    let mut in_comment = false;
+    let mut cur_text = String::new();
+    let mut in_t = false;
+
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) => {
+                bounds.open()?;
+                match e.local_name().as_ref() {
+                    b"author" => {
+                        in_author = true;
+                        cur_author.clear();
+                    }
+                    b"comment" => {
+                        in_comment = true;
+                        cur_ref = read_attr(&e, b"ref")?.unwrap_or_default();
+                        cur_aid = read_attr(&e, b"authorId")?
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        cur_text.clear();
+                    }
+                    b"t" if in_comment => in_t = true,
+                    _ => {}
+                }
+            }
+            Event::Text(e) => {
+                if in_author {
+                    cur_author.push_str(&e.unescape().map_err(xml_err)?);
+                } else if in_t {
+                    cur_text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(e) => {
+                bounds.close();
+                match e.local_name().as_ref() {
+                    b"author" => {
+                        in_author = false;
+                        authors.push(cur_author.clone());
+                    }
+                    b"t" => in_t = false,
+                    b"comment" => {
+                        in_comment = false;
+                        let author = authors.get(cur_aid).cloned();
+                        out.push((cur_ref.clone(), author, cur_text.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
+}
+
 /// A parsed worksheet: its cells, merged ranges, frozen panes, and axis sizing.
 #[derive(Debug, Default)]
 pub struct Worksheet {
