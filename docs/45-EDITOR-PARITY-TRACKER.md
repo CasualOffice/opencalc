@@ -76,7 +76,7 @@ OnlyOffice, Univer. The non-negotiable UX every one of them ships:
 |----|------|--------|-------|
 | UX-40 | Conditional formatting | Todo | |
 | UX-41 | Tables (structured ranges) | Todo | |
-| UX-42 | Sort & filter | Partial | **Sort done:** `session_sort_range` moves whole rows (values + styles + flags) sorted by a key column — blanks last, numbers before case-insensitive text; **relative formula references shift by the row delta** so per-row formulas (`=B2*C2`) re-anchor to their new row and recompute correctly (verified: sort by Qty asc kept the Total column right, no #REF!). One undo step. Toolbar sort menu (A→Z / Z→A) + cell context-menu items, keying off the active column. **Filter still Todo** |
+| UX-42 | Sort & filter | Done | **Filter done:** funnel toolbar button opens a checklist dropdown for the active column (sorted distinct values, Select-all, blanks as "(Blanks)"); unchecked values hide their rows (row 0 treated as header, never hidden) via `session_hide_rows`, Clear restores. Verified: unchecking "Gadget" hid row 3. **Sort done:** `session_sort_range` moves whole rows (values + styles + flags) sorted by a key column — blanks last, numbers before case-insensitive text; **relative formula references shift by the row delta** so per-row formulas (`=B2*C2`) re-anchor to their new row and recompute correctly (verified: sort by Qty asc kept the Total column right, no #REF!). One undo step. Toolbar sort menu (A→Z / Z→A) + cell context-menu items, keying off the active column. **Filter still Todo** |
 | UX-43 | Strikethrough | Done | `Style.strike` (round-trips `<strike/>`); toolbar toggle + strike-line render. Verified |
 | UX-44 | Cell comments/notes | Todo | |
 | UX-45 | Data validation | Todo | |

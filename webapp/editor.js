@@ -949,6 +949,122 @@ function sortRange(desc) {
   } catch (e) { status.textContent = `error: ${e}`; }
   draw();
 }
+// --- Column filter --------------------------------------------------------
+// A single-column filter that hides rows whose value in the key column is
+// unchecked. Row 0 of the used region is treated as a header and never hidden.
+// Reuses session_hide_rows / session_unhide_rows for the actual hiding.
+let filterState = null; // { col, r0, r1, excluded:Set<string>, hidden:number[] }
+
+// Map of row -> display string for a column band (missing cells read as "").
+function columnValues(col, r0, r1) {
+  const items = JSON.parse(wasm.session_cells(state.sheet, r0, col, r1, col));
+  const byRow = new Map();
+  for (const it of items) if (it.c === col) byRow.set(it.r, it.t ?? "");
+  const out = new Map();
+  for (let r = r0; r <= r1; r++) out.set(r, byRow.get(r) ?? "");
+  return out;
+}
+
+function clearFilter() {
+  if (!filterState) return;
+  for (const r of filterState.hidden) {
+    try { wasm.session_unhide_rows(state.sheet, r, r); } catch {}
+  }
+  filterState = null;
+}
+
+function applyFilter(col, r0, r1, excluded) {
+  clearFilter();
+  const vals = columnValues(col, r0, r1);
+  const hidden = [];
+  for (let r = r0; r <= r1; r++) {
+    if (excluded.has(vals.get(r))) { try { wasm.session_hide_rows(state.sheet, r, r); hidden.push(r); } catch {} }
+  }
+  filterState = excluded.size ? { col, r0, r1, excluded, hidden } : null;
+  status.textContent = excluded.size ? `filtered ${colName(col)} — ${hidden.length} rows hidden` : "filter cleared";
+  draw();
+}
+
+// Build the filter checklist dropdown for the active column.
+function openFilterMenu(x, y) {
+  closeSheetMenu();
+  const b = usedBounds();
+  const col = state.sel.col;
+  const r0 = 1, r1 = b.rows - 1; // row 0 = header
+  if (r1 < r0) { status.textContent = "nothing to filter"; return; }
+  const vals = columnValues(col, r0, r1);
+  const distinct = [];
+  const seen = new Set();
+  for (let r = r0; r <= r1; r++) {
+    const v = vals.get(r);
+    if (!seen.has(v)) { seen.add(v); distinct.push(v); }
+  }
+  distinct.sort((a, z) => a.localeCompare(z));
+  // Working exclusion set (seeded from the active filter on this column).
+  const excluded = new Set(filterState && filterState.col === col ? filterState.excluded : []);
+
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu filter-menu";
+  menu.id = "sheet-ctx";
+  menu.addEventListener("click", (e) => e.stopPropagation()); // internal clicks keep it open
+
+  const head = document.createElement("div");
+  head.className = "menu-label";
+  head.textContent = `Filter ${colName(col)}`;
+  menu.appendChild(head);
+
+  // Select-all toggle.
+  const allRow = document.createElement("label");
+  allRow.className = "filter-item filter-all";
+  const allCb = document.createElement("input");
+  allCb.type = "checkbox";
+  allCb.checked = excluded.size === 0;
+  allRow.appendChild(allCb);
+  allRow.appendChild(document.createTextNode("(Select all)"));
+  menu.appendChild(allRow);
+
+  const list = document.createElement("div");
+  list.className = "filter-list";
+  const boxes = [];
+  distinct.forEach((v) => {
+    const row = document.createElement("label");
+    row.className = "filter-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !excluded.has(v);
+    cb.addEventListener("change", () => {
+      if (cb.checked) excluded.delete(v); else excluded.add(v);
+      allCb.checked = excluded.size === 0;
+    });
+    boxes.push({ cb, v });
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(v === "" ? "(Blanks)" : v));
+    list.appendChild(row);
+  });
+  menu.appendChild(list);
+
+  allCb.addEventListener("change", () => {
+    excluded.clear();
+    if (!allCb.checked) distinct.forEach((v) => excluded.add(v));
+    boxes.forEach(({ cb }) => (cb.checked = allCb.checked));
+  });
+
+  const foot = document.createElement("div");
+  foot.className = "filter-foot";
+  const apply = document.createElement("button");
+  apply.className = "filter-apply";
+  apply.textContent = "Apply";
+  apply.addEventListener("click", () => { closeSheetMenu(); applyFilter(col, r0, r1, new Set(excluded)); });
+  const clr = document.createElement("button");
+  clr.className = "filter-clear";
+  clr.textContent = "Clear";
+  clr.addEventListener("click", () => { closeSheetMenu(); clearFilter(); status.textContent = "filter cleared"; draw(); });
+  foot.appendChild(clr);
+  foot.appendChild(apply);
+  menu.appendChild(foot);
+
+  positionMenu(menu, x, y);
+}
 function toggleMerge() {
   const s = effectiveRange();
   try {
@@ -1589,6 +1705,11 @@ function wireEvents() {
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) => sortRange(b.dataset.sort === "desc"));
+  document.getElementById("tb-filter").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    openFilterMenu(r.left, r.bottom + 4);
+  });
 
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });

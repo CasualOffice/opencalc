@@ -166,6 +166,20 @@
   background: var(--bg);
   background-image: linear-gradient(45deg, transparent 45%, #e53935 45%, #e53935 55%, transparent 55%);
 }
+/* Column filter checklist dropdown. */
+.filter-menu { min-width: 200px; padding: 6px; }
+.filter-list { max-height: 260px; overflow-y: auto; margin: 2px 0; }
+.filter-item {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 5px;
+  font-size: 13px; color: var(--fg); cursor: pointer; white-space: nowrap;
+}
+.filter-item:hover { background: var(--card); }
+.filter-item input { accent-color: var(--accent); cursor: pointer; }
+.filter-all { font-weight: 600; border-bottom: 1px solid var(--border); border-radius: 0; }
+.filter-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 6px 4px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
+.filter-foot button { padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); }
+.filter-clear { background: var(--bg); color: var(--muted); }
+.filter-apply { background: var(--accent); color: #fff; border-color: var(--accent); }
 .sheet-add {
   width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;
