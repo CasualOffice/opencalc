@@ -1958,6 +1958,9 @@ function wireEvents() {
         if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
         e.preventDefault(); return;
       }
+      // Ctrl+PageDown / PageUp switch sheets (Excel parity).
+      if (e.key === "PageDown") { const n = JSON.parse(wasm.session_sheet_names()).length; if (state.sheet < n - 1) switchSheet(state.sheet + 1); e.preventDefault(); return; }
+      if (e.key === "PageUp") { if (state.sheet > 0) switchSheet(state.sheet - 1); e.preventDefault(); return; }
       const k = e.key.toLowerCase();
       if (k === "home") { select(0, 0); e.preventDefault(); return; }
       if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
