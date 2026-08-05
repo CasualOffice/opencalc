@@ -1,7 +1,9 @@
 //! Transaction tests: inverses, atomic batches, undo/redo, and edit→recalc.
 
 use casual_calc_formula::parse;
-use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook};
+use casual_calc_model::{
+    Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook,
+};
 
 use crate::{History, Operation, apply};
 
@@ -710,6 +712,265 @@ fn delete_columns_round_trips_with_formulas() {
             sheet: 0,
             at: 4,
             count: 1,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Structural operations: position-indexed metadata (merges, sizing, hidden,
+// frozen panes) must shift in lock-step with the cells.
+// ---------------------------------------------------------------------------
+
+/// A merge spanning `[(r0,c0)..=(r1,c1)]`.
+fn merge(r0: u32, c0: u32, r1: u32, c1: u32) -> CellRange {
+    CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1))
+}
+
+#[test]
+fn insert_rows_shifts_merges_below_and_grows_a_straddling_one() {
+    let mut wb = workbook();
+    wb.sheets[0].merges.push(merge(4, 0, 5, 1)); // wholly below the insert
+    wb.sheets[0].merges.push(merge(0, 0, 3, 1)); // straddles the insert point
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    // Below-merge moved down by 2; straddling merge kept its top, grew its bottom.
+    assert_eq!(wb.sheets[0].merges[0], merge(6, 0, 7, 1));
+    assert_eq!(wb.sheets[0].merges[1], merge(0, 0, 5, 1));
+}
+
+#[test]
+fn delete_rows_removes_inner_merge_and_clamps_straddling() {
+    let mut wb = workbook();
+    wb.sheets[0].merges.push(merge(2, 0, 3, 1)); // wholly inside the deleted band
+    wb.sheets[0].merges.push(merge(1, 0, 4, 1)); // straddles the band
+    wb.sheets[0].merges.push(merge(6, 0, 7, 1)); // wholly below the band
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    // The inner merge is gone; the straddling one loses its two deleted rows
+    // (1..=4 -> 1..=2); the below one shifts up by 2 (6..=7 -> 4..=5).
+    assert_eq!(wb.sheets[0].merges.len(), 2);
+    assert_eq!(wb.sheets[0].merges[0], merge(1, 0, 2, 1));
+    assert_eq!(wb.sheets[0].merges[1], merge(4, 0, 5, 1));
+}
+
+#[test]
+fn insert_and_delete_shift_a_hidden_row() {
+    let mut wb = workbook();
+    wb.sheets[0].hidden_rows.insert(5);
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].hidden_rows.contains(&8));
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].hidden_rows.contains(&5));
+}
+
+#[test]
+fn delete_rows_drops_a_hidden_row_inside_the_band() {
+    let mut wb = workbook();
+    wb.sheets[0].hidden_rows.insert(3);
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+    // Row 3 was deleted; nothing survives to hide.
+    assert!(wb.sheets[0].hidden_rows.is_empty());
+}
+
+#[test]
+fn insert_columns_shifts_a_custom_width() {
+    let mut wb = workbook();
+    wb.sheets[0].columns.sizes.insert(2, 4200); // C is 4200 twips wide
+
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    // The custom width followed its column: C(2) -> D(3).
+    assert_eq!(wb.sheets[0].columns.sizes.get(&3), Some(&4200));
+    assert!(!wb.sheets[0].columns.sizes.contains_key(&2));
+}
+
+#[test]
+fn delete_columns_drops_a_custom_width_in_the_band() {
+    let mut wb = workbook();
+    wb.sheets[0].columns.sizes.insert(2, 4200);
+
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].columns.sizes.is_empty());
+}
+
+#[test]
+fn insert_before_freeze_boundary_grows_the_freeze() {
+    let mut wb = workbook();
+    wb.sheets[0].view.frozen_rows = 3;
+
+    // Insert inside the frozen band: the freeze extends to keep the same lines
+    // pinned plus the new blanks.
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].view.frozen_rows, 5);
+}
+
+#[test]
+fn insert_at_or_after_freeze_boundary_leaves_it_alone() {
+    let mut wb = workbook();
+    wb.sheets[0].view.frozen_rows = 3;
+
+    // Insert exactly at the boundary (index 3): the new rows fall below the
+    // freeze, so the count is unchanged.
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 3,
+            count: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].view.frozen_rows, 3);
+}
+
+#[test]
+fn delete_across_freeze_boundary_shrinks_the_freeze_by_the_overlap() {
+    let mut wb = workbook();
+    wb.sheets[0].view.frozen_rows = 3;
+
+    // Delete rows 2,3,4: only rows 2 (of 0,1,2 frozen) lie in the freeze, so it
+    // drops by exactly one to 2.
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].view.frozen_rows, 2);
+}
+
+#[test]
+fn insert_rows_metadata_round_trips_strictly() {
+    let mut wb = workbook();
+    wb.sheets[0].merges.push(merge(4, 0, 6, 2));
+    wb.sheets[0].merges.push(merge(0, 0, 3, 1));
+    wb.sheets[0].rows.sizes.insert(5, 900);
+    wb.sheets[0].hidden_rows.insert(6);
+    wb.sheets[0].view.frozen_rows = 2;
+    set_num(&mut wb, 0, 7, 0, 1.0);
+
+    // Insert is exactly invertible by its matching delete, metadata and all.
+    assert_round_trip_strict(
+        wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 3,
+        },
+    );
+}
+
+#[test]
+fn delete_rows_metadata_round_trips_via_snapshot() {
+    let mut wb = workbook();
+    wb.sheets[0].merges.push(merge(2, 0, 3, 1)); // dropped by the delete
+    wb.sheets[0].merges.push(merge(1, 0, 4, 1)); // clamped by the delete
+    wb.sheets[0].merges.push(merge(6, 0, 7, 2)); // shifted up
+    wb.sheets[0].rows.sizes.insert(2, 300); // dropped
+    wb.sheets[0].rows.sizes.insert(6, 900); // shifted
+    wb.sheets[0].hidden_rows.insert(3); // dropped
+    wb.sheets[0].hidden_rows.insert(7); // shifted
+    wb.sheets[0].view.frozen_rows = 3; // partially overlaps the band
+    set_num(&mut wb, 0, 8, 0, 1.0);
+
+    // The delete drops and clamps metadata, but its inverse carries the
+    // pre-delete snapshot, so undo restores every merge, size, and freeze exactly.
+    assert_round_trip_strict(
+        wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    );
+}
+
+#[test]
+fn set_sheet_metadata_is_self_inverse() {
+    let mut wb = workbook();
+    wb.sheets[0].merges.push(merge(0, 0, 1, 1));
+    wb.sheets[0].view.frozen_cols = 2;
+    assert_round_trip_strict(
+        wb,
+        Operation::SetSheetMetadata {
+            sheet: 0,
+            merges: vec![merge(3, 3, 4, 4)],
+            columns: Default::default(),
+            rows: Default::default(),
+            hidden_rows: Default::default(),
+            hidden_cols: Default::default(),
+            view: Default::default(),
         },
     );
 }

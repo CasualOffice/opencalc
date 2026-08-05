@@ -10,7 +10,11 @@
 //! atomic [`Operation::Batch`]. Structural ops (insert/delete rows & columns with
 //! formula-reference rewriting) are the next increment.
 
-use casual_calc_model::{AxisSizing, Cell, CellRef, CellValue, StyleId, Workbook};
+use std::collections::BTreeSet;
+
+use casual_calc_model::{
+    AxisSizing, Cell, CellRange, CellRef, CellValue, SheetView, StyleId, Workbook,
+};
 
 mod structural;
 
@@ -145,6 +149,28 @@ pub enum Operation {
         /// Number of columns to delete.
         count: u32,
     },
+    /// Replace a sheet's position-indexed metadata wholesale: merged ranges,
+    /// column widths, row heights, hidden row/column sets, and frozen-pane
+    /// counts. This is the universal inverse form for the metadata half of a
+    /// structural insert/delete — a delete that drops merges, sizing, hidden
+    /// lines, or freeze bands cannot recover them by re-inserting an empty band,
+    /// so its inverse carries a pre-mutation snapshot and this op restores it.
+    SetSheetMetadata {
+        /// Sheet index.
+        sheet: usize,
+        /// Merged ranges to install.
+        merges: Vec<CellRange>,
+        /// Column widths to install.
+        columns: AxisSizing,
+        /// Row heights to install.
+        rows: AxisSizing,
+        /// Hidden rows to install.
+        hidden_rows: BTreeSet<u32>,
+        /// Hidden columns to install.
+        hidden_cols: BTreeSet<u32>,
+        /// View state (frozen panes) to install.
+        view: SheetView,
+    },
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -218,6 +244,30 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         }
         Operation::DeleteColumns { sheet, at, count } => {
             structural::delete(workbook, sheet, Axis::Col, at, count)
+        }
+        Operation::SetSheetMetadata {
+            sheet,
+            merges,
+            columns,
+            rows,
+            hidden_rows,
+            hidden_cols,
+            view,
+        } => {
+            let target = workbook
+                .sheets
+                .get_mut(sheet)
+                .ok_or(TxnError::SheetNotFound { index: sheet })?;
+            // Swap each field in, handing back the prior contents as the inverse.
+            Ok(Operation::SetSheetMetadata {
+                sheet,
+                merges: std::mem::replace(&mut target.merges, merges),
+                columns: std::mem::replace(&mut target.columns, columns),
+                rows: std::mem::replace(&mut target.rows, rows),
+                hidden_rows: std::mem::replace(&mut target.hidden_rows, hidden_rows),
+                hidden_cols: std::mem::replace(&mut target.hidden_cols, hidden_cols),
+                view: std::mem::replace(&mut target.view, view),
+            })
         }
         Operation::Batch(ops) => {
             let mut inverses = Vec::with_capacity(ops.len());

@@ -240,7 +240,10 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         | Operation::ClearCell { sheet, at } => RecalcPlan::Cells(vec![(*sheet, *at)]),
         Operation::SetStyle { .. }
         | Operation::SetColumnWidth { .. }
-        | Operation::SetRowHeight { .. } => RecalcPlan::Skip,
+        | Operation::SetRowHeight { .. }
+        // Swaps sheet metadata (merges / sizes / hidden / freeze) — no cell
+        // value changes, so nothing to recompute.
+        | Operation::SetSheetMetadata { .. } => RecalcPlan::Skip,
         Operation::InsertRows { .. }
         | Operation::DeleteRows { .. }
         | Operation::InsertColumns { .. }

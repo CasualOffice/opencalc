@@ -1,12 +1,17 @@
 //! Structural row/column insert & delete with formula-reference rewriting.
 //!
-//! Inserting or deleting whole rows/columns has two coupled effects that must
+//! Inserting or deleting whole rows/columns has three coupled effects that must
 //! stay in lock-step or the model silently corrupts:
 //!
 //! 1. **Geometry** — every populated cell on or after the insertion/deletion
 //!    band shifts, and the sheet's [`CellStore`] is rebuilt at the new
 //!    coordinates.
-//! 2. **References** — every formula *anywhere in the workbook* that targets the
+//! 2. **Position-indexed metadata** — everything else on the sheet that is keyed
+//!    by row/column index shifts the same way: merged ranges, explicit column
+//!    widths / row heights, the hidden row/column sets, and the frozen-pane
+//!    counts. Miss any of these and a merge, custom height, or freeze silently
+//!    slides out from under the cells it belonged to.
+//! 3. **References** — every formula *anywhere in the workbook* that targets the
 //!    affected sheet has its cell/range references rewritten so they keep
 //!    pointing at the same logical cells (or collapse to `#REF!` when their
 //!    target is deleted).
@@ -18,12 +23,18 @@
 //!
 //! Both operations return an exact inverse, so undo is inverse replay (see
 //! [`crate::apply`]). Insert's inverse is the matching delete — exact because an
-//! insert opens an empty band no reference can point into. Delete's inverse is a
-//! [`Operation::Batch`] of the re-insert plus `SetCell` restores of every cell
-//! and formula the delete could have touched, snapshotted *before* mutation.
+//! insert opens an empty band no reference or metadata index can point into, so
+//! the matching delete shifts everything back with nothing to drop. Delete's
+//! inverse is a [`Operation::Batch`] of the re-insert, a
+//! [`Operation::SetSheetMetadata`] carrying the pre-delete metadata snapshot
+//! (the re-insert alone cannot resurrect a merge or custom height the delete
+//! dropped), plus `SetCell` restores of every cell and formula the delete could
+//! have touched — all snapshotted *before* mutation.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{CellReference, Expr};
-use casual_calc_model::{CellRef, CellStore, Workbook};
+use casual_calc_model::{AxisSizing, CellRef, CellStore, Sheet, Workbook};
 
 use crate::{Operation, TxnError};
 
@@ -88,6 +99,7 @@ pub(crate) fn insert(
 ) -> Result<Operation, TxnError> {
     let target = sheet_name(workbook, sheet)?;
     shift_cells_insert(workbook, sheet, axis, at, count);
+    shift_metadata_insert(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
     Ok(delete_op(sheet, axis, at, count))
 }
@@ -103,13 +115,21 @@ pub(crate) fn delete(
     count: u32,
 ) -> Result<Operation, TxnError> {
     let target = sheet_name(workbook, sheet)?;
-    // Snapshot everything the delete can change, before we mutate anything.
+    // Snapshot everything the delete can change, before we mutate anything. The
+    // metadata snapshot is taken as a whole because a delete can drop a merge or
+    // a hidden line outright — a shift alone is not invertible — so undo restores
+    // the exact pre-delete metadata rather than trying to un-shift it.
     let restores = snapshot_for_delete(workbook, sheet, axis, at);
+    let metadata_restore = snapshot_metadata(workbook, sheet);
     shift_cells_delete(workbook, sheet, axis, at, count);
+    shift_metadata_delete(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Delete, at, count);
 
-    let mut ops = Vec::with_capacity(restores.len() + 1);
+    // Inverse order: re-open the band (restores cell geometry), overwrite the
+    // metadata with its pre-delete snapshot, then restore the touched cells.
+    let mut ops = Vec::with_capacity(restores.len() + 2);
     ops.push(insert_op(sheet, axis, at, count));
+    ops.push(metadata_restore);
     ops.extend(restores);
     Ok(Operation::Batch(ops))
 }
@@ -175,6 +195,142 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
         // Cells inside the deleted band are dropped.
     }
     *store = rebuilt;
+}
+
+// ---------------------------------------------------------------------------
+// Position-indexed metadata (merges, sizing, hidden lines, frozen panes).
+// ---------------------------------------------------------------------------
+
+/// Capture the sheet's current position-indexed metadata as a
+/// [`Operation::SetSheetMetadata`]. Used as a delete's inverse so undo reinstates
+/// merges, sizing, hidden lines, and frozen panes the delete may have dropped —
+/// re-inserting an empty band cannot resurrect them.
+fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
+    let s = &workbook.sheets[sheet];
+    Operation::SetSheetMetadata {
+        sheet,
+        merges: s.merges.clone(),
+        columns: s.columns.clone(),
+        rows: s.rows.clone(),
+        hidden_rows: s.hidden_rows.clone(),
+        hidden_cols: s.hidden_cols.clone(),
+        view: s.view,
+    }
+}
+
+/// The along-axis sizing, hidden set, and frozen-count fields for `axis`. All
+/// three are disjoint fields, so returning them together is a sound split borrow.
+fn axis_metadata_mut(
+    sheet: &mut Sheet,
+    axis: Axis,
+) -> (&mut AxisSizing, &mut BTreeSet<u32>, &mut u32) {
+    match axis {
+        Axis::Row => (
+            &mut sheet.rows,
+            &mut sheet.hidden_rows,
+            &mut sheet.view.frozen_rows,
+        ),
+        Axis::Col => (
+            &mut sheet.columns,
+            &mut sheet.hidden_cols,
+            &mut sheet.view.frozen_cols,
+        ),
+    }
+}
+
+/// Bump `cell`'s along-axis coordinate by `count` if it sits on or after `at`.
+fn insert_coord(axis: Axis, cell: &mut CellRef, at: u32, count: u32) {
+    let coord = axis.coord(*cell);
+    if coord >= at {
+        *cell = axis.with_coord(*cell, coord.saturating_add(count));
+    }
+}
+
+/// Shift all position-indexed metadata for an insert of `count` lines at `at`:
+/// every index on or after `at` moves up by `count`, and a freeze boundary that
+/// the insert falls *before* grows to keep the same lines pinned.
+fn shift_metadata_insert(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
+    // Merges: each endpoint moves independently, so a merge straddling `at`
+    // grows (its start stays, its end shifts down) — matching spreadsheets.
+    for merge in &mut sheet.merges {
+        insert_coord(axis, &mut merge.start, at, count);
+        insert_coord(axis, &mut merge.end, at, count);
+    }
+    let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
+    reindex_map(&mut sizing.sizes, |k| {
+        Some(if k >= at { k.saturating_add(count) } else { k })
+    });
+    reindex_set(hidden, |k| {
+        Some(if k >= at { k.saturating_add(count) } else { k })
+    });
+    // Inserting inside (or above) the frozen band extends it; inserting exactly
+    // at the boundary (`at == *frozen`) or below leaves the freeze alone.
+    if at < *frozen {
+        *frozen = frozen.saturating_add(count);
+    }
+}
+
+/// Shift all position-indexed metadata for a delete of the band `[at, at+count)`:
+/// indices in the band are dropped, indices past it move down by `count`, a merge
+/// wholly inside the band is removed and one straddling it is clamped, and a
+/// freeze boundary loses however many of its pinned lines fell in the band.
+fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
+    sheet.merges.retain_mut(|merge| {
+        let lo = axis.coord(merge.start);
+        let hi = axis.coord(merge.end);
+        match map_range_delete(lo, hi, at, count) {
+            None => false,
+            Some((new_lo, new_hi)) => {
+                merge.start = axis.with_coord(merge.start, new_lo);
+                merge.end = axis.with_coord(merge.end, new_hi);
+                true
+            }
+        }
+    });
+    let end = at.saturating_add(count);
+    let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
+    reindex_map(&mut sizing.sizes, |k| map_index_delete(k, at, end, count));
+    reindex_set(hidden, |k| map_index_delete(k, at, end, count));
+    // Only the pinned lines that actually fell in the band reduce the freeze.
+    if at < *frozen {
+        let removed = end.min(*frozen).saturating_sub(at);
+        *frozen = frozen.saturating_sub(removed);
+    }
+}
+
+/// Map a single index through a delete of `[at, end)`: `None` (dropped) if it is
+/// in the band, shifted down by `count` if past it, unchanged if before it.
+fn map_index_delete(index: u32, at: u32, end: u32, count: u32) -> Option<u32> {
+    if index < at {
+        Some(index)
+    } else if index >= end {
+        Some(index - count)
+    } else {
+        None
+    }
+}
+
+/// Rebuild a sizing/height map under an index remapping, dropping keys the
+/// remapper returns `None` for. Values ride along with their (possibly moved)
+/// key; a collision keeps the last-written value in ascending key order.
+fn reindex_map(map: &mut BTreeMap<u32, i64>, remap: impl Fn(u32) -> Option<u32>) {
+    let taken = std::mem::take(map);
+    for (key, value) in taken {
+        if let Some(new_key) = remap(key) {
+            map.insert(new_key, value);
+        }
+    }
+}
+
+/// Rebuild an index set under an index remapping, dropping keys the remapper
+/// returns `None` for.
+fn reindex_set(set: &mut BTreeSet<u32>, remap: impl Fn(u32) -> Option<u32>) {
+    let taken = std::mem::take(set);
+    for key in taken {
+        if let Some(new_key) = remap(key) {
+            set.insert(new_key);
+        }
+    }
 }
 
 /// Snapshot, as `SetCell` restore ops, every cell a delete could disturb: on the
