@@ -540,3 +540,142 @@ fn recalc_is_deterministic() {
     let second = value_at(&wb, 1, 0);
     assert_eq!(first, second);
 }
+
+// --- Incremental recalc: differential against full recalc -----------------
+
+use crate::recalculate_incremental;
+
+/// Every cell's value in `a` equals the same cell in `b` (over the union of
+/// populated cells). Text is compared by resolved contents, not string id.
+fn assert_same_values(a: &Workbook, b: &Workbook) {
+    for s in 0..a.sheets.len().max(b.sheets.len()) {
+        let mut seen = std::collections::HashSet::new();
+        for wb in [a, b] {
+            if let Some(sheet) = wb.sheets.get(s) {
+                for (at, _) in sheet.cells.iter() {
+                    seen.insert((at.row, at.col));
+                }
+            }
+        }
+        for (row, col) in seen {
+            let va = value_norm(a, s, row, col);
+            let vb = value_norm(b, s, row, col);
+            assert_eq!(
+                va, vb,
+                "cell ({s},{row},{col}) diverged: incr={va:?} full={vb:?}"
+            );
+        }
+    }
+}
+
+/// A comparable snapshot of a cell value (text resolved to its contents).
+fn value_norm(wb: &Workbook, sheet: usize, row: u32, col: u32) -> String {
+    let v = wb
+        .sheets
+        .get(sheet)
+        .and_then(|s| s.cells.get(CellRef::new(row, col)))
+        .map(|c| c.value.clone())
+        .unwrap_or(CellValue::Empty);
+    match v {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            format!("T:{}", wb.strings.get(id).unwrap_or_default())
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// Apply a literal-number edit to a cell (single sheet 0), returning the changed
+/// key for `recalculate_incremental`.
+fn set_number(wb: &mut Workbook, row: u32, col: u32, n: f64) -> (usize, CellRef) {
+    let at = CellRef::new(row, col);
+    let mut cell = wb.sheets[0]
+        .cells
+        .get(at)
+        .cloned()
+        .unwrap_or(Cell::value(CellValue::Empty));
+    cell.value = CellValue::Number(n);
+    cell.formula = None;
+    wb.sheets[0].cells.set(at, cell);
+    (0, at)
+}
+
+/// After an edit, an incremental pass must produce the same cached values as a
+/// from-scratch full recalc — across chains, ranges, and unrelated cells.
+#[test]
+fn incremental_matches_full_recalc() {
+    // A workbook mixing a dependency chain, a range aggregate, a cross-cell
+    // reference, and cells that do not depend on the edit at all.
+    let build = || {
+        let mut b = Builder::new();
+        b.number((0, 0), 1.0) // A1
+            .number((1, 0), 2.0) // A2
+            .number((2, 0), 3.0) // A3
+            .formula((3, 0), "SUM(A1:A3)") // A4 = 6   (range dep)
+            .formula((4, 0), "A4*2") // A5 = 12   (chain on A4)
+            .formula((5, 0), "A5+A1") // A6 = 13   (two deps)
+            .number((0, 2), 100.0) // C1  (independent)
+            .formula((1, 2), "C1+1") // C2 = 101 (independent of A*)
+            .formula((0, 3), "IF(A2>1,\"big\",\"small\")"); // D1 text branch
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        wb
+    };
+
+    // Edit A2 (feeds the range A1:A3, the chain, and the IF) to 10.
+    let mut incr = build();
+    let changed = set_number(&mut incr, 1, 0, 10.0);
+    recalculate_incremental(&mut incr, &[changed]);
+
+    let mut full = build();
+    set_number(&mut full, 1, 0, 10.0);
+    recalculate(&mut full);
+
+    assert_same_values(&incr, &full);
+    // Spot-check the propagation actually happened.
+    assert_eq!(number_at(&incr, 3, 0), 14.0); // SUM(1,10,3)
+    assert_eq!(number_at(&incr, 4, 0), 28.0); // *2
+    assert_eq!(number_at(&incr, 5, 0), 29.0); // +A1
+    assert_eq!(number_at(&incr, 1, 2), 101.0); // C2 untouched
+}
+
+/// A pseudo-random sequence of edits, each followed by an incremental pass,
+/// must stay in lock-step with a full recalc of the same workbook. Uses a fixed
+/// LCG so the case is deterministic (no wall-clock / RNG dependence).
+#[test]
+fn incremental_matches_full_under_random_edits() {
+    let build = || {
+        let mut b = Builder::new();
+        // A grid where each cell sums two earlier ones — deep, wide dependents.
+        b.number((0, 0), 1.0)
+            .number((0, 1), 2.0)
+            .number((0, 2), 3.0);
+        for r in 1..8u32 {
+            b.formula((r, 0), &format!("A{r}+B{r}"));
+            b.formula((r, 1), &format!("B{r}+C{r}"));
+            b.formula((r, 2), &format!("SUM(A{}:C{})", r, r));
+        }
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        wb
+    };
+
+    let mut incr = build();
+    let mut full = build();
+    let mut state: u64 = 0x1234_5678;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as u32
+    };
+    for _ in 0..40 {
+        // Edit one of the three base inputs (row 0, cols 0..3).
+        let col = next() % 3;
+        let n = (next() % 20) as f64 - 5.0;
+        let changed = set_number(&mut incr, 0, col, n);
+        recalculate_incremental(&mut incr, &[changed]);
+        set_number(&mut full, 0, col, n);
+        recalculate(&mut full);
+        assert_same_values(&incr, &full);
+    }
+}

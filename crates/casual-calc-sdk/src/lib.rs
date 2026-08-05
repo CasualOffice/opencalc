@@ -7,7 +7,7 @@
 //! bridge) embeds. The public surface is deliberately narrower than the internal
 //! crates. See `docs/02-ARCHITECTURE.md`.
 
-use casual_calc_eval::recalculate;
+use casual_calc_eval::{recalculate, recalculate_incremental};
 use casual_calc_export::{ExportError, write_workbook};
 use casual_calc_import::{CompatibilityReport, ImportError, import_package};
 use casual_calc_layout::{DisplayList, GridGeometry, Viewport, layout_viewport};
@@ -121,9 +121,19 @@ impl WorkbookSession {
     }
 
     /// Apply an edit operation, then recalculate. Records undo history.
+    ///
+    /// The recalc is scoped to what the edit can affect: value edits recompute
+    /// only the changed cells' transitive dependents (incremental); pure style
+    /// or geometry edits skip recalc entirely; structural edits (insert/delete
+    /// rows or columns), which shift references workbook-wide, do a full recalc.
     pub fn edit(&mut self, op: Operation) -> Result<(), SdkError> {
+        let plan = recalc_plan(&op);
         self.history.apply(&mut self.workbook, op)?;
-        recalculate(&mut self.workbook);
+        match plan {
+            RecalcPlan::Skip => {}
+            RecalcPlan::Cells(cells) => recalculate_incremental(&mut self.workbook, &cells),
+            RecalcPlan::Full => recalculate(&mut self.workbook),
+        }
         Ok(())
     }
 
@@ -207,6 +217,49 @@ impl WorkbookSession {
 impl Default for WorkbookSession {
     fn default() -> Self {
         Self::blank()
+    }
+}
+
+/// How an operation should be recalculated.
+enum RecalcPlan {
+    /// No value can have changed (pure style / geometry edit) — skip recalc.
+    Skip,
+    /// Value edits: recompute the transitive dependents of these cells.
+    Cells(Vec<(usize, CellRef)>),
+    /// Reference-shifting edits (insert/delete rows or columns) — full recalc.
+    Full,
+}
+
+/// Classify an operation's recalc scope. A `Batch` is `Full` if any member is,
+/// otherwise the union of its members' changed cells (or `Skip` if none touch
+/// values).
+fn recalc_plan(op: &Operation) -> RecalcPlan {
+    match op {
+        Operation::SetCell { sheet, at, .. }
+        | Operation::SetValue { sheet, at, .. }
+        | Operation::ClearCell { sheet, at } => RecalcPlan::Cells(vec![(*sheet, *at)]),
+        Operation::SetStyle { .. }
+        | Operation::SetColumnWidth { .. }
+        | Operation::SetRowHeight { .. } => RecalcPlan::Skip,
+        Operation::InsertRows { .. }
+        | Operation::DeleteRows { .. }
+        | Operation::InsertColumns { .. }
+        | Operation::DeleteColumns { .. } => RecalcPlan::Full,
+        Operation::Batch(ops) => {
+            let mut cells = Vec::new();
+            for o in ops {
+                match recalc_plan(o) {
+                    RecalcPlan::Full => return RecalcPlan::Full,
+                    RecalcPlan::Cells(mut c) => cells.append(&mut c),
+                    RecalcPlan::Skip => {}
+                }
+            }
+            if cells.is_empty() {
+                RecalcPlan::Skip
+            } else {
+                RecalcPlan::Cells(cells)
+            }
+        }
     }
 }
 

@@ -15,20 +15,39 @@ use crate::value::{Value, value_from_cell};
 type CellKey = (usize, u32, u32);
 
 /// Evaluates cells and expressions against a workbook, memoizing results.
+///
+/// When `dirty` is set (incremental recalc), a formula cell **outside** the
+/// dirty set is read from its cached value rather than re-evaluated — its
+/// inputs did not change, so its cache is authoritative. This is what makes an
+/// incremental pass touch only the changed cell's transitive dependents while
+/// producing values identical to a full recalc.
 #[derive(Debug)]
 pub struct Evaluator<'a> {
     workbook: &'a Workbook,
     memo: HashMap<CellKey, Value>,
     in_progress: HashSet<CellKey>,
+    dirty: Option<&'a HashSet<CellKey>>,
 }
 
 impl<'a> Evaluator<'a> {
-    /// A new evaluator over `workbook`.
+    /// A new evaluator over `workbook` that evaluates every cell (full recalc).
     pub fn new(workbook: &'a Workbook) -> Self {
         Self {
             workbook,
             memo: HashMap::new(),
             in_progress: HashSet::new(),
+            dirty: None,
+        }
+    }
+
+    /// A new evaluator that recomputes only formula cells in `dirty` and reads
+    /// cached values for all others (incremental recalc).
+    pub fn with_dirty(workbook: &'a Workbook, dirty: &'a HashSet<CellKey>) -> Self {
+        Self {
+            workbook,
+            memo: HashMap::new(),
+            in_progress: HashSet::new(),
+            dirty: Some(dirty),
         }
     }
 
@@ -61,6 +80,13 @@ impl<'a> Evaluator<'a> {
             return Value::Empty;
         };
         if let Some(handle) = cell.formula {
+            // Incremental: a formula cell outside the dirty set keeps its cached
+            // value (its precedents are unchanged, so its cache is correct).
+            if let Some(dirty) = self.dirty
+                && !dirty.contains(&(sheet_index, at.row, at.col))
+            {
+                return value_from_cell(&cell.value, &self.workbook.strings);
+            }
             return match self.workbook.formula(handle) {
                 Some(expr) => self.eval_expr(sheet_index, expr),
                 None => Value::Empty,
