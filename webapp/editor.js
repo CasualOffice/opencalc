@@ -1117,19 +1117,40 @@ function effectiveRange() {
 function allRanges() {
   return state.ranges.concat([effectiveRange()]);
 }
-// Double-click a column boundary: size the column to its widest cell.
+// Double-click a column boundary: size the column to its widest cell, measured
+// with each cell's real font (family/size/bold/italic) so larger text fits.
 function autofitColumn(col) {
   const b = usedBounds();
   const items = JSON.parse(wasm.session_cells(state.sheet, 0, col, b.rows - 1, col));
   let maxw = 24;
   for (const it of items) {
     if (!it.t) continue;
-    const weight = it.b ? "600 " : "";
-    const slant = it.i ? "italic " : "";
-    ctx.font = `${slant}${weight}13px system-ui, sans-serif`;
-    maxw = Math.max(maxw, ctx.measureText(it.t).width);
+    ctx.font = cellFont(it);
+    maxw = Math.max(maxw, ctx.measureText(String(it.t)).width);
   }
   try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); } catch {}
+  draw();
+}
+// Double-click a row boundary: size the row to its tallest cell, honoring each
+// cell's font size, wrap (wrapped to the column width), and explicit newlines.
+function autofitRow(row) {
+  const b = usedBounds();
+  const items = JSON.parse(wasm.session_cells(state.sheet, row, 0, row, b.cols - 1));
+  let maxh = ROW_H;
+  for (const it of items) {
+    if (!it.t) continue;
+    // Match measure()'s per-cell wrap math exactly so autofit and render agree.
+    const lineH = cellLineH(it);
+    let lines;
+    if (it.w) {
+      const colW = Math.max(8, colWAt(it.c) - 8);
+      lines = String(it.t).split("\n").flatMap((seg) => wrapLines({ ...it, t: seg }, colW));
+    } else {
+      lines = String(it.t).split("\n");
+    }
+    maxh = Math.max(maxh, lines.length * lineH + 6);
+  }
+  try { wasm.session_set_row_height(state.sheet, row, Math.ceil(maxh)); } catch {}
   draw();
 }
 
@@ -2543,12 +2564,11 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    // Double-clicking a column boundary auto-fits it to its widest cell; a row
-    // boundary resets the row to the default height.
+    // Double-clicking a column or row boundary auto-fits it to its content.
     const hb = boundaryAt(px, py);
     if (hb) {
       if (hb.axis === "col") autofitColumn(hb.index);
-      else { try { wasm.session_clear_row_height(state.sheet, hb.index); } catch {} draw(); }
+      else autofitRow(hb.index);
       return;
     }
     const hit = cellAt(px, py);
