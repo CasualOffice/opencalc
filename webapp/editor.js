@@ -254,7 +254,7 @@ function measure() {
     if (i === fc) x = bodyX0 - subX;
     geo.colX[i] = x;
     if (x < v.w) geo.cols = i + 1;
-    x += geo.colW[i] || COL_W;
+    x += geo.colW[i] ?? COL_W; // hidden lines are 0 — must NOT fall back to COL_W
   }
   geo.rowY = new Array(geo.rowIdx.length);
   let y = HH; geo.rows = 0;
@@ -262,7 +262,7 @@ function measure() {
     if (i === fr) y = bodyY0 - subY;
     geo.rowY[i] = y;
     if (y < v.h) geo.rows = i + 1;
-    y += geo.rowH[i] || ROW_H;
+    y += geo.rowH[i] ?? ROW_H; // hidden lines are 0 — must NOT fall back to ROW_H
   }
   return v;
 }
@@ -810,6 +810,7 @@ function draw() {
   };
   if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
   drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
+  drawHiddenMarkers();
 
   updateNameBox();
   updateScrollbars(v);
@@ -1031,6 +1032,46 @@ function usedBounds() {
   const b = JSON.parse(wasm.session_used_bounds(state.sheet));
   return { rows: Math.max(1, b.rows), cols: Math.max(1, b.cols) };
 }
+// Hidden-region markers: a run of zero-width lines is a hidden band. Draw a
+// small accent double-bar at each gap in the header strips, and remember the
+// spans so a double-click on a marker can unhide them.
+let hiddenColMarks = [];
+let hiddenRowMarks = [];
+function drawHiddenMarkers() {
+  hiddenColMarks = [];
+  hiddenRowMarks = [];
+  let run = null;
+  for (let i = 0; i < geo.colIdx.length; i++) {
+    if (geo.colW[i] <= 0) {
+      if (!run) run = { x: geo.colX[i], from: geo.colIdx[i], to: geo.colIdx[i] };
+      else run.to = geo.colIdx[i];
+    } else if (run) { hiddenColMarks.push(run); run = null; }
+  }
+  if (run) hiddenColMarks.push(run);
+  run = null;
+  for (let i = 0; i < geo.rowIdx.length; i++) {
+    if (geo.rowH[i] <= 0) {
+      if (!run) run = { y: geo.rowY[i], from: geo.rowIdx[i], to: geo.rowIdx[i] };
+      else run.to = geo.rowIdx[i];
+    } else if (run) { hiddenRowMarks.push(run); run = null; }
+  }
+  if (run) hiddenRowMarks.push(run);
+
+  ctx.save();
+  ctx.fillStyle = colors.accent;
+  for (const m of hiddenColMarks) {
+    if (m.x < HW) continue;
+    ctx.fillRect(m.x - 2.5, 4, 1.5, HH - 8);
+    ctx.fillRect(m.x + 1, 4, 1.5, HH - 8);
+  }
+  for (const m of hiddenRowMarks) {
+    if (m.y < HH) continue;
+    ctx.fillRect(4, m.y - 2.5, HW - 8, 1.5);
+    ctx.fillRect(4, m.y + 1, HW - 8, 1.5);
+  }
+  ctx.restore();
+}
+
 // The column/row index at a canvas x/y (for header clicks + hit-testing).
 function colAtX(px) {
   for (let i = 0; i < geo.colX.length; i++) if (px < geo.colX[i] + geo.colW[i]) return geo.colIdx[i];
@@ -2574,6 +2615,15 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    // Double-clicking a hidden-region marker in a header unhides that band.
+    if (py < HH) {
+      const m = hiddenColMarks.find((g) => g.x >= HW && Math.abs(px - g.x) <= 5);
+      if (m) { tryEdit(() => wasm.session_unhide_cols(state.sheet, m.from, m.to)); return; }
+    }
+    if (px < HW) {
+      const m = hiddenRowMarks.find((g) => g.y >= HH && Math.abs(py - g.y) <= 5);
+      if (m) { tryEdit(() => wasm.session_unhide_rows(state.sheet, m.from, m.to)); return; }
+    }
     // Double-clicking a column or row boundary auto-fits it to its content.
     const hb = boundaryAt(px, py);
     if (hb) {
