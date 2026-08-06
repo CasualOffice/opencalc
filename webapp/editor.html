@@ -166,18 +166,34 @@
         <button id="tb-percent" class="tb-btn" title="Percent" aria-label="Percent">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>
         </button>
+        <button id="tb-comma" class="tb-btn" title="Comma style" aria-label="Comma style">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 4v16M4 12h16"/><circle cx="8" cy="16" r="1" fill="currentColor"/></svg>
+        </button>
+        <button id="tb-inc-dec" class="tb-btn" title="Increase decimals" aria-label="Increase decimals">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M3 12h10M17 9l3 3-3 3"/><circle cx="7" cy="12" r="1.5" fill="currentColor"/></svg>
+        </button>
+        <button id="tb-dec-dec" class="tb-btn" title="Decrease decimals" aria-label="Decrease decimals">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 12H11M7 9l-3 3 3 3"/><circle cx="17" cy="12" r="1.5" fill="currentColor"/></svg>
+        </button>
         <div class="menu-wrap">
           <button id="tb-numfmt" class="tb-btn" title="Number format" aria-label="Number format" aria-haspopup="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
           </button>
           <div id="numfmt-menu" class="popmenu" hidden>
-            <button data-nf="">Automatic</button>
-            <button data-nf="0">Number</button>
-            <button data-nf="0.00">Number (2 decimals)</button>
-            <button data-nf="#,##0">Thousands separator</button>
-            <button data-nf="0%">Percent</button>
-            <button data-nf="$#,##0.00">Currency</button>
-            <button data-nf="mm-dd-yy">Date</button>
+            <button data-nf="">Automatic (General)</button>
+            <button data-nf="0">Number (0)</button>
+            <button data-nf="0.00">Number (0.00)</button>
+            <button data-nf="#,##0">Thousands (#,##0)</button>
+            <button data-nf="#,##0.00">Thousands (#,##0.00)</button>
+            <button data-nf="0%">Percent (0%)</button>
+            <button data-nf="0.00%">Percent (0.00%)</button>
+            <button data-nf="$#,##0.00">Currency ($#,##0.00)</button>
+            <button data-nf="_($* #,##0.00_);_($* (#,##0.00);_($* &quot;-&quot;??_);_(@_)">Accounting</button>
+            <button data-nf="yyyy-mm-dd">Short Date (yyyy-mm-dd)</button>
+            <button data-nf="dddd, mmmm d, yyyy">Long Date</button>
+            <button data-nf="h:mm:ss AM/PM">Time (h:mm:ss AM/PM)</button>
+            <button data-nf="0.00E+00">Scientific (0.00E+00)</button>
+            <button data-nf="@">Text (@)</button>
           </div>
         </div>
         <div class="menu-wrap">
@@ -277,6 +293,6 @@
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
-    <script type="module" src="./editor.js?v=15"></script>
+    <script type="module" src="./editor.js?v=16"></script>
   </body>
 </html>

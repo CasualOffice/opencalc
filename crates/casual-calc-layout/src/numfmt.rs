@@ -9,19 +9,77 @@
 //! on the 1900 serial-date system. Deferred: negative/zero/text sections,
 //! colors, fractions, scientific notation, and elapsed-time (`[h]`) layout.
 
+/// Split a SpreadsheetML format code into sections separated by unquoted `;`.
+pub fn split_sections(code: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut in_brackets = false;
+    let mut chars = code.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '\\' => {
+                let _ = chars.next(); // Skip escaped character
+            }
+            '[' if !in_quotes => in_brackets = true,
+            ']' if !in_quotes => in_brackets = false,
+            ';' if !in_quotes && !in_brackets => {
+                sections.push(&code[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    sections.push(&code[start..]);
+    sections
+}
+
 /// Format `value` for display using the SpreadsheetML format `code`.
 pub fn format_number(value: f64, code: &str) -> String {
-    let section = code.split(';').next().unwrap_or(code).trim();
+    let sections = split_sections(code);
+    if sections.is_empty()
+        || (sections.len() == 1
+            && (sections[0].trim().is_empty() || sections[0].eq_ignore_ascii_case("General")))
+    {
+        return format_general(value);
+    }
+
+    let (section, is_custom_negative) = match sections.len() {
+        1 => (sections[0].trim(), false),
+        2 => {
+            if value < 0.0 {
+                (sections[1].trim(), true)
+            } else {
+                (sections[0].trim(), false)
+            }
+        }
+        _ => {
+            // 3 or 4 sections
+            if value > 0.0 {
+                (sections[0].trim(), false)
+            } else if value < 0.0 {
+                (sections[1].trim(), true)
+            } else {
+                (sections[2].trim(), false)
+            }
+        }
+    };
+
     if section.is_empty() || section.eq_ignore_ascii_case("General") {
         return format_general(value);
     }
     if has_digit_placeholder(section) {
-        return format_numeric(value, section);
+        return format_numeric_section(value, section, is_custom_negative);
     }
     if is_date_or_time(section) {
         return format_date_time(value, section);
     }
-    format_general(value)
+
+    // Literal-only section (e.g. `"-"` or `"Zero"`)
+    let (prefix, pattern, suffix) = split_literal_runs(section);
+    format!("{prefix}{pattern}{suffix}")
 }
 
 /// Default (`General`) formatting for a number.
@@ -59,9 +117,18 @@ fn decimal_places(section: &str) -> usize {
     }
 }
 
-fn format_numeric(value: f64, section: &str) -> String {
+fn format_numeric_section(value: f64, section: &str, is_custom_negative: bool) -> String {
     let percent = section.contains('%');
-    let scaled = if percent { value * 100.0 } else { value };
+    let target_val = if is_custom_negative {
+        value.abs()
+    } else {
+        value
+    };
+    let scaled = if percent {
+        target_val * 100.0
+    } else {
+        target_val
+    };
 
     let (prefix, pattern, suffix) = split_literal_runs(section);
     let decimals = decimal_places(&pattern);
@@ -70,7 +137,11 @@ fn format_numeric(value: f64, section: &str) -> String {
         digits = group_thousands(&digits);
     }
 
-    let sign = if scaled < 0.0 { "-" } else { "" };
+    let sign = if !is_custom_negative && scaled < 0.0 {
+        "-"
+    } else {
+        ""
+    };
     format!("{sign}{prefix}{digits}{suffix}")
 }
 
@@ -137,6 +208,12 @@ fn split_literal_runs(section: &str) -> (String, String, String) {
                 chars.next(); // fill: consume the next char, ignore.
             }
             ' ' => out.push(' '),
+            // `?` is a digit-alignment placeholder (pads with a space instead of
+            // a digit when there's nothing to show — used e.g. in the Accounting
+            // zero-section `"-"??` to align with the decimal digits of the
+            // positive/negative sections). Fraction layout (`# ??/??`) is still
+            // unsupported; this covers the common alignment-padding usage.
+            '?' => out.push(' '),
             c if !matches!(c, '0' | '#' | '.' | ',') => out.push(c),
             _ => {}
         }
@@ -448,9 +525,66 @@ fn serial_to_ymd(serial_days: i64) -> (i64, i64, i64) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+/// Adjust the number of decimal places in format code `code` by `delta`.
+///
+/// Positive `delta` adds decimal places (`0`), negative `delta` reduces them.
+/// Works across multi-section formats, adjusting decimal precision in numeric sections.
+pub fn adjust_format_decimals(code: &str, delta: i32) -> String {
+    if delta == 0 {
+        return code.to_owned();
+    }
+    let sections = split_sections(code);
+    if sections.is_empty() {
+        return adjust_section_decimals("General", delta);
+    }
+    let adjusted_sections: Vec<String> = sections
+        .iter()
+        .map(|sec| adjust_section_decimals(sec, delta))
+        .collect();
+    adjusted_sections.join(";")
+}
+
+fn adjust_section_decimals(section: &str, delta: i32) -> String {
+    let trimmed = section.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("General") {
+        if delta > 0 {
+            return format!("0.{}", "0".repeat(delta as usize));
+        } else {
+            return "0".to_owned();
+        }
+    }
+    if !has_digit_placeholder(trimmed) {
+        return trimmed.to_owned();
+    }
+
+    let (prefix, pattern, suffix) = split_literal_runs(trimmed);
+    let new_pattern = if let Some((int_part, frac_part)) = pattern.split_once('.') {
+        let current_dec = frac_part
+            .chars()
+            .take_while(|c| matches!(c, '0' | '#'))
+            .count();
+        let target_dec = (current_dec as i32 + delta).max(0) as usize;
+        let int_str = if int_part.is_empty() { "0" } else { int_part };
+        if target_dec > 0 {
+            format!("{int_str}.{}", "0".repeat(target_dec))
+        } else {
+            int_str.to_owned()
+        }
+    } else {
+        if delta > 0 {
+            let int_str = if pattern.is_empty() { "0" } else { &pattern };
+            format!("{int_str}.{}", "0".repeat(delta as usize))
+        } else {
+            pattern
+        }
+    };
+
+    format!("{prefix}{new_pattern}{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_number;
+    use super::{adjust_format_decimals, format_number, split_sections};
 
     #[test]
     fn general_and_fixed_decimals() {
@@ -479,6 +613,68 @@ mod tests {
         assert_eq!(format_number(-9.99, "$#,##0.00"), "-$9.99");
         assert_eq!(format_number(3.0, "0\" kg\""), "3 kg");
         assert_eq!(format_number(5.0, "[$€-407]#,##0.00"), "€5.00");
+    }
+
+    #[test]
+    fn multi_section_formats() {
+        let code = "$#,##0.00;($#,##0.00);\"-\"";
+        assert_eq!(format_number(1234.5, code), "$1,234.50");
+        assert_eq!(format_number(-1234.5, code), "($1,234.50)");
+        assert_eq!(format_number(0.0, code), "-");
+
+        let code4 = "0.00;[Red]-0.00;\"Zero\";\"Text\"";
+        assert_eq!(format_number(5.25, code4), "5.25");
+        assert_eq!(format_number(-5.25, code4), "-5.25");
+        assert_eq!(format_number(0.0, code4), "Zero");
+    }
+
+    #[test]
+    fn accounting_format_pads_question_marks_as_spaces() {
+        // The standard Accounting preset: pos;neg;zero;text, with `_(`/`_)`
+        // spacing tokens, a `*` fill token, and a `"-"??` zero-section that
+        // pads with spaces (not literal question marks) to align with the
+        // decimal digits of the other sections.
+        let code = "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)";
+        assert_eq!(format_number(1234.5, code), " $1,234.50 ");
+        assert_eq!(format_number(-1234.5, code), " $(1,234.50)");
+        // The zero-section's `??` pads with spaces, not literal `?` characters.
+        let zero = format_number(0.0, code);
+        assert!(
+            !zero.contains('?'),
+            "zero-section rendered a literal '?': {zero:?}"
+        );
+        assert_eq!(zero, " $-   ");
+    }
+
+    #[test]
+    fn split_sections_honors_quotes_and_brackets() {
+        let sections = split_sections("$#,##0.00;($#,##0.00);\"-\";[Red]@");
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0], "$#,##0.00");
+        assert_eq!(sections[1], "($#,##0.00)");
+        assert_eq!(sections[2], "\"-\"");
+        assert_eq!(sections[3], "[Red]@");
+
+        let quoted = split_sections("\"a;b\";\"c;d\"");
+        assert_eq!(quoted.len(), 2);
+        assert_eq!(quoted[0], "\"a;b\"");
+        assert_eq!(quoted[1], "\"c;d\"");
+    }
+
+    #[test]
+    fn decimal_adjustments() {
+        assert_eq!(adjust_format_decimals("General", 1), "0.0");
+        assert_eq!(adjust_format_decimals("General", 2), "0.00");
+        assert_eq!(adjust_format_decimals("General", -1), "0");
+        assert_eq!(adjust_format_decimals("0.00", 1), "0.000");
+        assert_eq!(adjust_format_decimals("0.00", -1), "0.0");
+        assert_eq!(adjust_format_decimals("0.00", -2), "0");
+        assert_eq!(adjust_format_decimals("$#,##0.00", 1), "$#,##0.000");
+        assert_eq!(adjust_format_decimals("$#,##0.00", -1), "$#,##0.0");
+        assert_eq!(
+            adjust_format_decimals("$#,##0.00;($#,##0.00);\"-\"", 1),
+            "$#,##0.000;($#,##0.000);\"-\""
+        );
     }
 
     #[test]

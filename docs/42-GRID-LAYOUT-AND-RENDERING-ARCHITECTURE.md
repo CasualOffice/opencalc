@@ -77,6 +77,10 @@ For each visible cell the layout engine computes:
 - The **displayed text**: the cached value formatted through the cell's
   **number format** (dates, currency, scientific, fractions, custom codes) —
   this is where format-code interpretation lives, matched to the oracle.
+  - Multi-section format codes (`Positive;Negative;Zero;Text`) are split on unquoted `;`.
+  - Section selection: 1 section (all numbers, `-` prepended for negative), 2 sections (positive/zero, negative), 3 sections (positive, negative, zero), 4 sections (positive, negative, zero, text).
+  - Bracket tokens (e.g. `[Red]`, `[Color N]`) are stripped from rendered text strings.
+  - Decimal place adjustments (`.0+` / `.0-`) adjust digit placeholders (`0`/`#`) in decimal sections.
 - Text shaping via **`parley`** (shared `LineShaper` seam with OpenDoc), honoring
   font/size/weight/color from the style, plus alignment, wrap, shrink-to-fit,
   rotation, and indent.

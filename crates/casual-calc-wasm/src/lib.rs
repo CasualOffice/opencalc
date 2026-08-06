@@ -2030,6 +2030,29 @@ pub fn session_set_number_format(
     })
 }
 
+/// Increase (`delta > 0`) or decrease (`delta < 0`) the number of decimal places
+/// across a cell range (atomic undo step).
+#[wasm_bindgen]
+pub fn session_adjust_decimals(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    delta: i32,
+) -> Result<(), JsError> {
+    if delta == 0 {
+        return Ok(());
+    }
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        let current_fmt = st.number_format.as_deref().unwrap_or("General");
+        st.number_format = Some(casual_calc_layout::adjust_format_decimals(
+            current_fmt,
+            delta,
+        ));
+    })
+}
+
 /// The active cell's formatting as JSON (drives the toolbar's active states):
 /// `{ b, i, u, al, nf, fc, bg }` — flags present only when set.
 #[wasm_bindgen]

@@ -23,7 +23,7 @@ mod numfmt;
 pub use axis::Axis;
 pub use display::{Align, BorderLine, DisplayList, PaintItem, Rect};
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
-pub use numfmt::{format_general, format_number};
+pub use numfmt::{adjust_format_decimals, format_general, format_number};
 
 use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
 

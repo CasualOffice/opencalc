@@ -1652,6 +1652,7 @@ function toggleMerge() {
 function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
 function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, pts)); }
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
+function adjustDecimals(delta) { formatSel((s) => wasm.session_adjust_decimals(state.sheet, s.r0, s.c0, s.r1, s.c1, delta)); }
 // Current border palette state (chosen line style + color, "" = automatic).
 let borderStyle = "thin";
 let borderColor = "";
@@ -2920,6 +2921,9 @@ function wireEvents() {
   document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
+  document.getElementById("tb-comma").addEventListener("click", () => { setNumberFormat("#,##0.00"); canvas.focus(); });
+  document.getElementById("tb-inc-dec").addEventListener("click", () => { adjustDecimals(1); canvas.focus(); });
+  document.getElementById("tb-dec-dec").addEventListener("click", () => { adjustDecimals(-1); canvas.focus(); });
   for (const b of document.querySelectorAll(".tb-align")) {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
