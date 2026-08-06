@@ -1206,6 +1206,70 @@ function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(stat
 function toggleStrike() { formatSel((s) => wasm.session_toggle_strike(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
 function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
+
+// A standard color palette (grays row + hue columns at 5 lightness levels),
+// shared by the font- and fill-color popovers, plus recent colors and a custom
+// hex entry so any RRGGBB the engine supports is reachable.
+const COLOR_PALETTE = [
+  "000000", "434343", "666666", "999999", "b7b7b7", "cccccc", "d9d9d9", "efefef", "f3f3f3", "ffffff",
+  "980000", "ff0000", "ff9900", "ffff00", "00ff00", "00ffff", "4a86e8", "0000ff", "9900ff", "ff00ff",
+  "e6b8af", "f4cccc", "fce5cd", "fff2cc", "d9ead3", "d0e0e3", "c9daf8", "cfe2f3", "d9d2e9", "ead1dc",
+  "dd7e6b", "ea9999", "f9cb9c", "ffe599", "b6d7a8", "a2c4c9", "a4c2f4", "9fc5e8", "b4a7d6", "d5a6bd",
+  "cc4125", "e06666", "f6b26b", "ffd966", "93c47d", "76a5af", "6d9eeb", "6fa8dc", "8e7cc3", "c27ba0",
+];
+let recentColors = [];
+function pushRecent(hex) {
+  const h = (hex || "").toUpperCase();
+  if (!h) return;
+  recentColors = [h, ...recentColors.filter((c) => c !== h)].slice(0, 10);
+}
+// Build a color popover into `menu`; `onPick(hex)` applies ("" clears).
+function buildColorMenu(menu, onPick, noneLabel) {
+  menu.textContent = "";
+  const pick = (hex) => { pushRecent(hex); onPick(hex); menu.hidden = true; canvas.focus(); };
+  const none = el("button", "cm-none");
+  none.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="icon-sm"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>' +
+    `<span>${noneLabel}</span>`;
+  none.addEventListener("click", (e) => { e.stopPropagation(); pick(""); });
+  menu.appendChild(none);
+
+  const grid = (colors) => {
+    const g = el("div", "cm-grid");
+    for (const c of colors) {
+      const b = el("button", "cm-sw");
+      b.style.background = "#" + c;
+      b.title = "#" + c;
+      b.addEventListener("click", (e) => { e.stopPropagation(); pick(c); });
+      g.appendChild(b);
+    }
+    return g;
+  };
+  if (recentColors.length) {
+    menu.appendChild(el("div", "cm-label", "Recent"));
+    menu.appendChild(grid(recentColors));
+  }
+  menu.appendChild(el("div", "cm-label", "Standard"));
+  menu.appendChild(grid(COLOR_PALETTE));
+
+  menu.appendChild(el("div", "cm-label", "Custom"));
+  const custom = el("div", "cm-custom");
+  const hex = el("input", "cm-hex");
+  hex.placeholder = "#RRGGBB";
+  hex.spellcheck = false;
+  hex.addEventListener("click", (e) => e.stopPropagation());
+  const apply = el("button", "cm-apply", "Apply");
+  const commitHex = () => {
+    const v = hex.value.trim().replace(/^#/, "");
+    if (/^[0-9a-fA-F]{6}$/.test(v)) pick(v.toUpperCase());
+    else { hex.style.borderColor = "#e5484d"; }
+  };
+  hex.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.stopPropagation(); commitHex(); } });
+  apply.addEventListener("click", (e) => { e.stopPropagation(); commitHex(); });
+  custom.appendChild(hex);
+  custom.appendChild(apply);
+  menu.appendChild(custom);
+}
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
@@ -2795,8 +2859,22 @@ function wireEvents() {
   document.addEventListener("click", () => { for (const m of menus) m.hidden = true; });
 
   wirePopup("tb-save", "save-menu", (b) => saveAs(b.dataset.fmt));
-  wirePopup("tb-fontcolor", "fontcolor-menu", (b) => setFontColor(b.dataset.c));
-  wirePopup("tb-fillcolor", "fillcolor-menu", (b) => setFill(b.dataset.c));
+  // Color popovers: custom toggle so the hex field doesn't close the menu;
+  // rebuilt on each open so the Recent row stays current.
+  for (const [btnId, menuId, onPick, noneLabel] of [
+    ["tb-fontcolor", "fontcolor-menu", setFontColor, "Automatic"],
+    ["tb-fillcolor", "fillcolor-menu", setFill, "No fill"],
+  ]) {
+    const btn = document.getElementById(btnId);
+    const menu = document.getElementById(menuId);
+    menus.push(menu);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      for (const m of menus) m.hidden = true;
+      if (open) { buildColorMenu(menu, onPick, noneLabel); menu.hidden = false; anchorMenu(menu, btn); }
+    });
+  }
   wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
   // Border palette: custom toggle (its placement buttons apply and close, but
   // the style select and color swatches must not), built once here.
