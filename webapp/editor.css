@@ -242,7 +242,7 @@ body {
 }
 .color-menu .cm-hex:focus { outline: none; border-color: var(--accent); }
 .color-menu .cm-apply {
-  flex: 0 0 auto; padding: 6px 11px; border-radius: 7px; border: 1px solid var(--accent);
+  flex: 0 0 auto; width: auto; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--accent);
   background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; cursor: pointer;
 }
 

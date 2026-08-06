@@ -644,10 +644,14 @@ function draw() {
     });
   }
 
-  // Range border (cell selections only) + focus-cell border (spans a merge).
+  // Range border (multi-cell selections only) + focus-cell border. A single-cell
+  // selection is drawn solely by the focus border below, which spans a merge —
+  // otherwise this would stroke a box around just the merge's anchor cell,
+  // showing a spurious interior line inside the merge.
   ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 2;
-  if (state.selKind === "cells" && sX.w > 0 && sY.h > 0) {
+  const singleCell = rectSel.r0 === rectSel.r1 && rectSel.c0 === rectSel.c1;
+  if (state.selKind === "cells" && !singleCell && sX.w > 0 && sY.h > 0) {
     ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
   }
   const fm = mergeAt(state.sel.row, state.sel.col);
