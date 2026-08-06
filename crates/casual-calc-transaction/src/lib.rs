@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
-    AxisSizing, Cell, CellRange, CellRef, CellValue, Sheet, SheetView, StyleId, Workbook,
+    AxisSizing, Cell, CellRange, CellRef, CellValue, DefinedName, Sheet, SheetView, StyleId,
+    Workbook,
 };
 
 mod structural;
@@ -210,6 +211,11 @@ pub enum Operation {
         /// The new tab color (`RRGGBB`), or `None` to clear.
         color: Option<String>,
     },
+    /// Replace the workbook's whole defined-name table wholesale. The
+    /// universal inverse form for defining, renaming, or deleting a name —
+    /// each swaps in the new list and carries the prior list back as its own
+    /// inverse, mirroring [`Operation::SetSheetMetadata`].
+    SetDefinedNames(Vec<DefinedName>),
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -366,6 +372,10 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
                 sheet,
                 color: previous,
             })
+        }
+        Operation::SetDefinedNames(names) => {
+            let previous = std::mem::replace(&mut workbook.defined_names, names);
+            Ok(Operation::SetDefinedNames(previous))
         }
         Operation::Batch(ops) => {
             let mut inverses = Vec::with_capacity(ops.len());

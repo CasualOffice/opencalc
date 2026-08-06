@@ -1236,3 +1236,67 @@ fn rename_sheet_rewrites_cross_sheet_refs_and_undoes() {
     assert_eq!(wb.sheets[0].name, "Data");
     assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Data!A1+1)"));
 }
+
+// ---- Defined names (M5-1): undoable define / rename / delete
+
+#[test]
+fn set_defined_names_is_self_inverse() {
+    let mut wb = workbook();
+    let named = |n: &str, f: &str| casual_calc_model::DefinedName {
+        name: n.to_owned(),
+        sheet: None,
+        formula: parse(f).unwrap(),
+    };
+
+    // Define "Total" over A1:A3.
+    let inverse = apply(
+        &mut wb,
+        Operation::SetDefinedNames(vec![named("Total", "A1:A3")]),
+    )
+    .unwrap();
+    assert_eq!(wb.defined_names.len(), 1);
+    assert_eq!(wb.defined_names[0].name, "Total");
+    assert_eq!(inverse, Operation::SetDefinedNames(vec![]));
+
+    // Undo: the name is gone again.
+    apply(&mut wb, inverse).unwrap();
+    assert!(wb.defined_names.is_empty());
+}
+
+#[test]
+fn defined_names_undo_redo_through_history() {
+    let mut wb = workbook();
+    let mut history = History::new();
+    let named = |n: &str, f: &str| casual_calc_model::DefinedName {
+        name: n.to_owned(),
+        sheet: None,
+        formula: parse(f).unwrap(),
+    };
+
+    history
+        .apply(
+            &mut wb,
+            Operation::SetDefinedNames(vec![named("Total", "A1:A3")]),
+        )
+        .unwrap();
+    assert_eq!(wb.defined_names[0].name, "Total");
+
+    // "Rename" by replacing the whole list (as the WASM layer does).
+    history
+        .apply(
+            &mut wb,
+            Operation::SetDefinedNames(vec![named("Grand", "A1:A3")]),
+        )
+        .unwrap();
+    assert_eq!(wb.defined_names[0].name, "Grand");
+
+    history.undo(&mut wb).unwrap(); // back to "Total"
+    assert_eq!(wb.defined_names[0].name, "Total");
+    history.undo(&mut wb).unwrap(); // back to no names at all
+    assert!(wb.defined_names.is_empty());
+
+    history.redo(&mut wb).unwrap(); // "Total" again
+    assert_eq!(wb.defined_names[0].name, "Total");
+    history.redo(&mut wb).unwrap(); // "Grand" again
+    assert_eq!(wb.defined_names[0].name, "Grand");
+}

@@ -748,32 +748,32 @@ pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        {
-            let wb = session.workbook_mut();
-            wb.defined_names.retain(|d| d.name != name);
-            wb.defined_names.push(DefinedName {
-                name: name.to_owned(),
-                sheet: None,
-                formula: expr,
-            });
-        }
-        session.recalculate();
-        Ok(())
+        let mut names = session.workbook().defined_names.clone();
+        names.retain(|d| d.name != name);
+        names.push(DefinedName {
+            name: name.to_owned(),
+            sheet: None,
+            formula: expr,
+        });
+        // Undoable, dirties the doc, and recalculates (a new/changed name can
+        // resolve previously-#NAME? formulas or change what they resolve to).
+        session
+            .edit(EditOperation::SetDefinedNames(names))
+            .map_err(js)
     })
 }
 
-/// Delete a defined name; recalculates so dependents become `#NAME?`.
+/// Delete a defined name (undoable); recalculates so dependents become `#NAME?`.
 #[wasm_bindgen]
 pub fn session_delete_name(name: &str) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut names = session.workbook().defined_names.clone();
+        names.retain(|d| d.name != name);
         session
-            .workbook_mut()
-            .defined_names
-            .retain(|d| d.name != name);
-        session.recalculate();
-        Ok(())
+            .edit(EditOperation::SetDefinedNames(names))
+            .map_err(js)
     })
 }
 

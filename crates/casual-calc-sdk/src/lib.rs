@@ -256,7 +256,10 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         // reference resolves to (or turns it into #REF!), so recompute fully.
         | Operation::InsertSheet { .. }
         | Operation::RemoveSheet { .. }
-        | Operation::RenameSheet { .. } => RecalcPlan::Full,
+        | Operation::RenameSheet { .. }
+        // Defining, renaming, or deleting a name changes what any formula
+        // referencing it resolves to (or turns it into #NAME?).
+        | Operation::SetDefinedNames(_) => RecalcPlan::Full,
         Operation::Batch(ops) => {
             let mut cells = Vec::new();
             for o in ops {
