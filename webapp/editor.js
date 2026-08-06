@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "23";
+const BUILD = "24";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -1712,6 +1712,16 @@ function replaceAll() {
   } catch (e) { status.textContent = `error: ${e}`; }
   runFind();
 }
+// Replace only the current match, then re-search and jump to the next one.
+function replaceOne() {
+  const m = findState.matches[findState.idx];
+  if (!m || !findInput.value) return;
+  try {
+    const did = wasm.session_replace_at(state.sheet, m.r, m.c, findInput.value, replaceInput.value, findCase.checked);
+    status.textContent = did ? "replaced 1" : "no match here";
+  } catch (e) { status.textContent = `error: ${e}`; }
+  runFind();
+}
 
 // Undo/redo can add, remove, or reorder sheets, so rebuild the tab bar (which
 // also re-clamps the active sheet if it vanished) before redrawing the grid.
@@ -2694,6 +2704,7 @@ function wireEvents() {
   findCase.addEventListener("change", runFind);
   document.getElementById("find-next").addEventListener("click", () => findStep(1));
   document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
+  document.getElementById("replace-one").addEventListener("click", replaceOne);
   document.getElementById("replace-all").addEventListener("click", replaceAll);
   document.getElementById("find-close").addEventListener("click", closeFind);
 

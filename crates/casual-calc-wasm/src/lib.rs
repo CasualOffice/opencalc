@@ -323,7 +323,7 @@ pub fn session_find(sheet: usize, query: &str, match_case: bool) -> String {
         }
         let mut hits = Vec::new();
         for (at, cell) in sh.cells.iter() {
-            if contains_ci(&display_text(wb, cell), query, match_case) {
+            if contains_ci(&cell_input_text(wb, cell), query, match_case) {
                 hits.push(format!("{{\"r\":{},\"c\":{}}}", at.row, at.col));
             }
         }
@@ -347,40 +347,76 @@ pub fn session_replace_all(
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        // Collect (cell, replaced-input) over the editable text of every cell —
+        // text, numbers, and formulas alike — so what Find matches, Replace
+        // rewrites.
         let mut edits: Vec<(CellRef, String)> = Vec::new();
         if let Some(sh) = session.workbook().sheets.get(sheet) {
+            let wb = session.workbook();
             for (at, c) in sh.cells.iter() {
-                let text = match c.value {
-                    CellValue::SharedString(id) | CellValue::InlineString(id) => {
-                        session.workbook().strings.get(id).unwrap_or_default()
-                    }
-                    _ => continue,
-                };
-                if !contains_ci(text, find, match_case) {
+                let input = cell_input_text(wb, c);
+                if !contains_ci(&input, find, match_case) {
                     continue;
                 }
                 let replaced = if match_case {
-                    text.replace(find, replace)
+                    input.replace(find, replace)
                 } else {
-                    ci_replace(text, find, replace)
+                    ci_replace(&input, find, replace)
                 };
                 edits.push((at, replaced));
             }
         }
         let count = edits.len();
-        let mut ops = Vec::with_capacity(count);
-        for (at, text) in edits {
-            let id = session.workbook_mut().intern_string(&text);
-            ops.push(EditOperation::SetValue {
-                sheet,
-                at,
-                value: CellValue::SharedString(id),
-            });
-        }
+        // Re-parse each replaced input so numbers/formulas are re-typed, not
+        // frozen as text.
+        let ops: Vec<EditOperation> = edits
+            .into_iter()
+            .map(|(at, input)| build_set_op(session, sheet, at, &input))
+            .collect();
         if !ops.is_empty() {
             session.edit(EditOperation::Batch(ops)).map_err(js)?;
         }
         Ok(count)
+    })
+}
+
+/// Replace occurrences of `find` in a single cell's editable text, re-parsing
+/// the result (formula/number/text). Returns whether the cell changed. Used by
+/// the Find bar's one-at-a-time **Replace**.
+#[wasm_bindgen]
+pub fn session_replace_at(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    find: &str,
+    replace: &str,
+    match_case: bool,
+) -> Result<bool, JsError> {
+    if find.is_empty() {
+        return Ok(false);
+    }
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let at = CellRef::new(row, col);
+        let input = {
+            let wb = session.workbook();
+            match wb.sheets.get(sheet).and_then(|s| s.cells.get(at)) {
+                Some(c) => cell_input_text(wb, c),
+                None => return Ok(false),
+            }
+        };
+        if !contains_ci(&input, find, match_case) {
+            return Ok(false);
+        }
+        let replaced = if match_case {
+            input.replace(find, replace)
+        } else {
+            ci_replace(&input, find, replace)
+        };
+        let op = build_set_op(session, sheet, at, &replaced);
+        session.edit(op).map_err(js)?;
+        Ok(true)
     })
 }
 
@@ -2772,6 +2808,18 @@ fn build_set_op(
         CellValue::InlineString(session.workbook_mut().intern_string(trimmed))
     };
     EditOperation::SetValue { sheet, at, value }
+}
+
+/// A cell's editable content: `=formula` for a formula cell, otherwise the
+/// value as it would be typed. Find & Replace operate on this (Excel's default
+/// "Formulas" look-in) so a match is always something Replace can rewrite.
+fn cell_input_text(wb: &Workbook, cell: &Cell) -> String {
+    if let Some(handle) = cell.formula
+        && let Some(expr) = wb.formula(handle)
+    {
+        return format!("={expr}");
+    }
+    value_text(wb, &cell.value)
 }
 
 fn value_text(workbook: &Workbook, value: &CellValue) -> String {
