@@ -2614,7 +2614,9 @@ pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsErro
 /// Paste-special: `mode` selects what is reproduced —
 /// `"all"` (value + formula + style, and honors a cut),
 /// `"values"` (the cached value only, keeping the target's formatting),
-/// `"formats"` (the source style only, keeping the target's value).
+/// `"formats"` (the source style only, keeping the target's value),
+/// `"formulas"` (value + formula, reference-shifted, keeping the target's
+/// formatting), or `"transpose"` (a full paste with rows and columns swapped).
 /// A cut only takes effect for `"all"` (Excel disables cut with paste-special).
 #[wasm_bindgen]
 pub fn session_clip_paste_mode(
@@ -2626,6 +2628,7 @@ pub fn session_clip_paste_mode(
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let transpose = mode == "transpose";
         let (ops, was_cut, empty) = CLIP.with(|cl| {
             let borrow = cl.borrow();
             let Some(clip) = borrow.as_ref() else {
@@ -2642,7 +2645,13 @@ pub fn session_clip_paste_mode(
                 }
             }
             for cc in &clip.cells {
-                let at = CellRef::new(row + cc.dr, col + cc.dc);
+                // Transpose swaps the row/column offsets so the block lands
+                // rotated about its top-left origin.
+                let at = if transpose {
+                    CellRef::new(row + cc.dc, col + cc.dr)
+                } else {
+                    CellRef::new(row + cc.dr, col + cc.dc)
+                };
                 match mode {
                     "values" => ops.push(EditOperation::SetValue {
                         sheet,
@@ -2654,6 +2663,30 @@ pub fn session_clip_paste_mode(
                         at,
                         style: cc.cell.style,
                     }),
+                    "formulas" => {
+                        // Value + formula (reference-shifted), but keep the
+                        // target cell's existing style. Read the target style
+                        // first (StyleId is Copy, so the borrow ends here).
+                        let target_style = session
+                            .workbook()
+                            .sheets
+                            .get(sheet)
+                            .and_then(|s| s.cells.get(at))
+                            .and_then(|c| c.style);
+                        let mut out = cc.cell.clone();
+                        out.style = target_style;
+                        if let Some(expr) = &cc.formula {
+                            let dr = at.row as i64 - cc.sr as i64;
+                            let dc = at.col as i64 - cc.sc as i64;
+                            let shifted = shift_references(expr, dr, dc);
+                            out.formula = Some(session.workbook_mut().store_formula(shifted));
+                        }
+                        ops.push(EditOperation::SetCell {
+                            sheet,
+                            at,
+                            cell: Some(out),
+                        });
+                    }
                     _ => {
                         let mut out = cc.cell.clone();
                         if let Some(expr) = &cc.formula {
@@ -2973,5 +3006,43 @@ mod tests {
         assert_eq!((clip[1].sr, clip[1].dr), (2, 1));
         assert_eq!((clip[2].sr, clip[2].dr), (3, 2));
         assert_eq!(clip[1].cell.value, CellValue::Number(3.0));
+    }
+
+    // Drives the real session_* functions (thread-local SESSION/CLIP) natively
+    // to exercise the M3-3 paste-special modes end to end.
+    #[test]
+    fn paste_special_transpose_and_formulas() {
+        use super::{
+            session_cell_format, session_cell_input, session_clip_copy, session_clip_paste_mode,
+            session_new, session_set_cell, session_toggle_bold,
+        };
+        // --- Transpose: a 2x2 block pasted rotated about its top-left. ---
+        session_new();
+        session_set_cell(0, 0, 0, "1").unwrap(); // A1
+        session_set_cell(0, 0, 1, "2").unwrap(); // B1
+        session_set_cell(0, 1, 0, "=A1*10").unwrap(); // A2 (a formula)
+
+        session_clip_copy(0, 0, 0, 1, 1, false); // copy A1:B2
+        session_clip_paste_mode(0, 4, 0, "transpose").unwrap(); // top-left at A5
+        assert_eq!(session_cell_input(0, 4, 0), "1"); // A5  (A1 stays at origin)
+        assert_eq!(session_cell_input(0, 5, 0), "2"); // A6  (B1 → below origin)
+        // A2's formula transposes to B5; it moved (dr=+3, dc=+1), so =A1*10 → B4*10.
+        assert_eq!(session_cell_input(0, 4, 1), "=(B4*10)"); // B5
+
+        // --- Formulas-only: value+formula in, target's formatting kept. ---
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap(); // A1
+        session_set_cell(0, 1, 0, "=A1+1").unwrap(); // A2 formula
+        session_set_cell(0, 4, 3, "9").unwrap(); // D5 target
+        session_toggle_bold(0, 4, 3, 4, 3).unwrap(); // bold D5
+        session_clip_copy(0, 1, 0, 1, 0, false); // copy A2
+        session_clip_paste_mode(0, 4, 3, "formulas").unwrap(); // onto D5
+        // A2 moved to D5 (dr=+3, dc=+3): =A1+1 → =(D4+1).
+        assert_eq!(session_cell_input(0, 4, 3), "=(D4+1)");
+        // The target's bold formatting is preserved (formulas-only ignores source style).
+        assert!(
+            session_cell_format(0, 4, 3).contains("\"b\":1"),
+            "formulas-only paste dropped the target's bold"
+        );
     }
 }
