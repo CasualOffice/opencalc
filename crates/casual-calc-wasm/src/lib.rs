@@ -1632,6 +1632,90 @@ pub fn session_toggle_wrap(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.wrap = target)
 }
 
+/// The built-in text fill lists (month and weekday names, full and abbreviated).
+/// Autofill extends a source drawn from one of these — `Jan, Feb → Mar` — and a
+/// single name extends too (`Jan → Feb, Mar`), matching Excel.
+const FILL_LISTS: &[&[&str]] = &[
+    &[
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ],
+    &[
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ],
+    &[
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ],
+    &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+];
+
+/// Locate `text` (case-insensitively) in the fill lists → `(list, item index)`.
+fn find_in_fill_lists(text: &str) -> Option<(usize, usize)> {
+    let t = text.trim();
+    for (li, list) in FILL_LISTS.iter().enumerate() {
+        if let Some(ii) = list.iter().position(|w| w.eq_ignore_ascii_case(t)) {
+            return Some((li, ii));
+        }
+    }
+    None
+}
+
+/// Detect whether a source line of text values is a named-list sequence.
+/// Returns `(list index, start item index, step)`; the step wraps modulo the
+/// list length, so a descending drag (`Dec, Nov`) continues correctly. A single
+/// recognized name yields step `+1` (Excel extends a lone month/weekday).
+fn detect_text_series(vals: &[Option<String>]) -> Option<(usize, i64, i64)> {
+    if vals.iter().any(|v| v.is_none()) {
+        return None;
+    }
+    let mut idxs = Vec::with_capacity(vals.len());
+    let mut list_id = None;
+    for v in vals {
+        let (li, ii) = find_in_fill_lists(v.as_ref().unwrap())?;
+        match list_id {
+            None => list_id = Some(li),
+            Some(prev) if prev != li => return None, // mixed lists
+            _ => {}
+        }
+        idxs.push(ii as i64);
+    }
+    let li = list_id?;
+    let len = FILL_LISTS[li].len() as i64;
+    if idxs.len() == 1 {
+        return Some((li, idxs[0], 1));
+    }
+    let step = (idxs[1] - idxs[0]).rem_euclid(len);
+    for w in idxs.windows(2) {
+        if (w[1] - w[0]).rem_euclid(len) != step {
+            return None;
+        }
+    }
+    Some((li, idxs[0], step))
+}
+
+/// The name a text series produces at forward offset `k` from its start.
+fn text_series_at(list_id: usize, idx0: i64, step: i64, k: i64) -> String {
+    let list = FILL_LISTS[list_id];
+    let len = list.len() as i64;
+    list[(idx0 + step * k).rem_euclid(len) as usize].to_owned()
+}
+
 /// Drag-fill: fill the destination box from the source box, tiling the source
 /// pattern and shifting relative formula references by each cell's offset
 /// (one undo step). Cells inside the source box are left untouched.
@@ -1656,6 +1740,9 @@ pub fn session_fill(
         struct Pending {
             at: CellRef,
             value: CellValue,
+            /// A named-list series result to intern into a string value in pass 2
+            /// (interning needs `&mut workbook`, unavailable in the read pass).
+            text: Option<String>,
             style: Option<StyleId>,
             formula: Option<Expr>,
         }
@@ -1668,6 +1755,18 @@ pub fn session_fill(
                     .get(CellRef::new(r, c))
                     .and_then(|cell| match cell.value {
                         CellValue::Number(n) if cell.formula.is_none() => Some(n),
+                        _ => None,
+                    })
+            };
+            // A string literal (no formula) at (r,c), for named-list series.
+            let text_lit = |r: u32, c: u32| -> Option<String> {
+                sh.cells
+                    .get(CellRef::new(r, c))
+                    .filter(|cell| cell.formula.is_none())
+                    .and_then(|cell| match cell.value {
+                        CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                            wb.strings.get(id).map(str::to_owned)
+                        }
                         _ => None,
                     })
             };
@@ -1704,6 +1803,25 @@ pub fn session_fill(
             } else {
                 Vec::new()
             };
+            // Named-list (month/weekday) series, per line, alongside the numeric.
+            let col_text: Vec<Option<(usize, i64, i64)>> = if vertical {
+                (sc0..=sc1)
+                    .map(|c| {
+                        detect_text_series(&(sr0..=sr1).map(|r| text_lit(r, c)).collect::<Vec<_>>())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let row_text: Vec<Option<(usize, i64, i64)>> = if horizontal {
+                (sr0..=sr1)
+                    .map(|r| {
+                        detect_text_series(&(sc0..=sc1).map(|c| text_lit(r, c)).collect::<Vec<_>>())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             for dr in dr0..=dr1 {
                 for dc in dc0..=dc1 {
@@ -1732,6 +1850,31 @@ pub fn session_fill(
                         pending.push(Pending {
                             at,
                             value: CellValue::Number(v),
+                            text: None,
+                            style,
+                            formula: None,
+                        });
+                        continue;
+                    }
+                    // Named-list (month/weekday) series along the fill axis.
+                    let text_series = if vertical {
+                        col_text[(dc - sc0) as usize]
+                            .map(|(li, i0, st)| text_series_at(li, i0, st, dr as i64 - sr0 as i64))
+                    } else if horizontal {
+                        row_text[(dr - sr0) as usize]
+                            .map(|(li, i0, st)| text_series_at(li, i0, st, dc as i64 - sc0 as i64))
+                    } else {
+                        None
+                    };
+                    if let Some(name) = text_series {
+                        let style = sh
+                            .cells
+                            .get(CellRef::new(sr as u32, sc as u32))
+                            .and_then(|c| c.style);
+                        pending.push(Pending {
+                            at,
+                            value: CellValue::Empty,
+                            text: Some(name),
                             style,
                             formula: None,
                         });
@@ -1746,6 +1889,7 @@ pub fn session_fill(
                             pending.push(Pending {
                                 at,
                                 value: c.value.clone(),
+                                text: None,
                                 style: c.style,
                                 formula,
                             });
@@ -1753,6 +1897,7 @@ pub fn session_fill(
                         None => pending.push(Pending {
                             at,
                             value: CellValue::Empty,
+                            text: None,
                             style: None,
                             formula: None,
                         }),
@@ -1763,10 +1908,15 @@ pub fn session_fill(
         // Pass 2 (mutable): store shifted formulas and build the edit batch.
         let mut ops = Vec::with_capacity(pending.len());
         for p in pending {
-            let cell = if p.value.is_empty() && p.style.is_none() && p.formula.is_none() {
+            // A named-list series result becomes an interned string value here.
+            let value = match p.text {
+                Some(name) => CellValue::SharedString(session.workbook_mut().intern_string(&name)),
+                None => p.value,
+            };
+            let cell = if value.is_empty() && p.style.is_none() && p.formula.is_none() {
                 None
             } else {
-                let mut c = Cell::value(p.value);
+                let mut c = Cell::value(value);
                 c.style = p.style;
                 if let Some(expr) = p.formula {
                     c.formula = Some(session.workbook_mut().store_formula(expr));
@@ -3072,5 +3222,55 @@ mod tests {
             session_cell_format(0, 4, 3).contains("\"b\":1"),
             "formulas-only paste dropped the target's bold"
         );
+    }
+}
+
+#[cfg(test)]
+mod fill_series_tests {
+    use super::{
+        detect_text_series, session_cell_input, session_fill, session_new, session_set_cell,
+        text_series_at,
+    };
+
+    #[test]
+    fn text_series_detection() {
+        // A single month name is a series (step +1); mixed lists are not.
+        assert_eq!(detect_text_series(&[Some("Jan".into())]), Some((1, 0, 1)));
+        assert_eq!(
+            detect_text_series(&[Some("Jan".into()), Some("Feb".into())]),
+            Some((1, 0, 1))
+        );
+        // Descending wraps: Dec, Nov → step 11 (== -1 mod 12).
+        assert_eq!(
+            detect_text_series(&[Some("Dec".into()), Some("Nov".into())]),
+            Some((1, 11, 11))
+        );
+        assert_eq!(
+            detect_text_series(&[Some("Jan".into()), Some("Mon".into())]),
+            None
+        );
+        assert_eq!(detect_text_series(&[Some("hello".into())]), None);
+        // Extension wraps December → January.
+        assert_eq!(text_series_at(1, 10, 1, 2), "Jan"); // Nov(10) + 2 steps = 12 mod 12 = 0 = Jan
+        assert_eq!(text_series_at(1, 11, 1, 1), "Jan"); // Dec(11) + 1 → Jan (wrap)
+    }
+
+    #[test]
+    fn fill_extends_month_names() {
+        session_new();
+        session_set_cell(0, 0, 0, "Jan").unwrap(); // A1
+        session_set_cell(0, 1, 0, "Feb").unwrap(); // A2
+        // Drag A1:A2 down to A5 → Mar, Apr, May.
+        session_fill(0, 0, 0, 1, 0, 0, 0, 4, 0).unwrap();
+        assert_eq!(session_cell_input(0, 2, 0), "Mar");
+        assert_eq!(session_cell_input(0, 3, 0), "Apr");
+        assert_eq!(session_cell_input(0, 4, 0), "May");
+
+        // A single weekday name also extends (and wraps).
+        session_new();
+        session_set_cell(0, 0, 0, "Fri").unwrap(); // A1
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap(); // A1 down to A3
+        assert_eq!(session_cell_input(0, 1, 0), "Sat");
+        assert_eq!(session_cell_input(0, 2, 0), "Sun"); // wraps Sat → Sun
     }
 }
