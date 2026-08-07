@@ -3061,7 +3061,22 @@ function wireEvents() {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
   document.getElementById("tb-font").addEventListener("change", (e) => { setFontName(e.target.value); canvas.focus(); });
-  document.getElementById("tb-size").addEventListener("change", (e) => { setFontSize(parseFloat(e.target.value) || 0); canvas.focus(); });
+  // Editable font-size combobox: accept any typed size, clamped to Excel's
+  // 1–409 pt range; a blank/zero clears the explicit size. Enter commits and
+  // returns focus to the grid; focus selects all for quick replacement.
+  const sizeInput = document.getElementById("tb-size");
+  const commitSize = () => {
+    const raw = parseFloat(sizeInput.value);
+    const pts = Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0;
+    setFontSize(pts);
+  };
+  sizeInput.addEventListener("change", commitSize);
+  sizeInput.addEventListener("focus", () => sizeInput.select());
+  sizeInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitSize(); canvas.focus(); }
+    else if (e.key === "Escape") { refreshFormulaBar(); canvas.focus(); }
+    e.stopPropagation();
+  });
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;

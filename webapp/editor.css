@@ -132,6 +132,9 @@ body {
 }
 .tb-select:hover { border-color: var(--border-hover); }
 .tb-size { width: 62px; }
+/* The font-size control is an editable combobox (input + datalist). */
+input.tb-size { box-sizing: border-box; cursor: text; }
+input.tb-size:focus { outline: none; border-color: var(--accent); }
 
 .icon { width: 16px; height: 16px; display: block; }
 .icon-sm { width: 13px; height: 13px; display: block; }
