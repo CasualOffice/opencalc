@@ -112,12 +112,18 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 48px;
-  padding: 0 12px;
+  row-gap: 6px;
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 4px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex: 0 0 auto;
-  overflow-x: auto;
+  /* Wrap to a second row on narrow screens instead of hiding tools behind a
+     horizontal scroll (the macOS scrollbar is invisible until active, so the
+     rightmost tools were effectively unreachable). resize() reads the grid's
+     real rect, so a taller toolbar just shrinks the grid. */
+  flex-wrap: wrap;
 }
 /* A grouped-pill cluster of icon buttons. */
 .tb-group {
