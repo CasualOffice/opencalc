@@ -1691,6 +1691,20 @@ function toggleMerge() {
 }
 function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
 function setFontSize(pts) { formatSel((s) => wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, pts)); }
+// Grow/shrink font: step to the next/previous size on a standard ladder, based
+// on the active cell's current size (default 11pt). Beyond the ladder, step ±2.
+const SIZE_LADDER = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72];
+function stepFontSize(dir) {
+  let cur = 11;
+  try {
+    const f = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col));
+    if (f.fs) cur = f.fs;
+  } catch {}
+  const next = dir > 0
+    ? (SIZE_LADDER.find((s) => s > cur) ?? Math.min(409, Math.round(cur) + 2))
+    : ([...SIZE_LADDER].reverse().find((s) => s < cur) ?? Math.max(1, Math.round(cur) - 2));
+  setFontSize(next);
+}
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
 function adjustDecimals(delta) { formatSel((s) => wasm.session_adjust_decimals(state.sheet, s.r0, s.c0, s.r1, s.c1, delta)); }
 // Current border palette state (chosen line style + color, "" = automatic).
@@ -3046,6 +3060,8 @@ function wireEvents() {
   document.getElementById("tb-note").addEventListener("click", () => togglePanel("note"));
   document.getElementById("side-panel-close").addEventListener("click", () => closePanel());
 
+  document.getElementById("tb-size-up").addEventListener("click", () => { stepFontSize(1); canvas.focus(); });
+  document.getElementById("tb-size-down").addEventListener("click", () => { stepFontSize(-1); canvas.focus(); });
   document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });

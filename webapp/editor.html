@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc — editor demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./editor.css?v=12" />
+    <link rel="stylesheet" href="./editor.css?v=13" />
   </head>
   <body class="editor-body">
     <header class="app-header">
@@ -99,6 +99,8 @@
           <option>12</option><option>14</option><option>16</option><option>18</option>
           <option>20</option><option>24</option><option>28</option><option>36</option><option>48</option><option>72</option>
         </datalist>
+        <button id="tb-size-up" class="tb-btn glyph" title="Increase font size" aria-label="Increase font size">A&#9650;</button>
+        <button id="tb-size-down" class="tb-btn glyph" title="Decrease font size" aria-label="Decrease font size">A&#9660;</button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
@@ -290,6 +292,6 @@
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
-    <script type="module" src="./editor.js?v=22"></script>
+    <script type="module" src="./editor.js?v=23"></script>
   </body>
 </html>

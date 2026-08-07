@@ -135,6 +135,8 @@ body {
 /* The font-size control is an editable combobox (input + datalist). */
 input.tb-size { box-sizing: border-box; cursor: text; }
 input.tb-size:focus { outline: none; border-color: var(--accent); }
+/* Grow/shrink font glyphs ("A▲" / "A▼") — small triangle so the A stays legible. */
+#tb-size-up, #tb-size-down { font-size: 12px; letter-spacing: -1px; }
 
 .icon { width: 16px; height: 16px; display: block; }
 .icon-sm { width: 13px; height: 13px; display: block; }
