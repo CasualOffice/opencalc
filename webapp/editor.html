@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc — editor demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./editor.css?v=10" />
+    <link rel="stylesheet" href="./editor.css?v=11" />
   </head>
   <body class="editor-body">
     <header class="app-header">
@@ -166,15 +166,9 @@
         <button id="tb-percent" class="tb-btn" title="Percent" aria-label="Percent">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>
         </button>
-        <button id="tb-comma" class="tb-btn" title="Comma style" aria-label="Comma style">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 4v16M4 12h16"/><circle cx="8" cy="16" r="1" fill="currentColor"/></svg>
-        </button>
-        <button id="tb-inc-dec" class="tb-btn" title="Increase decimals" aria-label="Increase decimals">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M3 12h10M17 9l3 3-3 3"/><circle cx="7" cy="12" r="1.5" fill="currentColor"/></svg>
-        </button>
-        <button id="tb-dec-dec" class="tb-btn" title="Decrease decimals" aria-label="Decrease decimals">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 12H11M7 9l-3 3 3 3"/><circle cx="17" cy="12" r="1.5" fill="currentColor"/></svg>
-        </button>
+        <button id="tb-comma" class="tb-btn glyph mono" title="Comma style" aria-label="Comma style">,</button>
+        <button id="tb-inc-dec" class="tb-btn glyph mono nf-dec" title="Increase decimals" aria-label="Increase decimals">.0&#8594;</button>
+        <button id="tb-dec-dec" class="tb-btn glyph mono nf-dec" title="Decrease decimals" aria-label="Decrease decimals">&#8592;.0</button>
         <div class="menu-wrap">
           <button id="tb-numfmt" class="tb-btn" title="Number format" aria-label="Number format" aria-haspopup="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
@@ -295,6 +289,6 @@
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
-    <script type="module" src="./editor.js?v=18"></script>
+    <script type="module" src="./editor.js?v=19"></script>
   </body>
 </html>

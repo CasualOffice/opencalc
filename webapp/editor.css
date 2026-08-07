@@ -150,6 +150,8 @@ body {
 /* Text-glyph buttons ($ % .00) in a pill. */
 .toolbar .tb-btn.glyph { font-size: 13px; font-weight: 600; color: var(--icon); }
 .toolbar .tb-btn.glyph.mono { font-family: var(--mono); font-size: 12px; }
+/* Increase/decrease-decimal glyphs (".0→" / "←.0") need a smaller size to fit. */
+.toolbar .tb-btn.glyph.nf-dec { font-size: 10.5px; letter-spacing: -0.5px; }
 
 .settings { position: relative; }
 .tb-icon {
