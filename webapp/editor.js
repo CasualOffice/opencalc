@@ -2230,10 +2230,42 @@ function resetView() {
   draw();
 }
 
+// Per-sheet view memory: switching sheets preserves each sheet's selection and
+// scroll position (Excel/Sheets behavior) instead of slamming back to A1. Keyed
+// by sheet NAME so it survives add/delete/reorder/undo without index-shift bugs
+// (a rename just drops that one sheet's remembered view — acceptable).
+const sheetViews = new Map(); // sheet name → { scrollX, scrollY, sel, anchor, selKind }
+function sheetNameAt(i) {
+  try { return JSON.parse(wasm.session_sheet_names())[i]; } catch { return null; }
+}
+function saveSheetView() {
+  const name = sheetNameAt(state.sheet);
+  if (name == null) return;
+  sheetViews.set(name, {
+    scrollX: state.scrollX,
+    scrollY: state.scrollY,
+    sel: { ...state.sel },
+    anchor: { ...state.anchor },
+    selKind: state.selKind,
+  });
+}
 function switchSheet(i) {
   if (i === state.sheet) return;
+  saveSheetView();
   state.sheet = i;
-  resetView();
+  endInline();
+  const v = sheetViews.get(sheetNameAt(i));
+  if (v) {
+    state.scrollX = v.scrollX;
+    state.scrollY = v.scrollY;
+    state.sel = { ...v.sel };
+    state.anchor = { ...v.anchor };
+    state.selKind = v.selKind;
+    state.ranges = [];
+    draw();
+  } else {
+    resetView(); // first visit to this sheet starts at A1
+  }
   renderTabs();
 }
 
@@ -2285,6 +2317,7 @@ function renderTabs() {
 function moveTab(from, to) {
   if (from < 0 || from === to) return;
   try { wasm.session_move_sheet(from, to); } catch (e) { status.textContent = `error: ${e}`; return; }
+
   if (state.sheet === from) state.sheet = to;
   else {
     let a = state.sheet > from ? state.sheet - 1 : state.sheet;
