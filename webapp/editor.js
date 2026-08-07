@@ -2406,6 +2406,22 @@ function tryEdit(fn) {
   draw();
 }
 
+// Ctrl +/- structural edits, axis chosen by the selection kind: whole-column
+// selection acts on columns, whole-row on rows, otherwise rows (Excel's default
+// for a cell selection). `count` spans the selection.
+function insertLines() {
+  const r = effectiveRange();
+  const rn = r.r1 - r.r0 + 1, cn = r.c1 - r.c0 + 1;
+  if (state.selKind === "cols") tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, cn));
+  else tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, rn));
+}
+function deleteLines() {
+  const r = effectiveRange();
+  const rn = r.r1 - r.r0 + 1, cn = r.c1 - r.c0 + 1;
+  if (state.selKind === "cols") tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, cn));
+  else tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, rn));
+}
+
 // Right-click menu on a cell: clipboard + structural row/column edits.
 // Trimmed right-click menu: fast verbs only. Multi-option groups (Paste
 // special, Insert, Delete, Hide, Clear, Sort) fold into submenus so the menu
@@ -2467,7 +2483,9 @@ function cellMenu(x, y) {
   sep();
   submenu("Insert", [
     ["Row above", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, rows)); }],
+    ["Row below", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r1 + 1, rows)); }],
     ["Column left", false, () => { const { r, cols } = span(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, cols)); }],
+    ["Column right", false, () => { const { r, cols } = span(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c1 + 1, cols)); }],
   ]);
   submenu("Delete", [
     ["Row", true, () => { const { r, rows } = span(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, rows)); }],
@@ -2837,6 +2855,10 @@ function wireEvents() {
       if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }
       if (k === "v") { await doPaste(); e.preventDefault(); return; }
+      // Ctrl+Shift+"+" inserts rows/columns, Ctrl+"-" deletes them (Excel).
+      // "+" arrives as key "+" or as "=" with Shift depending on the layout.
+      if ((e.key === "+" || (k === "=" && e.shiftKey))) { insertLines(); e.preventDefault(); return; }
+      if (e.key === "-" || e.key === "_") { deleteLines(); e.preventDefault(); return; }
     }
 
     const move = (dr, dc) => {
