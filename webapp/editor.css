@@ -132,9 +132,12 @@ body {
 }
 .tb-select:hover { border-color: var(--border-hover); }
 .tb-size { width: 62px; }
-/* The font-size control is an editable combobox (input + datalist). */
-input.tb-size { box-sizing: border-box; cursor: text; }
-input.tb-size:focus { outline: none; border-color: var(--accent); }
+/* The font-name and font-size controls are editable comboboxes (input+datalist).
+   `.tb-font` gets a wider min-width so long font names (e.g. Times New Roman) fit. */
+input.tb-size, input.tb-font { box-sizing: border-box; cursor: text; }
+input.tb-size:focus, input.tb-font:focus { outline: none; border-color: var(--accent); }
+input.tb-font { width: 118px; }
+input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
 /* Grow/shrink font glyphs ("A▲" / "A▼") — small triangle so the A stays legible. */
 #tb-size-up, #tb-size-down { font-size: 12px; letter-spacing: -1px; }
 

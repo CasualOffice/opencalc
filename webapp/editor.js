@@ -857,6 +857,12 @@ function updateStats() {
 
 function refreshFormulaBar() {
   if (state.editing) return;
+  // Don't clobber a control the user is actively typing in. Background redraws
+  // (e.g. the marching-ants copy animation) call this every frame; without this
+  // guard they'd reset the formula bar / font / size boxes mid-keystroke.
+  const active = document.activeElement;
+  if (active === fInput || active === document.getElementById("tb-font") ||
+      active === document.getElementById("tb-size")) return;
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   document.getElementById("tb-undo").disabled = !wasm.session_can_undo();
   document.getElementById("tb-redo").disabled = !wasm.session_can_redo();
@@ -2895,7 +2901,7 @@ function wireEvents() {
       if (k === "f") { openFind(); e.preventDefault(); return; }
       if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
       if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
-      if (k === "z") { doUndo(); e.preventDefault(); return; }
+      if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       if (k === "s") { doSave(); e.preventDefault(); return; }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
@@ -3076,7 +3082,16 @@ function wireEvents() {
   for (const b of document.querySelectorAll(".tb-align")) {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
-  document.getElementById("tb-font").addEventListener("change", (e) => { setFontName(e.target.value); canvas.focus(); });
+  // Editable font combobox: accept any typed font name (so imported fonts
+  // outside the preset list still display and can be re-applied).
+  const fontInput = document.getElementById("tb-font");
+  fontInput.addEventListener("change", () => setFontName(fontInput.value.trim()));
+  fontInput.addEventListener("focus", () => fontInput.select());
+  fontInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); setFontName(fontInput.value.trim()); canvas.focus(); }
+    else if (e.key === "Escape") { refreshFormulaBar(); canvas.focus(); }
+    e.stopPropagation();
+  });
   // Editable font-size combobox: accept any typed size, clamped to Excel's
   // 1–409 pt range; a blank/zero clears the explicit size. Enter commits and
   // returns focus to the grid; focus selects all for quick replacement.
