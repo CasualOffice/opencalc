@@ -23,6 +23,7 @@ const state = {
   selKind: "cells", // "cells" | "rows" | "cols" | "all"
   ranges: [], // committed extra rectangles for a multi-range (Ctrl+click) selection
   dragging: false,
+  headerDrag: null, // "row" | "col" | null — which axis a header drag extends
   editing: false,
   resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
@@ -900,6 +901,24 @@ function addRange(row, col) {
   state.selKind = "cells";
   draw();
 }
+// Ctrl/Cmd+click a column/row header: same idea as addRange, but the fresh
+// active range is a whole column/row instead of a single cell.
+function addColumnRange(c) {
+  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.selKind = "cols";
+  state.anchor = { row: 0, col: c };
+  state.sel = { row: 0, col: c };
+  endInline();
+  draw();
+}
+function addRowRange(r) {
+  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.selKind = "rows";
+  state.anchor = { row: r, col: 0 };
+  state.sel = { row: r, col: 0 };
+  endInline();
+  draw();
+}
 
 // Extend the selection to (row, col), keeping the anchor.
 function extend(row, col) {
@@ -948,8 +967,15 @@ function edgeVelocity() {
   const lo_x = f.bodyX0 + AUTOSCROLL_EDGE, hi_x = r.width - AUTOSCROLL_EDGE;
   const lo_y = f.bodyY0 + AUTOSCROLL_EDGE, hi_y = r.height - AUTOSCROLL_EDGE;
   let sx = 0, sy = 0;
-  if (px > hi_x) sx = px - hi_x; else if (px < lo_x) sx = px - lo_x;
-  if (py > hi_y) sy = py - hi_y; else if (py < lo_y) sy = py - lo_y;
+  // A column-header drag only extends columns, so it never auto-scrolls
+  // vertically (and vice versa for a row-header drag) — otherwise crossing
+  // the top/bottom edge while picking columns would scroll rows too.
+  if (state.headerDrag !== "row") {
+    if (px > hi_x) sx = px - hi_x; else if (px < lo_x) sx = px - lo_x;
+  }
+  if (state.headerDrag !== "col") {
+    if (py > hi_y) sy = py - hi_y; else if (py < lo_y) sy = py - lo_y;
+  }
   // The cell to extend to: pointer clamped into the body region.
   const cx = Math.min(Math.max(px, f.bodyX0 + 1), r.width - 2);
   const cy = Math.min(Math.max(py, f.bodyY0 + 1), r.height - 2);
@@ -967,8 +993,12 @@ function autoScrollTick() {
   // If the scroll is pinned at 0 against the edge (velocity points off-sheet
   // but nothing can move), idle instead of redrawing every frame forever.
   if (state.scrollX === x0 && state.scrollY === y0) return;
-  const hit = cellAt(cx, cy);
-  if (hit) { state.sel = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
+  if (state.headerDrag === "col") selectColumn(colAtX(cx), true);
+  else if (state.headerDrag === "row") selectRow(rowAtY(cy), true);
+  else {
+    const hit = cellAt(cx, cy);
+    if (hit) { state.sel = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
+  }
   draw();
   autoRaf = requestAnimationFrame(autoScrollTick);
 }
@@ -2530,10 +2560,31 @@ function wireEvents() {
       state.resize = { axis: hb.axis, index: hb.index, previewPx: cur, scope, b0, b1 };
       return;
     }
-    // Header clicks: select-all (corner), whole column, or whole row.
+    // Header clicks: select-all (corner), or a whole column/row — supporting
+    // Shift-extend, Ctrl/Cmd multi-select (banking a range per addRange), and
+    // drag-to-extend across adjacent headers (state.headerDrag drives both the
+    // mousemove handler and edge auto-scroll below).
     if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
-    if (py < HH && px >= HW) { selectColumn(colAtX(px)); canvas.focus(); return; }
-    if (px < HW && py >= HH) { selectRow(rowAtY(py)); canvas.focus(); return; }
+    if (py < HH && px >= HW) {
+      endInline();
+      const c = colAtX(px);
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) addColumnRange(c);
+      else selectColumn(c, e.shiftKey);
+      state.headerDrag = "col";
+      state.dragging = true;
+      canvas.focus();
+      return;
+    }
+    if (px < HW && py >= HH) {
+      endInline();
+      const r = rowAtY(py);
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) addRowRange(r);
+      else selectRow(r, e.shiftKey);
+      state.headerDrag = "row";
+      state.dragging = true;
+      canvas.focus();
+      return;
+    }
     const hit = cellAt(px, py);
     if (hit) {
       endInline();
@@ -2558,6 +2609,20 @@ function wireEvents() {
         const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
         insertRef(ref);
       }
+      return;
+    }
+    if (state.dragging && state.headerDrag) {
+      // Dragging across column/row headers extends the whole-column/row
+      // selection to the header under the pointer (anchor stays put).
+      dragPos = { px, py };
+      if (state.headerDrag === "col") {
+        const c = colAtX(Math.max(HW + 1, px));
+        if (c !== state.sel.col) selectColumn(c, true);
+      } else {
+        const r = rowAtY(Math.max(HH + 1, py));
+        if (r !== state.sel.row) selectRow(r, true);
+      }
+      maybeAutoScroll();
       return;
     }
     if (state.dragging) {
@@ -2641,6 +2706,7 @@ function wireEvents() {
       draw();
     }
     state.dragging = false;
+    state.headerDrag = null;
     dragPos = null;
     stopAutoScroll();
   });
