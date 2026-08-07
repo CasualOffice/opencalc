@@ -112,19 +112,34 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  row-gap: 6px;
-  min-height: 48px;
-  box-sizing: border-box;
-  padding: 4px 12px;
+  height: 48px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex: 0 0 auto;
-  /* Wrap to a second row on narrow screens instead of hiding tools behind a
-     horizontal scroll (the macOS scrollbar is invisible until active, so the
-     rightmost tools were effectively unreachable). resize() reads the grid's
-     real rect, so a taller toolbar just shrinks the grid. */
-  flex-wrap: wrap;
+  /* One fixed row, never a scrollbar or a second row. When the toolbar is too
+     narrow, whole groups collapse in-place into a single "Label ▾" button that
+     opens the group's tools in a flyout — Excel-ribbon-style progressive
+     collapse, lowest-priority group first. reflowToolbar() in editor.js drives
+     it via each group's data-collapse priority. */
+  overflow: visible;
 }
+/* A group's collapsed form: a labeled button shown in place of the group. */
+.tb-collapsed {
+  width: auto !important; padding: 0 8px !important; gap: 4px;
+  font-size: 12px; font-weight: 600; color: var(--icon); white-space: nowrap;
+}
+.tb-collapsed[hidden] { display: none; }
+.tb-collapsed .tbc-caret { width: 9px; height: 6px; opacity: .75; }
+.tb-group[hidden] { display: none; }
+/* Flyout holding a collapsed group's tools, laid out like a mini-toolbar. */
+.tb-flyout { display: none; }
+.tb-flyout:not([hidden]) {
+  display: flex; flex-flow: row wrap; align-items: center; gap: 2px;
+  padding: 6px; min-width: 0; max-width: min(92vw, 440px);
+}
+/* Sub-menu-wrap buttons inside a flyout keep their normal icon-button size. */
+.tb-flyout .menu-wrap { display: inline-flex; }
 /* A grouped-pill cluster of icon buttons. */
 .tb-group {
   display: flex; align-items: center; gap: 2px; padding: 2px;

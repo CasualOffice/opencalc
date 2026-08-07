@@ -3130,7 +3130,49 @@ function wireEvents() {
   document.getElementById("tb-undo").addEventListener("click", doUndo);
   document.getElementById("tb-redo").addEventListener("click", doRedo);
 
-  window.addEventListener("resize", resize);
+  // --- Progressive toolbar collapse (Excel-ribbon style) ---
+  // Each group tagged data-collapse=<priority> collapses in-place into its
+  // "Label ▾" button — whose flyout holds the group's live tools — whenever the
+  // single toolbar row would overflow, lowest priority first. Groups re-expand
+  // as the window widens. Never a scrollbar, never a second row.
+  const toolbarEl = document.querySelector(".toolbar");
+  const collapsibles = [...toolbarEl.querySelectorAll(".tb-group[data-collapse]")]
+    .map((groupEl) => ({
+      groupEl,
+      btn: toolbarEl.querySelector(`.tb-collapsed[data-for="${groupEl.id}"]`),
+      flyout: toolbarEl.querySelector(`.tb-flyout[data-flyout="${groupEl.id}"]`),
+      prio: +groupEl.dataset.collapse,
+    }))
+    .sort((a, b) => a.prio - b.prio); // lowest priority number collapses first
+  const flyouts = collapsibles.map((c) => c.flyout);
+  const closeFlyouts = () => { for (const f of flyouts) f.hidden = true; };
+  const expandGroup = (c) => {
+    while (c.flyout.firstChild) c.groupEl.appendChild(c.flyout.firstChild);
+    c.groupEl.hidden = false; c.btn.hidden = true; c.flyout.hidden = true;
+  };
+  const collapseGroup = (c) => {
+    while (c.groupEl.firstChild) c.flyout.appendChild(c.groupEl.firstChild);
+    c.groupEl.hidden = true; c.btn.hidden = false;
+  };
+  const fits = () => toolbarEl.scrollWidth <= toolbarEl.clientWidth + 1;
+  function reflowToolbar() {
+    for (const c of collapsibles) expandGroup(c); // reset to fully expanded
+    for (const c of collapsibles) { if (fits()) break; collapseGroup(c); }
+  }
+  for (const c of collapsibles) {
+    c.btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = c.flyout.hidden;
+      for (const m of menus) m.hidden = true;
+      closeFlyouts();
+      c.flyout.hidden = !open;
+      if (!c.flyout.hidden) anchorMenu(c.flyout, c.btn);
+    });
+  }
+  document.addEventListener("click", closeFlyouts);
+  reflowToolbar();
+
+  window.addEventListener("resize", () => { resize(); reflowToolbar(); });
   // Esc closes the tool panel (when no context menu is open and not editing).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && activePanel && !state.editing && !document.getElementById("sheet-ctx")) {
