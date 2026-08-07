@@ -99,6 +99,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "SWITCH",
         "SWITCH(expression, value1, result1, …, [default])",
     ),
+    ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
     ("TRIM", "TRIM(text)"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
@@ -216,6 +217,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "COLUMNS" => eval_dim(ev, sheet, args, false),
         "ROW" => eval_row_col(ev, args, true),
         "COLUMN" => eval_row_col(ev, args, false),
+        "TEXT" => eval_text(ev, sheet, args),
         "TEXTJOIN" => eval_textjoin(ev, sheet, args),
         _ => Value::Error(ErrorValue::Name),
     }
@@ -1615,6 +1617,27 @@ fn eval_dim(_ev: &mut Evaluator<'_>, _sheet: usize, args: &[Expr], rows: bool) -
 }
 
 /// TEXTJOIN(delimiter, ignore_empty, text1, …).
+/// TEXT(value, format_code): format a number with a SpreadsheetML format code,
+/// via the same engine the grid uses to display cells (so they never drift).
+/// A non-numeric first argument is returned as its text unchanged (Excel's
+/// behavior when the value is already text).
+fn eval_text(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let code = match ev.eval_expr(sheet, &args[1]).as_text() {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    match ev.eval_expr(sheet, &args[0]) {
+        Value::Error(e) => Value::Error(e),
+        Value::Number(n) => Value::Text(casual_calc_layout::format_number(n, &code)),
+        Value::Bool(b) => Value::Text(if b { "TRUE" } else { "FALSE" }.to_owned()),
+        // Text (or empty) already prints as itself.
+        v => Value::Text(v.as_text().unwrap_or_default()),
+    }
+}
+
 fn eval_textjoin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     if args.len() < 3 {
         return Value::Error(ErrorValue::Value);

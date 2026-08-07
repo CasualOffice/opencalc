@@ -10,6 +10,9 @@ publish = false
 [dependencies]
 casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-model = { path = "../casual-calc-model" }
+# Downward edge (layout is below eval in the DAG): reuse the display's pure
+# number-format engine so the TEXT function and on-screen display never drift.
+casual-calc-layout = { path = "../casual-calc-layout" }
 
 [dev-dependencies]
 casual-calc-import = { path = "../casual-calc-import" }

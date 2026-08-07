@@ -837,3 +837,21 @@ fn row_and_column_functions() {
     assert_eq!(num(2, 0), 2.0);
     assert_eq!(num(5, 0), 105.0);
 }
+
+#[test]
+fn text_function_formats_via_the_display_engine() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1234.5); // A1
+    b.number((1, 0), 0.25); // A2
+    b.number((2, 0), -42.0); // A3
+    b.formula((0, 1), "TEXT(A1,\"#,##0.00\")"); // "1,234.50"
+    b.formula((1, 1), "TEXT(A2,\"0%\")"); // "25%"
+    b.formula((2, 1), "TEXT(A3,\"$#,##0.00;[Red]($#,##0.00)\")"); // "($42.00)"
+    b.formula((3, 1), "TEXT(5,\"0.000\")"); // "5.000"
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 1), "1,234.50");
+    assert_eq!(text_at(&wb, 1, 1), "25%");
+    assert_eq!(text_at(&wb, 2, 1), "($42.00)");
+    assert_eq!(text_at(&wb, 3, 1), "5.000");
+}
