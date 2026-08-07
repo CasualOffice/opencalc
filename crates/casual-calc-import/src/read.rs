@@ -239,6 +239,8 @@ pub struct Worksheet {
     pub outline: Option<OutlinePr>,
     /// View zoom percentage from `<sheetView zoomScale>`, if set and non-default.
     pub zoom: Option<u16>,
+    /// `true` when `<sheetView showGridLines="0">` hides the grid lines.
+    pub hide_gridlines: bool,
     /// Tab color as `RRGGBB` (from `sheetPr/tabColor/@rgb`), if any.
     pub tab_color: Option<String>,
     /// List data-validations as `(sqref, formula1)`, where `formula1` is the
@@ -569,6 +571,10 @@ fn read_sheet_view(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), Imp
         && zoom != 100
     {
         result.zoom = Some(zoom);
+    }
+    // Grid lines show by default; only `showGridLines="0"` hides them.
+    if read_bool_attr(e, b"showGridLines")? == Some(false) {
+        result.hide_gridlines = true;
     }
     Ok(())
 }

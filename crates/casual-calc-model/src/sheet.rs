@@ -52,6 +52,15 @@ pub struct SheetView {
     /// view uses the application default, so no explicit `zoomScale` is written.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub zoom: u16,
+    /// Whether the grid lines are hidden. OOXML shows grid lines by default
+    /// (`showGridLines="1"` implied), so this is `false` for a normal sheet and
+    /// only `true` when the sheet carries `showGridLines="0"`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_gridlines: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -65,7 +74,7 @@ fn is_zero_u16(value: &u16) -> bool {
 impl SheetView {
     /// Whether the view is at its default (nothing frozen, default zoom).
     pub fn is_default(&self) -> bool {
-        self.frozen_rows == 0 && self.frozen_cols == 0 && self.zoom == 0
+        self.frozen_rows == 0 && self.frozen_cols == 0 && self.zoom == 0 && !self.hide_gridlines
     }
 }
 

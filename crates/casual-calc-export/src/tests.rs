@@ -18,6 +18,16 @@ fn zip_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
+/// Read a named part out of a written `.xlsx` package as a UTF-8 string.
+fn xml_of(package: &[u8], part: &str) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(Cursor::new(package)).unwrap();
+    let mut file = zip.by_name(part).unwrap();
+    let mut out = String::new();
+    file.read_to_string(&mut out).unwrap();
+    out
+}
+
 const CONTENT_TYPES: &[u8] =
     b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>";
 const ROOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
@@ -116,6 +126,25 @@ fn tab_color_round_trips() {
     if wb.sheets.len() > 1 {
         assert_eq!(wb.sheets[1].tab_color, None);
     }
+}
+
+#[test]
+fn hide_gridlines_round_trips() {
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    // Default: grid lines shown, and the written XML carries no showGridLines.
+    assert!(!workbook.sheets[0].view.hide_gridlines);
+    let written = write_workbook(&workbook).unwrap();
+    assert!(
+        !xml_of(&written, "xl/worksheets/sheet1.xml").contains("showGridLines"),
+        "a normal sheet must not emit showGridLines"
+    );
+
+    // Hiding grid lines survives a full round trip and writes showGridLines=\"0\".
+    workbook.sheets[0].view.hide_gridlines = true;
+    let written = write_workbook(&workbook).unwrap();
+    assert!(xml_of(&written, "xl/worksheets/sheet1.xml").contains("showGridLines=\"0\""));
+    let wb = import_package(written).unwrap().workbook;
+    assert!(wb.sheets[0].view.hide_gridlines);
 }
 
 #[test]

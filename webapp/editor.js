@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "26";
+const BUILD = "27";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -430,7 +430,10 @@ function draw() {
       ].filter((q) => q.w > 0 && q.h > 0)
     : [{ x: HW, y: HH, w: Math.max(0, v.w - HW), h: Math.max(0, v.h - HH), ci0: 0, ci1: nCol, ri0: 0, ri1: nRow }];
 
-  // Selection tint + gridlines, per quadrant.
+  // Selection tint + gridlines, per quadrant. Grid lines can be hidden per
+  // sheet (Excel's showGridLines="0") — the selection tint still paints.
+  let gridHidden = false;
+  try { gridHidden = wasm && wasm.session_gridlines_hidden(state.sheet); } catch {}
   for (const q of quads) {
     ctx.save();
     ctx.beginPath();
@@ -443,6 +446,7 @@ function draw() {
       const ex = spanX(rg.c0, rg.c1, v), ey = spanY(rg.r0, rg.r1, v);
       ctx.fillRect(ex.x, ey.y, ex.w, ey.h);
     }
+    if (gridHidden) { ctx.restore(); continue; }
     ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1308,6 +1312,12 @@ function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function setFreeze(kind) {
+  if (kind === "gridlines") {
+    try { wasm.session_set_gridlines_hidden(state.sheet, !wasm.session_gridlines_hidden(state.sheet)); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+    return;
+  }
   let rows = 0, cols = 0;
   if (kind === "sel") { rows = state.sel.row; cols = state.sel.col; }
   else if (kind === "row") rows = 1;

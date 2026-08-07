@@ -480,6 +480,34 @@ pub fn session_frozen(sheet: usize) -> String {
     .unwrap_or_else(|| "{\"rows\":0,\"cols\":0}".to_owned())
 }
 
+/// Whether a sheet hides its grid lines.
+#[wasm_bindgen]
+pub fn session_gridlines_hidden(sheet: usize) -> bool {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .is_some_and(|sh| sh.view.hide_gridlines)
+    })
+    .unwrap_or(false)
+}
+
+/// Show or hide a sheet's grid lines (undoable). Returns the new hidden state.
+#[wasm_bindgen]
+pub fn session_set_gridlines_hidden(sheet: usize, hidden: bool) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+            view.hide_gridlines = hidden;
+        }
+        session.edit(op).map_err(js)
+    })
+}
+
 /// Set the number of frozen rows/columns on a sheet.
 #[wasm_bindgen]
 pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsError> {

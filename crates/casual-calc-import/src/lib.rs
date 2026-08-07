@@ -149,6 +149,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         if let Some(zoom) = worksheet.zoom {
             sheet.view.zoom = zoom;
         }
+        sheet.view.hide_gridlines = worksheet.hide_gridlines;
         sheet.columns.default = worksheet.col_default;
         sheet.columns.sizes = worksheet.col_sizes;
         sheet.rows.default = worksheet.row_default;
