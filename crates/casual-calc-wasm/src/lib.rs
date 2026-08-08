@@ -1395,6 +1395,13 @@ pub fn session_cells(
                 },
             };
             let mut extra = String::new();
+            // Numeric-valued cells are flagged so the host can apply Excel's
+            // rule that a number too wide for its column renders as "#######"
+            // rather than spilling or — worse — being clipped into a shorter
+            // number that still reads as a plausible value.
+            if matches!(cell.value, CellValue::Number(_)) {
+                extra.push_str(",\"n\":1");
+            }
             if style.is_some_and(|s| s.bold) {
                 extra.push_str(",\"b\":1");
             }

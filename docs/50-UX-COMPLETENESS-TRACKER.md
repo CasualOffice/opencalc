@@ -29,6 +29,16 @@ each audit; this file is the durable backlog.
   missing builtin number-format IDs; Cmd+Shift+Z redo.
 - Font picker: custom searchable combobox (UX-P07) — a native `datalist` is
   filtered by the input's own text, so the auto-populated box offered one font.
+- **Import fidelity**: `<col customWidth="true">` (LibreOffice / POI / ExcelJS
+  spelling) no longer discards every column width; `customWidth` no longer gates
+  whether a width is honored at all; `hidden`/`collapsed`/`wrapText` likewise;
+  `<b val="0"/>` no longer reads as bold ON. The editor's auto row-height no
+  longer overrides a height the workbook set, no longer un-hides hidden rows,
+  and no longer inflates every styled row by 25%.
+- **Text overflow**: spill stays inside its own pane (a frozen cell can't borrow
+  the scrolling body's columns, and vice versa), and a number too wide for its
+  column renders `#######` instead of spilling or being clipped into a shorter,
+  plausible-looking wrong number.
 - **Frozen-pane painting**: selection spans are pane-relative (a body range no
   longer paints a sliding strip into the frozen band, and no longer vanishes
   when its start scrolls off); the selection outline / marching ants / fill

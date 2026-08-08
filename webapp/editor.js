@@ -690,26 +690,43 @@ function draw() {
       ctx.restore();
       continue;
     }
-    const tw = ctx.measureText(it.t).width;
+    let text = it.t;
+    let tw = ctx.measureText(text).width;
 
     // Text overflows across adjacent EMPTY cells (Excel behavior). Extend the
     // clip rectangle left/right over blank neighbours until the text fits or a
     // non-empty cell blocks it.
+    //
+    // The scan stays inside the cell's own pane: a frozen cell can't borrow the
+    // body's columns (they scroll out from under it) and a body cell can't
+    // reach back under the frozen band. Bounding by index rather than leaving
+    // it to the clip is what makes the *extent* right — the text is then cut at
+    // the real boundary instead of being laid out as if the pane went on.
+    const inFrozenCols = F.fc > 0 && it.c < F.fc;
+    const spillLo = inFrozenCols ? 0 : Math.max(state.firstCol, F.fc);
+    const spillHi = inFrozenCols ? F.fc : lastCol; // exclusive
     let clipL = x, clipR = x + w;
-    if (tw > w - 8) {
+    // A number never spills, not even into an empty neighbour: Excel fills the
+    // cell with "#" instead, because a number cut off mid-digits still reads as
+    // a real — and wrong — value.
+    if (it.n && tw > w - 8) {
+      const hashW = ctx.measureText("#").width || 1;
+      text = "#".repeat(Math.max(1, Math.floor((w - 8) / hashW)));
+      tw = ctx.measureText(text).width;
+    } else if (tw > w - 8) {
       if (align !== "right") {
         let c = it.c;
         // Stop at a non-empty cell OR a column that isn't drawn (e.g. the gap
         // between a frozen band and the scrolling body) — colXAt is undefined
         // there and would make the clip NaN.
-        while (clipR - x < tw + 8 && c + 1 < lastCol && geo.colOf.has(c + 1) && !occupied.has(it.r + "," + (c + 1))) {
+        while (clipR - x < tw + 8 && c + 1 < spillHi && geo.colOf.has(c + 1) && !occupied.has(it.r + "," + (c + 1))) {
           c += 1;
           clipR = colXAt(c) + colWAt(c);
         }
       }
       if (align !== "left") {
         let c = it.c;
-        while (x + w - clipL < tw + 8 && c - 1 >= state.firstCol && geo.colOf.has(c - 1) && !occupied.has(it.r + "," + (c - 1))) {
+        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && geo.colOf.has(c - 1) && !occupied.has(it.r + "," + (c - 1))) {
           c -= 1;
           clipL = colXAt(c);
         }
@@ -726,7 +743,7 @@ function draw() {
     if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5; }
     else if (align === "center") { ctx.textAlign = "center"; tx = x + w / 2; }
     else { ctx.textAlign = "left"; tx = x + 5; }
-    ctx.fillText(it.t, tx, y);
+    ctx.fillText(text, tx, y);
     if (it.u || it.st) {
       const lw = Math.min(tw, clipR - clipL - 8);
       const lx = align === "right" ? tx - lw : align === "center" ? tx - lw / 2 : tx;
