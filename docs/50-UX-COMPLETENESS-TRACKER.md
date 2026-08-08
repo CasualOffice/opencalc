@@ -29,6 +29,11 @@ each audit; this file is the durable backlog.
   missing builtin number-format IDs; Cmd+Shift+Z redo.
 - Font picker: custom searchable combobox (UX-P07) — a native `datalist` is
   filtered by the input's own text, so the auto-populated box offered one font.
+- **Import fidelity (round 2)**: shared formulas (`<f t="shared">`) expand from
+  their master instead of importing as bare cached constants; theme + tint and
+  legacy indexed colours resolve (the form every Excel built-in cell style
+  uses); multi-area `sqref` keeps every area; comments bind through the OPC
+  relationship graph rather than by part numbering.
 - **Import fidelity**: `<col customWidth="true">` (LibreOffice / POI / ExcelJS
   spelling) no longer discards every column width; `customWidth` no longer gates
   whether a width is honored at all; `hidden`/`collapsed`/`wrapText` likewise;
@@ -93,6 +98,7 @@ each audit; this file is the durable backlog.
 | UX-FM7 | Named cell styles (Good/Bad/Heading…) — absent | Format | 🔴 | Named-style registry + gallery |
 | UX-FM8 | Indent increase/decrease — model field dead, no UI/API/render | Format | 🔴 | `session_set_indent` + 2 buttons + render padding |
 | UX-FM9 | Text rotation — not even in model | Format | 🔴 | Model field + API + canvas transform |
+| UX-G01 | **Drawn geometry vs engine geometry diverge for auto-grown rows** — `measure()` grows a row for wrapped text, but scroll anchoring (`session_row_at_px`), the frozen-band origin, the scrollbar extent, `ensureVisible` and the row-resize origin all read the engine's un-grown offsets. Symptoms: a hitch at row boundaries while wheel-scrolling, a short scrollbar extent, `ensureVisible` under-scrolling so the selection creeps below the viewport, and a resize drag offset by the accumulated growth | Nav | 🔴 | Narrowed to wrapped rows only now that auto-height respects file-set heights. Either push effective auto-height into the engine (`GridGeometry` already owns it) or keep a prefix-sum of effective heights in `measure()` and derive `fsr`/`subY`/`frozenH`/`contentH`/`rT` from it. Horizontal axis is unaffected — nothing grows `geo.colW` |
 | UX-A01 | Status bar Min/Max never shown (engine computes them); no separate numeric count | Chrome | 🔴 | Extend `updateStats()` with running min/max |
 | UX-A02 | Cell-mode indicator (Ready/Enter/Edit/Point) + persistent bottom status; Count always-on | Chrome | 🔴 | Left region in `.bottom-bar` |
 | UX-A03 | Canvas invisible to AT: no `role=grid`, no `aria-live` active-cell announce | Chrome | 🔴 | Visually-hidden `aria-live` updated in `select`/`extend` |
