@@ -148,6 +148,31 @@ fn hide_gridlines_round_trips() {
 }
 
 #[test]
+fn text_rotation_round_trips() {
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let sheet_id = workbook.sheets[0].id;
+    let at = casual_calc_model::CellRef::new(0, 0);
+    let id = workbook.intern_style(casual_calc_model::Style {
+        rotation: 45,
+        ..Default::default()
+    });
+    let sheet = workbook
+        .sheets
+        .iter_mut()
+        .find(|s| s.id == sheet_id)
+        .unwrap();
+    let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+    cell.style = Some(id);
+    sheet.cells.set(at, cell);
+
+    let written = write_workbook(&workbook).unwrap();
+    assert!(xml_of(&written, "xl/styles.xml").contains("textRotation=\"45\""));
+    let wb = import_package(written).unwrap().workbook;
+    let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+    assert_eq!(wb.styles.get(round).unwrap().rotation, 45);
+}
+
+#[test]
 fn hide_headers_round_trips() {
     let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
     // Default: headers shown, and nothing written.

@@ -348,7 +348,20 @@ function measure() {
     // A hidden row is 0 px — growing it would make it reappear.
     if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
     let needed;
-    if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
+    // Rotated text needs vertical room, or it is clipped to a 20 px row and the
+    // rotation achieves nothing. Height is the text's own length projected onto
+    // the vertical axis; stacked text is one glyph per line.
+    if (it.rot) {
+      ctx.font = cellFont(it);
+      if (it.rot === 255) {
+        needed = [...String(it.t)].length * cellLineH(it) + 6;
+      } else {
+        const deg = it.rot <= 90 ? it.rot : it.rot - 90;
+        needed = Math.abs(Math.sin((deg * Math.PI) / 180)) * ctx.measureText(String(it.t)).width
+          + cellPx(it) + 6;
+      }
+      needed = Math.min(needed, 409); // Excel's row-height ceiling
+    } else if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
     // A tall font grows its row by the font's own box plus Excel's leading;
     // at the 11 pt default this comes to exactly the default row height, so an
     // ordinary styled row is left alone instead of being inflated by 25%.
@@ -803,6 +816,36 @@ function draw() {
       const block = lines.length * lh;
       let ly = (it.va === "t" ? yTop + 3 : it.va === "b" ? yTop + h - block - 3 : yTop + Math.max(0, (h - block) / 2)) + lh / 2;
       for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += lh; }
+      ctx.restore();
+      continue;
+    }
+    // Rotated text: draw it under a transform anchored at the cell's centre and
+    // clipped to the cell. OOXML's encoding is 0-90 counter-clockwise, 91-180 for
+    // (value - 90) clockwise, and 255 for letters stacked without rotating.
+    if (it.rot) {
+      ctx.save();
+      if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
+      ctx.beginPath();
+      ctx.rect(x, yTop, w, h);
+      ctx.clip();
+      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.textAlign = "center";
+      if (it.rot === 255) {
+        // Stacked: one glyph per line, upright.
+        const lh = cellLineH(it);
+        const chars = [...String(it.t)];
+        let sy = yTop + lh / 2 + 2;
+        for (const ch of chars) {
+          if (sy > yTop + h) break;
+          ctx.fillText(ch, x + w / 2, sy);
+          sy += lh;
+        }
+      } else {
+        const deg = it.rot <= 90 ? -it.rot : it.rot - 90;
+        ctx.translate(x + w / 2, yTop + h / 2);
+        ctx.rotate((deg * Math.PI) / 180);
+        ctx.fillText(String(it.t), 0, 0);
+      }
       ctx.restore();
       continue;
     }
@@ -1788,6 +1831,10 @@ function applyPainter(s) {
   if (!sticky) setPainter(null);
   draw();
   return true;
+}
+
+function setRotation(rot) {
+  formatSel((s) => wasm.session_set_rotation(state.sheet, s.r0, s.c0, s.r1, s.c1, rot));
 }
 
 function setIndent(delta) {
@@ -4504,6 +4551,7 @@ function wireEvents() {
   initTooltips();
   wirePopup("tb-wrap", "wrap-menu", (b) => setTextOverflow(b.dataset.ov));
   wirePopup("tb-merge", "merge-menu", (b) => mergeVariant(b.dataset.mg));
+  wirePopup("tb-rotate", "rotate-menu", (b) => setRotation(+b.dataset.rot));
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) =>

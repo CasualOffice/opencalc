@@ -355,6 +355,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             valign: style.valign,
             wrap: style.wrap,
             indent: style.indent,
+            rotation: style.rotation,
         });
     }
 
@@ -443,7 +444,11 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
         } else {
             ""
         };
-        let has_align = ids.align.is_some() || ids.valign.is_some() || ids.wrap || ids.indent != 0;
+        let has_align = ids.align.is_some()
+            || ids.valign.is_some()
+            || ids.wrap
+            || ids.indent != 0
+            || ids.rotation != 0;
         let apply_align = if has_align {
             " applyAlignment=\"1\""
         } else {
@@ -466,6 +471,9 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             }
             if ids.indent != 0 {
                 s.push_str(&format!(" indent=\"{}\"", ids.indent));
+            }
+            if ids.rotation != 0 {
+                s.push_str(&format!(" textRotation=\"{}\"", ids.rotation));
             }
             s.push_str("/></xf>");
         } else {
@@ -509,6 +517,7 @@ struct StyleIds {
     valign: Option<VAlign>,
     wrap: bool,
     indent: u8,
+    rotation: u16,
 }
 
 /// The per-column attributes coalesced into one `<col>` span: a custom width

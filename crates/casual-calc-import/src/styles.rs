@@ -52,6 +52,7 @@ struct Xf {
     align: Option<HAlign>,
     valign: Option<VAlign>,
     wrap: bool,
+    rotation: u16,
     indent: u8,
 }
 
@@ -265,6 +266,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             fill_id: attr_u32(e, b"fillId")?.unwrap_or(0) as usize,
                             border_id: attr_u32(e, b"borderId")?.unwrap_or(0) as usize,
                             align: None,
+                            rotation: 0,
                             valign: None,
                             wrap: false,
                             indent: 0,
@@ -286,6 +288,11 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             }
                             if let Some(indent) = attr_u32(e, b"indent")? {
                                 xf.indent = indent.min(u8::MAX as u32) as u8;
+                            }
+                            // OOXML's own encoding: 0-90 CCW, 91-180 clockwise,
+                            // 255 = stacked. Kept verbatim (see Style::rotation).
+                            if let Some(rot) = attr_u32(e, b"textRotation")? {
+                                xf.rotation = rot.min(255) as u16;
                             }
                         }
                     }
@@ -324,6 +331,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                 strike: font.strike,
                 // No SpreadsheetML attribute maps to clip; Excel always spills.
                 clip: false,
+                rotation: xf.rotation,
                 font_name: font.name,
                 font_size_hp: font.size_hp,
                 font_color: font.color,

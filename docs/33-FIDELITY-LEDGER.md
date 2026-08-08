@@ -48,6 +48,7 @@ evidence").
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
 | Number formats (incl. currency/literals) | ● | ● | ● | ● | — | E-001; numfmt literal runs; editor menu + $ / % |
 | Styles: bold/italic/underline/font color/fill | ● | ● | ● | ~ | — | P1A-003b/d (editor toggles + pickers) |
+| Styles: text rotation | ● | ● | ● | ● | — | OOXML `textRotation` kept in its own encoding; angled, vertical and stacked all render, and rows auto-grow to fit |
 | Styles: text overflow (overflow / wrap / clip) | ● | ~ | ● | ● | — | Wrap is OOXML's `wrapText` and round-trips. **Clip has no SpreadsheetML attribute** — Excel always spills into empty neighbours — so it is an engine-side view choice that is *not* written to `.xlsx` and is lost on save |
 | Styles: theme / indexed colors | ● | ~ | — | ● | — | `theme1.xml` palette + tint + legacy indexed table resolved on import (the form Excel's built-in cell styles use); export rewrites them as literal rgb, so the theme *linkage* is not yet round-tripped |
 | Shared formulas (`<f t="shared">`) | ● | ~ | — | — | ● | Followers expanded from their master via the AST shifter; the writer emits each expanded formula rather than re-sharing |

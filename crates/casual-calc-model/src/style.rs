@@ -160,6 +160,14 @@ pub struct Style {
     /// Wrap text within the cell (instead of overflowing/clipping).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrap: bool,
+    /// Text rotation, in OOXML's `textRotation` encoding: `0`–`90` is that many
+    /// degrees counter-clockwise, `91`–`180` is `value - 90` degrees *clockwise*,
+    /// and `255` means the letters are stacked vertically without rotating.
+    ///
+    /// Stored in the spec's own encoding rather than as a signed angle so the
+    /// round-trip is lossless and there is no conversion to get backwards.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub rotation: u16,
     /// Clip overflowing text at the cell edge instead of letting it spill into
     /// empty neighbours. Only meaningful when [`Style::wrap`] is off — the three
     /// states a user picks between are overflow (the default), wrap, and clip.
@@ -182,6 +190,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
 fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
@@ -202,6 +214,7 @@ impl Style {
             && self.valign.is_none()
             && !self.wrap
             && !self.clip
+            && self.rotation == 0
             && self.indent == 0
             && self.border.is_none()
     }

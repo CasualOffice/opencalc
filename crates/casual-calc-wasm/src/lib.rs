@@ -1632,6 +1632,9 @@ pub fn session_cells(
             if let Some(ind) = style.map(|s| s.indent).filter(|i| *i > 0) {
                 extra.push_str(&format!(",\"in\":{ind}"));
             }
+            if let Some(rot) = style.map(|s| s.rotation).filter(|r| *r > 0) {
+                extra.push_str(&format!(",\"rot\":{rot}"));
+            }
             if style.is_some_and(|s| s.strike) {
                 extra.push_str(",\"st\":1");
             }
@@ -2688,6 +2691,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             if st.indent > 0 {
                 parts.push(format!("\"in\":{}", st.indent));
             }
+            if st.rotation > 0 {
+                parts.push(format!("\"rot\":{}", st.rotation));
+            }
             if let Some(nf) = st.number_format.as_deref() {
                 parts.push(format!("\"nf\":{}", json_string(nf)));
             }
@@ -3415,6 +3421,21 @@ pub fn session_remove_duplicates(
         session.edit(EditOperation::Batch(ops)).map_err(js)?;
         Ok(removed)
     })
+}
+
+/// Set text rotation over a range, in OOXML's `textRotation` encoding (0–90
+/// counter-clockwise, 91–180 for `value - 90` clockwise, 255 stacked).
+#[wasm_bindgen]
+pub fn session_set_rotation(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    rotation: u16,
+) -> Result<(), JsError> {
+    let rot = rotation.min(255);
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.rotation = rot)
 }
 
 /// Step the indent of a range by `delta` levels, clamped to Excel's 0–250.

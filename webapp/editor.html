@@ -165,6 +165,19 @@
         <button class="tb-btn tb-toggle tb-align" data-al="right" title="Align right" aria-label="Align right">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>
         </button>
+        <div class="menu-wrap">
+          <button id="tb-rotate" class="tb-btn" title="Text rotation" aria-label="Text rotation" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M4 20L12 4l8 16"/><path d="M7.5 14h9"/><path d="M20 20a8 8 0 0 0-3-6" stroke-dasharray="2 2"/></svg>
+          </button>
+          <div id="rotate-menu" class="popmenu" hidden>
+            <button data-rot="0">None</button>
+            <button data-rot="45">Angle up (45°)</button>
+            <button data-rot="135">Angle down (45°)</button>
+            <button data-rot="90">Rotate up (90°)</button>
+            <button data-rot="180">Rotate down (90°)</button>
+            <button data-rot="255">Stacked</button>
+          </div>
+        </div>
         <button id="tb-indent-less" class="tb-btn" title="Decrease indent" aria-label="Decrease indent">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="11" y1="6" x2="21" y2="6"/><line x1="11" y1="12" x2="21" y2="12"/><line x1="11" y1="18" x2="21" y2="18"/><polyline points="7 8 3 12 7 16"/></svg>
         </button>
