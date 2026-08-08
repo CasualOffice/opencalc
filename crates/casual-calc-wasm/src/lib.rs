@@ -681,10 +681,10 @@ pub fn session_set_list_validation(
                 .filter(|s| !s.is_empty())
                 .collect();
             if !clean.is_empty() {
-                sh.validations.push(DataValidation {
-                    range: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
-                    values: clean,
-                });
+                sh.validations.push(DataValidation::list(
+                    CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+                    clean,
+                ));
             }
         }
         Ok(())
@@ -699,7 +699,16 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
         let Some(sh) = s.workbook().sheets.get(sheet) else {
             return "null".to_owned();
         };
-        match sh.validations.iter().find(|v| v.covers(row, col)) {
+        // Only a list rule has anything to pick from. A number or date rule
+        // returned an empty array, which the host read as "there is a dropdown"
+        // — every JS array is truthy — so a whole-number cell grew a chevron
+        // that opened onto nothing.
+        match sh
+            .validations
+            .iter()
+            .find(|v| v.covers(row, col))
+            .filter(|v| v.kind == casual_calc_model::DvKind::List && !v.values.is_empty())
+        {
             Some(v) => {
                 let items: Vec<String> = v.values.iter().map(|x| json_string(x)).collect();
                 format!("[{}]", items.join(","))
@@ -731,18 +740,108 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
         let Some(rule) = sh.validations.iter().find(|v| v.covers(row, col)) else {
             return String::new();
         };
-        if rule.values.is_empty() || rule.values.iter().any(|v| v == trimmed) {
+        // The model decides; this only phrases the refusal. `None` means the
+        // rule needs the formula engine, so nothing is blocked on it.
+        let number = trimmed.parse::<f64>().ok();
+        if rule.accepts(trimmed, number) != Some(false) {
             return String::new();
         }
-        let shown: Vec<&str> = rule.values.iter().take(6).map(String::as_str).collect();
-        let ellipsis = if rule.values.len() > shown.len() {
-            ", …"
-        } else {
-            ""
+        // Author-set wording always wins: they know what the rule is for.
+        if !rule.error_text.is_empty() {
+            return rule.error_text.clone();
+        }
+        if rule.kind == casual_calc_model::DvKind::List {
+            let shown: Vec<&str> = rule.values.iter().take(6).map(String::as_str).collect();
+            let ellipsis = if rule.values.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            };
+            return format!("must be one of: {}{ellipsis}", shown.join(", "));
+        }
+        let what = match rule.kind {
+            casual_calc_model::DvKind::Whole => "a whole number",
+            casual_calc_model::DvKind::Decimal => "a number",
+            casual_calc_model::DvKind::Date => "a date",
+            casual_calc_model::DvKind::Time => "a time",
+            casual_calc_model::DvKind::TextLength => "text of an allowed length",
+            _ => "a permitted value",
         };
-        format!("must be one of: {}{ellipsis}", shown.join(", "))
+        let bound = match rule.operator {
+            casual_calc_model::DvOperator::Between => {
+                format!(" between {} and {}", rule.formula1, rule.formula2)
+            }
+            casual_calc_model::DvOperator::NotBetween => {
+                format!(" outside {} to {}", rule.formula1, rule.formula2)
+            }
+            casual_calc_model::DvOperator::Equal => format!(" equal to {}", rule.formula1),
+            casual_calc_model::DvOperator::NotEqual => format!(" not equal to {}", rule.formula1),
+            casual_calc_model::DvOperator::GreaterThan => {
+                format!(" greater than {}", rule.formula1)
+            }
+            casual_calc_model::DvOperator::LessThan => format!(" less than {}", rule.formula1),
+            casual_calc_model::DvOperator::GreaterThanOrEqual => {
+                format!(" at least {}", rule.formula1)
+            }
+            casual_calc_model::DvOperator::LessThanOrEqual => {
+                format!(" at most {}", rule.formula1)
+            }
+        };
+        format!(
+            "must be {what}{}",
+            if rule.formula1.is_empty() {
+                String::new()
+            } else {
+                bound
+            }
+        )
     })
     .unwrap_or_default()
+}
+
+/// Set a non-list validation over a range: `kind` and `op` are the OOXML tokens,
+/// `f1`/`f2` the operands, plus the author's own message wording.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_set_validation(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+    op: &str,
+    f1: &str,
+    f2: &str,
+    allow_blank: bool,
+    error_text: &str,
+) -> Result<(), JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) else {
+            return Ok(());
+        };
+        // Replace whatever covered this block, as the list setter does.
+        sh.validations.retain(|v| {
+            !(v.range.start.row <= rr1
+                && v.range.end.row >= rr0
+                && v.range.start.col <= cc1
+                && v.range.end.col >= cc0)
+        });
+        let range = CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1));
+        sh.validations.push(casual_calc_model::DataValidation {
+            kind: casual_calc_model::DvKind::from_ooxml(kind),
+            operator: casual_calc_model::DvOperator::from_ooxml(op),
+            formula1: f1.trim().to_owned(),
+            formula2: f2.trim().to_owned(),
+            allow_blank,
+            error_text: error_text.trim().to_owned(),
+            ..casual_calc_model::DataValidation::none(range)
+        });
+        Ok(())
+    })
 }
 
 /// Remove any validation intersecting a range.

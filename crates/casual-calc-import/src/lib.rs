@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
-    CustomFilter, DataValidation, DefinedName, ErrorValue, FilterOp, FilterRule, Id, IdGenerator,
-    Sheet, SheetId, SheetVisibility, StringId, Workbook,
+    CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue, FilterOp,
+    FilterRule, Id, IdGenerator, Sheet, SheetId, SheetVisibility, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -311,19 +311,29 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             sheet.auto_filter = Some(filter);
         }
 
-        // Data-validation dropdown lists: only an inline quoted CSV in formula1
-        // is modeled (a range-reference list is left for later).
-        for (sqref, formula1) in worksheet.validations {
-            let trimmed = formula1.trim();
-            if !(trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"')) {
-                continue;
-            }
-            let values: Vec<String> = trimmed[1..trimmed.len() - 1]
-                .split(',')
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if values.is_empty() {
+        // Data validations, every kind. Only a `list` rule's inline quoted CSV is
+        // expanded into values; the other kinds keep their operands as the raw
+        // formula text, which is what they are.
+        for raw in worksheet.validations {
+            let kind = DvKind::from_ooxml(&raw.kind);
+            let trimmed = raw.formula1.trim();
+            let values: Vec<String> = if kind == DvKind::List
+                && trimmed.len() >= 2
+                && trimmed.starts_with('"')
+                && trimmed.ends_with('"')
+            {
+                trimmed[1..trimmed.len() - 1]
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // A list whose values are a range reference rather than an inline
+            // CSV keeps its formula, so the rule survives even though the editor
+            // cannot offer the dropdown yet.
+            if kind == DvKind::None && values.is_empty() && raw.formula1.trim().is_empty() {
                 continue;
             }
             // An sqref is a space-separated list of areas; taking only the first
@@ -331,16 +341,26 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             // Bounded, because each area copies the value list: a hand-written
             // sqref with tens of thousands of areas would otherwise turn a small
             // part into millions of heap strings.
-            for area in sqref.split_whitespace().take(MAX_SQREF_AREAS) {
+            for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
                 let range =
                     parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)));
                 if let Some(range) = range {
                     sheet.validations.push(DataValidation {
-                        range,
                         values: values.clone(),
+                        kind,
+                        operator: DvOperator::from_ooxml(&raw.operator),
+                        formula1: raw.formula1.clone(),
+                        formula2: raw.formula2.clone(),
+                        allow_blank: raw.allow_blank,
+                        error_title: raw.error_title.clone(),
+                        error_text: raw.error_text.clone(),
+                        prompt_title: raw.prompt_title.clone(),
+                        prompt_text: raw.prompt_text.clone(),
+                        ..DataValidation::none(range)
                     });
                 }
             }
+            let sqref = raw.sqref;
             if sqref.split_whitespace().count() > MAX_SQREF_AREAS {
                 report.record(
                     "dataValidation/sqref",

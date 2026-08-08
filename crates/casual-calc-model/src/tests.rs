@@ -2,8 +2,9 @@
 //! Phase 0 exit-gate condition (`docs/06-ROADMAP-AND-DELIVERY.md`).
 
 use crate::{
-    Cell, CellRef, CellValue, CustomFilter, FilterOp, FilterRule, Id, IdGenerator, SCHEMA_VERSION,
-    Sheet, SheetId, StringId, StringTable, Workbook,
+    Cell, CellRange, CellRef, CellValue, CustomFilter, DataValidation, DvKind, DvOperator,
+    FilterOp, FilterRule, Id, IdGenerator, SCHEMA_VERSION, Sheet, SheetId, StringId, StringTable,
+    Workbook,
 };
 
 fn wb_id() -> Id {
@@ -333,4 +334,67 @@ fn column_bands_follow_summary_right() {
     assert_eq!(sheet.outline_band(4, true), Some((1, 3)));
     sheet.outline.summary_right = false;
     assert_eq!(sheet.outline_band(0, true), Some((1, 3)));
+}
+
+// --- Data validation ------------------------------------------------------
+
+fn dv(kind: DvKind, op: DvOperator, f1: &str, f2: &str) -> DataValidation {
+    DataValidation {
+        kind,
+        operator: op,
+        formula1: f1.into(),
+        formula2: f2.into(),
+        ..DataValidation::none(CellRange::new(CellRef::new(0, 0), CellRef::new(9, 0)))
+    }
+}
+
+#[test]
+fn whole_number_rules_reject_fractions_and_text() {
+    let rule = dv(DvKind::Whole, DvOperator::Between, "1", "10");
+    assert_eq!(rule.accepts("5", Some(5.0)), Some(true));
+    assert_eq!(rule.accepts("5.5", Some(5.5)), Some(false));
+    assert_eq!(rule.accepts("50", Some(50.0)), Some(false));
+    assert_eq!(rule.accepts("abc", None), Some(false));
+}
+
+#[test]
+fn text_length_measures_characters_not_bytes() {
+    let rule = dv(DvKind::TextLength, DvOperator::LessThanOrEqual, "3", "");
+    assert_eq!(rule.accepts("abc", None), Some(true));
+    assert_eq!(rule.accepts("abcd", None), Some(false));
+    // Three characters, more than three bytes.
+    assert_eq!(
+        rule.accepts("héllo".get(..4).unwrap_or("hé"), None),
+        Some(true)
+    );
+}
+
+#[test]
+fn blank_follows_allow_blank() {
+    let mut rule = dv(DvKind::Decimal, DvOperator::GreaterThan, "0", "");
+    assert_eq!(rule.accepts("   ", None), Some(true));
+    rule.allow_blank = false;
+    assert_eq!(rule.accepts("   ", None), Some(false));
+}
+
+#[test]
+fn a_custom_rule_is_not_judged_here() {
+    // It needs the formula engine, and blocking input on a rule this layer does
+    // not understand would be worse than letting it through.
+    let rule = dv(DvKind::Custom, DvOperator::Between, "=A1>0", "");
+    assert_eq!(rule.accepts("anything", None), None);
+}
+
+#[test]
+fn an_unparseable_operand_rejects_nothing() {
+    // A range-reference bound cannot be compared here; refusing every value
+    // would make the cell uneditable.
+    let rule = dv(DvKind::Decimal, DvOperator::GreaterThan, "$B$1", "");
+    assert_eq!(rule.accepts("5", Some(5.0)), Some(true));
+}
+
+#[test]
+fn between_tolerates_reversed_bounds() {
+    let rule = dv(DvKind::Decimal, DvOperator::Between, "10", "1");
+    assert_eq!(rule.accepts("5", Some(5.0)), Some(true));
 }

@@ -3254,22 +3254,84 @@ function refreshPanel() {
 
 function buildDvPanel(body) {
   panelRangeReadout(body);
-  panelLabel(body, "Dropdown values");
+  panelLabel(body, "Allow");
+  // Every OOXML kind, not just the dropdown. The other kinds constrain what may
+  // be typed; only `list` shows a picker.
+  const kindSel = el("select", "panel-select");
+  for (const [v, t] of [
+    ["list", "List of values"], ["whole", "Whole number"], ["decimal", "Number"],
+    ["date", "Date"], ["time", "Time"], ["textLength", "Text length"],
+    ["custom", "Custom formula"], ["none", "Any value"],
+  ]) { const o = el("option", null, t); o.value = v; kindSel.appendChild(o); }
+  body.appendChild(kindSel);
+
+  // List values.
   const inp = el("input", "panel-field");
   inp.placeholder = "Yes, No, Maybe";
   inp.spellcheck = false;
   const s0 = effectiveRange();
-  try { const vj = wasm.session_validation_at(state.sheet, s0.r0, s0.c0); if (vj !== "null") inp.value = JSON.parse(vj).join(", "); } catch {}
-  body.appendChild(inp);
-  body.appendChild(el("div", "panel-hint", "Comma-separated. Cells in the range show a dropdown to pick from these values."));
+  try {
+    const vj = wasm.session_validation_at(state.sheet, s0.r0, s0.c0);
+    if (vj !== "null") inp.value = JSON.parse(vj).join(", ");
+  } catch {}
+  const listHint = el("div", "panel-hint", "Comma-separated. Cells in the range show a dropdown to pick from these values.");
+
+  // Comparison operands, for the kinds that take them.
+  const opSel = el("select", "panel-select");
+  for (const [v, t] of [
+    ["between", "between"], ["notBetween", "not between"], ["equal", "equal to"],
+    ["notEqual", "not equal to"], ["greaterThan", "greater than"], ["lessThan", "less than"],
+    ["greaterThanOrEqual", "at least"], ["lessThanOrEqual", "at most"],
+  ]) { const o = el("option", null, t); o.value = v; opSel.appendChild(o); }
+  const f1 = el("input", "panel-field"); f1.placeholder = "value"; f1.spellcheck = false;
+  const f2 = el("input", "panel-field"); f2.placeholder = "and"; f2.spellcheck = false;
+  const customHint = el("div", "panel-hint", "A formula that must be true, e.g. A1>0. Checked by the calc engine, not here.");
+  body.append(inp, listHint, opSel, f1, f2, customHint);
+
+  panelLabel(body, "If the value is rejected");
+  const msg = el("input", "panel-field");
+  msg.placeholder = "Optional message";
+  msg.spellcheck = false;
+  const blankWrap = el("label", "panel-check");
+  const blank = document.createElement("input");
+  blank.type = "checkbox";
+  blank.checked = true;
+  blankWrap.append(blank, document.createTextNode(" allow an empty cell"));
+  body.append(msg, blankWrap);
+
+  const sync = () => {
+    const k = kindSel.value;
+    const isList = k === "list";
+    const isCustom = k === "custom";
+    const isNone = k === "none";
+    const cmp = !isList && !isCustom && !isNone;
+    inp.style.display = isList ? "" : "none";
+    listHint.style.display = isList ? "" : "none";
+    opSel.style.display = cmp ? "" : "none";
+    f1.style.display = cmp || isCustom ? "" : "none";
+    f2.style.display = cmp && opSel.value.toLowerCase().includes("between") ? "" : "none";
+    customHint.style.display = isCustom ? "" : "none";
+    f1.placeholder = isCustom ? "A1>0" : k === "textLength" ? "length" : "value";
+  };
+  kindSel.addEventListener("change", sync);
+  opSel.addEventListener("change", sync);
+  sync();
+
   const apply = panelActions(
     body,
     "Apply",
     () => {
       const s = effectiveRange();
-      const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
-      try { wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals); }
-      catch (e) { status.textContent = `error: ${e}`; }
+      try {
+        if (kindSel.value === "list") {
+          const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
+          wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals);
+        } else {
+          wasm.session_set_validation(
+            state.sheet, s.r0, s.c0, s.r1, s.c1,
+            kindSel.value, opSel.value, f1.value, f2.value, blank.checked, msg.value);
+        }
+      } catch (e) { status.textContent = `error: ${e}`; }
       draw();
     },
     "Remove",

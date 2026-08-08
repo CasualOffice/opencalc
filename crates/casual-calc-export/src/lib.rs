@@ -19,8 +19,8 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, ErrorValue,
-    FilterRule, HAlign, Sheet, SheetId, Style, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
+    ErrorValue, FilterRule, HAlign, Sheet, SheetId, Style, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -975,12 +975,56 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             sheet.validations.len()
         ));
         for v in &sheet.validations {
-            let list = v.values.join(",");
-            s.push_str(&format!(
-                "<dataValidation type=\"list\" allowBlank=\"1\" showInputMessage=\"1\" showErrorMessage=\"1\" sqref=\"{}\"><formula1>{}</formula1></dataValidation>",
-                range_a1(&v.range),
-                escape_text(&format!("\"{list}\""))
-            ));
+            s.push_str(&format!("<dataValidation type=\"{}\"", v.kind.ooxml()));
+            // `between` and `allowBlank=1` are the schema defaults, written by
+            // omission. The operator is meaningless for list and custom rules.
+            if !matches!(v.kind, DvKind::List | DvKind::Custom | DvKind::None)
+                && v.operator != DvOperator::Between
+            {
+                s.push_str(&format!(" operator=\"{}\"", v.operator.ooxml()));
+            }
+            if v.allow_blank {
+                s.push_str(" allowBlank=\"1\"");
+            }
+            // Author-set wording is preserved; the flags follow whether there is
+            // anything to show.
+            if !v.prompt_title.is_empty() || !v.prompt_text.is_empty() {
+                s.push_str(" showInputMessage=\"1\"");
+                if !v.prompt_title.is_empty() {
+                    s.push_str(&format!(
+                        " promptTitle=\"{}\"",
+                        escape_attr(&v.prompt_title)
+                    ));
+                }
+                if !v.prompt_text.is_empty() {
+                    s.push_str(&format!(" prompt=\"{}\"", escape_attr(&v.prompt_text)));
+                }
+            }
+            s.push_str(" showErrorMessage=\"1\"");
+            if !v.error_title.is_empty() {
+                s.push_str(&format!(" errorTitle=\"{}\"", escape_attr(&v.error_title)));
+            }
+            if !v.error_text.is_empty() {
+                s.push_str(&format!(" error=\"{}\"", escape_attr(&v.error_text)));
+            }
+            s.push_str(&format!(" sqref=\"{}\">", range_a1(&v.range)));
+            // A list's values are an inline quoted CSV; every other kind keeps
+            // the operand text it came in with.
+            let f1 = if v.kind == DvKind::List && !v.values.is_empty() {
+                format!("\"{}\"", v.values.join(","))
+            } else {
+                v.formula1.clone()
+            };
+            if !f1.is_empty() {
+                s.push_str(&format!("<formula1>{}</formula1>", escape_text(&f1)));
+            }
+            if !v.formula2.is_empty() {
+                s.push_str(&format!(
+                    "<formula2>{}</formula2>",
+                    escape_text(&v.formula2)
+                ));
+            }
+            s.push_str("</dataValidation>");
         }
         s.push_str("</dataValidations>");
     }

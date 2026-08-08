@@ -267,10 +267,10 @@ fn indent_round_trips() {
 fn data_validation_list_round_trips() {
     use casual_calc_model::{CellRange, CellRef, DataValidation};
     let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
-    workbook.sheets[0].validations.push(DataValidation {
-        range: CellRange::new(CellRef::new(0, 0), CellRef::new(4, 0)),
-        values: vec!["Yes".to_owned(), "No".to_owned(), "Maybe".to_owned()],
-    });
+    workbook.sheets[0].validations.push(DataValidation::list(
+        CellRange::new(CellRef::new(0, 0), CellRef::new(4, 0)),
+        vec!["Yes".to_owned(), "No".to_owned(), "Maybe".to_owned()],
+    ));
     let written = write_workbook(&workbook).unwrap();
     let wb = import_package(written).unwrap().workbook;
     let v = &wb.sheets[0].validations;
@@ -803,4 +803,47 @@ fn sheet_and_cell_protection_round_trip() {
     let st = wb.styles.get(round).unwrap();
     assert_eq!(st.locked, Some(false));
     assert_eq!(st.formula_hidden, Some(true));
+}
+
+#[test]
+fn non_list_validations_round_trip() {
+    use casual_calc_model::{CellRange, CellRef, DataValidation, DvKind, DvOperator};
+
+    // Only `type="list"` was parsed, so a file's number, date, text-length and
+    // custom rules were dropped the moment it was saved — the cell kept looking
+    // constrained in Excel until you reopened it and found it was not.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = CellRange::new(CellRef::new(0, 0), CellRef::new(9, 0));
+    let mut whole = DataValidation {
+        kind: DvKind::Whole,
+        operator: DvOperator::Between,
+        formula1: "1".into(),
+        formula2: "10".into(),
+        error_title: "Out of range".into(),
+        error_text: "Pick 1 to 10".into(),
+        prompt_title: "Quantity".into(),
+        prompt_text: "How many?".into(),
+        ..DataValidation::none(r)
+    };
+    whole.allow_blank = false;
+    let custom = DataValidation {
+        kind: DvKind::Custom,
+        formula1: "A1>0".into(),
+        ..DataValidation::none(r)
+    };
+    workbook.sheets[0].validations = vec![whole.clone(), custom.clone()];
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("type=\"whole\""), "{xml:.400}");
+    assert!(xml.contains("type=\"custom\""));
+    assert!(xml.contains("errorTitle=\"Out of range\""));
+    assert!(xml.contains("promptTitle=\"Quantity\""));
+    // `allowBlank` is false here, so it must not be written.
+    assert!(!xml.contains("type=\"whole\" allowBlank"));
+
+    let back = &import_package(written).unwrap().workbook.sheets[0].validations;
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0], whole, "the number rule changed on the way through");
+    assert_eq!(back[1], custom);
 }

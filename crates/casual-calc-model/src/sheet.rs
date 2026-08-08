@@ -580,15 +580,234 @@ pub enum CfRule {
     },
 }
 
-/// A data-validation rule over a range. Only the explicit-list dropdown kind is
-/// modeled today (`<dataValidation type="list">` with an inline value list).
+/// A data-validation rule over a range, covering the full OOXML `type` set.
+///
+/// `List` is the only kind with a dropdown; the rest constrain what may be typed.
+/// Modelling all of them is what keeps a file's number, date and text-length
+/// rules from being dropped the moment it is saved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DataValidation {
     /// The range the rule applies to.
     pub range: CellRange,
-    /// The allowed values shown in the dropdown.
+    /// The allowed values, for a list rule. Empty for every other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<String>,
+    /// What the rule constrains. `List` is the only kind that uses `values`.
+    #[serde(default)]
+    pub kind: DvKind,
+    /// How the operands are compared. Ignored by `List` and `Custom`.
+    #[serde(default)]
+    pub operator: DvOperator,
+    /// First operand, as the raw OOXML `<formula1>` text.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub formula1: String,
+    /// Second operand, for `Between` / `NotBetween`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub formula2: String,
+    /// Whether an empty cell passes — OOXML's `allowBlank`, which the schema
+    /// defaults to **false**. Excel's own dialog ticks "ignore blank" by
+    /// default, so rules created here set it, but a file that omits the
+    /// attribute means false and must come back that way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_blank: bool,
+    /// Title and body of the message shown when the rule is broken. Author-set
+    /// wording beats anything generated here, so it is preserved.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_title: String,
+    /// Body of the error message.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_text: String,
+    /// Title of the hint shown when the cell is selected.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_title: String,
+    /// Body of that hint.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_text: String,
+}
+
+/// What a data-validation rule constrains — OOXML `dataValidation/@type`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DvKind {
+    /// No constraint (`none`).
+    #[default]
+    None,
+    /// One of an explicit list — the only kind with a dropdown.
+    List,
+    /// A whole number.
+    Whole,
+    /// Any number.
+    Decimal,
+    /// A date.
+    Date,
+    /// A time.
+    Time,
+    /// The text's length.
+    TextLength,
+    /// An arbitrary formula that must evaluate truthy.
+    Custom,
+}
+
+impl DvKind {
+    /// The OOXML `type` token.
+    pub fn ooxml(&self) -> &'static str {
+        match self {
+            DvKind::None => "none",
+            DvKind::List => "list",
+            DvKind::Whole => "whole",
+            DvKind::Decimal => "decimal",
+            DvKind::Date => "date",
+            DvKind::Time => "time",
+            DvKind::TextLength => "textLength",
+            DvKind::Custom => "custom",
+        }
+    }
+
+    /// Parse an OOXML `type` token.
+    pub fn from_ooxml(token: &str) -> Self {
+        match token {
+            "list" => DvKind::List,
+            "whole" => DvKind::Whole,
+            "decimal" => DvKind::Decimal,
+            "date" => DvKind::Date,
+            "time" => DvKind::Time,
+            "textLength" => DvKind::TextLength,
+            "custom" => DvKind::Custom,
+            _ => DvKind::None,
+        }
+    }
+}
+
+/// How a validation compares its operands — OOXML `dataValidation/@operator`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DvOperator {
+    /// Within `[formula1, formula2]` — the OOXML default.
+    #[default]
+    Between,
+    /// Outside that range.
+    NotBetween,
+    /// Equal to `formula1`.
+    Equal,
+    /// Not equal to it.
+    NotEqual,
+    /// Greater than it.
+    GreaterThan,
+    /// Less than it.
+    LessThan,
+    /// Greater than or equal to it.
+    GreaterThanOrEqual,
+    /// Less than or equal to it.
+    LessThanOrEqual,
+}
+
+impl DvOperator {
+    /// The OOXML `operator` token.
+    pub fn ooxml(&self) -> &'static str {
+        match self {
+            DvOperator::Between => "between",
+            DvOperator::NotBetween => "notBetween",
+            DvOperator::Equal => "equal",
+            DvOperator::NotEqual => "notEqual",
+            DvOperator::GreaterThan => "greaterThan",
+            DvOperator::LessThan => "lessThan",
+            DvOperator::GreaterThanOrEqual => "greaterThanOrEqual",
+            DvOperator::LessThanOrEqual => "lessThanOrEqual",
+        }
+    }
+
+    /// Parse an OOXML `operator` token. Absent means `between`, per the schema.
+    pub fn from_ooxml(token: &str) -> Self {
+        match token {
+            "notBetween" => DvOperator::NotBetween,
+            "equal" => DvOperator::Equal,
+            "notEqual" => DvOperator::NotEqual,
+            "greaterThan" => DvOperator::GreaterThan,
+            "lessThan" => DvOperator::LessThan,
+            "greaterThanOrEqual" => DvOperator::GreaterThanOrEqual,
+            "lessThanOrEqual" => DvOperator::LessThanOrEqual,
+            _ => DvOperator::Between,
+        }
+    }
+}
+
+impl DataValidation {
+    /// A rule over `range` with no constraint — the base every kind builds on.
+    /// `CellRange` has no meaningful default, so this takes one rather than
+    /// deriving `Default` and inventing an A1:A1 that means nothing.
+    pub fn none(range: CellRange) -> Self {
+        Self {
+            range,
+            values: Vec::new(),
+            kind: DvKind::None,
+            operator: DvOperator::Between,
+            formula1: String::new(),
+            formula2: String::new(),
+            allow_blank: true,
+            error_title: String::new(),
+            error_text: String::new(),
+            prompt_title: String::new(),
+            prompt_text: String::new(),
+        }
+    }
+
+    /// A list rule over `range`, which is what the editor's picker creates.
+    pub fn list(range: CellRange, values: Vec<String>) -> Self {
+        Self {
+            values,
+            kind: DvKind::List,
+            ..Self::none(range)
+        }
+    }
+
+    /// Whether a typed value satisfies this rule, given its numeric reading
+    /// where it has one. `None` means the rule cannot be judged here — a
+    /// `Custom` rule needs the formula engine — and is treated as passing
+    /// rather than blocking input on a rule this layer does not understand.
+    pub fn accepts(&self, text: &str, number: Option<f64>) -> Option<bool> {
+        if text.trim().is_empty() {
+            return Some(self.allow_blank);
+        }
+        match self.kind {
+            DvKind::None => Some(true),
+            DvKind::Custom => None,
+            DvKind::List => Some(self.values.iter().any(|v| v == text.trim())),
+            DvKind::TextLength => {
+                let len = text.chars().count() as f64;
+                Some(self.compare(len))
+            }
+            // Whole/Decimal/Date/Time all compare a number; a date or time is a
+            // serial, so the operand parses the same way.
+            DvKind::Whole => match number {
+                Some(n) if n.fract() == 0.0 => Some(self.compare(n)),
+                Some(_) => Some(false),
+                None => Some(false),
+            },
+            DvKind::Decimal | DvKind::Date | DvKind::Time => match number {
+                Some(n) => Some(self.compare(n)),
+                None => Some(false),
+            },
+        }
+    }
+
+    /// Apply the operator to a value against the rule's operands.
+    fn compare(&self, value: f64) -> bool {
+        let a = self.formula1.trim().parse::<f64>().ok();
+        let b = self.formula2.trim().parse::<f64>().ok();
+        // An unparseable operand cannot be judged, so nothing is rejected on it.
+        let Some(a) = a else { return true };
+        match self.operator {
+            DvOperator::Between => b.is_none_or(|b| value >= a.min(b) && value <= a.max(b)),
+            DvOperator::NotBetween => b.is_none_or(|b| value < a.min(b) || value > a.max(b)),
+            DvOperator::Equal => (value - a).abs() < 1e-9,
+            DvOperator::NotEqual => (value - a).abs() >= 1e-9,
+            DvOperator::GreaterThan => value > a,
+            DvOperator::LessThan => value < a,
+            DvOperator::GreaterThanOrEqual => value >= a,
+            DvOperator::LessThanOrEqual => value <= a,
+        }
+    }
 }
 
 impl DataValidation {

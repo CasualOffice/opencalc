@@ -250,9 +250,8 @@ pub struct Worksheet {
     pub hide_headers: bool,
     /// Tab color as `RRGGBB` (from `sheetPr/tabColor/@rgb`), if any.
     pub tab_color: Option<String>,
-    /// List data-validations as `(sqref, formula1)`, where `formula1` is the
-    /// raw inline list text (e.g. `"a,b,c"`) or a range reference (skipped).
-    pub validations: Vec<(String, String)>,
+    /// Data-validations, mapped to the model in `lib.rs`.
+    pub validations: Vec<RawDv>,
     /// Raw conditional-formatting rules, mapped to the model in `lib.rs`.
     pub conditional_formats: Vec<RawCf>,
     /// `<sheetProtection>` attributes exactly as read, or `None` if absent.
@@ -279,6 +278,31 @@ pub struct RawFilterColumn {
     pub custom: Vec<(String, String)>,
     /// `<customFilters and="1">`.
     pub custom_and: bool,
+}
+
+/// A raw `<dataValidation>`, before mapping to the model.
+#[derive(Debug, Default, Clone)]
+pub struct RawDv {
+    /// The `sqref` attribute — a space-separated list of areas.
+    pub sqref: String,
+    /// The `type` attribute; absent means `none`.
+    pub kind: String,
+    /// The `operator` attribute; absent means `between`.
+    pub operator: String,
+    /// `<formula1>` text.
+    pub formula1: String,
+    /// `<formula2>` text.
+    pub formula2: String,
+    /// `allowBlank`; OOXML defaults it to true.
+    pub allow_blank: bool,
+    /// Author-set message wording.
+    pub error_title: String,
+    /// Body of the error message.
+    pub error_text: String,
+    /// Title of the selection hint.
+    pub prompt_title: String,
+    /// Body of that hint.
+    pub prompt_text: String,
 }
 
 /// A raw `<cfRule>` with its enclosing `sqref`, before mapping to the model.
@@ -522,8 +546,9 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
     let mut in_inline = false;
     let mut in_inline_text = false;
     // Active `<dataValidation>` being parsed: (sqref, accumulated formula1).
-    let mut dv: Option<(String, String)> = None;
+    let mut dv: Option<RawDv> = None;
     let mut in_dv_formula1 = false;
+    let mut in_dv_formula2 = false;
     // Active `<conditionalFormatting>` sqref + `<cfRule>` being parsed.
     let mut cf_sqref = String::new();
     let mut cur_cf: Option<RawCf> = None;
@@ -570,13 +595,22 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result, theme)?,
                     b"dataValidation" => {
-                        // Only explicit-list dropdowns are modeled.
-                        if read_attr(&e, b"type")?.as_deref() == Some("list") {
-                            let sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
-                            dv = Some((sqref, String::new()));
-                        }
+                        // Every kind is modelled: dropping the non-list ones is
+                        // how a file's number and date rules used to disappear.
+                        dv = Some(RawDv {
+                            sqref: read_attr(&e, b"sqref")?.unwrap_or_default(),
+                            kind: read_attr(&e, b"type")?.unwrap_or_default(),
+                            operator: read_attr(&e, b"operator")?.unwrap_or_default(),
+                            allow_blank: read_bool_attr(&e, b"allowBlank")?.unwrap_or(false),
+                            error_title: read_attr(&e, b"errorTitle")?.unwrap_or_default(),
+                            error_text: read_attr(&e, b"error")?.unwrap_or_default(),
+                            prompt_title: read_attr(&e, b"promptTitle")?.unwrap_or_default(),
+                            prompt_text: read_attr(&e, b"prompt")?.unwrap_or_default(),
+                            ..RawDv::default()
+                        });
                     }
                     b"formula1" if dv.is_some() => in_dv_formula1 = true,
+                    b"formula2" if dv.is_some() => in_dv_formula2 = true,
                     b"conditionalFormatting" => {
                         cf_sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
                     }
@@ -654,8 +688,10 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                 }
             }
             Event::Text(e) => {
-                if in_dv_formula1 && let Some((_, f1)) = dv.as_mut() {
-                    f1.push_str(&e.unescape().map_err(xml_err)?);
+                if in_dv_formula1 && let Some(raw) = dv.as_mut() {
+                    raw.formula1.push_str(&e.unescape().map_err(xml_err)?);
+                } else if in_dv_formula2 && let Some(raw) = dv.as_mut() {
+                    raw.formula2.push_str(&e.unescape().map_err(xml_err)?);
                 } else if in_cf_formula
                     && let Some(cf) = cur_cf.as_mut()
                     && let Some(last) = cf.formulas.last_mut()
@@ -683,9 +719,10 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"v" => in_value = false,
                     b"f" => in_formula = false,
                     b"formula1" => in_dv_formula1 = false,
+                    b"formula2" => in_dv_formula2 = false,
                     b"dataValidation" => {
-                        if let Some((sqref, f1)) = dv.take() {
-                            result.validations.push((sqref, f1));
+                        if let Some(raw) = dv.take() {
+                            result.validations.push(raw);
                         }
                     }
                     b"formula" => in_cf_formula = false,
