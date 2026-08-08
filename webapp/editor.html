@@ -56,7 +56,16 @@
 
     <!-- Application menu bar (File/Edit/View/… ) — populated by buildMenuBar()
          in editor.js; each item delegates to an existing handler/control. -->
-    <div class="menubar" id="menubar" role="menubar" aria-label="Application menu"></div>
+    <div class="menubar" id="menubar" role="menubar" aria-label="Application menu">
+      <!-- Right-aligned: collapses the app header (branding / status / Open /
+           Settings) to give the grid its 52px back. buildMenuBar() inserts the
+           File…Help buttons before this. -->
+      <button id="hdr-collapse" class="menu-collapse" type="button"
+              title="Hide the page header" aria-label="Hide the page header" aria-expanded="true">
+        <svg viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round" class="mc-caret"><path d="M1.5 5.5L6 1.5l4.5 4"/></svg>
+      </button>
+    </div>
 
     <!-- Lightweight modal used by Help ▸ (shortcuts / about). -->
     <div class="oc-modal" id="oc-modal" hidden>

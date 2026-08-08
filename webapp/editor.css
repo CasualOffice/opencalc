@@ -125,6 +125,8 @@ body {
   background: var(--bg);
   flex: 0 0 auto;
 }
+/* Folded away by the menu bar's caret, handing its 52px to the grid. */
+.app-header.collapsed { display: none; }
 .brand-logo { display: inline-flex; width: 22px; height: 22px; color: var(--accent); flex: 0 0 auto; }
 .brand-logo .icon { width: 100%; height: 100%; }
 .tb-brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; color: var(--fg); text-decoration: none; }
@@ -178,6 +180,21 @@ body {
   height: 30px; padding: 0 8px; flex: 0 0 auto;
   background: var(--bg); border-bottom: 1px solid var(--border);
   -webkit-user-select: none; user-select: none;
+}
+/* Page-header collapse toggle, pinned to the right end of the menu bar. The
+   caret points up while the header is showing (click to fold it away) and
+   flips down once it is hidden. */
+.menu-collapse {
+  margin-left: auto; align-self: center;
+  width: 26px; height: 22px; padding: 0; border: 0; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.menu-collapse:hover { background: var(--surface); color: var(--fg); }
+.menu-collapse .mc-caret { width: 12px; height: 8px; transition: transform 120ms ease; }
+.menu-collapse.collapsed .mc-caret { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .menu-collapse .mc-caret { transition: none; }
 }
 .menu-top {
   border: 0; background: transparent; color: var(--fg);

@@ -468,6 +468,33 @@ function quadClip(row, col, v) {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
+// --- App-header collapse ----------------------------------------------------
+// The header bar (branding, status, Open, Settings) is 52px of chrome that a
+// user working in a large sheet may not want. Collapsing hands that space to
+// the grid; the toggle stays in the menu bar, which is never hidden, so there
+// is always a way back. Remembered across sessions — it is a workspace
+// preference, not a property of the document.
+const HEADER_COLLAPSE_KEY = "oc.headerCollapsed";
+let headerCollapsed = false;
+function setHeaderCollapsed(collapsed) {
+  headerCollapsed = collapsed;
+  const hdr = document.querySelector(".app-header");
+  const btn = document.getElementById("hdr-collapse");
+  // A class, not the `hidden` attribute: `.app-header { display: flex }` is a
+  // stronger rule than the UA's `[hidden] { display: none }`, so the attribute
+  // alone leaves the bar on screen.
+  if (hdr) hdr.classList.toggle("collapsed", collapsed);
+  if (btn) {
+    btn.classList.toggle("collapsed", collapsed);
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    const label = collapsed ? "Show the page header" : "Hide the page header";
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+  try { localStorage.setItem(HEADER_COLLAPSE_KEY, collapsed ? "1" : "0"); } catch {}
+  resize(); // the canvas re-fits into (or out of) the reclaimed space
+}
+
 function resize() {
   const rect = wrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -3816,6 +3843,23 @@ function wireEvents() {
 
   buildMenuBar();
 
+  // The page-header collapse toggle, kept right-most: buildMenuBar() appends
+  // File…Help, so re-append it afterwards rather than relying on markup order.
+  {
+    const btn = document.getElementById("hdr-collapse");
+    const bar = document.getElementById("menubar");
+    if (btn && bar) {
+      bar.appendChild(btn);
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setHeaderCollapsed(!headerCollapsed);
+      });
+      let saved = false;
+      try { saved = localStorage.getItem(HEADER_COLLAPSE_KEY) === "1"; } catch {}
+      if (saved) setHeaderCollapsed(true);
+    }
+  }
+
   window.addEventListener("resize", () => { resize(); reflowToolbar(); });
 
   // ---- Application menu bar (File / Edit / View / …) -----------------------
@@ -3900,9 +3944,12 @@ function wireEvents() {
           ["Unfreeze", clickEl('#freeze-menu [data-fz="none"]')],
         ] },
         ["Gridlines", () => { try { wasm.session_set_gridlines_hidden(state.sheet, gridOn()); } catch {} draw(); }, null, gridOn],
-        ["Headers", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
+        // "Cell markings" = the A/B/C and 1/2/3 strips. Deliberately not called
+        // "headers": that word belongs to the page header this menu bar can
+        // collapse, and having both under one name is a coin-flip every time.
+        ["Cell markings", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
         "sep",
-        ["Settings…", clickEl("#tb-settings")],
+        ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
       ]],
       ["Insert", [
         ["Rows above", () => tryEdit(() => { const r = rng(); wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
@@ -3961,7 +4008,7 @@ function wireEvents() {
         ["Unhide rows/columns", () => tryEdit(() => { const r = rng(); wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); })],
       ]],
       ["Tools", [
-        ["Settings…", clickEl("#tb-settings")],
+        ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
         ["Name manager…", () => openNameManager(160, 120)],
       ]],
       ["Help", [
