@@ -853,3 +853,16 @@ textarea.inline-edit.tinted::selection {
   /* Selection has to stay visible even though the glyphs are transparent. */
   color: transparent; background: var(--sel-tint, rgba(47,109,246,.28));
 }
+
+/* Format Cells dialog: tab strip over stacked pages. */
+.fc-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.fc-tab {
+  padding: 6px 12px; border: 0; background: none; color: var(--muted);
+  font-size: 13px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent;
+}
+.fc-tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.fc-page { min-height: 180px; }
+.fc-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0; }
+.fc-check { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--fg); }
+.fc-borders { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
+.cf-preset.on { outline: 2px solid var(--accent); outline-offset: 1px; }

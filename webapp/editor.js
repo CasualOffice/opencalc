@@ -570,6 +570,15 @@ function drawEdge(spec, x0, y0, x1, y1) {
 // Size + position the custom scrollbar thumbs from the current scroll and the
 // used extent (plus a buffer so you can always scroll a little past the data).
 let scrollMeta = { maxScrollY: 1, maxScrollX: 1, vSpan: 1, hSpan: 1 };
+
+// Hold the scroll inside the content extent. Wheeling or paging past the end
+// used to leave the grid parked in blank space with no way back but scrolling
+// the other way — the thumb had already bottomed out, so it gave no hint that
+// anything had moved.
+function clampScroll() {
+  state.scrollY = Math.max(0, Math.min(state.scrollY, scrollMeta.maxScrollY));
+  state.scrollX = Math.max(0, Math.min(state.scrollX, scrollMeta.maxScrollX));
+}
 function updateScrollbars(v) {
   if (!wasm) return;
   const b = usedBounds();
@@ -1606,6 +1615,17 @@ function select(row, col) {
 // Ctrl/Cmd+click: bank the current range and start a fresh active range at
 // (row, col) without clearing the banked ones — builds a multi-range selection.
 function addRange(row, col) {
+  // Ctrl+clicking a cell that is already selected *removes* it, as in Excel —
+  // otherwise a mis-click into a multi-range selection could only be undone by
+  // starting the whole selection again.
+  const hit = state.ranges.findIndex(
+    (g) => row >= g.r0 && row <= g.r1 && col >= g.c0 && col <= g.c1,
+  );
+  if (hit >= 0) {
+    state.ranges = state.ranges.filter((_, i) => i !== hit);
+    draw();
+    return;
+  }
   state.ranges = state.ranges.concat([effectiveRange()]);
   let r = Math.max(0, row), c = Math.max(0, col);
   const m = mergeAt(r, c);
@@ -2250,6 +2270,187 @@ function manageCfRules() {
   };
   render();
   modal.hidden = false;
+}
+
+// Format Cells (Ctrl+1): the number/font/alignment/fill/border controls in one
+// place. The toolbar has all of these, but scattered — this is the dialog people
+// reach for when they want to set several at once and see them together.
+function formatCellsDialog() {
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Format cells";
+  body.textContent = "";
+
+  let cur = {};
+  try { cur = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col)) || {}; }
+  catch {}
+
+  const tabs = el("div", "fc-tabs");
+  const pages = el("div", "fc-pages");
+  const made = [];
+  const addTab = (name, build) => {
+    const b = el("button", "fc-tab", name);
+    const page = el("div", "fc-page");
+    page.hidden = made.length > 0;
+    if (!made.length) b.classList.add("on");
+    build(page);
+    b.addEventListener("click", () => {
+      for (const [tb, pg] of made) { tb.classList.remove("on"); pg.hidden = true; }
+      b.classList.add("on");
+      page.hidden = false;
+    });
+    tabs.appendChild(b);
+    pages.appendChild(page);
+    made.push([b, page]);
+  };
+
+  // Each page collects its own setter, applied together on OK so the whole
+  // dialog is one visible change rather than a dozen.
+  const pending = [];
+
+  addTab("Number", (page) => {
+    page.append(el("p", "oc-confirm-text", "Format code"));
+    const inp = el("input", "cf-code");
+    inp.value = cur.nf || "";
+    inp.placeholder = "General";
+    inp.spellcheck = false;
+    const preview = el("div", "cf-preview");
+    const render = () => {
+      try { preview.textContent = inp.value.trim() ? wasm.format_preview(1234.567, inp.value.trim()) : "1234.567"; }
+      catch { preview.textContent = "—"; }
+    };
+    inp.addEventListener("input", render);
+    render();
+    const presets = el("div", "cf-presets");
+    for (const [label, code] of [
+      ["General", ""], ["0.00", "0.00"], ["#,##0", "#,##0"], ["0%", "0%"],
+      ["$#,##0.00", "$#,##0.00"], ["yyyy-mm-dd", "yyyy-mm-dd"], ["Text", "@"],
+    ]) {
+      const b = el("button", "cf-preset", label);
+      b.addEventListener("click", () => { inp.value = code; render(); });
+      presets.appendChild(b);
+    }
+    page.append(inp, preview, presets);
+    pending.push((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, inp.value.trim()));
+  });
+
+  addTab("Font", (page) => {
+    const row = el("div", "fc-row");
+    const mk = (label, on) => {
+      const l = el("label", "fc-check");
+      const c = document.createElement("input");
+      c.type = "checkbox";
+      c.checked = !!on;
+      l.append(c, document.createTextNode(" " + label));
+      row.appendChild(l);
+      return c;
+    };
+    const b = mk("Bold", cur.b), i = mk("Italic", cur.i);
+    const u = mk("Underline", cur.u), st = mk("Strikethrough", cur.st);
+    page.append(row);
+    page.append(el("p", "oc-confirm-text", "Size (pt)"));
+    const size = el("input", "panel-field");
+    size.type = "number"; size.min = "1"; size.max = "409";
+    size.value = cur.fs || "";
+    size.placeholder = "default";
+    page.append(size);
+    page.append(el("p", "oc-confirm-text", "Text colour"));
+    const col = document.createElement("input");
+    col.type = "color";
+    col.value = cur.fc ? "#" + cur.fc : "#000000";
+    page.append(col);
+    pending.push((s) => {
+      wasm.session_set_font_flags(
+        state.sheet, s.r0, s.c0, s.r1, s.c1,
+        b.checked, i.checked, u.checked, st.checked);
+      if (size.value) wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, parseFloat(size.value));
+      wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, col.value.replace("#", ""));
+    });
+  });
+
+  addTab("Alignment", (page) => {
+    page.append(el("p", "oc-confirm-text", "Horizontal"));
+    const h = el("select", "panel-select");
+    for (const [v, t] of [["", "General"], ["left", "Left"], ["center", "Center"], ["right", "Right"],
+                          ["fill", "Fill"], ["justify", "Justify"],
+                          ["centerContinuous", "Center across selection"], ["distributed", "Distributed"]]) {
+      const o = el("option", null, t); o.value = v; h.appendChild(o);
+    }
+    h.value = cur.al || "";
+    const v = el("select", "panel-select");
+    for (const [val, t] of [["", "Default"], ["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"],
+                            ["justify", "Justify"], ["distributed", "Distributed"]]) {
+      const o = el("option", null, t); o.value = val; v.appendChild(o);
+    }
+    v.value = { t: "top", m: "middle", b: "bottom", vj: "justify", vd: "distributed" }[cur.va] || "";
+    const wrapL = el("label", "fc-check");
+    const wrapC = document.createElement("input");
+    wrapC.type = "checkbox"; wrapC.checked = !!cur.w;
+    wrapL.append(wrapC, document.createTextNode(" Wrap text"));
+    page.append(el("p", "oc-confirm-text", "Horizontal"), h,
+                el("p", "oc-confirm-text", "Vertical"), v, wrapL);
+    pending.push((s) => {
+      wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, h.value);
+      wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, v.value);
+      wasm.session_set_text_overflow(state.sheet, s.r0, s.c0, s.r1, s.c1, wrapC.checked ? "wrap" : "overflow");
+    });
+  });
+
+  addTab("Fill", (page) => {
+    page.append(el("p", "oc-confirm-text", "Background"));
+    const col = document.createElement("input");
+    col.type = "color";
+    col.value = cur.bg ? "#" + cur.bg : "#ffffff";
+    const none = el("button", "cf-preset", "No fill");
+    let cleared = false;
+    none.addEventListener("click", () => { cleared = true; none.classList.add("on"); });
+    col.addEventListener("input", () => { cleared = false; none.classList.remove("on"); });
+    page.append(col, none);
+    pending.push((s) =>
+      wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, cleared ? "" : col.value.replace("#", "")));
+  });
+
+  addTab("Border", (page) => {
+    page.append(el("p", "oc-confirm-text", "Placement"));
+    const grid = el("div", "fc-borders");
+    let chosen = null;
+    for (const kind of ["all", "outer", "inner", "top", "bottom", "left", "right",
+                        "topandbottom", "bottomdouble", "diagdown", "diagup", "none"]) {
+      const b = el("button", "cf-preset", BD_TITLES[kind] || kind);
+      b.addEventListener("click", () => {
+        chosen = kind;
+        grid.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+      });
+      grid.appendChild(b);
+    }
+    page.append(grid);
+    page.append(el("div", "panel-hint", "Uses the line style and colour from the toolbar's border palette."));
+    pending.push((s) => {
+      if (chosen) wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, chosen, borderStyle, borderColor);
+    });
+  });
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Apply");
+  actions.append(cancel, ok);
+  body.append(tabs, pages, actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  ok.addEventListener("click", () => {
+    const s = effectiveRange();
+    close();
+    canvas.focus();
+    // One try around the lot: a failure part-way through should report once, not
+    // once per tab.
+    try { for (const apply of pending) apply(s); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+  });
+  ok.focus();
 }
 
 // The named cell-style gallery. Applying one writes its formatting *and*
@@ -5103,6 +5304,17 @@ function cellMenu(x, y) {
     [`${colName(state.sel.col)} Z → A`, false, () => sortRange(true)],
     ["Custom sort…", false, () => sortDialog()],
   ]);
+  sep();
+  // The things you reach for *from a cell* — previously only on the toolbar or
+  // the menu bar, which is a long way to go for something the right-click is
+  // already asking about.
+  item("Format cells…", false, () => formatCellsDialog());
+  item("Insert note", false, () => togglePanel("note"));
+  item("Define name…", false, () => {
+    const r = canvas.getBoundingClientRect();
+    openNameManager(r.left + 120, r.top + 90);
+  });
+  item("Filter", false, () => toggleFilter());
   positionMenu(menu, x, y);
 }
 
@@ -5566,6 +5778,22 @@ function wireEvents() {
   };
   vthumb.addEventListener("mousedown", startThumb("v", vthumb));
   hthumb.addEventListener("mousedown", startThumb("h", hthumb));
+  // Clicking the track pages toward the click — a viewport at a time, the way
+  // every other scrollbar behaves. Without it the track was inert and the only
+  // way to move a long way was to drag the thumb precisely.
+  const pageFromTrack = (axis, track, thumb) => (e) => {
+    if (e.target !== track) return; // the thumb handles its own drag
+    const v = { w: wrap.clientWidth / state.zoom, h: wrap.clientHeight / state.zoom };
+    const page = axis === "v" ? Math.max(1, v.h - HH) : Math.max(1, v.w - HW);
+    const r = thumb.getBoundingClientRect();
+    const before = axis === "v" ? e.clientY < r.top : e.clientX < r.left;
+    if (axis === "v") state.scrollY = Math.max(0, state.scrollY + (before ? -page : page));
+    else state.scrollX = Math.max(0, state.scrollX + (before ? -page : page));
+    clampScroll();
+    draw();
+  };
+  vscroll.addEventListener("mousedown", pageFromTrack("v", vscroll, vthumb));
+  hscroll.addEventListener("mousedown", pageFromTrack("h", hscroll, hthumb));
   window.addEventListener("mousemove", (e) => {
     if (!sbDrag) return;
     if (sbDrag.axis === "v") {
@@ -5654,8 +5882,15 @@ function wireEvents() {
       // Fluid pixel scrolling: move the absolute content offset directly, so the
       // grid glides smoothly instead of snapping a whole row/column at a time.
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? wrap.clientHeight : 1;
-      state.scrollY = Math.max(0, state.scrollY + e.deltaY * unit * scrollDamp);
-      state.scrollX = Math.max(0, state.scrollX + e.deltaX * unit * scrollDamp);
+      // Shift turns a vertical wheel horizontal — the convention everywhere, and
+      // the only way to pan sideways on a mouse with one wheel.
+      if (e.shiftKey && e.deltaX === 0) {
+        state.scrollX += e.deltaY * unit * scrollDamp;
+      } else {
+        state.scrollY += e.deltaY * unit * scrollDamp;
+        state.scrollX += e.deltaX * unit * scrollDamp;
+      }
+      clampScroll();
       draw();
     },
     { passive: false },
@@ -5675,6 +5910,15 @@ function wireEvents() {
         if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
         e.preventDefault(); return;
       }
+      // Alt+PageUp/PageDown page sideways (Excel parity); Ctrl pages sheets.
+      if (e.altKey && (e.key === "PageDown" || e.key === "PageUp")) {
+        const v = wrap.clientWidth / state.zoom;
+        state.scrollX += (e.key === "PageDown" ? 1 : -1) * Math.max(1, v - HW);
+        clampScroll();
+        draw();
+        e.preventDefault();
+        return;
+      }
       // Ctrl+PageDown / PageUp switch sheets (Excel parity).
       if (e.key === "PageDown") { const n = JSON.parse(wasm.session_sheet_names()).length; if (state.sheet < n - 1) switchSheet(state.sheet + 1); e.preventDefault(); return; }
       if (e.key === "PageUp") { if (state.sheet > 0) switchSheet(state.sheet - 1); e.preventDefault(); return; }
@@ -5686,6 +5930,9 @@ function wireEvents() {
       if (k === "d" && !e.shiftKey) { fillWithin("down"); e.preventDefault(); return; }
       if (k === "r" && !e.shiftKey) { fillWithin("right"); e.preventDefault(); return; }
       if (k === "0") { setZoom(1); e.preventDefault(); return; }
+      // Ctrl+1 — Format Cells, the shortcut every spreadsheet user already has
+      // in their fingers.
+      if (k === "1" && !e.shiftKey) { formatCellsDialog(); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
@@ -5953,8 +6200,18 @@ function wireEvents() {
     pb.addEventListener("dblclick", () => { armPainter(true); canvas.focus(); });
   }
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
-  document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
-  document.getElementById("tb-comma").addEventListener("click", () => { setNumberFormat("#,##0.00"); canvas.focus(); });
+  // These are toggles, not one-way switches: pressing the button that is already
+  // applied returns the cell to General, which is the only way back without
+  // hunting through the number menu.
+  const toggleFormat = (code) => () => {
+    let current = "";
+    try { current = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col)).nf || ""; }
+    catch {}
+    setNumberFormat(current === code ? "" : code);
+    canvas.focus();
+  };
+  document.getElementById("tb-percent").addEventListener("click", toggleFormat("0%"));
+  document.getElementById("tb-comma").addEventListener("click", toggleFormat("#,##0.00"));
   document.getElementById("tb-inc-dec").addEventListener("click", () => { adjustDecimals(1); canvas.focus(); });
   document.getElementById("tb-dec-dec").addEventListener("click", () => { adjustDecimals(-1); canvas.focus(); });
   for (const b of document.querySelectorAll(".tb-align")) {
@@ -6258,6 +6515,15 @@ function wireEvents() {
       catch { return false; }
     };
     const gridOn = () => { try { return !wasm.session_gridlines_hidden(state.sheet); } catch { return true; } };
+    // The active cell's number format and alignment, for the submenu ticks — a
+    // menu that never shows what is already applied makes you guess.
+    const curFmt = (key) => {
+      try { return JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col))[key] || ""; }
+      catch { return ""; }
+    };
+    const nfIs = (code) => () => curFmt("nf") === code;
+    const alIs = (token) => () => curFmt("al") === token;
+    const vaIs = (token) => () => curFmt("va") === token;
     const headersOn = () => { try { return !wasm.session_headers_hidden(state.sheet); } catch { return true; } };
     const clearContents = () => {
       try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
@@ -6365,9 +6631,9 @@ function wireEvents() {
           ["Clear trace arrows", () => clearTrace()],
         ] },
         { sub: "Alignment", items: [
-          ["Left", () => setAlign("left")],
-          ["Center", () => setAlign("center")],
-          ["Right", () => setAlign("right")],
+          ["Left", () => setAlign("left"), null, alIs("left")],
+          ["Center", () => setAlign("center"), null, alIs("center")],
+          ["Right", () => setAlign("right"), null, alIs("right")],
           // The OOXML modes that are more than an edge. `centerContinuous` is
           // Excel's "Center Across Selection" — it looks merged but merges
           // nothing, so the cells underneath stay addressable.
@@ -6377,9 +6643,9 @@ function wireEvents() {
           ["Distributed", () => setAlign("distributed")],
           ["Clear (General)", () => setAlign("")],
           "sep",
-          ["Top", () => setValign("top")],
-          ["Middle", () => setValign("middle")],
-          ["Bottom", () => setValign("bottom")],
+          ["Top", () => setValign("top"), null, vaIs("t")],
+          ["Middle", () => setValign("middle"), null, vaIs("m")],
+          ["Bottom", () => setValign("bottom"), null, vaIs("b")],
           ["Justify (vertical)", () => setValign("justify")],
           ["Distributed (vertical)", () => setValign("distributed")],
         ] },
@@ -6391,15 +6657,15 @@ function wireEvents() {
         ["Merge cells", clickEl("#tb-merge")],
         "sep",
         { sub: "Number", items: [
-          ["Automatic", nf("")],
-          ["Number (0.00)", nf("0.00")],
-          ["Thousands (#,##0)", nf("#,##0")],
-          ["Percent (0%)", nf("0%")],
-          ["Currency", nf("$#,##0.00")],
-          ["Short date", nf("yyyy-mm-dd")],
-          ["Time", nf("h:mm:ss AM/PM")],
-          ["Scientific", nf("0.00E+00")],
-          ["Text", nf("@")],
+          ["Automatic", nf(""), null, nfIs("")],
+          ["Number (0.00)", nf("0.00"), null, nfIs("0.00")],
+          ["Thousands (#,##0)", nf("#,##0"), null, nfIs("#,##0")],
+          ["Percent (0%)", nf("0%"), null, nfIs("0%")],
+          ["Currency", nf("$#,##0.00"), null, nfIs("$#,##0.00")],
+          ["Short date", nf("yyyy-mm-dd"), null, nfIs("yyyy-mm-dd")],
+          ["Time", nf("h:mm:ss AM/PM"), null, nfIs("h:mm:ss AM/PM")],
+          ["Scientific", nf("0.00E+00"), null, nfIs("0.00E+00")],
+          ["Text", nf("@"), null, nfIs("@")],
         ] },
         ["Custom number format…", () => customFormatDialog()],
         ["Conditional formatting…", clickEl("#tb-cf")],

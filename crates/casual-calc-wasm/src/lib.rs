@@ -3421,6 +3421,32 @@ fn sort_reanchor(expr: &Expr, dr: i64, src_row: u32, c0: u32, c1: u32) -> Expr {
     }
 }
 
+/// Set the four font flags explicitly across a range (one undo step).
+///
+/// The toolbar toggles are relative — they flip whatever the range currently is
+/// — which a dialog cannot use: it shows checkboxes with definite states and has
+/// to be able to apply them as such.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_set_font_flags(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+) -> Result<(), JsError> {
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.bold = bold;
+        st.italic = italic;
+        st.underline = underline;
+        st.strike = strike;
+    })
+}
+
 /// Toggle strikethrough across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_toggle_strike(
