@@ -233,6 +233,12 @@ fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
         BinaryOp::Power => a.powf(b),
         _ => unreachable!("non-arithmetic op"),
     };
+    // Overflow (e.g. 1e308*10) or an undefined result (e.g. (-1)^0.5) yields a
+    // non-finite float, which Excel reports as #NUM! and which must never be
+    // stored — `<v>inf</v>` is not a valid xlsx number.
+    if !result.is_finite() {
+        return Value::Error(ErrorValue::Num);
+    }
     Value::Number(result)
 }
 

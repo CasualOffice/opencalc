@@ -19,8 +19,8 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, HAlign, Sheet,
-    SheetId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, ErrorValue, HAlign,
+    Sheet, SheetId, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -857,11 +857,20 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
         .unwrap_or_default();
 
     let has_formula = cell.formula.is_some();
+    // A non-finite number (inf/NaN — e.g. arithmetic overflow, or a `1e999`
+    // literal) is not a valid OOXML numeric literal and would emit `<v>inf</v>`,
+    // corrupting the file. Treat it as a #NUM! error cell for both the type
+    // attribute and the value below.
+    let num_error = CellValue::Error(ErrorValue::Num);
+    let effective_value = match &cell.value {
+        CellValue::Number(n) if !n.is_finite() => &num_error,
+        other => other,
+    };
     // A formula cell whose cached result is a string is a `str` type with the
     // text in `<v>` — OOXML does not allow `<is>`/shared-string on a formula
     // cell (Excel would drop the formula or repair the file). Only a *literal*
     // inline string (no formula) uses `t="inlineStr"` with `<is>`.
-    let type_attr = match &cell.value {
+    let type_attr = match effective_value {
         CellValue::Bool(_) => " t=\"b\"",
         CellValue::Error(_) => " t=\"e\"",
         CellValue::SharedString(_) if has_formula => " t=\"str\"",
@@ -879,7 +888,7 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
         s.push_str(&format!("<f>{}</f>", escape_text(&expr.to_string())));
     }
 
-    match &cell.value {
+    match effective_value {
         CellValue::Empty => {}
         CellValue::Number(n) => s.push_str(&format!("<v>{n}</v>")),
         CellValue::Bool(b) => s.push_str(&format!("<v>{}</v>", if *b { 1 } else { 0 })),

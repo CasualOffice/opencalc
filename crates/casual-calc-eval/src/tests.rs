@@ -225,6 +225,20 @@ fn countif_with_comparison() {
 }
 
 #[test]
+fn non_finite_arithmetic_is_num_error() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "1E308*10") // overflow to +inf
+        .formula((1, 0), "10^400") // overflow via power
+        .formula((2, 0), "1E308+1E308"); // overflow via add
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 0), CellValue::Error(ErrorValue::Num));
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Error(ErrorValue::Num));
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Error(ErrorValue::Num));
+}
+
+#[test]
 fn countif_sumif_wildcards() {
     let mut b = Builder::new();
     b.text((0, 0), "Apple") // A1
