@@ -110,6 +110,9 @@ function readColors() {
     headerBg: css("--surface") || "#f6f7f9",
     accent: css("--accent") || "#2f6df6",
     sel: css("--sel-tint") || "rgba(47,109,246,.10)",
+    // Distinct from the selection tint: a find hit and the active cell must not
+    // read as the same thing.
+    findHit: css("--find-tint") || "rgba(245,158,11,.28)",
   };
 }
 
@@ -921,6 +924,19 @@ function draw() {
           ctx.restore();
         }
       });
+    }
+  }
+
+  // Find highlights: every match on this sheet gets a soft tint, so "3 of 47"
+  // is answerable by looking at the sheet rather than by stepping through it.
+  // The current match keeps the ordinary selection, which stays distinct.
+  if (findState.matches.length && !findBar.hidden) {
+    ctx.fillStyle = colors.findHit;
+    for (const m of findState.matches) {
+      if (m.s !== undefined && m.s !== state.sheet) continue;
+      const hx = colXAt(m.c), hy = rowYAt(m.r);
+      if (hx === undefined || hy === undefined) continue;
+      withQuad(m.r, m.c, () => ctx.fillRect(hx + 1, hy + 1, colWAt(m.c) - 1, rowHAt(m.r) - 1));
     }
   }
 
@@ -2656,13 +2672,20 @@ const findInput = document.getElementById("find-input");
 const replaceInput = document.getElementById("replace-input");
 const findCount = document.getElementById("find-count");
 const findCase = document.getElementById("find-case");
+const findWhole = document.getElementById("find-whole");
+const findValues = document.getElementById("find-values");
+const findAllSheets = document.getElementById("find-all-sheets");
 const findState = { matches: [], idx: -1 };
 
 function openFind() { findBar.hidden = false; findInput.focus(); findInput.select(); runFind(); }
 function closeFind() { findBar.hidden = true; canvas.focus(); }
 function runFind() {
   const q = findInput.value;
-  findState.matches = q ? JSON.parse(wasm.session_find(state.sheet, q, findCase.checked)) : [];
+  findState.matches = q
+    ? JSON.parse(wasm.session_find_opts(
+        state.sheet, q, findCase.checked,
+        findWhole.checked, findValues.checked, findAllSheets.checked))
+    : [];
   findState.idx = findState.matches.length ? 0 : -1;
   if (findState.idx >= 0) gotoMatch();
   else { findCount.textContent = q ? "0" : ""; draw(); }
@@ -2670,6 +2693,9 @@ function runFind() {
 function gotoMatch() {
   const m = findState.matches[findState.idx];
   if (!m) return;
+  // A whole-workbook search can land on another sheet; follow it there rather
+  // than reporting a hit the user cannot see.
+  if (m.s !== undefined && m.s !== state.sheet) switchSheet(m.s);
   select(m.r, m.c);
   findCount.textContent = `${findState.idx + 1}/${findState.matches.length}`;
 }
@@ -4362,7 +4388,9 @@ function wireEvents() {
     else if (e.key === "Escape") { closeFind(); e.preventDefault(); }
   });
   replaceInput.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFind(); });
-  findCase.addEventListener("change", runFind);
+  for (const box of [findCase, findWhole, findValues, findAllSheets]) {
+    box.addEventListener("change", runFind);
+  }
   document.getElementById("find-next").addEventListener("click", () => findStep(1));
   document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
   document.getElementById("replace-one").addEventListener("click", replaceOne);

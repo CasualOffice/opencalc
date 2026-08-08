@@ -314,18 +314,64 @@ fn contains_ci(hay: &str, needle: &str, match_case: bool) -> bool {
 /// All cells whose display text contains `query`, as JSON `[{r,c}, …]`.
 #[wasm_bindgen]
 pub fn session_find(sheet: usize, query: &str, match_case: bool) -> String {
+    session_find_opts(sheet, query, match_case, false, false, false)
+}
+
+/// Search a sheet — or the whole workbook — with the options a find bar offers.
+///
+/// - `whole_cell`: the cell must equal the query, not merely contain it.
+/// - `in_values`: match what the cell *displays* (Excel's "Values" look-in)
+///   rather than what you would type into it. The difference matters: a
+///   formula's text is `=B2*C2` while its value is `13.5`, and only one of
+///   those is what the user can see.
+/// - `all_sheets`: search every sheet, tagging each hit with its sheet index.
+#[wasm_bindgen]
+pub fn session_find_opts(
+    sheet: usize,
+    query: &str,
+    match_case: bool,
+    whole_cell: bool,
+    in_values: bool,
+    all_sheets: bool,
+) -> String {
     with_session(|s| {
         let wb = s.workbook();
-        let Some(sh) = wb.sheets.get(sheet) else {
-            return "[]".to_owned();
-        };
         if query.is_empty() {
             return "[]".to_owned();
         }
+        let sheets: Vec<usize> = if all_sheets {
+            (0..wb.sheets.len()).collect()
+        } else {
+            vec![sheet]
+        };
+        let matches = |haystack: &str| {
+            if whole_cell {
+                if match_case {
+                    haystack == query
+                } else {
+                    haystack.eq_ignore_ascii_case(query)
+                }
+            } else {
+                contains_ci(haystack, query, match_case)
+            }
+        };
         let mut hits = Vec::new();
-        for (at, cell) in sh.cells.iter() {
-            if contains_ci(&cell_input_text(wb, cell), query, match_case) {
-                hits.push(format!("{{\"r\":{},\"c\":{}}}", at.row, at.col));
+        for idx in sheets {
+            let Some(sh) = wb.sheets.get(idx) else {
+                continue;
+            };
+            for (at, cell) in sh.cells.iter() {
+                let haystack = if in_values {
+                    display_text(wb, cell)
+                } else {
+                    cell_input_text(wb, cell)
+                };
+                if matches(&haystack) {
+                    hits.push(format!(
+                        "{{\"r\":{},\"c\":{},\"s\":{}}}",
+                        at.row, at.col, idx
+                    ));
+                }
             }
         }
         format!("[{}]", hits.join(","))

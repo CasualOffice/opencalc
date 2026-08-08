@@ -47,6 +47,7 @@
   --accent-hover: #1f56cf;
   --accent-ink: #ffffff;
   --sel-tint: rgba(47, 109, 246, .10);
+  --find-tint: rgba(245, 158, 11, .28);
   --ok: #16a34a;
   --shadow-btn: 0 1px 2px rgba(11, 13, 18, .08);
   --shadow-pop: 0 1px 2px rgba(11, 13, 18, .06), 0 14px 34px rgba(11, 13, 18, .14);
@@ -73,6 +74,7 @@
   --accent-hover: #7aa0ff;
   --accent-ink: #0b0d12;
   --sel-tint: rgba(91, 139, 255, .16);
+  --find-tint: rgba(245, 158, 11, .34);
   --shadow-btn: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-pop: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
 }
@@ -94,6 +96,7 @@
     --accent-hover: #7aa0ff;
     --accent-ink: #0b0d12;
     --sel-tint: rgba(91, 139, 255, .16);
+  --find-tint: rgba(245, 158, 11, .34);
     --shadow-btn: 0 1px 2px rgba(0, 0, 0, .4);
     --shadow-pop: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
   }
