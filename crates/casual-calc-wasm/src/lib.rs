@@ -1516,6 +1516,32 @@ pub fn font_families() -> String {
     format!("[{}]", items.join(","))
 }
 
+/// The cell references inside formula text, as JSON
+/// `[{s,e,r0,c0,r1,c1,sh?}, …]` — the character span of each reference plus the
+/// block it covers, in the order they appear. Drives the editor's range finder
+/// (colored outlines on the grid while a formula is being edited).
+///
+/// Shared with the parser rather than re-derived in the host: whether a name is
+/// a reference or a function call, and what counts as inside a string literal,
+/// must be the engine's answer.
+#[wasm_bindgen]
+pub fn formula_ref_spans(text: &str) -> String {
+    let items: Vec<String> = casual_calc_formula::reference_spans(text)
+        .into_iter()
+        .map(|r| {
+            let sheet = r
+                .sheet
+                .map(|s| format!(",\"sh\":{}", json_string(&s)))
+                .unwrap_or_default();
+            format!(
+                "{{\"s\":{},\"e\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}{sheet}}}",
+                r.start, r.end, r.row0, r.col0, r.row1, r.col1
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 /// The editable input for a cell (formula text with `=`, or the raw value).
 #[wasm_bindgen]
 pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {

@@ -74,11 +74,11 @@ each audit; this file is the durable backlog.
 | ID | Item | Domain | Status | Fix |
 |----|------|--------|--------|-----|
 | UX-F02 | Arg/signature tooltip inside `()` with active arg bolded, persists | Formula | 🔴 | Caret-anchored tooltip; comma-count active arg; catalog `sig` already present |
-| UX-F03 | Colored reference highlighting (formula tokens + on-grid range-finder boxes) | Formula | 🔴 | WASM ref-span parse; overlay for tokens; stroke colored rects in `draw()` |
+| UX-F03 | Colored reference highlighting (formula tokens + on-grid range-finder boxes) | Formula | 🟡 | **On-grid boxes done**: `formula_ref_spans()` (engine-side scanner, so a function name is never mistaken for a reference and string literals are skipped) drives one coloured outline per reference in `draw()`, clipped per pane. **Remaining**: tinting the reference *tokens inside the text* to match, which needs an overlay behind the input since a plain `<input>` cannot colour a substring |
 | UX-F04 | Cross-sheet reference picking (click another sheet's cells mid-formula) | Formula | 🔴 | Sheet-tab click during edit → point mode, insert `Sheet!ref`, restore on commit |
 | UX-F05 | F4 anchor cycling ($A$1→A$1→$A1→A1) | Formula | 🔴 | F4 handler rewrites the ref token under caret |
 | UX-F06 | Keyboard point mode (arrows insert/extend a ref while editing) | Formula | 🔴 | Arrow in edit mode starts/extends `formulaRefDrag` via `insertRef` |
-| UX-F07 | Editing an existing formula re-highlights its refs | Formula | 🔴 | On `startInline` of `=`-value run the UX-F03 path |
+| UX-F07 | Editing an existing formula re-highlights its refs | Formula | ✅ | `beginEdit` runs the range finder, so F2 on a stored formula outlines its inputs immediately — from either surface |
 | UX-F08 | Error affordances: per-cell error corner marker + hover explanation + trace precedents/dependents | Formula | 🔴 | Mark error cells in `draw()`; reuse comment-tip; expose dep graph |
 | UX-E02 | Formula bar second-class: no Esc-revert, no autocomplete, no ref insert, Enter doesn't advance | Editing | ✅ | All four closed by UX-F01: Escape restores the cell's text, autocomplete and reference insert work from the bar, Enter commits and moves down, Tab commits and moves right, an invalid formula outlines the bar and keeps focus there |
 | UX-E03 | Find: no highlight-all, match-entire-cell, wildcards/regex, Values look-in, all-sheets scope | Editing | 🔴 | Overlay match set; flags on `session_find`; Values via `display_text`; workbook scope |

@@ -820,6 +820,22 @@ function draw() {
     }
   }
 
+  // Range finder: while a formula is being edited, outline each block it
+  // references, one colour per reference, matching the order they appear in the
+  // text. Drawn under the selection so the active cell still reads as active.
+  // A reference to another sheet is not outlined here — it is not on screen.
+  if (refSpans.length) {
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
+    refSpans.forEach((r, i) => {
+      if (r.sh) return;
+      const rx = spanX(r.c0, r.c1, v), ry = spanY(r.r0, r.r1, v);
+      if (rx.w <= 0 || ry.h <= 0) return;
+      ctx.strokeStyle = REF_COLORS[i % REF_COLORS.length];
+      perQuad(() => ctx.strokeRect(rx.x + 0.75, ry.y + 0.75, rx.w - 1.5, ry.h - 1.5));
+    });
+  }
+
   // Range border (multi-cell selections only) + focus-cell border. A single-cell
   // selection is drawn solely by the focus border below, which spans a merge —
   // otherwise this would stroke a box around just the merge's anchor cell,
@@ -2275,6 +2291,7 @@ let editOriginal = "";
 function beginEdit(surface, initial) {
   editSurface = surface;
   state.editing = true;
+  refSpans = [];
   editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   if (surface === inline) {
     inline.style.display = "block";
@@ -2286,6 +2303,9 @@ function beginEdit(surface, initial) {
   // Typing a character starts a fresh value; opening the editor selects what is
   // already there so the next keystroke replaces it.
   if (initial === undefined) surface.select();
+  // Opening an existing formula highlights the cells it reads straight away,
+  // rather than waiting for the first keystroke.
+  updateRefSpans();
 }
 
 function startInline(initial) {
@@ -2298,17 +2318,46 @@ function endEdit(refocus = true) {
   const was = editSurface;
   editSurface = null;
   state.editing = false;
+  // The range-finder outlines are painted into the canvas, so dropping them
+  // needs a repaint — otherwise they linger over the grid after the edit ends.
+  const hadSpans = refSpans.length > 0;
+  refSpans = [];
   inline.style.display = "none";
   hideAutocomplete();
   formulaRefDrag = null;
   inline.classList.remove("invalid");
   fInput.classList.remove("invalid");
   if (refocus && was) canvas.focus();
+  if (hadSpans) draw();
 }
 // Kept as the name the rest of the editor already calls.
 function endInline() {
   endEdit();
 }
+// --- Range finder -----------------------------------------------------------
+// While a formula is being edited, each reference in it gets a colored outline
+// on the grid, so "which cells does this formula actually read?" is answerable
+// by looking rather than by parsing the text in your head. The spans come from
+// the engine's scanner, so a function name is never mistaken for a reference.
+let refSpans = []; // [{s,e,r0,c0,r1,c1,sh}] for the formula being edited
+// Excel/Sheets use a small rotating palette, one color per distinct reference.
+const REF_COLORS = ["#1a73e8", "#e37400", "#0f9d58", "#a142f4", "#d93025", "#12b5cb"];
+
+function updateRefSpans() {
+  const text = editSurface ? editSurface.value : "";
+  const next = text.startsWith("=") && wasm
+    ? (() => { try { return JSON.parse(wasm.formula_ref_spans(text)); } catch { return []; } })()
+    : [];
+  // Only repaint when the set actually changed — this runs on every keystroke.
+  const same = next.length === refSpans.length &&
+    next.every((r, i) => {
+      const p = refSpans[i];
+      return p && r.r0 === p.r0 && r.c0 === p.c0 && r.r1 === p.r1 && r.c1 === p.c1 && r.sh === p.sh;
+    });
+  refSpans = next;
+  if (!same) draw();
+}
+
 // Excel shows the in-progress text on both surfaces at once. Mirror the one
 // being typed in onto the other — never the reverse, or the two carets fight.
 function mirrorEdit() {
@@ -2535,6 +2584,7 @@ function insertRef(text) {
   if (formulaRefDrag) formulaRefDrag.end = caret;
   else editSurface.setSelectionRange(caret, caret);
   mirrorEdit();
+  updateRefSpans();
 }
 
 const tabsEl = document.getElementById("sheet-tabs");
@@ -3267,6 +3317,7 @@ function wireEvents() {
       surface.classList.remove("invalid");
       mirrorEdit();
       showAutocomplete();
+      updateRefSpans();
     });
     surface.addEventListener("keydown", (e) => {
       // Autocomplete navigation takes priority when its menu is open.
