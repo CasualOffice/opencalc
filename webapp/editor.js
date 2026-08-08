@@ -3215,6 +3215,99 @@ function cellMenu(x, y) {
   positionMenu(menu, x, y);
 }
 
+// Ask for a row height / column width in pixels, seeded with the current one.
+// A plain prompt rather than a styled modal: it is a single number, and the
+// alternative was no way to set an exact size at all.
+function sizeDialog(axis, index) {
+  const isCol = axis === "col";
+  let current = 0;
+  try {
+    current = isCol
+      ? JSON.parse(wasm.session_col_px(state.sheet, index, 1))[0]
+      : JSON.parse(wasm.session_row_px(state.sheet, index, 1))[0];
+  } catch {}
+  const label = isCol ? `Column ${colName(index)} width (px)` : `Row ${index + 1} height (px)`;
+  const answer = window.prompt(label, String(current || (isCol ? COL_W : ROW_H)));
+  if (answer === null) return;
+  const px = Math.round(parseFloat(answer));
+  if (!Number.isFinite(px) || px < 0) { status.textContent = "not a size"; return; }
+  const r = selRect();
+  tryEdit(() => {
+    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) wasm.session_set_col_width(state.sheet, c, px);
+    else for (let row = r.r0; row <= r.r1; row += 1) wasm.session_set_row_height(state.sheet, row, px);
+  });
+}
+
+// The context menu for a row or column header. Same chrome as the cell menu,
+// but every verb names — and acts on — the band that was right-clicked.
+function headerMenu(axis, x, y) {
+  closeSheetMenu();
+  const isCol = axis === "col";
+  const menu = el("div", "popmenu ctx-menu");
+  menu.id = "sheet-ctx";
+  const item = (label, danger, fn) => {
+    const b = el("button", danger ? "danger" : null, label);
+    b.addEventListener("click", () => { closeSheetMenu(); fn(); });
+    menu.appendChild(b);
+  };
+  const sep = () => menu.appendChild(el("div", "menu-sep"));
+  const span = () => {
+    const r = effectiveRange();
+    return { r, n: isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1 };
+  };
+  const what = isCol ? "column" : "row";
+  const plural = (n) => (n === 1 ? what : `${what}s`);
+
+  item("Cut", false, () => doCut());
+  item("Copy", false, () => doCopy());
+  item("Paste", false, () => doPaste());
+  sep();
+  const { n } = span();
+  item(isCol ? `Insert ${n} ${plural(n)} left` : `Insert ${n} ${plural(n)} above`, false, () => {
+    const { r, n: count } = span();
+    tryEdit(() => (isCol
+      ? wasm.session_insert_columns(state.sheet, r.c0, count)
+      : wasm.session_insert_rows(state.sheet, r.r0, count)));
+  });
+  item(isCol ? `Insert ${n} ${plural(n)} right` : `Insert ${n} ${plural(n)} below`, false, () => {
+    const { r, n: count } = span();
+    tryEdit(() => (isCol
+      ? wasm.session_insert_columns(state.sheet, r.c1 + 1, count)
+      : wasm.session_insert_rows(state.sheet, r.r1 + 1, count)));
+  });
+  item(`Delete ${n} ${plural(n)}`, true, () => {
+    const { r, n: count } = span();
+    tryEdit(() => (isCol
+      ? wasm.session_delete_columns(state.sheet, r.c0, count)
+      : wasm.session_delete_rows(state.sheet, r.r0, count)));
+  });
+  item("Clear contents", false, () => clearSelection());
+  sep();
+  item(isCol ? "Column width…" : "Row height…", false, () => {
+    const r = selRect();
+    sizeDialog(axis, isCol ? r.c0 : r.r0);
+  });
+  item(isCol ? "Autofit width" : "Autofit height", false, () => {
+    const r = selRect();
+    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) autofitColumn(c);
+    else for (let row = r.r0; row <= r.r1; row += 1) autofitRow(row);
+  });
+  sep();
+  item(`Hide ${plural(n)}`, false, () => {
+    const { r } = span();
+    tryEdit(() => (isCol
+      ? wasm.session_hide_cols(state.sheet, r.c0, r.c1)
+      : wasm.session_hide_rows(state.sheet, r.r0, r.r1)));
+  });
+  item("Unhide", false, () => {
+    const { r } = span();
+    tryEdit(() => (isCol
+      ? wasm.session_unhide_cols(state.sheet, r.c0, r.c1)
+      : wasm.session_unhide_rows(state.sheet, r.r0, r.r1)));
+  });
+  positionMenu(menu, x, y);
+}
+
 // Live-update the drag-fill target box (extends the source in the dominant axis).
 function updateFill(px, py) {
   const hit = cellAt(px, py);
@@ -3490,7 +3583,29 @@ function wireEvents() {
   canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
-    const hit = cellAt(e.clientX - rect.left, e.clientY - rect.top);
+    const px = e.clientX - rect.left, py = e.clientY - rect.top;
+    // A right-click in a header targets that row or column. cellAt() returns
+    // null over the header strips, so this used to fall through and open the
+    // cell menu against whatever was selected *before* — every verb in it then
+    // acted on the wrong target, including Delete.
+    if (HH && py < HH && px >= HW) {
+      const col = colAtX(px);
+      const r = selRect();
+      const covered = state.selKind === "cols" && col >= r.c0 && col <= r.c1;
+      if (!covered) selectColumn(col, false);
+      headerMenu("col", e.clientX, e.clientY);
+      return;
+    }
+    if (HW && px < HW && py >= HH) {
+      const row = rowAtY(py);
+      const r = selRect();
+      const covered = state.selKind === "rows" && row >= r.r0 && row <= r.r1;
+      if (!covered) selectRow(row, false);
+      headerMenu("row", e.clientX, e.clientY);
+      return;
+    }
+    if (HW && HH && px < HW && py < HH) { selectAll(); cellMenu(e.clientX, e.clientY); return; }
+    const hit = cellAt(px, py);
     if (hit && state.selKind === "cells") {
       const r = selRect();
       const inside = hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1;
