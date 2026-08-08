@@ -247,6 +247,15 @@ body {
 .oc-btn:hover { border-color: var(--border-hover); }
 .oc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .oc-btn.primary:hover { filter: brightness(1.06); }
+/* Sort dialog: a header checkbox and up to three "sort by / then by" rows. */
+.sort-head { display: flex; align-items: center; gap: 7px; margin: 0 0 12px; cursor: pointer; }
+.sort-keys { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.sort-key { display: grid; grid-template-columns: 64px 1fr 110px; align-items: center; gap: 8px; }
+.sort-lbl { color: var(--muted); font-size: 12.5px; }
+.sort-key select {
+  height: 30px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; min-width: 0;
+}
 .oc-modal-body kbd {
   font: 11.5px var(--mono); background: var(--surface); border: 1px solid var(--border);
   border-radius: 5px; padding: 1px 6px;

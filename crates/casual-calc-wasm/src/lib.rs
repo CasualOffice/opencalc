@@ -2173,6 +2173,29 @@ pub fn session_sort_range(
     key_col: u32,
     ascending: bool,
 ) -> Result<(), JsError> {
+    session_sort_range_multi(sheet, r0, c0, r1, c1, vec![key_col], vec![u8::from(ascending)])
+}
+
+/// Sort a range by up to several key columns, each with its own direction.
+///
+/// `key_cols[i]` is compared before `key_cols[i + 1]`, so later keys only break
+/// ties in the earlier ones — the "then by" of a sort dialog. `ascending[i]` is
+/// 0 or 1 for the matching key. Callers exclude a header row by passing `r0`
+/// one below it; this deliberately knows nothing about headers, because whether
+/// the first row is one is a question about the *sheet*, not the sort.
+#[wasm_bindgen]
+pub fn session_sort_range_multi(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    key_cols: Vec<u32>,
+    ascending: Vec<u8>,
+) -> Result<(), JsError> {
+    if key_cols.is_empty() || r1 <= r0 {
+        return Ok(());
+    }
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -2185,7 +2208,8 @@ pub fn session_sort_range(
         }
         struct Row {
             src_row: u32,
-            key: (u8, f64, String),
+            /// One sort key per key column, in `key_cols` order.
+            keys: Vec<(u8, f64, String)>,
             blank: bool,
             cells: Vec<Option<RowCell>>,
         }
@@ -2193,12 +2217,9 @@ pub fn session_sort_range(
         if let Some(sh) = session.workbook().sheets.get(sheet) {
             let wb = session.workbook();
             for r in r0..=r1 {
-                let kv = sh
-                    .cells
-                    .get(CellRef::new(r, key_col))
-                    .map(|c| c.value.clone())
-                    .unwrap_or(CellValue::Empty);
-                let key = match &kv {
+                // Excel's type order: numbers, then text, then errors, then
+                // blanks — so a mixed column sorts predictably.
+                let sort_key = |value: &CellValue| match value {
                     CellValue::Number(n) => (0u8, *n, String::new()),
                     CellValue::Bool(b) => (0, if *b { 1.0 } else { 0.0 }, String::new()),
                     CellValue::SharedString(id) | CellValue::InlineString(id) => (
@@ -2209,6 +2230,15 @@ pub fn session_sort_range(
                     CellValue::Error(_) => (2, 0.0, String::new()),
                     CellValue::Empty => (3, 0.0, String::new()),
                 };
+                let value_at = |col: u32| {
+                    sh.cells
+                        .get(CellRef::new(r, col))
+                        .map(|c| c.value.clone())
+                        .unwrap_or(CellValue::Empty)
+                };
+                let kv = value_at(key_cols[0]);
+                let keys: Vec<(u8, f64, String)> =
+                    key_cols.iter().map(|c| sort_key(&value_at(*c))).collect();
                 let cells = (c0..=c1)
                     .map(|c| {
                         sh.cells.get(CellRef::new(r, c)).map(|cell| RowCell {
@@ -2219,7 +2249,7 @@ pub fn session_sort_range(
                     .collect();
                 rows.push(Row {
                     src_row: r,
-                    key,
+                    keys,
                     blank: kv.is_empty(),
                     cells,
                 });
@@ -2231,13 +2261,23 @@ pub fn session_sort_range(
         // Keep blanks pinned to the end (Excel behavior), sort the rest by key.
         let (mut filled, empties): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| !r.blank);
         filled.sort_by(|a, b| {
-            let ord = a
-                .key
-                .0
-                .cmp(&b.key.0)
-                .then_with(|| a.key.1.partial_cmp(&b.key.1).unwrap_or(Ordering::Equal))
-                .then_with(|| a.key.2.cmp(&b.key.2));
-            if ascending { ord } else { ord.reverse() }
+            // Each key decides only if the ones before it tied, and carries its
+            // own direction — "A→Z by Region, then Z→A by Total".
+            for (i, (ka, kb)) in a.keys.iter().zip(b.keys.iter()).enumerate() {
+                let ord = ka
+                    .0
+                    .cmp(&kb.0)
+                    .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(Ordering::Equal))
+                    .then_with(|| ka.2.cmp(&kb.2));
+                if ord != Ordering::Equal {
+                    return if ascending.get(i).copied().unwrap_or(1) != 0 {
+                        ord
+                    } else {
+                        ord.reverse()
+                    };
+                }
+            }
+            Ordering::Equal
         });
         filled.extend(empties);
 

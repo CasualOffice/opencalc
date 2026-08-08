@@ -1662,20 +1662,144 @@ function setFreeze(kind) {
 // Sort the current selection's rows by the active cell's column. A single-cell
 // selection sorts the whole used data region (rows 1..end, keeping a header row
 // out only if the caller selected a body range). Ascending unless `desc`.
-function sortRange(desc) {
-  let s = effectiveRange();
-  // A lone cell: sort every used row by that column (Excel's "sort this column").
+// The block a sort should act on: the selection, or — for a lone cell — the
+// whole used area, which is Excel's "sort this column" gesture.
+function sortTarget() {
+  const s = effectiveRange();
   if (s.r0 === s.r1 && s.c0 === s.c1) {
     const b = usedBounds();
-    s = { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+    return { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
   }
-  // Key column is the active cell's column, clamped into the range.
+  return s;
+}
+
+// Whether a range's first row looks like column headings, by Excel's rule of
+// thumb: a heading is text sitting over data that is not. Getting this wrong in
+// either direction is destructive — sorting the heading into the middle of the
+// data, or treating the first record as a heading and leaving it behind — so
+// the answer is only ever a *default* for the dialog's checkbox.
+function looksLikeHeader(s) {
+  if (s.r1 <= s.r0) return false;
+  let differs = false;
+  for (let c = s.c0; c <= Math.min(s.c1, s.c0 + 63); c += 1) {
+    let head, below;
+    try {
+      head = JSON.parse(wasm.session_cells(state.sheet, s.r0, c, s.r0, c))[0];
+      below = JSON.parse(wasm.session_cells(state.sheet, s.r0 + 1, c, s.r0 + 1, c))[0];
+    } catch { return false; }
+    const headText = head && head.t && !head.n;
+    const belowNumeric = below && below.n;
+    if (headText && belowNumeric) differs = true;
+    // A number in the heading row is strong evidence it is data, not a heading.
+    if (head && head.n) return false;
+  }
+  return differs;
+}
+
+function sortRange(desc) {
+  const s = sortTarget();
+  const hasHeader = looksLikeHeader(s);
   const key = Math.min(Math.max(state.sel.col, s.c0), s.c1);
+  applySort(s, [{ col: key, asc: !desc }], hasHeader);
+}
+
+// Run a sort, excluding the heading row when there is one.
+function applySort(s, keys, hasHeader) {
+  const first = hasHeader ? s.r0 + 1 : s.r0;
+  if (first >= s.r1) { status.textContent = "nothing to sort"; return; }
   try {
-    wasm.session_sort_range(state.sheet, s.r0, s.c0, s.r1, s.c1, key, !desc);
-    status.textContent = `sorted by ${colName(key)} ${desc ? "Z→A" : "A→Z"}`;
+    wasm.session_sort_range_multi(
+      state.sheet, first, s.c0, s.r1, s.c1,
+      new Uint32Array(keys.map((k) => k.col)),
+      new Uint8Array(keys.map((k) => (k.asc ? 1 : 0))),
+    );
+    const by = keys.map((k) => `${colName(k.col)} ${k.asc ? "A→Z" : "Z→A"}`).join(", then ");
+    status.textContent = `sorted by ${by}${hasHeader ? " (header kept)" : ""}`;
   } catch (e) { status.textContent = `error: ${e}`; }
   draw();
+}
+
+// The Sort dialog: choose up to three keys and say whether row 1 is a heading.
+// The single-click A→Z / Z→A menu items stay for the common case; this is for
+// when "sort by region, then by total descending" is what you actually meant.
+function sortDialog() {
+  const s = sortTarget();
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Sort range";
+  body.textContent = "";
+
+  const where = el("p", "oc-confirm-text",
+    `${colName(s.c0)}${s.r0 + 1}:${colName(s.c1)}${s.r1 + 1} — ${s.r1 - s.r0 + 1} rows`);
+  const headerRow = el("label", "sort-head");
+  const headerBox = document.createElement("input");
+  headerBox.type = "checkbox";
+  headerBox.checked = looksLikeHeader(s);
+  headerRow.append(headerBox, document.createTextNode(" My data has a header row"));
+
+  const keysWrap = el("div", "sort-keys");
+  const cols = [];
+  for (let c = s.c0; c <= s.c1; c += 1) cols.push(c);
+  const headingOf = (c) => {
+    if (!headerBox.checked) return colName(c);
+    try {
+      const it = JSON.parse(wasm.session_cells(state.sheet, s.r0, c, s.r0, c))[0];
+      if (it && it.t) return `${colName(c)} — ${it.t}`;
+    } catch {}
+    return colName(c);
+  };
+  const rows = [];
+  const addKeyRow = (index) => {
+    const row = el("div", "sort-key");
+    row.append(el("span", "sort-lbl", index === 0 ? "Sort by" : "Then by"));
+    const pick = document.createElement("select");
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "—";
+    if (index > 0) pick.appendChild(none);
+    for (const c of cols) {
+      const o = document.createElement("option");
+      o.value = String(c);
+      o.textContent = headingOf(c);
+      pick.appendChild(o);
+    }
+    pick.value = String(index === 0 ? Math.min(Math.max(state.sel.col, s.c0), s.c1) : "");
+    const dir = document.createElement("select");
+    for (const [v, t] of [["asc", "A → Z"], ["desc", "Z → A"]]) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = t;
+      dir.appendChild(o);
+    }
+    row.append(pick, dir);
+    keysWrap.appendChild(row);
+    rows.push({ pick, dir });
+  };
+  [0, 1, 2].forEach(addKeyRow);
+  // Re-label the pickers when the header checkbox flips, so they name the
+  // columns the way the user now thinks of them.
+  headerBox.addEventListener("change", () => {
+    for (const { pick } of rows) {
+      [...pick.options].forEach((o) => { if (o.value !== "") o.textContent = headingOf(+o.value); });
+    }
+  });
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Sort");
+  actions.append(cancel, ok);
+  body.append(where, headerRow, keysWrap, actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", () => {
+    const keys = rows
+      .filter(({ pick }) => pick.value !== "")
+      .map(({ pick, dir }) => ({ col: +pick.value, asc: dir.value === "asc" }));
+    close();
+    canvas.focus();
+    if (keys.length) applySort(s, keys, headerBox.checked);
+  });
+  ok.focus();
 }
 // --- Column filter --------------------------------------------------------
 // A single-column filter that hides rows whose value in the key column is
@@ -3231,6 +3355,7 @@ function cellMenu(x, y) {
   submenu("Sort", [
     [`${colName(state.sel.col)} A → Z`, false, () => sortRange(false)],
     [`${colName(state.sel.col)} Z → A`, false, () => sortRange(true)],
+    ["Custom sort…", false, () => sortDialog()],
   ]);
   positionMenu(menu, x, y);
 }
@@ -3911,7 +4036,8 @@ function wireEvents() {
   initTooltips();
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
-  wirePopup("tb-sort", "sort-menu", (b) => sortRange(b.dataset.sort === "desc"));
+  wirePopup("tb-sort", "sort-menu", (b) =>
+    (b.dataset.sort === "custom" ? sortDialog() : sortRange(b.dataset.sort === "desc")));
   document.getElementById("tb-filter").addEventListener("click", (e) => {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();
@@ -4307,6 +4433,7 @@ function wireEvents() {
         { sub: "Sort range", items: [
           ["A → Z", clickEl('#sort-menu [data-sort="asc"]')],
           ["Z → A", clickEl('#sort-menu [data-sort="desc"]')],
+          ["Custom sort…", () => sortDialog()],
         ] },
         ["Filter", clickEl("#tb-filter")],
         ["Data validation…", clickEl("#tb-dv")],
