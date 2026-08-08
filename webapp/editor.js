@@ -179,7 +179,23 @@ let dragTab = -1; // index of the sheet tab being dragged (reorder)
 // The height a cell needs, or null if it cannot grow its row. Shared by the
 // per-frame measure and the document-wide growth map below — if these two ever
 // disagreed, the drawn rows and the scroll offsets would disagree with them.
+// Measured heights, keyed by everything that can change one. Sheets repeat text
+// heavily — a label column is the same string a thousand times — and measuring
+// each occurrence separately was the bulk of a rebuild. Cleared on zoom, which
+// is the only thing that changes the metrics without changing the key.
+let heightMemo = new Map();
+
 function neededRowHeight(it, colWidth) {
+  const key = `${it.t}\u0000${it.w ? 1 : 0}\u0000${it.rot || 0}\u0000${it.fs || 0}\u0000${it.b ? 1 : 0}\u0000${it.i ? 1 : 0}\u0000${it.fn || ""}\u0000${Math.round(colWidth)}`;
+  const hit = heightMemo.get(key);
+  if (hit !== undefined) return hit;
+  const value = measureRowHeight(it, colWidth);
+  // Bounded so a sheet of entirely distinct strings cannot grow it without end.
+  if (heightMemo.size < 50000) heightMemo.set(key, value);
+  return value;
+}
+
+function measureRowHeight(it, colWidth) {
   // Rotated text needs vertical room, or it is clipped to a 20 px row and the
   // rotation achieves nothing. Height is the text's own length projected onto
   // the vertical axis; stacked text is one glyph per line.
@@ -224,6 +240,9 @@ let growthTotal = 0;
 let growthDirty = true;
 
 function invalidateGrowth() { growthDirty = true; }
+
+// Zoom changes the metrics without changing any memo key, so the memo has to go.
+function clearHeightMemo() { heightMemo = new Map(); }
 
 function rebuildGrowth() {
   growthDirty = false;
@@ -718,6 +737,7 @@ function setZoom(z) {
   if (next === state.zoom) return;
   state.zoom = next;
   // Text is measured in zoom-logical units, so every grown row's height changes.
+  clearHeightMemo();
   invalidateGrowth();
   resize();
   status.textContent = `zoom ${Math.round(next * 100)}%`;
@@ -7586,6 +7606,7 @@ async function main() {
   init = mod.default;
   wasm = mod;
   await init(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`);
+
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();
   readColors();
