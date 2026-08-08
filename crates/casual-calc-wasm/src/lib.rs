@@ -2249,13 +2249,16 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             .and_then(|cell| cell.style)
             .and_then(|id| wb.styles.get(id));
         let mut parts: Vec<String> = Vec::new();
-        // Effective font name / size: the cell's own, else the workbook default.
-        // Always emitted so the toolbar never falls back to a placeholder.
+        // Effective font name / size: the cell's own, else the workbook's
+        // default font (from the imported styles.xml), else Calibri 11. Always
+        // emitted so the toolbar never falls back to a placeholder.
         let font_name = style
             .and_then(|st| st.font_name.clone())
+            .or_else(|| wb.default_font_name.clone())
             .unwrap_or_else(|| DEFAULT_FONT_NAME.to_owned());
         let font_pt = style
             .and_then(|st| st.font_size_hp)
+            .or(wb.default_font_size_hp)
             .map(|hp| hp as f64 / 2.0)
             .unwrap_or(DEFAULT_FONT_PT);
         parts.push(format!("\"fn\":{}", json_string(&font_name)));

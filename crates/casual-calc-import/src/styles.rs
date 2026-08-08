@@ -18,6 +18,10 @@ pub struct StyleSheet {
     /// Differential-format fill color (`RRGGBB`) per `<dxf>`, by dxfId — used by
     /// conditional formatting. `None` if the dxf carries no solid fill.
     pub dxf_fills: Vec<Option<String>>,
+    /// The workbook default font (name + half-point size): `<fonts>` entry 0,
+    /// which OOXML treats as the default. Shown for cells with no explicit font.
+    pub default_font_name: Option<String>,
+    pub default_font_size_hp: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -300,9 +304,15 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
         })
         .collect();
 
+    // `<fonts>` entry 0 is the workbook default font (referenced by the Normal
+    // cell style); surface its name/size so the editor can show the real
+    // effective font for cells that carry no explicit one.
+    let default_font = fonts.first();
     Ok(StyleSheet {
         xf_styles,
         dxf_fills: dxfs,
+        default_font_name: default_font.and_then(|f| f.name.clone()),
+        default_font_size_hp: default_font.and_then(|f| f.size_hp),
     })
 }
 
@@ -359,8 +369,23 @@ fn builtin_number_format(id: u32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod builtin_fmt_tests {
-    use super::{builtin_number_format, resolve_format};
+    use super::{builtin_number_format, parse_styles, resolve_format};
     use std::collections::HashMap;
+
+    #[test]
+    fn captures_workbook_default_font_from_fonts_entry_0() {
+        let xml =
+            br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <fonts count="2">
+                <font><sz val="12"/><name val="Aptos"/></font>
+                <font><b/><sz val="18"/><name val="Arial"/></font>
+            </fonts>
+            <cellXfs count="1"><xf numFmtId="0" fontId="0"/></cellXfs>
+        </styleSheet>"#;
+        let ss = parse_styles(xml).expect("parse");
+        assert_eq!(ss.default_font_name.as_deref(), Some("Aptos"));
+        assert_eq!(ss.default_font_size_hp, Some(24)); // 12pt = 24 half-points
+    }
 
     #[test]
     fn currency_accounting_and_exponential_ids_resolve() {

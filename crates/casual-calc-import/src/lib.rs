@@ -71,6 +71,8 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     } else {
         StyleSheet::default()
     };
+    workbook.default_font_name = stylesheet.default_font_name.clone();
+    workbook.default_font_size_hp = stylesheet.default_font_size_hp;
     let xf_style_ids: Vec<Option<_>> = stylesheet
         .xf_styles
         .iter()

@@ -44,6 +44,14 @@ pub struct Workbook {
     /// Sheets in tab order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<Sheet>,
+    /// The workbook default font name (`<fonts>` entry 0 in `styles.xml`), shown
+    /// for cells that carry no explicit font. `None` for a blank workbook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_font_name: Option<String>,
+    /// The workbook default font size in half-points, paired with
+    /// [`Self::default_font_name`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_font_size_hp: Option<u32>,
 }
 
 impl Workbook {
@@ -57,6 +65,8 @@ impl Workbook {
             formulas: Vec::new(),
             defined_names: Vec::new(),
             sheets: Vec::new(),
+            default_font_name: None,
+            default_font_size_hp: None,
         }
     }
 
