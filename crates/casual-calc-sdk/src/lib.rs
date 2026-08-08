@@ -142,6 +142,16 @@ impl WorkbookSession {
         self.history.can_undo()
     }
 
+    /// What undo would reverse, for a menu label.
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.history.undo_label()
+    }
+
+    /// What redo would reapply.
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.history.redo_label()
+    }
+
     /// Whether an undone edit can be redone.
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()

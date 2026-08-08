@@ -5008,6 +5008,18 @@ fn apply_style_range_pos(
     })
 }
 
+/// What undo would reverse, for a menu label, or empty when there is nothing.
+#[wasm_bindgen]
+pub fn session_undo_label() -> String {
+    with_session(|s| s.undo_label().unwrap_or_default().to_owned()).unwrap_or_default()
+}
+
+/// What redo would reapply, or empty.
+#[wasm_bindgen]
+pub fn session_redo_label() -> String {
+    with_session(|s| s.redo_label().unwrap_or_default().to_owned()).unwrap_or_default()
+}
+
 /// Undo the last edit.
 #[wasm_bindgen]
 pub fn session_undo() -> Result<(), JsError> {

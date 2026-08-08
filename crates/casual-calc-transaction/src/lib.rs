@@ -295,6 +295,33 @@ pub enum Operation {
     Batch(Vec<Operation>),
 }
 
+/// A short, human name for an operation, for undo/redo labels.
+///
+/// Deliberately coarse: a label's job is to say which action is about to be
+/// reversed, not to describe it exactly. Naming the inverse of a delete
+/// "insert" would be accurate and useless.
+fn describe_op(op: &Operation) -> &'static str {
+    match op {
+        Operation::SetCell { .. } | Operation::SetValue { .. } => "cell edit",
+        Operation::ClearCell { .. } => "clear cells",
+        Operation::SetStyle { .. } => "formatting",
+        Operation::SetColumnWidth { .. } => "column width",
+        Operation::SetRowHeight { .. } => "row height",
+        Operation::SetTabColor { .. } => "tab colour",
+        Operation::SetSheetMetadata { .. } => "sheet change",
+        Operation::InsertRows { .. } => "insert rows",
+        Operation::DeleteRows { .. } => "delete rows",
+        Operation::InsertColumns { .. } => "insert columns",
+        Operation::DeleteColumns { .. } => "delete columns",
+        Operation::InsertSheet { .. } => "add sheet",
+        Operation::RemoveSheet { .. } => "remove sheet",
+        Operation::RenameSheet { .. } => "rename sheet",
+        Operation::MoveSheet { .. } => "move sheet",
+        Operation::SetDefinedNames(_) => "defined names",
+        Operation::Batch(ops) => ops.first().map_or("change", describe_op),
+    }
+}
+
 /// Apply `op` to `workbook`, returning the inverse operation.
 ///
 /// A `Batch` is all-or-nothing: if any member fails, the already-applied members
@@ -568,6 +595,20 @@ impl History {
     /// Whether there is anything to redo.
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// A short description of what undo would reverse, for a menu label.
+    ///
+    /// The stack holds *inverses*, so this describes the operation that would be
+    /// applied — which is the right thing to name: "Undo delete rows" is what the
+    /// user is about to get back.
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.undo.last().map(describe_op)
+    }
+
+    /// Likewise for redo.
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.redo.last().map(describe_op)
     }
 
     /// Undo the most recent operation.

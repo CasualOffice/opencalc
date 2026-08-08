@@ -98,6 +98,9 @@ let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
 
 // The normalized selection rectangle (inclusive) from anchor..focus.
 function selRect() {
+  // While Enter/Tab are walking a block, the block is the selection — deriving
+  // it from anchor+sel would shrink it as the active cell moves inside.
+  if (navBlock) return { ...navBlock };
   return {
     r0: Math.min(state.anchor.row, state.sel.row),
     c0: Math.min(state.anchor.col, state.sel.col),
@@ -1574,8 +1577,21 @@ function refreshFormulaBar() {
   if (active === fInput || active === document.getElementById("tb-font") ||
       active === document.getElementById("tb-size")) return;
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
-  document.getElementById("tb-undo").disabled = !wasm.session_can_undo();
-  document.getElementById("tb-redo").disabled = !wasm.session_can_redo();
+  // Name what each will do, rather than leaving "Undo" to mean anything. The
+  // label is the engine's, so it always matches the operation on the stack.
+  for (const [id, can, label, verb, key] of [
+    ["tb-undo", "session_can_undo", "session_undo_label", "Undo", "Ctrl+Z"],
+    ["tb-redo", "session_can_redo", "session_redo_label", "Redo", "Ctrl+Shift+Z"],
+  ]) {
+    const btn = document.getElementById(id);
+    const enabled = wasm[can]();
+    btn.disabled = !enabled;
+    let what = "";
+    try { what = enabled ? wasm[label]() : ""; } catch {}
+    const text = what ? `${verb} ${what} (${key})` : `${verb} (${key})`;
+    btn.title = text;
+    btn.setAttribute("aria-label", text);
+  }
   // Reflect formatting from the selection's top-left (the representative/active
   // cell). For a range/row/column selection state.sel is the *moving end*, which
   // is often an empty corner — reading that left the font/size boxes blank.
@@ -1599,6 +1615,76 @@ function cellAt(px, py) {
   return { row: rowAtY(py), col: colAtX(px) };
 }
 
+// --- Enter / Tab navigation ------------------------------------------------
+//
+// Two Excel behaviours that both need somewhere to remember a little context.
+//
+// Inside a multi-cell selection, Enter and Tab walk *within* the block and wrap
+// at its edges, leaving the selection itself alone. `state.sel` is the active
+// cell everywhere else in this file, and the block is derived from anchor+sel —
+// so moving `sel` would shrink the very selection being walked. `navBlock` holds
+// the block still while `sel` moves inside it; `selRect` prefers it when set.
+//
+// And a run of Tabs remembers the column it started in, so Enter returns there
+// and drops a row — which is what makes tabbing across a record and pressing
+// Enter land at the start of the next one rather than wherever you stopped.
+let navBlock = null;   // {r0,c0,r1,c1} being walked, or null
+let tabOrigin = null;  // column a Tab run began in
+
+// Any selection change by other means ends both runs.
+function resetNavRuns() {
+  navBlock = null;
+  tabOrigin = null;
+}
+
+// The block Enter/Tab should walk, or null for a single cell.
+function navTarget() {
+  if (navBlock) return navBlock;
+  const r = effectiveRange();
+  const multi = r.r1 > r.r0 || r.c1 > r.c0;
+  return multi ? r : null;
+}
+
+// Step the active cell within `b`, wrapping at the edges. `axis` is "row" for
+// Enter (down the column, then to the next column) or "col" for Tab.
+function stepWithin(b, axis, back) {
+  let { row, col } = state.sel;
+  const d = back ? -1 : 1;
+  if (axis === "row") {
+    row += d;
+    if (row > b.r1) { row = b.r0; col = col + 1 > b.c1 ? b.c0 : col + 1; }
+    else if (row < b.r0) { row = b.r1; col = col - 1 < b.c0 ? b.c1 : col - 1; }
+  } else {
+    col += d;
+    if (col > b.c1) { col = b.c0; row = row + 1 > b.r1 ? b.r0 : row + 1; }
+    else if (col < b.c0) { col = b.c1; row = row - 1 < b.r0 ? b.r1 : row - 1; }
+  }
+  state.sel = { row, col };
+  ensureVisible();
+  draw();
+}
+
+// Enter: inside a block, walk it; otherwise return to the Tab run's origin
+// column and drop a row, or just drop a row.
+function enterStep(back) {
+  const b = navTarget();
+  if (b) { navBlock = b; stepWithin(b, "row", back); return; }
+  const col = tabOrigin !== null ? tabOrigin : state.sel.col;
+  tabOrigin = null;
+  select(state.sel.row + (back ? -1 : 1), col);
+}
+
+// Tab: inside a block, walk it; otherwise move sideways, remembering where the
+// run began.
+function tabStep(back) {
+  const b = navTarget();
+  if (b) { navBlock = b; stepWithin(b, "col", back); return; }
+  if (tabOrigin === null) tabOrigin = state.sel.col;
+  const origin = tabOrigin;
+  select(state.sel.row, state.sel.col + (back ? -1 : 1));
+  tabOrigin = origin; // `select` cleared it; this run is still going
+}
+
 function select(row, col) {
   let r = Math.max(0, row);
   let c = Math.max(0, col);
@@ -1608,6 +1694,7 @@ function select(row, col) {
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
   state.ranges = [];
+  resetNavRuns();
   ensureVisible();
   draw();
 }
@@ -1824,7 +1911,9 @@ function commit(value, advance) {
   // Move to the next row on Enter as a fresh single-cell selection (reset the
   // anchor + clear any multi-range, else anchor stays put and paints a ghost
   // 2-cell range).
-  if (advance) select(state.sel.row + 1, state.sel.col);
+  // Enter after an edit obeys the same rules as Enter on the grid: walk the
+  // block if one is being walked, else return to the Tab run's column.
+  if (advance) enterStep(false);
   else { ensureVisible(); draw(); }
   return true;
 }
@@ -4198,7 +4287,7 @@ let editMode = "Enter";
 // away from.
 let editHome = null;
 
-function beginEdit(surface, initial) {
+function beginEdit(surface, initial, caretAtEnd = false) {
   editSurface = surface;
   state.editing = true;
   // Where this edit will be written. Reference picking may walk to another
@@ -4215,16 +4304,20 @@ function beginEdit(surface, initial) {
   else surface.value = editOriginal;
   surface.focus();
   // Typing a character starts a fresh value; opening the editor selects what is
-  // already there so the next keystroke replaces it.
-  if (initial === undefined) surface.select();
+  // already there so the next keystroke replaces it — except under F2, which
+  // exists precisely to *amend* the value, so it puts the caret at the end.
+  if (initial === undefined) {
+    if (caretAtEnd) surface.setSelectionRange(surface.value.length, surface.value.length);
+    else surface.select();
+  }
   // Opening an existing formula highlights the cells it reads straight away,
   // rather than waiting for the first keystroke.
   updateRefSpans();
   updateCellMode();
 }
 
-function startInline(initial) {
-  beginEdit(inline, initial);
+function startInline(initial, caretAtEnd = false) {
+  beginEdit(inline, initial, caretAtEnd);
 }
 
 // End the edit without committing. `refocus` false leaves focus alone — used
@@ -5965,10 +6058,10 @@ function wireEvents() {
     switch (e.key) {
       case "ArrowUp": move(-1, 0); e.preventDefault(); break;
       case "ArrowDown": move(1, 0); e.preventDefault(); break;
-      case "Enter": select(state.sel.row + (e.shiftKey ? -1 : 1), state.sel.col); e.preventDefault(); break;
+      case "Enter": enterStep(e.shiftKey); e.preventDefault(); break;
       case "ArrowLeft": move(0, -1); e.preventDefault(); break;
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
-      case "Tab": select(state.sel.row, state.sel.col + (e.shiftKey ? -1 : 1)); e.preventDefault(); break;
+      case "Tab": tabStep(e.shiftKey); e.preventDefault(); break;
       case "Home": if (e.shiftKey) extend(state.sel.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
       case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.sel.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
@@ -5976,7 +6069,7 @@ function wireEvents() {
       case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
       case "F2": {
         if (e.shiftKey) openPanel("note"); // Shift+F2 → note (Excel parity)
-        else startInline();
+        else startInline(undefined, true);
         e.preventDefault(); break;
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
@@ -6040,7 +6133,26 @@ function wireEvents() {
       }
       else if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
       else if (e.key === "Escape") { cancelEdit(); e.preventDefault(); }
-      else if (e.key === "Tab") { if (commit(surface.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
+      // Excel's "enter mode": while *typing a fresh value*, an arrow commits and
+      // moves. It must not while amending an existing value (the arrows move the
+      // caret) or mid-formula (they pick references), which is what `editMode`
+      // and the leading `=` distinguish.
+      else if (
+        editMode === "Enter" &&
+        !surface.value.trim().startsWith("=") &&
+        ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)
+      ) {
+        if (commit(surface.value, false)) {
+          const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+          select(state.sel.row + d[0], state.sel.col + d[1]);
+        }
+        e.preventDefault();
+      }
+      else if (e.key === "Tab") {
+        // Shift+Tab while editing moves left, which it previously could not.
+        if (commit(surface.value, false)) tabStep(e.shiftKey);
+        e.preventDefault();
+      }
     });
   }
   // Clicking into the formula bar opens an edit on the active cell, so a click
