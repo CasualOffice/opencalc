@@ -2,25 +2,25 @@
 //!
 //! Phase 1D, increment 1: executes a [`DisplayList`] for a viewport onto a
 //! `tiny-skia` pixmap and encodes a PNG. It draws the grid — a white ground,
-//! light gridlines at the visible row/column boundaries, solid cell fills, and
-//! cell border edges — from the display list's paint items, in painter's order.
-//! **Glyph text is not yet rendered** (that needs a bundled font + `skrifa`, the
-//! next increment); each text cell is marked by an inset bar painted in its font
-//! color so geometry, color, and virtualization stay inspectable.
+//! light gridlines at the visible row/column boundaries, solid cell fills, cell
+//! border edges, and **cell text as real glyph outlines** — from the display
+//! list's paint items, in painter's order. Text is drawn by resolving each
+//! cell's font (via the shared substitution table) to a bundled face and
+//! outlining its glyphs with `skrifa` into a `tiny-skia` path.
 //!
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
+mod fonts;
+
 use casual_calc_layout::visible_range;
 use casual_calc_layout::{
-    BorderLine, DisplayList, GridGeometry, PaintItem, Rect as LayoutRect, Viewport,
+    Align, BorderLine, DisplayList, GridGeometry, PaintItem, Rect as LayoutRect, Viewport,
 };
-use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+use skrifa::instance::{LocationRef, Size};
+use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::{FontRef, MetadataProvider};
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
 
-/// The neutral color used for a text placeholder when the cell sets no font
-/// color (glyphs are not yet rendered; a bar marks laid-out text).
-fn neutral_text() -> Color {
-    Color::from_rgba8(210, 224, 246, 255)
-}
 /// The default border color when an edge specifies none.
 fn default_border() -> Color {
     Color::BLACK
@@ -119,14 +119,33 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
                 pixmap.fill_rect(screen, &paint, Transform::identity(), None);
             }
         }
-        PaintItem::Text { rect, color, .. } => {
-            // Glyphs are not yet rendered; paint an inset bar in the font color
-            // (neutral when unset) to mark laid-out text without hiding fills.
+        PaintItem::Text {
+            rect,
+            content,
+            align,
+            color,
+            bold,
+            italic,
+            font_name,
+            font_pt,
+        } => {
             let color = color
                 .as_deref()
                 .and_then(parse_hex_color)
-                .unwrap_or_else(neutral_text);
-            draw_text_marker(pixmap, rect, viewport, dpi, color);
+                .unwrap_or(Color::BLACK);
+            draw_glyphs(
+                pixmap,
+                rect,
+                content,
+                *align,
+                color,
+                *bold,
+                *italic,
+                font_name.as_deref(),
+                font_pt.unwrap_or(DEFAULT_FONT_PT),
+                viewport,
+                dpi,
+            );
         }
         PaintItem::CellBorder {
             rect,
@@ -140,27 +159,134 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
     }
 }
 
-/// Paint the inset bar that stands in for a line of cell text.
-fn draw_text_marker(
+/// The default font size (points) for a Text item that carries no explicit size.
+const DEFAULT_FONT_PT: f32 = 11.0;
+/// Cell text inset from the left/right edge, in twips (~2px at 96 dpi).
+const TEXT_PAD_TWIPS: i64 = 30;
+
+/// Render a cell's text by outlining each glyph from the resolved bundled face
+/// into a single `tiny-skia` path, then filling it in the font color. Glyphs are
+/// laid out left-to-right using the face's own advances, vertically centered on
+/// the cell, and horizontally aligned per `align`.
+#[allow(clippy::too_many_arguments)]
+fn draw_glyphs(
     pixmap: &mut Pixmap,
     rect: &LayoutRect,
+    content: &str,
+    align: Align,
+    color: Color,
+    bold: bool,
+    italic: bool,
+    font_name: Option<&str>,
+    font_pt: f32,
     viewport: &Viewport,
     dpi: u32,
-    color: Color,
 ) {
-    let x = twips_to_px(rect.x - viewport.x, dpi);
-    let y = twips_to_px(rect.y - viewport.y, dpi);
+    let bytes = fonts::face_bytes_for(font_name, bold, italic);
+    let Ok(font) = FontRef::new(bytes) else {
+        return;
+    };
+    let size_px = font_pt * dpi as f32 / 72.0;
+    if size_px <= 0.0 {
+        return;
+    }
+    let size = Size::new(size_px);
+    let loc = LocationRef::default();
+    let charmap = font.charmap();
+    let glyph_metrics = font.glyph_metrics(size, loc);
+    let metrics = font.metrics(size, loc);
+    let outlines = font.outline_glyphs();
+
+    // First pass: total advance width, to place the run for the requested align.
+    let advance = |ch: char| -> f32 {
+        charmap
+            .map(ch)
+            .and_then(|g| glyph_metrics.advance_width(g))
+            .unwrap_or(0.0)
+    };
+    let total: f32 = content.chars().map(advance).sum();
+
+    let x0 = twips_to_px(rect.x - viewport.x, dpi);
+    let y0 = twips_to_px(rect.y - viewport.y, dpi);
     let w = twips_to_px(rect.w, dpi);
     let h = twips_to_px(rect.h, dpi);
-    let bar_w = w * 0.8;
-    let bar_h = (h * 0.25).max(2.0);
-    let bar_x = x + (w - bar_w) / 2.0;
-    let bar_y = y + (h - bar_h) / 2.0;
+    let pad = twips_to_px(TEXT_PAD_TWIPS, dpi);
+    let mut pen_x = match align {
+        Align::Left => x0 + pad,
+        Align::Right => x0 + w - pad - total,
+    };
+    // Vertically center the ascent/descent band within the cell.
+    let text_h = metrics.ascent - metrics.descent;
+    let baseline_y = y0 + ((h - text_h) / 2.0).max(0.0) + metrics.ascent;
 
+    let mut builder = PathBuilder::new();
+    for ch in content.chars() {
+        if let Some(gid) = charmap.map(ch)
+            && let Some(glyph) = outlines.get(gid)
+        {
+            let mut pen = GlyphPen {
+                builder: &mut builder,
+                origin_x: pen_x,
+                baseline_y,
+            };
+            let settings = DrawSettings::unhinted(size, loc);
+            let _ = glyph.draw(settings, &mut pen);
+        }
+        pen_x += advance(ch);
+    }
+    let Some(path) = builder.finish() else {
+        return;
+    };
     let mut paint = Paint::default();
     paint.set_color(color);
-    paint.anti_alias = false;
-    fill_thin(pixmap, &paint, bar_x, bar_y, bar_w, bar_h);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+}
+
+/// A `skrifa` outline pen that appends glyph contours to a `tiny-skia` path,
+/// translating font space (origin at the glyph, y-up) to device space
+/// (`origin_x`, `baseline_y`, y-down).
+struct GlyphPen<'a> {
+    builder: &'a mut PathBuilder,
+    origin_x: f32,
+    baseline_y: f32,
+}
+
+impl GlyphPen<'_> {
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.origin_x + x, self.baseline_y - y)
+    }
+}
+
+impl OutlinePen for GlyphPen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (px, py) = self.map(x, y);
+        self.builder.move_to(px, py);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (px, py) = self.map(x, y);
+        self.builder.line_to(px, py);
+    }
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let (cx, cy) = self.map(cx0, cy0);
+        let (px, py) = self.map(x, y);
+        self.builder.quad_to(cx, cy, px, py);
+    }
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let (c0x, c0y) = self.map(cx0, cy0);
+        let (c1x, c1y) = self.map(cx1, cy1);
+        let (px, py) = self.map(x, y);
+        self.builder.cubic_to(c0x, c0y, c1x, c1y, px, py);
+    }
+    fn close(&mut self) {
+        self.builder.close();
+    }
 }
 
 /// Paint the present border edges as thin rects along the cell rectangle.

@@ -38,24 +38,44 @@ fn renders_a_png() {
     );
 }
 
+/// Whether any pixel in `[x0,x1) x [y0,y1)` satisfies `pred(r,g,b)`.
+fn any_pixel(
+    pixmap: &tiny_skia::Pixmap,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    pred: impl Fn(u8, u8, u8) -> bool,
+) -> bool {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if let Some(p) = pixmap.pixel(x, y)
+                && pred(p.red(), p.green(), p.blue())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[test]
-fn content_cell_is_filled_and_empty_cell_is_white() {
+fn content_cell_has_glyphs_and_empty_cell_is_white() {
     let wb = sample();
     let geo = GridGeometry::default();
     let list = layout_full(&wb, 0, &geo);
     let pixmap = render_pixmap(&list, &geo, &viewport(), 96).unwrap();
 
-    // A pixel near the middle of cell A1 (col 0, row 0) should carry the content fill.
-    let a1 = pixmap.pixel(20, 8).unwrap();
+    // Cell A1 (~64x20 px at 96 dpi) holds the number "1"; a real glyph is painted,
+    // so some dark (near-black) pixel exists inside the cell.
     assert!(
-        a1.blue() > a1.red() && a1.blue() > 200,
-        "A1 should be filled bluish, got r{} g{} b{}",
-        a1.red(),
-        a1.green(),
-        a1.blue()
+        any_pixel(&pixmap, 0, 0, 64, 20, |r, g, b| r < 128
+            && g < 128
+            && b < 128),
+        "A1 should contain painted glyph pixels"
     );
 
-    // A pixel deep inside an empty cell (col 2, row 2) should stay white.
+    // A pixel deep inside an empty cell (col 2, row 2) stays white.
     let empty = pixmap.pixel(2 * 64 + 20, 2 * 20 + 8).unwrap();
     assert!(
         empty.red() > 240 && empty.green() > 240 && empty.blue() > 240,
@@ -107,14 +127,13 @@ fn fill_font_and_border_are_painted() {
         fill.blue()
     );
 
-    // The centered text bar is red (font color).
-    let text = pixmap.pixel(30, 10).unwrap();
+    // The glyph is painted in the font color (red): some reddish pixel exists
+    // inside the cell.
     assert!(
-        text.red() > text.green() && text.red() > text.blue() && text.red() > 200,
-        "text marker should be red, got r{} g{} b{}",
-        text.red(),
-        text.green(),
-        text.blue()
+        any_pixel(&pixmap, 0, 0, 64, 20, |r, g, b| r > 150
+            && g < 120
+            && b < 120),
+        "A1 should contain red glyph pixels"
     );
 
     // The left border edge (column 0) is blue.

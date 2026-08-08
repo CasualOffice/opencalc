@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 casual-calc-layout = { path = "../casual-calc-layout" }
 tiny-skia = "0.11"
+skrifa = "0.43"
 
 [dev-dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
