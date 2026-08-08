@@ -292,13 +292,18 @@ function rowOffsetPx(row) {
 // the current guess and re-asking the engine converges in a couple of steps.
 function rowAtPx(px) {
   if (growthDirty) rebuildGrowth();
-  let row = wasm.session_row_at_px(state.sheet, Math.round(px));
+  const row = wasm.session_row_at_px(state.sheet, Math.round(px));
+  // With nothing grown there is nothing to correct for, and every extra engine
+  // call rebuilds the sheet's geometry from scratch. This loop ran regardless,
+  // turning one call a frame into five on every sheet.
+  if (!growthTotal) return row;
+  let at = row;
   for (let i = 0; i < 4; i++) {
-    const next = wasm.session_row_at_px(state.sheet, Math.round(px - growthBefore(row)));
-    if (next === row) break;
-    row = next;
+    const next = wasm.session_row_at_px(state.sheet, Math.round(px - growthBefore(at)));
+    if (next === at) break;
+    at = next;
   }
-  return row;
+  return at;
 }
 
 // Absolute screen position of a column's left / row's top edge (any index).
@@ -586,13 +591,15 @@ function updateScrollbars(v) {
   if (!wasm) return;
   const b = usedBounds();
   const viewH = v.h - HH, viewW = v.w - HW;
-  const contentH = Math.max(
-    rowOffsetPx(b.rows + 30),
-    state.scrollY + viewH + 1,
-  );
+  // A fixed buffer past the data, not one measured from the current scroll.
+  // Including `scrollY` made the extent grow as you scrolled, so the end could
+  // never be reached: scrolling past the data kept going forever, and every one
+  // of those frames did the geometry work again. That is the drag past the last
+  // row, and it is also why `clampScroll` had nothing to clamp to.
+  const contentH = Math.max(rowOffsetPx(b.rows + 30), viewH + 1);
   const contentW = Math.max(
     wasm.session_col_offset_px(state.sheet, b.cols + 8),
-    state.scrollX + viewW + 1,
+    viewW + 1,
   );
   const trackH = vscroll.clientHeight, trackW = hscroll.clientWidth;
   const thumbH = Math.max(28, trackH * Math.min(1, viewH / contentH));
@@ -4753,6 +4760,53 @@ function colFromName(letters) {
   return n - 1;
 }
 
+// Delimited text arrives in whatever encoding produced it. The engine reads
+// UTF-8, so anything else has to be converted here — a UTF-16 export opened as
+// UTF-8 is not slightly wrong, it is unreadable.
+function decodeTextBytes(bytes) {
+  const enc = (label) => new TextEncoder().encode(new TextDecoder(label).decode(bytes));
+  // Byte-order marks are definitive, so they are checked before anything else.
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return enc("utf-16le");
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) return enc("utf-16be");
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return bytes.slice(3); // UTF-8 BOM: strip it, the rest is already UTF-8
+  }
+  // No BOM. A UTF-16 file without one still gives itself away: half its bytes
+  // are zero. Sniffing beats failing, and the fallback is plain UTF-8.
+  const probe = bytes.subarray(0, Math.min(bytes.length, 512));
+  let zeros = 0;
+  for (const b of probe) if (b === 0) zeros += 1;
+  if (probe.length > 8 && zeros > probe.length / 4) {
+    return enc(bytes[0] === 0 ? "utf-16be" : "utf-16le");
+  }
+  return bytes;
+}
+
+// Turn an engine error into something that says what to do about it.
+function friendlyOpenError(err, name, isText) {
+  const text = String(err && err.message ? err.message : err);
+  if (/zip|central directory|not a valid/i.test(text)) {
+    return `${name} is not a readable .xlsx — if it is an older .xls, re-save it as .xlsx first`;
+  }
+  if (/limit|too (large|many)|bound/i.test(text)) {
+    return `${name} exceeds this build's size limits and was not opened`;
+  }
+  if (/utf-?8|invalid|encoding/i.test(text) && isText) {
+    return `${name} is not text this build can decode — try saving it as UTF-8 CSV`;
+  }
+  return `could not open ${name}: ${text}`;
+}
+
+// Anything the importer had to drop or degrade, said once, plainly. The report
+// exists in the engine; nothing surfaced it, so a lossy import looked clean.
+function reportImportIssues() {
+  let summary = "";
+  try { summary = wasm.session_import_summary(); } catch {}
+  if (!summary) return;
+  const bar = document.getElementById("tb-status");
+  bar.innerHTML = `${bar.textContent} — <span class="warn">${summary}</span>`;
+}
+
 // Fill the selection from its own first row or column, in an explicit mode.
 // Which axis is decided by the selection's shape: a tall block fills down, a
 // wide one fills right — the same reading the fill handle gives it.
@@ -6875,16 +6929,25 @@ function wireEvents() {
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    // A large file takes a moment to parse; say so rather than appearing to
+    // have ignored the click.
+    status.textContent = `opening ${file.name}…`;
+    await new Promise((r) => requestAnimationFrame(r)); // let that paint first
+    let bytes = new Uint8Array(await file.arrayBuffer());
     const ext = (file.name.split(".").pop() || "").toLowerCase();
     // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
     const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
     try {
       stopMarch();
-      if (delim !== null) wasm.session_open_delimited(bytes, delim);
-      else wasm.session_open(bytes);
-      status.textContent = "opened " + file.name;
-    } catch (err) { status.textContent = `error: ${err}`; }
+      if (delim !== null) {
+        bytes = decodeTextBytes(bytes);
+        wasm.session_open_delimited(bytes, delim);
+      } else {
+        wasm.session_open(bytes);
+      }
+      status.textContent = `opened ${file.name}`;
+      reportImportIssues();
+    } catch (err) { status.textContent = friendlyOpenError(err, file.name, delim !== null); }
     e.target.value = ""; // allow re-opening the same file
     invalidateGrowth();
     state.sheet = 0;
