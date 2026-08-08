@@ -2235,6 +2235,11 @@ pub fn session_adjust_decimals(
 /// `{ b, i, u, al, nf, fc, bg }` — flags present only when set.
 #[wasm_bindgen]
 pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
+    // The workbook default font shown when a cell carries no explicit font — so
+    // the toolbar reflects the *effective* font/size (like Excel showing
+    // "Calibri"/"11" for an untouched cell) instead of appearing blank.
+    const DEFAULT_FONT_NAME: &str = "Calibri";
+    const DEFAULT_FONT_PT: f64 = 11.0;
     with_session(|s| {
         let wb = s.workbook();
         let style = wb
@@ -2243,50 +2248,54 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             .and_then(|sh| sh.cells.get(CellRef::new(row, col)))
             .and_then(|cell| cell.style)
             .and_then(|id| wb.styles.get(id));
-        let Some(st) = style else {
-            return "{}".to_owned();
-        };
         let mut parts: Vec<String> = Vec::new();
-        if st.bold {
-            parts.push("\"b\":1".to_owned());
-        }
-        if st.italic {
-            parts.push("\"i\":1".to_owned());
-        }
-        if st.underline {
-            parts.push("\"u\":1".to_owned());
-        }
-        if st.strike {
-            parts.push("\"st\":1".to_owned());
-        }
-        if st.wrap {
-            parts.push("\"w\":1".to_owned());
-        }
-        if let Some(fname) = &st.font_name {
-            parts.push(format!("\"fn\":{}", json_string(fname)));
-        }
-        if let Some(hp) = st.font_size_hp {
-            parts.push(format!("\"fs\":{}", hp as f64 / 2.0));
-        }
-        if let Some(al) = st.align {
-            parts.push(format!("\"al\":\"{}\"", al.ooxml()));
-        }
-        if let Some(va) = st.valign {
-            let t = match va {
-                VAlign::Top => "t",
-                VAlign::Middle => "m",
-                VAlign::Bottom => "b",
-            };
-            parts.push(format!("\"va\":\"{t}\""));
-        }
-        if let Some(nf) = &st.number_format {
-            parts.push(format!("\"nf\":{}", json_string(nf)));
-        }
-        if let Some(fc) = &st.font_color {
-            parts.push(format!("\"fc\":{}", json_string(fc)));
-        }
-        if let Some(bg) = &st.fill_color {
-            parts.push(format!("\"bg\":{}", json_string(bg)));
+        // Effective font name / size: the cell's own, else the workbook default.
+        // Always emitted so the toolbar never falls back to a placeholder.
+        let font_name = style
+            .and_then(|st| st.font_name.clone())
+            .unwrap_or_else(|| DEFAULT_FONT_NAME.to_owned());
+        let font_pt = style
+            .and_then(|st| st.font_size_hp)
+            .map(|hp| hp as f64 / 2.0)
+            .unwrap_or(DEFAULT_FONT_PT);
+        parts.push(format!("\"fn\":{}", json_string(&font_name)));
+        parts.push(format!("\"fs\":{font_pt}"));
+        if let Some(st) = style {
+            if st.bold {
+                parts.push("\"b\":1".to_owned());
+            }
+            if st.italic {
+                parts.push("\"i\":1".to_owned());
+            }
+            if st.underline {
+                parts.push("\"u\":1".to_owned());
+            }
+            if st.strike {
+                parts.push("\"st\":1".to_owned());
+            }
+            if st.wrap {
+                parts.push("\"w\":1".to_owned());
+            }
+            if let Some(al) = st.align {
+                parts.push(format!("\"al\":\"{}\"", al.ooxml()));
+            }
+            if let Some(va) = st.valign {
+                let t = match va {
+                    VAlign::Top => "t",
+                    VAlign::Middle => "m",
+                    VAlign::Bottom => "b",
+                };
+                parts.push(format!("\"va\":\"{t}\""));
+            }
+            if let Some(nf) = &st.number_format {
+                parts.push(format!("\"nf\":{}", json_string(nf)));
+            }
+            if let Some(fc) = &st.font_color {
+                parts.push(format!("\"fc\":{}", json_string(fc)));
+            }
+            if let Some(bg) = &st.fill_color {
+                parts.push(format!("\"bg\":{}", json_string(bg)));
+            }
         }
         format!("{{{}}}", parts.join(","))
     })
