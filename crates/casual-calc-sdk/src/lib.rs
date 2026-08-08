@@ -18,7 +18,7 @@ use casual_calc_transaction::{History, Operation, TxnError, apply};
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
 pub use casual_calc_layout::Viewport as GridViewport;
 pub use casual_calc_model::{Cell, CellRef, CellValue, Sheet, SheetId, Style};
-pub use casual_calc_transaction::Operation as EditOperation;
+pub use casual_calc_transaction::{Operation as EditOperation, SheetMetadata};
 
 const SESSION_NAMESPACE: u64 = 0x5345_5300_0000_0000; // "SES"
 

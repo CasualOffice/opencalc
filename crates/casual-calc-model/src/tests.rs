@@ -270,3 +270,67 @@ fn filter_hidden_is_separate_from_hand_hidden_rows() {
     assert!(sheet.is_row_hidden(3));
     assert!(!sheet.is_row_hidden(5));
 }
+
+// --- Outline grouping -----------------------------------------------------
+
+fn outlined(levels: &[(u32, u8)]) -> Sheet {
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(1, 1)), "S");
+    for &(row, level) in levels {
+        sheet.row_outline_levels.insert(row, level);
+    }
+    sheet
+}
+
+#[test]
+fn outline_band_walks_back_to_the_summary_below() {
+    // Rows 1..3 nested under a summary at row 4 (OOXML's default placement).
+    let sheet = outlined(&[(1, 1), (2, 1), (3, 1)]);
+    assert_eq!(sheet.outline_band(4, false), Some((1, 3)));
+    // The summary line is never part of its own band.
+    assert!(!(1..=3).contains(&4));
+}
+
+#[test]
+fn outline_band_walks_forward_when_the_summary_is_above() {
+    let mut sheet = outlined(&[(5, 1), (6, 1)]);
+    sheet.outline.summary_below = false;
+    assert_eq!(sheet.outline_band(4, false), Some((5, 6)));
+}
+
+#[test]
+fn a_line_with_no_deeper_neighbours_has_no_band() {
+    let sheet = outlined(&[(1, 1), (2, 1)]);
+    // Row 0 is above the group, so nothing hangs off it.
+    assert_eq!(sheet.outline_band(0, false), None);
+    // Row 1 is *inside* the group and at the same level as row 2 — not a summary.
+    assert_eq!(sheet.outline_band(1, false), None);
+}
+
+#[test]
+fn nested_groups_resolve_to_their_own_depth() {
+    // level: r1=1 r2=2 r3=2 r4=1 (inner summary), r5=0 (outer summary)
+    let sheet = outlined(&[(1, 1), (2, 2), (3, 2), (4, 1)]);
+    // The inner summary at row 4 takes only the deeper run above it.
+    assert_eq!(sheet.outline_band(4, false), Some((2, 3)));
+    // The outer summary at row 5 takes everything nested below level 0.
+    assert_eq!(sheet.outline_band(5, false), Some((1, 4)));
+}
+
+#[test]
+fn forward_band_stops_at_the_deepest_recorded_line() {
+    // Guards the summary-above walk against running past the outline map.
+    let mut sheet = outlined(&[(1, 1), (2, 1)]);
+    sheet.outline.summary_below = false;
+    assert_eq!(sheet.outline_band(0, false), Some((1, 2)));
+}
+
+#[test]
+fn column_bands_follow_summary_right() {
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(1, 1)), "S");
+    for c in 1..=3 {
+        sheet.col_outline_levels.insert(c, 1);
+    }
+    assert_eq!(sheet.outline_band(4, true), Some((1, 3)));
+    sheet.outline.summary_right = false;
+    assert_eq!(sheet.outline_band(0, true), Some((1, 3)));
+}

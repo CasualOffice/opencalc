@@ -206,17 +206,9 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
 /// merges, sizing, hidden lines, and frozen panes the delete may have dropped —
 /// re-inserting an empty band cannot resurrect them.
 fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
-    let s = &workbook.sheets[sheet];
     Operation::SetSheetMetadata {
         sheet,
-        merges: s.merges.clone(),
-        columns: s.columns.clone(),
-        rows: s.rows.clone(),
-        hidden_rows: s.hidden_rows.clone(),
-        hidden_cols: s.hidden_cols.clone(),
-        view: s.view,
-        auto_filter: s.auto_filter.clone(),
-        filter_hidden: s.filter_hidden.clone(),
+        data: Box::new(crate::SheetMetadata::capture(&workbook.sheets[sheet])),
     }
 }
 

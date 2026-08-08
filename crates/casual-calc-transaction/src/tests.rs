@@ -965,14 +965,10 @@ fn set_sheet_metadata_is_self_inverse() {
         wb,
         Operation::SetSheetMetadata {
             sheet: 0,
-            merges: vec![merge(3, 3, 4, 4)],
-            columns: Default::default(),
-            rows: Default::default(),
-            hidden_rows: Default::default(),
-            hidden_cols: Default::default(),
-            view: Default::default(),
-            auto_filter: None,
-            filter_hidden: Default::default(),
+            data: Box::new(crate::SheetMetadata {
+                merges: vec![merge(3, 3, 4, 4)],
+                ..Default::default()
+            }),
         },
     );
 }
@@ -1391,14 +1387,11 @@ fn set_sheet_metadata_restores_the_filter_on_undo() {
         &mut wb,
         Operation::SetSheetMetadata {
             sheet: 0,
-            merges: Vec::new(),
-            columns: Default::default(),
-            rows: Default::default(),
-            hidden_rows: Default::default(),
-            hidden_cols: Default::default(),
-            view: Default::default(),
-            auto_filter: Some(with_rule),
-            filter_hidden: [4u32].into_iter().collect(),
+            data: Box::new(crate::SheetMetadata {
+                auto_filter: Some(with_rule),
+                filter_hidden: [4u32].into_iter().collect(),
+                ..Default::default()
+            }),
         },
     )
     .unwrap();
@@ -1414,4 +1407,42 @@ fn set_sheet_metadata_restores_the_filter_on_undo() {
             .as_ref()
             .is_some_and(|f| f.rules.is_empty())
     );
+}
+
+#[test]
+fn the_operation_enum_stays_small_enough_for_the_undo_stack() {
+    // `SetSheetMetadata` carries a dozen collections. Unboxed it padded every
+    // other variant — including `SetCell`, which a bulk edit pushes thousands of
+    // — up to its size. Boxing keeps the enum near its second-largest variant.
+    assert!(
+        std::mem::size_of::<Operation>() <= 128,
+        "Operation grew to {} bytes; box the payload of whatever was added",
+        std::mem::size_of::<Operation>()
+    );
+}
+
+#[test]
+fn sheet_metadata_install_returns_the_exact_prior_bundle() {
+    let mut wb = workbook();
+    wb.sheets[0].row_outline_levels.insert(3, 2);
+    wb.sheets[0].collapsed_rows.insert(5);
+    wb.sheets[0].hidden_rows.insert(3);
+
+    let replacement = crate::SheetMetadata::default();
+    let inverse = apply(
+        &mut wb,
+        Operation::SetSheetMetadata {
+            sheet: 0,
+            data: Box::new(replacement),
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].row_outline_levels.is_empty());
+    assert!(wb.sheets[0].collapsed_rows.is_empty());
+
+    // Undo restores the outline, the collapse flag and the rows it hid together.
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].row_level(3), 2);
+    assert!(wb.sheets[0].collapsed_rows.contains(&5));
+    assert!(wb.sheets[0].is_row_hidden(3));
 }

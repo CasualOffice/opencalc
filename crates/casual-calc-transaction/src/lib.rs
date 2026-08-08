@@ -10,7 +10,7 @@
 //! atomic [`Operation::Batch`]. Structural ops (insert/delete rows & columns with
 //! formula-reference rewriting) are the next increment.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
@@ -51,6 +51,89 @@ impl core::fmt::Display for TxnError {
 }
 
 impl std::error::Error for TxnError {}
+
+/// Everything on a sheet that is keyed by position rather than by cell: merges,
+/// axis sizing, the hidden sets, the frozen bands, the autofilter, and the
+/// outline.
+///
+/// Travelling as one bundle is what makes these undoable together — a delete
+/// that drops a merge, a custom height and an outline level cannot recover them
+/// by re-inserting an empty band, so its inverse carries a pre-mutation snapshot
+/// of the lot. It also means adding another positional field is a change in one
+/// place rather than at every construction site.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SheetMetadata {
+    /// Merged ranges.
+    pub merges: Vec<CellRange>,
+    /// Column widths.
+    pub columns: AxisSizing,
+    /// Row heights.
+    pub rows: AxisSizing,
+    /// Hidden rows.
+    pub hidden_rows: BTreeSet<u32>,
+    /// Hidden columns.
+    pub hidden_cols: BTreeSet<u32>,
+    /// View state (frozen panes, zoom, gridline/header visibility).
+    pub view: SheetView,
+    /// The autofilter, or `None` when the sheet has none.
+    pub auto_filter: Option<AutoFilter>,
+    /// Rows the autofilter hides. Travels with the filter so undo restores the
+    /// rules and the rows they hid together.
+    pub filter_hidden: BTreeSet<u32>,
+    /// Outline nesting level per row.
+    pub row_outline_levels: BTreeMap<u32, u8>,
+    /// Outline nesting level per column.
+    pub col_outline_levels: BTreeMap<u32, u8>,
+    /// Rows whose outline group is collapsed.
+    pub collapsed_rows: BTreeSet<u32>,
+    /// Columns whose outline group is collapsed.
+    pub collapsed_cols: BTreeSet<u32>,
+}
+
+impl SheetMetadata {
+    /// A snapshot of a sheet's positional metadata.
+    pub fn capture(sheet: &Sheet) -> Self {
+        Self {
+            merges: sheet.merges.clone(),
+            columns: sheet.columns.clone(),
+            rows: sheet.rows.clone(),
+            hidden_rows: sheet.hidden_rows.clone(),
+            hidden_cols: sheet.hidden_cols.clone(),
+            view: sheet.view,
+            auto_filter: sheet.auto_filter.clone(),
+            filter_hidden: sheet.filter_hidden.clone(),
+            row_outline_levels: sheet.row_outline_levels.clone(),
+            col_outline_levels: sheet.col_outline_levels.clone(),
+            collapsed_rows: sheet.collapsed_rows.clone(),
+            collapsed_cols: sheet.collapsed_cols.clone(),
+        }
+    }
+
+    /// Install this bundle on `sheet`, returning what was there before — the
+    /// exact inverse.
+    pub fn install(self, sheet: &mut Sheet) -> Self {
+        Self {
+            merges: std::mem::replace(&mut sheet.merges, self.merges),
+            columns: std::mem::replace(&mut sheet.columns, self.columns),
+            rows: std::mem::replace(&mut sheet.rows, self.rows),
+            hidden_rows: std::mem::replace(&mut sheet.hidden_rows, self.hidden_rows),
+            hidden_cols: std::mem::replace(&mut sheet.hidden_cols, self.hidden_cols),
+            view: std::mem::replace(&mut sheet.view, self.view),
+            auto_filter: std::mem::replace(&mut sheet.auto_filter, self.auto_filter),
+            filter_hidden: std::mem::replace(&mut sheet.filter_hidden, self.filter_hidden),
+            row_outline_levels: std::mem::replace(
+                &mut sheet.row_outline_levels,
+                self.row_outline_levels,
+            ),
+            col_outline_levels: std::mem::replace(
+                &mut sheet.col_outline_levels,
+                self.col_outline_levels,
+            ),
+            collapsed_rows: std::mem::replace(&mut sheet.collapsed_rows, self.collapsed_rows),
+            collapsed_cols: std::mem::replace(&mut sheet.collapsed_cols, self.collapsed_cols),
+        }
+    }
+}
 
 /// A closed set of atomic edit operations. Every operation is invertible; the
 /// inverse of any operation is expressible as a `SetCell` (or a `Batch` of them).
@@ -160,23 +243,10 @@ pub enum Operation {
     SetSheetMetadata {
         /// Sheet index.
         sheet: usize,
-        /// Merged ranges to install.
-        merges: Vec<CellRange>,
-        /// Column widths to install.
-        columns: AxisSizing,
-        /// Row heights to install.
-        rows: AxisSizing,
-        /// Hidden rows to install.
-        hidden_rows: BTreeSet<u32>,
-        /// Hidden columns to install.
-        hidden_cols: BTreeSet<u32>,
-        /// View state (frozen panes) to install.
-        view: SheetView,
-        /// The autofilter to install, or `None` to turn it off.
-        auto_filter: Option<AutoFilter>,
-        /// Rows the autofilter hides, to install alongside it. Travels with the
-        /// filter so undo restores the rules and the rows they hid together.
-        filter_hidden: BTreeSet<u32>,
+        /// The bundle to install. Boxed: it is by far the largest payload here,
+        /// and an unboxed variant would pad every `SetCell` on the undo stack up
+        /// to its size.
+        data: Box<SheetMetadata>,
     },
     /// Insert a fully-formed sheet at position `index`, shifting later sheets
     /// right. The caller assigns the sheet's id and name; the inverse removes it.
@@ -295,32 +365,17 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         Operation::DeleteColumns { sheet, at, count } => {
             structural::delete(workbook, sheet, Axis::Col, at, count)
         }
-        Operation::SetSheetMetadata {
-            sheet,
-            merges,
-            columns,
-            rows,
-            hidden_rows,
-            hidden_cols,
-            view,
-            auto_filter,
-            filter_hidden,
-        } => {
+        Operation::SetSheetMetadata { sheet, data } => {
             let target = workbook
                 .sheets
                 .get_mut(sheet)
                 .ok_or(TxnError::SheetNotFound { index: sheet })?;
-            // Swap each field in, handing back the prior contents as the inverse.
+            // Swap the whole bundle in, handing back the prior contents as the
+            // inverse.
+            let previous = data.install(target);
             Ok(Operation::SetSheetMetadata {
                 sheet,
-                merges: std::mem::replace(&mut target.merges, merges),
-                columns: std::mem::replace(&mut target.columns, columns),
-                rows: std::mem::replace(&mut target.rows, rows),
-                hidden_rows: std::mem::replace(&mut target.hidden_rows, hidden_rows),
-                hidden_cols: std::mem::replace(&mut target.hidden_cols, hidden_cols),
-                view: std::mem::replace(&mut target.view, view),
-                auto_filter: std::mem::replace(&mut target.auto_filter, auto_filter),
-                filter_hidden: std::mem::replace(&mut target.filter_hidden, filter_hidden),
+                data: Box::new(previous),
             })
         }
         Operation::InsertSheet { index, sheet } => {

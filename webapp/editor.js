@@ -15,13 +15,36 @@ const HEADER_W = 46; // row-header width (px)
 const HEADER_H = 24; // column-header height (px)
 let HW = HEADER_W;
 let HH = HEADER_H;
+// Outline gutter: the strip left of the row headers / above the column headers
+// holding the group rails and their collapse toggles. Zero-width unless the
+// sheet actually has an outline, so a normal sheet is unaffected.
+const OUTLINE_STEP = 11; // px of indent per nesting level
+let GW = 0;
+let GH = 0;
+let outlineRowMax = 0;
+let outlineColMax = 0;
+let outlineToggles = []; // [{x,y,w,h,index,columns}] rebuilt each frame
 // Re-read the active sheet's header visibility. Called at the top of measure(),
 // so every frame lays out against the current setting.
 function syncHeaderMetrics() {
   let hidden = false;
   try { hidden = !!(wasm && wasm.session_headers_hidden(state.sheet)); } catch {}
-  HW = hidden ? 0 : HEADER_W;
-  HH = hidden ? 0 : HEADER_H;
+  // The deepest nesting on each axis sizes its gutter. Asking for zero lines
+  // returns just the maximum, so this costs nothing on a sheet with no outline.
+  outlineRowMax = outlineColMax = 0;
+  if (wasm && !hidden) {
+    try {
+      outlineRowMax = JSON.parse(wasm.session_outline(state.sheet, 0, 0, false)).max || 0;
+      outlineColMax = JSON.parse(wasm.session_outline(state.sheet, 0, 0, true)).max || 0;
+    } catch {}
+  }
+  GW = outlineRowMax ? outlineRowMax * OUTLINE_STEP + 8 : 0;
+  GH = outlineColMax ? outlineColMax * OUTLINE_STEP + 8 : 0;
+  // HW/HH are the *total* inset the grid starts after, so every existing
+  // geometry consumer follows the gutter without knowing it exists. The header
+  // strips themselves draw from GW/GH inward.
+  HW = hidden ? 0 : HEADER_W + GW;
+  HH = hidden ? 0 : HEADER_H + GH;
 }
 // One indent level, in px — Excel's is about three space-widths.
 const INDENT_PX = 10;
@@ -1179,14 +1202,14 @@ function draw() {
   // scrolling headers can't bleed into the frozen band).
   const drawColHeaders = (clipX, clipW, wantFrozen) => {
     if (clipW <= 0) return;
-    ctx.save(); ctx.beginPath(); ctx.rect(clipX, 0, clipW, HH); ctx.clip();
+    ctx.save(); ctx.beginPath(); ctx.rect(clipX, GH, clipW, HH - GH); ctx.clip();
     for (let i = 0; i < geo.cols; i++) {
       if (geo.colW[i] <= 0) continue;
       if ((geo.colIdx[i] < F.fc) !== wantFrozen) continue;
       const c = geo.colIdx[i];
-      if (colInSel(c)) { ctx.fillStyle = colors.sel; ctx.fillRect(geo.colX[i], 0, geo.colW[i], HH); }
+      if (colInSel(c)) { ctx.fillStyle = colors.sel; ctx.fillRect(geo.colX[i], GH, geo.colW[i], HH - GH); }
       ctx.fillStyle = colInSel(c) ? colors.accent : colors.muted;
-      ctx.fillText(colName(c), geo.colX[i] + geo.colW[i] / 2, HH / 2);
+      ctx.fillText(colName(c), geo.colX[i] + geo.colW[i] / 2, GH + (HH - GH) / 2);
     }
     ctx.restore();
   };
@@ -1195,20 +1218,21 @@ function draw() {
 
   const drawRowHeaders = (clipY, clipH, wantFrozen) => {
     if (clipH <= 0) return;
-    ctx.save(); ctx.beginPath(); ctx.rect(0, clipY, HW, clipH); ctx.clip();
+    ctx.save(); ctx.beginPath(); ctx.rect(GW, clipY, HW - GW, clipH); ctx.clip();
     for (let i = 0; i < geo.rows; i++) {
       if (geo.rowH[i] <= 0) continue;
       if ((geo.rowIdx[i] < F.fr) !== wantFrozen) continue;
       const r = geo.rowIdx[i];
-      if (rowInSel(r)) { ctx.fillStyle = colors.sel; ctx.fillRect(0, geo.rowY[i], HW, geo.rowH[i]); }
+      if (rowInSel(r)) { ctx.fillStyle = colors.sel; ctx.fillRect(GW, geo.rowY[i], HW - GW, geo.rowH[i]); }
       ctx.fillStyle = rowInSel(r) ? colors.accent : colors.muted;
-      ctx.fillText(String(r + 1), HW / 2, geo.rowY[i] + geo.rowH[i] / 2);
+      ctx.fillText(String(r + 1), GW + (HW - GW) / 2, geo.rowY[i] + geo.rowH[i] / 2);
     }
     ctx.restore();
   };
   if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
   drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
   drawHiddenMarkers();
+  drawOutlineGutter(v);
   } // end headers
   drawFreezeDividers(v);
 
@@ -1667,6 +1691,115 @@ function unhideMark(hit) {
       : wasm.session_unhide_rows(state.sheet, from, to),
   );
   status.textContent = `showed ${n} hidden ${hit.axis === "col" ? "column" : "row"}${n === 1 ? "" : "s"}`;
+}
+
+// The outline gutter: a rail per nesting level with a collapse toggle at each
+// group's summary line. Rows get the strip left of the row headers, columns the
+// one above the column headers; both are zero-width when the axis has no groups.
+function drawOutlineGutter(v) {
+  outlineToggles = [];
+  if (!wasm || (!GW && !GH)) return;
+  ctx.save();
+  ctx.font = "10px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  // One toggle: a bordered box holding − when the group is open, + when shut.
+  const toggle = (bx, by, size, collapsed) => {
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(bx, by, size, size);
+    ctx.strokeStyle = colors.muted;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, size - 1, size - 1);
+    ctx.strokeStyle = colors.fg;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(bx + 2.5, by + size / 2);
+    ctx.lineTo(bx + size - 2.5, by + size / 2);
+    if (collapsed) {
+      ctx.moveTo(bx + size / 2, by + 2.5);
+      ctx.lineTo(bx + size / 2, by + size - 2.5);
+    }
+    ctx.stroke();
+  };
+
+  if (GW) {
+    const info = readOutline(state.firstRow, geo.rows, false);
+    ctx.beginPath();
+    ctx.rect(0, HH, GW, v.h - HH);
+    ctx.clip();
+    for (let i = 0; i < geo.rows; i++) {
+      if (geo.rowH[i] <= 0) continue;
+      const r = geo.rowIdx[i];
+      const line = info[r];
+      if (!line) continue;
+      const depth = Math.max(0, line.l - (line.b ? 1 : 0));
+      const cx = 4 + depth * OUTLINE_STEP;
+      // A rail along the lines inside a group, so the extent is visible.
+      if (line.l > 0) {
+        ctx.fillStyle = colors.muted;
+        ctx.globalAlpha = 0.45;
+        ctx.fillRect(4 + (line.l - 1) * OUTLINE_STEP + 4, geo.rowY[i], 1, geo.rowH[i]);
+        ctx.globalAlpha = 1;
+      }
+      if (!line.b) continue;
+      const size = 9;
+      const by = geo.rowY[i] + (geo.rowH[i] - size) / 2;
+      toggle(cx, by, size, line.c);
+      outlineToggles.push({ x: cx, y: by, w: size, h: size, index: r, columns: false });
+    }
+  }
+  ctx.restore();
+
+  if (GH) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(HW, 0, v.w - HW, GH);
+    ctx.clip();
+    const info = readOutline(state.firstCol, geo.cols, true);
+    for (let i = 0; i < geo.cols; i++) {
+      if (geo.colW[i] <= 0) continue;
+      const c = geo.colIdx[i];
+      const line = info[c];
+      if (!line) continue;
+      const depth = Math.max(0, line.l - (line.b ? 1 : 0));
+      const cy = 4 + depth * OUTLINE_STEP;
+      if (line.l > 0) {
+        ctx.fillStyle = colors.muted;
+        ctx.globalAlpha = 0.45;
+        ctx.fillRect(geo.colX[i], 4 + (line.l - 1) * OUTLINE_STEP + 4, geo.colW[i], 1);
+        ctx.globalAlpha = 1;
+      }
+      if (!line.b) continue;
+      const size = 9;
+      const bx = geo.colX[i] + (geo.colW[i] - size) / 2;
+      toggle(bx, cy, size, line.c);
+      outlineToggles.push({ x: bx, y: cy, w: size, h: size, index: c, columns: true });
+    }
+    ctx.restore();
+  }
+}
+
+// Outline data for the visible window, keyed by line index. Frozen panes mean
+// the window is not one contiguous run, so this covers from line 0 when a
+// freeze is in play rather than trying to stitch two spans together.
+function readOutline(first, count, columns) {
+  const f = columns ? state.freeze.fc : state.freeze.fr;
+  const from = f > 0 ? 0 : first;
+  const span = (first - from) + count + 2;
+  const out = {};
+  try {
+    const { lines } = JSON.parse(wasm.session_outline(state.sheet, from, span, columns));
+    lines.forEach((l, i) => { out[from + i] = l; });
+  } catch {}
+  return out;
+}
+
+// The outline toggle under a canvas point, if any.
+function outlineToggleAt(px, py) {
+  return outlineToggles.find(
+    (t) => px >= t.x && px <= t.x + t.w && py >= t.y && py <= t.y + t.h,
+  );
 }
 
 // The column/row index at a canvas x/y (for header clicks + hit-testing).
@@ -4311,6 +4444,12 @@ function wireEvents() {
         return;
       }
     }
+    // An outline collapse toggle in the gutter.
+    const ot = outlineToggleAt(px, py);
+    if (ot) {
+      tryEdit(() => wasm.session_toggle_outline(state.sheet, ot.index, ot.columns));
+      return;
+    }
     // A hidden-band handle in either header: one click brings the band back.
     // Double-click still works (below) for anyone who learned it that way.
     const hm = hiddenMarkAt(px, py);
@@ -4451,6 +4590,7 @@ function wireEvents() {
       canvas.style.cursor = "crosshair";
       return;
     }
+    if (outlineToggleAt(px, py)) { canvas.style.cursor = "pointer"; return; }
     // A hidden-band handle: say what it does, since a collapsed band is the one
     // thing on the grid you cannot select your way out of.
     const hmh = hiddenMarkAt(px, py);
@@ -5387,6 +5527,18 @@ function wireEvents() {
         "sep",
         ["Hide rows", () => tryEdit(() => { const r = rng(); wasm.session_hide_rows(state.sheet, r.r0, r.r1); })],
         ["Hide columns", () => tryEdit(() => { const r = rng(); wasm.session_hide_cols(state.sheet, r.c0, r.c1); })],
+        { sub: "Group", items: [
+          ["Group rows", () => tryEdit(() => { const r = effectiveRange(); wasm.session_group(state.sheet, r.r0, r.r1, false); })],
+          ["Group columns", () => tryEdit(() => { const r = effectiveRange(); wasm.session_group(state.sheet, r.c0, r.c1, true); })],
+          ["Ungroup rows", () => tryEdit(() => { const r = effectiveRange(); wasm.session_ungroup(state.sheet, r.r0, r.r1, false); })],
+          ["Ungroup columns", () => tryEdit(() => { const r = effectiveRange(); wasm.session_ungroup(state.sheet, r.c0, r.c1, true); })],
+          "sep",
+          ["Expand all", () => tryEdit(() => { wasm.session_show_outline_level(state.sheet, 7, false); wasm.session_show_outline_level(state.sheet, 7, true); })],
+          ["Collapse all", () => tryEdit(() => { wasm.session_show_outline_level(state.sheet, 0, false); wasm.session_show_outline_level(state.sheet, 0, true); })],
+          ["Show level 1", () => tryEdit(() => wasm.session_show_outline_level(state.sheet, 1, false))],
+          ["Show level 2", () => tryEdit(() => wasm.session_show_outline_level(state.sheet, 2, false))],
+        ] },
+        "sep",
         ["Unhide rows/columns in selection", () => tryEdit(() => { const r = rng(); wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); })],
         // Unhide-in-selection cannot help when you no longer know where the
         // hidden band is — or when it is outside whatever is selected. This

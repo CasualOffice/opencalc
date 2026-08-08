@@ -27,7 +27,7 @@ use casual_calc_model::{
     Sheet, SheetId, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
-use casual_calc_sdk::{EditOperation, WorkbookSession};
+use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -550,7 +550,8 @@ pub fn session_set_gridlines_hidden(sheet: usize, hidden: bool) -> Result<(), Js
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let view = &mut data.view;
             view.hide_gridlines = hidden;
         }
         session.edit(op).map_err(js)
@@ -579,7 +580,8 @@ pub fn session_set_headers_hidden(sheet: usize, hidden: bool) -> Result<(), JsEr
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let view = &mut data.view;
             view.hide_headers = hidden;
         }
         session.edit(op).map_err(js)
@@ -595,7 +597,8 @@ pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsEr
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let view = &mut data.view;
             view.frozen_rows = rows;
             view.frozen_cols = cols;
         }
@@ -1024,7 +1027,8 @@ pub fn session_merge_cells(
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { merges, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let merges = &mut data.merges;
             merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
             if r0 != r1 || c0 != c1 {
                 merges.push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
@@ -1087,7 +1091,8 @@ pub fn session_merge_cells_discarding(
         let Some(mut merge_op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { merges, .. } = &mut merge_op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut merge_op {
+            let merges = &mut data.merges;
             merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
             if r0 != r1 || c0 != c1 {
                 merges.push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
@@ -1144,7 +1149,8 @@ pub fn session_unmerge_cells(
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { merges, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let merges = &mut data.merges;
             merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
         }
         session.edit(op).map_err(js)
@@ -1207,14 +1213,7 @@ fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<Edi
     let sh = session.workbook().sheets.get(sheet)?;
     Some(EditOperation::SetSheetMetadata {
         sheet,
-        merges: sh.merges.clone(),
-        columns: sh.columns.clone(),
-        rows: sh.rows.clone(),
-        hidden_rows: sh.hidden_rows.clone(),
-        hidden_cols: sh.hidden_cols.clone(),
-        view: sh.view,
-        auto_filter: sh.auto_filter.clone(),
-        filter_hidden: sh.filter_hidden.clone(),
+        data: Box::new(SheetMetadata::capture(sh)),
     })
 }
 
@@ -1488,7 +1487,8 @@ pub fn session_set_all_col_width(sheet: usize, px: u32) -> Result<(), JsError> {
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { columns, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let columns = &mut data.columns;
             columns.default = Some(resize_px_to_twips(px));
             columns.sizes.clear();
         }
@@ -1505,7 +1505,8 @@ pub fn session_set_all_row_height(sheet: usize, px: u32) -> Result<(), JsError> 
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata { rows, .. } = &mut op {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let rows = &mut data.rows;
             rows.default = Some(resize_px_to_twips(px));
             rows.sizes.clear();
         }
@@ -2650,31 +2651,247 @@ pub fn session_unhide_cols(sheet: usize, c0: u32, c1: u32) -> Result<(), JsError
 }
 
 fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |sh, data| {
+        let set = if columns {
+            &mut data.hidden_cols
+        } else {
+            &mut data.hidden_rows
+        };
+        for i in a..=b {
+            if hide {
+                set.insert(i);
+            } else {
+                set.remove(&i);
+            }
+        }
+        if hide {
+            return;
+        }
+        // An outline collapse hides through this same set, so revealing lines by
+        // hand can un-collapse a group behind its own toggle's back. Any summary
+        // whose band is no longer fully hidden is no longer collapsed — without
+        // this the toggle keeps showing "+" over rows that are plainly visible.
+        let hidden = if columns {
+            &data.hidden_cols
+        } else {
+            &data.hidden_rows
+        };
+        let summaries: Vec<u32> = if columns {
+            data.collapsed_cols.iter().copied().collect()
+        } else {
+            data.collapsed_rows.iter().copied().collect()
+        };
+        let stale: Vec<u32> = summaries
+            .into_iter()
+            .filter(|&summary| match sh.outline_band(summary, columns) {
+                Some((start, end)) => (start..=end).any(|i| !hidden.contains(&i)),
+                None => true,
+            })
+            .collect();
+        let collapsed = if columns {
+            &mut data.collapsed_cols
+        } else {
+            &mut data.collapsed_rows
+        };
+        for summary in stale {
+            collapsed.remove(&summary);
+        }
+    })
+}
+
+// --- Outline (row/column grouping) ----------------------------------------
+//
+// The model already carried outline levels and collapsed flags — import and
+// export round-trip them — but nothing could create or toggle a group. These
+// route through `SetSheetMetadata` so a group, and the rows a collapse hid, undo
+// as one step.
+
+/// OOXML caps outline nesting at seven levels.
+const MAX_OUTLINE_LEVEL: u8 = 7;
+
+/// Apply `edit` to the sheet's positional-metadata bundle and commit it as one
+/// undo step. The closure also gets the sheet itself, for the reads (outline
+/// bands, cell text) that decide what the edit should be.
+fn edit_sheet_metadata(
+    sheet: usize,
+    edit: impl FnOnce(&Sheet, &mut SheetMetadata),
+) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        // Route through SetSheetMetadata so hide/unhide is one undoable edit that
-        // dirties the document (recalc-skipped: hiding changes no values).
-        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+        let Some(sh) = session.workbook().sheets.get(sheet).cloned() else {
             return Ok(());
         };
-        if let EditOperation::SetSheetMetadata {
-            hidden_rows,
-            hidden_cols,
-            ..
-        } = &mut op
-        {
-            let set = if columns { hidden_cols } else { hidden_rows };
-            for i in a..=b {
-                if hide {
-                    set.insert(i);
-                } else {
-                    set.remove(&i);
+        let mut data = SheetMetadata::capture(&sh);
+        edit(&sh, &mut data);
+        session
+            .edit(EditOperation::SetSheetMetadata {
+                sheet,
+                data: Box::new(data),
+            })
+            .map_err(js)
+    })
+}
+
+/// Nest lines `a..=b` one level deeper (`columns` picks the axis).
+#[wasm_bindgen]
+pub fn session_group(sheet: usize, a: u32, b: u32, columns: bool) -> Result<(), JsError> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    edit_sheet_metadata(sheet, move |_, data| {
+        let levels = if columns {
+            &mut data.col_outline_levels
+        } else {
+            &mut data.row_outline_levels
+        };
+        for i in lo..=hi {
+            let next = levels.get(&i).copied().unwrap_or(0).saturating_add(1);
+            levels.insert(i, next.min(MAX_OUTLINE_LEVEL));
+        }
+    })
+}
+
+/// Lift lines `a..=b` one level out, dropping them from the outline at zero.
+#[wasm_bindgen]
+pub fn session_ungroup(sheet: usize, a: u32, b: u32, columns: bool) -> Result<(), JsError> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    edit_sheet_metadata(sheet, move |_, data| {
+        let (levels, collapsed, hidden) = if columns {
+            (
+                &mut data.col_outline_levels,
+                &mut data.collapsed_cols,
+                &mut data.hidden_cols,
+            )
+        } else {
+            (
+                &mut data.row_outline_levels,
+                &mut data.collapsed_rows,
+                &mut data.hidden_rows,
+            )
+        };
+        for i in lo..=hi {
+            match levels.get(&i).copied().unwrap_or(0) {
+                0 | 1 => {
+                    // Out of the outline entirely: a line with no level cannot
+                    // stay collapsed, and must not stay hidden by a group that no
+                    // longer exists.
+                    levels.remove(&i);
+                    collapsed.remove(&i);
+                    hidden.remove(&i);
+                }
+                n => {
+                    levels.insert(i, n - 1);
                 }
             }
         }
-        session.edit(op).map_err(js)
     })
+}
+
+/// Collapse or expand the group whose summary line is `index`.
+#[wasm_bindgen]
+pub fn session_toggle_outline(sheet: usize, index: u32, columns: bool) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |sh, data| {
+        let Some((start, end)) = sh.outline_band(index, columns) else {
+            return;
+        };
+        let (collapsed, hidden) = if columns {
+            (&mut data.collapsed_cols, &mut data.hidden_cols)
+        } else {
+            (&mut data.collapsed_rows, &mut data.hidden_rows)
+        };
+        // A collapse hides through the ordinary hidden set, because that is what
+        // OOXML writes — a collapsed detail row is just `hidden="1"`. The
+        // `collapsed` flag on the summary line is what remembers that a group,
+        // rather than a person, did the hiding.
+        if collapsed.remove(&index) {
+            for i in start..=end {
+                hidden.remove(&i);
+            }
+        } else {
+            collapsed.insert(index);
+            for i in start..=end {
+                hidden.insert(i);
+            }
+        }
+    })
+}
+
+/// Show outline levels up to `level` and collapse everything deeper — the
+/// numbered level buttons. `level` 0 collapses every group.
+#[wasm_bindgen]
+pub fn session_show_outline_level(sheet: usize, level: u8, columns: bool) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |sh, data| {
+        let levels: Vec<(u32, u8)> = if columns {
+            sh.col_outline_levels
+                .iter()
+                .map(|(&k, &v)| (k, v))
+                .collect()
+        } else {
+            sh.row_outline_levels
+                .iter()
+                .map(|(&k, &v)| (k, v))
+                .collect()
+        };
+        let (collapsed, hidden) = if columns {
+            (&mut data.collapsed_cols, &mut data.hidden_cols)
+        } else {
+            (&mut data.collapsed_rows, &mut data.hidden_rows)
+        };
+        for (i, l) in &levels {
+            if *l > level {
+                hidden.insert(*i);
+            } else {
+                hidden.remove(i);
+            }
+        }
+        // A summary reads as collapsed exactly when its own band just went
+        // hidden, so the toggles agree with what is on screen.
+        collapsed.clear();
+        for (i, l) in &levels {
+            if *l <= level
+                && let Some((start, _)) = sh.outline_band(*i, columns)
+                && levels.iter().any(|(j, jl)| *j == start && *jl > level)
+            {
+                collapsed.insert(*i);
+            }
+        }
+    })
+}
+
+/// The outline for `count` lines from `first`, as JSON
+/// `{"max":N,"lines":[{"l":level,"c":0|1,"b":0|1}, …]}` — nesting level, whether
+/// that line's group is collapsed, and whether a group hangs off it at all (so
+/// the host knows where to draw a toggle).
+///
+/// `max` is the deepest level on the sheet, which sizes the gutter. Asking for
+/// `count` 0 returns just that, which is how the host decides whether to reserve
+/// any gutter at all — so a sheet with no outline costs one cheap call a frame.
+#[wasm_bindgen]
+pub fn session_outline(sheet: usize, first: u32, count: u32, columns: bool) -> String {
+    const NONE: &str = "{\"max\":0,\"lines\":[]}";
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return NONE.to_owned();
+        };
+        let (levels, collapsed) = if columns {
+            (&sh.col_outline_levels, &sh.collapsed_cols)
+        } else {
+            (&sh.row_outline_levels, &sh.collapsed_rows)
+        };
+        let max = levels.values().copied().max().unwrap_or(0);
+        if max == 0 {
+            return NONE.to_owned();
+        }
+        let lines: Vec<String> = (first..first.saturating_add(count))
+            .map(|i| {
+                let l = levels.get(&i).copied().unwrap_or(0);
+                let c = u8::from(collapsed.contains(&i));
+                let b = u8::from(sh.outline_band(i, columns).is_some());
+                format!("{{\"l\":{l},\"c\":{c},\"b\":{b}}}")
+            })
+            .collect();
+        format!("{{\"max\":{max},\"lines\":[{}]}}", lines.join(","))
+    })
+    .unwrap_or_else(|| NONE.to_owned())
 }
 
 // --- Autofilter -----------------------------------------------------------
@@ -2765,12 +2982,9 @@ fn commit_filter(sheet: usize, filter: Option<AutoFilter>) -> Result<(), JsError
             }
             None => BTreeSet::new(),
         };
-        if let EditOperation::SetSheetMetadata {
-            auto_filter,
-            filter_hidden,
-            ..
-        } = &mut op
-        {
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            let auto_filter = &mut data.auto_filter;
+            let filter_hidden = &mut data.filter_hidden;
             *auto_filter = filter;
             *filter_hidden = hidden;
         }

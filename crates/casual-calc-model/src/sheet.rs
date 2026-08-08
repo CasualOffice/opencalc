@@ -495,6 +495,62 @@ impl Sheet {
         }
     }
 
+    /// The outline nesting level of a row (0 when it is not in any group).
+    pub fn row_level(&self, row: u32) -> u8 {
+        self.row_outline_levels.get(&row).copied().unwrap_or(0)
+    }
+
+    /// The outline nesting level of a column (0 when it is not in any group).
+    pub fn col_level(&self, col: u32) -> u8 {
+        self.col_outline_levels.get(&col).copied().unwrap_or(0)
+    }
+
+    /// The detail band a collapse toggle at `index` controls, as an inclusive
+    /// `(start, end)`, or `None` if no group hangs off that line.
+    ///
+    /// A group is a contiguous run of lines nested *deeper* than its summary
+    /// line, sitting above it when [`OutlinePr::summary_below`] (the OOXML
+    /// default) and below it otherwise. The summary line itself is never part of
+    /// the band — collapsing must leave the toggle you clicked on screen.
+    pub fn outline_band(&self, index: u32, columns: bool) -> Option<(u32, u32)> {
+        let level_of = |i: u32| {
+            if columns {
+                self.col_level(i)
+            } else {
+                self.row_level(i)
+            }
+        };
+        let summary_after = if columns {
+            self.outline.summary_right
+        } else {
+            self.outline.summary_below
+        };
+        let own = level_of(index);
+        if summary_after {
+            // Detail sits above/left: walk back while the lines nest deeper.
+            let mut start = index;
+            while start > 0 && level_of(start - 1) > own {
+                start -= 1;
+            }
+            (start < index).then(|| (start, index - 1))
+        } else {
+            // Detail sits below/right. Bounded by the outline-level map rather
+            // than scanning to infinity: nothing past the deepest recorded line
+            // can be in a group.
+            let last = if columns {
+                self.col_outline_levels.keys().next_back().copied()
+            } else {
+                self.row_outline_levels.keys().next_back().copied()
+            }
+            .unwrap_or(index);
+            let mut end = index;
+            while end < last && level_of(end + 1) > own {
+                end += 1;
+            }
+            (end > index).then(|| (index + 1, end))
+        }
+    }
+
     /// Whether a row is hidden, for any reason — hidden by hand or filtered out.
     ///
     /// Every reader that asks "should this row be drawn / measured / exported as
