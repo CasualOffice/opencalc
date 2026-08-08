@@ -4,7 +4,7 @@
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
 // rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
 // the dev server send no-store) to force a fresh fetch.
-const BUILD = "31";
+const BUILD = "32";
 let init, wasm;
 
 const HW = 46; // row-header width (px)
@@ -132,11 +132,25 @@ function mergeInSel(m) {
 
 // The canvas font string for a cell (family + size from its style, or defaults).
 function cellPx(it) { return it.fs ? Math.round((it.fs * 4) / 3) : 13; }
+// Cache the CSS font stack per requested family. font_css_stack (wasm) routes a
+// name through the shared substitution table (Calibri→Carlito, Arial→Liberation
+// Sans, …) + the bundled @font-face fonts, so a cell's font renders as its
+// metric-compatible face on every machine instead of silently falling back to
+// the system font. Cached because draw() asks per cell, but families repeat.
+const _fontStackCache = new Map();
+function fontStack(fn) {
+  const key = fn || "";
+  let s = _fontStackCache.get(key);
+  if (s === undefined) {
+    try { s = wasm.font_css_stack(key); } catch { s = "system-ui, sans-serif"; }
+    _fontStackCache.set(key, s);
+  }
+  return s;
+}
 function cellFont(it) {
   const weight = it.b ? "600 " : "";
   const slant = it.i ? "italic " : "";
-  const fam = it.fn ? `"${it.fn}", system-ui, sans-serif` : "system-ui, sans-serif";
-  return `${slant}${weight}${cellPx(it)}px ${fam}`;
+  return `${slant}${weight}${cellPx(it)}px ${fontStack(it.fn)}`;
 }
 function cellLineH(it) { return cellPx(it) + 4; }
 // Baseline y for a single line given the cell's vertical alignment.

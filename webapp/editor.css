@@ -1,3 +1,32 @@
+/* Bundled fonts (Apache-2.0 / SIL OFL-1.1) — the metric-compatible substitutes
+   the canvas renders through so a cell's font shows deterministically on every
+   machine (e.g. Calibri→Carlito, Arial→Liberation Sans), regardless of what the
+   OS has installed. font_css_stack() (wasm) picks the family per cell. */
+@font-face { font-family: "Roboto"; font-weight: 400; font-style: normal; src: url("./fonts/Roboto-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Roboto"; font-weight: 700; font-style: normal; src: url("./fonts/Roboto-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Roboto"; font-weight: 400; font-style: italic; src: url("./fonts/Roboto-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Roboto"; font-weight: 700; font-style: italic; src: url("./fonts/Roboto-BoldItalic.ttf"); font-display: swap; }
+@font-face { font-family: "Carlito"; font-weight: 400; font-style: normal; src: url("./fonts/Carlito-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Carlito"; font-weight: 700; font-style: normal; src: url("./fonts/Carlito-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Carlito"; font-weight: 400; font-style: italic; src: url("./fonts/Carlito-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Carlito"; font-weight: 700; font-style: italic; src: url("./fonts/Carlito-BoldItalic.ttf"); font-display: swap; }
+@font-face { font-family: "Caladea"; font-weight: 400; font-style: normal; src: url("./fonts/Caladea-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Caladea"; font-weight: 700; font-style: normal; src: url("./fonts/Caladea-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Caladea"; font-weight: 400; font-style: italic; src: url("./fonts/Caladea-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Caladea"; font-weight: 700; font-style: italic; src: url("./fonts/Caladea-BoldItalic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Sans"; font-weight: 400; font-style: normal; src: url("./fonts/LiberationSans-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Sans"; font-weight: 700; font-style: normal; src: url("./fonts/LiberationSans-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Sans"; font-weight: 400; font-style: italic; src: url("./fonts/LiberationSans-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Sans"; font-weight: 700; font-style: italic; src: url("./fonts/LiberationSans-BoldItalic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Serif"; font-weight: 400; font-style: normal; src: url("./fonts/LiberationSerif-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Serif"; font-weight: 700; font-style: normal; src: url("./fonts/LiberationSerif-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Serif"; font-weight: 400; font-style: italic; src: url("./fonts/LiberationSerif-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Serif"; font-weight: 700; font-style: italic; src: url("./fonts/LiberationSerif-BoldItalic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Mono"; font-weight: 400; font-style: normal; src: url("./fonts/LiberationMono-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Mono"; font-weight: 700; font-style: normal; src: url("./fonts/LiberationMono-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Mono"; font-weight: 400; font-style: italic; src: url("./fonts/LiberationMono-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "Liberation Mono"; font-weight: 700; font-style: italic; src: url("./fonts/LiberationMono-BoldItalic.ttf"); font-display: swap; }
+
 /* Design tokens — self-contained editor chrome, implementing the "OpenCalc
    Editor" design system. The editor never depends on the marketing style.css.
    `--surface` is the grouped-pill background; `--card` is popovers/panels. */

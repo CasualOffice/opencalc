@@ -1450,6 +1450,15 @@ pub fn function_catalog() -> String {
     format!("[{}]", items.join(","))
 }
 
+/// The CSS font stack for a requested family (the deterministic bundled
+/// substitute first, then the requested name, then the generic), from the shared
+/// substitution table. The editor caches this per unique font name to build the
+/// canvas font so families render as their metric-compatible bundled faces.
+#[wasm_bindgen]
+pub fn font_css_stack(name: &str) -> String {
+    casual_calc_layout::css_stack(name)
+}
+
 /// The editable input for a cell (formula text with `=`, or the raw value).
 #[wasm_bindgen]
 pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
