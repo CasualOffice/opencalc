@@ -1143,6 +1143,29 @@ fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -
     .unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Which of `count` rows starting at `first` carry an explicit height, as a
+/// JSON array of 0/1. A row the workbook sized itself is *pinned*: the editor's
+/// auto row-height must not grow it, or an imported `ht="7.5"` would silently
+/// become the editor's own idea of how tall the row should be (Excel likewise
+/// stops auto-fitting a row once its height is set).
+#[wasm_bindgen]
+pub fn session_row_pinned(sheet: usize, first: u32, count: u32) -> String {
+    with_session(|s| {
+        let sizes = s.workbook().sheets.get(sheet).map(|sh| &sh.rows.sizes);
+        let mut out = String::from("[");
+        for i in 0..count {
+            if i > 0 {
+                out.push(',');
+            }
+            let pinned = sizes.is_some_and(|m| m.contains_key(&(first + i)));
+            out.push(if pinned { '1' } else { '0' });
+        }
+        out.push(']');
+        out
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
 /// Absolute pixel offset (96 dpi) of a column's left edge from column 0.
 #[wasm_bindgen]
 pub fn session_col_offset_px(sheet: usize, col: u32) -> i32 {

@@ -276,6 +276,38 @@ fn imports_outline_levels_collapsed_and_zoom() {
 }
 
 #[test]
+fn column_widths_survive_the_true_spelling_of_ooxml_booleans() {
+    // LibreOffice, Apache POI and ExcelJS all write `customWidth="true"` rather
+    // than `="1"`. Both are valid `xsd:boolean`; matching only "1" silently
+    // dropped every column width, row height and hidden flag in those files.
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cols>
+          <col min="1" max="1" width="30" customWidth="true"/>
+          <col min="2" max="2" width="12" customWidth="1"/>
+          <col min="3" max="3" width="9" hidden="true"/>
+          <col min="4" max="4" width="18"/>
+        </cols>
+        <sheetData>
+          <row r="1" ht="42" customHeight="true"><c r="A1"><v>1</v></c></row>
+          <row r="2" hidden="true"><c r="A2"><v>2</v></c></row>
+        </sheetData>
+    </worksheet>"#
+        .to_vec();
+    let import = import_package(package_with_sheet(sheet_xml, None)).unwrap();
+    let sheet = &import.workbook.sheets[0];
+
+    // Every width is kept, whichever spelling declared it — and a width with no
+    // customWidth attribute at all is still authoritative for its column.
+    let w = |c: u32| sheet.columns.sizes.get(&c).copied();
+    assert_eq!(w(0), Some(super::read::col_width_to_twips(30.0)));
+    assert_eq!(w(1), Some(super::read::col_width_to_twips(12.0)));
+    assert_eq!(w(3), Some(super::read::col_width_to_twips(18.0)));
+    assert!(sheet.hidden_cols.contains(&2));
+    assert!(sheet.hidden_rows.contains(&1));
+    assert!(sheet.rows.sizes.contains_key(&0));
+}
+
+#[test]
 fn imports_cell_indent_from_alignment() {
     const STYLES: &[u8] = br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
         <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="0" applyAlignment="1"><alignment horizontal="left" indent="2"/></xf></cellXfs>

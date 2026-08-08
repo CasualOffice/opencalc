@@ -90,6 +90,14 @@ fn attr_u32(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<u32>, ImportError
     Ok(attr(e, local)?.and_then(|s| s.parse().ok()))
 }
 
+/// An OOXML font toggle (`<b/>`, `<i/>`, `<strike/>`): present means *on*, but
+/// a writer may state it explicitly, and `val="0"` / `val="false"` means off.
+/// Treating the element's mere presence as on turned every explicitly-disabled
+/// property back on.
+fn toggle_on(e: &BytesStart<'_>) -> Result<bool, ImportError> {
+    Ok(attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+}
+
 /// Normalize an OOXML `rgb` color (`FFRRGGBB` or `RRGGBB`) to `RRGGBB`.
 fn rgb(e: &BytesStart<'_>) -> Result<Option<String>, ImportError> {
     Ok(attr(e, b"rgb")?.map(|s| if s.len() == 8 { s[2..].to_owned() } else { s }))
@@ -183,22 +191,24 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                     b"font" if in_fonts => fonts.push(Font::default()),
                     b"b" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
-                            f.bold = true;
+                            f.bold = toggle_on(e)?;
                         }
                     }
                     b"i" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
-                            f.italic = true;
+                            f.italic = toggle_on(e)?;
                         }
                     }
+                    // `<u>` carries a style, not a boolean: absent means single,
+                    // and `val="none"` is the one value that means no underline.
                     b"u" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
-                            f.underline = true;
+                            f.underline = !matches!(attr(e, b"val")?.as_deref(), Some("none"));
                         }
                     }
                     b"strike" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
-                            f.strike = true;
+                            f.strike = toggle_on(e)?;
                         }
                     }
                     b"color" if in_fonts => {
@@ -250,7 +260,10 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                             if let Some(vtoken) = attr(e, b"vertical")? {
                                 xf.valign = VAlign::from_ooxml(&vtoken);
                             }
-                            if attr(e, b"wrapText")?.as_deref() == Some("1") {
+                            // `xsd:boolean` — "true" is as valid as "1".
+                            if attr(e, b"wrapText")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            {
                                 xf.wrap = true;
                             }
                             if let Some(indent) = attr_u32(e, b"indent")? {

@@ -279,13 +279,32 @@ function measure() {
   geoItems = JSON.parse(
     wasm.session_cells(state.sheet, fr > 0 ? 0 : fsr, fc > 0 ? 0 : fsc, lastRowIdx, lastColIdx),
   );
+  // Rows the workbook sized itself are pinned: auto-height must not override an
+  // imported height (nor one the user dragged), exactly as Excel stops
+  // auto-fitting a row once its height is set. Without this every styled row of
+  // an opened file was silently re-heighted by the editor.
+  // (geo.rowIdx is the frozen band followed by the scrolled body, so ask per
+  // contiguous run rather than over the gap between them.)
+  const pinnedRows = new Set();
+  for (let i = 0; i < geo.rowIdx.length; ) {
+    let j = i;
+    while (j + 1 < geo.rowIdx.length && geo.rowIdx[j + 1] === geo.rowIdx[j] + 1) j++;
+    const flags = JSON.parse(wasm.session_row_pinned(state.sheet, geo.rowIdx[i], j - i + 1));
+    flags.forEach((p, k) => { if (p) pinnedRows.add(geo.rowIdx[i] + k); });
+    i = j + 1;
+  }
   for (const it of geoItems) {
     if (!it.t) continue;
     const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
     if (ci === undefined || ri === undefined) continue;
+    // A hidden row is 0 px — growing it would make it reappear.
+    if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
     let needed;
     if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
-    else if (it.fs) needed = cellLineH(it) + 6;
+    // A tall font grows its row by the font's own box plus Excel's leading;
+    // at the 11 pt default this comes to exactly the default row height, so an
+    // ordinary styled row is left alone instead of being inflated by 25%.
+    else if (it.fs) needed = cellPx(it) + 5;
     else continue;
     if (needed > geo.rowH[ri]) geo.rowH[ri] = needed;
   }

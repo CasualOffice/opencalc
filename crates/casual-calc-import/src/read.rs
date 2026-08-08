@@ -273,7 +273,7 @@ const MAX_COL_SPAN: u32 = 4096;
 
 /// Convert an Excel column width (character units) to twips, matching the
 /// pixel rounding Excel uses so the value survives a write→read round-trip.
-fn col_width_to_twips(chars: f64) -> i64 {
+pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
     let px = (chars * 7.0 + 5.0).round();
     (px as i64) * 15
 }
@@ -306,7 +306,7 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     // hidden — are meaningful even when the column carries no custom width, so
     // they are parsed before the width-driven early return below.
     let narrow = max.saturating_sub(min) < MAX_COL_SPAN;
-    if read_attr(e, b"hidden")?.as_deref() == Some("1") && narrow {
+    if read_bool_attr(e, b"hidden")?.unwrap_or(false) && narrow {
         for col in min..=max {
             result.hidden_cols.insert(col - 1);
         }
@@ -319,7 +319,7 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
             result.col_outline_levels.insert(col - 1, level);
         }
     }
-    if read_attr(e, b"collapsed")?.as_deref() == Some("1") && narrow {
+    if read_bool_attr(e, b"collapsed")?.unwrap_or(false) && narrow {
         for col in min..=max {
             result.collapsed_cols.insert(col - 1);
         }
@@ -328,11 +328,19 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
         return Ok(());
     };
     let twips = col_width_to_twips(width);
-    let custom = read_attr(e, b"customWidth")?.as_deref() == Some("1");
-    // A wide span without an explicit custom flag is the sheet's default width,
-    // not a per-column override — record it as the default to stay compact.
-    if !custom || max.saturating_sub(min) >= MAX_COL_SPAN {
-        result.col_default.get_or_insert(twips);
+    // A span covering (nearly) the whole sheet is the default width, not
+    // thousands of per-column overrides — record it as the default to stay
+    // compact, and let it win over an earlier `<sheetFormatPr defaultColWidth>`
+    // since it is the more specific statement.
+    //
+    // Everything narrower is an authoritative per-column width. `customWidth`
+    // does NOT gate this: it only records whether the user set the width by
+    // hand rather than by autofit, and gating on it silently dropped every
+    // width in files that write the equally-valid `customWidth="true"`
+    // (LibreOffice, Apache POI, ExcelJS) — the widths of an imported workbook
+    // simply vanished.
+    if !narrow {
+        result.col_default = Some(twips);
         return Ok(());
     }
     for col in min..=max {
@@ -353,7 +361,7 @@ fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     if let Some(ht) = read_f64_attr(e, b"ht")? {
         result.row_sizes.insert(r - 1, row_height_to_twips(ht));
     }
-    if read_attr(e, b"hidden")?.as_deref() == Some("1") {
+    if read_bool_attr(e, b"hidden")?.unwrap_or(false) {
         result.hidden_rows.insert(r - 1);
     }
     if let Some(level) = read_attr(e, b"outlineLevel")?.and_then(|s| s.parse::<u8>().ok())
@@ -361,7 +369,7 @@ fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     {
         result.row_outline_levels.insert(r - 1, level);
     }
-    if read_attr(e, b"collapsed")?.as_deref() == Some("1") {
+    if read_bool_attr(e, b"collapsed")?.unwrap_or(false) {
         result.collapsed_rows.insert(r - 1);
     }
     Ok(())
