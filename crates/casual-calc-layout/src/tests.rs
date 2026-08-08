@@ -244,3 +244,49 @@ fn layout_is_deterministic() {
     let geo = GridGeometry::default();
     assert_eq!(layout_full(&wb, 0, &geo), layout_full(&wb, 0, &geo));
 }
+
+#[test]
+fn elapsed_time_counts_past_a_day() {
+    use crate::format_number;
+
+    // 1.25 days = 30 hours. `[h]` must show the *total*, not the clock hour —
+    // the brackets used to be swallowed, so this rendered without its hours and
+    // a 30-hour timesheet entry read as 6:00.
+    assert_eq!(format_number(1.25, "[h]:mm"), "30:00");
+    assert_eq!(format_number(1.25, "[m]"), "1800");
+    assert_eq!(format_number(1.25, "[s]"), "108000");
+    // Padding follows the bracket's own width.
+    assert_eq!(format_number(0.25, "[hh]:mm"), "06:00");
+    // A plain `h` still wraps at 24, which is the difference being tested.
+    assert_eq!(format_number(1.25, "h:mm"), "6:00");
+}
+
+#[test]
+fn elapsed_hours_make_the_following_m_a_minute() {
+    use crate::format_number;
+
+    // Without the neighbour rule the `mm` after `[h]` would read as a month.
+    assert_eq!(format_number(1.5, "[h]:mm:ss"), "36:00:00");
+}
+
+#[test]
+fn negative_elapsed_time_keeps_its_sign() {
+    use crate::format_number;
+
+    assert_eq!(format_number(-0.5, "[h]:mm"), "-12:00");
+}
+
+#[test]
+fn locale_and_colour_brackets_still_emit_nothing() {
+    use crate::format_number;
+
+    // The bracket arm now recognises elapsed units, so the tokens that are *not*
+    // elapsed must still be dropped rather than leaking into the output.
+    assert_eq!(format_number(0.5, "[Red]h:mm"), "12:00");
+    // `[$-409]` is a locale marker with an empty currency symbol, and one of the
+    // commonest prefixes on real date/time formats. The `0` inside the locale id
+    // used to be mistaken for a digit placeholder, routing the whole format down
+    // the numeric path — it rendered as the literal text `h:mm0`.
+    assert_eq!(format_number(0.5, "[$-409]h:mm"), "12:00");
+    assert_eq!(format_number(1.25, "[$-409][h]:mm"), "30:00");
+}

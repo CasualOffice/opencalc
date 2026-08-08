@@ -11,7 +11,7 @@
 //! ([`format_text`]); and the eight named section colours
 //! ([`format_number_colored`]).
 //!
-//! Deferred: fractions (`# ??/??`), elapsed-time (`[h]`) layout, conditional
+//! Deferred: fractions (`# ??/??`), conditional
 //! sections (`[>100]`), and the legacy `[Color n]` palette index.
 
 /// Split a SpreadsheetML format code into sections separated by unquoted `;`.
@@ -234,8 +234,36 @@ pub fn format_general(value: f64) -> String {
     format!("{rounded}")
 }
 
+/// Whether a section contains a real digit placeholder, ignoring the places a
+/// `0` or `#` can appear without being one: inside a quoted literal, after an
+/// escape, or inside a bracket token.
+///
+/// A plain `contains('0')` misread `[$-409]h:mm` — the `0` belongs to the locale
+/// id — and sent a perfectly ordinary time format down the numeric path, where
+/// it rendered as the literal text `h:mm0`. `[$-409]` is one of the most common
+/// prefixes on real date and time formats.
 fn has_digit_placeholder(section: &str) -> bool {
-    section.contains('0') || section.contains('#')
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let mut in_quotes = false;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => in_quotes = !in_quotes,
+            '\\' if !in_quotes => i += 1, // the escaped character is a literal
+            '[' if !in_quotes => {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+            }
+            // Only `0` and `#`. `?` is padding — the accounting zero section
+            // `_-$* "-"??_-` is literal, not numeric — so including it would
+            // change which path that format takes.
+            '0' | '#' if !in_quotes => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 fn is_date_or_time(section: &str) -> bool {
@@ -471,6 +499,9 @@ fn group_thousands(number: &str) -> String {
 
 /// A single element of a parsed date/time format section.
 enum DateToken {
+    /// An elapsed-time field: `[h]`, `[mm]`, `[ss]`. `count` is how many
+    /// characters were inside the brackets, which sets zero-padding.
+    Elapsed { kind: char, count: usize },
     /// A run of a date/time field letter (`y`, `m`, `d`, `h`, `s`), lower-cased,
     /// with its repeat count (`yyyy` → `('y', 4)`).
     Field { kind: char, count: usize },
@@ -551,6 +582,20 @@ fn format_date_time(value: f64, section: &str) -> String {
         match token {
             DateToken::Literal(text) => out.push_str(text),
             DateToken::AmPm { am, pm } => out.push_str(if is_pm { pm } else { am }),
+            // Elapsed fields count the *whole* duration, so they use the signed
+            // total rather than the clock components — and the parts that follow
+            // (`[h]:mm`) still show the remainder, which is why the day is not
+            // folded away here.
+            DateToken::Elapsed { kind, count } => {
+                let total_secs = (value * 86_400.0).round() as i64;
+                let n = match kind {
+                    'h' => total_secs / 3600,
+                    'm' => total_secs / 60,
+                    _ => total_secs,
+                };
+                let sign = if n < 0 { "-" } else { "" };
+                out.push_str(&format!("{sign}{:0width$}", n.abs(), width = *count));
+            }
             DateToken::Field { kind, count } => match kind {
                 'y' => {
                     if *count <= 2 {
@@ -632,7 +677,9 @@ fn adjacent_field_kind(tokens: &[DateToken], idx: usize, forward: bool) -> Optio
             i -= 1;
         }
         match &tokens[i] {
-            DateToken::Field { kind, .. } => return Some(*kind),
+            // An elapsed field counts as its own letter here, so the `mm` in
+            // `[h]:mm` reads as minutes rather than as a month.
+            DateToken::Field { kind, .. } | DateToken::Elapsed { kind, .. } => return Some(*kind),
             DateToken::AmPm { .. } | DateToken::Literal(_) => {}
         }
     }
@@ -687,12 +734,31 @@ fn parse_date_tokens(section: &str) -> Vec<DateToken> {
                 i += 2;
             }
             '[' => {
-                // Locale / color / elapsed brackets: consume through `]`, emit nothing.
-                i += 1;
-                while i < chars.len() && chars[i] != ']' {
-                    i += 1;
+                // `[h]`, `[m]`, `[s]` are elapsed-time fields: the *total* hours,
+                // minutes or seconds, not the clock component. Swallowing them —
+                // as this used to — silently drops the part of a duration that
+                // exceeds a day, so a 30-hour timesheet entry displayed as 6:00.
+                let close = chars[i + 1..]
+                    .iter()
+                    .position(|c| *c == ']')
+                    .map(|p| i + 1 + p);
+                let inner: String = match close {
+                    Some(end) => chars[i + 1..end].iter().collect(),
+                    None => String::new(),
+                };
+                let lower = inner.to_ascii_lowercase();
+                let unit = lower.chars().next().unwrap_or(' ');
+                if !lower.is_empty()
+                    && matches!(unit, 'h' | 'm' | 's')
+                    && lower.chars().all(|c| c == unit)
+                {
+                    tokens.push(DateToken::Elapsed {
+                        kind: unit,
+                        count: lower.len(),
+                    });
                 }
-                i += 1;
+                // Locale and colour brackets still emit nothing.
+                i = close.map_or(chars.len(), |end| end + 1);
             }
             _ => {
                 push_literal(&mut tokens, ch);
