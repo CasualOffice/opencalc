@@ -25,12 +25,26 @@ python3 webapp/serve.py    # http://localhost:8099
 ## What the demo exposes
 
 The `casual-calc-wasm` bridge is a thin transport over the host-agnostic engine
-(the same core runs native on Tauri):
+(the same core runs native on Tauri). Stateless helpers:
 
 - `version()` — engine version.
 - `eval_formula(text)` — parse + evaluate a self-contained formula.
 - `render_xlsx(bytes, w, h, dpi)` — import → recalc → layout viewport → PNG.
 - `describe_xlsx(bytes)` — a short summary of an opened workbook.
+- `function_catalog()` — the supported functions and signatures, which drives the
+  editor's autocomplete and argument hint.
+- `font_families()` / `font_css_stack(name)` — the families the engine renders
+  faithfully, from the shared substitution table.
+- `formula_ref_spans(text)` — each cell reference in formula text with its
+  character span, for the editor's range finder.
 
-Cell **text** is rendered as highlighted regions for now (glyph shaping is in
-progress); the formula evaluator and the import→calc→render pipeline are real.
+Everything else is the **session** API (`session_*`): open a workbook, read the
+visible cells, edit through undoable operations, recalculate, and write back.
+The editor holds no model of its own — the canvas is drawn from what the session
+reports, so the engine is the single source of truth for values, formatting and
+geometry.
+
+Both the browser canvas and the PNG backend draw real glyphs, from bundled
+metric-compatible faces (Carlito for Calibri, Liberation Sans for Arial, and so
+on), so a sheet looks the same on a machine that has none of the original fonts
+installed.
