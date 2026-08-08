@@ -1433,6 +1433,20 @@ function friendlyFormulaError(err) {
   return m;
 }
 function commit(value, advance) {
+  // A cell under a data-validation rule refuses input the rule disallows. The
+  // dropdown was previously a suggestion — anything typed over it was accepted,
+  // which is the opposite of what a validation is for. Gated on typed entry
+  // only, as in Excel: fill and paste are not checked.
+  if (!value.trim().startsWith("=")) {
+    let bad = "";
+    try { bad = wasm.session_validation_error(state.sheet, state.sel.row, state.sel.col, value); }
+    catch {}
+    if (bad) {
+      status.innerHTML = `<span class="err">Not allowed here — ${bad}</span>`;
+      if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+      return false;
+    }
+  }
   // Reject an unparseable formula instead of silently storing it as text —
   // keep the editor open with the error, like Excel's formula guard.
   if (value.trim().startsWith("=")) {

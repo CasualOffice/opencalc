@@ -647,6 +647,41 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_else(|| "null".to_owned())
 }
 
+/// Why `input` is not allowed in `(row, col)`, or an empty string if it is.
+///
+/// A dropdown that accepts anything typed over it is not a validation — it is a
+/// suggestion. The host calls this before committing an edit and refuses the
+/// commit with the returned message, which is how Excel behaves (and, like
+/// Excel, only for typed entry: fill and paste are not gated).
+///
+/// An empty input always passes: clearing a cell is not entering a bad value.
+#[wasm_bindgen]
+pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return String::new();
+        };
+        let Some(rule) = sh.validations.iter().find(|v| v.covers(row, col)) else {
+            return String::new();
+        };
+        if rule.values.is_empty() || rule.values.iter().any(|v| v == trimmed) {
+            return String::new();
+        }
+        let shown: Vec<&str> = rule.values.iter().take(6).map(String::as_str).collect();
+        let ellipsis = if rule.values.len() > shown.len() {
+            ", …"
+        } else {
+            ""
+        };
+        format!("must be one of: {}{ellipsis}", shown.join(", "))
+    })
+    .unwrap_or_default()
+}
+
 /// Remove any validation intersecting a range.
 #[wasm_bindgen]
 pub fn session_clear_validation(
