@@ -524,7 +524,211 @@ enum DateToken {
     Literal(String),
 }
 
-/// English month names, indexed by `month - 1`. Locale-independent by design.
+/// The first `n` *characters* of a name. Slicing by byte would split a code
+/// point — `&"décembre"[..3]` panics — which is exactly what a localized name
+/// table introduces the risk of.
+fn truncate_chars(name: &str, n: usize) -> String {
+    name.chars().take(n).collect()
+}
+
+/// Month and weekday names for the languages a `[$-lcid]` prefix can select.
+///
+/// Excel takes the language from the format code itself, not from the reader's
+/// machine — `[$-40C]dddd` says French wherever the file is opened — so that is
+/// what decides here too. A workbook's dates then read the same for everyone,
+/// which is the point of putting the locale in the file.
+///
+/// The set is deliberately bounded rather than a full CLDR import: these are the
+/// languages whose LCIDs actually appear in the wild in `numFmt` codes. Anything
+/// else falls back to English, which is what happened to *every* code before.
+struct Names {
+    months: [&'static str; 12],
+    days: [&'static str; 7],
+}
+
+/// The primary-language part of an LCID (its low 10 bits) to names. Sub-language
+/// is ignored: `[$-809]` (UK) and `[$-409]` (US) name the months identically.
+fn names_for(lang: u16) -> Option<Names> {
+    Some(match lang {
+        0x0C => Names {
+            months: [
+                "janvier",
+                "février",
+                "mars",
+                "avril",
+                "mai",
+                "juin",
+                "juillet",
+                "août",
+                "septembre",
+                "octobre",
+                "novembre",
+                "décembre",
+            ],
+            days: [
+                "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
+            ],
+        },
+        0x07 => Names {
+            months: [
+                "Januar",
+                "Februar",
+                "März",
+                "April",
+                "Mai",
+                "Juni",
+                "Juli",
+                "August",
+                "September",
+                "Oktober",
+                "November",
+                "Dezember",
+            ],
+            days: [
+                "Sonntag",
+                "Montag",
+                "Dienstag",
+                "Mittwoch",
+                "Donnerstag",
+                "Freitag",
+                "Samstag",
+            ],
+        },
+        0x0A => Names {
+            months: [
+                "enero",
+                "febrero",
+                "marzo",
+                "abril",
+                "mayo",
+                "junio",
+                "julio",
+                "agosto",
+                "septiembre",
+                "octubre",
+                "noviembre",
+                "diciembre",
+            ],
+            days: [
+                "domingo",
+                "lunes",
+                "martes",
+                "miércoles",
+                "jueves",
+                "viernes",
+                "sábado",
+            ],
+        },
+        0x10 => Names {
+            months: [
+                "gennaio",
+                "febbraio",
+                "marzo",
+                "aprile",
+                "maggio",
+                "giugno",
+                "luglio",
+                "agosto",
+                "settembre",
+                "ottobre",
+                "novembre",
+                "dicembre",
+            ],
+            days: [
+                "domenica",
+                "lunedì",
+                "martedì",
+                "mercoledì",
+                "giovedì",
+                "venerdì",
+                "sabato",
+            ],
+        },
+        0x16 => Names {
+            months: [
+                "janeiro",
+                "fevereiro",
+                "março",
+                "abril",
+                "maio",
+                "junho",
+                "julho",
+                "agosto",
+                "setembro",
+                "outubro",
+                "novembro",
+                "dezembro",
+            ],
+            days: [
+                "domingo",
+                "segunda-feira",
+                "terça-feira",
+                "quarta-feira",
+                "quinta-feira",
+                "sexta-feira",
+                "sábado",
+            ],
+        },
+        0x13 => Names {
+            months: [
+                "januari",
+                "februari",
+                "maart",
+                "april",
+                "mei",
+                "juni",
+                "juli",
+                "augustus",
+                "september",
+                "oktober",
+                "november",
+                "december",
+            ],
+            days: [
+                "zondag",
+                "maandag",
+                "dinsdag",
+                "woensdag",
+                "donderdag",
+                "vrijdag",
+                "zaterdag",
+            ],
+        },
+        _ => return None,
+    })
+}
+
+/// The language id from a section's `[$-lcid]` (or `[$SYM-lcid]`) prefix, if it
+/// has one. Only the primary language is returned.
+fn section_language(section: &str) -> Option<u16> {
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let mut in_quotes = false;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => in_quotes = !in_quotes,
+            '\\' if !in_quotes => i += 1,
+            '[' if !in_quotes => {
+                let end = chars[i..].iter().position(|c| *c == ']').map(|p| i + p)?;
+                let inner: String = chars[i + 1..end].iter().collect();
+                // `[$-409]` and `[$£-809]` both carry the id after the dash.
+                if let Some(rest) = inner.strip_prefix('$')
+                    && let Some((_, lcid)) = rest.rsplit_once('-')
+                    && let Ok(v) = u32::from_str_radix(lcid.trim(), 16)
+                {
+                    return Some((v & 0x3FF) as u16);
+                }
+                i = end;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// English month names, indexed by `month - 1`. The fallback for any language
+/// not in [`names_for`], and for a code with no locale prefix at all.
 const MONTHS: [&str; 12] = [
     "January",
     "February",
@@ -559,6 +763,15 @@ const WEEKDAYS: [&str; 7] = [
 /// date; the fractional part is the time of day. Rendering never consults a locale
 /// or the wall clock, so it is fully deterministic.
 fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
+    // The names the format's own `[$-lcid]` selects, English otherwise.
+    let names = section_language(section).and_then(names_for);
+    let month_name = |m: i64| -> &str {
+        names
+            .as_ref()
+            .map(|n| n.months[(m - 1) as usize])
+            .unwrap_or(MONTHS[(m - 1) as usize])
+    };
+    let day_name = |d: usize| -> &str { names.as_ref().map(|n| n.days[d]).unwrap_or(WEEKDAYS[d]) };
     // A 1904 serial names the same instant as `serial + 1462` in the 1900 system
     // the rest of this function is written against.
     let value = if date1904 {
@@ -626,8 +839,8 @@ fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
                 'd' => match count {
                     1 => out.push_str(&day.to_string()),
                     2 => out.push_str(&format!("{day:02}")),
-                    3 => out.push_str(&WEEKDAYS[weekday as usize][..3]),
-                    _ => out.push_str(WEEKDAYS[weekday as usize]),
+                    3 => out.push_str(&truncate_chars(day_name(weekday as usize), 3)),
+                    _ => out.push_str(day_name(weekday as usize)),
                 },
                 'h' => {
                     if *count >= 2 {
@@ -651,13 +864,13 @@ fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
                             out.push_str(&minute.to_string());
                         }
                     } else {
-                        let name = MONTHS[(month - 1) as usize];
+                        let name = month_name(month);
                         match count {
                             1 => out.push_str(&month.to_string()),
                             2 => out.push_str(&format!("{month:02}")),
-                            3 => out.push_str(&name[..3]),
+                            3 => out.push_str(&truncate_chars(name, 3)),
                             4 => out.push_str(name),
-                            _ => out.push_str(&name[..1]),
+                            _ => out.push_str(&truncate_chars(name, 1)),
                         }
                     }
                 }

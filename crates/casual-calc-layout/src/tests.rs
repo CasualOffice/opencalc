@@ -318,3 +318,45 @@ fn the_1904_epoch_shifts_dates_but_not_plain_numbers() {
     // Time-of-day is epoch-independent too.
     assert_eq!(format_number_1904(0.5, "h:mm"), "12:00");
 }
+
+#[test]
+fn month_and_day_names_follow_the_format_locale() {
+    use crate::format_number;
+
+    // 45000 = 2023-03-15, a Wednesday.
+    assert_eq!(
+        format_number(45000.0, "dddd d mmmm yyyy"),
+        "Wednesday 15 March 2023"
+    );
+    // Excel takes the language from the code, not the reader's machine, so the
+    // same file reads the same everywhere.
+    assert_eq!(
+        format_number(45000.0, "[$-40C]dddd d mmmm yyyy"),
+        "mercredi 15 mars 2023"
+    );
+    assert_eq!(
+        format_number(45000.0, "[$-407]dddd d mmmm yyyy"),
+        "Mittwoch 15 März 2023"
+    );
+    // Sub-language is ignored: Swiss German (0x807) is still German.
+    assert_eq!(format_number(45000.0, "[$-807]mmmm"), "März");
+    // An unknown language falls back to English rather than failing.
+    assert_eq!(format_number(45000.0, "[$-41F]mmmm"), "March");
+}
+
+#[test]
+fn abbreviating_a_localized_name_does_not_split_a_code_point() {
+    use crate::format_number;
+
+    // `&"décembre"[..3]` would panic mid-character; truncation is by chars.
+    assert_eq!(format_number(45261.0, "[$-40C]mmm"), "déc");
+    assert_eq!(format_number(45261.0, "[$-40C]mmmmm"), "d");
+}
+
+#[test]
+fn a_currency_symbol_before_the_locale_still_selects_the_language() {
+    use crate::format_number;
+
+    // `[$€-40C]` carries both; the id is after the dash.
+    assert_eq!(format_number(45000.0, "[$€-40C]mmmm"), "mars");
+}
