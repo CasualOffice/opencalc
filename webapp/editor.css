@@ -815,3 +815,8 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .cf-currency { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 10px; }
 .cf-currency select { flex: 0 1 auto; }
 .cf-redneg { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+
+/* Alt mnemonics: the letter is always wrapped, but only underlined while Alt is
+   held, so it does not read as a link the rest of the time. */
+.menu-top .mn { text-decoration: none; }
+#menubar.show-mnemonics .menu-top .mn { text-decoration: underline; text-underline-offset: 2px; }

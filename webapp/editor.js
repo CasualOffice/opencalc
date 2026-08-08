@@ -6220,9 +6220,27 @@ function wireEvents() {
       openIdx = i;
     };
 
+    // Alt mnemonics: the first letter of each top-level menu, which is unique
+    // across File/Edit/View/Insert/Format/Data/Tools/Help. Underlined only while
+    // Alt is held, as on Windows — a permanently underlined letter reads as a
+    // link, and on a Mac Alt is a compose key, so the hint stays out of the way
+    // until it is relevant.
+    const mnemonics = new Map();
     MENUS.forEach(([name, items], i) => {
       const btn = document.createElement("button");
-      btn.className = "menu-top"; btn.textContent = name;
+      btn.className = "menu-top";
+      // Not always the first letter: File and Format both start with F, so the
+      // first-letter rule left Format unreachable *and* advertising a shortcut
+      // that belonged to File. Take the first character not already claimed —
+      // which is how Windows menus have always assigned these.
+      let at = [...name].findIndex((ch) => !mnemonics.has(ch.toLowerCase()));
+      if (at < 0) at = 0; // every letter taken: no mnemonic, but still labelled
+      const key = name[at].toLowerCase();
+      if (!mnemonics.has(key)) mnemonics.set(key, i);
+      // The letter is wrapped so it can be underlined without changing layout.
+      btn.innerHTML =
+        `${name.slice(0, at)}<span class="mn">${name[at]}</span>${name.slice(at + 1)}`;
+      btn.setAttribute("aria-keyshortcuts", `Alt+${name[at].toUpperCase()}`);
       btn.setAttribute("role", "menuitem");
       // Roving tabindex: the bar is one tab stop, not nine — Tab moves past it,
       // arrows move within it, which is what a menubar is supposed to do.
@@ -6235,6 +6253,24 @@ function wireEvents() {
       btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
       bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
     });
+
+    // Alt+letter opens the matching menu; holding Alt alone reveals which letter
+    // each menu answers to.
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Alt") { bar.classList.add("show-mnemonics"); return; }
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      const i = mnemonics.get((e.key || "").toLowerCase());
+      if (i === undefined) return;
+      e.preventDefault();
+      openMenu(i);
+      const first = drops[i].querySelector("button");
+      if (first) first.focus();
+    });
+    const clearMnemonics = () => bar.classList.remove("show-mnemonics");
+    document.addEventListener("keyup", (e) => { if (e.key === "Alt") clearMnemonics(); });
+    // Alt+Tab and the like leave the key "held" as far as this document is
+    // concerned, so drop the hint whenever the window loses focus too.
+    window.addEventListener("blur", clearMnemonics);
 
     // Keyboard navigation for the menu bar and the open menu.
     const focusTop = (i) => {
