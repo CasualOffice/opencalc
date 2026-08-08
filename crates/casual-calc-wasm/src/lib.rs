@@ -3237,6 +3237,14 @@ fn with_session<R>(f: impl FnOnce(&WorkbookSession) -> R) -> Option<R> {
     SESSION.with(|cell| cell.borrow().as_ref().map(f))
 }
 
+/// Whether a format code is the Text format — a single `@` section, i.e. "keep
+/// whatever was typed as text". A four-section code's text section does not
+/// make the *cell* text; it only styles text that is already there.
+fn is_text_format(code: &str) -> bool {
+    let trimmed = code.trim();
+    !trimmed.is_empty() && !trimmed.contains(';') && trimmed.contains('@')
+}
+
 fn build_set_op(
     session: &mut WorkbookSession,
     sheet: usize,
@@ -3269,10 +3277,16 @@ fn build_set_op(
         };
     }
 
-    let value = if let Ok(n) = trimmed.parse::<f64>() {
-        CellValue::Number(n)
-    } else {
-        CellValue::InlineString(session.workbook_mut().intern_string(trimmed))
+    // A cell formatted as Text (`@`) keeps what was typed as text — that is the
+    // entire point of the format, and coercing "007" or "1-2" to a number here
+    // is a silent edit of what the user entered.
+    let text_formatted = existing_style
+        .and_then(|id| session.workbook().styles.get(id))
+        .and_then(|st| st.number_format.as_deref())
+        .is_some_and(is_text_format);
+    let value = match trimmed.parse::<f64>() {
+        Ok(n) if !text_formatted => CellValue::Number(n),
+        _ => CellValue::InlineString(session.workbook_mut().intern_string(trimmed)),
     };
     EditOperation::SetValue { sheet, at, value }
 }

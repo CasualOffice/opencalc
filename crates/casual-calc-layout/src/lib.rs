@@ -27,7 +27,9 @@ pub use font_substitution::{
     BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, substitute,
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
-pub use numfmt::{adjust_format_decimals, format_general, format_number, format_number_colored};
+pub use numfmt::{
+    adjust_format_decimals, format_general, format_number, format_number_colored, format_text,
+};
 
 use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
 
@@ -217,7 +219,13 @@ pub fn display_text(workbook: &Workbook, cell: &Cell) -> String {
         CellValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
         CellValue::Error(e) => e.to_string(),
         CellValue::SharedString(id) | CellValue::InlineString(id) => {
-            workbook.strings.get(*id).unwrap_or_default().to_owned()
+            let text = workbook.strings.get(*id).unwrap_or_default().to_owned();
+            // A format's text section applies to text values (`@" kg"`), and
+            // the stock Text format is exactly this case.
+            match cell_number_format(workbook, cell) {
+                Some(code) => numfmt::format_text(&text, code).unwrap_or(text),
+                None => text,
+            }
         }
     }
 }

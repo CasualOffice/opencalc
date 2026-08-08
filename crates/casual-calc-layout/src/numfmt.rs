@@ -1,13 +1,18 @@
 //! Number-format interpretation: a cached numeric value plus a format code →
 //! the displayed string. See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 //!
-//! Supported subset: `General`; fixed decimals (`0`, `0.00`); thousands grouping
-//! (`#,##0`); percent (`0%`, `0.00%`); **literal runs** around the number —
-//! currency symbols (`$#,##0.00`), quoted text (`0" kg"`), escaped characters
-//! (`0\ x`), and `[$SYM-locale]` currency tokens; and date/time formats
-//! rendered by their exact token layout (`mm-dd-yy`, `d-mmm-yyyy`, `h:mm AM/PM`)
-//! on the 1900 serial-date system. Deferred: negative/zero/text sections,
-//! colors, fractions, scientific notation, and elapsed-time (`[h]`) layout.
+//! Supported: `General`; fixed decimals (`0`, `0.00`); thousands grouping
+//! (`#,##0`); percent (`0%`, `0.00%`); scientific (`0.00E+00`); **literal runs**
+//! around the number — currency symbols (`$#,##0.00`), quoted text (`0" kg"`),
+//! escaped characters (`0\ x`), and `[$SYM-locale]` currency tokens; date/time
+//! formats rendered by their exact token layout (`mm-dd-yy`, `d-mmm-yyyy`,
+//! `h:mm AM/PM`) on the 1900 serial-date system; the positive/negative/zero/text
+//! sections of a multi-section code; the text section applied to string values
+//! ([`format_text`]); and the eight named section colours
+//! ([`format_number_colored`]).
+//!
+//! Deferred: fractions (`# ??/??`), elapsed-time (`[h]`) layout, conditional
+//! sections (`[>100]`), and the legacy `[Color n]` palette index.
 
 /// Split a SpreadsheetML format code into sections separated by unquoted `;`.
 pub fn split_sections(code: &str) -> Vec<&str> {
@@ -140,6 +145,75 @@ pub fn format_number_colored(value: f64, code: &str) -> (String, Option<&'static
     // Literal-only section (e.g. `"-"` or `"Zero"`)
     let (prefix, pattern, suffix) = split_literal_runs(section);
     (format!("{prefix}{pattern}{suffix}"), color)
+}
+
+/// Apply a format code's **text section** to a string value.
+///
+/// A four-section code ends with the section for text (`…;…;…;"pre "@`), and
+/// the stock `@` ("Text") format is a single section that applies to text too.
+/// `@` stands for the value; everything else is literal. `None` when the code
+/// has nothing to say about text, in which case the value is shown as-is.
+///
+/// Without this a cell formatted as Text was indistinguishable from an
+/// unformatted one, and a code like `@" kg"` printed nothing at all.
+#[must_use]
+pub fn format_text(text: &str, code: &str) -> Option<String> {
+    let sections = split_sections(code);
+    let section = match sections.len() {
+        4 => sections[3].trim(),
+        1 if sections[0].contains('@') => sections[0].trim(),
+        _ => return None,
+    };
+    if section.is_empty() || section.eq_ignore_ascii_case("General") {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = section.chars().peekable();
+    let mut saw_placeholder = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '@' => {
+                out.push_str(text);
+                saw_placeholder = true;
+            }
+            '"' => {
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    out.push(q);
+                }
+            }
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    out.push(esc);
+                }
+            }
+            '[' => {
+                // Colour / condition tokens are not text.
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                }
+            }
+            '_' => {
+                chars.next();
+                out.push(' ');
+            }
+            '*' => {
+                chars.next();
+            }
+            c => out.push(c),
+        }
+    }
+    // A text section with no `@` (e.g. `;;;"n/a"`) replaces the value outright,
+    // which is legitimate — but a section that never mentioned text and yielded
+    // nothing is more likely a code we misread, so leave the value alone.
+    if !saw_placeholder && out.is_empty() {
+        return None;
+    }
+    Some(out)
 }
 
 /// Default (`General`) formatting for a number.
@@ -734,7 +808,27 @@ fn adjust_section_decimals(section: &str, delta: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_format_decimals, format_number, format_number_colored, split_sections};
+    use super::{
+        adjust_format_decimals, format_number, format_number_colored, format_text, split_sections,
+    };
+
+    #[test]
+    fn text_sections_apply_to_text() {
+        // The stock Text format shows the value unchanged…
+        assert_eq!(format_text("007", "@").as_deref(), Some("007"));
+        // …and a text section can decorate it.
+        assert_eq!(format_text("12", "@\" kg\"").as_deref(), Some("12 kg"));
+        assert_eq!(format_text("x", "\"[\"@\"]\"").as_deref(), Some("[x]"));
+        // A four-section code's last section is the text one.
+        assert_eq!(
+            format_text("hi", "#,##0;[Red]-#,##0;\"-\";\">> \"@").as_deref(),
+            Some(">> hi")
+        );
+        // Codes that say nothing about text leave the value alone.
+        assert_eq!(format_text("hi", "#,##0.00"), None);
+        assert_eq!(format_text("hi", "General"), None);
+        assert_eq!(format_text("hi", "#,##0;[Red]-#,##0"), None);
+    }
 
     #[test]
     fn section_colors_are_reported() {
