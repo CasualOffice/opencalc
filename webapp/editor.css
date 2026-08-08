@@ -664,6 +664,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
   border: 1px solid var(--border-2); border-radius: 8px; background: var(--bg); color: var(--fg);
 }
 .panel-field:focus, .panel-select:focus { outline: none; border-color: var(--accent); }
+.panel-hint { margin: 2px 0 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit; }
 .panel-swatches { display: flex; flex-wrap: wrap; gap: 7px; }
 .panel-swatches .swatch { width: 24px; height: 24px; padding: 0; border-radius: 6px; border: 2px solid transparent; cursor: pointer; }

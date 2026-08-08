@@ -214,6 +214,19 @@ pub enum CfRule {
     Between(f64, f64),
     /// Display text contains the substring (case-insensitive).
     TextContains(String),
+    /// A two- or three-stop colour scale across the range's numeric span. The
+    /// colours are `RRGGBB`, ordered low → high, and the cell's own colour is
+    /// interpolated from where its value falls between them.
+    ///
+    /// Unlike the predicates above this is not a per-cell test: it needs the
+    /// range's minimum and maximum, so it is evaluated with range statistics
+    /// rather than by [`CfRule::matches_number`]. The sibling
+    /// [`ConditionalFormat::fill`] is unused for this kind.
+    ColorScale(Vec<String>),
+    /// A proportional bar drawn behind the value, in this `RRGGBB` colour, its
+    /// length being the value's position in the range's span. Also
+    /// range-relative, and likewise ignores `fill`.
+    DataBar(String),
 }
 
 /// A data-validation rule over a range. Only the explicit-list dropdown kind is
@@ -281,8 +294,18 @@ impl CfRule {
             CfRule::LessThan(x) => n < *x,
             CfRule::EqualTo(x) => (n - *x).abs() < 1e-9,
             CfRule::Between(lo, hi) => n >= *lo && n <= *hi,
-            CfRule::TextContains(_) => false,
+            // Range-relative kinds are not per-cell predicates: they need the
+            // range's own statistics, so a caller evaluates them with
+            // `is_range_relative` and its own min/max rather than here.
+            CfRule::TextContains(_) | CfRule::ColorScale(_) | CfRule::DataBar(_) => false,
         }
+    }
+
+    /// Whether this rule is evaluated against the range's statistics (minimum
+    /// and maximum) rather than by a per-cell predicate.
+    #[must_use]
+    pub fn is_range_relative(&self) -> bool {
+        matches!(self, CfRule::ColorScale(_) | CfRule::DataBar(_))
     }
     /// Whether this rule matches display text (only `TextContains` does).
     pub fn matches_text(&self, text: &str) -> bool {

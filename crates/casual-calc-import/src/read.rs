@@ -272,6 +272,9 @@ pub struct RawCf {
     pub text: Option<String>,
     /// The `<formula>` operand texts, in order.
     pub formulas: Vec<String>,
+    /// The `<color>` stops inside a `<colorScale>` / `<dataBar>`, low → high,
+    /// as `RRGGBB`. Those kinds carry their own presentation instead of a dxf.
+    pub colors: Vec<String>,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -468,7 +471,18 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             dxf_id: read_attr(&e, b"dxfId")?.and_then(|s| s.parse().ok()),
                             text: read_attr(&e, b"text")?,
                             formulas: Vec::new(),
+                            colors: Vec::new(),
                         });
+                    }
+                    b"color" if cur_cf.is_some() => {
+                        if let Some(rgb) = read_attr(&e, b"rgb")?
+                            && let Some(cf) = cur_cf.as_mut()
+                        {
+                            let hex = rgb.trim();
+                            if hex.len() >= 6 {
+                                cf.colors.push(hex[hex.len() - 6..].to_ascii_uppercase());
+                            }
+                        }
                     }
                     b"formula" if cur_cf.is_some() => {
                         in_cf_formula = true;

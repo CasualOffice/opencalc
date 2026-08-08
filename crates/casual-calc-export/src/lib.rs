@@ -852,6 +852,27 @@ fn cf_rule_xml(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> String
             fmt_f64(*lo),
             fmt_f64(*hi)
         ),
+        // Colour scales and data bars carry their own presentation, so they take
+        // no dxfId — the `<cfvo>` stops describe the range's own min and max.
+        CfRule::ColorScale(colors) => {
+            let stops: Vec<&str> = colors.iter().map(String::as_str).collect();
+            let cfvo = if stops.len() >= 3 {
+                "<cfvo type=\"min\"/><cfvo type=\"percentile\" val=\"50\"/><cfvo type=\"max\"/>"
+            } else {
+                "<cfvo type=\"min\"/><cfvo type=\"max\"/>"
+            };
+            let mut colours = String::new();
+            for c in &stops {
+                colours.push_str(&format!("<color rgb=\"FF{}\"/>", escape_attr(c)));
+            }
+            format!(
+                "<cfRule type=\"colorScale\" priority=\"{priority}\"><colorScale>{cfvo}{colours}</colorScale></cfRule>"
+            )
+        }
+        CfRule::DataBar(color) => format!(
+            "<cfRule type=\"dataBar\" priority=\"{priority}\"><dataBar><cfvo type=\"min\"/><cfvo type=\"max\"/><color rgb=\"FF{}\"/></dataBar></cfRule>",
+            escape_attr(color)
+        ),
         CfRule::TextContains(text) => {
             let top = cell_a1(cf.range.start.row, cf.range.start.col);
             format!(

@@ -284,11 +284,16 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // range via the sqref, and its predicate via type/operator/formulas.
         // Rules without a solid fill (the only kind modeled) are skipped.
         for raw in worksheet.conditional_formats {
-            let Some(fill) = raw
+            // Colour scales and data bars carry their own colours and have no
+            // dxfId, so the fill lookup must not gate them out.
+            let scale_or_bar = matches!(raw.kind.as_str(), "colorScale" | "dataBar");
+            let fill = match raw
                 .dxf_id
                 .and_then(|id| stylesheet.dxf_fills.get(id).cloned().flatten())
-            else {
-                continue;
+            {
+                Some(f) => f,
+                None if scale_or_bar => String::new(),
+                None => continue,
             };
             let num = |i: usize| {
                 raw.formulas
@@ -304,6 +309,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                     _ => None,
                 },
                 ("containsText", _) => raw.text.clone().map(CfRule::TextContains),
+                ("colorScale", _) if raw.colors.len() >= 2 => {
+                    Some(CfRule::ColorScale(raw.colors.clone()))
+                }
+                ("dataBar", _) => raw.colors.first().cloned().map(CfRule::DataBar),
                 _ => None,
             };
             if let Some(rule) = rule {

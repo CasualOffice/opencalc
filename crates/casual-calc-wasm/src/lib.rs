@@ -775,6 +775,21 @@ pub fn session_add_cf(
         "eq" => CfRule::EqualTo(a),
         "between" => CfRule::Between(a.min(b), a.max(b)),
         "contains" => CfRule::TextContains(text.to_owned()),
+        // Range-relative kinds take their colours through `text` as a
+        // comma-separated list (low → high), since they need two or three and
+        // the single `fill` slot cannot carry them.
+        "colorscale" => {
+            let colors: Vec<String> = text
+                .split(',')
+                .map(|c| c.trim().trim_start_matches('#').to_ascii_uppercase())
+                .filter(|c| c.len() == 6)
+                .collect();
+            if colors.len() < 2 {
+                return Err(JsError::new("a colour scale needs at least two colours"));
+            }
+            CfRule::ColorScale(colors)
+        }
+        "databar" => CfRule::DataBar(text.trim().trim_start_matches('#').to_ascii_uppercase()),
         _ => return Err(JsError::new("unknown conditional-format rule")),
     };
     let fill = fill.trim().trim_start_matches('#').to_ascii_uppercase();
@@ -1563,6 +1578,31 @@ pub fn session_cells(
         let Some(sheet) = wb.sheets.get(sheet) else {
             return "[]".to_owned();
         };
+        // One pass over each range-relative rule's range to find its numeric
+        // span. Done once per call rather than per cell: a colour scale over a
+        // thousand rows would otherwise be a thousand scans.
+        let cf_spans: Vec<(f64, f64)> = sheet
+            .conditional_formats
+            .iter()
+            .map(|cf| {
+                if !cf.rule.is_range_relative() {
+                    return (0.0, 0.0);
+                }
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                for r in cf.range.start.row..=cf.range.end.row {
+                    for c in cf.range.start.col..=cf.range.end.col {
+                        if let Some(cell) = sheet.cells.get(CellRef::new(r, c))
+                            && let CellValue::Number(n) = cell.value
+                        {
+                            lo = lo.min(n);
+                            hi = hi.max(n);
+                        }
+                    }
+                }
+                if lo.is_finite() { (lo, hi) } else { (0.0, 0.0) }
+            })
+            .collect();
+
         let mut items = Vec::new();
         for (at, cell) in sheet.cells.row_band(first_row, last_row) {
             if at.col < first_col || at.col > last_col {
@@ -1573,16 +1613,42 @@ pub fn session_cells(
             // Conditional formatting overrides the cell's own fill when a rule
             // matches (first match wins). Numeric rules test the cell's number;
             // text rules test its display text.
-            let cf_fill = sheet.conditional_formats.iter().find_map(|cf| {
-                if !cf.covers(at.row, at.col) {
-                    return None;
-                }
-                let hit = match cell.value {
-                    CellValue::Number(n) => cf.rule.matches_number(n),
-                    _ => cf.rule.matches_text(&text),
-                };
-                hit.then(|| cf.fill.clone())
-            });
+            // Range-relative rules (colour scale, data bar) need where this
+            // value sits between the range's own minimum and maximum, so they
+            // are resolved against the pre-computed span rather than by a
+            // per-cell predicate.
+            let mut bar: Option<(f64, String)> = None;
+            let cf_fill = sheet
+                .conditional_formats
+                .iter()
+                .enumerate()
+                .find_map(|(i, cf)| {
+                    if !cf.covers(at.row, at.col) {
+                        return None;
+                    }
+                    if cf.rule.is_range_relative() {
+                        let CellValue::Number(n) = cell.value else {
+                            return None;
+                        };
+                        let (lo, hi) = cf_spans[i];
+                        // A flat range has no gradient to speak of; put everything
+                        // at the top rather than dividing by zero.
+                        let t = if hi > lo { (n - lo) / (hi - lo) } else { 1.0 };
+                        return match &cf.rule {
+                            CfRule::ColorScale(colors) => Some(scale_color(colors, t)),
+                            CfRule::DataBar(color) => {
+                                bar = Some((t.clamp(0.0, 1.0), color.clone()));
+                                None
+                            }
+                            _ => None,
+                        };
+                    }
+                    let hit = match cell.value {
+                        CellValue::Number(n) => cf.rule.matches_number(n),
+                        _ => cf.rule.matches_text(&text),
+                    };
+                    hit.then(|| cf.fill.clone())
+                });
             let fill = cf_fill
                 .or_else(|| style.and_then(|s| s.fill_color.clone()))
                 .unwrap_or_default();
@@ -1613,6 +1679,13 @@ pub fn session_cells(
             // would be a lie about the user's data.
             if matches!(cell.value, CellValue::Error(_)) {
                 extra.push_str(",\"er\":1");
+            }
+            if let Some((frac, color)) = &bar {
+                extra.push_str(&format!(
+                    ",\"bar\":{:.4},\"barc\":{}",
+                    frac,
+                    json_string(color)
+                ));
             }
             if style.is_some_and(|s| s.bold) {
                 extra.push_str(",\"b\":1");
@@ -1704,6 +1777,38 @@ pub fn function_catalog() -> String {
         .map(|(n, sig)| format!("{{\"n\":{},\"sig\":{}}}", json_string(n), json_string(sig)))
         .collect();
     format!("[{}]", items.join(","))
+}
+
+/// The colour at position `t` (0..1) along a 2- or 3-stop scale, as `RRGGBB`.
+/// Interpolated in plain RGB, which is what Excel does for colour scales.
+fn scale_color(colors: &[String], t: f64) -> String {
+    let parse = |hex: &str| -> (f64, f64, f64) {
+        let v = u32::from_str_radix(hex, 16).unwrap_or(0);
+        (
+            f64::from((v >> 16) & 0xff),
+            f64::from((v >> 8) & 0xff),
+            f64::from(v & 0xff),
+        )
+    };
+    if colors.is_empty() {
+        return String::new();
+    }
+    let t = t.clamp(0.0, 1.0);
+    // With three stops the midpoint is its own anchor, so each half interpolates
+    // separately — otherwise the middle colour would never appear.
+    let (a, b, local) = if colors.len() >= 3 {
+        if t < 0.5 {
+            (&colors[0], &colors[1], t * 2.0)
+        } else {
+            (&colors[1], &colors[2], (t - 0.5) * 2.0)
+        }
+    } else {
+        (&colors[0], &colors[colors.len() - 1], t)
+    };
+    let (ar, ag, ab) = parse(a);
+    let (br, bg, bb) = parse(b);
+    let mix = |x: f64, y: f64| (x + (y - x) * local).round() as u32;
+    format!("{:02X}{:02X}{:02X}", mix(ar, br), mix(ag, bg), mix(ab, bb))
 }
 
 /// The CSS font stack for a requested family (the deterministic bundled

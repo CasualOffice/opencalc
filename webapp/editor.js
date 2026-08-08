@@ -744,7 +744,21 @@ function draw() {
     ctx.restore();
   };
 
+  // Data bars sit behind the value: drawn after the cell fills so they read as
+  // part of the cell, before the text so they never obscure it.
   ctx.textBaseline = "middle";
+  for (const it of items) {
+    if (it.bar === undefined) continue;
+    const bx = colXAt(it.c), by = rowYAt(it.r);
+    if (bx === undefined || by === undefined) continue;
+    const bw = Math.max(0, (colWAt(it.c) - 2) * it.bar);
+    withQuad(it.r, it.c, () => {
+      ctx.fillStyle = "#" + (it.barc || "638EC6");
+      ctx.globalAlpha = 0.45;
+      ctx.fillRect(bx + 1, by + 2, bw, rowHAt(it.r) - 4);
+      ctx.globalAlpha = 1;
+    });
+  }
   for (const it of items) {
     if (!it.bg) continue;
     const x = colXAt(it.c);
@@ -2367,16 +2381,27 @@ function buildCfPanel(body) {
   panelRangeReadout(body);
   panelLabel(body, "Highlight cells where the value…");
   const op = el("select", "panel-select");
-  [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"], ["contains", "text contains"]]
+  [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"],
+   ["contains", "text contains"], ["colorscale", "— colour scale (2 stops)"],
+   ["colorscale3", "— colour scale (3 stops)"], ["databar", "— data bar"]]
     .forEach(([v, t]) => { const o = el("option", null, t); o.value = v; op.appendChild(o); });
   body.appendChild(op);
   const a = el("input", "panel-field"); a.placeholder = "value"; a.spellcheck = false;
   const b = el("input", "panel-field"); b.placeholder = "and"; b.spellcheck = false; b.style.display = "none";
   body.appendChild(a); body.appendChild(b);
+  // The scale/bar kinds are range-relative: they take no operand, and their
+  // colours come from the swatch row rather than a single fill.
+  const rangeRelative = () => op.value.startsWith("colorscale") || op.value === "databar";
   op.addEventListener("change", () => {
     b.style.display = op.value === "between" ? "" : "none";
+    a.style.display = rangeRelative() ? "none" : "";
     a.placeholder = op.value === "contains" ? "text" : "value";
+    panelHint.textContent = rangeRelative()
+      ? "Colour comes from the value's position between the range's smallest and largest."
+      : "";
   });
+  const panelHint = el("div", "panel-hint");
+  body.appendChild(panelHint);
   panelLabel(body, "Fill color");
   const strip = el("div", "panel-swatches");
   let fill = "ffd166";
@@ -2393,9 +2418,14 @@ function buildCfPanel(body) {
     "Apply",
     () => {
       const s = effectiveRange();
-      const kind = op.value;
+      let kind = op.value;
       const av = parseFloat(a.value) || 0, bv = parseFloat(b.value) || 0;
-      const txt = kind === "contains" ? a.value : "";
+      // Scale and bar colours travel in the text slot: a scale needs two or
+      // three, which the single fill slot cannot carry.
+      let txt = kind === "contains" ? a.value : "";
+      if (kind === "colorscale") { txt = `${fill},ffffff`; }
+      else if (kind === "colorscale3") { kind = "colorscale"; txt = `${fill},ffffff,63be7b`; }
+      else if (kind === "databar") { txt = fill; }
       try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, av, bv, txt, fill); }
       catch (e) { status.textContent = `error: ${e}`; }
       draw();
