@@ -4751,6 +4751,140 @@ function colFromName(letters) {
   return n - 1;
 }
 
+// Paste Special (Ctrl+Alt+V): what to paste, and what to do with it when it
+// lands. The context submenu covers the common three; this is the rest —
+// transpose and the arithmetic combinations.
+function pasteSpecialDialog() {
+  if (!wasm.session_clip_has()) { status.textContent = "clipboard is empty"; return; }
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Paste special";
+  body.textContent = "";
+
+  let what = "all";
+  const group = (label, options, onPick) => {
+    body.append(el("p", "oc-confirm-text", label));
+    const row = el("div", "fc-row");
+    options.forEach(([v, t], i) => {
+      const l = el("label", "fc-check");
+      const r = document.createElement("input");
+      r.type = "radio";
+      r.name = "ps-" + label;
+      r.value = v;
+      if (i === 0) r.checked = true;
+      r.addEventListener("change", () => onPick(v));
+      l.append(r, document.createTextNode(" " + t));
+      row.appendChild(l);
+    });
+    body.appendChild(row);
+  };
+  group("Paste", [
+    ["all", "Everything"], ["values", "Values only"],
+    ["formulas", "Formulas"], ["formats", "Formats only"],
+  ], (v) => { what = v; });
+
+  let op = "none";
+  group("Operation", [
+    ["none", "None"], ["add", "Add"], ["subtract", "Subtract"],
+    ["multiply", "Multiply"], ["divide", "Divide"],
+  ], (v) => { op = v; });
+
+  const tWrap = el("label", "fc-check");
+  const transpose = document.createElement("input");
+  transpose.type = "checkbox";
+  tWrap.append(transpose, document.createTextNode(" Transpose"));
+  body.append(tWrap);
+  body.append(el("div", "panel-hint",
+    "An operation combines the copied numbers with what is already there. Non-numeric cells are left alone."));
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Paste");
+  actions.append(cancel, ok);
+  body.appendChild(actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  ok.addEventListener("click", () => {
+    close();
+    canvas.focus();
+    // An arithmetic operation is what to *do*, so it wins over what to paste;
+    // transpose is a placement and only applies to a plain paste.
+    const mode = op !== "none" ? op : transpose.checked ? "transpose" : what;
+    doPasteMode(mode);
+  });
+  ok.focus();
+}
+
+// Text to columns: split the selected column on a delimiter into the columns to
+// its right. Runs entirely on values already in the sheet, so it needs no
+// clipboard and no import path.
+function textToColumnsDialog() {
+  const s0 = effectiveRange();
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Text to columns";
+  body.textContent = "";
+  body.append(el("p", "oc-confirm-text",
+    `Split column ${colName(s0.c0)}, rows ${s0.r0 + 1}–${s0.r1 + 1}, into the columns to its right.`));
+
+  let delim = ",";
+  const row = el("div", "fc-row");
+  for (const [v, t] of [[",", "Comma"], ["\t", "Tab"], [";", "Semicolon"], [" ", "Space"], ["", "Custom"]]) {
+    const l = el("label", "fc-check");
+    const r = document.createElement("input");
+    r.type = "radio"; r.name = "ttc"; r.value = v;
+    if (v === ",") r.checked = true;
+    r.addEventListener("change", () => { delim = v === "" ? custom.value : v; });
+    l.append(r, document.createTextNode(" " + t));
+    row.appendChild(l);
+  }
+  const custom = el("input", "panel-field");
+  custom.placeholder = "delimiter";
+  custom.style.maxWidth = "120px";
+  custom.addEventListener("input", () => {
+    const c = row.querySelector('input[value=""]');
+    if (c) { c.checked = true; delim = custom.value; }
+  });
+  body.append(row, custom);
+  const warn = el("div", "panel-hint", "");
+  body.append(warn);
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Split");
+  actions.append(cancel, ok);
+  body.appendChild(actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  ok.addEventListener("click", () => {
+    if (!delim) { warn.textContent = "Choose a delimiter first."; return; }
+    close();
+    canvas.focus();
+    tryEdit(() => {
+      let widest = 0;
+      for (let r = s0.r0; r <= s0.r1; r++) {
+        const text = wasm.session_cell_input(state.sheet, r, s0.c0);
+        // Only literal text splits; a formula's result is not the user's text,
+        // and overwriting the formula would lose it.
+        if (!text || text.startsWith("=")) continue;
+        const parts = text.split(delim);
+        widest = Math.max(widest, parts.length);
+        parts.forEach((part, i) => {
+          wasm.session_set_cell(state.sheet, r, s0.c0 + i, part.trim());
+        });
+      }
+      status.textContent = widest > 1
+        ? `split into ${widest} columns`
+        : "nothing to split — no cell contained the delimiter";
+    });
+  });
+  ok.focus();
+}
+
 // Insert Function: the catalogue, searchable, with each entry's signature and
 // summary. The `fx` beside the formula bar was decorative — the only way to find
 // a function was to already know its name and start typing it.
@@ -5524,6 +5658,7 @@ function cellMenu(x, y) {
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
   submenu("Paste special", [
+    ["Paste special…", false, () => pasteSpecialDialog()],
     ["Values only", false, () => doPasteMode("values")],
     ["Formulas only", false, () => doPasteMode("formulas")],
     ["Formats only", false, () => doPasteMode("formats")],
@@ -6185,6 +6320,8 @@ function wireEvents() {
       // Ctrl+1 — Format Cells, the shortcut every spreadsheet user already has
       // in their fingers.
       if (k === "1" && !e.shiftKey) { formatCellsDialog(); e.preventDefault(); return; }
+      // Ctrl+Alt+V — Paste Special, as everywhere else.
+      if (k === "v" && e.altKey) { pasteSpecialDialog(); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
@@ -6967,6 +7104,7 @@ function wireEvents() {
           ["Custom sort…", () => sortDialog()],
         ] },
         ["Remove duplicates…", () => removeDuplicates()],
+        ["Text to columns…", () => textToColumnsDialog()],
         ["Filter", () => toggleFilter()],
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Data validation…", clickEl("#tb-dv")],

@@ -4773,6 +4773,53 @@ pub fn session_clip_paste_mode(
                     CellRef::new(row + cc.dr, col + cc.dc)
                 };
                 match mode {
+                    // Arithmetic paste: combine the copied number with what is
+                    // already there. Anything non-numeric on either side is left
+                    // alone rather than coerced to zero, which would silently
+                    // turn a label into a number.
+                    "add" | "subtract" | "multiply" | "divide" => {
+                        let CellValue::Number(src) = cc.cell.value else {
+                            return (ops, cut, false);
+                        };
+                        let target = session
+                            .workbook()
+                            .sheets
+                            .get(sheet)
+                            .and_then(|s| s.cells.get(at))
+                            .map(|c| c.value.clone())
+                            .unwrap_or(CellValue::Empty);
+                        // An empty target is the identity for the operation, so
+                        // pasting onto blanks behaves like a plain paste.
+                        let base = match target {
+                            CellValue::Number(n) => n,
+                            CellValue::Empty => match mode {
+                                "multiply" | "divide" => 1.0,
+                                _ => 0.0,
+                            },
+                            _ => return (ops, cut, false),
+                        };
+                        let value = match mode {
+                            "add" => base + src,
+                            "subtract" => base - src,
+                            "multiply" => base * src,
+                            // Division by zero yields Excel's own error rather
+                            // than an infinity the grid cannot render.
+                            _ if src == 0.0 => {
+                                ops.push(EditOperation::SetValue {
+                                    sheet,
+                                    at,
+                                    value: CellValue::Error(casual_calc_model::ErrorValue::Div0),
+                                });
+                                continue;
+                            }
+                            _ => base / src,
+                        };
+                        ops.push(EditOperation::SetValue {
+                            sheet,
+                            at,
+                            value: CellValue::Number(value),
+                        });
+                    }
                     "values" => ops.push(EditOperation::SetValue {
                         sheet,
                         at,
