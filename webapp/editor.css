@@ -705,6 +705,23 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .scrollbar.vscroll .thumb { left: 3px; width: 8px; min-height: 28px; }
 .scrollbar.hscroll .thumb { top: 3px; height: 8px; min-width: 28px; }
 #grid { display: block; outline: none; }
+/* Keyboard focus has to be visible: the grid takes focus and every shortcut
+   depends on it having focus, so "which pane am I typing into" must be
+   answerable without clicking. Inset so it is not clipped by the wrapper. */
+/* Chrome counts a focusable <canvas> as focus-visible even on a mouse click,
+   which would ring the whole grid every time you click a cell. The ring is for
+   keyboard users, so it is gated on the last input being a key. */
+:root[data-kbnav] #grid:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Announcer for assistive tech — present in the a11y tree, not on screen. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+/* Cell mode (Ready / Enter / Edit / Point), as in Excel's status bar. */
+.cell-mode {
+  margin-left: 12px; padding: 2px 8px; border-radius: 6px;
+  background: var(--surface); color: var(--muted); font-size: 12px; flex: 0 0 auto;
+}
 /* A <textarea> so a cell can hold a hard line break (Alt+Enter). Sized by
    positionInline(), which grows it past the cell once the value is multi-line —
    hence no resize grip and no scrollbars. */

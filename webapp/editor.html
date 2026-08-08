@@ -322,7 +322,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <canvas id="grid" tabindex="0"></canvas>
+      <!-- The grid is a canvas, so assistive tech cannot read it structurally.
+           role/label say what it is, and #grid-live (below) announces the active
+           cell as it moves — an announcer, not a full accessibility tree. -->
+      <canvas id="grid" tabindex="0" role="grid" aria-label="Spreadsheet grid"
+              aria-describedby="grid-live"></canvas>
+      <div id="grid-live" class="sr-only" role="status" aria-live="polite"></div>
       <!-- A textarea, not an input: Alt+Enter puts a hard line break in a cell,
            which an <input> cannot hold. Enter still commits. -->
       <textarea id="inline-edit" class="inline-edit" spellcheck="false" rows="1" wrap="off"></textarea>
@@ -349,6 +354,7 @@
 
     <div class="bottom-bar">
       <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
+      <span class="cell-mode" id="cell-mode" aria-live="off">Ready</span>
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 

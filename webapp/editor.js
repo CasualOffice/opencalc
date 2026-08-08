@@ -1139,6 +1139,8 @@ function draw() {
   // cell leaves the viewport), instead of leaving it parked mid-air.
   if (editSurface === inline) positionInline();
   updateNameBox();
+  announceCell();
+  updateCellMode();
   updateScrollbars(v);
   updateStats();
   if (wasm) refreshFormulaBar();
@@ -2857,10 +2859,16 @@ function positionInline() {
 let editSurface = null;
 // The cell's text when the edit began, for Escape to restore.
 let editOriginal = "";
+// How the edit started: typing a fresh value ("Enter") or opening the existing
+// one with F2 / double-click / the formula bar ("Edit"). Excel's status bar
+// distinguishes these, and it is about the *gesture*, not about whether the
+// cell happened to be empty.
+let editMode = "Enter";
 
 function beginEdit(surface, initial) {
   editSurface = surface;
   state.editing = true;
+  editMode = initial !== undefined ? "Enter" : "Edit";
   refSpans = [];
   editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   if (surface === inline) {
@@ -2876,6 +2884,7 @@ function beginEdit(surface, initial) {
   // Opening an existing formula highlights the cells it reads straight away,
   // rather than waiting for the first keystroke.
   updateRefSpans();
+  updateCellMode();
 }
 
 function startInline(initial) {
@@ -2900,6 +2909,7 @@ function endEdit(refocus = true) {
   inline.classList.remove("invalid");
   fInput.classList.remove("invalid");
   if (refocus && was) canvas.focus();
+  updateCellMode();
   if (hadSpans) draw();
 }
 // Kept as the name the rest of the editor already calls.
@@ -3021,6 +3031,43 @@ const A1 = (row, col) => colName(col) + (row + 1);
 // --- Name box (cell-ref input): show address / drag size, jump on Enter -----
 // Reflect the selection into the name box unless the user is typing in it. While
 // drag-selecting a block, show Excel's "3R x 2C" size readout.
+// --- Assistive announcements + cell mode -----------------------------------
+// The grid is a canvas: nothing in it is in the accessibility tree. This
+// announces the active cell and what it holds as the selection moves, so the
+// grid is at least navigable with a screen reader — an announcer, not a full
+// grid tree.
+const liveEl = document.getElementById("grid-live");
+const modeEl = document.getElementById("cell-mode");
+let lastAnnounced = "";
+function announceCell() {
+  if (!liveEl || !wasm) return;
+  const ref = A1(state.sel.row, state.sel.col);
+  const r = selRect();
+  const size = r.r0 === r.r1 && r.c0 === r.c1
+    ? ""
+    : `, ${r.r1 - r.r0 + 1} by ${r.c1 - r.c0 + 1} selected`;
+  let text = "";
+  try {
+    const it = JSON.parse(wasm.session_cells(state.sheet, state.sel.row, state.sel.col, state.sel.row, state.sel.col))[0];
+    text = it && it.t ? it.t : "empty";
+  } catch { text = ""; }
+  const msg = `${ref}${size}. ${text}`;
+  // Re-announcing the same string is silence in most screen readers, and noise
+  // in the rest; only speak on an actual change.
+  if (msg === lastAnnounced) return;
+  lastAnnounced = msg;
+  liveEl.textContent = msg;
+}
+
+// Excel's status-bar mode word. Ready → Enter (typing a fresh value) → Edit
+// (F2 into an existing one) → Point (picking a reference mid-formula).
+function updateCellMode() {
+  if (!modeEl) return;
+  let mode = "Ready";
+  if (editSurface) mode = pointMode || formulaRefDrag ? "Point" : editMode;
+  if (modeEl.textContent !== mode) modeEl.textContent = mode;
+}
+
 function updateNameBox() {
   if (document.activeElement === cellRef) return;
   const r = selRect();
@@ -4641,6 +4688,13 @@ function wireEvents() {
   // clicking into one would otherwise close the panel out from under it.
   document.addEventListener("click", (e) => { if (!e.target.closest(".tb-flyout")) closeFlyouts(); });
   reflowToolbar();
+
+  // Track whether the user is driving by keyboard, so the grid's focus ring
+  // appears for them and not on every mouse click (see the CSS note).
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Tab" || e.key.startsWith("Arrow")) document.documentElement.dataset.kbnav = "1";
+  }, true);
+  window.addEventListener("mousedown", () => { delete document.documentElement.dataset.kbnav; }, true);
 
   buildMenuBar();
 
