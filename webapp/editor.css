@@ -810,3 +810,8 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
     scroll-behavior: auto !important;
   }
 }
+
+/* Currency builder inside the custom-format dialog. */
+.cf-currency { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 10px; }
+.cf-currency select { flex: 0 1 auto; }
+.cf-redneg { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }

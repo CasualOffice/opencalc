@@ -2623,11 +2623,59 @@ function customFormatDialog() {
     presets.appendChild(b);
   }
 
+  // Currency builder. A currency format is `[$SYM-locale]`, and the locale id is
+  // a hex LCID nobody remembers — so the code is assembled rather than typed.
+  // The symbol goes *inside* the bracket: writing a bare "£" would work until it
+  // met a format that treats the character as a literal in the wrong section.
+  const CURRENCIES = [
+    ["$", "409", "US dollar"],
+    ["£", "809", "Pound sterling"],
+    ["€", "407", "Euro"],
+    ["¥", "411", "Japanese yen"],
+    ["₹", "4009", "Indian rupee"],
+    ["CHF", "807", "Swiss franc"],
+    ["A$", "C09", "Australian dollar"],
+    ["C$", "1009", "Canadian dollar"],
+  ];
+  const curWrap = el("div", "cf-currency");
+  const curSel = document.createElement("select");
+  curSel.className = "panel-select";
+  curSel.setAttribute("aria-label", "Currency");
+  for (const [sym, lcid, name] of CURRENCIES) {
+    const o = el("option", null, `${sym} — ${name}`);
+    o.value = `${sym}|${lcid}`;
+    curSel.appendChild(o);
+  }
+  const decSel = document.createElement("select");
+  decSel.className = "panel-select";
+  decSel.setAttribute("aria-label", "Decimal places");
+  for (const d of [0, 2]) {
+    const o = el("option", null, d === 0 ? "no decimals" : "2 decimals");
+    o.value = String(d);
+    decSel.appendChild(o);
+  }
+  decSel.value = "2";
+  const redNeg = document.createElement("input");
+  redNeg.type = "checkbox";
+  const redLabel = el("label", "cf-redneg");
+  redLabel.append(redNeg, document.createTextNode(" red negatives"));
+  const build = el("button", "cf-preset", "Insert currency format");
+  build.addEventListener("click", () => {
+    const [sym, lcid] = curSel.value.split("|");
+    const dp = decSel.value === "0" ? "" : ".00";
+    const money = `[$${sym}-${lcid}]#,##0${dp}`;
+    input.value = redNeg.checked ? `${money};[Red]-${money}` : money;
+    render();
+    input.focus();
+  });
+  curWrap.append(curSel, decSel, redLabel, build);
+
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Apply");
   actions.append(cancel, ok);
-  body.append(el("p", "oc-confirm-text", "Format code"), input, preview, presets, hint, actions);
+  body.append(el("p", "oc-confirm-text", "Format code"), input, preview,
+              el("p", "oc-confirm-text", "Currency"), curWrap, presets, hint, actions);
   modal.hidden = false;
   const close = () => { modal.hidden = true; body.textContent = ""; };
   cancel.addEventListener("click", close);
