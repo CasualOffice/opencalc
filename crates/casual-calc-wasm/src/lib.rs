@@ -2329,6 +2329,36 @@ pub fn session_set_cf_stop(sheet: usize, index: usize, stop: bool) -> Result<(),
     })
 }
 
+/// The cells a formula reads (`deps=false`) or the formulas that read this cell
+/// (`deps=true`), as JSON `[{s,r0,c0,r1,c1}]` — blocks, since a range precedent
+/// is one arrow, not one per cell.
+///
+/// Precedents come from the same walk the recalculator uses for its dirty set,
+/// so a traced arrow can never point somewhere recalculation would not follow.
+#[wasm_bindgen]
+pub fn session_trace(sheet: usize, row: u32, col: u32, deps: bool) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let at = CellRef::new(row, col);
+        let blocks: Vec<(usize, u32, u32, u32, u32)> = if deps {
+            casual_calc_eval::dependents_of(wb, sheet, at)
+                .into_iter()
+                .map(|(si, r, c)| (si, r, c, r, c))
+                .collect()
+        } else {
+            casual_calc_eval::precedents_of(wb, sheet, at)
+        };
+        let items: Vec<String> = blocks
+            .iter()
+            .map(|(si, r0, c0, r1, c1)| {
+                format!("{{\"s\":{si},\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}")
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
 /// Whole-range statistics for the conditional-format rules that cannot be
 /// decided from a cell alone. Computed once per rule per `session_cells` call.
 #[derive(Default)]

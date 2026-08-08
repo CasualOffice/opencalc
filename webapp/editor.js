@@ -1327,6 +1327,7 @@ function draw() {
   // active cell's own dropdown wins if the two ever land on the same cell.
   refreshFilterInfo();
   drawFilterButtons(withQuad);
+  drawTraceArrows(withQuad);
 
   // Data-validation dropdown button on the active cell (if it has a list rule).
   validationChevron = null;
@@ -4061,6 +4062,84 @@ function endInline() {
 // on the grid, so "which cells does this formula actually read?" is answerable
 // by looking rather than by parsing the text in your head. The spans come from
 // the engine's scanner, so a function name is never mistaken for a reference.
+// --- Trace precedents / dependents ----------------------------------------
+//
+// "Why is this cell wrong?" is usually answered by seeing what it reads, or what
+// reads it. The blocks come from the same walk the recalculator uses, so an
+// arrow can never point somewhere recalculation would not follow.
+let traceBlocks = [];   // [{s,r0,c0,r1,c1}] on the active sheet
+let traceMode = null;   // "prec" | "dep"
+
+function toggleTrace(mode) {
+  if (traceMode === mode) { clearTrace(); return; }
+  traceMode = mode;
+  try {
+    traceBlocks = JSON.parse(
+      wasm.session_trace(state.sheet, state.sel.row, state.sel.col, mode === "dep"),
+    );
+  } catch { traceBlocks = []; }
+  // Only this sheet's blocks can be drawn; a cross-sheet arrow has nowhere to
+  // point, so it is reported rather than silently dropped.
+  const here = traceBlocks.filter((b) => b.s === state.sheet);
+  const elsewhere = traceBlocks.length - here.length;
+  traceBlocks = here;
+  const n = traceBlocks.length;
+  const what = mode === "dep"
+    ? (n === 1 ? "dependent" : "dependents")
+    : (n === 1 ? "precedent" : "precedents");
+  status.textContent = n
+    ? `${n} ${what}${elsewhere ? ` (+${elsewhere} on other sheets)` : ""}`
+    : `no ${mode === "dep" ? "dependents" : "precedents"}`;
+  draw();
+}
+
+function clearTrace() {
+  if (!traceMode && !traceBlocks.length) return;
+  traceMode = null;
+  traceBlocks = [];
+  draw();
+}
+
+// Draw an arrow from each traced block to the active cell (or the reverse for
+// dependents), plus a box around the block itself.
+function drawTraceArrows(withQuad) {
+  if (!traceBlocks.length) return;
+  const tx = colXAt(state.sel.col), ty = rowYAt(state.sel.row);
+  if (tx === undefined || ty === undefined) return;
+  const tcx = tx + colWAt(state.sel.col) / 2, tcy = ty + rowHAt(state.sel.row) / 2;
+  ctx.save();
+  ctx.strokeStyle = traceMode === "dep" ? "#a142f4" : "#1a73e8";
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.lineWidth = 1.5;
+  for (const b of traceBlocks) {
+    const x = colXAt(b.c0), y = rowYAt(b.r0);
+    if (x === undefined || y === undefined) continue;
+    const x1 = (colXAt(b.c1) ?? x) + colWAt(b.c1);
+    const y1 = (rowYAt(b.r1) ?? y) + rowHAt(b.r1);
+    withQuad(b.r0, b.c0, () => {
+      ctx.strokeRect(x + 0.5, y + 0.5, x1 - x - 1, y1 - y - 1);
+      // Arrow from the block's centre to the traced cell, or the other way for
+      // dependents — the direction *is* the information.
+      const bcx = (x + x1) / 2, bcy = (y + y1) / 2;
+      const [fx, fy, txx, tyy] = traceMode === "dep"
+        ? [tcx, tcy, bcx, bcy]
+        : [bcx, bcy, tcx, tcy];
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(txx, tyy);
+      ctx.stroke();
+      const ang = Math.atan2(tyy - fy, txx - fx);
+      ctx.beginPath();
+      ctx.moveTo(txx, tyy);
+      ctx.lineTo(txx - 8 * Math.cos(ang - 0.4), tyy - 8 * Math.sin(ang - 0.4));
+      ctx.lineTo(txx - 8 * Math.cos(ang + 0.4), tyy - 8 * Math.sin(ang + 0.4));
+      ctx.closePath();
+      ctx.fill();
+    });
+  }
+  ctx.restore();
+}
+
 // --- Reference tinting in the text ----------------------------------------
 //
 // The grid outlines say *where* each reference points; this says *which* piece
@@ -6280,6 +6359,11 @@ function wireEvents() {
         "sep",
         ["Cell styles…", () => cellStyleGallery()],
         ["Conditional formatting rules…", () => manageCfRules()],
+        { sub: "Trace", items: [
+          ["Trace precedents", () => toggleTrace("prec")],
+          ["Trace dependents", () => toggleTrace("dep")],
+          ["Clear trace arrows", () => clearTrace()],
+        ] },
         { sub: "Alignment", items: [
           ["Left", () => setAlign("left")],
           ["Center", () => setAlign("center")],

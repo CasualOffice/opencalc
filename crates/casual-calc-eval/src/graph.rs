@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use casual_calc_formula::{CellReference, Expr};
-use casual_calc_model::Workbook;
+use casual_calc_model::{CellRef, Workbook};
 
 /// `(sheet_index, row, col)`.
 pub(crate) type CellKey = (usize, u32, u32);
@@ -117,6 +117,90 @@ pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<Cel
         }
     }
     dirty
+}
+
+/// The cells and ranges a formula reads directly — its **precedents** — as
+/// `(sheet, r0, c0, r1, c1)` blocks. A single-cell reference is a 1x1 block.
+///
+/// Public because "what does this formula read?" is a question the *user* asks,
+/// not only the recalculator: tracing precedents is how a wrong answer gets
+/// diagnosed. This is the same walk the dirty-set uses, so a traced arrow can
+/// never disagree with what recalculation actually followed.
+pub fn precedents_of(
+    workbook: &Workbook,
+    sheet: usize,
+    at: CellRef,
+) -> Vec<(usize, u32, u32, u32, u32)> {
+    let Some(cell) = workbook.sheets.get(sheet).and_then(|sh| sh.cells.get(at)) else {
+        return Vec::new();
+    };
+    let Some(expr) = cell
+        .formula
+        .and_then(|id| workbook.formulas.get(id.0 as usize))
+    else {
+        return Vec::new();
+    };
+    // Two accumulators rather than one: the walker takes both callbacks at once,
+    // so they cannot share a mutable borrow.
+    let mut cells = Vec::new();
+    let mut ranges = Vec::new();
+    let mut uses_name = false;
+    collect_precedents(
+        expr,
+        sheet,
+        workbook,
+        &mut |(si, r, c)| cells.push((si, r, c, r, c)),
+        &mut |si, r0, c0, r1, c1| ranges.push((si, r0, c0, r1, c1)),
+        &mut uses_name,
+    );
+    let mut out = cells;
+    out.extend(ranges);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The formula cells that read `at`, directly — its **dependents**.
+///
+/// Walks every formula in the workbook rather than keeping a reverse index: the
+/// trace is a deliberate, one-off action, and a persistent reverse map would have
+/// to be maintained on every edit for something asked once in a while.
+pub fn dependents_of(workbook: &Workbook, sheet: usize, at: CellRef) -> Vec<(usize, u32, u32)> {
+    let mut out = Vec::new();
+    for (si, sh) in workbook.sheets.iter().enumerate() {
+        for (addr, cell) in sh.cells.iter() {
+            let Some(expr) = cell
+                .formula
+                .and_then(|id| workbook.formulas.get(id.0 as usize))
+            else {
+                continue;
+            };
+            let mut by_cell = false;
+            let mut by_range = false;
+            let mut uses_name = false;
+            collect_precedents(
+                expr,
+                si,
+                workbook,
+                &mut |(ps, r, c)| {
+                    if ps == sheet && r == at.row && c == at.col {
+                        by_cell = true;
+                    }
+                },
+                &mut |ps, r0, c0, r1, c1| {
+                    if ps == sheet && at.row >= r0 && at.row <= r1 && at.col >= c0 && at.col <= c1 {
+                        by_range = true;
+                    }
+                },
+                &mut uses_name,
+            );
+            if by_cell || by_range {
+                out.push((si, addr.row, addr.col));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Walk `expr`, reporting each single-cell precedent to `on_cell`, each range
