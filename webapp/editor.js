@@ -1451,6 +1451,13 @@ function friendlyFormulaError(err) {
   return m;
 }
 function commit(value, advance) {
+  // A cross-sheet pick leaves the view on another sheet; go back before writing,
+  // or the value would land on whichever sheet the user happened to end on.
+  if (editHome && editHome.sheet !== state.sheet) {
+    switchSheet(editHome.sheet, true);
+    state.sel = { row: editHome.row, col: editHome.col };
+    state.anchor = { ...state.sel };
+  }
   // A cell under a data-validation rule refuses input the rule disallows. The
   // dropdown was previously a suggestion — anything typed over it was accepted,
   // which is the opposite of what a validation is for. Gated on typed entry
@@ -2890,10 +2897,16 @@ let editOriginal = "";
 // distinguishes these, and it is about the *gesture*, not about whether the
 // cell happened to be empty.
 let editMode = "Enter";
+// The cell an in-progress edit belongs to, which reference picking can navigate
+// away from.
+let editHome = null;
 
 function beginEdit(surface, initial) {
   editSurface = surface;
   state.editing = true;
+  // Where this edit will be written. Reference picking may walk to another
+  // sheet, so the target cannot simply be "wherever the selection is now".
+  editHome = { sheet: state.sheet, row: state.sel.row, col: state.sel.col };
   editMode = initial !== undefined ? "Enter" : "Edit";
   refSpans = [];
   editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
@@ -3046,6 +3059,11 @@ function mirrorEdit() {
 
 // Abandon the edit and put the cell's own text back on both surfaces.
 function cancelEdit() {
+  if (editHome && editHome.sheet !== state.sheet) {
+    switchSheet(editHome.sheet, true);
+    state.sel = { row: editHome.row, col: editHome.col };
+    state.anchor = { ...state.sel };
+  }
   if (editSurface) editSurface.value = editOriginal;
   endEdit();
   if (wasm) refreshFormulaBar();
@@ -3377,6 +3395,13 @@ function refAcceptable() {
 // point mode — the previously inserted text is replaced rather than appended.
 function insertRef(text) {
   if (!editSurface) return;
+  // Picking on another sheet writes a qualified reference. Quote the name when
+  // it is not a bare word, and double any quote inside it, as Excel does.
+  if (editHome && editHome.sheet !== state.sheet) {
+    const name = sheetNameAt(state.sheet) || "";
+    const q = /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
+    text = `${q}!${text}`;
+  }
   const pending = formulaRefDrag ?? pointMode;
   const val = editSurface.value;
   const start = pending ? pending.start : editSurface.selectionStart;
@@ -3419,11 +3444,14 @@ function saveSheetView() {
     selKind: state.selKind,
   });
 }
-function switchSheet(i) {
+// `keepEdit` leaves an in-progress edit open — used when a formula is picking a
+// reference on another sheet, where switching sheets is part of *authoring* the
+// formula rather than abandoning it.
+function switchSheet(i, keepEdit = false) {
   if (i === state.sheet) return;
   saveSheetView();
   state.sheet = i;
-  endInline();
+  if (!keepEdit) endInline();
   const v = sheetViews.get(sheetNameAt(i));
   if (v) {
     state.scrollX = v.scrollX;
@@ -3456,7 +3484,12 @@ function renderTabs() {
     }
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", i === state.sheet ? "true" : "false");
-    b.addEventListener("click", () => switchSheet(i));
+    b.addEventListener("mousedown", (e) => {
+      // Mid-formula, clicking a tab is part of writing the formula: keep the
+      // edit alive and do not let the click blur the editor.
+      if (refAcceptable()) { e.preventDefault(); switchSheet(i, true); }
+    });
+    b.addEventListener("click", () => { if (!editSurface) switchSheet(i); });
     b.addEventListener("dblclick", () => renameSheet(i, b));
     b.addEventListener("contextmenu", (e) => { e.preventDefault(); sheetMenu(i, e.clientX, e.clientY); });
     // Drag to reorder.
