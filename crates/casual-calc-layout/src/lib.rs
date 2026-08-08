@@ -17,11 +17,13 @@
 
 mod axis;
 mod display;
+pub mod font_substitution;
 mod geometry;
 mod numfmt;
 
 pub use axis::Axis;
 pub use display::{Align, BorderLine, DisplayList, PaintItem, Rect};
+pub use font_substitution::{BundledFamily, Substitute, SubstituteKind, css_stack, substitute};
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
 pub use numfmt::{adjust_format_decimals, format_general, format_number};
 
