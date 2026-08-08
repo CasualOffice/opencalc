@@ -496,6 +496,9 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
 .tb-status { color: var(--faint); font-size: 12px; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 
 .formula-bar {
+  /* The tint mirror is absolutely positioned against this box, so it has to be
+     the offset parent — otherwise the mirror anchors to the page. */
+  position: relative;
   display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px;
   border-bottom: 1px solid var(--border); background: var(--bg); flex: 0 0 auto;
 }
@@ -827,3 +830,26 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .popmenu .menu-item.on { font-weight: 700; }
 
 .panel-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); margin: 4px 0; }
+
+/* Reference tinting: a mirror element renders the formula text with coloured
+   reference tokens, exactly behind the editing surface. The surface keeps its
+   caret and selection but draws its own glyphs transparent, so what you see is
+   the mirror and what you interact with is the real control. */
+.ref-mirror {
+  position: absolute; margin: 0; overflow: hidden; pointer-events: none;
+  color: var(--fg); background: transparent; z-index: 0;
+  border-style: solid; border-color: transparent;
+}
+/* Specificity has to clear `.formula-bar input#formula-input`, which is where
+   the bar's own colour comes from — a plain `#formula-input.tinted` loses. */
+.formula-bar input#formula-input.tinted, textarea.inline-edit.tinted {
+  position: relative; z-index: 1; background: transparent;
+  /* Transparent glyphs, visible caret — `caret-color` is what keeps the caret
+     from disappearing along with the text. */
+  color: transparent; caret-color: var(--fg);
+}
+.formula-bar input#formula-input.tinted::selection,
+textarea.inline-edit.tinted::selection {
+  /* Selection has to stay visible even though the glyphs are transparent. */
+  color: transparent; background: var(--sel-tint, rgba(47,109,246,.28));
+}

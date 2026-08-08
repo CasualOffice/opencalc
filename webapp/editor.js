@@ -4035,6 +4035,12 @@ function endEdit(refocus = true) {
   // needs a repaint — otherwise they linger over the grid after the edit ends.
   const hadSpans = refSpans.length > 0;
   refSpans = [];
+  paintRefTokens();
+  for (const surface of [inline, fInput]) {
+    const m = refMirrors.get(surface);
+    if (m) { m.textContent = ""; m.style.display = "none"; }
+    surface.classList.remove("tinted");
+  }
   inline.style.display = "none";
   hideAutocomplete();
   hideSignatureTip();
@@ -4055,6 +4061,87 @@ function endInline() {
 // on the grid, so "which cells does this formula actually read?" is answerable
 // by looking rather than by parsing the text in your head. The spans come from
 // the engine's scanner, so a function name is never mistaken for a reference.
+// --- Reference tinting in the text ----------------------------------------
+//
+// The grid outlines say *where* each reference points; this says *which* piece
+// of the formula each outline belongs to, by tinting the reference tokens in
+// the same colours. A plain `<input>`/`<textarea>` cannot colour a substring, so
+// a mirror element sits exactly behind the editing surface rendering the same
+// text with coloured spans, and the surface itself draws its text transparent
+// while keeping its caret. The mirror is inert — no pointer events, hidden from
+// assistive tech — so selection, IME and every key behave as they did.
+const refMirrors = new WeakMap();
+
+function mirrorFor(surface) {
+  let m = refMirrors.get(surface);
+  if (m) return m;
+  m = document.createElement("div");
+  m.className = "ref-mirror";
+  m.setAttribute("aria-hidden", "true");
+  // Inserted as a sibling so it shares the surface's containing block.
+  surface.parentNode.insertBefore(m, surface);
+  refMirrors.set(surface, m);
+  return m;
+}
+
+// Copy the metrics that decide where each glyph lands. Getting any of these
+// wrong shows up immediately as text that drifts out of register with the caret.
+function syncMirrorBox(surface, m) {
+  const cs = getComputedStyle(surface);
+  for (const prop of [
+    "fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing",
+    "lineHeight", "textIndent", "paddingTop", "paddingRight", "paddingBottom",
+    "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth",
+    "borderLeftWidth", "boxSizing", "whiteSpace", "textAlign",
+  ]) m.style[prop] = cs[prop];
+  m.style.left = surface.offsetLeft + "px";
+  m.style.top = surface.offsetTop + "px";
+  m.style.width = surface.offsetWidth + "px";
+  m.style.height = surface.offsetHeight + "px";
+}
+
+function paintRefTokens() {
+  const surface = editSurface;
+  if (!surface) return;
+  const m = refMirrors.get(surface);
+  // Nothing to tint: drop the mirror's content and give the surface its own
+  // text back, so a plain value never depends on the mirror being right.
+  if (!refSpans.length) {
+    if (m) { m.textContent = ""; m.style.display = "none"; }
+    surface.classList.remove("tinted");
+    return;
+  }
+  const mirror = mirrorFor(surface);
+  syncMirrorBox(surface, mirror);
+  mirror.style.display = "";
+  surface.classList.add("tinted");
+
+  const text = surface.value;
+  // Spans are character offsets from the engine's scanner, in order.
+  const parts = [];
+  let at = 0;
+  refSpans.forEach((r, i) => {
+    const start = Math.max(at, Math.min(r.s, text.length));
+    const end = Math.max(start, Math.min(r.e, text.length));
+    if (start > at) parts.push([text.slice(at, start), null]);
+    parts.push([text.slice(start, end), REF_COLORS[i % REF_COLORS.length]]);
+    at = end;
+  });
+  parts.push([text.slice(at), null]);
+  mirror.textContent = "";
+  for (const [chunk, color] of parts) {
+    if (!chunk) continue;
+    const node = document.createElement("span");
+    node.textContent = chunk;
+    if (color) node.style.color = color;
+    mirror.appendChild(node);
+  }
+  // A long formula scrolls inside the surface; the mirror has to follow or the
+  // tint slides off the tokens it belongs to.
+  mirror.scrollLeft = surface.scrollLeft;
+  mirror.scrollTop = surface.scrollTop;
+}
+
 let refSpans = []; // [{s,e,r0,c0,r1,c1,sh}] for the formula being edited
 // Excel/Sheets use a small rotating palette, one color per distinct reference.
 const REF_COLORS = ["#1a73e8", "#e37400", "#0f9d58", "#a142f4", "#d93025", "#12b5cb"];
@@ -4071,6 +4158,10 @@ function updateRefSpans() {
       return p && r.r0 === p.r0 && r.c0 === p.c0 && r.r1 === p.r1 && r.c1 === p.c1 && r.sh === p.sh;
     });
   refSpans = next;
+  // The text can change without the *set* of references changing (typing inside
+  // a token, or anywhere else in the formula), so the tint is repainted every
+  // time while only the grid outlines are gated on a real change.
+  paintRefTokens();
   if (!same) draw();
 }
 
