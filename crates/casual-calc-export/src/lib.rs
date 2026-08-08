@@ -900,7 +900,14 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             "<conditionalFormatting sqref=\"{}\">",
             range_a1(&cf.range)
         ));
-        s.push_str(&cf_rule_xml(cf, dxf_id, i + 1));
+        // An explicit priority wins; zero means the rule never carried one, so
+        // fall back to document order rather than writing an invalid 0.
+        let priority = if cf.priority > 0 {
+            cf.priority as usize
+        } else {
+            i + 1
+        };
+        s.push_str(&cf_rule_xml(cf, dxf_id, priority));
         s.push_str("</conditionalFormatting>");
     }
 
@@ -933,6 +940,16 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
 
 /// A single `<cfRule>` for a highlight-cells rule.
 fn cf_rule_xml(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> String {
+    let xml = cf_rule_body(cf, dxf_id, priority);
+    if !cf.stop_if_true {
+        return xml;
+    }
+    // `stopIfTrue` is an attribute of every rule form, so it is spliced in here
+    // rather than repeated across a dozen format! calls.
+    xml.replacen("<cfRule ", "<cfRule stopIfTrue=\"1\" ", 1)
+}
+
+fn cf_rule_body(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> String {
     match &cf.rule {
         CfRule::GreaterThan(x) => format!(
             "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"greaterThan\"><formula>{}</formula></cfRule>",
@@ -971,6 +988,30 @@ fn cf_rule_xml(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> String
         CfRule::DataBar(color) => format!(
             "<cfRule type=\"dataBar\" priority=\"{priority}\"><dataBar><cfvo type=\"min\"/><cfvo type=\"max\"/><color rgb=\"FF{}\"/></dataBar></cfRule>",
             escape_attr(color)
+        ),
+        CfRule::Top10 {
+            rank,
+            bottom,
+            percent,
+        } => format!(
+            "<cfRule type=\"top10\" dxfId=\"{dxf_id}\" priority=\"{priority}\"{}{} rank=\"{rank}\"/>",
+            if *bottom { " bottom=\"1\"" } else { "" },
+            if *percent { " percent=\"1\"" } else { "" },
+        ),
+        // The schema defaults `aboveAverage` to true, so only the "below" case
+        // needs writing out.
+        CfRule::AboveAverage { below, equal } => format!(
+            "<cfRule type=\"aboveAverage\" dxfId=\"{dxf_id}\" priority=\"{priority}\"{}{}/>",
+            if *below { " aboveAverage=\"0\"" } else { "" },
+            if *equal { " equalAverage=\"1\"" } else { "" },
+        ),
+        CfRule::DuplicateValues { unique } => format!(
+            "<cfRule type=\"{}\" dxfId=\"{dxf_id}\" priority=\"{priority}\"/>",
+            if *unique {
+                "uniqueValues"
+            } else {
+                "duplicateValues"
+            },
         ),
         CfRule::TextContains(text) => {
             let top = cell_a1(cf.range.start.row, cf.range.start.col);

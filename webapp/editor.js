@@ -2059,6 +2059,62 @@ function pushRecent(hex) {
   recentColors = [h, ...recentColors.filter((c) => c !== h)].slice(0, 10);
 }
 // Build a color popover into `menu`; `onPick(hex)` applies ("" clears).
+// Manage Rules: the sheet's conditional formats in the order they are actually
+// evaluated, with the reorder / stop-if-true / delete controls that order needs
+// to be meaningful. Without this, rules could only be added and cleared
+// wholesale, and which of two overlapping rules won was invisible.
+function manageCfRules() {
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Conditional formatting rules";
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  const render = () => {
+    body.textContent = "";
+    let rules = [];
+    try { rules = JSON.parse(wasm.session_cf_rules(state.sheet)); } catch {}
+    if (!rules.length) {
+      body.append(el("p", "oc-confirm-text", "No conditional formatting on this sheet."));
+    } else {
+      body.append(el("p", "oc-confirm-text", "Listed in evaluation order — the first rule that matches a cell wins."));
+      const list = el("div", "cf-rules");
+      for (const r of rules) {
+        const row = el("div", "cf-rule-row");
+        const sw = el("span", "cf-rule-swatch");
+        if (r.fill) sw.style.background = "#" + r.fill;
+        const label = el("span", "cf-rule-text", `${r.range} — ${r.desc}`);
+        const stop = document.createElement("input");
+        stop.type = "checkbox";
+        stop.checked = !!r.stop;
+        stop.title = "Stop evaluating later rules when this one matches";
+        stop.addEventListener("change", () => {
+          tryEdit(() => wasm.session_set_cf_stop(state.sheet, r.i, stop.checked));
+          render();
+        });
+        const up = el("button", "oc-btn", "↑");
+        up.title = "Evaluate earlier";
+        up.addEventListener("click", () => { tryEdit(() => wasm.session_reorder_cf_rule(state.sheet, r.i, true)); render(); });
+        const down = el("button", "oc-btn", "↓");
+        down.title = "Evaluate later";
+        down.addEventListener("click", () => { tryEdit(() => wasm.session_reorder_cf_rule(state.sheet, r.i, false)); render(); });
+        const del = el("button", "oc-btn", "Delete");
+        del.addEventListener("click", () => { tryEdit(() => wasm.session_delete_cf_rule(state.sheet, r.i)); render(); });
+        row.append(sw, label, stop, up, down, del);
+        list.appendChild(row);
+      }
+      body.appendChild(list);
+    }
+    const actions = el("div", "oc-confirm-actions");
+    const done = el("button", "oc-btn primary", "Close");
+    done.addEventListener("click", () => { close(); canvas.focus(); });
+    actions.appendChild(done);
+    body.appendChild(actions);
+    done.focus();
+  };
+  render();
+  modal.hidden = false;
+}
+
 // The named cell-style gallery. Applying one writes its formatting *and*
 // records which style the cells belong to, so the association survives a save —
 // that link is the whole point of a named style over ad-hoc formatting.
@@ -3048,7 +3104,13 @@ function buildCfPanel(body) {
   panelLabel(body, "Highlight cells where the value…");
   const op = el("select", "panel-select");
   [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"],
-   ["contains", "text contains"], ["colorscale", "— colour scale (2 stops)"],
+   ["contains", "text contains"],
+   // Decided from the whole range rather than the cell alone.
+   ["top", "is in the top N"], ["bottom", "is in the bottom N"],
+   ["toppct", "is in the top N%"], ["bottompct", "is in the bottom N%"],
+   ["above", "is above average"], ["below", "is below average"],
+   ["duplicate", "is duplicated"], ["unique", "appears only once"],
+   ["colorscale", "— colour scale (2 stops)"],
    ["colorscale3", "— colour scale (3 stops)"], ["databar", "— data bar"]]
     .forEach(([v, t]) => { const o = el("option", null, t); o.value = v; op.appendChild(o); });
   body.appendChild(op);
@@ -3058,13 +3120,18 @@ function buildCfPanel(body) {
   // The scale/bar kinds are range-relative: they take no operand, and their
   // colours come from the swatch row rather than a single fill.
   const rangeRelative = () => op.value.startsWith("colorscale") || op.value === "databar";
+  // Kinds needing a rank, and kinds needing no operand at all.
+  const ranked = () => ["top", "bottom", "toppct", "bottompct"].includes(op.value);
+  const noOperand = () => rangeRelative() || ["above", "below", "duplicate", "unique"].includes(op.value);
   op.addEventListener("change", () => {
     b.style.display = op.value === "between" ? "" : "none";
-    a.style.display = rangeRelative() ? "none" : "";
-    a.placeholder = op.value === "contains" ? "text" : "value";
+    a.style.display = noOperand() ? "none" : "";
+    a.placeholder = op.value === "contains" ? "text" : ranked() ? "how many" : "value";
     panelHint.textContent = rangeRelative()
       ? "Colour comes from the value's position between the range's smallest and largest."
-      : "";
+      : ranked() || noOperand()
+        ? "Compared against the whole range, so adding rows can change which cells match."
+        : "";
   });
   const panelHint = el("div", "panel-hint");
   body.appendChild(panelHint);
@@ -3089,10 +3156,14 @@ function buildCfPanel(body) {
       // Scale and bar colours travel in the text slot: a scale needs two or
       // three, which the single fill slot cannot carry.
       let txt = kind === "contains" ? a.value : "";
+      // A ranked rule's operand is a count, and it defaults to the top 10 —
+      // Excel's own default, and the one the rule type is named after.
+      const ranks = ["top", "bottom", "toppct", "bottompct"];
+      const rank = ranks.includes(kind) ? Math.max(1, parseInt(a.value, 10) || 10) : av;
       if (kind === "colorscale") { txt = `${fill},ffffff`; }
       else if (kind === "colorscale3") { kind = "colorscale"; txt = `${fill},ffffff,63be7b`; }
       else if (kind === "databar") { txt = fill; }
-      try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, av, bv, txt, fill); }
+      try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, rank, bv, txt, fill); }
       catch (e) { status.textContent = `error: ${e}`; }
       draw();
     },
@@ -5724,6 +5795,7 @@ function wireEvents() {
         ["Strikethrough", clickEl("#tb-strike"), null, () => fmtHas("st")],
         "sep",
         ["Cell styles…", () => cellStyleGallery()],
+        ["Conditional formatting rules…", () => manageCfRules()],
         { sub: "Alignment", items: [
           ["Left", () => setAlign("left")],
           ["Center", () => setAlign("center")],

@@ -297,6 +297,20 @@ pub struct RawCf {
     /// The `<color>` stops inside a `<colorScale>` / `<dataBar>`, low → high,
     /// as `RRGGBB`. Those kinds carry their own presentation instead of a dxf.
     pub colors: Vec<String>,
+    /// `rank` for a `top10` rule.
+    pub rank: u32,
+    /// `bottom="1"` on a `top10` rule.
+    pub bottom: bool,
+    /// `percent="1"` on a `top10` rule.
+    pub percent: bool,
+    /// `aboveAverage` — absent defaults to `1` (above), per the schema.
+    pub above_average: bool,
+    /// `equalAverage="1"`.
+    pub equal_average: bool,
+    /// Evaluation order; lower wins.
+    pub priority: u32,
+    /// `stopIfTrue="1"`.
+    pub stop_if_true: bool,
 }
 
 /// Ceiling on how many columns one `<col>` span may expand into per-line
@@ -313,6 +327,30 @@ pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
 /// Convert an Excel row height (points) to twips.
 fn row_height_to_twips(points: f64) -> i64 {
     (points * 20.0).round() as i64
+}
+
+/// Build a [`RawCf`] from a `<cfRule>` element. Shared by the Start and Empty
+/// dispatches: a rule with `<formula>` children opens an element, while
+/// `top10` / `aboveAverage` / `duplicateValues` are self-closing.
+fn read_cf_rule(e: &BytesStart<'_>, sqref: &str) -> Result<RawCf, ImportError> {
+    Ok(RawCf {
+        sqref: sqref.to_owned(),
+        kind: read_attr(e, b"type")?.unwrap_or_default(),
+        operator: read_attr(e, b"operator")?.unwrap_or_default(),
+        dxf_id: read_attr(e, b"dxfId")?.and_then(|s| s.parse().ok()),
+        text: read_attr(e, b"text")?,
+        formulas: Vec::new(),
+        colors: Vec::new(),
+        rank: parse_u32_attr(e, b"rank")?,
+        bottom: read_bool_attr(e, b"bottom")?.unwrap_or(false),
+        percent: read_bool_attr(e, b"percent")?.unwrap_or(false),
+        // The schema defaults `aboveAverage` to true, so an absent attribute
+        // means "above", not "below".
+        above_average: read_bool_attr(e, b"aboveAverage")?.unwrap_or(true),
+        equal_average: read_bool_attr(e, b"equalAverage")?.unwrap_or(false),
+        priority: parse_u32_attr(e, b"priority")?,
+        stop_if_true: read_bool_attr(e, b"stopIfTrue")?.unwrap_or(false),
+    })
 }
 
 /// Handle one `<autoFilter>` subtree element. Returns `true` if the element was
@@ -539,15 +577,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     }
                     n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
                     b"cfRule" => {
-                        cur_cf = Some(RawCf {
-                            sqref: cf_sqref.clone(),
-                            kind: read_attr(&e, b"type")?.unwrap_or_default(),
-                            operator: read_attr(&e, b"operator")?.unwrap_or_default(),
-                            dxf_id: read_attr(&e, b"dxfId")?.and_then(|s| s.parse().ok()),
-                            text: read_attr(&e, b"text")?,
-                            formulas: Vec::new(),
-                            colors: Vec::new(),
-                        });
+                        cur_cf = Some(read_cf_rule(&e, &cf_sqref)?);
                     }
                     b"color" if cur_cf.is_some() => {
                         if let Some(rgb) = read_attr(&e, b"rgb")?
@@ -600,6 +630,14 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result, theme)?,
+                    // A rule with no children — top10, aboveAverage,
+                    // duplicateValues — arrives self-closing, so it never reaches
+                    // the End handler that pushes the others. Complete it here.
+                    b"cfRule" => {
+                        result
+                            .conditional_formats
+                            .push(read_cf_rule(&e, &cf_sqref)?);
+                    }
                     n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
                     _ => {}
                 }

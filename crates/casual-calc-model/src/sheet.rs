@@ -413,8 +413,23 @@ pub struct ConditionalFormat {
     pub range: CellRange,
     /// The predicate on a cell's value.
     pub rule: CfRule,
-    /// Fill color (`RRGGBB`, no `#`) applied when the rule matches.
+    /// Fill color (`RRGGBB`, no `#`) applied when the rule matches. Empty when
+    /// the rule paints itself, or when only the font effects below apply.
     pub fill: String,
+    /// Font colour (`RRGGBB`) applied when the rule matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    /// Whether matching cells are bolded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    /// OOXML evaluation order: the lowest priority that matches wins. Zero means
+    /// "unset", and the writer falls back to document order.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub priority: u32,
+    /// Stop evaluating later rules for a cell this one matched — OOXML
+    /// `stopIfTrue`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stop_if_true: bool,
 }
 
 /// A conditional-format predicate. Numeric comparisons act on a cell's numeric
@@ -445,6 +460,30 @@ pub enum CfRule {
     /// length being the value's position in the range's span. Also
     /// range-relative, and likewise ignores `fill`.
     DataBar(String),
+    /// The highest (or lowest) `rank` values in the range, or `rank` percent of
+    /// them. OOXML `<cfRule type="top10">`.
+    Top10 {
+        /// How many values, or what percentage.
+        rank: u32,
+        /// Take the lowest rather than the highest.
+        bottom: bool,
+        /// `rank` is a percentage of the range rather than a count.
+        percent: bool,
+    },
+    /// Values above (or below) the range's mean. OOXML
+    /// `<cfRule type="aboveAverage">`.
+    AboveAverage {
+        /// Below the mean rather than above it.
+        below: bool,
+        /// Count values exactly equal to the mean as matching.
+        equal: bool,
+    },
+    /// Values appearing more than once in the range — or, with `unique`, exactly
+    /// once. OOXML `duplicateValues` / `uniqueValues`.
+    DuplicateValues {
+        /// Match values that appear exactly once instead.
+        unique: bool,
+    },
 }
 
 /// A data-validation rule over a range. Only the explicit-list dropdown kind is
@@ -562,6 +601,20 @@ impl Sheet {
 }
 
 impl ConditionalFormat {
+    /// A rule painting `fill`, with no font effects, no explicit priority (so
+    /// document order applies) and no stop-if-true.
+    pub fn new(range: CellRange, rule: CfRule, fill: impl Into<String>) -> Self {
+        Self {
+            range,
+            rule,
+            fill: fill.into(),
+            font_color: None,
+            bold: false,
+            priority: 0,
+            stop_if_true: false,
+        }
+    }
+
     /// Whether the rule's range covers `(row, col)`.
     pub fn covers(&self, row: u32, col: u32) -> bool {
         row >= self.range.start.row
@@ -582,14 +635,36 @@ impl CfRule {
             // Range-relative kinds are not per-cell predicates: they need the
             // range's own statistics, so a caller evaluates them with
             // `is_range_relative` and its own min/max rather than here.
-            CfRule::TextContains(_) | CfRule::ColorScale(_) | CfRule::DataBar(_) => false,
+            // Kinds needing the range's own statistics are not per-cell
+            // predicates; a caller evaluates them via `needs_range_stats`.
+            CfRule::TextContains(_)
+            | CfRule::ColorScale(_)
+            | CfRule::DataBar(_)
+            | CfRule::Top10 { .. }
+            | CfRule::AboveAverage { .. }
+            | CfRule::DuplicateValues { .. } => false,
         }
     }
 
-    /// Whether this rule is evaluated against the range's statistics (minimum
-    /// and maximum) rather than by a per-cell predicate.
+    /// Whether this rule can only be decided by looking at the whole range —
+    /// its extremes, its mean, or how often a value repeats — rather than at the
+    /// cell alone.
     #[must_use]
-    pub fn is_range_relative(&self) -> bool {
+    pub fn needs_range_stats(&self) -> bool {
+        matches!(
+            self,
+            CfRule::ColorScale(_)
+                | CfRule::DataBar(_)
+                | CfRule::Top10 { .. }
+                | CfRule::AboveAverage { .. }
+                | CfRule::DuplicateValues { .. }
+        )
+    }
+
+    /// Whether the rule carries its own presentation (a gradient or a bar)
+    /// instead of painting through the sibling [`ConditionalFormat`] dxf.
+    #[must_use]
+    pub fn has_own_presentation(&self) -> bool {
         matches!(self, CfRule::ColorScale(_) | CfRule::DataBar(_))
     }
     /// Whether this rule matches display text (only `TextContains` does).

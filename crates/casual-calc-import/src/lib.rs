@@ -373,6 +373,18 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                     Some(CfRule::ColorScale(raw.colors.clone()))
                 }
                 ("dataBar", _) => raw.colors.first().cloned().map(CfRule::DataBar),
+                ("top10", _) => Some(CfRule::Top10 {
+                    // A rank of zero would select nothing; Excel's minimum is 1.
+                    rank: raw.rank.max(1),
+                    bottom: raw.bottom,
+                    percent: raw.percent,
+                }),
+                ("aboveAverage", _) => Some(CfRule::AboveAverage {
+                    below: !raw.above_average,
+                    equal: raw.equal_average,
+                }),
+                ("duplicateValues", _) => Some(CfRule::DuplicateValues { unique: false }),
+                ("uniqueValues", _) => Some(CfRule::DuplicateValues { unique: true }),
                 _ => None,
             };
             if let Some(rule) = rule {
@@ -388,6 +400,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                         range,
                         rule: rule.clone(),
                         fill: fill.clone(),
+                        font_color: None,
+                        bold: false,
+                        priority: raw.priority,
+                        stop_if_true: raw.stop_if_true,
                     });
                 }
             }

@@ -60,6 +60,7 @@ evidence").
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |
+| Conditional formatting | ● | ● | ● | ◐ | — | cellIs, containsText, colorScale, dataBar, top10, aboveAverage, duplicate/uniqueValues, plus `priority` and `stopIfTrue`. Dxf carries fill, font colour and bold; other dxf effects (borders, number format, italic/underline) are not yet modelled |
 | Named cell styles | ● | ● | ● | ● | — | `cellStyleXfs` + `cellStyles` (name, `builtinId`) and the `xf/@xfId` link per cell. Normal is emitted in slot 0 on write, since unlinked cells resolve `xfId="0"` to it |
 | Alignment | ● | ● | ● | ◐ | — | All OOXML `horizontal` and `vertical` tokens model and round-trip exactly. Render: left/center/right/fill/centerContinuous/justify/distributed and vertical top/center/bottom/justify/distributed are drawn; justification stretches word gaps rather than shaping glyphs, so it is a close approximation and not oracle-exact |
 | Outline / grouping | ● | ● | ● | ● | — | `outlineLevel` per row/column, `collapsed`, and `<outlinePr>` summary placement. Collapsed detail lines write `hidden="1"` — OOXML has no separate marker — with the `collapsed` flag on the summary line recording that a group did the hiding |

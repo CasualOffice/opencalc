@@ -286,21 +286,13 @@ fn conditional_formatting_round_trips() {
     let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
     let r = |r0, c0, r1, c1| CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1));
     workbook.sheets[0].conditional_formats = vec![
-        ConditionalFormat {
-            range: r(0, 0, 4, 3),
-            rule: CfRule::GreaterThan(5.0),
-            fill: "FFD166".into(),
-        },
-        ConditionalFormat {
-            range: r(1, 1, 1, 1),
-            rule: CfRule::Between(2.0, 10.0),
-            fill: "D1F0D6".into(),
-        },
-        ConditionalFormat {
-            range: r(0, 0, 0, 0),
-            rule: CfRule::TextContains("total".into()),
-            fill: "FFD6E0".into(),
-        },
+        ConditionalFormat::new(r(0, 0, 4, 3), CfRule::GreaterThan(5.0), "FFD166"),
+        ConditionalFormat::new(r(1, 1, 1, 1), CfRule::Between(2.0, 10.0), "D1F0D6"),
+        ConditionalFormat::new(
+            r(0, 0, 0, 0),
+            CfRule::TextContains("total".into()),
+            "FFD6E0",
+        ),
     ];
     let written = write_workbook(&workbook).unwrap();
     let cfs = import_package(written).unwrap().workbook.sheets[0]
@@ -601,4 +593,76 @@ fn a_workbook_with_no_named_styles_still_writes_the_default_entry() {
     let written = write_workbook(&workbook).unwrap();
     let xml = xml_of(&written, "xl/styles.xml");
     assert!(xml.contains("<cellStyleXfs count=\"1\">"), "{xml}");
+}
+
+#[test]
+fn ranked_and_average_and_duplicate_rules_round_trip() {
+    use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = CellRange::new(CellRef::new(0, 0), CellRef::new(9, 0));
+    let rules = vec![
+        CfRule::Top10 {
+            rank: 3,
+            bottom: false,
+            percent: false,
+        },
+        CfRule::Top10 {
+            rank: 10,
+            bottom: true,
+            percent: true,
+        },
+        CfRule::AboveAverage {
+            below: false,
+            equal: false,
+        },
+        CfRule::AboveAverage {
+            below: true,
+            equal: true,
+        },
+        CfRule::DuplicateValues { unique: false },
+        CfRule::DuplicateValues { unique: true },
+    ];
+    workbook.sheets[0].conditional_formats = rules
+        .iter()
+        .map(|rule| ConditionalFormat::new(r, rule.clone(), "FFD166"))
+        .collect();
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("type=\"top10\""), "{xml}");
+    assert!(xml.contains("bottom=\"1\" percent=\"1\""));
+    assert!(xml.contains("type=\"aboveAverage\""));
+    // The schema defaults aboveAverage to true, so only "below" is written out.
+    assert!(xml.contains("aboveAverage=\"0\" equalAverage=\"1\""));
+    assert!(xml.contains("type=\"duplicateValues\""));
+    assert!(xml.contains("type=\"uniqueValues\""));
+
+    let back = import_package(written).unwrap().workbook.sheets[0]
+        .conditional_formats
+        .iter()
+        .map(|c| c.rule.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(back, rules);
+}
+
+#[test]
+fn rule_priority_and_stop_if_true_round_trip() {
+    use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = CellRange::new(CellRef::new(0, 0), CellRef::new(4, 0));
+    let mut first = ConditionalFormat::new(r, CfRule::GreaterThan(1.0), "FFD166");
+    first.priority = 7;
+    first.stop_if_true = true;
+    workbook.sheets[0].conditional_formats = vec![first];
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("stopIfTrue=\"1\""), "{xml}");
+    assert!(xml.contains("priority=\"7\""));
+
+    let back = &import_package(written).unwrap().workbook.sheets[0].conditional_formats[0];
+    assert_eq!(back.priority, 7);
+    assert!(back.stop_if_true);
 }

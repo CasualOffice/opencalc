@@ -777,3 +777,13 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 }
 .style-chip:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
 .style-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Manage-rules list: swatch, description, then the order/stop/delete controls. */
+.cf-rules { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; max-height: 340px; overflow-y: auto; }
+.cf-rule-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
+}
+.cf-rule-swatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--border); flex: 0 0 auto; }
+.cf-rule-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-rule-row .oc-btn { padding: 3px 8px; font-size: 12px; }
