@@ -1695,6 +1695,8 @@ function select(row, col) {
   state.selKind = "cells";
   state.ranges = [];
   extending = false;
+  lastFill = null;
+  hideFillOptions();
   resetNavRuns();
   ensureVisible();
   draw();
@@ -4751,6 +4753,75 @@ function colFromName(letters) {
   return n - 1;
 }
 
+// Fill the selection from its own first row or column, in an explicit mode.
+// Which axis is decided by the selection's shape: a tall block fills down, a
+// wide one fills right — the same reading the fill handle gives it.
+function fillSelection(mode) {
+  const s = effectiveRange();
+  const rows = s.r1 - s.r0 + 1, cols = s.c1 - s.c0 + 1;
+  if (rows < 2 && cols < 2) { status.textContent = "select the cells to fill"; return; }
+  const down = rows >= cols;
+  const src = down
+    ? { r0: s.r0, c0: s.c0, r1: s.r0, c1: s.c1 }
+    : { r0: s.r0, c0: s.c0, r1: s.r1, c1: s.c0 };
+  tryEdit(() => wasm.session_fill_mode(
+    state.sheet, src.r0, src.c0, src.r1, src.c1, s.r0, s.c0, s.r1, s.c1, mode));
+  lastFill = { src, dst: { ...s } };
+  status.textContent = `filled — ${mode}`;
+}
+
+// The fill-options button Excel drops at the corner of a fill. A fill has to
+// guess between copying and continuing a series, and this is how you tell it it
+// guessed wrong — without which the only recourse is undo and a different drag.
+let lastFill = null;
+
+function hideFillOptions() {
+  const b = document.getElementById("fill-options");
+  if (b) b.remove();
+}
+
+function showFillOptions(dst) {
+  hideFillOptions();
+  if (!lastFill) return;
+  const x = colXAt(dst.c1), y = rowYAt(dst.r1);
+  if (x === undefined || y === undefined) return;
+  const rect = canvas.getBoundingClientRect();
+  const btn = document.createElement("button");
+  btn.id = "fill-options";
+  btn.className = "fill-options";
+  btn.title = "Fill options";
+  btn.setAttribute("aria-label", "Fill options");
+  btn.textContent = "⊞";
+  btn.style.left = rect.left + (x + colWAt(dst.c1)) * state.zoom + "px";
+  btn.style.top = rect.top + (y + rowHAt(dst.r1)) * state.zoom + "px";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = document.createElement("div");
+    menu.className = "popmenu ctx-menu";
+    menu.id = "sheet-ctx";
+    for (const [label, mode] of [
+      ["Copy cells", "copy"],
+      ["Fill series", "series"],
+      ["Growth series", "growth"],
+      ["Fill formatting only", "formats"],
+      ["Fill without formatting", "values"],
+    ]) {
+      const b = el("button", "menu-item", label);
+      b.addEventListener("click", () => {
+        closeSheetMenu();
+        const { src, dst: d } = lastFill;
+        tryEdit(() => wasm.session_fill_mode(
+          state.sheet, src.r0, src.c0, src.r1, src.c1, d.r0, d.c0, d.r1, d.c1, mode));
+        status.textContent = label.toLowerCase();
+      });
+      menu.appendChild(b);
+    }
+    const r = btn.getBoundingClientRect();
+    positionMenu(menu, r.left, r.bottom + 2);
+  });
+  document.body.appendChild(btn);
+}
+
 // Paste Special (Ctrl+Alt+V): what to paste, and what to do with it when it
 // lands. The context submenu covers the common three; this is the rest —
 // transpose and the arithmetic combinations.
@@ -6135,13 +6206,20 @@ function wireEvents() {
       state.fill = null;
       const d = f.dst;
       if (d && (d.r0 !== f.src.r0 || d.c0 !== f.src.c0 || d.r1 !== f.src.r1 || d.c1 !== f.src.c1)) {
+        // Ctrl inverts the default, as in Excel: a series-looking source copies
+        // instead, and a plain one becomes a series.
+        const mode = (e.ctrlKey || e.metaKey) ? "copy" : "auto";
         try {
-          wasm.session_fill(state.sheet, f.src.r0, f.src.c0, f.src.r1, f.src.c1, d.r0, d.c0, d.r1, d.c1);
+          wasm.session_fill_mode(state.sheet, f.src.r0, f.src.c0, f.src.r1, f.src.c1,
+                                 d.r0, d.c0, d.r1, d.c1, mode);
           status.textContent = "filled";
-        } catch (e) { status.textContent = `error: ${e}`; }
+        } catch (err) { status.textContent = `error: ${err}`; }
         state.anchor = { row: d.r0, col: d.c0 };
         state.sel = { row: d.r1, col: d.c1 };
         state.selKind = "cells";
+        // Remember the fill so the options popup can redo it differently.
+        lastFill = { src: f.src, dst: d };
+        showFillOptions(d);
       }
       draw();
     }
@@ -7007,6 +7085,19 @@ function wireEvents() {
           ["Values", clearContents],
           ["Formatting", clearFormats],
           ["All", clearAll],
+        ] },
+        // Fill from the top/left of the selection into the rest of it. The fill
+        // handle can do the same, but only by dragging — and a mode you can only
+        // reach by dragging is one most people never find.
+        { sub: "Fill", items: [
+          ["Fill down", () => fillWithin("down"), "Ctrl+D"],
+          ["Fill right", () => fillWithin("right"), "Ctrl+R"],
+          "sep",
+          ["Fill series", () => fillSelection("series")],
+          ["Growth series", () => fillSelection("growth")],
+          ["Copy cells", () => fillSelection("copy")],
+          ["Formatting only", () => fillSelection("formats")],
+          ["Without formatting", () => fillSelection("values")],
         ] },
       ]],
       ["View", [

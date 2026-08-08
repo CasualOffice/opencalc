@@ -3008,6 +3008,31 @@ pub fn session_fill(
     dr1: u32,
     dc1: u32,
 ) -> Result<(), JsError> {
+    session_fill_mode(sheet, sr0, sc0, sr1, sc1, dr0, dc0, dr1, dc1, "auto")
+}
+
+/// Fill with an explicit mode, for the fill-options popup and the Ctrl toggle.
+///
+/// - `auto` — detect a series, else tile (what dragging the handle does)
+/// - `copy` — always tile, even where a series was detectable
+/// - `series` — force a linear series, stepping by 1 from a single cell
+/// - `growth` — geometric: continue by ratio rather than by difference
+/// - `formats` — carry only the styling
+/// - `values` — carry only the values, leaving the target's styling alone
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_fill_mode(
+    sheet: usize,
+    sr0: u32,
+    sc0: u32,
+    sr1: u32,
+    sc1: u32,
+    dr0: u32,
+    dc0: u32,
+    dr1: u32,
+    dc1: u32,
+    mode: &str,
+) -> Result<(), JsError> {
     let (src_rows, src_cols) = ((sr1 - sr0 + 1) as i64, (sc1 - sc0 + 1) as i64);
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -3051,9 +3076,42 @@ pub fn session_fill(
             // step), extend the sequence instead of tiling — Excel's autofill.
             let vertical = dc0 == sc0 && dc1 == sc1 && (dr1 > sr1 || dr0 < sr0);
             let horizontal = dr0 == sr0 && dr1 == sr1 && (dc1 > sc1 || dc0 < sc0);
+            let growth = mode == "growth";
             let arithmetic = |vals: &[Option<f64>]| -> Option<(f64, f64)> {
-                if vals.len() < 2 || vals.iter().any(|v| v.is_none()) {
+                // Copy never extends, whatever the values look like.
+                if mode == "copy" || mode == "formats" {
                     return None;
+                }
+                if vals.iter().any(|v| v.is_none()) {
+                    return None;
+                }
+                if vals.is_empty() {
+                    return None;
+                }
+                if growth {
+                    // Geometric: a constant *ratio* rather than a constant
+                    // difference. A single cell doubles, matching Excel's
+                    // default growth step.
+                    let first = vals[0].unwrap();
+                    if first == 0.0 {
+                        return None; // no ratio can be recovered from zero
+                    }
+                    if vals.len() == 1 {
+                        return Some((first, 2.0));
+                    }
+                    let ratio = vals[1].unwrap() / first;
+                    for w in vals.windows(2) {
+                        let a = w[0].unwrap();
+                        if a == 0.0 || (w[1].unwrap() / a - ratio).abs() > 1e-9 {
+                            return None;
+                        }
+                    }
+                    return Some((first, ratio));
+                }
+                if vals.len() < 2 {
+                    // An explicit "fill series" steps by one from a single cell;
+                    // auto-detection needs two to know the step.
+                    return (mode == "series").then(|| (vals[0].unwrap(), 1.0));
                 }
                 let step = vals[1].unwrap() - vals[0].unwrap();
                 for w in vals.windows(2) {
@@ -3108,12 +3166,21 @@ pub fn session_fill(
                     let sc = sc0 as i64 + (dc as i64 - sc0 as i64).rem_euclid(src_cols);
                     let at = CellRef::new(dr, dc);
                     // Series value along the fill axis, if one was detected.
+                    // Growth multiplies by the ratio; a linear series adds the
+                    // step. `n` is how far along the fill axis this cell sits.
+                    let project = |v0: f64, step: f64, n: i64| {
+                        if growth {
+                            v0 * step.powi(n as i32)
+                        } else {
+                            v0 + step * n as f64
+                        }
+                    };
                     let series_value = if vertical {
                         col_series[(dc - sc0) as usize]
-                            .map(|(v0, step)| v0 + step * (dr as i64 - sr0 as i64) as f64)
+                            .map(|(v0, step)| project(v0, step, dr as i64 - sr0 as i64))
                     } else if horizontal {
                         row_series[(dr - sr0) as usize]
-                            .map(|(v0, step)| v0 + step * (dc as i64 - sc0 as i64) as f64)
+                            .map(|(v0, step)| project(v0, step, dc as i64 - sc0 as i64))
                     } else {
                         None
                     };
@@ -3185,16 +3252,42 @@ pub fn session_fill(
         let mut ops = Vec::with_capacity(pending.len());
         for p in pending {
             // A named-list series result becomes an interned string value here.
-            let value = match p.text {
+            let mut value = match p.text {
                 Some(name) => CellValue::SharedString(session.workbook_mut().intern_string(&name)),
                 None => p.value,
             };
-            let cell = if value.is_empty() && p.style.is_none() && p.formula.is_none() {
+            let mut style = p.style;
+            let mut formula = p.formula;
+            // "Formatting only" and "without formatting" are the same fill with
+            // one half discarded — the target keeps whatever the other half was.
+            if mode == "formats" {
+                value = CellValue::Empty;
+                formula = None;
+            } else if mode == "values" {
+                style = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|sh| sh.cells.get(p.at))
+                    .and_then(|c| c.style);
+            }
+            // Formatting-only must not erase the value already there.
+            if mode == "formats"
+                && let Some(existing) = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|sh| sh.cells.get(p.at))
+            {
+                value = existing.value.clone();
+                formula = None;
+            }
+            let cell = if value.is_empty() && style.is_none() && formula.is_none() {
                 None
             } else {
                 let mut c = Cell::value(value);
-                c.style = p.style;
-                if let Some(expr) = p.formula {
+                c.style = style;
+                if let Some(expr) = formula {
                     c.formula = Some(session.workbook_mut().store_formula(expr));
                 }
                 Some(c)

@@ -898,3 +898,11 @@ button.fx:hover { color: var(--fg); background: var(--card); }
 }
 .fn-row:hover { background: var(--card); }
 .fn-row.on { background: var(--accent); color: #fff; }
+
+/* Fill-options button, parked at the corner of the last fill. */
+.fill-options {
+  position: fixed; width: 18px; height: 18px; padding: 0; z-index: 30;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg);
+  color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer;
+}
+.fill-options:hover { color: var(--fg); border-color: var(--accent); }
