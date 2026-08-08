@@ -119,6 +119,14 @@ fn layout_range(
 
         let content = display_text(workbook, cell);
         if !content.is_empty() {
+            // Effective font: the cell's own, else the workbook default.
+            let font_name = style
+                .and_then(|s| s.font_name.clone())
+                .or_else(|| workbook.default_font_name.clone());
+            let font_pt = style
+                .and_then(|s| s.font_size_hp)
+                .or(workbook.default_font_size_hp)
+                .map(|hp| hp as f32 / 2.0);
             list.items.push(PaintItem::Text {
                 rect,
                 content,
@@ -126,6 +134,8 @@ fn layout_range(
                 color: style.and_then(|s| s.font_color.clone()),
                 bold: style.is_some_and(|s| s.bold),
                 italic: style.is_some_and(|s| s.italic),
+                font_name,
+                font_pt,
             });
         }
 

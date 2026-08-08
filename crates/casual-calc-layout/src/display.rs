@@ -76,6 +76,15 @@ pub enum PaintItem {
         /// Whether the text is italic.
         #[serde(default, skip_serializing_if = "core::ops::Not::not")]
         italic: bool,
+        /// Requested font family (the cell's own, else the workbook default).
+        /// `None` means the renderer's default family. A font resolver maps this
+        /// to a concrete bundled face at paint time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_name: Option<String>,
+        /// Font size in points (the cell's own, else the workbook default).
+        /// `None` means the renderer's default size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font_pt: Option<f32>,
     },
     /// The border edges of a cell, painted on top of fills and text.
     CellBorder {
