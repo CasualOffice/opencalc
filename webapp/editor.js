@@ -204,10 +204,16 @@ function textY(it, yTop, h, lineH) {
 
 // Word-wrap a cell's text to `maxW` px (hard-breaking over-long words).
 function wrapLines(it, maxW) {
+  // An explicit line break (Alt+Enter) is a hard break: wrap each of its
+  // segments separately rather than letting \s+ swallow it as a space.
+  const text = String(it.t);
+  if (text.includes("\n")) {
+    return text.split("\n").flatMap((seg) => wrapLines({ ...it, t: seg }, maxW));
+  }
   ctx.font = cellFont(it);
   const lines = [];
   let line = "";
-  for (const word of String(it.t).split(/\s+/)) {
+  for (const word of text.split(/\s+/)) {
     const test = line ? line + " " + word : word;
     if (ctx.measureText(test).width <= maxW || !line) {
       if (!line && ctx.measureText(word).width > maxW) {
@@ -1369,6 +1375,14 @@ function commit(value, advance) {
   }
   try {
     wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, value);
+    // A value with a hard line break is only legible with wrap on, so entering
+    // one turns wrap on for that cell — as Excel does for Alt+Enter.
+    if (value.includes("\n")) {
+      const fmt = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col));
+      if (!fmt.w) {
+        wasm.session_toggle_wrap(state.sheet, state.sel.row, state.sel.col, state.sel.row, state.sel.col);
+      }
+    }
     status.textContent = "ok";
   } catch (e) {
     status.textContent = `error: ${e}`;
@@ -2420,7 +2434,13 @@ function positionInline() {
   inline.style.left = left + "px";
   inline.style.top = top + "px";
   inline.style.width = Math.max(0, Math.min(x1, hiX) - left) + "px";
-  inline.style.height = Math.max(0, Math.min(y1, hiY) - top) + "px";
+  const boxH = Math.max(0, Math.min(y1, hiY) - top);
+  // Grow past the cell for a multi-line entry (Alt+Enter), the way Excel's
+  // in-cell editor does — the value is taller than the cell until it commits.
+  inline.style.height = boxH + "px";
+  if (inline.value.includes("\n")) {
+    inline.style.height = Math.max(boxH, Math.min(inline.scrollHeight, 400)) + "px";
+  }
 }
 
 // --- The edit session -------------------------------------------------------
@@ -3765,6 +3785,16 @@ function wireEvents() {
         if (pointStep(step[0], step[1], e.shiftKey)) { e.preventDefault(); return; }
       }
       if (e.key === "F4") { if (cycleAnchors()) e.preventDefault(); }
+      // Alt+Enter breaks the line inside the cell instead of committing. Only
+      // the in-cell editor can hold one — the formula bar is a single line.
+      else if (e.key === "Enter" && e.altKey && surface === inline) {
+        e.preventDefault();
+        const at = surface.selectionStart;
+        surface.value = surface.value.slice(0, at) + "\n" + surface.value.slice(surface.selectionEnd);
+        surface.setSelectionRange(at + 1, at + 1);
+        mirrorEdit();
+        positionInline();
+      }
       else if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
       else if (e.key === "Escape") { cancelEdit(); e.preventDefault(); }
       else if (e.key === "Tab") { if (commit(surface.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }

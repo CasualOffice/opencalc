@@ -676,8 +676,12 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .scrollbar.vscroll .thumb { left: 3px; width: 8px; min-height: 28px; }
 .scrollbar.hscroll .thumb { top: 3px; height: 8px; min-width: 28px; }
 #grid { display: block; outline: none; }
+/* A <textarea> so a cell can hold a hard line break (Alt+Enter). Sized by
+   positionInline(), which grows it past the cell once the value is multi-line —
+   hence no resize grip and no scrollbars. */
 .inline-edit {
   position: absolute; display: none; box-sizing: border-box;
-  border: 2px solid var(--accent); padding: 0 4px; margin: 0;
+  border: 2px solid var(--accent); padding: 1px 4px; margin: 0;
   font: 13px var(--mono); background: var(--bg); color: var(--fg); outline: none;
+  resize: none; overflow: hidden; white-space: pre; line-height: 1.35;
 }

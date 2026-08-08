@@ -295,7 +295,9 @@
         </button>
       </div>
       <canvas id="grid" tabindex="0"></canvas>
-      <input id="inline-edit" class="inline-edit" spellcheck="false" />
+      <!-- A textarea, not an input: Alt+Enter puts a hard line break in a cell,
+           which an <input> cannot hold. Enter still commits. -->
+      <textarea id="inline-edit" class="inline-edit" spellcheck="false" rows="1" wrap="off"></textarea>
       <div id="ac-menu" class="ac-menu" hidden></div>
       <!-- Argument hint shown while the caret is inside a function's parens
            (populated by updateSignatureTip()). -->

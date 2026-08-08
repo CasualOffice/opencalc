@@ -67,7 +67,7 @@ each audit; this file is the durable backlog.
 | UX-N03 | **Text (`@`) format inert**; text values bypass number formatting | Format | 🔴 | Honor `@` at input coercion + apply text section in `display_text` |
 | UX-D01 | **Sort includes the header row + single-key only** — corrupts tables | Data | 🔴 | Header detection (start r0+1); Sort dialog with N keys + "has header"; extend `session_sort_range` |
 | UX-C01 | **Right-click on row/col header** shows generic cell menu and acts on the *previous* selection (wrong target) | Chrome | ✅ | The contextmenu handler detects a header hit (cellAt returns null there, which is why it fell through), selects that band unless it is already inside a row/column selection, and opens a header menu whose verbs name the band: insert before/after, delete, clear, exact size, autofit, hide/unhide. Corner → select all |
-| UX-E01 | **Alt+Enter multi-line entry impossible** (inline is `<input>`) | Editing | 🔴 | Convert `#inline-edit` to auto-grow `<textarea>`; Alt+Enter inserts `\n` |
+| UX-E01 | **Alt+Enter multi-line entry impossible** (inline is `<input>`) | Editing | ✅ | `#inline-edit` is a `<textarea>` that grows past the cell while editing; Alt+Enter inserts a break (in-cell only — the formula bar is one line), Enter still commits. `wrapLines()` now treats `\n` as a hard break instead of letting `\s+` swallow it, and committing a multi-line value turns wrap on for that cell, as Excel does |
 
 ## P1 — expected daily
 
