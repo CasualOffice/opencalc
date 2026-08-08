@@ -784,12 +784,17 @@ function draw() {
     let clipL = x, clipR = x + w;
     // A number never spills, not even into an empty neighbour: Excel fills the
     // cell with "#" instead, because a number cut off mid-digits still reads as
-    // a real — and wrong — value.
+    // a real — and wrong — value. This holds under "clip" too, for the same
+    // reason.
     if (it.n && tw > w - 8) {
       const hashW = ctx.measureText("#").width || 1;
       text = "#".repeat(Math.max(1, Math.floor((w - 8) / hashW)));
       tw = ctx.measureText(text).width;
-    } else if (tw > w - 8) {
+    // "Clip" (`it.cl`) is the third state of the overflow control: stop at the
+    // cell edge rather than borrowing empty neighbours. Excel has no such
+    // setting — it always spills — so this skips the spill scan entirely and
+    // leaves the span at the cell's own bounds.
+    } else if (!it.cl && tw > w - 8) {
       if (align !== "right") {
         let c = it.c;
         // Stop at a non-empty cell OR a column that isn't drawn (e.g. the gap
@@ -1185,7 +1190,7 @@ function refreshFormulaBar() {
   press("tb-italic", fmt.i);
   press("tb-underline", fmt.u);
   press("tb-strike", fmt.st);
-  press("tb-wrap", fmt.w);
+  press("tb-wrap", fmt.w || fmt.cl);
   for (const b of document.querySelectorAll(".tb-align")) {
     b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
   }
@@ -1642,6 +1647,12 @@ function buildColorMenu(menu, onPick, noneLabel) {
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+// One three-way choice: "overflow" (spill into empty neighbours), "wrap", or
+// "clip" (stop at the cell edge). Wrap and clip are mutually exclusive, so the
+// engine sets them together rather than exposing two toggles that can disagree.
+function setTextOverflow(mode) {
+  formatSel((s) => wasm.session_set_text_overflow(state.sheet, s.r0, s.c0, s.r1, s.c1, mode));
+}
 function setFreeze(kind) {
   if (kind === "gridlines") {
     try { wasm.session_set_gridlines_hidden(state.sheet, !wasm.session_gridlines_hidden(state.sheet)); }
@@ -4034,6 +4045,7 @@ function wireEvents() {
   // Styled tooltips over the chrome (converts native titles, incl. the border
   // palette just built above).
   initTooltips();
+  wirePopup("tb-wrap", "wrap-menu", (b) => setTextOverflow(b.dataset.ov));
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) =>
@@ -4055,7 +4067,6 @@ function wireEvents() {
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
   document.getElementById("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
-  document.getElementById("tb-wrap").addEventListener("click", () => { toggleWrap(); canvas.focus(); });
   document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
@@ -4411,7 +4422,11 @@ function wireEvents() {
           ["Middle", () => setValign("middle")],
           ["Bottom", () => setValign("bottom")],
         ] },
-        ["Wrap text", clickEl("#tb-wrap"), null, () => fmtHas("w")],
+        { sub: "Text overflow", items: [
+          ["Overflow", () => setTextOverflow("overflow"), null, () => !fmtHas("w") && !fmtHas("cl")],
+          ["Wrap", () => setTextOverflow("wrap"), null, () => fmtHas("w")],
+          ["Clip", () => setTextOverflow("clip"), null, () => fmtHas("cl")],
+        ] },
         ["Merge cells", clickEl("#tb-merge")],
         "sep",
         { sub: "Number", items: [

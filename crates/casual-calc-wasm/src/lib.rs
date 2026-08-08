@@ -1539,6 +1539,9 @@ pub fn session_cells(
             if style.is_some_and(|s| s.wrap) {
                 extra.push_str(",\"w\":1");
             }
+            if style.is_some_and(|s| s.clip) {
+                extra.push_str(",\"cl\":1");
+            }
             if style.is_some_and(|s| s.strike) {
                 extra.push_str(",\"st\":1");
             }
@@ -1840,7 +1843,34 @@ pub fn session_toggle_underline(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.underline = target)
 }
 
-/// Toggle text wrapping across a range (one undo step).
+/// Set how a range's text behaves when it does not fit its column:
+/// `"overflow"` (spill into empty neighbours — the default and what Excel
+/// always does), `"wrap"`, or `"clip"` (stop at the cell edge).
+///
+/// These are one three-way choice, not two independent flags, which is why they
+/// are set together: wrap and clip cannot both be on.
+#[wasm_bindgen]
+pub fn session_set_text_overflow(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    mode: &str,
+) -> Result<(), JsError> {
+    let (wrap, clip) = match mode {
+        "wrap" => (true, false),
+        "clip" => (false, true),
+        _ => (false, false), // "overflow" — the default
+    };
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.wrap = wrap;
+        st.clip = clip;
+    })
+}
+
+/// Toggle wrap on a range (the toolbar button). Prefer
+/// [`session_set_text_overflow`] when setting an explicit mode.
 #[wasm_bindgen]
 pub fn session_toggle_wrap(
     sheet: usize,
@@ -2539,6 +2569,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             }
             if st.wrap {
                 parts.push("\"w\":1".to_owned());
+            }
+            if st.clip {
+                parts.push("\"cl\":1".to_owned());
             }
             if let Some(al) = st.align {
                 parts.push(format!("\"al\":\"{}\"", al.ooxml()));

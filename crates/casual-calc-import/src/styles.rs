@@ -322,6 +322,8 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                 italic: font.italic,
                 underline: font.underline,
                 strike: font.strike,
+                // No SpreadsheetML attribute maps to clip; Excel always spills.
+                clip: false,
                 font_name: font.name,
                 font_size_hp: font.size_hp,
                 font_color: font.color,

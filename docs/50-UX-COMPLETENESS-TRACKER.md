@@ -40,6 +40,10 @@ each audit; this file is the durable backlog.
   `<b val="0"/>` no longer reads as bold ON. The editor's auto row-height no
   longer overrides a height the workbook set, no longer un-hides hidden rows,
   and no longer inflates every styled row by 25%.
+- **Text overflow control**: overflow / wrap / **clip** as one three-way choice
+  on the toolbar and in Format ▸ Text overflow. Clip is an engine-side view
+  setting (SpreadsheetML has no attribute for it — Excel always spills), noted
+  in the fidelity ledger as not surviving a save.
 - **Text overflow**: spill stays inside its own pane (a frozen cell can't borrow
   the scrolling body's columns, and vice versa), and a number too wide for its
   column renders `#######` instead of spilling or being clipped into a shorter,

@@ -160,6 +160,15 @@ pub struct Style {
     /// Wrap text within the cell (instead of overflowing/clipping).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrap: bool,
+    /// Clip overflowing text at the cell edge instead of letting it spill into
+    /// empty neighbours. Only meaningful when [`Style::wrap`] is off — the three
+    /// states a user picks between are overflow (the default), wrap, and clip.
+    ///
+    /// SpreadsheetML has no attribute for this: Excel always spills into empty
+    /// neighbours. It is therefore a view choice this engine keeps in its own
+    /// model and **does not write to `.xlsx`**; see the fidelity ledger.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clip: bool,
     /// Indent level (in indent units, ~3 space-widths each) from the alignment's
     /// leading edge. `0` (the default) writes no `indent` attribute.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
@@ -192,6 +201,7 @@ impl Style {
             && self.align.is_none()
             && self.valign.is_none()
             && !self.wrap
+            && !self.clip
             && self.indent == 0
             && self.border.is_none()
     }
