@@ -197,13 +197,23 @@ fn draw_glyphs(
     let metrics = font.metrics(size, loc);
     let outlines = font.outline_glyphs();
 
-    // First pass: total advance width, to place the run for the requested align.
+    // Per-glyph advance: the primary face when it covers `ch`, otherwise the
+    // coverage-fallback face's advance for that glyph (so the run stays metric-
+    // correct across faces), or 0.0 if nothing covers it.
     let advance = |ch: char| -> f32 {
-        charmap
-            .map(ch)
-            .and_then(|g| glyph_metrics.advance_width(g))
+        if let Some(g) = charmap.map(ch) {
+            return glyph_metrics.advance_width(g).unwrap_or(0.0);
+        }
+        fonts::coverage_face_bytes(ch, bold, italic)
+            .and_then(|bytes| FontRef::new(bytes).ok())
+            .and_then(|fb| {
+                let fb_charmap = fb.charmap();
+                let g = fb_charmap.map(ch)?;
+                fb.glyph_metrics(size, loc).advance_width(g)
+            })
             .unwrap_or(0.0)
     };
+    // First pass: total advance width, to place the run for the requested align.
     let total: f32 = content.chars().map(advance).sum();
 
     let x0 = twips_to_px(rect.x - viewport.x, dpi);
@@ -221,16 +231,36 @@ fn draw_glyphs(
 
     let mut builder = PathBuilder::new();
     for ch in content.chars() {
-        if let Some(gid) = charmap.map(ch)
-            && let Some(glyph) = outlines.get(gid)
+        if let Some(gid) = charmap.map(ch) {
+            // Primary face covers this char: outline from it.
+            if let Some(glyph) = outlines.get(gid) {
+                let mut pen = GlyphPen {
+                    builder: &mut builder,
+                    origin_x: pen_x,
+                    baseline_y,
+                };
+                let settings = DrawSettings::unhinted(size, loc);
+                let _ = glyph.draw(settings, &mut pen);
+            }
+        } else if let Some(bytes) = fonts::coverage_face_bytes(ch, bold, italic)
+            && let Ok(fb) = FontRef::new(bytes)
         {
-            let mut pen = GlyphPen {
-                builder: &mut builder,
-                origin_x: pen_x,
-                baseline_y,
-            };
-            let settings = DrawSettings::unhinted(size, loc);
-            let _ = glyph.draw(settings, &mut pen);
+            // Coverage fallback: outline from the first family that covers `ch`,
+            // accumulating into the same builder (uniform fill color) at the same
+            // pen position, size, and baseline.
+            let fb_charmap = fb.charmap();
+            let fb_outlines = fb.outline_glyphs();
+            if let Some(gid) = fb_charmap.map(ch)
+                && let Some(glyph) = fb_outlines.get(gid)
+            {
+                let mut pen = GlyphPen {
+                    builder: &mut builder,
+                    origin_x: pen_x,
+                    baseline_y,
+                };
+                let settings = DrawSettings::unhinted(size, loc);
+                let _ = glyph.draw(settings, &mut pen);
+            }
         }
         pen_x += advance(ch);
     }

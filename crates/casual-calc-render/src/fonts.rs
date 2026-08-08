@@ -13,6 +13,7 @@
 //! deps), so `cargo-deny` does not scan them.
 
 use casual_calc_layout::substitute;
+use skrifa::{FontRef, MetadataProvider};
 
 macro_rules! face {
     ($path:literal) => {
@@ -130,6 +131,26 @@ pub fn face_bytes_for(family: Option<&str>, bold: bool, italic: bool) -> &'stati
         .face_bytes(bold, italic)
 }
 
+/// Whether the given face bytes cover `ch` (its `cmap` maps the code point to a
+/// glyph). Bytes that do not parse as a font are treated as covering nothing.
+fn face_covers(bytes: &'static [u8], ch: char) -> bool {
+    FontRef::new(bytes).is_ok_and(|font| font.charmap().map(ch).is_some())
+}
+
+/// The bytes of the first family in [`FAMILIES`] (in order) whose face — for the
+/// given bold/italic combination — covers `ch`, or `None` if no bundled family
+/// covers it. This is the per-glyph coverage fallback (a port of opendoc's
+/// `resolve::cover_fallback`): the bold/italic face is preserved, only the family
+/// changes. Deterministic and pure — coverage is decided solely by the embedded
+/// font bytes.
+#[must_use]
+pub fn coverage_face_bytes(ch: char, bold: bool, italic: bool) -> Option<&'static [u8]> {
+    FAMILIES
+        .iter()
+        .map(|family| family.face_bytes(bold, italic))
+        .find(|&bytes| face_covers(bytes, ch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +189,34 @@ mod tests {
             face_bytes_for(None, false, false),
             ROBOTO.face_bytes(false, false)
         );
+    }
+
+    #[test]
+    fn coverage_returns_first_family_for_common_latin() {
+        // A common Latin char is covered by the first family (Roboto), so the
+        // fallback resolves to it and preserves the requested bold/italic face.
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let bytes =
+                coverage_face_bytes('A', bold, italic).expect("some bundled family must cover 'A'");
+            // First covering family for a common Latin char is the default (Roboto),
+            // with the requested bold/italic face preserved.
+            assert_eq!(bytes, ROBOTO.face_bytes(bold, italic));
+        }
+    }
+
+    #[test]
+    fn coverage_falls_back_when_default_family_lacks_glyph() {
+        // U+03E2 (Coptic capital letter Shei) is absent from the default family
+        // (Roboto) but present in a later bundled family, so coverage fallback
+        // must still find a covering face — and it must not be the default.
+        let ch = '\u{03E2}';
+        assert!(
+            !face_covers(ROBOTO.face_bytes(false, false), ch),
+            "test assumes Roboto lacks U+03E2"
+        );
+        let bytes =
+            coverage_face_bytes(ch, false, false).expect("a bundled family must cover U+03E2");
+        assert!(face_covers(bytes, ch));
+        assert_ne!(bytes, ROBOTO.face_bytes(false, false));
     }
 }
