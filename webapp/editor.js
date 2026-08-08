@@ -2059,6 +2059,49 @@ function pushRecent(hex) {
   recentColors = [h, ...recentColors.filter((c) => c !== h)].slice(0, 10);
 }
 // Build a color popover into `menu`; `onPick(hex)` applies ("" clears).
+// The named cell-style gallery. Applying one writes its formatting *and*
+// records which style the cells belong to, so the association survives a save —
+// that link is the whole point of a named style over ad-hoc formatting.
+function cellStyleGallery() {
+  let styles = [];
+  try { styles = JSON.parse(wasm.session_cell_styles()); } catch {}
+  if (!styles.length) { status.textContent = "no cell styles available"; return; }
+
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Cell styles";
+  body.textContent = "";
+  body.append(el("p", "oc-confirm-text", "Applies the style's formatting and tags the cells with its name."));
+
+  const grid = el("div", "style-gallery");
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  for (const st of styles) {
+    const b = el("button", "style-chip", st.n);
+    // Preview each entry in its own look, which is the only way to tell
+    // "Heading 2" from "Heading 3" at a glance.
+    if (st.bg) b.style.background = "#" + st.bg;
+    if (st.fg) b.style.color = "#" + st.fg;
+    if (st.bold) b.style.fontWeight = "700";
+    if (st.sz) b.style.fontSize = Math.min(18, Math.max(11, st.sz)) + "px";
+    b.addEventListener("click", () => {
+      close();
+      canvas.focus();
+      formatSel((r) => wasm.session_apply_cell_style(state.sheet, r.r0, r.c0, r.r1, r.c1, st.n));
+      status.textContent = `applied cell style "${st.n}"`;
+    });
+    grid.appendChild(b);
+  }
+  body.appendChild(grid);
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Close");
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  actions.appendChild(cancel);
+  body.appendChild(actions);
+  modal.hidden = false;
+  grid.querySelector("button")?.focus();
+}
+
 // Parse the colour notations people actually paste: `#abc`, `abc`, `#aabbcc`,
 // `aabbcc`, `rgb(1,2,3)` / `rgba(...)`, and `hsl(h,s%,l%)`. Returns `RRGGBB` or
 // null. Accepting only 6-digit hex rejected half of what a designer copies.
@@ -5680,6 +5723,7 @@ function wireEvents() {
         ["Underline", clickEl("#tb-underline"), "Ctrl+U", () => fmtHas("u")],
         ["Strikethrough", clickEl("#tb-strike"), null, () => fmtHas("st")],
         "sep",
+        ["Cell styles…", () => cellStyleGallery()],
         { sub: "Alignment", items: [
           ["Left", () => setAlign("left")],
           ["Center", () => setAlign("center")],

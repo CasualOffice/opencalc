@@ -99,14 +99,27 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     workbook.theme_colors = palette.slots().to_vec();
     workbook.default_font_name = stylesheet.default_font_name.clone();
     workbook.default_font_size_hp = stylesheet.default_font_size_hp;
+    workbook.cell_styles = stylesheet.cell_styles.clone();
     let xf_style_ids: Vec<Option<_>> = stylesheet
         .xf_styles
         .iter()
-        .map(|style| {
+        .enumerate()
+        .map(|(i, style)| {
+            let mut style = style.clone();
+            // Carry the named-style association. `xfId` 0 is Normal, which every
+            // cell points at by default and which says nothing, so only a
+            // non-zero link is worth keeping — otherwise every plain cell would
+            // become "styled" and stop deduplicating.
+            style.style_ref = stylesheet
+                .xf_style_refs
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|id| *id != 0);
             if style.is_default() {
                 None
             } else {
-                Some(workbook.intern_style(style.clone()))
+                Some(workbook.intern_style(style))
             }
         })
         .collect();

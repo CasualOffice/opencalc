@@ -764,3 +764,16 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
   font: 13px var(--mono); background: var(--bg); color: var(--fg); outline: none;
   resize: none; overflow: hidden; white-space: pre; line-height: 1.35;
 }
+
+/* Named cell-style gallery: each chip previews the style it applies. */
+.style-gallery {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px; margin: 10px 0; max-height: 320px; overflow-y: auto;
+}
+.style-chip {
+  padding: 10px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); cursor: pointer; font-size: 13px;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.style-chip:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+.style-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

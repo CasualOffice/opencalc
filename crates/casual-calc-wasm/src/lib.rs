@@ -1854,6 +1854,143 @@ pub fn format_preview_text(text: &str, code: &str) -> String {
     casual_calc_layout::format_text(text, code).unwrap_or_else(|| text.to_owned())
 }
 
+// --- Named cell styles ----------------------------------------------------
+
+/// Excel's stock gallery, with the `builtinId`s Excel keys its own gallery off
+/// — the *name* is localized, the id is not, so a file written by a French Excel
+/// still lines up. A workbook that already defines a style of the same name uses
+/// its definition instead of this one.
+fn builtin_cell_styles() -> Vec<(&'static str, u32, Style)> {
+    let tinted = |fill: &str, font: &str| Style {
+        fill_color: Some(fill.to_owned()),
+        font_color: Some(font.to_owned()),
+        ..Default::default()
+    };
+    let heading = |size_hp: u32| Style {
+        bold: true,
+        font_size_hp: Some(size_hp),
+        font_color: Some("1F4E79".to_owned()),
+        ..Default::default()
+    };
+    vec![
+        ("Normal", 0, Style::default()),
+        ("Good", 26, tinted("C6EFCE", "006100")),
+        ("Bad", 27, tinted("FFC7CE", "9C0006")),
+        ("Neutral", 28, tinted("FFEB9C", "9C6500")),
+        ("Title", 15, heading(36)),
+        ("Heading 1", 16, heading(30)),
+        ("Heading 2", 17, heading(26)),
+        ("Heading 3", 18, heading(22)),
+        ("Heading 4", 19, heading(22)),
+        (
+            "Total",
+            25,
+            Style {
+                bold: true,
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+/// The cell styles to offer in a gallery, as JSON
+/// `[{n,b,bold,fg,bg,sz}]` — name, builtin id, and enough formatting for the
+/// host to preview each entry in its own look.
+///
+/// The workbook's own styles come first; the stock gallery fills in the rest, so
+/// a file that defines "Heading 1" shows *its* Heading 1.
+#[wasm_bindgen]
+pub fn session_cell_styles() -> String {
+    let mut out: Vec<(String, Option<u32>, Style)> = with_session(|s| {
+        s.workbook()
+            .cell_styles
+            .iter()
+            .map(|c| (c.name.clone(), c.builtin_id, c.style.clone()))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    for (name, builtin, style) in builtin_cell_styles() {
+        if !out.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(name)) {
+            out.push((name.to_owned(), Some(builtin), style));
+        }
+    }
+    let items: Vec<String> = out
+        .iter()
+        .map(|(name, builtin, st)| {
+            let mut parts = vec![format!("\"n\":{}", json_string(name))];
+            if let Some(b) = builtin {
+                parts.push(format!("\"b\":{b}"));
+            }
+            if st.bold {
+                parts.push("\"bold\":1".to_owned());
+            }
+            if let Some(c) = &st.font_color {
+                parts.push(format!("\"fg\":{}", json_string(c)));
+            }
+            if let Some(c) = &st.fill_color {
+                parts.push(format!("\"bg\":{}", json_string(c)));
+            }
+            if let Some(hp) = st.font_size_hp {
+                parts.push(format!("\"sz\":{}", hp as f64 / 2.0));
+            }
+            format!("{{{}}}", parts.join(","))
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Apply the named cell style `name` across a range (one undo step).
+///
+/// The style's formatting is written onto each cell *and* the association is
+/// recorded, so the cells still say which style they belong to after a save. An
+/// unknown name is a no-op rather than an error — the gallery is the only caller
+/// and it only offers names this returns.
+#[wasm_bindgen]
+pub fn session_apply_cell_style(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    name: &str,
+) -> Result<(), JsError> {
+    // Make sure the workbook actually defines the style, so the link has
+    // something to point at and the name survives the save.
+    let index = SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut()?;
+        let wb = session.workbook_mut();
+        if let Some(i) = wb
+            .cell_styles
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+        {
+            return Some((i as u32, wb.cell_styles[i].style.clone()));
+        }
+        let (n, b, style) = builtin_cell_styles()
+            .into_iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))?;
+        wb.cell_styles.push(casual_calc_model::NamedCellStyle {
+            name: n.to_owned(),
+            builtin_id: Some(b),
+            style: style.clone(),
+        });
+        Some((wb.cell_styles.len() as u32 - 1, style))
+    });
+    let Some((index, style)) = index else {
+        return Ok(());
+    };
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        // Replace rather than merge: picking a named style means "look like
+        // this", and a leftover fill from the previous style would make it
+        // look like neither.
+        let mut next = style.clone();
+        next.number_format = st.number_format.clone();
+        next.style_ref = Some(index);
+        *st = next;
+    })
+}
+
 /// The workbook's theme colours as a JSON array of `RRGGBB`, in OOXML slot
 /// order, or the stock Office scheme when the package carried no theme part.
 ///

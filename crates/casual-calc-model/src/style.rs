@@ -224,6 +224,15 @@ pub struct Style {
     /// Cell borders, if any edge is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Borders>,
+    /// The named cell style this cell belongs to, as an index into
+    /// [`crate::Workbook::cell_styles`] — OOXML's `xf/@xfId`.
+    ///
+    /// Purely an association: the formatting itself is already resolved into the
+    /// fields above. Keeping it is what lets a cell still say "I am a Heading 1"
+    /// after a round-trip, so Excel's gallery highlights it and restyling the
+    /// name reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_ref: Option<u32>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -257,6 +266,7 @@ impl Style {
             && self.rotation == 0
             && self.indent == 0
             && self.border.is_none()
+            && self.style_ref.is_none()
     }
 }
 

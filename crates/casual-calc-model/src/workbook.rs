@@ -61,6 +61,27 @@ pub struct Workbook {
     /// snapshot byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub theme_colors: Vec<String>,
+    /// Named cell styles (`Normal`, `Good`, `Heading 1`, …) in `cellStyleXfs`
+    /// order, which is the order `Style::style_ref` indexes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_styles: Vec<NamedCellStyle>,
+}
+
+/// A named cell style: OOXML's `<cellStyle>` entry paired with the
+/// `<cellStyleXf>` it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamedCellStyle {
+    /// The name shown in a style gallery, e.g. `Heading 1`.
+    pub name: String,
+    /// Excel's `builtinId`, when this is one of its stock styles. Preserved
+    /// because Excel keys its own gallery off the id, not off the name — a
+    /// localized file names them differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_id: Option<u32>,
+    /// The formatting the name stands for.
+    #[serde(default, skip_serializing_if = "Style::is_default")]
+    pub style: Style,
 }
 
 impl Workbook {
@@ -77,6 +98,7 @@ impl Workbook {
             default_font_name: None,
             default_font_size_hp: None,
             theme_colors: Vec::new(),
+            cell_styles: Vec::new(),
         }
     }
 

@@ -20,7 +20,7 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, ErrorValue,
-    FilterRule, HAlign, Sheet, SheetId, VAlign, Workbook,
+    FilterRule, HAlign, Sheet, SheetId, Style, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -287,6 +287,54 @@ fn collect_dxfs(workbook: &Workbook) -> Vec<String> {
     out
 }
 
+/// Write one `<xf>`. Shared by `cellStyleXfs` (which carries no `xfId`) and
+/// `cellXfs` (which points at the named style it belongs to), so the two can
+/// never disagree about how a format is spelled.
+fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
+    let flag = |on: bool, attr: &'static str| if on { attr } else { "" };
+    let has_align = ids.align.is_some()
+        || ids.valign.is_some()
+        || ids.wrap
+        || ids.indent != 0
+        || ids.rotation != 0;
+    let xf_attr = xf_id
+        .map(|id| format!(" xfId=\"{id}\""))
+        .unwrap_or_default();
+    s.push_str(&format!(
+        "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\"{xf_attr}{}{}{}{}{}",
+        ids.num_fmt_id,
+        ids.font_id,
+        ids.fill_id,
+        ids.border_id,
+        flag(ids.num_fmt_id != 0, " applyNumberFormat=\"1\""),
+        flag(ids.font_id != 0, " applyFont=\"1\""),
+        flag(ids.fill_id != 0, " applyFill=\"1\""),
+        flag(ids.border_id != 0, " applyBorder=\"1\""),
+        flag(has_align, " applyAlignment=\"1\""),
+    ));
+    if !has_align {
+        s.push_str("/>");
+        return;
+    }
+    s.push_str("><alignment");
+    if let Some(align) = ids.align {
+        s.push_str(&format!(" horizontal=\"{}\"", align.ooxml()));
+    }
+    if let Some(valign) = ids.valign {
+        s.push_str(&format!(" vertical=\"{}\"", valign.ooxml()));
+    }
+    if ids.wrap {
+        s.push_str(" wrapText=\"1\"");
+    }
+    if ids.indent != 0 {
+        s.push_str(&format!(" indent=\"{}\"", ids.indent));
+    }
+    if ids.rotation != 0 {
+        s.push_str(&format!(" textRotation=\"{}\"", ids.rotation));
+    }
+    s.push_str("/></xf>");
+}
+
 fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     let styles: Vec<_> = workbook.styles.iter().collect();
 
@@ -301,7 +349,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     let mut borders: Vec<Borders> = Vec::new();
     let mut per_style: Vec<StyleIds> = Vec::with_capacity(styles.len());
 
-    for style in &styles {
+    let mut intern = |style: &Style| {
         let font_key = (
             style.bold,
             style.italic,
@@ -346,7 +394,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             }
             _ => 0,
         };
-        per_style.push(StyleIds {
+        StyleIds {
             font_id,
             fill_id,
             num_fmt_id,
@@ -356,8 +404,33 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             wrap: style.wrap,
             indent: style.indent,
             rotation: style.rotation,
-        });
+        }
+    };
+    for style in &styles {
+        per_style.push(intern(style));
     }
+    // Named styles resolve through the same tables, so a font only a named style
+    // uses still lands in `<fonts>`.
+    //
+    // OOXML requires `cellStyleXfs[0]` to be the Normal style — it is what every
+    // unlinked cell's `xfId="0"` points at. Our own ordering is whatever the
+    // source file's `<cellStyles>` happened to be, so emit Normal first and remap
+    // the links rather than assuming it was already there.
+    let normal = workbook
+        .cell_styles
+        .iter()
+        .position(|cs| cs.builtin_id == Some(0) || cs.name.eq_ignore_ascii_case("Normal"));
+    let mut order: Vec<usize> = normal.into_iter().collect();
+    order.extend((0..workbook.cell_styles.len()).filter(|i| Some(*i) != normal));
+    // `slot[i]` is where cell_styles[i] ends up in cellStyleXfs.
+    let mut slot = vec![0usize; workbook.cell_styles.len()];
+    for (pos, &i) in order.iter().enumerate() {
+        slot[i] = pos;
+    }
+    let per_named: Vec<StyleIds> = order
+        .iter()
+        .map(|&i| intern(&workbook.cell_styles[i].style))
+        .collect();
 
     let mut s = format!("{DECL}<styleSheet xmlns=\"{NS_MAIN}\">");
     if !num_codes.is_empty() {
@@ -419,68 +492,50 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
         write_border(&mut s, border);
     }
     s.push_str("</borders>");
-    s.push_str("<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>");
+    // `<cellStyleXfs>`: the formats the named styles stand for. With no named
+    // styles the single default entry is still required — `cellXfs` entries all
+    // point at index 0.
+    if per_named.is_empty() {
+        s.push_str("<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>");
+    } else {
+        s.push_str(&format!("<cellStyleXfs count=\"{}\">", per_named.len()));
+        for ids in &per_named {
+            write_xf(&mut s, ids, None);
+        }
+        s.push_str("</cellStyleXfs>");
+    }
 
     s.push_str(&format!("<cellXfs count=\"{}\">", styles.len() + 1));
     s.push_str("<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>");
-    for ids in &per_style {
-        let apply_num = if ids.num_fmt_id != 0 {
-            " applyNumberFormat=\"1\""
-        } else {
-            ""
-        };
-        let apply_font = if ids.font_id != 0 {
-            " applyFont=\"1\""
-        } else {
-            ""
-        };
-        let apply_fill = if ids.fill_id != 0 {
-            " applyFill=\"1\""
-        } else {
-            ""
-        };
-        let apply_border = if ids.border_id != 0 {
-            " applyBorder=\"1\""
-        } else {
-            ""
-        };
-        let has_align = ids.align.is_some()
-            || ids.valign.is_some()
-            || ids.wrap
-            || ids.indent != 0
-            || ids.rotation != 0;
-        let apply_align = if has_align {
-            " applyAlignment=\"1\""
-        } else {
-            ""
-        };
-        s.push_str(&format!(
-            "<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\"{apply_num}{apply_font}{apply_fill}{apply_border}{apply_align}",
-            ids.num_fmt_id, ids.font_id, ids.fill_id, ids.border_id
-        ));
-        if has_align {
-            s.push_str("><alignment");
-            if let Some(align) = ids.align {
-                s.push_str(&format!(" horizontal=\"{}\"", align.ooxml()));
-            }
-            if let Some(valign) = ids.valign {
-                s.push_str(&format!(" vertical=\"{}\"", valign.ooxml()));
-            }
-            if ids.wrap {
-                s.push_str(" wrapText=\"1\"");
-            }
-            if ids.indent != 0 {
-                s.push_str(&format!(" indent=\"{}\"", ids.indent));
-            }
-            if ids.rotation != 0 {
-                s.push_str(&format!(" textRotation=\"{}\"", ids.rotation));
-            }
-            s.push_str("/></xf>");
-        } else {
-            s.push_str("/>");
-        }
+    for (i, ids) in per_style.iter().enumerate() {
+        // The named style this cell format belongs to, remapped to its emitted
+        // slot. Absent or out of range falls back to Normal.
+        let xf_id = styles[i]
+            .style_ref
+            .and_then(|r| slot.get(r as usize).copied())
+            .unwrap_or(0);
+        write_xf(&mut s, ids, Some(xf_id));
     }
     s.push_str("</cellXfs>");
+
+    // `<cellStyles>` names the cellStyleXfs entries. It sits between cellXfs and
+    // dxfs in the CT_Stylesheet sequence.
+    if !order.is_empty() {
+        s.push_str(&format!("<cellStyles count=\"{}\">", order.len()));
+        for (pos, &i) in order.iter().enumerate() {
+            let cs = &workbook.cell_styles[i];
+            let builtin = cs
+                .builtin_id
+                .map(|b| format!(" builtinId=\"{b}\""))
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "<cellStyle name=\"{}\" xfId=\"{pos}\"{builtin}/>",
+                escape_attr(&cs.name)
+            ));
+        }
+        s.push_str("</cellStyles>");
+    }
+
     // Differential formats (conditional-format fills), after cellXfs.
     if !dxfs.is_empty() {
         s.push_str(&format!("<dxfs count=\"{}\">", dxfs.len()));

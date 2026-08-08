@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use casual_calc_model::{BorderEdge, Borders, HAlign, Style, VAlign};
+use casual_calc_model::{BorderEdge, Borders, HAlign, NamedCellStyle, Style, VAlign};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -16,6 +16,11 @@ use crate::theme::{ThemePalette, indexed_color};
 pub struct StyleSheet {
     /// One `Style` per `xf` in `cellXfs`, in order.
     pub xf_styles: Vec<Style>,
+    /// `xf/@xfId` per `cellXfs` entry, in the same order — the link to a named
+    /// style, kept separate because it is an association, not formatting.
+    pub xf_style_refs: Vec<Option<u32>>,
+    /// Named cell styles in `cellStyleXfs` order, resolved from `<cellStyles>`.
+    pub cell_styles: Vec<NamedCellStyle>,
     /// Differential-format fill color (`RRGGBB`) per `<dxf>`, by dxfId — used by
     /// conditional formatting. `None` if the dxf carries no solid fill.
     pub dxf_fills: Vec<Option<String>>,
@@ -54,6 +59,9 @@ struct Xf {
     wrap: bool,
     rotation: u16,
     indent: u8,
+    /// `xf/@xfId` — which `cellStyleXfs` entry (and so which named style) this
+    /// cell format belongs to. Only meaningful on a `cellXfs` entry.
+    xf_id: Option<u32>,
 }
 
 /// The border edge currently being parsed, so a nested `<color>` attaches to it.
@@ -134,6 +142,13 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
     let mut xfs: Vec<Xf> = Vec::new();
 
     let (mut in_fonts, mut in_fills, mut in_cellxfs) = (false, false, false);
+    // `cellStyleXfs` holds the *named* styles' formats; `cellStyles` names them
+    // and points at those entries. Both were previously ignored, so a file's
+    // Good/Bad/Heading styles were dropped and every cell was written back
+    // pointing at xfId 0.
+    let mut in_style_xfs = false;
+    let mut style_xfs: Vec<Xf> = Vec::new();
+    let mut style_names: Vec<(String, u32, Option<u32>)> = Vec::new();
     let mut in_borders = false;
     let mut in_dxfs = false;
     let mut dxfs: Vec<Option<String>> = Vec::new();
@@ -169,6 +184,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                     b"fills" => in_fills = true,
                     b"borders" => in_borders = true,
                     b"cellXfs" => in_cellxfs = true,
+                    b"cellStyleXfs" => in_style_xfs = true,
                     b"dxfs" => in_dxfs = true,
                     b"dxf" if in_dxfs => dxfs.push(None),
                     b"bgColor" if in_dxfs => {
@@ -259,8 +275,8 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             fill.color = Some(c);
                         }
                     }
-                    b"xf" if in_cellxfs => {
-                        xfs.push(Xf {
+                    b"xf" if in_cellxfs || in_style_xfs => {
+                        let parsed = Xf {
                             num_fmt_id: attr_u32(e, b"numFmtId")?.unwrap_or(0),
                             font_id: attr_u32(e, b"fontId")?.unwrap_or(0) as usize,
                             fill_id: attr_u32(e, b"fillId")?.unwrap_or(0) as usize,
@@ -270,10 +286,30 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             valign: None,
                             wrap: false,
                             indent: 0,
-                        });
+                            xf_id: attr_u32(e, b"xfId")?,
+                        };
+                        if in_cellxfs {
+                            xfs.push(parsed)
+                        } else {
+                            style_xfs.push(parsed)
+                        }
                     }
-                    b"alignment" if in_cellxfs => {
-                        if let Some(xf) = xfs.last_mut() {
+                    b"cellStyle" => {
+                        if let Some(name) = attr(e, b"name")? {
+                            style_names.push((
+                                name,
+                                attr_u32(e, b"xfId")?.unwrap_or(0),
+                                attr_u32(e, b"builtinId")?,
+                            ));
+                        }
+                    }
+                    b"alignment" if in_cellxfs || in_style_xfs => {
+                        let target = if in_cellxfs {
+                            xfs.last_mut()
+                        } else {
+                            style_xfs.last_mut()
+                        };
+                        if let Some(xf) = target {
                             if let Some(h) = attr(e, b"horizontal")? {
                                 xf.align = HAlign::from_ooxml(&h);
                             }
@@ -307,6 +343,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                     b"dxfs" => in_dxfs = false,
                     b"borders" => in_borders = false,
                     b"cellXfs" => in_cellxfs = false,
+                    b"cellStyleXfs" => in_style_xfs = false,
                     b"left" | b"right" | b"top" | b"bottom" if in_borders => cur_edge = None,
                     _ => {}
                 }
@@ -317,31 +354,47 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
         buf.clear();
     }
 
-    let xf_styles = xfs
+    // One conversion, used for both `cellXfs` and `cellStyleXfs` — they are the
+    // same element shape and must resolve identically.
+    let to_style = |xf: &Xf| {
+        let font = fonts.get(xf.font_id).cloned().unwrap_or_default();
+        let fill = fills.get(xf.fill_id).cloned().unwrap_or_default();
+        let border = borders.get(xf.border_id).cloned().unwrap_or_default();
+        Style {
+            number_format: resolve_format(xf.num_fmt_id, &custom_formats),
+            bold: font.bold,
+            italic: font.italic,
+            underline: font.underline,
+            strike: font.strike,
+            // No SpreadsheetML attribute maps to clip; Excel always spills.
+            clip: false,
+            rotation: xf.rotation,
+            font_name: font.name,
+            font_size_hp: font.size_hp,
+            font_color: font.color,
+            fill_color: if fill.solid { fill.color } else { None },
+            align: xf.align,
+            valign: xf.valign,
+            wrap: xf.wrap,
+            indent: xf.indent,
+            border: (!border.is_empty()).then_some(border),
+            // A named style's own entry is the definition, not a reference.
+            style_ref: None,
+        }
+    };
+    let xf_styles: Vec<Style> = xfs.iter().map(&to_style).collect();
+    let xf_style_refs: Vec<Option<u32>> = xfs.iter().map(|xf| xf.xf_id).collect();
+    // Pair each `<cellStyle>` name with the `cellStyleXfs` entry it points at.
+    // A name pointing past the end is dropped rather than guessed at.
+    let cell_styles: Vec<NamedCellStyle> = style_names
         .into_iter()
-        .map(|xf| {
-            let font = fonts.get(xf.font_id).cloned().unwrap_or_default();
-            let fill = fills.get(xf.fill_id).cloned().unwrap_or_default();
-            let border = borders.get(xf.border_id).cloned().unwrap_or_default();
-            Style {
-                number_format: resolve_format(xf.num_fmt_id, &custom_formats),
-                bold: font.bold,
-                italic: font.italic,
-                underline: font.underline,
-                strike: font.strike,
-                // No SpreadsheetML attribute maps to clip; Excel always spills.
-                clip: false,
-                rotation: xf.rotation,
-                font_name: font.name,
-                font_size_hp: font.size_hp,
-                font_color: font.color,
-                fill_color: if fill.solid { fill.color } else { None },
-                align: xf.align,
-                valign: xf.valign,
-                wrap: xf.wrap,
-                indent: xf.indent,
-                border: (!border.is_empty()).then_some(border),
-            }
+        .filter_map(|(name, xf_id, builtin_id)| {
+            let xf = style_xfs.get(xf_id as usize)?;
+            Some(NamedCellStyle {
+                name,
+                builtin_id,
+                style: to_style(xf),
+            })
         })
         .collect();
 
@@ -351,6 +404,8 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
     let default_font = fonts.first();
     Ok(StyleSheet {
         xf_styles,
+        xf_style_refs,
+        cell_styles,
         dxf_fills: dxfs,
         default_font_name: default_font.and_then(|f| f.name.clone()),
         default_font_size_hp: default_font.and_then(|f| f.size_hp),

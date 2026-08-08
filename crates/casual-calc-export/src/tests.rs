@@ -525,3 +525,80 @@ fn every_alignment_mode_round_trips_without_collapsing() {
         assert_eq!(wb.styles.get(round).unwrap().valign, Some(valign));
     }
 }
+
+#[test]
+fn named_cell_styles_round_trip_with_their_links() {
+    use casual_calc_model::{CellRef, NamedCellStyle, Style};
+
+    // Named styles were dropped entirely: import never read `cellStyleXfs` or
+    // `cellStyles`, and the writer emitted one anonymous entry with every cell
+    // pointing at it. A "Heading 1" cell came back as merely bold-and-blue.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.cell_styles = vec![
+        NamedCellStyle {
+            name: "Normal".into(),
+            builtin_id: Some(0),
+            style: Style::default(),
+        },
+        NamedCellStyle {
+            name: "Heading 1".into(),
+            builtin_id: Some(16),
+            style: Style {
+                bold: true,
+                font_color: Some("1F4E79".into()),
+                ..Default::default()
+            },
+        },
+    ];
+    let at = CellRef::new(0, 0);
+    let id = workbook.intern_style(Style {
+        bold: true,
+        font_color: Some("1F4E79".into()),
+        style_ref: Some(1), // the Heading 1 entry
+        ..Default::default()
+    });
+    let sheet = &mut workbook.sheets[0];
+    let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+    cell.style = Some(id);
+    sheet.cells.set(at, cell);
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/styles.xml");
+    assert!(xml.contains("<cellStyles count=\"2\">"), "{xml}");
+    assert!(xml.contains("name=\"Heading 1\""));
+    assert!(xml.contains("builtinId=\"16\""));
+    // Normal must occupy cellStyleXfs slot 0 — it is what every unlinked cell's
+    // xfId="0" resolves to.
+    assert!(xml.contains("<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/>"));
+    // cellStyles comes after cellXfs in the CT_Stylesheet sequence.
+    if let (Some(cx), Some(cs)) = (xml.find("<cellXfs"), xml.find("<cellStyles")) {
+        assert!(cx < cs, "cellStyles must follow cellXfs");
+    }
+
+    let wb = import_package(written).unwrap().workbook;
+    let names: Vec<&str> = wb.cell_styles.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"Heading 1"), "named styles lost: {names:?}");
+    let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+    let style = wb.styles.get(round).unwrap();
+    assert!(style.bold);
+    // The association survived, not just the formatting.
+    let heading = wb
+        .cell_styles
+        .iter()
+        .position(|c| c.name == "Heading 1")
+        .unwrap() as u32;
+    assert_eq!(
+        style.style_ref,
+        Some(heading),
+        "the cell no longer says which named style it belongs to"
+    );
+}
+
+#[test]
+fn a_workbook_with_no_named_styles_still_writes_the_default_entry() {
+    // cellXfs entries all carry xfId="0", so cellStyleXfs can never be empty.
+    let workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/styles.xml");
+    assert!(xml.contains("<cellStyleXfs count=\"1\">"), "{xml}");
+}
