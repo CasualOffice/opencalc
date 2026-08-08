@@ -89,7 +89,7 @@ each audit; this file is the durable backlog.
 
 | ID | Item | Domain | Status | Fix |
 |----|------|--------|--------|-----|
-| UX-P01 | Toolbar file group (New/Open/Download) redundant with File menu — declutter | Chrome | 🟡 | Remove group; keep Open in header + File menu; new-sheet is the bottom "+" _(user request, in progress)_ |
+| UX-P01 | Toolbar file group (New/Open/Download) redundant with File menu — declutter | Chrome | ✅ | Removed group; Open now in header + File menu; Download/New in File menu; new-sheet is the bottom "+" |
 | UX-P02 | Ctrl+click deselect toggle; Shift+wheel horizontal; Alt+PageUp/Dn; clamp scroll to extent; Ctrl+Arrow into blank; End-mode; Go-To dialog | Nav | 🔴 | per audit-1 P2 list |
 | UX-P03 | Name Box: accept `A:A`/`1:5`/`Sheet!ref`/comma-multi; NRxNC on keyboard extend; defined-names dropdown | Nav/Chrome | 🔴 | extend `gotoName` parser + dropdown |
 | UX-P04 | Paste-special: arithmetic ops + full dialog (Ctrl+Alt+V) | Editing | 🔴 | extend `session_clip_paste_mode` + dialog |

@@ -16,6 +16,9 @@
       <span class="badge"><span class="dot"></span>Alpha</span>
       <div class="header-right">
       <span class="tb-status" id="tb-status">loading engine…</span>
+      <button id="hdr-open" class="tb-icon" title="Open a file (.xlsx, .csv, .tsv, .psv)" aria-label="Open file">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>
       <div class="settings">
         <button id="tb-settings" class="tb-icon" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -64,28 +67,11 @@
       </div>
     </div>
 
+    <!-- Hidden file picker; triggered from the header Open button and File ▸ Open.
+         File ops (New / Open / Download) live in the header + File menu, not the
+         toolbar; new sheets are the bottom tab-bar "+". -->
+    <input id="tb-open" type="file" accept=".xlsx,.csv,.tsv,.psv" hidden />
     <div class="toolbar" role="toolbar" aria-label="Formatting">
-      <div class="tb-group">
-        <button id="tb-new" class="tb-btn" title="New" aria-label="New">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-        </button>
-        <label class="tb-btn tb-file" title="Open (.xlsx, .csv, .tsv, .psv)" aria-label="Open">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          <input id="tb-open" type="file" accept=".xlsx,.csv,.tsv,.psv" />
-        </label>
-        <div class="menu-wrap">
-          <button id="tb-save" class="tb-btn" title="Download" aria-label="Download" aria-haspopup="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          </button>
-          <div id="save-menu" class="popmenu" hidden>
-            <button data-fmt="xlsx">Excel (.xlsx)</button>
-            <button data-fmt="csv">CSV (.csv)</button>
-            <button data-fmt="tsv">Tab-separated (.tsv)</button>
-            <button data-fmt="psv">Pipe-separated (.psv)</button>
-          </div>
-        </div>
-      </div>
-      <span class="tb-sep"></span>
       <div class="tb-group">
         <button id="tb-undo" class="tb-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -316,6 +302,6 @@
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
-    <script type="module" src="./editor.js?v=34"></script>
+    <script type="module" src="./editor.js?v=35"></script>
   </body>
 </html>

@@ -3062,7 +3062,7 @@ function wireEvents() {
   document.getElementById("replace-all").addEventListener("click", replaceAll);
   document.getElementById("find-close").addEventListener("click", closeFind);
 
-  document.getElementById("tb-new").addEventListener("click", () => { stopMarch(); wasm.session_new(); state.sheet = 0; seed(); renderTabs(); });
+  document.getElementById("hdr-open").addEventListener("click", () => document.getElementById("tb-open").click());
 
   // Popover menus: click toggles, outside-click / Escape closes, only one open.
   const menus = [];
@@ -3098,7 +3098,6 @@ function wireEvents() {
   }
   document.addEventListener("click", () => { for (const m of menus) m.hidden = true; });
 
-  wirePopup("tb-save", "save-menu", (b) => saveAs(b.dataset.fmt));
   // Color popovers: custom toggle so the hex field doesn't close the menu;
   // rebuilt on each open so the Recent row stays current.
   for (const [btnId, menuId, onPick, noneLabel] of [
@@ -3305,7 +3304,7 @@ function wireEvents() {
 
     const MENUS = [
       ["File", [
-        ["New", clickEl("#tb-new")],
+        ["New", () => { stopMarch(); wasm.session_new(); state.sheet = 0; seed(); renderTabs(); }],
         ["Open…", clickEl("#tb-open")],
         { sub: "Download", items: [
           ["Excel (.xlsx)", () => saveAs("xlsx")],
