@@ -130,7 +130,7 @@ each audit; this file is the durable backlog.
 | UX-P08 | Borders: 13 placements incl. composite bottoms + diagonals; line-color swatch reflects pick | Format | 🔴 | add presets + diagonal model/render |
 | UX-P09 | Date `[h]/[m]/[s]` elapsed time dropped; English-only month/day | Format | 🔴 | special-case brackets before drop |
 | UX-P10 | numfmt/align submenu checkmarks; %/comma toggle back to General | Format/Chrome | 🔴 | `check` predicates; toggle logic |
-| UX-P11 | Header right-click selects line (dup of UX-C01); Insert/Delete cells w/ shift; move/cut rows-cols; Unhide All; resize drag tooltip; autofit all-selected + wrap/merge | Data | 🔴 | per audit-4 P2 list |
+| UX-P11 | Header right-click selects line (dup of UX-C01); Insert/Delete cells w/ shift; move/cut rows-cols; Unhide All; resize drag tooltip; autofit all-selected + wrap/merge | Data | 🔴 | per audit-4 P2 list **Unhide is done** (2026-08-09): the hidden-band marker was a bare double-bar that read as a freeze line and only answered to a double-click, so a hidden row was easy to notice and hard to get back. It is now an accent handle with chevrons pointing apart, unhides on a single click, shows a pointer cursor, and says "N hidden rows — click to show" on hover. Data ▸ **Unhide all rows and columns** added as the escape hatch for when the band is outside the selection or you no longer know where it is. |
 | UX-P12 | Threaded comments (author/time/replies); right-click Insert comment | Data | 🔴 | extend comment model + popover |
 | UX-P13 | Sheet tabs: overflow scroll + all-sheets menu; hide/unhide sheet; move-to; protect | Data | 🔴 | tab bar affordances + ops |
 | UX-P14 | Text-to-columns | Data | 🔴 | reuse `casual-calc-io` delimiter split |

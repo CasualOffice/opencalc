@@ -1601,19 +1601,72 @@ function drawHiddenMarkers() {
   }
   if (run) hiddenRowMarks.push(run);
 
+  // A bare double-bar marked the spot but read as a freeze line or a selection
+  // edge, and it only responded to a double-click — so a hidden row was easy to
+  // notice and hard to get back. Draw an actual control: an accent handle with
+  // two chevrons pointing apart, the same "expand from here" idiom Sheets uses.
+  // Single click unhides (see the mousedown handler); hovering says so.
   ctx.save();
   ctx.fillStyle = colors.accent;
   for (const m of hiddenColMarks) {
     if (m.x < HW) continue;
-    ctx.fillRect(m.x - 2.5, 4, 1.5, HH - 8);
-    ctx.fillRect(m.x + 1, 4, 1.5, HH - 8);
+    const h = Math.min(14, HH - 6);
+    const top = (HH - h) / 2;
+    ctx.fillRect(m.x - 4, top, 8, h);
+    ctx.fillStyle = "#fff";
+    const cy = top + h / 2;
+    // ‹ ›
+    ctx.beginPath();
+    ctx.moveTo(m.x - 1.2, cy - 3); ctx.lineTo(m.x - 3.2, cy); ctx.lineTo(m.x - 1.2, cy + 3);
+    ctx.closePath();
+    ctx.moveTo(m.x + 1.2, cy - 3); ctx.lineTo(m.x + 3.2, cy); ctx.lineTo(m.x + 1.2, cy + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = colors.accent;
   }
   for (const m of hiddenRowMarks) {
     if (m.y < HH) continue;
-    ctx.fillRect(4, m.y - 2.5, HW - 8, 1.5);
-    ctx.fillRect(4, m.y + 1, HW - 8, 1.5);
+    const w = Math.min(18, HW - 6);
+    const left = (HW - w) / 2;
+    ctx.fillRect(left, m.y - 4, w, 8);
+    ctx.fillStyle = "#fff";
+    const cx = left + w / 2;
+    // Chevrons pointing up and down, away from the collapsed band.
+    ctx.beginPath();
+    ctx.moveTo(cx - 3, m.y - 1.2); ctx.lineTo(cx, m.y - 3.2); ctx.lineTo(cx + 3, m.y - 1.2);
+    ctx.closePath();
+    ctx.moveTo(cx - 3, m.y + 1.2); ctx.lineTo(cx, m.y + 3.2); ctx.lineTo(cx + 3, m.y + 1.2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = colors.accent;
   }
   ctx.restore();
+}
+
+// The hidden-band handle under a canvas point, if any. Shared by the click
+// handler and the hover cursor so the two can never disagree about the target.
+function hiddenMarkAt(px, py) {
+  if (py < HH && px >= HW) {
+    const m = hiddenColMarks.find((g) => g.x >= HW && Math.abs(px - g.x) <= 5);
+    if (m) return { axis: "col", mark: m };
+  }
+  if (px < HW && py >= HH) {
+    const m = hiddenRowMarks.find((g) => g.y >= HH && Math.abs(py - g.y) <= 5);
+    if (m) return { axis: "row", mark: m };
+  }
+  return null;
+}
+
+// Reveal the band a handle stands for.
+function unhideMark(hit) {
+  const { from, to } = hit.mark;
+  const n = to - from + 1;
+  tryEdit(() =>
+    hit.axis === "col"
+      ? wasm.session_unhide_cols(state.sheet, from, to)
+      : wasm.session_unhide_rows(state.sheet, from, to),
+  );
+  status.textContent = `showed ${n} hidden ${hit.axis === "col" ? "column" : "row"}${n === 1 ? "" : "s"}`;
 }
 
 // The column/row index at a canvas x/y (for header clicks + hit-testing).
@@ -4258,6 +4311,10 @@ function wireEvents() {
         return;
       }
     }
+    // A hidden-band handle in either header: one click brings the band back.
+    // Double-click still works (below) for anyone who learned it that way.
+    const hm = hiddenMarkAt(px, py);
+    if (hm) { unhideMark(hm); return; }
     // An autofilter header button. Swallowed here so the press neither moves
     // the selection nor starts a drag; the menu itself opens on the `click`
     // that follows (see the canvas click handler) because `positionMenu` arms
@@ -4392,6 +4449,16 @@ function wireEvents() {
     // Idle hover: fill cursor over the handle, resize cursor over a boundary.
     if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
       canvas.style.cursor = "crosshair";
+      return;
+    }
+    // A hidden-band handle: say what it does, since a collapsed band is the one
+    // thing on the grid you cannot select your way out of.
+    const hmh = hiddenMarkAt(px, py);
+    if (hmh) {
+      canvas.style.cursor = "pointer";
+      const n = hmh.mark.to - hmh.mark.from + 1;
+      const what = hmh.axis === "col" ? "column" : "row";
+      status.textContent = `${n} hidden ${what}${n === 1 ? "" : "s"} — click to show`;
       return;
     }
     const fh = freezeHit(px, py);
@@ -4557,15 +4624,10 @@ function wireEvents() {
       autofillToNeighbour();
       return;
     }
-    // Double-clicking a hidden-region marker in a header unhides that band.
-    if (py < HH) {
-      const m = hiddenColMarks.find((g) => g.x >= HW && Math.abs(px - g.x) <= 5);
-      if (m) { tryEdit(() => wasm.session_unhide_cols(state.sheet, m.from, m.to)); return; }
-    }
-    if (px < HW) {
-      const m = hiddenRowMarks.find((g) => g.y >= HH && Math.abs(py - g.y) <= 5);
-      if (m) { tryEdit(() => wasm.session_unhide_rows(state.sheet, m.from, m.to)); return; }
-    }
+    // Double-clicking a hidden-band handle unhides it too (single click already
+    // did, on mousedown — this only catches the second click of a fast pair).
+    const hmd = hiddenMarkAt(px, py);
+    if (hmd) { unhideMark(hmd); return; }
     // Double-clicking a column or row boundary auto-fits it to its content.
     const hb = boundaryAt(px, py);
     if (hb) {
@@ -5325,7 +5387,11 @@ function wireEvents() {
         "sep",
         ["Hide rows", () => tryEdit(() => { const r = rng(); wasm.session_hide_rows(state.sheet, r.r0, r.r1); })],
         ["Hide columns", () => tryEdit(() => { const r = rng(); wasm.session_hide_cols(state.sheet, r.c0, r.c1); })],
-        ["Unhide rows/columns", () => tryEdit(() => { const r = rng(); wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); })],
+        ["Unhide rows/columns in selection", () => tryEdit(() => { const r = rng(); wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); })],
+        // Unhide-in-selection cannot help when you no longer know where the
+        // hidden band is — or when it is outside whatever is selected. This
+        // always works.
+        ["Unhide all rows and columns", () => { const b = usedBounds(); tryEdit(() => { wasm.session_unhide_rows(state.sheet, 0, Math.max(b.rows, 1) + 1000); wasm.session_unhide_cols(state.sheet, 0, Math.max(b.cols, 1) + 1000); }); status.textContent = "all rows and columns shown"; }],
       ]],
       ["Tools", [
         ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
