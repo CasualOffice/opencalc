@@ -4717,6 +4717,51 @@ function wireEvents() {
   document.addEventListener("click", (e) => { if (!e.target.closest(".tb-flyout")) closeFlyouts(); });
   reflowToolbar();
 
+  // --- Toolbar as one composite control (roving tabindex) ------------------
+  // Every button and field in the toolbar was its own tab stop, so reaching the
+  // grid by keyboard meant ~40 presses of Tab. A toolbar is one stop: Tab moves
+  // past it, arrows move within it. Re-scanned on each interaction because the
+  // collapse machinery moves controls in and out of flyouts.
+  {
+    const toolbar = document.querySelector(".toolbar");
+    const items = () => [...toolbar.querySelectorAll("button, input, select")]
+      .filter((el) => !el.disabled && el.offsetParent !== null);
+    const rove = (list, at) => {
+      for (const el of list) el.tabIndex = -1;
+      const n = list.length;
+      const target = list[((at % n) + n) % n];
+      target.tabIndex = 0;
+      target.focus();
+    };
+    const syncStops = () => {
+      // Reset *every* control, including those parked in a collapsed group's
+      // flyout: they are invisible now, but they keep their tabindex and would
+      // become extra tab stops the moment the flyout opened.
+      for (const el of toolbar.querySelectorAll("button, input, select")) el.tabIndex = -1;
+      const list = items();
+      if (!list.length) return;
+      const focused = list.findIndex((el) => el === document.activeElement);
+      list[Math.max(0, focused)].tabIndex = 0;
+    };
+    syncStops();
+    toolbar.addEventListener("focusin", syncStops);
+    toolbar.addEventListener("keydown", (e) => {
+      // A text field owns its own arrow keys (the font and size boxes), so only
+      // step between controls when the caret is not in one.
+      const inField = document.activeElement && document.activeElement.tagName === "INPUT";
+      if (inField && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+      const list = items();
+      const at = list.indexOf(document.activeElement);
+      if (at < 0) return;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") { rove(list, at + 1); e.preventDefault(); }
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { rove(list, at - 1); e.preventDefault(); }
+      else if (e.key === "Home") { rove(list, 0); e.preventDefault(); }
+      else if (e.key === "End") { rove(list, list.length - 1); e.preventDefault(); }
+    });
+    // Re-establish a single stop after the toolbar reflows into/out of flyouts.
+    window.addEventListener("resize", syncStops);
+  }
+
   // Track whether the user is driving by keyboard, so the grid's focus ring
   // appears for them and not on every mouse click (see the CSS note).
   window.addEventListener("keydown", (e) => {
@@ -4984,12 +5029,64 @@ function wireEvents() {
     MENUS.forEach(([name, items], i) => {
       const btn = document.createElement("button");
       btn.className = "menu-top"; btn.textContent = name;
+      btn.setAttribute("role", "menuitem");
+      // Roving tabindex: the bar is one tab stop, not nine — Tab moves past it,
+      // arrows move within it, which is what a menubar is supposed to do.
+      btn.tabIndex = i === 0 ? 0 : -1;
       btn.setAttribute("aria-haspopup", "true"); btn.setAttribute("aria-expanded", "false");
       const drop = document.createElement("div"); drop.className = "menu-drop popmenu"; drop.hidden = true;
+      drop.setAttribute("role", "menu");
       document.body.appendChild(drop); renderItems(drop, items, true);
       btn.addEventListener("click", (e) => { e.stopPropagation(); openIdx === i ? closeMenus() : openMenu(i); });
       btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
       bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
+    });
+
+    // Keyboard navigation for the menu bar and the open menu.
+    const focusTop = (i) => {
+      const n = topBtns.length;
+      const at = ((i % n) + n) % n;
+      for (const [j, b] of topBtns.entries()) b.tabIndex = j === at ? 0 : -1;
+      topBtns[at].focus();
+      return at;
+    };
+    // The items of the open drop, in visual order, skipping separators.
+    const dropItems = () => (openIdx < 0 ? [] : [...drops[openIdx].querySelectorAll("button")]);
+    const focusItem = (list, i) => {
+      if (!list.length) return;
+      const n = list.length;
+      list[((i % n) + n) % n].focus();
+    };
+    bar.addEventListener("keydown", (e) => {
+      const i = topBtns.indexOf(document.activeElement);
+      if (i < 0) return;
+      if (e.key === "ArrowRight") { const at = focusTop(i + 1); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
+      else if (e.key === "ArrowLeft") { const at = focusTop(i - 1); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
+      else if (e.key === "Home") { const at = focusTop(0); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
+      else if (e.key === "End") { const at = focusTop(topBtns.length - 1); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
+      else if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+        openMenu(i);
+        focusItem(dropItems(), 0);
+        e.preventDefault();
+      } else if (e.key === "Escape") { closeMenus(); e.preventDefault(); }
+    });
+    // Within an open menu: up/down through the items, left/right to the
+    // neighbouring menu, Escape back to the bar.
+    document.addEventListener("keydown", (e) => {
+      if (openIdx < 0) return;
+      const list = dropItems();
+      const at = list.indexOf(document.activeElement);
+      if (at < 0) return;
+      if (e.key === "ArrowDown") { focusItem(list, at + 1); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { focusItem(list, at - 1); e.preventDefault(); }
+      else if (e.key === "Home") { focusItem(list, 0); e.preventDefault(); }
+      else if (e.key === "End") { focusItem(list, list.length - 1); e.preventDefault(); }
+      else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        const next = focusTop(openIdx + (e.key === "ArrowRight" ? 1 : -1));
+        openMenu(next);
+        focusItem(dropItems(), 0);
+        e.preventDefault();
+      } else if (e.key === "Escape") { const i = openIdx; closeMenus(); focusTop(i); e.preventDefault(); }
     });
 
     document.addEventListener("click", (e) => {
