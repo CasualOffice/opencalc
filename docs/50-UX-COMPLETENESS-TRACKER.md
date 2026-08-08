@@ -60,7 +60,7 @@ each audit; this file is the durable backlog.
 
 | ID | Item | Domain | Status | Fix |
 |----|------|--------|--------|-----|
-| UX-F01 | **Formula bar is a dumb field** — no autocomplete, no ref-picking, no highlight; all formula intelligence is bound to the inline editor only | Formula | 🔴 | Extract a surface-agnostic formula-editor controller keyed off the active input (`inline` or `fInput`); unlocks UX-F02/03/06/07. **First item.** |
+| UX-F01 | **Formula bar is a dumb field** — no autocomplete, no ref-picking, no highlight; all formula intelligence is bound to the inline editor only | Formula | ✅ | One edit session keyed to `editSurface` (the in-cell overlay *or* the formula bar): autocomplete, click/drag reference picking, the invalid-formula outline, commit and revert all read the active surface. Text mirrors between the two, and focusing the bar mid-edit hands the same edit over. Reference highlighting (UX-F03) still to come |
 | UX-M01 | **Merge silently hides data** — non-anchor values not cleared, no confirm; reappear on unmerge, round-trip keeps hidden values | Format | 🔴 | On merge over >1 non-empty cell, confirm + clear non-anchor cells in one undo step |
 | UX-N01 | **Scientific format renders garbage** (`0.00E+00` → `12345.00E+`) | Format | 🔴 | Implement exponential branch in `numfmt.rs::format_number`; until then remove the preset |
 | UX-N02 | **`[Red]`/color codes in number formats dropped** (negatives not red) | Format | 🔴 | `format_number` returns per-section color; thread through `session_cells` `fc` |
@@ -80,7 +80,7 @@ each audit; this file is the durable backlog.
 | UX-F06 | Keyboard point mode (arrows insert/extend a ref while editing) | Formula | 🔴 | Arrow in edit mode starts/extends `formulaRefDrag` via `insertRef` |
 | UX-F07 | Editing an existing formula re-highlights its refs | Formula | 🔴 | On `startInline` of `=`-value run the UX-F03 path |
 | UX-F08 | Error affordances: per-cell error corner marker + hover explanation + trace precedents/dependents | Formula | 🔴 | Mark error cells in `draw()`; reuse comment-tip; expose dep graph |
-| UX-E02 | Formula bar second-class: no Esc-revert, no autocomplete, no ref insert, Enter doesn't advance | Editing | 🔴 | Route fInput through shared edit state (see UX-F01) |
+| UX-E02 | Formula bar second-class: no Esc-revert, no autocomplete, no ref insert, Enter doesn't advance | Editing | ✅ | All four closed by UX-F01: Escape restores the cell's text, autocomplete and reference insert work from the bar, Enter commits and moves down, Tab commits and moves right, an invalid formula outlines the bar and keeps focus there |
 | UX-E03 | Find: no highlight-all, match-entire-cell, wildcards/regex, Values look-in, all-sheets scope | Editing | 🔴 | Overlay match set; flags on `session_find`; Values via `display_text`; workbook scope |
 | UX-E04 | Ctrl+D / Ctrl+R fill-down/right missing | Editing | 🔴 | Wire to `session_fill` over `selRect()` |
 | UX-E05 | Double-click fill handle to autofill to neighbor extent | Editing | 🔴 | In dblclick, if on `fillHandleRect`, fill to neighbor column data end |

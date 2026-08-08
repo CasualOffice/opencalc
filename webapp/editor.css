@@ -538,8 +538,11 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
 .nm-del { width: 30px; border: 0; background: none; color: var(--muted); font-size: 18px; cursor: pointer; border-radius: 6px; }
 .nm-del:hover { background: color-mix(in srgb, #e5484d 18%, transparent); color: #e5484d; }
 /* Formula function autocomplete. */
+/* Fixed, not absolute: the same menu is anchored under the in-cell editor
+   (inside the grid wrapper) and under the formula bar (outside it), so its
+   position is computed in viewport coordinates. */
 .ac-menu {
-  position: absolute; z-index: 40; min-width: 260px; max-width: 360px;
+  position: fixed; z-index: 70; min-width: 260px; max-width: 360px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; overflow: hidden;
 }
@@ -549,7 +552,10 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
 .ac-name { font-weight: 700; font-size: 13px; color: var(--fg); font-family: ui-monospace, monospace; }
 .ac-sig { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Invalid-formula editor outline + status error text. */
-.inline-edit.invalid { outline: 2px solid #e53935; box-shadow: 0 0 0 2px rgba(229,57,53,.25); }
+/* Rejected-formula outline — on whichever surface the edit came from. */
+.inline-edit.invalid, #formula-input.invalid {
+  outline: 2px solid #e53935; box-shadow: 0 0 0 2px rgba(229,57,53,.25);
+}
 #tb-status .err, .err { color: #e53935; font-weight: 600; }
 .sheet-add {
   width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;

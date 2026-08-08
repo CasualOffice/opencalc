@@ -993,7 +993,7 @@ function draw() {
   // The in-cell editor is a DOM element over the canvas: keep it on its cell as
   // the grid scrolls or resizes under it (grid-wrap's overflow clips it once the
   // cell leaves the viewport), instead of leaving it parked mid-air.
-  if (state.editing) positionInline();
+  if (editSurface === inline) positionInline();
   updateNameBox();
   updateScrollbars(v);
   updateStats();
@@ -1281,10 +1281,11 @@ function commit(value, advance) {
     try { err = wasm.validate_formula(value); } catch {}
     if (err) {
       // Refuse the commit whether the edit came from the grid or the formula
-      // bar — never silently store an unparseable formula as literal text. Only
-      // the in-cell affordance (red outline + refocus) is gated on editing.
+      // bar — never silently store an unparseable formula as literal text. The
+      // red outline and the refocus land on whichever surface was being typed
+      // in, so the formula bar reports its own errors like the cell does.
       status.innerHTML = `<span class="err">Formula error: ${friendlyFormulaError(err)}</span>`;
-      if (state.editing) { inline.classList.add("invalid"); inline.focus(); }
+      if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
       return false;
     }
   }
@@ -1294,7 +1295,7 @@ function commit(value, advance) {
   } catch (e) {
     status.textContent = `error: ${e}`;
   }
-  endInline();
+  endEdit();
   // Move to the next row on Enter as a fresh single-cell selection (reset the
   // anchor + clear any multi-range, else anchor stays put and paints a ghost
   // 2-cell range).
@@ -2260,25 +2261,67 @@ function positionInline() {
   inline.style.height = Math.max(0, h) + "px";
 }
 
-function startInline(initial) {
+// --- The edit session -------------------------------------------------------
+// A cell can be edited from two surfaces: the in-cell overlay and the formula
+// bar. `editSurface` is whichever <input> currently holds the edit, and every
+// piece of formula intelligence below (autocomplete, click-to-insert a
+// reference, the invalid-formula outline, commit/revert) is keyed off it rather
+// than off the in-cell editor. Without this the formula bar is a dumb text box:
+// the same typing that autocompletes in a cell does nothing up there.
+let editSurface = null;
+// The cell's text when the edit began, for Escape to restore.
+let editOriginal = "";
+
+function beginEdit(surface, initial) {
+  editSurface = surface;
   state.editing = true;
-  inline.style.display = "block";
-  positionInline();
-  inline.value =
-    initial !== undefined
-      ? initial
-      : wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
-  inline.focus();
-  if (initial === undefined) inline.select();
+  editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
+  if (surface === inline) {
+    inline.style.display = "block";
+    positionInline();
+  }
+  if (initial !== undefined) surface.value = initial;
+  else surface.value = editOriginal;
+  surface.focus();
+  // Typing a character starts a fresh value; opening the editor selects what is
+  // already there so the next keystroke replaces it.
+  if (initial === undefined) surface.select();
 }
 
-function endInline() {
+function startInline(initial) {
+  beginEdit(inline, initial);
+}
+
+// End the edit without committing. `refocus` false leaves focus alone — used
+// when the caller is about to move it somewhere specific.
+function endEdit(refocus = true) {
+  const was = editSurface;
+  editSurface = null;
   state.editing = false;
   inline.style.display = "none";
   hideAutocomplete();
   formulaRefDrag = null;
   inline.classList.remove("invalid");
-  canvas.focus();
+  fInput.classList.remove("invalid");
+  if (refocus && was) canvas.focus();
+}
+// Kept as the name the rest of the editor already calls.
+function endInline() {
+  endEdit();
+}
+// Excel shows the in-progress text on both surfaces at once. Mirror the one
+// being typed in onto the other — never the reverse, or the two carets fight.
+function mirrorEdit() {
+  if (!editSurface) return;
+  if (editSurface === inline) fInput.value = inline.value;
+  else inline.value = fInput.value;
+}
+
+// Abandon the edit and put the cell's own text back on both surfaces.
+function cancelEdit() {
+  if (editSurface) editSurface.value = editOriginal;
+  endEdit();
+  if (wasm) refreshFormulaBar();
 }
 
 // --- Formula editing UX: autocomplete, reference insertion, validation -----
@@ -2413,7 +2456,8 @@ const acEl = document.getElementById("ac-menu");
 // The function-name token being typed just before the caret, if the caret sits
 // somewhere a function name is valid (after =, an operator, "(", or ",").
 function currentFnToken() {
-  const val = inline.value, pos = inline.selectionStart;
+  if (!editSurface) return null;
+  const val = editSurface.value, pos = editSurface.selectionStart;
   if (!val.startsWith("=")) return null;
   const before = val.slice(0, pos);
   if (inStringLiteral(before)) return null; // don't autocomplete inside "text"
@@ -2445,29 +2489,35 @@ function renderAutocomplete() {
     row.addEventListener("mousedown", (e) => { e.preventDefault(); acState.idx = i; acceptAutocomplete(); });
     acEl.appendChild(row);
   });
-  // Position under the inline editor.
-  acEl.style.left = inline.offsetLeft + "px";
-  acEl.style.top = (inline.offsetTop + inline.offsetHeight) + "px";
+  // Anchored under whichever surface is being typed in — the in-cell editor
+  // sits over the canvas, the formula bar above it, so this is measured in
+  // viewport coordinates (the menu is position: fixed) rather than as an offset
+  // inside the grid wrapper.
+  const r = (editSurface ?? inline).getBoundingClientRect();
   acEl.hidden = false;
+  const width = acEl.offsetWidth;
+  acEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - width)) + "px";
+  acEl.style.top = r.bottom + 2 + "px";
 }
 
 function hideAutocomplete() { acState = null; if (acEl) acEl.hidden = true; }
 
 function acceptAutocomplete() {
-  if (!acState) return;
+  if (!acState || !editSurface) return;
   const name = acState.matches[acState.idx].n;
-  const val = inline.value, pos = inline.selectionStart;
-  inline.value = val.slice(0, acState.start) + name + "(" + val.slice(pos);
+  const val = editSurface.value, pos = editSurface.selectionStart;
+  editSurface.value = val.slice(0, acState.start) + name + "(" + val.slice(pos);
   const caret = acState.start + name.length + 1;
-  inline.setSelectionRange(caret, caret);
+  editSurface.setSelectionRange(caret, caret);
   hideAutocomplete();
-  inline.focus();
+  editSurface.focus();
+  mirrorEdit();
 }
 
 // Whether the caret sits where a cell reference may be inserted by clicking.
 function refAcceptable() {
-  if (!state.editing || !inline.value.startsWith("=")) return false;
-  const raw = inline.value.slice(0, inline.selectionStart);
+  if (!editSurface || !editSurface.value.startsWith("=")) return false;
+  const raw = editSurface.value.slice(0, editSurface.selectionStart);
   if (inStringLiteral(raw)) return false; // caret inside a "text" literal
   const before = raw.trimEnd();
   if (before === "=") return true;
@@ -2476,13 +2526,15 @@ function refAcceptable() {
 
 // Insert (or, during a drag, replace) a reference at the caret while editing.
 function insertRef(text) {
-  const val = inline.value;
-  const start = formulaRefDrag ? formulaRefDrag.start : inline.selectionStart;
-  const end = formulaRefDrag ? formulaRefDrag.end : inline.selectionStart;
-  inline.value = val.slice(0, start) + text + val.slice(end);
+  if (!editSurface) return;
+  const val = editSurface.value;
+  const start = formulaRefDrag ? formulaRefDrag.start : editSurface.selectionStart;
+  const end = formulaRefDrag ? formulaRefDrag.end : editSurface.selectionStart;
+  editSurface.value = val.slice(0, start) + text + val.slice(end);
   const caret = start + text.length;
   if (formulaRefDrag) formulaRefDrag.end = caret;
-  else inline.setSelectionRange(caret, caret);
+  else editSurface.setSelectionRange(caret, caret);
+  mirrorEdit();
 }
 
 const tabsEl = document.getElementById("sheet-tabs");
@@ -2849,7 +2901,7 @@ function wireEvents() {
       const hit = cellAt(px, py);
       if (hit) {
         e.preventDefault();
-        formulaRefDrag = { anchor: hit, start: inline.selectionStart, end: inline.selectionStart };
+        formulaRefDrag = { anchor: hit, start: editSurface.selectionStart, end: editSurface.selectionStart };
         insertRef(A1(hit.row, hit.col));
         hideAutocomplete();
         return;
@@ -2865,7 +2917,7 @@ function wireEvents() {
     // Any other click while editing first commits the in-progress edit (like
     // Excel) rather than discarding it. If the value is an invalid formula the
     // commit is refused and the click is swallowed so the user stays in the cell.
-    if (state.editing && !commit(inline.value, false)) return;
+    if (editSurface && !commit(editSurface.value, false)) return;
     // The fill handle (bottom-right of the selection) starts a drag-fill.
     if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
       endInline();
@@ -3012,8 +3064,9 @@ function wireEvents() {
     if (formulaRefDrag) {
       const caret = formulaRefDrag.end;
       formulaRefDrag = null;
-      inline.focus();
-      inline.setSelectionRange(caret, caret);
+      const surface = editSurface ?? inline;
+      surface.focus();
+      surface.setSelectionRange(caret, caret);
       return;
     }
     if (state.resize) {
@@ -3203,21 +3256,46 @@ function wireEvents() {
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
   });
-  inline.addEventListener("input", () => { inline.classList.remove("invalid"); showAutocomplete(); });
-  inline.addEventListener("keydown", (e) => {
-    // Autocomplete navigation takes priority when its menu is open.
-    if (acState) {
-      if (e.key === "ArrowDown") { acState.idx = (acState.idx + 1) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
-      if (e.key === "ArrowUp") { acState.idx = (acState.idx - 1 + acState.matches.length) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
-      if (e.key === "Enter" || e.key === "Tab") { acceptAutocomplete(); e.preventDefault(); return; }
-      if (e.key === "Escape") { hideAutocomplete(); e.preventDefault(); return; }
-    }
-    if (e.key === "Enter") { commit(inline.value, true); e.preventDefault(); }
-    else if (e.key === "Escape") { endInline(); e.preventDefault(); }
-    else if (e.key === "Tab") { if (commit(inline.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
+  // Both editing surfaces share one set of handlers: the in-cell editor and the
+  // formula bar behave identically (autocomplete, Escape reverts, Enter commits
+  // and advances, Tab commits and moves right), because they are two views of
+  // the same edit session.
+  for (const surface of [inline, fInput]) {
+    surface.addEventListener("input", () => {
+      // Typing in the formula bar with no edit open starts one.
+      if (!editSurface) beginEdit(surface, surface.value);
+      surface.classList.remove("invalid");
+      mirrorEdit();
+      showAutocomplete();
+    });
+    surface.addEventListener("keydown", (e) => {
+      // Autocomplete navigation takes priority when its menu is open.
+      if (acState) {
+        if (e.key === "ArrowDown") { acState.idx = (acState.idx + 1) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
+        if (e.key === "ArrowUp") { acState.idx = (acState.idx - 1 + acState.matches.length) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }
+        if (e.key === "Enter" || e.key === "Tab") { acceptAutocomplete(); e.preventDefault(); return; }
+        if (e.key === "Escape") { hideAutocomplete(); e.preventDefault(); return; }
+      }
+      if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
+      else if (e.key === "Escape") { cancelEdit(); e.preventDefault(); }
+      else if (e.key === "Tab") { if (commit(surface.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
+    });
+  }
+  // Clicking into the formula bar opens an edit on the active cell, so a click
+  // there is the same gesture as F2 in the grid. Clicking it *during* an in-cell
+  // edit hands that same edit over — the text is already mirrored, so only the
+  // surface changes and the cell keeps showing what is typed.
+  fInput.addEventListener("focus", () => {
+    if (!editSurface) beginEdit(fInput);
+    else if (editSurface === inline) editSurface = fInput;
   });
-  fInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { commit(fInput.value, false); canvas.focus(); e.preventDefault(); }
+  // Leaving the formula bar commits, as Excel does. Two paths must not: handing
+  // the edit back to the in-cell editor, and clicking a cell to pick a
+  // reference (that path calls preventDefault, so no blur fires at all — the
+  // formulaRefDrag guard is belt and braces).
+  fInput.addEventListener("blur", (e) => {
+    if (e.relatedTarget === inline || formulaRefDrag) return;
+    if (editSurface === fInput) commit(fInput.value, false);
   });
   // Name box: Enter jumps to the typed cell/range; Escape reverts. Focus selects
   // all so it's ready to retype.
