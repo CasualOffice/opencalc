@@ -46,6 +46,21 @@ const state = {
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
 let validationChevron = null; // {x,y,w,h,values} of the active cell's list-dropdown button
 let commentCells = new Set(); // "r,c" of cells with a note in view (for hover tooltip)
+let errorCells = new Set();   // "r,c" of cells holding an error value, likewise
+
+// What each spreadsheet error actually means, in the terms that caused it.
+// "#VALUE!" alone tells you something broke; it does not tell you what to look
+// for, which is the whole difficulty of fixing someone else's sheet.
+const ERROR_HELP = {
+  "#DIV/0!": "Dividing by zero, or by an empty cell.",
+  "#VALUE!": "A value has the wrong type — often text where a number is expected.",
+  "#REF!": "A reference points at cells that no longer exist (deleted rows or columns).",
+  "#NAME?": "An unrecognised name — check the function spelling, or a missing defined name.",
+  "#NUM!": "A number the calculation can't represent — out of range, or not a real result.",
+  "#N/A": "A lookup found no match.",
+  "#NULL!": "Two ranges that were intersected don't overlap.",
+  "#SPILL!": "A result needs more room than is free.",
+};
 let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
 
@@ -997,6 +1012,26 @@ function draw() {
       });
       validationChevron = { x: bx, y: by, w: bw, h: ch, values: vals };
     }
+  }
+
+  // Error indicators — a small marker in the top-left of any cell holding an
+  // error value, so a broken formula is findable by eye instead of only by
+  // reading every cell. Hovering explains it (see the mousemove handler).
+  errorCells = new Set();
+  for (const it of items) {
+    if (!it.er) continue;
+    errorCells.add(it.r + "," + it.c);
+    const ex = colXAt(it.c), ey = rowYAt(it.r);
+    if (ex === undefined || ey === undefined) continue;
+    withQuad(it.r, it.c, () => {
+      ctx.fillStyle = "#e5484d";
+      ctx.beginPath();
+      ctx.moveTo(ex + 1, ey + 1);
+      ctx.lineTo(ex + 8, ey + 1);
+      ctx.lineTo(ex + 1, ey + 8);
+      ctx.closePath();
+      ctx.fill();
+    });
   }
 
   // Comment indicators — a small red triangle in each commented cell's corner.
@@ -3694,11 +3729,26 @@ function wireEvents() {
       : "cell";
     // Comment tooltip on hover.
     const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
-    if (hit && commentCells.has(hit.row + "," + hit.col)) {
+    if (hit && errorCells.has(hit.row + "," + hit.col)) {
+      // Hovering an error explains it, and names the formula that produced it —
+      // the two things you need before you can fix it.
+      let code = "", input = "";
+      try {
+        code = JSON.parse(wasm.session_cells(state.sheet, hit.row, hit.col, hit.row, hit.col))[0]?.t || "";
+        input = wasm.session_cell_input(state.sheet, hit.row, hit.col);
+      } catch {}
+      const help = ERROR_HELP[code] || "This formula could not be calculated.";
+      commentTip.textContent = input.startsWith("=") ? `${code} — ${help}\n${input}` : `${code} — ${help}`;
+      commentTip.style.whiteSpace = "pre-line";
+      commentTip.style.left = (px + 14) + "px";
+      commentTip.style.top = (py + 8) + "px";
+      commentTip.hidden = false;
+    } else if (hit && commentCells.has(hit.row + "," + hit.col)) {
       let text = "";
       try { text = wasm.session_comment_at(state.sheet, hit.row, hit.col); } catch {}
       if (text) {
         commentTip.textContent = text;
+        commentTip.style.whiteSpace = "";
         commentTip.style.left = (px + 14) + "px";
         commentTip.style.top = (py + 8) + "px";
         commentTip.hidden = false;

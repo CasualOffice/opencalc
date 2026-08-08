@@ -1527,6 +1527,12 @@ pub fn session_cells(
             if matches!(cell.value, CellValue::Number(_)) {
                 extra.push_str(",\"n\":1");
             }
+            // Flagged rather than inferred from the text: a *text* cell may
+            // legitimately contain "#VALUE!", and marking that as an error
+            // would be a lie about the user's data.
+            if matches!(cell.value, CellValue::Error(_)) {
+                extra.push_str(",\"er\":1");
+            }
             if style.is_some_and(|s| s.bold) {
                 extra.push_str(",\"b\":1");
             }
