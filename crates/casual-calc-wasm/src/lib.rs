@@ -1414,6 +1414,90 @@ pub fn session_row_pinned(sheet: usize, first: u32, count: u32) -> String {
     .unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Ceiling on how many auto-height candidates are reported. Beyond this the
+/// host is told the list is incomplete rather than being handed a silent
+/// truncation it would mistake for "no more rows grow".
+const MAX_AUTOFIT_CANDIDATES: usize = 20_000;
+
+/// Every cell that could make its row taller than the engine's height — wrapped
+/// text, rotated text, or a font larger than the default — as JSON
+/// `{"truncated":0|1,"cells":[{r,c,t,w,rot,fs,b,i,fn}]}`.
+///
+/// Row height for these can only be settled by measuring text, which is the
+/// host's job. But if the host measures only the rows it can see, every offset
+/// past the first grown row is wrong — scroll anchoring, the scrollbar extent
+/// and scroll-into-view all read engine offsets that know nothing about the
+/// growth. So this reports the candidates across the *whole* sheet, letting the
+/// host build a complete picture once instead of a partial one per frame.
+///
+/// Rows the workbook sized itself are excluded: an explicit height wins over
+/// auto-fit, exactly as in Excel, so those rows cannot grow.
+#[wasm_bindgen]
+pub fn session_autofit_candidates(sheet: usize) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return "{\"truncated\":0,\"default\":20,\"cells\":[]}".to_owned();
+        };
+        let mut cells = Vec::new();
+        let mut truncated = false;
+        for (at, cell) in sh.cells.iter() {
+            if sh.rows.sizes.contains_key(&at.row) || sh.is_row_hidden(at.row) {
+                continue;
+            }
+            let Some(style) = cell.style.and_then(|id| wb.styles.get(id)) else {
+                continue;
+            };
+            let grows = style.wrap || style.rotation != 0 || style.font_size_hp.is_some();
+            if !grows {
+                continue;
+            }
+            let text = casual_calc_layout::display_text(wb, cell);
+            if text.is_empty() {
+                continue;
+            }
+            if cells.len() >= MAX_AUTOFIT_CANDIDATES {
+                truncated = true;
+                break;
+            }
+            let mut parts = vec![
+                format!("\"r\":{}", at.row),
+                format!("\"c\":{}", at.col),
+                format!("\"t\":{}", json_string(&text)),
+            ];
+            if style.wrap {
+                parts.push("\"w\":1".to_owned());
+            }
+            if style.rotation != 0 {
+                parts.push(format!("\"rot\":{}", style.rotation));
+            }
+            if let Some(hp) = style.font_size_hp {
+                parts.push(format!("\"fs\":{}", hp as f64 / 2.0));
+            }
+            if style.bold {
+                parts.push("\"b\":1".to_owned());
+            }
+            if style.italic {
+                parts.push("\"i\":1".to_owned());
+            }
+            if let Some(name) = &style.font_name {
+                parts.push(format!("\"fn\":{}", json_string(name)));
+            }
+            cells.push(format!("{{{}}}", parts.join(",")));
+        }
+        // Candidates are never pinned, so they all sit at the sheet default —
+        // reporting it once saves the host a call per row to discover that.
+        let default_px = sh.rows.default.unwrap_or(DEFAULT_ROW_HEIGHT) * 96 / 1440;
+        format!(
+            "{{\"truncated\":{},\"default\":{},\"cells\":[{}]}}",
+            u8::from(truncated),
+            default_px,
+            cells.join(",")
+        )
+    })
+    .unwrap_or_else(|| "{\"truncated\":0,\"default\":20,\"cells\":[]}".to_owned())
+}
+
 /// Absolute pixel offset (96 dpi) of a column's left edge from column 0.
 #[wasm_bindgen]
 pub fn session_col_offset_px(sheet: usize, col: u32) -> i32 {

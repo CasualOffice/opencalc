@@ -168,9 +168,134 @@ let geoItems = []; // cells for the visible window, fetched in measure(), reused
 let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
 let dragTab = -1; // index of the sheet tab being dragged (reorder)
 
+// The height a cell needs, or null if it cannot grow its row. Shared by the
+// per-frame measure and the document-wide growth map below — if these two ever
+// disagreed, the drawn rows and the scroll offsets would disagree with them.
+function neededRowHeight(it, colWidth) {
+  // Rotated text needs vertical room, or it is clipped to a 20 px row and the
+  // rotation achieves nothing. Height is the text's own length projected onto
+  // the vertical axis; stacked text is one glyph per line.
+  if (it.rot) {
+    ctx.font = cellFont(it);
+    let needed;
+    if (it.rot === 255) {
+      needed = [...String(it.t)].length * cellLineH(it) + 6;
+    } else {
+      const deg = it.rot <= 90 ? it.rot : it.rot - 90;
+      needed = Math.abs(Math.sin((deg * Math.PI) / 180)) * ctx.measureText(String(it.t)).width
+        + cellPx(it) + 6;
+    }
+    return Math.min(needed, 409); // Excel's row-height ceiling
+  }
+  if (it.w) return wrapLines(it, colWidth - 8).length * cellLineH(it) + 6;
+  // A tall font grows its row by the font's own box plus Excel's leading; at the
+  // 11 pt default this comes to exactly the default row height, so an ordinary
+  // styled row is left alone instead of being inflated by 25%.
+  if (it.fs) return cellPx(it) + 5;
+  return null;
+}
+
+// --- Auto-height growth, document-wide ------------------------------------
+//
+// A wrapped or rotated cell makes its row taller than the height the engine
+// knows about. Measuring text is the host's job, so the engine cannot account
+// for it — and when only the *visible* rows were measured, everything derived
+// from engine offsets was wrong past the first grown row: scroll anchoring
+// hitched at row boundaries, the scrollbar extent came up short, scroll-into-view
+// under-scrolled so the selection crept off screen, and a resize drag started
+// offset by the accumulated growth.
+//
+// So the growth is computed for every candidate row on the sheet, once, and
+// folded into the offsets through `rowOffsetPx` / `rowAtPx`. Rebuilt whenever
+// the document, zoom or column widths change.
+let growthRows = [];   // ascending row indices that grow
+// growthPrefix[i] = summed growth of the first i entries, so it has one more
+// element than growthRows and growthPrefix[n] is the total.
+let growthPrefix = [0];
+let growthTotal = 0;
+let growthDirty = true;
+
+function invalidateGrowth() { growthDirty = true; }
+
+function rebuildGrowth() {
+  growthDirty = false;
+  growthRows = [];
+  growthPrefix = [0];
+  growthTotal = 0;
+  if (!wasm) return;
+  let payload;
+  try { payload = JSON.parse(wasm.session_autofit_candidates(state.sheet)); } catch { return; }
+  const base = payload.default || 20;
+  const extra = new Map();
+  // Column widths are looked up once per distinct column, not once per cell: a
+  // wrapped column of ten thousand rows is one lookup, not ten thousand.
+  const widths = new Map();
+  for (const it of payload.cells || []) {
+    // Column width matters only for wrapping, and comes from the engine rather
+    // than the drawn window — a candidate may be far outside the viewport.
+    let cw = widths.get(it.c);
+    if (cw === undefined) { cw = colWidthOf(it.c); widths.set(it.c, cw); }
+    const needed = neededRowHeight(it, cw);
+    if (needed === null || needed <= base) continue;
+    const grow = needed - base;
+    if (grow > (extra.get(it.r) || 0)) extra.set(it.r, grow);
+  }
+  growthRows = [...extra.keys()].sort((a, b) => a - b);
+  let acc = 0;
+  for (const r of growthRows) {
+    acc += extra.get(r);
+    growthPrefix.push(acc);
+  }
+  growthTotal = acc;
+  if (payload.truncated) {
+    // Never silently: a partial map means offsets past the cut are wrong again.
+    status.textContent = "too many auto-height rows to measure — scrolling may drift";
+  }
+}
+
+// A column's width from the engine, cached per frame-independent lookup.
+function colWidthOf(col) {
+  const drawn = geo.colOf.has(col) ? geo.colW[geo.colOf.get(col)] : undefined;
+  if (drawn !== undefined && drawn > 0) return drawn;
+  try { return JSON.parse(wasm.session_col_px(state.sheet, col, 1))[0] ?? COL_W; }
+  catch { return COL_W; }
+}
+
+// Total growth of rows strictly before `row`.
+function growthBefore(row) {
+  if (growthDirty) rebuildGrowth();
+  if (!growthRows.length) return 0;
+  // How many grown rows sit strictly above `row`.
+  let lo = 0, hi = growthRows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (growthRows[mid] < row) lo = mid + 1; else hi = mid;
+  }
+  return growthPrefix[lo];
+}
+
+// Effective offset of a row's top edge: what the engine says, plus the growth of
+// every grown row above it.
+function rowOffsetPx(row) {
+  return wasm.session_row_offset_px(state.sheet, row) + growthBefore(row);
+}
+
+// Inverse of `rowOffsetPx`. Growth is monotonic, so subtracting the growth above
+// the current guess and re-asking the engine converges in a couple of steps.
+function rowAtPx(px) {
+  if (growthDirty) rebuildGrowth();
+  let row = wasm.session_row_at_px(state.sheet, Math.round(px));
+  for (let i = 0; i < 4; i++) {
+    const next = wasm.session_row_at_px(state.sheet, Math.round(px - growthBefore(row)));
+    if (next === row) break;
+    row = next;
+  }
+  return row;
+}
+
 // Absolute screen position of a column's left / row's top edge (any index).
 function screenX(col) { return wasm.session_col_offset_px(state.sheet, col) - state.scrollX + HW; }
-function screenY(row) { return wasm.session_row_offset_px(state.sheet, row) - state.scrollY + HH; }
+function screenY(row) { return rowOffsetPx(row) - state.scrollY + HH; }
 // Freeze-aware screen position: frozen lines (index < fc/fr) are pinned and
 // ignore the scroll offset; body lines subtract it. In the no-freeze case this
 // equals screenX/screenY. Used where geometry must line up under frozen panes
@@ -192,7 +317,7 @@ function fscreenY(row) {
   const y = rowYAt(row);
   if (y !== undefined) return y;
   const f = state.freeze || { fr: 0 };
-  const o = wasm.session_row_offset_px(state.sheet, row);
+  const o = rowOffsetPx(row);
   return HH + (row < f.fr ? o : o - state.scrollY);
 }
 // The trailing (right/bottom) edge of a line: from the drawn geometry when the
@@ -299,7 +424,7 @@ function measure() {
   const fz = JSON.parse(wasm.session_frozen(state.sheet));
   const fc = fz.cols, fr = fz.rows;
   const frozenW = fc > 0 ? wasm.session_col_offset_px(state.sheet, fc) : 0;
-  const frozenH = fr > 0 ? wasm.session_row_offset_px(state.sheet, fr) : 0;
+  const frozenH = fr > 0 ? rowOffsetPx(fr) : 0;
   const bodyX0 = HW + frozenW, bodyY0 = HH + frozenH;
   state.freeze = { fc, fr, bodyX0, bodyY0 };
 
@@ -309,8 +434,8 @@ function measure() {
   const fsc = Math.max(fc, wasm.session_col_at_px(state.sheet, Math.round(absX)));
   const subX = absX - wasm.session_col_offset_px(state.sheet, fsc);
   const absY = frozenH + state.scrollY;
-  const fsr = Math.max(fr, wasm.session_row_at_px(state.sheet, Math.round(absY)));
-  const subY = absY - wasm.session_row_offset_px(state.sheet, fsr);
+  const fsr = Math.max(fr, rowAtPx(absY));
+  const subY = absY - rowOffsetPx(fsr);
   state.firstCol = fsc;
   state.firstRow = fsr;
 
@@ -370,27 +495,8 @@ function measure() {
     if (ci === undefined || ri === undefined) continue;
     // A hidden row is 0 px — growing it would make it reappear.
     if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
-    let needed;
-    // Rotated text needs vertical room, or it is clipped to a 20 px row and the
-    // rotation achieves nothing. Height is the text's own length projected onto
-    // the vertical axis; stacked text is one glyph per line.
-    if (it.rot) {
-      ctx.font = cellFont(it);
-      if (it.rot === 255) {
-        needed = [...String(it.t)].length * cellLineH(it) + 6;
-      } else {
-        const deg = it.rot <= 90 ? it.rot : it.rot - 90;
-        needed = Math.abs(Math.sin((deg * Math.PI) / 180)) * ctx.measureText(String(it.t)).width
-          + cellPx(it) + 6;
-      }
-      needed = Math.min(needed, 409); // Excel's row-height ceiling
-    } else if (it.w) needed = wrapLines(it, geo.colW[ci] - 8).length * cellLineH(it) + 6;
-    // A tall font grows its row by the font's own box plus Excel's leading;
-    // at the 11 pt default this comes to exactly the default row height, so an
-    // ordinary styled row is left alone instead of being inflated by 25%.
-    else if (it.fs) needed = cellPx(it) + 5;
-    else continue;
-    if (needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+    const needed = neededRowHeight(it, geo.colW[ci]);
+    if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
   }
 
   // Positions: frozen lines from HW/HH, scrolling lines from bodyX0/Y0 − sub.
@@ -447,7 +553,7 @@ function updateScrollbars(v) {
   const b = usedBounds();
   const viewH = v.h - HH, viewW = v.w - HW;
   const contentH = Math.max(
-    wasm.session_row_offset_px(state.sheet, b.rows + 30),
+    rowOffsetPx(b.rows + 30),
     state.scrollY + viewH + 1,
   );
   const contentW = Math.max(
@@ -570,6 +676,8 @@ function setZoom(z) {
   const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
   if (next === state.zoom) return;
   state.zoom = next;
+  // Text is measured in zoom-logical units, so every grown row's height changes.
+  invalidateGrowth();
   resize();
   status.textContent = `zoom ${Math.round(next * 100)}%`;
 }
@@ -1525,7 +1633,7 @@ function ensureVisible(row = state.sel.row, col = state.sel.col) {
     else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
   }
   if (row >= f.fr) {
-    const rT = wasm.session_row_offset_px(state.sheet, row) - frozenH;
+    const rT = rowOffsetPx(row) - frozenH;
     const rH = JSON.parse(wasm.session_row_px(state.sheet, row, 1))[0] || ROW_H;
     if (rT < state.scrollY) state.scrollY = rT;
     else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
@@ -1597,7 +1705,7 @@ function fzOffset(_line, columns, count) {
   if (count <= 0) return 0;
   return columns
     ? wasm.session_col_offset_px(state.sheet, count)
-    : wasm.session_row_offset_px(state.sheet, count);
+    : rowOffsetPx(count);
 }
 
 // Turn an engine parse error ("[OC-FML-0001] unexpected token: Star") into a
@@ -4265,6 +4373,8 @@ function switchSheet(i, keepEdit = false) {
   if (i === state.sheet) return;
   saveSheetView();
   state.sheet = i;
+  // The map is per sheet.
+  invalidateGrowth();
   if (!keepEdit) endInline();
   const v = sheetViews.get(sheetNameAt(i));
   if (v) {
@@ -4453,6 +4563,9 @@ function positionMenu(menu, x, y) {
 
 function tryEdit(fn) {
   try { fn(); } catch (e) { status.textContent = `error: ${e}`; }
+  // Any edit can add, remove or re-wrap a grown row, so the growth map — and
+  // every offset derived from it — has to be rebuilt.
+  invalidateGrowth();
   draw();
 }
 
@@ -4714,7 +4827,7 @@ function updateResize(px, py) {
     const left = HW + off - (state.resize.index < f.fc ? 0 : state.scrollX);
     state.resize.previewPx = Math.max(MIN_LINE, Math.round(px - left));
   } else {
-    const off = wasm.session_row_offset_px(state.sheet, state.resize.index);
+    const off = rowOffsetPx(state.resize.index);
     const top = HH + off - (state.resize.index < f.fr ? 0 : state.scrollY);
     state.resize.previewPx = Math.max(MIN_LINE, Math.round(py - top));
   }
@@ -4968,6 +5081,8 @@ function wireEvents() {
     if (state.resize) {
       const r = state.resize;
       state.resize = null;
+      // A narrower column wraps to more lines, so its rows grow differently.
+      invalidateGrowth();
       const px = r.previewPx;
       try {
         if (r.axis === "col") {
@@ -5555,6 +5670,7 @@ function wireEvents() {
       status.textContent = "opened " + file.name;
     } catch (err) { status.textContent = `error: ${err}`; }
     e.target.value = ""; // allow re-opening the same file
+    invalidateGrowth();
     state.sheet = 0;
     state.scrollX = state.scrollY = 0;
     renderTabs();
