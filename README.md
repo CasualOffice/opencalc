@@ -117,7 +117,7 @@ is evaluated. Formulas are imported and preserved from Phase 1A, but they are no
 | 1D — Grid render & virtualization | CPU raster (tiny-skia), viewport virtualization, hit-testing | ✅ core (the PNG backend does not split frozen panes; the editor canvas does) |
 | 1E — Browser grid editor (WASM) | cell edit, selection, formatting, structural ops, undo/redo | ✅ done (see the parity + UX trackers) |
 | **2 — Formula & calc engine** | tokenizer/parser, recalc, function library; dependency graph, incremental recalc, spill/array | 🟡 recalc + core functions live; incremental graph pending |
-| 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | 🟡 conditional formatting, data validation, single-key sort and a basic filter are live; tables, charts and pivots are not |
+| 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | 🟡 conditional formatting (incl. colour scales and data bars), data validation, multi-key sort and per-column autofilter (checklists + conditions, saved as `<autoFilter>`) are live; **tables/structured references, charts and pivots are not** — a table's definition is dropped on save and `Table1[Sales]` does not parse |
 | 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | ⬜ |
 | 5 — Collaboration / web | operation model for shared editing | ⬜ |
 | 6 — 1.0 | stable SDK, support guarantees | ⬜ |

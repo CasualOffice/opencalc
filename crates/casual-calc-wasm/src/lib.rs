@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use casual_calc_eval::recalculate;
 use casual_calc_formula::{CellReference, Expr, parse, shift_references};
@@ -21,9 +22,9 @@ use casual_calc_layout::{
     layout_viewport,
 };
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
-    ConditionalFormat, DataValidation, DefinedName, HAlign, Id, Sheet, SheetId, Style, StyleId,
-    VAlign, Workbook,
+    AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
+    ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp, FilterRule, HAlign, Id,
+    Sheet, SheetId, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, WorkbookSession};
@@ -134,7 +135,8 @@ pub fn session_new() {
 /// Open an `.xlsx` into the editor session.
 #[wasm_bindgen]
 pub fn session_open(bytes: &[u8]) -> Result<(), JsError> {
-    let session = WorkbookSession::open(bytes.to_vec()).map_err(js)?;
+    let mut session = WorkbookSession::open(bytes.to_vec()).map_err(js)?;
+    reapply_filters_after_load(&mut session);
     set_session(session);
     Ok(())
 }
@@ -1198,9 +1200,9 @@ fn commit_edit(op: EditOperation) -> Result<(), JsError> {
 }
 
 /// A `SetSheetMetadata` op carrying the sheet's *current* metadata bundle
-/// (merges, axis sizing, hidden sets, view). Callers tweak one field and submit
-/// it so freeze / merge / resize-all become single undoable edits that dirty
-/// the document. `None` if the sheet index is out of range.
+/// (merges, axis sizing, hidden sets, view, autofilter). Callers tweak one field
+/// and submit it so freeze / merge / resize-all / filter become single undoable
+/// edits that dirty the document. `None` if the sheet index is out of range.
 fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<EditOperation> {
     let sh = session.workbook().sheets.get(sheet)?;
     Some(EditOperation::SetSheetMetadata {
@@ -1211,6 +1213,8 @@ fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<Edi
         hidden_rows: sh.hidden_rows.clone(),
         hidden_cols: sh.hidden_cols.clone(),
         view: sh.view,
+        auto_filter: sh.auto_filter.clone(),
+        filter_hidden: sh.filter_hidden.clone(),
     })
 }
 
@@ -1348,7 +1352,9 @@ fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -
                 if columns {
                     sh.hidden_cols.contains(&line)
                 } else {
-                    sh.hidden_rows.contains(&line)
+                    // `is_row_hidden`, not `hidden_rows`: a filtered-out row has
+                    // to collapse here too or the filter changes nothing on screen.
+                    sh.is_row_hidden(line)
                 }
             });
             let twips = if hidden {
@@ -2671,6 +2677,332 @@ fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Resul
     })
 }
 
+// --- Autofilter -----------------------------------------------------------
+//
+// The rules live in the model; evaluating them lives here, because a checklist
+// matches on the text the user *sees* and formatting is only available at this
+// layer.
+//
+// Re-evaluation is explicit — on a filter change and on load — not on every
+// cell edit. That is Excel's behaviour (a filtered-out row you edit stays put
+// until you re-apply) and it keeps a keystroke from costing a full range scan.
+
+/// Most distinct values a checklist will return. Excel's own limit is 10,000;
+/// past that the UI has to offer a condition instead of a list. The payload
+/// reports truncation rather than silently returning a short list.
+const MAX_FILTER_VALUES: usize = 10_000;
+
+/// A cell's display text and numeric value, for filter matching.
+fn filter_operands(wb: &Workbook, sheet: &Sheet, row: u32, col: u32) -> (String, Option<f64>) {
+    match sheet.cells.get(CellRef::new(row, col)) {
+        Some(cell) => {
+            let num = match cell.value {
+                CellValue::Number(n) => Some(n),
+                _ => None,
+            };
+            (casual_calc_layout::display_text(wb, cell), num)
+        }
+        None => (String::new(), None),
+    }
+}
+
+/// Whether `row` passes every column rule except `skip` (used to build a
+/// checklist that reflects what the *other* columns have already narrowed to).
+fn row_passes(
+    wb: &Workbook,
+    sheet: &Sheet,
+    filter: &AutoFilter,
+    row: u32,
+    skip: Option<u32>,
+) -> bool {
+    filter.rules.iter().all(|(&off, rule)| {
+        if Some(off) == skip {
+            return true;
+        }
+        let col = filter.range.start.col.saturating_add(off);
+        let (text, num) = filter_operands(wb, sheet, row, col);
+        rule.matches(&text, num)
+    })
+}
+
+/// The rows a sheet's autofilter hides, recomputed from its rules.
+fn recompute_filter_hidden(wb: &Workbook, sheet: &Sheet) -> BTreeSet<u32> {
+    let mut hidden = BTreeSet::new();
+    let Some(filter) = &sheet.auto_filter else {
+        return hidden;
+    };
+    if !filter.is_active() {
+        return hidden;
+    }
+    for row in filter.body_start()..=filter.range.end.row {
+        if !row_passes(wb, sheet, filter, row, None) {
+            hidden.insert(row);
+        }
+    }
+    hidden
+}
+
+/// Install `filter` on a sheet and hide the rows it excludes, as one undoable
+/// edit. Passing `None` turns the filter off and releases every row it hid.
+fn commit_filter(sheet: usize, filter: Option<AutoFilter>) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        let hidden = match &filter {
+            Some(f) => {
+                let wb = session.workbook();
+                let Some(sh) = wb.sheets.get(sheet) else {
+                    return Ok(());
+                };
+                // Evaluate against a sheet carrying the *new* rules, not the
+                // ones currently installed.
+                let mut probe = sh.clone();
+                probe.auto_filter = Some(f.clone());
+                recompute_filter_hidden(wb, &probe)
+            }
+            None => BTreeSet::new(),
+        };
+        if let EditOperation::SetSheetMetadata {
+            auto_filter,
+            filter_hidden,
+            ..
+        } = &mut op
+        {
+            *auto_filter = filter;
+            *filter_hidden = hidden;
+        }
+        session.edit(op).map_err(js)
+    })
+}
+
+/// Read a sheet's autofilter, or `None` if it has none.
+fn sheet_filter(sheet: usize) -> Option<AutoFilter> {
+    with_session(|s| s.workbook().sheets.get(sheet)?.auto_filter.clone()).flatten()
+}
+
+/// The sheet's autofilter as JSON `{r0,c0,r1,c1,cols:[…]}` — the header range
+/// plus which column offsets currently carry a rule — or `null` if the sheet
+/// has no filter. The host draws a filter button on every header cell in the
+/// range and a "filtered" variant on the columns listed.
+#[wasm_bindgen]
+pub fn session_filter_info(sheet: usize) -> String {
+    // Reads in place rather than cloning the filter: the host polls this every
+    // frame to decide where to draw the buttons.
+    with_session(|s| {
+        let sh = s.workbook().sheets.get(sheet)?;
+        let f = sh.auto_filter.as_ref()?;
+        // Absolute column indices, so the host needs no offset arithmetic.
+        let cols: Vec<String> = f
+            .rules
+            .keys()
+            .map(|off| (f.range.start.col.saturating_add(*off)).to_string())
+            .collect();
+        Some(format!(
+            "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"cols\":[{}],\"hidden\":{}}}",
+            f.range.start.row,
+            f.range.start.col,
+            f.range.end.row,
+            f.range.end.col,
+            cols.join(","),
+            sh.filter_hidden.len()
+        ))
+    })
+    .flatten()
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Turn an autofilter on over `r0..=r1 × c0..=c1`, treating the first row as
+/// the header. Replaces any existing filter, dropping its rules.
+#[wasm_bindgen]
+pub fn session_set_filter_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let range = CellRange::new(
+        CellRef::new(r0.min(r1), c0.min(c1)),
+        CellRef::new(r1.max(r0), c1.max(c0)),
+    );
+    commit_filter(sheet, Some(AutoFilter::new(range)))
+}
+
+/// Turn the autofilter off, releasing every row it hid.
+#[wasm_bindgen]
+pub fn session_clear_filter(sheet: usize) -> Result<(), JsError> {
+    commit_filter(sheet, None)
+}
+
+/// Drop every column rule but keep the filter (and its buttons) in place.
+#[wasm_bindgen]
+pub fn session_clear_filter_rules(sheet: usize) -> Result<(), JsError> {
+    let Some(mut f) = sheet_filter(sheet) else {
+        return Ok(());
+    };
+    f.rules.clear();
+    commit_filter(sheet, Some(f))
+}
+
+/// The distinct values to offer in column `col`'s checklist, as JSON
+/// `{"values":[{"v":…,"c":0|1}],"truncated":0|1,"custom":0|1}`.
+///
+/// `c` is whether the value is currently checked. The list reflects the rows
+/// left by the *other* columns' rules, which is what makes chained filtering
+/// behave: filtering Region to "West" leaves only West's cities on offer.
+/// `custom` flags that this column carries a condition rather than a checklist,
+/// so the host can say so instead of showing every box ticked.
+#[wasm_bindgen]
+pub fn session_filter_values(sheet: usize, col: u32) -> String {
+    let empty = "{\"values\":[],\"truncated\":0,\"custom\":0}".to_owned();
+    let out = with_session(|s| {
+        let wb = s.workbook();
+        let sh = wb.sheets.get(sheet)?;
+        let filter = sh.auto_filter.as_ref()?;
+        if col < filter.range.start.col || col > filter.range.end.col {
+            return None;
+        }
+        let off = col - filter.range.start.col;
+        let checked: Option<&Vec<String>> = match filter.rules.get(&off) {
+            Some(FilterRule::Values(v)) => Some(v),
+            _ => None,
+        };
+        let custom = matches!(filter.rules.get(&off), Some(FilterRule::Custom { .. }));
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut truncated = false;
+        for row in filter.body_start()..=filter.range.end.row {
+            if !row_passes(wb, sh, filter, row, Some(off)) {
+                continue;
+            }
+            if seen.len() >= MAX_FILTER_VALUES {
+                truncated = true;
+                break;
+            }
+            seen.insert(filter_operands(wb, sh, row, col).0);
+        }
+        let items: Vec<String> = seen
+            .iter()
+            .map(|v| {
+                // With no checklist on this column every value is on; with one,
+                // only the listed values are.
+                let on = checked.is_none_or(|c| c.iter().any(|x| x.eq_ignore_ascii_case(v)));
+                format!("{{\"v\":{},\"c\":{}}}", json_string(v), u8::from(on))
+            })
+            .collect();
+        Some(format!(
+            "{{\"values\":[{}],\"truncated\":{},\"custom\":{}}}",
+            items.join(","),
+            u8::from(truncated),
+            u8::from(custom)
+        ))
+    })
+    .flatten();
+    out.unwrap_or(empty)
+}
+
+/// Set column `col` to a checklist of `values`. An
+/// empty array clears the column's rule rather than hiding every row — a
+/// checklist that selects nothing is a user mistake, not an instruction to
+/// blank the sheet.
+#[wasm_bindgen]
+pub fn session_set_filter_values(
+    sheet: usize,
+    col: u32,
+    values: Vec<String>,
+) -> Result<(), JsError> {
+    let Some(mut f) = sheet_filter(sheet) else {
+        return Ok(());
+    };
+    if col < f.range.start.col || col > f.range.end.col {
+        return Ok(());
+    }
+    let off = col - f.range.start.col;
+    if values.is_empty() {
+        f.rules.remove(&off);
+    } else {
+        f.rules.insert(off, FilterRule::Values(values));
+    }
+    commit_filter(sheet, Some(f))
+}
+
+/// Set column `col` to a condition: `op`/`val` and an optional second
+/// `op2`/`val2` joined by AND (`and`) or OR.
+///
+/// `op` names are the OOXML ones (`equal`, `notEqual`, `greaterThan`,
+/// `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`); "contains",
+/// "begins with" and "ends with" are `equal` with the host supplying the
+/// wildcards, exactly as Excel stores them. An empty `op` clears the column.
+#[wasm_bindgen]
+pub fn session_set_filter_custom(
+    sheet: usize,
+    col: u32,
+    op: &str,
+    val: &str,
+    op2: &str,
+    val2: &str,
+    and: bool,
+) -> Result<(), JsError> {
+    let Some(mut f) = sheet_filter(sheet) else {
+        return Ok(());
+    };
+    if col < f.range.start.col || col > f.range.end.col {
+        return Ok(());
+    }
+    let off = col - f.range.start.col;
+    if op.is_empty() {
+        f.rules.remove(&off);
+    } else {
+        f.rules.insert(
+            off,
+            FilterRule::Custom {
+                first: CustomFilter {
+                    op: FilterOp::from_ooxml(op),
+                    value: val.to_owned(),
+                },
+                second: (!op2.is_empty()).then(|| CustomFilter {
+                    op: FilterOp::from_ooxml(op2),
+                    value: val2.to_owned(),
+                }),
+                and,
+            },
+        );
+    }
+    commit_filter(sheet, Some(f))
+}
+
+/// Re-evaluate every sheet's autofilter against the current data.
+///
+/// Called after a load, where the rows arrive marked `hidden="1"` with no way
+/// to tell which of them the filter hid — OOXML records no distinction. Any row
+/// this filter would hide is moved out of the hand-hidden set and into the
+/// filter's, so clearing the filter later releases exactly those rows. A row
+/// hidden by hand that the filter *also* excludes is reattributed to the
+/// filter; Excel cannot tell those apart either.
+fn reapply_filters_after_load(session: &mut WorkbookSession) {
+    let sheet_count = session.workbook().sheets.len();
+    for i in 0..sheet_count {
+        let wb = session.workbook();
+        let Some(sh) = wb.sheets.get(i) else { continue };
+        if sh.auto_filter.as_ref().is_none_or(|f| !f.is_active()) {
+            continue;
+        }
+        let hidden = recompute_filter_hidden(wb, sh);
+        // Mutate the loaded document in place: this is reconciling what was
+        // read, not an edit, so it must not land on the undo stack or dirty the
+        // document.
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(i) {
+            for row in &hidden {
+                sh.hidden_rows.remove(row);
+            }
+            sh.filter_hidden = hidden;
+        }
+    }
+}
+
 /// Set (or clear, with empty hex) the font color across a range (one undo step).
 #[wasm_bindgen]
 pub fn session_set_font_color(
@@ -3105,7 +3437,7 @@ pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
         let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
         let mut out = String::new();
         for r in r0..=r1 {
-            if sh.hidden_rows.contains(&r) {
+            if sh.is_row_hidden(r) {
                 continue; // visible cells only
             }
             for (i, &c) in vis_cols.iter().enumerate() {
@@ -3136,7 +3468,7 @@ pub fn session_copy_html(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> St
         let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
         let mut out = String::from("<table>");
         for r in r0..=r1 {
-            if sh.hidden_rows.contains(&r) {
+            if sh.is_row_hidden(r) {
                 continue; // visible cells only
             }
             out.push_str("<tr>");
@@ -3276,7 +3608,7 @@ fn clip_capture(
     r1: u32,
     c1: u32,
 ) -> Vec<ClipCell> {
-    let vis_rows: Vec<u32> = (r0..=r1).filter(|r| !sh.hidden_rows.contains(r)).collect();
+    let vis_rows: Vec<u32> = (r0..=r1).filter(|r| !sh.is_row_hidden(*r)).collect();
     let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
     let mut cells = Vec::new();
     for (dr, &r) in vis_rows.iter().enumerate() {

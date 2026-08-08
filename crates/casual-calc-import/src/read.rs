@@ -255,6 +255,28 @@ pub struct Worksheet {
     pub validations: Vec<(String, String)>,
     /// Raw conditional-formatting rules, mapped to the model in `lib.rs`.
     pub conditional_formats: Vec<RawCf>,
+    /// The `<autoFilter ref>` range, if the sheet has an autofilter.
+    pub auto_filter: Option<String>,
+    /// Per-column filter rules inside that `<autoFilter>`.
+    pub filter_columns: Vec<RawFilterColumn>,
+}
+
+/// A raw `<filterColumn>`, before mapping to the model.
+#[derive(Debug, Default)]
+pub struct RawFilterColumn {
+    /// The `colId` attribute — an offset from the filter range's first column.
+    pub col_id: u32,
+    /// `<filter val>` entries from a `<filters>` checklist.
+    pub values: Vec<String>,
+    /// `<filters blank="1">` — blanks are an attribute, not a `<filter>` entry.
+    pub blank: bool,
+    /// Whether a `<filters>` element was seen at all. Distinguishes a checklist
+    /// that selects only blanks from a column with no checklist.
+    pub saw_filters: bool,
+    /// `<customFilter>` entries as `(operator, val)`.
+    pub custom: Vec<(String, String)>,
+    /// `<customFilters and="1">`.
+    pub custom_and: bool,
 }
 
 /// A raw `<cfRule>` with its enclosing `sqref`, before mapping to the model.
@@ -291,6 +313,57 @@ pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
 /// Convert an Excel row height (points) to twips.
 fn row_height_to_twips(points: f64) -> i64 {
     (points * 20.0).round() as i64
+}
+
+/// Handle one `<autoFilter>` subtree element. Returns `true` if the element was
+/// consumed here, so both the Start and Empty dispatches can share this — every
+/// one of these elements appears in either form depending on whether it has
+/// children.
+fn read_filter_element(
+    e: &BytesStart<'_>,
+    name: &[u8],
+    result: &mut Worksheet,
+    cur_fc: &mut Option<RawFilterColumn>,
+) -> Result<bool, ImportError> {
+    match name {
+        b"autoFilter" => {
+            result.auto_filter = read_attr(e, b"ref")?;
+        }
+        b"filterColumn" => {
+            *cur_fc = Some(RawFilterColumn {
+                col_id: parse_u32_attr(e, b"colId")?,
+                ..RawFilterColumn::default()
+            });
+        }
+        b"filters" if cur_fc.is_some() => {
+            if let Some(fc) = cur_fc.as_mut() {
+                fc.saw_filters = true;
+                fc.blank = read_bool_attr(e, b"blank")?.unwrap_or(false);
+            }
+        }
+        b"filter" if cur_fc.is_some() => {
+            if let Some(val) = read_attr(e, b"val")?
+                && let Some(fc) = cur_fc.as_mut()
+            {
+                fc.values.push(val);
+            }
+        }
+        b"customFilters" if cur_fc.is_some() => {
+            if let Some(fc) = cur_fc.as_mut() {
+                fc.custom_and = read_bool_attr(e, b"and")?.unwrap_or(false);
+            }
+        }
+        b"customFilter" if cur_fc.is_some() => {
+            // An absent operator means `equal` per the schema.
+            let op = read_attr(e, b"operator")?.unwrap_or_else(|| "equal".to_owned());
+            let val = read_attr(e, b"val")?.unwrap_or_default();
+            if let Some(fc) = cur_fc.as_mut() {
+                fc.custom.push((op, val));
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn parse_u32_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<u32, ImportError> {
@@ -414,6 +487,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
     // Active `<conditionalFormatting>` sqref + `<cfRule>` being parsed.
     let mut cf_sqref = String::new();
     let mut cur_cf: Option<RawCf> = None;
+    let mut cur_fc: Option<RawFilterColumn> = None;
     let mut in_cf_formula = false;
 
     loop {
@@ -463,6 +537,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"conditionalFormatting" => {
                         cf_sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
                     }
+                    n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
                     b"cfRule" => {
                         cur_cf = Some(RawCf {
                             sqref: cf_sqref.clone(),
@@ -525,6 +600,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result, theme)?,
+                    n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
                     _ => {}
                 }
             }
@@ -570,6 +646,11 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                         }
                     }
                     b"conditionalFormatting" => cf_sqref.clear(),
+                    b"filterColumn" => {
+                        if let Some(fc) = cur_fc.take() {
+                            result.filter_columns.push(fc);
+                        }
+                    }
                     b"t" if in_inline => in_inline_text = false,
                     b"is" => in_inline = false,
                     b"c" => {

@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
-    AxisSizing, Cell, CellRange, CellRef, CellValue, DefinedName, Sheet, SheetView, StyleId,
-    Workbook,
+    AutoFilter, AxisSizing, Cell, CellRange, CellRef, CellValue, DefinedName, Sheet, SheetView,
+    StyleId, Workbook,
 };
 
 mod structural;
@@ -172,6 +172,11 @@ pub enum Operation {
         hidden_cols: BTreeSet<u32>,
         /// View state (frozen panes) to install.
         view: SheetView,
+        /// The autofilter to install, or `None` to turn it off.
+        auto_filter: Option<AutoFilter>,
+        /// Rows the autofilter hides, to install alongside it. Travels with the
+        /// filter so undo restores the rules and the rows they hid together.
+        filter_hidden: BTreeSet<u32>,
     },
     /// Insert a fully-formed sheet at position `index`, shifting later sheets
     /// right. The caller assigns the sheet's id and name; the inverse removes it.
@@ -298,6 +303,8 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             hidden_rows,
             hidden_cols,
             view,
+            auto_filter,
+            filter_hidden,
         } => {
             let target = workbook
                 .sheets
@@ -312,6 +319,8 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
                 hidden_rows: std::mem::replace(&mut target.hidden_rows, hidden_rows),
                 hidden_cols: std::mem::replace(&mut target.hidden_cols, hidden_cols),
                 view: std::mem::replace(&mut target.view, view),
+                auto_filter: std::mem::replace(&mut target.auto_filter, auto_filter),
+                filter_hidden: std::mem::replace(&mut target.filter_hidden, filter_hidden),
             })
         }
         Operation::InsertSheet { index, sheet } => {

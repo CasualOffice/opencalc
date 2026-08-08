@@ -215,6 +215,8 @@ fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
         hidden_rows: s.hidden_rows.clone(),
         hidden_cols: s.hidden_cols.clone(),
         view: s.view,
+        auto_filter: s.auto_filter.clone(),
+        filter_hidden: s.filter_hidden.clone(),
     }
 }
 
@@ -256,6 +258,19 @@ fn shift_metadata_insert(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
         insert_coord(axis, &mut merge.start, at, count);
         insert_coord(axis, &mut merge.end, at, count);
     }
+    // The autofilter's header range moves like a merge: both endpoints shift
+    // independently, so an insert inside the range grows it to cover the new rows.
+    if let Some(filter) = &mut sheet.auto_filter {
+        insert_coord(axis, &mut filter.range.start, at, count);
+        insert_coord(axis, &mut filter.range.end, at, count);
+    }
+    // Filter-hidden rows are position-indexed too; miss this and an insert leaves
+    // the wrong rows collapsed.
+    if axis == Axis::Row {
+        reindex_set(&mut sheet.filter_hidden, |k| {
+            Some(if k >= at { k.saturating_add(count) } else { k })
+        });
+    }
     let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
     reindex_map(&mut sizing.sizes, |k| {
         Some(if k >= at { k.saturating_add(count) } else { k })
@@ -288,6 +303,24 @@ fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
         }
     });
     let end = at.saturating_add(count);
+    // Clamp the autofilter's range the way a straddling merge is clamped, and
+    // drop the filter outright if the delete takes the whole range with it.
+    if let Some(filter) = &mut sheet.auto_filter {
+        let lo = axis.coord(filter.range.start);
+        let hi = axis.coord(filter.range.end);
+        match map_range_delete(lo, hi, at, count) {
+            Some((new_lo, new_hi)) => {
+                filter.range.start = axis.with_coord(filter.range.start, new_lo);
+                filter.range.end = axis.with_coord(filter.range.end, new_hi);
+            }
+            None => sheet.auto_filter = None,
+        }
+    }
+    if axis == Axis::Row {
+        reindex_set(&mut sheet.filter_hidden, |k| {
+            map_index_delete(k, at, end, count)
+        });
+    }
     let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
     reindex_map(&mut sizing.sizes, |k| map_index_delete(k, at, end, count));
     reindex_set(hidden, |k| map_index_delete(k, at, end, count));

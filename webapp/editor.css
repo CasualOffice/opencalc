@@ -565,6 +565,26 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
 .filter-foot button { padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); }
 .filter-clear { background: var(--bg); color: var(--muted); }
 .filter-apply { background: var(--accent); color: #fff; border-color: var(--accent); }
+.filter-menu { min-width: 230px; max-width: 320px; }
+/* Search box above the checklist. The list can be long; typing is the only
+   practical way to reach a value in a column of thousands. */
+.filter-search {
+  width: 100%; box-sizing: border-box; margin: 4px 0 2px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
+  background: var(--bg); color: var(--fg);
+}
+.filter-search:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.filter-cond {
+  display: block; width: 100%; text-align: left; padding: 5px 8px; border: 0;
+  border-radius: 5px; background: none; color: var(--fg); font-size: 13px; cursor: pointer;
+}
+.filter-cond:hover { background: var(--card); }
+/* Condition dialog: operator + operand on one line, twice. */
+.filter-cond-row { display: flex; gap: 8px; margin: 6px 0; }
+.filter-cond-row select { flex: 1 1 auto; min-width: 0; }
+.filter-cond-row input { flex: 0 1 120px; min-width: 0; }
+.filter-join { display: flex; gap: 16px; margin: 4px 0; font-size: 13px; color: var(--muted); }
+.filter-join label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 /* Data-validation dropdown + editor. */
 .dv-menu { max-height: 280px; overflow-y: auto; min-width: 120px; }
 .dv-set { min-width: 240px; padding: 8px; }

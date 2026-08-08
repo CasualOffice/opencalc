@@ -971,6 +971,8 @@ fn set_sheet_metadata_is_self_inverse() {
             hidden_rows: Default::default(),
             hidden_cols: Default::default(),
             view: Default::default(),
+            auto_filter: None,
+            filter_hidden: Default::default(),
         },
     );
 }
@@ -1299,4 +1301,117 @@ fn defined_names_undo_redo_through_history() {
     assert_eq!(wb.defined_names[0].name, "Total");
     history.redo(&mut wb).unwrap(); // "Grand" again
     assert_eq!(wb.defined_names[0].name, "Grand");
+}
+
+// --- Autofilter shifting --------------------------------------------------
+
+fn sheet_with_filter(r0: u32, r1: u32) -> Workbook {
+    use casual_calc_model::AutoFilter;
+    let mut wb = workbook();
+    wb.sheets[0].auto_filter = Some(AutoFilter::new(CellRange::new(
+        CellRef::new(r0, 0),
+        CellRef::new(r1, 2),
+    )));
+    wb
+}
+
+#[test]
+fn inserting_rows_moves_the_filter_range_and_its_hidden_rows() {
+    let mut wb = sheet_with_filter(0, 9);
+    wb.sheets[0].filter_hidden.insert(5);
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+    let f = wb.sheets[0].auto_filter.as_ref().unwrap();
+    // The header stays at row 0; the insert falls inside, so the range grows.
+    assert_eq!(f.range.start.row, 0);
+    assert_eq!(f.range.end.row, 12);
+    // The hidden row rode along with the data it belonged to.
+    assert!(wb.sheets[0].filter_hidden.contains(&8));
+    assert!(!wb.sheets[0].filter_hidden.contains(&5));
+}
+
+#[test]
+fn deleting_rows_drops_filtered_rows_in_the_band_and_shifts_the_rest() {
+    let mut wb = sheet_with_filter(0, 9);
+    wb.sheets[0].filter_hidden.extend([3, 7]);
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+    // Row 3 was inside [2,5) and is gone; row 7 shifts down by 3.
+    assert_eq!(
+        wb.sheets[0]
+            .filter_hidden
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![4]
+    );
+    assert_eq!(wb.sheets[0].auto_filter.as_ref().unwrap().range.end.row, 6);
+}
+
+#[test]
+fn deleting_the_whole_filter_range_removes_the_filter() {
+    let mut wb = sheet_with_filter(2, 5);
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 0,
+            count: 8,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].auto_filter.is_none());
+}
+
+#[test]
+fn set_sheet_metadata_restores_the_filter_on_undo() {
+    use casual_calc_model::{AutoFilter, FilterRule};
+
+    let mut wb = sheet_with_filter(0, 9);
+    let mut with_rule = AutoFilter::new(CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2)));
+    with_rule
+        .rules
+        .insert(1, FilterRule::Values(vec!["Apple".into()]));
+
+    let inverse = apply(
+        &mut wb,
+        Operation::SetSheetMetadata {
+            sheet: 0,
+            merges: Vec::new(),
+            columns: Default::default(),
+            rows: Default::default(),
+            hidden_rows: Default::default(),
+            hidden_cols: Default::default(),
+            view: Default::default(),
+            auto_filter: Some(with_rule),
+            filter_hidden: [4u32].into_iter().collect(),
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].is_row_hidden(4));
+
+    // Undo takes the rules *and* the rows they hid back together.
+    apply(&mut wb, inverse).unwrap();
+    assert!(wb.sheets[0].filter_hidden.is_empty());
+    assert!(!wb.sheets[0].is_row_hidden(4));
+    assert!(
+        wb.sheets[0]
+            .auto_filter
+            .as_ref()
+            .is_some_and(|f| f.rules.is_empty())
+    );
 }

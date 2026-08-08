@@ -60,6 +60,8 @@ evidence").
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |
+| Autofilter | ● | ● | ● | ● | — | `<autoFilter>` with `<filters>` (incl. `blank`) and `<customFilters>` (one or two comparisons, AND/OR). Rules are per column offset (`colId`), so the mapping survives a round-trip. Filtered rows write `hidden="1"` like any other hidden row — OOXML has no separate marker — and are re-derived from the rules on load. Not modelled: `sortState`, filter-by-colour, top-10, dynamic (date-period) filters |
+| Tables (ListObjects) | ✗ | ✗ | ✗ | ✗ | ✗ | **Not handled at all** — `xl/tables/table*.xml` and the worksheet's `<tableParts>` are neither read nor written, so a table's name, style, header/total rows and its own autofilter are dropped on save, and structured references (`Table1[Sales]`) do not parse. See [18](18-SUPPORT-MATRIX.md); Phase 3 |
 | Charts | ✗ (preserve-only) | ✗ | ✗ | ✗ | — | P3 |
 | Pivot tables | ✗ (preserve-only) | ✗ | ✗ | ✗ | ✗ | P3 |
 | VBA / macros | preserve-only | ✗ | — | — | never | — |

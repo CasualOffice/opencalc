@@ -346,3 +346,112 @@ fn cell_comments_round_trip() {
     // as our sentinel and comes back attributed to it.
     assert_eq!(comments[1].author.as_deref(), Some("OpenCalc"));
 }
+
+#[test]
+fn autofilter_value_list_round_trips() {
+    use casual_calc_model::{AutoFilter, CellRange, CellRef, FilterRule};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let range = CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2));
+    let mut filter = AutoFilter::new(range);
+    // A blank is carried as the empty string and must come back as one.
+    filter.rules.insert(
+        1,
+        FilterRule::Values(vec!["Apple".into(), "Pear".into(), String::new()]),
+    );
+    workbook.sheets[0].auto_filter = Some(filter);
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("<autoFilter ref=\"A1:C10\">"), "{xml}");
+    assert!(xml.contains("<filterColumn colId=\"1\">"));
+    // The blank rides on the container, never as <filter val="">.
+    assert!(xml.contains("<filters blank=\"1\">"));
+    assert!(!xml.contains("<filter val=\"\"/>"));
+    // autoFilter precedes mergeCells in the CT_Worksheet sequence.
+    if let (Some(af), Some(mc)) = (xml.find("<autoFilter"), xml.find("<mergeCells")) {
+        assert!(af < mc, "autoFilter must precede mergeCells");
+    }
+
+    let wb = import_package(written).unwrap().workbook;
+    let back = wb.sheets[0].auto_filter.as_ref().expect("filter dropped");
+    assert_eq!(back.range, range);
+    match back.rules.get(&1).expect("colId 1 dropped") {
+        FilterRule::Values(v) => {
+            assert!(v.contains(&"Apple".to_owned()));
+            assert!(v.contains(&"Pear".to_owned()));
+            assert!(v.contains(&String::new()), "the blank entry was lost");
+        }
+        other => panic!("wrong rule kind: {other:?}"),
+    }
+}
+
+#[test]
+fn autofilter_custom_filters_round_trip() {
+    use casual_calc_model::{AutoFilter, CellRange, CellRef, CustomFilter, FilterOp, FilterRule};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let mut filter = AutoFilter::new(CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2)));
+    filter.rules.insert(
+        0,
+        FilterRule::Custom {
+            first: CustomFilter {
+                op: FilterOp::GreaterThanOrEqual,
+                value: "10".into(),
+            },
+            second: Some(CustomFilter {
+                op: FilterOp::LessThanOrEqual,
+                value: "20".into(),
+            }),
+            and: true,
+        },
+    );
+    // "contains" is `equal` plus wildcards — there is no dedicated operator.
+    filter.rules.insert(
+        2,
+        FilterRule::Custom {
+            first: CustomFilter {
+                op: FilterOp::Equal,
+                value: "*ap*".into(),
+            },
+            second: None,
+            and: false,
+        },
+    );
+    workbook.sheets[0].auto_filter = Some(filter.clone());
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("<customFilters and=\"1\">"), "{xml}");
+    assert!(xml.contains("operator=\"greaterThanOrEqual\" val=\"10\""));
+    assert!(xml.contains("operator=\"lessThanOrEqual\" val=\"20\""));
+    assert!(xml.contains("operator=\"equal\" val=\"*ap*\""));
+
+    let wb = import_package(written).unwrap().workbook;
+    assert_eq!(wb.sheets[0].auto_filter, Some(filter));
+}
+
+#[test]
+fn filtered_rows_export_as_hidden_without_becoming_hand_hidden() {
+    use casual_calc_model::{AutoFilter, CellRange, CellRef};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].auto_filter = Some(AutoFilter::new(CellRange::new(
+        CellRef::new(0, 0),
+        CellRef::new(9, 2),
+    )));
+    workbook.sheets[0].filter_hidden.insert(4);
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    // Row 5 (1-based) must be emitted and marked hidden even with no cells of
+    // its own — otherwise reopening the file shows the filtered-out row.
+    let row5 = xml
+        .split("<row r=\"5\"")
+        .nth(1)
+        .expect("filtered row was not emitted at all");
+    assert!(
+        row5[..row5.find('>').unwrap()].contains("hidden=\"1\""),
+        "filtered row lost its hidden flag: {row5:.80}"
+    );
+}

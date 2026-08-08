@@ -171,6 +171,224 @@ pub struct Sheet {
     /// Cell comments / notes, keyed by cell address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<CellComment>,
+    /// The autofilter over a header range, if one is turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<AutoFilter>,
+    /// Rows the autofilter is currently hiding, by zero-based index.
+    ///
+    /// Deliberately *not* folded into [`Sheet::hidden_rows`]: a filter must be
+    /// able to release exactly the rows it hid without disturbing rows the user
+    /// hid by hand. Both sets hide a row — see [`Sheet::is_row_hidden`] — but
+    /// only this one is cleared when the filter changes.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub filter_hidden: BTreeSet<u32>,
+}
+
+/// An autofilter: a header range plus a rule per filtered column.
+///
+/// Mirrors OOXML `<autoFilter>`. The range covers the header row *and* the body
+/// rows beneath it, which is what Excel writes and what the filter buttons are
+/// drawn from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutoFilter {
+    /// Header row + body, inclusive.
+    pub range: CellRange,
+    /// Active rules, keyed by column *offset* from `range.start.col` — the same
+    /// `colId` basis OOXML uses, so the mapping survives a round-trip
+    /// unchanged. Columns absent from the map are unfiltered.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rules: BTreeMap<u32, FilterRule>,
+}
+
+/// How one column of an autofilter selects rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterRule {
+    /// Keep rows whose displayed text is one of these. OOXML `<filters>`.
+    ///
+    /// The empty string stands for a blank cell, which OOXML encodes out of
+    /// band as `<filters blank="1">`.
+    Values(Vec<String>),
+    /// Keep rows matching one or two comparisons. OOXML `<customFilters>`.
+    Custom {
+        /// The first (always present) comparison.
+        first: CustomFilter,
+        /// An optional second comparison.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        second: Option<CustomFilter>,
+        /// Join the two with AND rather than OR. OOXML `customFilters/@and`.
+        #[serde(default)]
+        and: bool,
+    },
+}
+
+/// One comparison inside a [`FilterRule::Custom`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomFilter {
+    /// The comparison to apply.
+    pub op: FilterOp,
+    /// The operand, as text. For [`FilterOp::Equal`] and [`FilterOp::NotEqual`]
+    /// it may contain the OOXML wildcards `*` and `?` — which is how Excel
+    /// stores "contains" (`*foo*`), "begins with" (`foo*`) and "ends with"
+    /// (`*foo`). There are no separate operators for those.
+    pub value: String,
+}
+
+/// The comparison operators OOXML `<customFilter>` allows. Nothing outside this
+/// set is representable in a `.xlsx`, so nothing outside it is modelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterOp {
+    /// `equal` — supports wildcards.
+    Equal,
+    /// `notEqual` — supports wildcards.
+    NotEqual,
+    /// `greaterThan`.
+    GreaterThan,
+    /// `greaterThanOrEqual`.
+    GreaterThanOrEqual,
+    /// `lessThan`.
+    LessThan,
+    /// `lessThanOrEqual`.
+    LessThanOrEqual,
+}
+
+impl FilterOp {
+    /// The OOXML `operator` attribute value.
+    pub fn as_ooxml(&self) -> &'static str {
+        match self {
+            FilterOp::Equal => "equal",
+            FilterOp::NotEqual => "notEqual",
+            FilterOp::GreaterThan => "greaterThan",
+            FilterOp::GreaterThanOrEqual => "greaterThanOrEqual",
+            FilterOp::LessThan => "lessThan",
+            FilterOp::LessThanOrEqual => "lessThanOrEqual",
+        }
+    }
+
+    /// Parse an OOXML `operator` attribute. Unknown values — and the absent
+    /// attribute, which OOXML defines as `equal` — fall back to `Equal`.
+    pub fn from_ooxml(s: &str) -> Self {
+        match s {
+            "notEqual" => FilterOp::NotEqual,
+            "greaterThan" => FilterOp::GreaterThan,
+            "greaterThanOrEqual" => FilterOp::GreaterThanOrEqual,
+            "lessThan" => FilterOp::LessThan,
+            "lessThanOrEqual" => FilterOp::LessThanOrEqual,
+            _ => FilterOp::Equal,
+        }
+    }
+}
+
+/// Match `text` against an OOXML filter pattern, where `*` is any run of
+/// characters and `?` is exactly one. Comparison is case-insensitive, as it is
+/// in Excel.
+///
+/// Iterative with a backtrack point rather than recursive, so a pathological
+/// pattern like `*a*a*a*…` against a long string cannot blow the stack or go
+/// exponential — it stays O(text × pattern) in the worst case.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Where to resume if the current `*` guess turns out too short.
+    let (mut star, mut retry) = (usize::MAX, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            retry = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            // Let the last `*` swallow one more character and try again.
+            retry += 1;
+            ti = retry;
+            pi = star + 1;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s can still match the empty remainder.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+impl CustomFilter {
+    /// Whether a cell passes this comparison.
+    ///
+    /// `text` is the cell as the user sees it and `num` its numeric value when
+    /// it has one. Ordering comparisons use `num` when both sides are numeric
+    /// and fall back to case-insensitive text ordering otherwise, so a filter
+    /// on a text column still behaves sensibly.
+    pub fn matches(&self, text: &str, num: Option<f64>) -> bool {
+        match self.op {
+            FilterOp::Equal => wildcard_match(&self.value, text),
+            FilterOp::NotEqual => !wildcard_match(&self.value, text),
+            _ => {
+                let ord = match (num, self.value.trim().parse::<f64>()) {
+                    (Some(a), Ok(b)) => a.partial_cmp(&b),
+                    _ => Some(text.to_lowercase().cmp(&self.value.to_lowercase())),
+                };
+                let Some(ord) = ord else {
+                    return false; // NaN compares false against everything
+                };
+                match self.op {
+                    FilterOp::GreaterThan => ord.is_gt(),
+                    FilterOp::GreaterThanOrEqual => ord.is_ge(),
+                    FilterOp::LessThan => ord.is_lt(),
+                    FilterOp::LessThanOrEqual => ord.is_le(),
+                    _ => unreachable!("equality handled above"),
+                }
+            }
+        }
+    }
+}
+
+impl FilterRule {
+    /// Whether a cell passes this rule, and so keeps its row visible.
+    pub fn matches(&self, text: &str, num: Option<f64>) -> bool {
+        match self {
+            // Case-insensitive, matching the checklist the values came from.
+            FilterRule::Values(vals) => vals.iter().any(|v| v.eq_ignore_ascii_case(text)),
+            FilterRule::Custom { first, second, and } => {
+                let a = first.matches(text, num);
+                match second {
+                    Some(b) => {
+                        let b = b.matches(text, num);
+                        if *and { a && b } else { a || b }
+                    }
+                    None => a,
+                }
+            }
+        }
+    }
+}
+
+impl AutoFilter {
+    /// A filter over `range` with no column rules yet — buttons shown, nothing
+    /// filtered out.
+    pub fn new(range: CellRange) -> Self {
+        Self {
+            range,
+            rules: BTreeMap::new(),
+        }
+    }
+
+    /// The first row of data, i.e. the row below the header.
+    pub fn body_start(&self) -> u32 {
+        self.range.start.row.saturating_add(1)
+    }
+
+    /// Whether any column currently narrows the rows.
+    pub fn is_active(&self) -> bool {
+        !self.rules.is_empty()
+    }
 }
 
 /// A note attached to a cell.
@@ -272,7 +490,18 @@ impl Sheet {
             validations: Vec::new(),
             conditional_formats: Vec::new(),
             comments: Vec::new(),
+            auto_filter: None,
+            filter_hidden: BTreeSet::new(),
         }
+    }
+
+    /// Whether a row is hidden, for any reason — hidden by hand or filtered out.
+    ///
+    /// Every reader that asks "should this row be drawn / measured / exported as
+    /// hidden" must go through here rather than reading [`Sheet::hidden_rows`]
+    /// directly, or filtered rows leak back into view.
+    pub fn is_row_hidden(&self, row: u32) -> bool {
+        self.hidden_rows.contains(&row) || self.filter_hidden.contains(&row)
     }
 }
 

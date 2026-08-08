@@ -46,7 +46,8 @@ impl GridGeometry {
             .sizes
             .iter()
             .map(|(&k, &v)| (k, v))
-            .chain(sheet.hidden_rows.iter().map(|&r| (r, 0)));
+            .chain(sheet.hidden_rows.iter().map(|&r| (r, 0)))
+            .chain(sheet.filter_hidden.iter().map(|&r| (r, 0)));
         Self {
             columns: Axis::with_sizes(col_default, cols),
             rows: Axis::with_sizes(row_default, rows),

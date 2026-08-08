@@ -1088,6 +1088,11 @@ function draw() {
     }
   }
 
+  // Autofilter header buttons, drawn before the validation chevron so the
+  // active cell's own dropdown wins if the two ever land on the same cell.
+  refreshFilterInfo();
+  drawFilterButtons(withQuad);
+
   // Data-validation dropdown button on the active cell (if it has a list rule).
   validationChevron = null;
   if (wasm && state.selKind === "cells" && !state.fill) {
@@ -2121,121 +2126,352 @@ function sortDialog() {
   });
   ok.focus();
 }
-// --- Column filter --------------------------------------------------------
-// A single-column filter that hides rows whose value in the key column is
-// unchecked. Row 0 of the used region is treated as a header and never hidden.
-// Reuses session_hide_rows / session_unhide_rows for the actual hiding.
-let filterState = null; // { col, r0, r1, excluded:Set<string>, hidden:number[] }
+// --- Autofilter -----------------------------------------------------------
+// Per-column filtering, held by the engine rather than here: the rules live on
+// the sheet (so they save to .xlsx and undo as one step) and the rows they hide
+// are a set of their own, separate from rows hidden by hand. Clearing a filter
+// therefore releases exactly the rows it hid.
+let filterInfo = null;    // {r0,c0,r1,c1,cols:Set<absCol>,hidden} or null
+let filterButtons = [];   // hit targets rebuilt each frame by drawFilterButtons()
 
-// Map of row -> display string for a column band (missing cells read as "").
-function columnValues(col, r0, r1) {
-  const items = JSON.parse(wasm.session_cells(state.sheet, r0, col, r1, col));
-  const byRow = new Map();
-  for (const it of items) if (it.c === col) byRow.set(it.r, it.t ?? "");
-  const out = new Map();
-  for (let r = r0; r <= r1; r++) out.set(r, byRow.get(r) ?? "");
-  return out;
+function refreshFilterInfo() {
+  filterInfo = null;
+  if (!wasm) return;
+  try {
+    const j = wasm.session_filter_info(state.sheet);
+    if (j && j !== "null") {
+      filterInfo = JSON.parse(j);
+      filterInfo.cols = new Set(filterInfo.cols);
+    }
+  } catch {}
 }
 
-function clearFilter() {
-  if (!filterState) return;
-  for (const r of filterState.hidden) {
-    try { wasm.session_unhide_rows(state.sheet, r, r); } catch {}
+// Turn the filter on over the current block, or off if one is already on.
+function toggleFilter() {
+  if (!wasm) return;
+  if (filterInfo) {
+    tryEdit(() => wasm.session_clear_filter(state.sheet));
+    status.textContent = "filter removed";
+  } else {
+    // An explicit multi-cell selection wins; otherwise take the used region,
+    // which is what a user pressing the button on a single cell means.
+    const r = effectiveRange();
+    const multi = r.r1 > r.r0 || r.c1 > r.c0;
+    const b = usedBounds();
+    if (!multi && (b.rows < 2 || b.cols < 1)) { status.textContent = "nothing to filter"; return; }
+    const box = multi ? r : { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+    tryEdit(() => wasm.session_set_filter_range(state.sheet, box.r0, box.c0, box.r1, box.c1));
+    status.textContent = "filter on — click a header button to filter a column";
   }
-  filterState = null;
 }
 
-function applyFilter(col, r0, r1, excluded) {
-  clearFilter();
-  const vals = columnValues(col, r0, r1);
-  const hidden = [];
-  for (let r = r0; r <= r1; r++) {
-    if (excluded.has(vals.get(r))) { try { wasm.session_hide_rows(state.sheet, r, r); hidden.push(r); } catch {} }
+// Draw a dropdown button on each header cell in the filter range, recording the
+// hit targets. A column carrying a rule gets the accent treatment so it is
+// obvious at a glance which columns are narrowing the view.
+//
+// `withQuad` is draw()'s pane clipper, passed in because it closes over the
+// frame's frozen-pane geometry: a button on a header scrolled under a frozen
+// pane must be clipped to its own pane, not painted over the frozen one.
+function drawFilterButtons(withQuad) {
+  filterButtons = [];
+  if (!filterInfo) return;
+  const row = filterInfo.r0;
+  const y = rowYAt(row);
+  if (y === undefined) return;
+  const ch = rowHAt(row);
+  // Header fills, so the glyph can be drawn in whatever contrasts with the cell
+  // it sits on — a header is usually filled, and the fill can be any colour.
+  const fillOf = new Map();
+  for (const it of geoItems) if (it.r === row && it.bg) fillOf.set(it.c, it.bg);
+
+  for (let col = filterInfo.c0; col <= filterInfo.c1; col++) {
+    const x = colXAt(col);
+    if (x === undefined) continue;
+    const cw = colWAt(col);
+    // Skip a column too narrow to hold the glyph without covering its label.
+    if (cw < 22) continue;
+    const size = 11;
+    const bx = x + cw - size - 4, by = y + (ch - size) / 2;
+    const active = filterInfo.cols.has(col);
+    const ink = contrastInk(fillOf.get(col));
+    withQuad(row, col, () => {
+      ctx.save();
+      // A bare funnel, no container: at this size a box reads as a form control
+      // and fights the cell it sits in.
+      const mx = bx + size / 2, my = by + size / 2;
+      ctx.beginPath();
+      ctx.moveTo(mx - 4.5, my - 4);
+      ctx.lineTo(mx + 4.5, my - 4);
+      ctx.lineTo(mx + 1.4, my - 0.3);
+      ctx.lineTo(mx + 1.4, my + 4.5);
+      ctx.lineTo(mx - 1.4, my + 3);
+      ctx.lineTo(mx - 1.4, my - 0.3);
+      ctx.closePath();
+      if (active) {
+        // Solid: this column is narrowing the view.
+        ctx.fillStyle = ink;
+        ctx.fill();
+      } else {
+        // Outlined and dimmed: available, but not doing anything yet.
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1.2;
+        ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+    filterButtons.push({ x: bx, y: by, w: size, h: size, col, row });
   }
-  filterState = excluded.size ? { col, r0, r1, excluded, hidden } : null;
-  status.textContent = excluded.size ? `filtered ${colName(col)} — ${hidden.length} rows hidden` : "filter cleared";
-  draw();
 }
 
-// Build the filter checklist dropdown for the active column.
-function openFilterMenu(x, y) {
+// Ink that reads against a cell fill (`RRGGBB`, no `#`). Uses the sRGB relative
+// luminance the WCAG contrast ratio is built on, so a mid-tone fill flips at the
+// point where white actually starts winning rather than at a guessed midpoint.
+// No fill means the sheet background, so fall back to the theme foreground.
+function contrastInk(hex) {
+  if (!hex || hex.length < 6) return colors.fg;
+  const lin = (c) => {
+    const v = parseInt(hex.slice(c, c + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  const l = 0.2126 * lin(0) + 0.7152 * lin(2) + 0.0722 * lin(4);
+  return l > 0.179 ? "#111418" : "#ffffff";
+}
+
+
+// The button under a canvas point, if any.
+function filterButtonAt(px, py) {
+  return filterButtons.find(
+    (b) => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h,
+  );
+}
+
+// The per-column dropdown: a searchable checklist plus a conditions submenu.
+function openColumnFilter(col, x, y) {
   closeSheetMenu();
-  const b = usedBounds();
-  const col = state.sel.col;
-  const r0 = 1, r1 = b.rows - 1; // row 0 = header
-  if (r1 < r0) { status.textContent = "nothing to filter"; return; }
-  const vals = columnValues(col, r0, r1);
-  const distinct = [];
-  const seen = new Set();
-  for (let r = r0; r <= r1; r++) {
-    const v = vals.get(r);
-    if (!seen.has(v)) { seen.add(v); distinct.push(v); }
-  }
-  distinct.sort((a, z) => a.localeCompare(z));
-  // Working exclusion set (seeded from the active filter on this column).
-  const excluded = new Set(filterState && filterState.col === col ? filterState.excluded : []);
+  let payload;
+  try { payload = JSON.parse(wasm.session_filter_values(state.sheet, col)); }
+  catch { status.textContent = "could not read column values"; return; }
+  const all = payload.values || [];
+
+  // Working set of checked values, seeded from what the engine reports.
+  const checked = new Set(all.filter((v) => v.c).map((v) => v.v));
 
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu filter-menu";
   menu.id = "sheet-ctx";
-  menu.addEventListener("click", (e) => e.stopPropagation()); // internal clicks keep it open
+  menu.addEventListener("click", (e) => e.stopPropagation());
 
   const head = document.createElement("div");
   head.className = "menu-label";
   head.textContent = `Filter ${colName(col)}`;
   menu.appendChild(head);
 
-  // Select-all toggle.
+  // Conditions — the entry point to the two-comparison dialog.
+  const cond = document.createElement("button");
+  cond.className = "menu-item filter-cond";
+  cond.textContent = payload.custom ? "Edit condition…" : "Filter by condition…";
+  cond.addEventListener("click", () => { closeSheetMenu(); conditionDialog(col); });
+  menu.appendChild(cond);
+
+  if (payload.custom) {
+    const note = document.createElement("div");
+    note.className = "panel-hint";
+    note.textContent = "A condition is active on this column. Ticking values below replaces it.";
+    menu.appendChild(note);
+  }
+  if (payload.truncated) {
+    const note = document.createElement("div");
+    note.className = "panel-hint";
+    note.textContent = `Only the first ${all.length} distinct values are listed — use a condition to match the rest.`;
+    menu.appendChild(note);
+  }
+
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "filter-search";
+  search.placeholder = "Search values";
+  search.setAttribute("aria-label", `Search values in ${colName(col)}`);
+  menu.appendChild(search);
+
   const allRow = document.createElement("label");
   allRow.className = "filter-item filter-all";
   const allCb = document.createElement("input");
   allCb.type = "checkbox";
-  allCb.checked = excluded.size === 0;
   allRow.appendChild(allCb);
   allRow.appendChild(document.createTextNode("(Select all)"));
   menu.appendChild(allRow);
 
   const list = document.createElement("div");
   list.className = "filter-list";
-  const boxes = [];
-  distinct.forEach((v) => {
-    const row = document.createElement("label");
-    row.className = "filter-item";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !excluded.has(v);
-    cb.addEventListener("change", () => {
-      if (cb.checked) excluded.delete(v); else excluded.add(v);
-      allCb.checked = excluded.size === 0;
-    });
-    boxes.push({ cb, v });
-    row.appendChild(cb);
-    row.appendChild(document.createTextNode(v === "" ? "(Blanks)" : v));
-    list.appendChild(row);
-  });
   menu.appendChild(list);
 
+  // Rebuild the visible rows for the current search text. (Select all) applies
+  // to what is *shown*, which is what makes search-then-tick usable.
+  let shown = all;
+  function build() {
+    const q = search.value.trim().toLowerCase();
+    shown = q ? all.filter((v) => v.v.toLowerCase().includes(q)) : all;
+    list.textContent = "";
+    for (const item of shown) {
+      const row = document.createElement("label");
+      row.className = "filter-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = checked.has(item.v);
+      cb.addEventListener("change", () => {
+        if (cb.checked) checked.add(item.v); else checked.delete(item.v);
+        syncAll();
+      });
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode(item.v === "" ? "(Blanks)" : item.v));
+      list.appendChild(row);
+    }
+    if (!shown.length) {
+      const none = document.createElement("div");
+      none.className = "panel-hint";
+      none.textContent = "No matching values";
+      list.appendChild(none);
+    }
+    syncAll();
+  }
+  function syncAll() {
+    const on = shown.filter((v) => checked.has(v.v)).length;
+    allCb.checked = shown.length > 0 && on === shown.length;
+    allCb.indeterminate = on > 0 && on < shown.length;
+  }
   allCb.addEventListener("change", () => {
-    excluded.clear();
-    if (!allCb.checked) distinct.forEach((v) => excluded.add(v));
-    boxes.forEach(({ cb }) => (cb.checked = allCb.checked));
+    for (const v of shown) { if (allCb.checked) checked.add(v.v); else checked.delete(v.v); }
+    build();
   });
+  search.addEventListener("input", build);
+  build();
 
   const foot = document.createElement("div");
   foot.className = "filter-foot";
-  const apply = document.createElement("button");
-  apply.className = "filter-apply";
-  apply.textContent = "Apply";
-  apply.addEventListener("click", () => { closeSheetMenu(); applyFilter(col, r0, r1, new Set(excluded)); });
   const clr = document.createElement("button");
   clr.className = "filter-clear";
   clr.textContent = "Clear";
-  clr.addEventListener("click", () => { closeSheetMenu(); clearFilter(); status.textContent = "filter cleared"; draw(); });
+  clr.addEventListener("click", () => {
+    closeSheetMenu();
+    tryEdit(() => wasm.session_set_filter_values(state.sheet, col, []));
+    afterFilterChange();
+  });
+  const apply = document.createElement("button");
+  apply.className = "filter-apply";
+  apply.textContent = "Apply";
+  apply.addEventListener("click", () => {
+    closeSheetMenu();
+    // Everything ticked means "no rule" — same as clearing, and it keeps the
+    // saved file free of a filter that excludes nothing.
+    const values = all.every((v) => checked.has(v.v)) ? [] : all.filter((v) => checked.has(v.v)).map((v) => v.v);
+    if (values.length === 0 && !all.every((v) => checked.has(v.v))) {
+      status.textContent = "tick at least one value";
+      return;
+    }
+    tryEdit(() => wasm.session_set_filter_values(state.sheet, col, values));
+    afterFilterChange();
+  });
   foot.appendChild(clr);
   foot.appendChild(apply);
   menu.appendChild(foot);
 
   positionMenu(menu, x, y);
+  search.focus();
+}
+
+// Report what the filter now hides. The repaint already happened inside
+// tryEdit, and draw() refreshes `filterInfo`, so this only reads the result.
+function afterFilterChange() {
+  const n = filterInfo ? filterInfo.hidden : 0;
+  status.textContent = n ? `filtered — ${n} row${n === 1 ? "" : "s"} hidden` : "filter cleared";
+}
+
+// The two-comparison condition dialog for one column.
+function conditionDialog(col) {
+  const OPS = [
+    ["equal", "equals"],
+    ["notEqual", "does not equal"],
+    ["greaterThan", "is greater than"],
+    ["greaterThanOrEqual", "is greater than or equal to"],
+    ["lessThan", "is less than"],
+    ["lessThanOrEqual", "is less than or equal to"],
+    ["contains", "contains"],
+    ["notContains", "does not contain"],
+    ["beginsWith", "begins with"],
+    ["endsWith", "ends with"],
+  ];
+  // The last four are not OOXML operators. Excel stores them as equal /
+  // notEqual with wildcards, so translate here and keep the written file honest
+  // rather than inventing an operator no other reader would understand.
+  const encode = (op, val) => {
+    switch (op) {
+      case "contains": return ["equal", `*${val}*`];
+      case "notContains": return ["notEqual", `*${val}*`];
+      case "beginsWith": return ["equal", `${val}*`];
+      case "endsWith": return ["equal", `*${val}`];
+      default: return [op, val];
+    }
+  };
+
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Filter by condition";
+  body.textContent = "";
+
+  const where = el("p", "oc-confirm-text", `Show rows where ${colName(col)}:`);
+  const mkRow = (n) => {
+    const row = el("div", "filter-cond-row");
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", `Condition ${n} operator`);
+    if (n === 2) sel.append(new Option("(none)", ""));
+    for (const [v, label] of OPS) sel.append(new Option(label, v));
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.setAttribute("aria-label", `Condition ${n} value`);
+    row.append(sel, inp);
+    return { row, sel, inp };
+  };
+  const one = mkRow(1);
+  const two = mkRow(2);
+
+  const join = el("div", "filter-join");
+  const radios = [];
+  for (const [val, text] of [["and", "And"], ["or", "Or"]]) {
+    const l = el("label");
+    const r = document.createElement("input");
+    r.type = "radio";
+    r.name = "oc-filter-join";
+    r.value = val;
+    if (val === "and") r.checked = true;
+    radios.push(r);
+    l.append(r, document.createTextNode(" " + text));
+    join.append(l);
+  }
+
+  const hint = el("div", "panel-hint", "Wildcards: * matches any characters, ? matches one.");
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Apply");
+  actions.append(cancel, ok);
+  body.append(where, one.row, join, two.row, hint, actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  ok.addEventListener("click", () => {
+    const [op1, v1] = encode(one.sel.value, one.inp.value);
+    if (!one.inp.value) { status.textContent = "enter a value to compare against"; one.inp.focus(); return; }
+    let op2 = "", v2 = "";
+    if (two.sel.value && two.inp.value) [op2, v2] = encode(two.sel.value, two.inp.value);
+    const and = radios.find((r) => r.checked).value === "and";
+    close();
+    canvas.focus();
+    tryEdit(() => wasm.session_set_filter_custom(state.sheet, col, op1, v1, op2, v2, and));
+    afterFilterChange();
+  });
+  one.inp.focus();
 }
 // --- Data validation (dropdown lists) -------------------------------------
 // Open the value picker for the active cell's list validation.
@@ -3985,6 +4221,23 @@ function updateResize(px, py) {
 }
 
 function wireEvents() {
+  // Autofilter header buttons open on click, not mousedown — see the note in
+  // the mousedown handler. stopPropagation keeps any already-armed
+  // dismiss-on-next-click from closing the menu we are about to open.
+  canvas.addEventListener("click", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / state.zoom;
+    const py = (e.clientY - rect.top) / state.zoom;
+    const fb = filterButtonAt(px, py);
+    if (!fb) return;
+    e.stopPropagation();
+    openColumnFilter(
+      fb.col,
+      rect.left + fb.x * state.zoom,
+      rect.top + (fb.y + fb.h) * state.zoom,
+    );
+  });
+
   canvas.addEventListener("mousedown", (e) => {
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) / state.zoom;
@@ -4001,6 +4254,17 @@ function wireEvents() {
         hideAutocomplete();
         return;
       }
+    }
+    // An autofilter header button. Swallowed here so the press neither moves
+    // the selection nor starts a drag; the menu itself opens on the `click`
+    // that follows (see the canvas click handler) because `positionMenu` arms
+    // its dismiss-on-next-click with a zero timeout — open from mousedown and
+    // that timer fires before the click, so the click closes the menu on the
+    // spot and it only appears while the button is held.
+    if (filterButtonAt(px, py)) {
+      if (editSurface && !commit(editSurface.value, false)) return;
+      e.preventDefault();
+      return;
     }
     // The active cell's data-validation dropdown button.
     if (validationChevron) {
@@ -4588,8 +4852,7 @@ function wireEvents() {
     (b.dataset.sort === "custom" ? sortDialog() : sortRange(b.dataset.sort === "desc")));
   document.getElementById("tb-filter").addEventListener("click", (e) => {
     e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
-    openFilterMenu(r.left, r.bottom + 4);
+    toggleFilter();
   });
   // Tool side panel: toolbar buttons toggle it; the header ✕ and Esc close it.
   document.getElementById("tb-dv").addEventListener("click", () => togglePanel("dv"));
@@ -5053,7 +5316,8 @@ function wireEvents() {
           ["Custom sort…", () => sortDialog()],
         ] },
         ["Remove duplicates…", () => removeDuplicates()],
-        ["Filter", clickEl("#tb-filter")],
+        ["Filter", () => toggleFilter()],
+        ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Data validation…", clickEl("#tb-dv")],
         "sep",
         ["Hide rows", () => tryEdit(() => { const r = rng(); wasm.session_hide_rows(state.sheet, r.r0, r.r1); })],

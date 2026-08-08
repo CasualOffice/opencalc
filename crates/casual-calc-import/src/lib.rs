@@ -27,8 +27,9 @@ use std::collections::HashMap;
 
 use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
-    Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat, DataValidation,
-    DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
+    AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
+    CustomFilter, DataValidation, DefinedName, ErrorValue, FilterOp, FilterRule, Id, IdGenerator,
+    Sheet, SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -240,6 +241,47 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             sheet.outline = outline;
         }
         sheet.tab_color = worksheet.tab_color;
+
+        // Autofilter. The rows it hides arrive as ordinary `hidden="1"` rows —
+        // OOXML has no separate marker — so they land in `hidden_rows` here and
+        // the session re-derives `filter_hidden` from the rules once formatting
+        // is available (display text is what a checklist matches on).
+        if let Some(reference) = worksheet.auto_filter.as_deref()
+            && let Some(range) = a1::parse_range(reference)
+        {
+            let mut filter = AutoFilter::new(range);
+            for fc in worksheet.filter_columns {
+                let rule = if fc.saw_filters {
+                    let mut values = fc.values;
+                    if fc.blank {
+                        // `blank="1"` is the checklist's "(Blanks)" entry, which
+                        // the model carries as the empty string.
+                        values.push(String::new());
+                    }
+                    // An empty checklist would select nothing at all; Excel does
+                    // not write one, and honouring it would blank the sheet.
+                    if values.is_empty() {
+                        continue;
+                    }
+                    FilterRule::Values(values)
+                } else {
+                    let mut ops = fc.custom.into_iter().map(|(op, value)| CustomFilter {
+                        op: FilterOp::from_ooxml(&op),
+                        value,
+                    });
+                    let Some(first) = ops.next() else {
+                        continue; // a filterColumn with neither kind of child
+                    };
+                    FilterRule::Custom {
+                        first,
+                        second: ops.next(),
+                        and: fc.custom_and,
+                    }
+                };
+                filter.rules.insert(fc.col_id, rule);
+            }
+            sheet.auto_filter = Some(filter);
+        }
 
         // Data-validation dropdown lists: only an inline quoted CSV in formula1
         // is modeled (a range-reference list is left for later).

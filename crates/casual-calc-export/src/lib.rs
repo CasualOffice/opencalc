@@ -19,8 +19,8 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, ErrorValue, HAlign,
-    Sheet, SheetId, VAlign, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, ErrorValue,
+    FilterRule, HAlign, Sheet, SheetId, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -739,6 +739,7 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
     // cells). Cells iterate in row-major order.
     let mut rows: BTreeSet<u32> = sheet.rows.sizes.keys().copied().collect();
     rows.extend(sheet.hidden_rows.iter().copied());
+    rows.extend(sheet.filter_hidden.iter().copied());
     rows.extend(sheet.row_outline_levels.keys().copied());
     rows.extend(sheet.collapsed_rows.iter().copied());
     for (at, _) in sheet.cells.iter() {
@@ -757,7 +758,10 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
                 )
             })
             .unwrap_or_default();
-        let hidden_attr = if sheet.hidden_rows.contains(&row) {
+        // Filtered-out rows carry hidden="1" exactly like hand-hidden ones —
+        // OOXML has no separate marker, which is why the two sets are kept
+        // apart in the model rather than here.
+        let hidden_attr = if sheet.is_row_hidden(row) {
             " hidden=\"1\""
         } else {
             ""
@@ -785,6 +789,46 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
     }
     s.push_str("</sheetData>");
 
+    // <autoFilter> precedes <mergeCells> in the CT_Worksheet sequence.
+    if let Some(filter) = &sheet.auto_filter {
+        s.push_str(&format!("<autoFilter ref=\"{}\">", range_a1(&filter.range)));
+        for (&col_id, rule) in &filter.rules {
+            s.push_str(&format!("<filterColumn colId=\"{col_id}\">"));
+            match rule {
+                FilterRule::Values(vals) => {
+                    // A blank is not a <filter val="">; OOXML carries it as an
+                    // attribute on the container.
+                    let blank = vals.iter().any(|v| v.is_empty());
+                    s.push_str(if blank {
+                        "<filters blank=\"1\">"
+                    } else {
+                        "<filters>"
+                    });
+                    for v in vals.iter().filter(|v| !v.is_empty()) {
+                        s.push_str(&format!("<filter val=\"{}\"/>", escape_attr(v)));
+                    }
+                    s.push_str("</filters>");
+                }
+                FilterRule::Custom { first, second, and } => {
+                    s.push_str(&format!(
+                        "<customFilters{}>",
+                        if *and { " and=\"1\"" } else { "" }
+                    ));
+                    for f in std::iter::once(first).chain(second.as_ref()) {
+                        s.push_str(&format!(
+                            "<customFilter operator=\"{}\" val=\"{}\"/>",
+                            f.op.as_ooxml(),
+                            escape_attr(&f.value)
+                        ));
+                    }
+                    s.push_str("</customFilters>");
+                }
+            }
+            s.push_str("</filterColumn>");
+        }
+        s.push_str("</autoFilter>");
+    }
+
     if !sheet.merges.is_empty() {
         s.push_str(&format!("<mergeCells count=\"{}\">", sheet.merges.len()));
         for range in &sheet.merges {
@@ -793,7 +837,19 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         s.push_str("</mergeCells>");
     }
 
-    // Data validations (dropdown lists) follow mergeCells in the CT_Worksheet
+    // Conditional formatting — one <conditionalFormatting> per rule, its <dxf>
+    // referenced by the fill's index in the workbook dxfs list.
+    for (i, cf) in sheet.conditional_formats.iter().enumerate() {
+        let dxf_id = dxfs.iter().position(|f| *f == cf.fill).unwrap_or(0);
+        s.push_str(&format!(
+            "<conditionalFormatting sqref=\"{}\">",
+            range_a1(&cf.range)
+        ));
+        s.push_str(&cf_rule_xml(cf, dxf_id, i + 1));
+        s.push_str("</conditionalFormatting>");
+    }
+
+    // Data validations come after conditionalFormatting in the CT_Worksheet
     // sequence. A list's allowed values are an inline quoted CSV in <formula1>.
     if !sheet.validations.is_empty() {
         s.push_str(&format!(
@@ -809,18 +865,6 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             ));
         }
         s.push_str("</dataValidations>");
-    }
-
-    // Conditional formatting — one <conditionalFormatting> per rule, its <dxf>
-    // referenced by the fill's index in the workbook dxfs list.
-    for (i, cf) in sheet.conditional_formats.iter().enumerate() {
-        let dxf_id = dxfs.iter().position(|f| *f == cf.fill).unwrap_or(0);
-        s.push_str(&format!(
-            "<conditionalFormatting sqref=\"{}\">",
-            range_a1(&cf.range)
-        ));
-        s.push_str(&cf_rule_xml(cf, dxf_id, i + 1));
-        s.push_str("</conditionalFormatting>");
     }
 
     // Legacy drawing ref (the VML holding note markers) — last in the sequence.
