@@ -2190,35 +2190,38 @@ function drawFilterButtons(withQuad) {
     const cw = colWAt(col);
     // Skip a column too narrow to hold the glyph without covering its label.
     if (cw < 22) continue;
-    const size = 11;
-    const bx = x + cw - size - 4, by = y + (ch - size) / 2;
+    const size = 12;
+    const bx = Math.round(x + cw - size - 4), by = Math.round(y + (ch - size) / 2);
     const active = filterInfo.cols.has(col);
     const ink = contrastInk(fillOf.get(col));
     withQuad(row, col, () => {
       ctx.save();
-      // A bare funnel, no container: at this size a box reads as a form control
-      // and fights the cell it sits in.
+      // Following Sheets: an inverted triangle while the column is merely
+      // filterable, a funnel once a rule is on it — the shape carries the state,
+      // so it survives being small and needs no colour cue.
+      //
+      // Both are filled. A 1px outline at this size renders muddy once the
+      // canvas transform (dpr x zoom) puts its edges off-pixel; a solid shape
+      // stays crisp at any scale.
       const mx = bx + size / 2, my = by + size / 2;
+      ctx.fillStyle = ink;
+      ctx.globalAlpha = active ? 1 : 0.75;
       ctx.beginPath();
-      ctx.moveTo(mx - 4.5, my - 4);
-      ctx.lineTo(mx + 4.5, my - 4);
-      ctx.lineTo(mx + 1.4, my - 0.3);
-      ctx.lineTo(mx + 1.4, my + 4.5);
-      ctx.lineTo(mx - 1.4, my + 3);
-      ctx.lineTo(mx - 1.4, my - 0.3);
-      ctx.closePath();
       if (active) {
-        // Solid: this column is narrowing the view.
-        ctx.fillStyle = ink;
-        ctx.fill();
+        // Symmetric funnel: flat top, sides converging to a straight stem.
+        ctx.moveTo(mx - 5, my - 4.5);
+        ctx.lineTo(mx + 5, my - 4.5);
+        ctx.lineTo(mx + 1.6, my - 0.6);
+        ctx.lineTo(mx + 1.6, my + 4.5);
+        ctx.lineTo(mx - 1.6, my + 4.5);
+        ctx.lineTo(mx - 1.6, my - 0.6);
       } else {
-        // Outlined and dimmed: available, but not doing anything yet.
-        ctx.strokeStyle = ink;
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = 1.2;
-        ctx.lineJoin = "round";
-        ctx.stroke();
+        ctx.moveTo(mx - 4, my - 2.2);
+        ctx.lineTo(mx + 4, my - 2.2);
+        ctx.lineTo(mx, my + 2.8);
       }
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     });
     filterButtons.push({ x: bx, y: by, w: size, h: size, col, row });
