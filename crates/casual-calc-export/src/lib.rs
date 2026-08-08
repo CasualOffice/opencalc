@@ -206,8 +206,14 @@ fn root_rels() -> String {
 fn workbook_xml(workbook: &Workbook) -> String {
     let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\"><sheets>");
     for (i, sheet) in workbook.sheets.iter().enumerate() {
+        // Visible is the schema default, so it is written by omission.
+        let state = sheet
+            .visibility
+            .ooxml()
+            .map(|v| format!(" state=\"{v}\""))
+            .unwrap_or_default();
         s.push_str(&format!(
-            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
+            "<sheet name=\"{}\" sheetId=\"{}\"{state} r:id=\"rId{}\"/>",
             escape_attr(&sheet.name),
             i + 1,
             i + 1

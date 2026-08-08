@@ -18,6 +18,8 @@ pub struct SheetEntry {
     pub sheet_id: u32,
     /// The worksheet part path within the package.
     pub part: String,
+    /// The raw `state` attribute, empty when the sheet is visible.
+    pub state: String,
 }
 
 /// An admitted SpreadsheetML package with its workbook and sheet parts
@@ -67,6 +69,7 @@ impl SpreadsheetPackage {
                 name: sheet_ref.name,
                 sheet_id: sheet_ref.sheet_id,
                 part: resolve_target(&workbook_part, &rel.target),
+                state: sheet_ref.state,
             });
         }
 

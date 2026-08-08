@@ -705,3 +705,32 @@ fn diagonal_borders_round_trip() {
     let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
     assert_eq!(wb.styles.get(round).unwrap().border, Some(border));
 }
+
+#[test]
+fn sheet_visibility_round_trips() {
+    use casual_calc_model::SheetVisibility;
+
+    // A hidden sheet used to come back visible: nothing parsed or wrote `state`,
+    // so saving quietly exposed data its author had put away.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    assert!(workbook.sheets[0].visibility.is_visible());
+    let written = write_workbook(&workbook).unwrap();
+    assert!(
+        !xml_of(&written, "xl/workbook.xml").contains("state="),
+        "a visible sheet must not write a state attribute"
+    );
+
+    for state in [SheetVisibility::Hidden, SheetVisibility::VeryHidden] {
+        workbook.sheets[0].visibility = state;
+        let written = write_workbook(&workbook).unwrap();
+        let token = state.ooxml().unwrap();
+        assert!(
+            xml_of(&written, "xl/workbook.xml").contains(&format!("state=\"{token}\"")),
+            "{state:?} did not write state=\"{token}\""
+        );
+        let wb = import_package(written).unwrap().workbook;
+        // veryHidden must not be flattened to hidden — the difference is the
+        // whole reason the state exists.
+        assert_eq!(wb.sheets[0].visibility, state);
+    }
+}

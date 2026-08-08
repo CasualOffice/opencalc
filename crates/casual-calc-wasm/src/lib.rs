@@ -24,7 +24,7 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp, FilterRule, HAlign, Id,
-    Sheet, SheetId, Style, StyleId, VAlign, Workbook,
+    Sheet, SheetId, SheetVisibility, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -1309,6 +1309,50 @@ pub fn session_set_font_size(
 ) -> Result<(), JsError> {
     let hp = (points > 0.0).then(|| (points * 2.0).round() as u32);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.font_size_hp = hp)
+}
+
+/// Each sheet's visibility as JSON `["visible"|"hidden"|"veryHidden", …]`, so
+/// the host can leave hidden tabs out of the strip while still offering them in
+/// an unhide list.
+#[wasm_bindgen]
+pub fn session_sheet_visibility() -> String {
+    with_session(|s| {
+        let items: Vec<String> = s
+            .workbook()
+            .sheets
+            .iter()
+            .map(|sheet| json_string(sheet.visibility.ooxml().unwrap_or("visible")))
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Show or hide a sheet's tab. Hiding the last visible sheet is refused — a
+/// workbook with nothing on screen has no way back.
+#[wasm_bindgen]
+pub fn session_set_sheet_visibility(index: usize, state: &str) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let wb = session.workbook_mut();
+        let next = SheetVisibility::from_ooxml(state);
+        if !next.is_visible() {
+            let visible = wb
+                .sheets
+                .iter()
+                .enumerate()
+                .filter(|(i, sh)| *i != index && sh.visibility.is_visible())
+                .count();
+            if visible == 0 {
+                return Err(JsError::new("a workbook needs at least one visible sheet"));
+            }
+        }
+        if let Some(sh) = wb.sheets.get_mut(index) {
+            sh.visibility = next;
+        }
+        Ok(())
+    })
 }
 
 /// The sheet names as a JSON array of strings.

@@ -26,6 +26,8 @@ pub struct SheetRef {
     pub sheet_id: u32,
     /// The relationship id linking to the worksheet part.
     pub rel_id: String,
+    /// The raw `state` attribute (`hidden`, `veryHidden`), empty when visible.
+    pub state: String,
 }
 
 /// Walk `xml`, invoking `on_element` for each start/empty element, bounded by
@@ -124,10 +126,12 @@ pub fn parse_sheet_refs(xml: &[u8], limits: &OoxmlLimits) -> Result<Vec<SheetRef
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let rel_id = attr_value(e, b"id")?.unwrap_or_default();
+            let state = attr_value(e, b"state")?.unwrap_or_default();
             sheets.push(SheetRef {
                 name,
                 sheet_id,
                 rel_id,
+                state,
             });
         }
         Ok(())

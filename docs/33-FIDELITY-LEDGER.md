@@ -58,6 +58,7 @@ evidence").
 | Column/row sizing | ● | ● | ● | ● | — | P1C-004 (widths/heights + defaults; render + editor honor them; drag-to-resize, undoable) |
 | Frozen panes | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & freeze control (UX-27) |
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
+| Sheet visibility | ● | ● | ● | ● | — | `<sheet state="hidden"|"veryHidden">`; veryHidden is preserved distinctly rather than flattened |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |
 | Conditional formatting | ● | ● | ● | ◐ | — | cellIs, containsText, colorScale, dataBar, top10, aboveAverage, duplicate/uniqueValues, plus `priority` and `stopIfTrue`. Dxf carries fill, font colour and bold; other dxf effects (borders, number format, italic/underline) are not yet modelled |

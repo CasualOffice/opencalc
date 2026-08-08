@@ -31,7 +31,7 @@ pub use ids::{
 };
 pub use sheet::{
     AutoFilter, AxisSizing, CellComment, CfRule, ConditionalFormat, CustomFilter, DataValidation,
-    FilterOp, FilterRule, OutlinePr, Sheet, SheetView,
+    FilterOp, FilterRule, OutlinePr, Sheet, SheetView, SheetVisibility,
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;

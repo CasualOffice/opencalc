@@ -4437,9 +4437,20 @@ function switchSheet(i, keepEdit = false) {
 // (Re)build the bottom sheet-tab bar from the engine's sheet list.
 function renderTabs() {
   const names = JSON.parse(wasm.session_sheet_names());
+  let vis = [];
+  try { vis = JSON.parse(wasm.session_sheet_visibility()); } catch {}
   if (state.sheet >= names.length) state.sheet = names.length - 1;
+  // Never sit on a hidden sheet — the tab is gone, so there would be no way
+  // back to a visible one.
+  if (vis[state.sheet] && vis[state.sheet] !== "visible") {
+    const firstVisible = names.findIndex((_, i) => (vis[i] || "visible") === "visible");
+    if (firstVisible >= 0) state.sheet = firstVisible;
+  }
   tabsEl.textContent = "";
   names.forEach((name, i) => {
+    // Hidden sheets keep their index (everything addresses sheets by it) but
+    // get no tab; they are reachable through the tab context menu.
+    if ((vis[i] || "visible") !== "visible") return;
     const b = document.createElement("button");
     b.className = "sheet-tab" + (i === state.sheet ? " active" : "");
     b.textContent = name;
@@ -4580,6 +4591,28 @@ function sheetMenu(i, x, y) {
   strip.appendChild(none);
   menu.appendChild(strip);
   menu.appendChild(document.createElement("div")).className = "menu-sep";
+  item("Hide sheet", false, () => {
+    try { wasm.session_set_sheet_visibility(i, "hidden"); renderTabs(); draw(); }
+    catch (e) { status.textContent = `${e}`.replace(/^Error:\s*/, ""); }
+  });
+  // Unhide lists the hidden sheets by name, since they have no tab to click.
+  let vis = [];
+  try { vis = JSON.parse(wasm.session_sheet_visibility()); } catch {}
+  const names = JSON.parse(wasm.session_sheet_names());
+  // `veryHidden` is deliberately absent: Excel does not offer it here either,
+  // and silently promoting it to merely hidden would undo the author's choice.
+  const hidden = names
+    .map((n, idx) => ({ n, idx }))
+    .filter(({ idx }) => vis[idx] === "hidden");
+  if (hidden.length) {
+    for (const { n, idx } of hidden) {
+      item(`Unhide "${n}"`, false, () => {
+        try { wasm.session_set_sheet_visibility(idx, "visible"); renderTabs(); draw(); }
+        catch (e) { status.textContent = `${e}`; }
+      });
+    }
+    menu.appendChild(document.createElement("div")).className = "menu-sep";
+  }
   item("Delete", true, () => {
     try {
       wasm.session_delete_sheet(i);

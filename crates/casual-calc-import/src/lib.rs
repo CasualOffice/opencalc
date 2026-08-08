@@ -30,7 +30,7 @@ use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
     CustomFilter, DataValidation, DefinedName, ErrorValue, FilterOp, FilterRule, Id, IdGenerator,
-    Sheet, SheetId, StringId, Workbook,
+    Sheet, SheetId, SheetVisibility, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
@@ -125,20 +125,23 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         .collect();
 
     // Own the sheet metadata so the package can be mutated (read) while looping.
-    let sheet_meta: Vec<(String, String)> = package
+    let sheet_meta: Vec<(String, String, String)> = package
         .sheets()
         .iter()
-        .map(|s| (s.name.clone(), s.part.clone()))
+        .map(|s| (s.name.clone(), s.part.clone(), s.state.clone()))
         .collect();
 
     let mut sheet_ids = IdGenerator::new(SHEET_NAMESPACE);
     let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
-    for (name, part) in sheet_meta {
+    for (name, part, state) in sheet_meta {
         let xml = package.read_part(&part)?;
         let worksheet = parse_worksheet(&xml, &palette)?;
         let sheet_id = SheetId(sheet_ids.next_id());
         sheet_ids_by_index.push(sheet_id);
         let mut sheet = Sheet::new(sheet_id, name);
+        // A hidden sheet that comes back visible exposes data its author put
+        // away on purpose, so the state travels with the sheet.
+        sheet.visibility = SheetVisibility::from_ooxml(&state);
 
         // Shared formulas: Excel's fill-down writes the expression once, on the
         // group's master cell, and leaves every follower's `<f>` empty. Without

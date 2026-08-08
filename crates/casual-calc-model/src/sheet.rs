@@ -174,6 +174,9 @@ pub struct Sheet {
     /// The autofilter over a header range, if one is turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
+    /// Whether the tab is shown, hidden, or hidden beyond the UI's reach.
+    #[serde(default, skip_serializing_if = "SheetVisibility::is_visible")]
+    pub visibility: SheetVisibility,
     /// Rows the autofilter is currently hiding, by zero-based index.
     ///
     /// Deliberately *not* folded into [`Sheet::hidden_rows`]: a filter must be
@@ -182,6 +185,51 @@ pub struct Sheet {
     /// only this one is cleared when the filter changes.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub filter_hidden: BTreeSet<u32>,
+}
+
+/// Whether a sheet's tab is shown — OOXML `<sheet state=…>`.
+///
+/// Modelled because dropping it changes what the file means: a hidden sheet that
+/// comes back visible exposes working data its author deliberately put away.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SheetVisibility {
+    /// A normal, visible tab.
+    #[default]
+    Visible,
+    /// Hidden, but unhideable from the UI.
+    Hidden,
+    /// Hidden and not offered in the unhide list — only reachable through VBA.
+    /// Preserved rather than downgraded to `Hidden`, since the distinction is
+    /// the whole point of the state.
+    VeryHidden,
+}
+
+impl SheetVisibility {
+    /// Whether the tab is shown. The serde skip-condition, so an ordinary sheet
+    /// writes nothing.
+    pub fn is_visible(&self) -> bool {
+        matches!(self, SheetVisibility::Visible)
+    }
+
+    /// The OOXML `state` attribute value, or `None` when visible (the default,
+    /// which is written by omission).
+    pub fn ooxml(&self) -> Option<&'static str> {
+        match self {
+            SheetVisibility::Visible => None,
+            SheetVisibility::Hidden => Some("hidden"),
+            SheetVisibility::VeryHidden => Some("veryHidden"),
+        }
+    }
+
+    /// Parse an OOXML `state` attribute.
+    pub fn from_ooxml(token: &str) -> Self {
+        match token {
+            "hidden" => SheetVisibility::Hidden,
+            "veryHidden" => SheetVisibility::VeryHidden,
+            _ => SheetVisibility::Visible,
+        }
+    }
 }
 
 /// An autofilter: a header range plus a rule per filtered column.
@@ -529,6 +577,7 @@ impl Sheet {
             validations: Vec::new(),
             conditional_formats: Vec::new(),
             comments: Vec::new(),
+            visibility: SheetVisibility::Visible,
             auto_filter: None,
             filter_hidden: BTreeSet::new(),
         }
