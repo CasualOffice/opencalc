@@ -37,13 +37,69 @@ pub fn split_sections(code: &str) -> Vec<&str> {
 }
 
 /// Format `value` for display using the SpreadsheetML format `code`.
+///
+/// Colour-blind: a `[Red]` in the chosen section is applied by
+/// [`format_number_colored`], which this delegates to.
 pub fn format_number(value: f64, code: &str) -> String {
+    format_number_colored(value, code).0
+}
+
+/// The colour a format section names, as `RRGGBB`.
+///
+/// A number format may state the colour of its own output — `#,##0;[Red]-#,##0`
+/// is how a negative total turns red — and dropping it silently loses the one
+/// piece of formatting the author explicitly asked for. Excel's eight named
+/// colours are recognised; the legacy `[Color n]` palette index is not, and is
+/// treated as no colour rather than guessed at.
+fn section_color(section: &str) -> Option<&'static str> {
+    let mut chars = section.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                }
+            }
+            '\\' => {
+                chars.next();
+            }
+            '[' => {
+                let mut token = String::new();
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                    token.push(b);
+                }
+                let named = match token.trim().to_ascii_lowercase().as_str() {
+                    "black" => "000000",
+                    "blue" => "0000FF",
+                    "cyan" => "00FFFF",
+                    "green" => "00FF00",
+                    "magenta" => "FF00FF",
+                    "red" => "FF0000",
+                    "white" => "FFFFFF",
+                    "yellow" => "FFFF00",
+                    _ => continue,
+                };
+                return Some(named);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Format `value`, also reporting the colour its section names (if any).
+pub fn format_number_colored(value: f64, code: &str) -> (String, Option<&'static str>) {
     let sections = split_sections(code);
     if sections.is_empty()
         || (sections.len() == 1
             && (sections[0].trim().is_empty() || sections[0].eq_ignore_ascii_case("General")))
     {
-        return format_general(value);
+        return (format_general(value), None);
     }
 
     let (section, is_custom_negative) = match sections.len() {
@@ -67,19 +123,23 @@ pub fn format_number(value: f64, code: &str) -> String {
         }
     };
 
+    let color = section_color(section);
     if section.is_empty() || section.eq_ignore_ascii_case("General") {
-        return format_general(value);
+        return (format_general(value), color);
     }
     if has_digit_placeholder(section) {
-        return format_numeric_section(value, section, is_custom_negative);
+        return (
+            format_numeric_section(value, section, is_custom_negative),
+            color,
+        );
     }
     if is_date_or_time(section) {
-        return format_date_time(value, section);
+        return (format_date_time(value, section), color);
     }
 
     // Literal-only section (e.g. `"-"` or `"Zero"`)
     let (prefix, pattern, suffix) = split_literal_runs(section);
-    format!("{prefix}{pattern}{suffix}")
+    (format!("{prefix}{pattern}{suffix}"), color)
 }
 
 /// Default (`General`) formatting for a number.
@@ -117,7 +177,97 @@ fn decimal_places(section: &str) -> usize {
     }
 }
 
+/// A scientific section (`0.00E+00`): the mantissa pattern, how many digits the
+/// exponent is padded to, and whether a positive exponent shows its `+`.
+///
+/// `None` for any other section. The scan skips quoted literals and escapes so
+/// an `E` inside `"SIZE"` is not mistaken for the exponent marker.
+fn scientific_spec(section: &str) -> Option<(String, usize, bool)> {
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    i += 1;
+                }
+            }
+            '\\' => i += 1,
+            '[' => {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+            }
+            'E' | 'e' if matches!(chars.get(i + 1), Some('+') | Some('-')) => {
+                let plus = chars[i + 1] == '+';
+                let digits = chars[i + 2..]
+                    .iter()
+                    .take_while(|c| matches!(c, '0' | '#' | '?'))
+                    .count();
+                if digits == 0 {
+                    return None;
+                }
+                let mantissa: String = chars[..i].iter().collect();
+                return Some((mantissa, digits, plus));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Format a value in scientific notation for a `0.00E+00`-style section.
+fn format_scientific(
+    value: f64,
+    mantissa_pat: &str,
+    exp_digits: usize,
+    plus: bool,
+    is_custom_negative: bool,
+) -> String {
+    let target = if is_custom_negative { value.abs() } else { value };
+    let decimals = decimal_places(mantissa_pat);
+    let (prefix, _, suffix) = split_literal_runs(mantissa_pat);
+
+    let mut exp = 0i32;
+    let mut mantissa = target.abs();
+    if mantissa != 0.0 && mantissa.is_finite() {
+        exp = mantissa.log10().floor() as i32;
+        mantissa /= 10f64.powi(exp);
+        // Rounding the mantissa can carry it to 10.0 (9.99 at 1 decimal), which
+        // must become 1.0 one exponent up rather than printing "10.0E+03".
+        let rounded: f64 = format!("{mantissa:.decimals$}").parse().unwrap_or(mantissa);
+        if rounded >= 10.0 {
+            mantissa /= 10.0;
+            exp += 1;
+        }
+    }
+    let sign = if !is_custom_negative && target < 0.0 {
+        "-"
+    } else {
+        ""
+    };
+    let exp_sign = if exp < 0 {
+        "-"
+    } else if plus {
+        "+"
+    } else {
+        ""
+    };
+    format!(
+        "{sign}{prefix}{:.*}{suffix}E{exp_sign}{:0width$}",
+        decimals,
+        mantissa,
+        exp.unsigned_abs(),
+        width = exp_digits
+    )
+}
+
 fn format_numeric_section(value: f64, section: &str, is_custom_negative: bool) -> String {
+    if let Some((mantissa, exp_digits, plus)) = scientific_spec(section) {
+        return format_scientific(value, &mantissa, exp_digits, plus, is_custom_negative);
+    }
     let percent = section.contains('%');
     let target_val = if is_custom_negative {
         value.abs()
@@ -584,7 +734,42 @@ fn adjust_section_decimals(section: &str, delta: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_format_decimals, format_number, split_sections};
+    use super::{adjust_format_decimals, format_number, format_number_colored, split_sections};
+
+    #[test]
+    fn section_colors_are_reported() {
+        // The negative section paints red; the positive one says nothing.
+        let code = "#,##0;[Red]-#,##0";
+        assert_eq!(format_number_colored(1234.0, code), ("1,234".to_owned(), None));
+        assert_eq!(
+            format_number_colored(-1234.0, code),
+            ("-1,234".to_owned(), Some("FF0000"))
+        );
+        // The colour is stripped from the output text, not printed.
+        assert_eq!(format_number(-5.0, "[Blue]0.00"), "-5.00");
+        assert_eq!(format_number_colored(-5.0, "[Blue]0.00").1, Some("0000FF"));
+        // A currency token is not a colour, and an unknown bracket token is
+        // ignored rather than guessed at.
+        assert_eq!(format_number_colored(5.0, "[$€-407]0.00").1, None);
+        assert_eq!(format_number_colored(5.0, "[Color 7]0.00").1, None);
+        // "Red" inside a literal is text, not a colour instruction.
+        assert_eq!(format_number_colored(5.0, "0\"[Red]\"").1, None);
+    }
+
+    #[test]
+    fn scientific_sections() {
+        // The reported garbage: "12345.00E+" from the unimplemented branch.
+        assert_eq!(format_number(12345.0, "0.00E+00"), "1.23E+04");
+        assert_eq!(format_number(-12345.0, "0.00E+00"), "-1.23E+04");
+        assert_eq!(format_number(0.00012, "0.00E+00"), "1.20E-04");
+        assert_eq!(format_number(0.0, "0.00E+00"), "0.00E+00");
+        // No `+` in the pattern means no sign on a positive exponent.
+        assert_eq!(format_number(12345.0, "0.0E-0"), "1.2E4");
+        // Rounding that carries the mantissa to 10 steps the exponent instead.
+        assert_eq!(format_number(9_999.0, "0.0E+00"), "1.0E+04");
+        // A literal `E` is not an exponent marker.
+        assert_eq!(format_number(12.0, "0\"EACH\""), "12EACH");
+    }
 
     #[test]
     fn general_and_fixed_decimals() {

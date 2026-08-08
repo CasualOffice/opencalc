@@ -17,7 +17,8 @@ use casual_calc_eval::recalculate;
 use casual_calc_formula::{CellReference, Expr, parse, shift_references};
 use casual_calc_import::import_package;
 use casual_calc_layout::{
-    DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_text, layout_viewport,
+    DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_color, display_text,
+    layout_viewport,
 };
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
@@ -1555,7 +1556,11 @@ pub fn session_cells(
                 };
                 extra.push_str(&format!(",\"va\":\"{t}\""));
             }
-            if let Some(fc) = style.and_then(|s| s.font_color.as_deref()) {
+            // A number format may name the colour of its own output
+            // (`#,##0;[Red]-#,##0`); that is a deliberate instruction about
+            // this value, so it wins over the style's font colour, as in Excel.
+            let fc = display_color(wb, cell).or_else(|| style.and_then(|s| s.font_color.as_deref()));
+            if let Some(fc) = fc {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
             }
             if !fill.is_empty() {

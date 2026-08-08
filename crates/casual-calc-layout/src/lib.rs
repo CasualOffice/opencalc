@@ -27,7 +27,7 @@ pub use font_substitution::{
     BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, substitute,
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
-pub use numfmt::{adjust_format_decimals, format_general, format_number};
+pub use numfmt::{adjust_format_decimals, format_general, format_number, format_number_colored};
 
 use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
 
@@ -191,6 +191,18 @@ fn align_for(value: &CellValue) -> Align {
         CellValue::Number(_) | CellValue::Bool(_) | CellValue::Error(_) => Align::Right,
         _ => Align::Left,
     }
+}
+
+/// The colour a cell's number format asks its own output to be drawn in
+/// (`#,##0;[Red]-#,##0`), as `RRGGBB`. `None` when the format names no colour,
+/// or the value is not numeric — a format colour applies to the number it
+/// formats. Overrides the style's font colour, as in Excel.
+#[must_use]
+pub fn display_color(workbook: &Workbook, cell: &Cell) -> Option<&'static str> {
+    let CellValue::Number(n) = &cell.value else {
+        return None;
+    };
+    numfmt::format_number_colored(*n, cell_number_format(workbook, cell)?).1
 }
 
 /// The display string for a cell's cached value, applying the cell's
