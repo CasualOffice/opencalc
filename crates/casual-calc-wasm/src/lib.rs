@@ -935,6 +935,101 @@ pub fn session_merge_cells(
     })
 }
 
+/// How many cells in a range, other than its top-left, hold a value.
+///
+/// Merging keeps only the top-left value, so the host asks this first: a
+/// non-zero answer means the merge would destroy data and the user has to be
+/// told before it happens.
+#[wasm_bindgen]
+pub fn session_merge_hidden_count(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> u32 {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return 0;
+        };
+        let mut n = 0;
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if r == r0 && c == c0 {
+                    continue;
+                }
+                let occupied = sh
+                    .cells
+                    .get(CellRef::new(r, c))
+                    .is_some_and(|cell| cell.formula.is_some() || cell.value != CellValue::Empty);
+                if occupied {
+                    n += 1;
+                }
+            }
+        }
+        n
+    })
+    .unwrap_or(0)
+}
+
+/// Merge a range **and** clear every value it covers except the top-left, in
+/// one undoable step.
+///
+/// The plain merge only records the range, which leaves the other values in the
+/// document: invisible on screen, still in the file, and back again the moment
+/// the merge is removed. Excel discards them, and so does this — but only after
+/// the host has warned, which is why the destructive form is a separate entry
+/// point rather than the default.
+#[wasm_bindgen]
+pub fn session_merge_cells_discarding(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(mut merge_op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { merges, .. } = &mut merge_op {
+            merges.retain(|m| !merge_hits(m, r0, c0, r1, c1));
+            if r0 != r1 || c0 != c1 {
+                merges.push(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)));
+            }
+        }
+        // Clear the covered cells' values but keep their styling, so the block
+        // does not lose its fill or borders along with the text.
+        let mut ops = vec![merge_op];
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if r == r0 && c == c0 {
+                    continue;
+                }
+                let at = CellRef::new(r, c);
+                let existing = session
+                    .workbook()
+                    .sheets
+                    .get(sheet)
+                    .and_then(|s| s.cells.get(at));
+                let Some(existing) = existing else { continue };
+                if existing.formula.is_none() && existing.value == CellValue::Empty {
+                    continue;
+                }
+                match existing.style {
+                    Some(sid) => {
+                        let mut cleared = Cell::value(CellValue::Empty);
+                        cleared.style = Some(sid);
+                        ops.push(EditOperation::SetCell {
+                            sheet,
+                            at,
+                            cell: Some(cleared),
+                        });
+                    }
+                    None => ops.push(EditOperation::ClearCell { sheet, at }),
+                }
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 /// Remove any merges intersecting a range.
 #[wasm_bindgen]
 pub fn session_unmerge_cells(

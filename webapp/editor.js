@@ -1994,8 +1994,79 @@ function buildNotePanel(body) {
   setTimeout(() => ta.focus(), 0);
 }
 
-function toggleMerge() {
+// A yes/no question in the shared modal. Resolves true only on the confirm
+// button; Escape, the ✕ and the backdrop all mean "no", because this is only
+// used to guard destructive steps.
+function confirmModal(title, message, confirmLabel = "OK") {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("oc-modal");
+    const body = document.getElementById("oc-modal-body");
+    document.getElementById("oc-modal-title").textContent = title;
+    body.textContent = "";
+    const p = document.createElement("p");
+    p.className = "oc-confirm-text";
+    p.textContent = message;
+    const row = document.createElement("div");
+    row.className = "oc-confirm-actions";
+    const cancel = document.createElement("button");
+    cancel.className = "oc-btn";
+    cancel.textContent = "Cancel";
+    const ok = document.createElement("button");
+    ok.className = "oc-btn primary";
+    ok.textContent = confirmLabel;
+    row.append(cancel, ok);
+    body.append(p, row);
+    modal.hidden = false;
+    // The modal's own ✕ / backdrop wiring just hides it, which would leave this
+    // promise pending and its key handler installed forever — so treat those
+    // dismissals as "no" here too.
+    const x = document.getElementById("oc-modal-x");
+    const done = (answer) => {
+      modal.hidden = true;
+      body.textContent = "";
+      document.removeEventListener("keydown", onKey, true);
+      x.removeEventListener("click", onDismiss);
+      modal.removeEventListener("click", onBackdrop);
+      resolve(answer);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+      else if (e.key === "Enter") { e.stopPropagation(); done(true); }
+    };
+    const onDismiss = () => done(false);
+    const onBackdrop = (e) => { if (e.target === modal) done(false); };
+    document.addEventListener("keydown", onKey, true);
+    x.addEventListener("click", onDismiss);
+    modal.addEventListener("click", onBackdrop);
+    cancel.addEventListener("click", () => done(false));
+    ok.addEventListener("click", () => done(true));
+    ok.focus();
+  });
+}
+
+async function toggleMerge() {
   const s = effectiveRange();
+  // Merging keeps only the top-left value. The engine can discard the rest in
+  // the same undo step, but silently throwing away data is exactly what this
+  // project says it will not do — so ask first, as Excel does.
+  let hidden = 0;
+  try { hidden = wasm.session_merge_hidden_count(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  const alreadyMerged = sheetMerges.some(
+    (m) => m.r0 >= s.r0 && m.c0 >= s.c0 && m.r1 <= s.r1 && m.c1 <= s.c1,
+  );
+  if (!alreadyMerged && hidden > 0) {
+    const ok = await confirmModal(
+      "Merge cells",
+      `Merging keeps only the top-left value. ${hidden} other ${hidden === 1 ? "value" : "values"} in the selection will be discarded.`,
+      "Merge",
+    );
+    canvas.focus();
+    if (!ok) return;
+    try { wasm.session_merge_cells_discarding(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+    return;
+  }
   try {
     // Any selection that *contains* a merge unmerges it (Excel's rule) — the
     // exact-match test used here meant selecting a block around a merge silently

@@ -237,6 +237,16 @@ body {
 }
 .oc-modal-title { margin: 0 0 12px; font-size: 16px; }
 .oc-modal-body { font-size: 13px; line-height: 1.55; }
+/* Confirm prompt (e.g. the merge-discards-values warning). */
+.oc-confirm-text { margin: 0 0 16px; }
+.oc-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.oc-btn {
+  padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border-2);
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer;
+}
+.oc-btn:hover { border-color: var(--border-hover); }
+.oc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.oc-btn.primary:hover { filter: brightness(1.06); }
 .oc-modal-body kbd {
   font: 11.5px var(--mono); background: var(--surface); border: 1px solid var(--border);
   border-radius: 5px; padding: 1px 6px;
