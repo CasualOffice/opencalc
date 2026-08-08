@@ -52,6 +52,15 @@ pub struct Workbook {
     /// [`Self::default_font_name`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_font_size_hp: Option<u32>,
+    /// The workbook's theme colour slots as `RRGGBB`, in OOXML slot order
+    /// (`lt1, dk1, lt2, dk2, accent1..6, hlink, folHlink`).
+    ///
+    /// Kept so a host can offer *this file's* theme colours rather than the
+    /// stock Office ones. Empty means the package had no theme part, and the
+    /// stock scheme applies — which is also what keeps an untouched workbook's
+    /// snapshot byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub theme_colors: Vec<String>,
 }
 
 impl Workbook {
@@ -67,6 +76,7 @@ impl Workbook {
             sheets: Vec::new(),
             default_font_name: None,
             default_font_size_hp: None,
+            theme_colors: Vec::new(),
         }
     }
 

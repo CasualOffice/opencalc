@@ -434,6 +434,15 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
   border: 1px solid rgba(0, 0, 0, .12); cursor: pointer;
 }
 .color-menu .cm-sw:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The theme tint ladder sits directly under its base row, with no gap, so the
+   five rows read as one block of variations rather than five palettes. */
+.color-menu .cm-label + .cm-grid { margin-bottom: 0; }
+.color-menu .cm-grid + .cm-grid { margin-top: 2px; }
+/* Native colour input, shown as a swatch-sized button rather than a form field. */
+.color-menu .cm-native {
+  width: 32px; height: 26px; padding: 0; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); cursor: pointer;
+}
 .color-menu .cm-label { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .color-menu .cm-custom { display: flex; gap: 6px; }
 .color-menu .cm-hex {

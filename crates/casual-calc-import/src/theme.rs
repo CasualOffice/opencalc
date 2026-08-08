@@ -64,6 +64,19 @@ impl ThemePalette {
             apply_tint(base, tint)
         })
     }
+
+    /// The slots in OOXML order, for a host that wants to offer the workbook's
+    /// own theme colours.
+    #[must_use]
+    pub fn slots(&self) -> &[String] {
+        &self.slots
+    }
+}
+
+/// The stock Office theme slots, for a workbook that never came from a package.
+#[must_use]
+pub fn stock_theme_slots() -> Vec<String> {
+    ThemePalette::default().slots().to_vec()
 }
 
 /// Parse `xl/theme/theme1.xml` into the palette. Anything it cannot read keeps

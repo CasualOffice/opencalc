@@ -1854,6 +1854,32 @@ pub fn format_preview_text(text: &str, code: &str) -> String {
     casual_calc_layout::format_text(text, code).unwrap_or_else(|| text.to_owned())
 }
 
+/// The workbook's theme colours as a JSON array of `RRGGBB`, in OOXML slot
+/// order, or the stock Office scheme when the package carried no theme part.
+///
+/// A colour picker that offers "theme colours" has to offer *this file's*
+/// theme; the stock ten would be a plausible-looking lie about a workbook that
+/// uses its own scheme.
+#[wasm_bindgen]
+pub fn theme_colors() -> String {
+    let items: Vec<String> = with_session(|s| {
+        let wb = s.workbook();
+        if wb.theme_colors.is_empty() {
+            None
+        } else {
+            Some(wb.theme_colors.iter().map(|c| json_string(c)).collect())
+        }
+    })
+    .flatten()
+    .unwrap_or_else(|| {
+        casual_calc_import::stock_theme_slots()
+            .iter()
+            .map(|c| json_string(c))
+            .collect()
+    });
+    format!("[{}]", items.join(","))
+}
+
 /// The font families to offer in a host's font picker, as JSON
 /// `[{n,f,k}, …]` — name, the bundled family it renders as, and the fidelity
 /// of that match (`"exact"` / `"metric"` / `"generic"`). Sourced from the

@@ -22,6 +22,7 @@ mod theme;
 
 pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
+pub use theme::stock_theme_slots;
 
 use std::collections::HashMap;
 
@@ -92,6 +93,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     } else {
         StyleSheet::default()
     };
+    // Keep the theme itself, not just its resolved colours: a host offering a
+    // colour picker should offer *this file's* theme, and the writer will need
+    // it once theme linkage round-trips.
+    workbook.theme_colors = palette.slots().to_vec();
     workbook.default_font_name = stylesheet.default_font_name.clone();
     workbook.default_font_size_hp = stylesheet.default_font_size_hp;
     let xf_style_ids: Vec<Option<_>> = stylesheet

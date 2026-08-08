@@ -2059,6 +2059,57 @@ function pushRecent(hex) {
   recentColors = [h, ...recentColors.filter((c) => c !== h)].slice(0, 10);
 }
 // Build a color popover into `menu`; `onPick(hex)` applies ("" clears).
+// Parse the colour notations people actually paste: `#abc`, `abc`, `#aabbcc`,
+// `aabbcc`, `rgb(1,2,3)` / `rgba(...)`, and `hsl(h,s%,l%)`. Returns `RRGGBB` or
+// null. Accepting only 6-digit hex rejected half of what a designer copies.
+function parseColor(input) {
+  const v = String(input || "").trim().toLowerCase();
+  if (!v) return null;
+  const hex = v.replace(/^#/, "");
+  if (/^[0-9a-f]{3}$/.test(hex)) {
+    // Shorthand doubles each nibble: #abc is #aabbcc.
+    return [...hex].map((c) => c + c).join("").toUpperCase();
+  }
+  if (/^[0-9a-f]{6}$/.test(hex)) return hex.toUpperCase();
+  const to255 = (n) => Math.max(0, Math.min(255, Math.round(n)));
+  const hx = (n) => to255(n).toString(16).padStart(2, "0").toUpperCase();
+  let m = v.match(/^rgba?\(([^)]+)\)$/);
+  if (m) {
+    // Alpha is accepted and dropped: the model has no alpha channel, and
+    // silently keeping it would be a lie about what got stored.
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+    if (p.length >= 3 && p.slice(0, 3).every((n) => Number.isFinite(n))) {
+      return hx(p[0]) + hx(p[1]) + hx(p[2]);
+    }
+    return null;
+  }
+  m = v.match(/^hsla?\(([^)]+)\)$/);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean);
+    const h = ((parseFloat(p[0]) % 360) + 360) % 360;
+    const sat = parseFloat(p[1]) / 100;
+    const li = parseFloat(p[2]) / 100;
+    if (![h, sat, li].every(Number.isFinite)) return null;
+    const c = (1 - Math.abs(2 * li - 1)) * sat;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const mm = li - c / 2;
+    const seg = [[c,x,0],[x,c,0],[0,c,x],[0,x,c],[x,0,c],[c,0,x]][Math.floor(h / 60) % 6];
+    return hx((seg[0] + mm) * 255) + hx((seg[1] + mm) * 255) + hx((seg[2] + mm) * 255);
+  }
+  return null;
+}
+
+// Shade a colour toward white (positive tint) or black (negative), the same way
+// OOXML's `tint` attribute does — so the theme row's lighter/darker variants are
+// the ones the file itself would produce.
+function tintColor(hex, tint) {
+  const n = parseInt(hex, 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) =>
+    tint >= 0 ? c + (255 - c) * tint : c * (1 + tint),
+  );
+  return ch.map((c) => Math.round(c).toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
 function buildColorMenu(menu, onPick, noneLabel) {
   menu.textContent = "";
   const pick = (hex) => { pushRecent(hex); onPick(hex); menu.hidden = true; canvas.focus(); };
@@ -2084,6 +2135,22 @@ function buildColorMenu(menu, onPick, noneLabel) {
     menu.appendChild(el("div", "cm-label", "Recent"));
     menu.appendChild(grid(recentColors));
   }
+  // The workbook's own theme, not a stock imitation of one: the engine hands
+  // back the slots it read from `theme1.xml`. Slot order is OOXML's, and the
+  // first four are the light/dark background/text pairs — shown in the order
+  // Excel shows them so the swatches sit where people expect.
+  let theme = [];
+  try { theme = JSON.parse(wasm.theme_colors()); } catch {}
+  if (theme.length >= 10) {
+    const order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const base = order.map((i) => theme[i]).filter(Boolean);
+    menu.appendChild(el("div", "cm-label", "Theme"));
+    menu.appendChild(grid(base));
+    // Excel's tint ladder under the base row: lighter above, darker below.
+    for (const t of [0.6, 0.4, -0.25, -0.5]) {
+      menu.appendChild(grid(base.map((c) => tintColor(c, t))));
+    }
+  }
   menu.appendChild(el("div", "cm-label", "Standard"));
   menu.appendChild(grid(COLOR_PALETTE));
 
@@ -2095,15 +2162,42 @@ function buildColorMenu(menu, onPick, noneLabel) {
   hex.addEventListener("click", (e) => e.stopPropagation());
   const apply = el("button", "cm-apply", "Apply");
   const commitHex = () => {
-    const v = hex.value.trim().replace(/^#/, "");
-    if (/^[0-9a-fA-F]{6}$/.test(v)) pick(v.toUpperCase());
+    const parsed = parseColor(hex.value);
+    if (parsed) pick(parsed);
     else { hex.style.borderColor = "#e5484d"; }
   };
   hex.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.stopPropagation(); commitHex(); } });
+  hex.addEventListener("input", () => { hex.style.borderColor = ""; });
   apply.addEventListener("click", (e) => { e.stopPropagation(); commitHex(); });
   custom.appendChild(hex);
   custom.appendChild(apply);
   menu.appendChild(custom);
+
+  // Native colour dialog — the full HS/V surface, without shipping one.
+  const more = el("div", "cm-custom");
+  const native = el("input", "cm-native");
+  native.type = "color";
+  native.title = "More colours";
+  native.addEventListener("click", (e) => e.stopPropagation());
+  native.addEventListener("change", (e) => { e.stopPropagation(); pick(native.value.replace("#", "").toUpperCase()); });
+  more.appendChild(native);
+  // Eyedropper is Chromium-only, so it appears only where it works rather than
+  // sitting there dead.
+  if (window.EyeDropper) {
+    const drop = el("button", "cm-apply", "Pick from screen");
+    drop.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        const { sRGBHex } = await new window.EyeDropper().open();
+        const parsed = parseColor(sRGBHex);
+        if (parsed) pick(parsed);
+      } catch {
+        // The user dismissed the picker; nothing to report.
+      }
+    });
+    more.appendChild(drop);
+  }
+  menu.appendChild(more);
 }
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
