@@ -322,9 +322,15 @@ fn builtin_number_format(id: u32) -> Option<&'static str> {
         2 => "0.00",
         3 => "#,##0",
         4 => "#,##0.00",
+        5 => "$#,##0_);($#,##0)",
+        6 => "$#,##0_);[Red]($#,##0)",
+        7 => "$#,##0.00_);($#,##0.00)",
+        8 => "$#,##0.00_);[Red]($#,##0.00)",
         9 => "0%",
         10 => "0.00%",
         11 => "0.00E+00",
+        12 => "# ?/?",
+        13 => "# ??/??",
         14 => "mm-dd-yy",
         15 => "d-mmm-yy",
         16 => "d-mmm",
@@ -334,10 +340,52 @@ fn builtin_number_format(id: u32) -> Option<&'static str> {
         20 => "h:mm",
         21 => "h:mm:ss",
         22 => "m/d/yy h:mm",
+        37 => "#,##0_);(#,##0)",
+        38 => "#,##0_);[Red](#,##0)",
+        39 => "#,##0.00_);(#,##0.00)",
+        40 => "#,##0.00_);[Red](#,##0.00)",
+        41 => "_(* #,##0_);_(* (#,##0);_(* \"-\"_);_(@_)",
+        42 => "_($* #,##0_);_($* (#,##0);_($* \"-\"_);_(@_)",
+        43 => "_(* #,##0.00_);_(* (#,##0.00);_(* \"-\"??_);_(@_)",
+        44 => "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
         45 => "mm:ss",
         46 => "[h]:mm:ss",
         47 => "mmss.0",
+        48 => "##0.0E+0",
         49 => "@",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod builtin_fmt_tests {
+    use super::{builtin_number_format, resolve_format};
+    use std::collections::HashMap;
+
+    #[test]
+    fn currency_accounting_and_exponential_ids_resolve() {
+        // Previously-missing builtins that silently reverted to General.
+        assert_eq!(builtin_number_format(7), Some("$#,##0.00_);($#,##0.00)"));
+        assert_eq!(
+            builtin_number_format(44),
+            Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)")
+        );
+        assert_eq!(builtin_number_format(37), Some("#,##0_);(#,##0)"));
+        assert_eq!(builtin_number_format(48), Some("##0.0E+0"));
+        assert_eq!(builtin_number_format(12), Some("# ?/?"));
+        // Unknown ids still fall through.
+        assert_eq!(builtin_number_format(999), None);
+    }
+
+    #[test]
+    fn resolve_prefers_custom_then_builtin_and_drops_general() {
+        let custom = HashMap::from([(164, "0.000".to_owned())]);
+        assert_eq!(resolve_format(164, &custom), Some("0.000".to_owned()));
+        assert_eq!(
+            resolve_format(44, &custom),
+            Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)".to_owned())
+        );
+        // General / empty resolve to None (no explicit format needed).
+        assert_eq!(resolve_format(0, &custom), None);
+    }
 }
