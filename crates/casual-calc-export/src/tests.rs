@@ -455,3 +455,73 @@ fn filtered_rows_export_as_hidden_without_becoming_hand_hidden() {
         "filtered row lost its hidden flag: {row5:.80}"
     );
 }
+
+#[test]
+fn every_alignment_mode_round_trips_without_collapsing() {
+    use casual_calc_model::{CellRef, HAlign, Style, VAlign};
+
+    // `centerContinuous` used to import as `center` and vertical `justify` as
+    // `bottom`, so opening and saving quietly rewrote the file's alignment.
+    let cases = [
+        (HAlign::Left, "left"),
+        (HAlign::Center, "center"),
+        (HAlign::Right, "right"),
+        (HAlign::Fill, "fill"),
+        (HAlign::Justify, "justify"),
+        (HAlign::CenterContinuous, "centerContinuous"),
+        (HAlign::Distributed, "distributed"),
+    ];
+    for (i, (align, token)) in cases.iter().enumerate() {
+        let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+        let at = CellRef::new(i as u32, 0);
+        let id = workbook.intern_style(Style {
+            align: Some(*align),
+            ..Default::default()
+        });
+        let sheet = &mut workbook.sheets[0];
+        let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+        cell.style = Some(id);
+        sheet.cells.set(at, cell);
+
+        let written = write_workbook(&workbook).unwrap();
+        assert!(
+            xml_of(&written, "xl/styles.xml").contains(&format!("horizontal=\"{token}\"")),
+            "{align:?} did not write horizontal=\"{token}\""
+        );
+        let wb = import_package(written).unwrap().workbook;
+        let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+        assert_eq!(
+            wb.styles.get(round).unwrap().align,
+            Some(*align),
+            "{align:?} did not survive the round trip"
+        );
+    }
+
+    for (valign, token) in [
+        (VAlign::Top, "top"),
+        (VAlign::Middle, "center"),
+        (VAlign::Bottom, "bottom"),
+        (VAlign::Justify, "justify"),
+        (VAlign::Distributed, "distributed"),
+    ] {
+        let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+        let at = CellRef::new(0, 0);
+        let id = workbook.intern_style(Style {
+            valign: Some(valign),
+            ..Default::default()
+        });
+        let sheet = &mut workbook.sheets[0];
+        let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+        cell.style = Some(id);
+        sheet.cells.set(at, cell);
+
+        let written = write_workbook(&workbook).unwrap();
+        assert!(
+            xml_of(&written, "xl/styles.xml").contains(&format!("vertical=\"{token}\"")),
+            "{valign:?} did not write vertical=\"{token}\""
+        );
+        let wb = import_package(written).unwrap().workbook;
+        let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+        assert_eq!(wb.styles.get(round).unwrap().valign, Some(valign));
+    }
+}

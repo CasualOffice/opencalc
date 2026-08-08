@@ -818,6 +818,9 @@ function draw() {
       if (list.some((m) => c >= m.c0 && c <= m.c1)) occupied.add(r + "," + c);
     }
   }
+  // Cells carrying centre-across, so a label can find the extent of its run.
+  const contCols = new Set();
+  for (const it of items) if (it.a === "cont") contCols.add(it.r + "," + it.c);
   for (const it of items) {
     if (!it.t) continue;
     // Merged text belongs to the merge pass below, which lays it out across the
@@ -832,7 +835,12 @@ function draw() {
     const h = rowHAt(it.r);
     const y = textY(it, yTop, h, cellLineH(it));
     ctx.font = cellFont(it);
-    const align = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
+    // `it.a` carries the OOXML mode, not just an edge: fill, justify,
+    // centre-across and distributed all need their own layout. `align` is the
+    // edge each of them starts from.
+    const mode = it.a;
+    const align =
+      mode === "r" ? "right" : mode === "c" || mode === "cont" ? "center" : "left";
 
     // Wrapped cells: multi-line, clipped to the (auto-grown) cell — no overflow.
     if (it.w) {
@@ -851,8 +859,34 @@ function draw() {
       const tx = align === "right" ? x + w - 5 - ind : align === "center" ? x + w / 2 : x + 5 + ind;
       ctx.textAlign = align;
       const block = lines.length * lh;
-      let ly = (it.va === "t" ? yTop + 3 : it.va === "b" ? yTop + h - block - 3 : yTop + Math.max(0, (h - block) / 2)) + lh / 2;
-      for (const ln of lines) { ctx.fillText(ln, tx, ly); ly += lh; }
+      // Vertical justify/distribute spread the lines over the cell's height
+      // instead of stacking them at one edge. Justify puts the first line hard
+      // at the top and the last hard at the bottom; distribute leaves an equal
+      // gap outside them too.
+      const spread = it.va === "vj" || it.va === "vd";
+      const slack = Math.max(0, h - 6 - block);
+      const gaps = it.va === "vd" ? lines.length + 1 : Math.max(1, lines.length - 1);
+      const step = spread && lines.length > 1 ? slack / gaps : 0;
+      let ly =
+        (spread
+          ? yTop + 3 + (it.va === "vd" ? step : 0)
+          : it.va === "t"
+            ? yTop + 3
+            : it.va === "b"
+              ? yTop + h - block - 3
+              : yTop + Math.max(0, (h - block) / 2)) + lh / 2;
+      const stretch = mode === "just" || mode === "dist";
+      lines.forEach((ln, i) => {
+        // Justify stretches every line but the last; distributed stretches that
+        // one too, which is the only difference between the two.
+        const last = i === lines.length - 1;
+        if (stretch && !(last && mode === "just")) {
+          drawStretched(ln, x + 5 + ind, w - 10 - ind, ly);
+        } else {
+          ctx.fillText(ln, tx, ly);
+        }
+        ly += lh + step;
+      });
       ctx.restore();
       continue;
     }
@@ -883,6 +917,48 @@ function draw() {
         ctx.rotate((deg * Math.PI) / 180);
         ctx.fillText(String(it.t), 0, 0);
       }
+      ctx.restore();
+      continue;
+    }
+    // "Fill" repeats the text until the cell is full — Excel's separator-row
+    // idiom. Repeating is the mode, so it happens before any overflow scan.
+    if (mode === "fill") {
+      const unit = ctx.measureText(String(it.t)).width;
+      ctx.save();
+      if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
+      ctx.beginPath();
+      ctx.rect(x, yTop, w, h);
+      ctx.clip();
+      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.textAlign = "left";
+      if (unit > 0.5) {
+        // Guarded on a real width: a zero-width string would loop forever.
+        for (let fx = x + 5; fx < x + w; fx += unit) ctx.fillText(String(it.t), fx, y);
+      }
+      ctx.restore();
+      continue;
+    }
+    // "Center across selection": centre over this cell plus the run of empty
+    // cells to its right. It looks like a merge but merges nothing, so the
+    // cells underneath stay individually addressable.
+    if (mode === "cont") {
+      // The span is the run of *cells that also carry the mode* — that is how
+      // OOXML encodes the group, one `centerContinuous` per cell. Centring over
+      // every empty neighbour instead would fling a lone label into the middle
+      // of the viewport.
+      let last = it.c;
+      const inFroz = F.fc > 0 && it.c < F.fc;
+      const hi = inFroz ? F.fc : lastCol;
+      while (last + 1 < hi && geo.colOf.has(last + 1) && contCols.has(it.r + "," + (last + 1))) last += 1;
+      const spanR = colXAt(last) + colWAt(last);
+      ctx.save();
+      if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
+      ctx.beginPath();
+      ctx.rect(x, yTop, spanR - x, h);
+      ctx.clip();
+      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.textAlign = "center";
+      ctx.fillText(String(it.t), (x + spanR) / 2, y);
       ctx.restore();
       continue;
     }
@@ -1800,6 +1876,34 @@ function outlineToggleAt(px, py) {
   return outlineToggles.find(
     (t) => px >= t.x && px <= t.x + t.w && py >= t.y && py <= t.y + t.h,
   );
+}
+
+// Draw one line stretched to `width` by widening the gaps between words, the
+// way horizontal justify/distribute lay out. A line with nothing to stretch (one
+// word, or wider than the space already) is drawn plainly rather than having its
+// glyphs pulled apart.
+function drawStretched(line, x0, width, y) {
+  const words = String(line).split(/\s+/).filter(Boolean);
+  const prev = ctx.textAlign;
+  ctx.textAlign = "left";
+  if (words.length < 2) {
+    ctx.fillText(String(line), x0, y);
+    ctx.textAlign = prev;
+    return;
+  }
+  const ink = words.reduce((sum, wd) => sum + ctx.measureText(wd).width, 0);
+  const gap = (width - ink) / (words.length - 1);
+  if (gap <= 0) {
+    ctx.fillText(String(line), x0, y);
+    ctx.textAlign = prev;
+    return;
+  }
+  let wx = x0;
+  for (const wd of words) {
+    ctx.fillText(wd, wx, y);
+    wx += ctx.measureText(wd).width + gap;
+  }
+  ctx.textAlign = prev;
 }
 
 // The column/row index at a canvas x/y (for header clicks + hit-testing).
@@ -5486,10 +5590,20 @@ function wireEvents() {
           ["Left", () => setAlign("left")],
           ["Center", () => setAlign("center")],
           ["Right", () => setAlign("right")],
+          // The OOXML modes that are more than an edge. `centerContinuous` is
+          // Excel's "Center Across Selection" — it looks merged but merges
+          // nothing, so the cells underneath stay addressable.
+          ["Fill (repeat text)", () => setAlign("fill")],
+          ["Justify", () => setAlign("justify")],
+          ["Center across selection", () => setAlign("centerContinuous")],
+          ["Distributed", () => setAlign("distributed")],
+          ["Clear (General)", () => setAlign("")],
           "sep",
           ["Top", () => setValign("top")],
           ["Middle", () => setValign("middle")],
           ["Bottom", () => setValign("bottom")],
+          ["Justify (vertical)", () => setValign("justify")],
+          ["Distributed (vertical)", () => setValign("distributed")],
         ] },
         { sub: "Text overflow", items: [
           ["Overflow", () => setTextOverflow("overflow"), null, () => !fmtHas("w") && !fmtHas("cl")],

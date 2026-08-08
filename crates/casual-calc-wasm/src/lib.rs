@@ -1252,12 +1252,10 @@ pub fn session_set_valign(
     c1: u32,
     valign: &str,
 ) -> Result<(), JsError> {
-    let value = match valign {
-        "top" => Some(VAlign::Top),
-        "middle" | "center" => Some(VAlign::Middle),
-        "bottom" => Some(VAlign::Bottom),
-        _ => None,
-    };
+    // Defer to the model's own parser so this can never drift from the OOXML
+    // token set again; "middle" is the host's word for what OOXML calls
+    // "center", and an unrecognised token clears back to General.
+    let value = VAlign::from_ooxml(if valign == "middle" { "center" } else { valign });
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.valign = value)
 }
 
@@ -1660,14 +1658,27 @@ pub fn session_cells(
                 .or_else(|| style.and_then(|s| s.fill_color.clone()))
                 .unwrap_or_default();
             let has_border = style.is_some_and(|s| s.border.is_some());
-            if text.is_empty() && fill.is_empty() && !has_border {
+            // A `centerContinuous` cell earns its place in the payload even when
+            // it is otherwise bare: the run of such cells is exactly what the
+            // label is centred across, so the host has to be able to see them.
+            let center_across = style
+                .and_then(|s| s.align)
+                .is_some_and(|a| a == HAlign::CenterContinuous);
+            if text.is_empty() && fill.is_empty() && !has_border && !center_across {
                 continue;
             }
             // Explicit alignment wins; otherwise numbers/bools/errors go right.
+            // The modes that are more than an edge (fill, justify, centre-across,
+            // distributed) travel under their own token so the host can lay them
+            // out rather than guessing an edge from them.
             let align = match style.and_then(|s| s.align) {
                 Some(HAlign::Left) => "l",
                 Some(HAlign::Center) => "c",
                 Some(HAlign::Right) => "r",
+                Some(HAlign::Fill) => "fill",
+                Some(HAlign::Justify) => "just",
+                Some(HAlign::CenterContinuous) => "cont",
+                Some(HAlign::Distributed) => "dist",
                 None => match cell.value {
                     CellValue::Number(_) | CellValue::Bool(_) | CellValue::Error(_) => "r",
                     _ => "l",
@@ -1729,6 +1740,8 @@ pub fn session_cells(
                     VAlign::Top => "t",
                     VAlign::Middle => "m",
                     VAlign::Bottom => "b",
+                    VAlign::Justify => "vj",
+                    VAlign::Distributed => "vd",
                 };
                 extra.push_str(&format!(",\"va\":\"{t}\""));
             }
@@ -3356,6 +3369,8 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
                     VAlign::Top => "t",
                     VAlign::Middle => "m",
                     VAlign::Bottom => "b",
+                    VAlign::Justify => "vj",
+                    VAlign::Distributed => "vd",
                 };
                 parts.push(format!("\"va\":\"{t}\""));
             }
@@ -3737,10 +3752,16 @@ fn html_cell_css(style: &Style) -> String {
         css.push_str(&format!("background-color:#{c};"));
     }
     if let Some(a) = style.align {
+        // CSS has no `fill` or `centerContinuous`, so those fall back to the
+        // edge the text starts from — the receiving app gets the placement right
+        // even where it cannot reproduce the effect.
         let ta = match a {
-            HAlign::Left => "left",
-            HAlign::Center => "center",
-            HAlign::Right => "right",
+            HAlign::Justify | HAlign::Distributed => "justify",
+            other => match other.base_edge() {
+                HAlign::Center => "center",
+                HAlign::Right => "right",
+                _ => "left",
+            },
         };
         css.push_str(&format!("text-align:{ta};"));
     }

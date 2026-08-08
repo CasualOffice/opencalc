@@ -53,6 +53,9 @@ impl Borders {
 }
 
 /// Horizontal text alignment within a cell.
+///
+/// Covers the full OOXML `horizontal` set rather than the three obvious ones:
+/// a file that says `centerContinuous` must not come back out as `center`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HAlign {
@@ -62,6 +65,15 @@ pub enum HAlign {
     Center,
     /// Right-aligned.
     Right,
+    /// The text repeats to fill the cell's width.
+    Fill,
+    /// Wrapped lines stretch to both margins; the last line does not.
+    Justify,
+    /// Centered across this cell and the empty cells following it — Excel's
+    /// "Center Across Selection", which looks like a merge but merges nothing.
+    CenterContinuous,
+    /// Like [`HAlign::Justify`], but the final line is stretched too.
+    Distributed,
 }
 
 impl HAlign {
@@ -71,16 +83,35 @@ impl HAlign {
             HAlign::Left => "left",
             HAlign::Center => "center",
             HAlign::Right => "right",
+            HAlign::Fill => "fill",
+            HAlign::Justify => "justify",
+            HAlign::CenterContinuous => "centerContinuous",
+            HAlign::Distributed => "distributed",
         }
     }
 
-    /// Parse an OOXML `horizontal` token.
+    /// Parse an OOXML `horizontal` token. `general` is the absence of an
+    /// explicit alignment, so it maps to `None` rather than to a variant.
     pub fn from_ooxml(token: &str) -> Option<Self> {
         match token {
             "left" => Some(HAlign::Left),
-            "center" | "centerContinuous" => Some(HAlign::Center),
+            "center" => Some(HAlign::Center),
             "right" => Some(HAlign::Right),
+            "fill" => Some(HAlign::Fill),
+            "justify" => Some(HAlign::Justify),
+            "centerContinuous" => Some(HAlign::CenterContinuous),
+            "distributed" => Some(HAlign::Distributed),
             _ => None,
+        }
+    }
+
+    /// Which edge the text starts from once the mode's own effect is applied.
+    /// Renderers that cannot implement a mode fully still place it sensibly.
+    pub fn base_edge(self) -> Self {
+        match self {
+            HAlign::Center | HAlign::CenterContinuous => HAlign::Center,
+            HAlign::Right => HAlign::Right,
+            _ => HAlign::Left,
         }
     }
 }
@@ -95,6 +126,11 @@ pub enum VAlign {
     Middle,
     /// Bottom-aligned.
     Bottom,
+    /// Wrapped lines spread to fill the cell's height.
+    Justify,
+    /// Like [`VAlign::Justify`], with equal space above the first line and
+    /// below the last.
+    Distributed,
 }
 
 impl VAlign {
@@ -104,6 +140,8 @@ impl VAlign {
             VAlign::Top => "top",
             VAlign::Middle => "center",
             VAlign::Bottom => "bottom",
+            VAlign::Justify => "justify",
+            VAlign::Distributed => "distributed",
         }
     }
 
@@ -111,8 +149,10 @@ impl VAlign {
     pub fn from_ooxml(token: &str) -> Option<Self> {
         match token {
             "top" => Some(VAlign::Top),
-            "center" | "distributed" => Some(VAlign::Middle),
-            "bottom" | "justify" => Some(VAlign::Bottom),
+            "center" => Some(VAlign::Middle),
+            "bottom" => Some(VAlign::Bottom),
+            "justify" => Some(VAlign::Justify),
+            "distributed" => Some(VAlign::Distributed),
             _ => None,
         }
     }
