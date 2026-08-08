@@ -42,6 +42,8 @@ const SHEET_NAMESPACE: u64 = 0x5348_0000_0000_0000; // "SH"
 const SHARED_STRINGS_PART: &str = "xl/sharedStrings.xml";
 const STYLES_PART: &str = "xl/styles.xml";
 const THEME_PART: &str = "xl/theme/theme1.xml";
+/// Relationship type suffix binding a worksheet to its comments part.
+const COMMENTS_REL_SUFFIX: &str = "/comments";
 
 /// The result of importing a package: the model plus its compatibility report.
 #[derive(Debug)]
@@ -108,7 +110,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
 
     let mut sheet_ids = IdGenerator::new(SHEET_NAMESPACE);
     let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
-    for (idx, (name, part)) in sheet_meta.into_iter().enumerate() {
+    for (name, part) in sheet_meta {
         let xml = package.read_part(&part)?;
         let worksheet = parse_worksheet(&xml, &palette)?;
         let sheet_id = SheetId(sheet_ids.next_id());
@@ -307,10 +309,17 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             }
         }
 
-        // Cell comments live in a sibling `xl/comments{n}.xml` part, matching the
-        // one-based sheet index our writer uses.
-        let comments_part = format!("xl/comments{}.xml", idx + 1);
-        if package.contains(&comments_part) {
+        // Cell comments: follow the sheet's own relationships. Guessing
+        // `xl/comments{index+1}.xml` only agrees with files this writer
+        // produced — in anyone else's package the numbering follows which
+        // sheets *have* comments, so sheet 2's notes landed on sheet 1 (or on
+        // no sheet at all).
+        // (A comments part is only reachable through a relationship, so a sheet
+        // without one simply has no notes — there is nothing to fall back to.)
+        let comments_part = package
+            .related_part(&part, COMMENTS_REL_SUFFIX, &OoxmlLimits::default())?
+            .filter(|p| package.contains(p));
+        if let Some(comments_part) = comments_part {
             let cxml = package.read_part(&comments_part)?;
             for (reference, author, text) in parse_comments(&cxml)? {
                 if !text.is_empty()

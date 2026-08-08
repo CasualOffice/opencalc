@@ -97,6 +97,31 @@ impl SpreadsheetPackage {
         Ok(self.package.read_part(name)?)
     }
 
+    /// The part a relationship of `rel_type` points to from `part`, resolved
+    /// against `part`'s directory. `None` when `part` has no `.rels`, or no
+    /// relationship of that type.
+    ///
+    /// Use this rather than guessing a sibling's path: a package is free to
+    /// name and number its parts however it likes, and only the OPC graph says
+    /// which one belongs to which sheet.
+    pub fn related_part(
+        &mut self,
+        part: &str,
+        rel_type_suffix: &str,
+        limits: &OoxmlLimits,
+    ) -> Result<Option<String>, OoxmlError> {
+        let rels_part = rels_part_for(part);
+        if !self.package.contains(&rels_part) {
+            return Ok(None);
+        }
+        let xml = self.package.read_part(&rels_part)?;
+        let target = parse_relationships(&xml, limits)?
+            .into_iter()
+            .find(|r| r.rel_type.ends_with(rel_type_suffix))
+            .map(|r| resolve_target(part, &r.target));
+        Ok(target)
+    }
+
     /// Consume this inspector, returning the underlying package.
     pub fn into_package(self) -> Package {
         self.package

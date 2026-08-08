@@ -276,6 +276,35 @@ fn imports_outline_levels_collapsed_and_zoom() {
 }
 
 #[test]
+fn comments_bind_through_the_relationship_graph_not_part_numbering() {
+    // Only the second sheet has notes, so its part is `comments1.xml`. Guessing
+    // `comments{sheet index + 1}.xml` put those notes on sheet 1.
+    const WB2: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="First" sheetId="1" r:id="rId1"/><sheet name="Second" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    const WB2_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    const SHEET2_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/></Relationships>"#;
+    const COMMENTS: &[u8] = br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Ada</author></authors><commentList><comment ref="B2" authorId="0"><text><t>note on the second sheet</t></text></comment></commentList></comments>"#;
+    let sheet1 = sheet_with(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#);
+    let sheet2 = sheet_with(r#"<row r="2"><c r="B2"><v>2</v></c></row>"#);
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WB2),
+        ("xl/_rels/workbook.xml.rels", WB2_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet1),
+        ("xl/worksheets/sheet2.xml", &sheet2),
+        ("xl/worksheets/_rels/sheet2.xml.rels", SHEET2_RELS),
+        ("xl/comments1.xml", COMMENTS),
+    ]);
+    let import = import_package(bytes).unwrap();
+    assert!(
+        import.workbook.sheets[0].comments.is_empty(),
+        "sheet 1 has no comments part of its own"
+    );
+    assert_eq!(import.workbook.sheets[1].comments.len(), 1);
+    assert_eq!(import.workbook.sheets[1].comments[0].at, CellRef::new(1, 1));
+}
+
+#[test]
 fn theme_and_indexed_colors_resolve_to_rgb() {
     // Excel's built-in cell styles state colours as a theme slot plus a tint,
     // never as literal rgb — reading only `rgb` dropped all of them.
