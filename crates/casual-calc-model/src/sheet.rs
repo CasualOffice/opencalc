@@ -340,7 +340,13 @@ impl FilterOp {
 /// pattern like `*a*a*a*…` against a long string cannot blow the stack or go
 /// exponential — it stays O(text × pattern) in the worst case.
 pub fn wildcard_match(pattern: &str, text: &str, fold_case: bool) -> bool {
-    let fold = |s: &str| if fold_case { s.to_lowercase() } else { s.to_owned() };
+    let fold = |s: &str| {
+        if fold_case {
+            s.to_lowercase()
+        } else {
+            s.to_owned()
+        }
+    };
     let p: Vec<char> = fold(pattern).chars().collect();
     let t: Vec<char> = fold(text).chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
