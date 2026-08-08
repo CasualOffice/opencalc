@@ -25,6 +25,15 @@ impl Builder {
         self
     }
 
+    fn text(&mut self, at: (u32, u32), s: &str) -> &mut Self {
+        let id = self.wb.intern_string(s);
+        self.sheet.cells.set(
+            CellRef::new(at.0, at.1),
+            Cell::value(CellValue::InlineString(id)),
+        );
+        self
+    }
+
     fn formula(&mut self, at: (u32, u32), text: &str) -> &mut Self {
         let expr = parse(text).unwrap_or_else(|e| panic!("parse {text:?}: {e}"));
         let handle = self.wb.store_formula(expr);
@@ -213,6 +222,35 @@ fn countif_with_comparison() {
     assert_eq!(number_at(&wb, 0, 1), 3.0);
     assert_eq!(number_at(&wb, 1, 1), 2.0);
     assert_eq!(number_at(&wb, 2, 1), 2.0);
+}
+
+#[test]
+fn countif_sumif_wildcards() {
+    let mut b = Builder::new();
+    b.text((0, 0), "Apple") // A1
+        .text((1, 0), "Apricot") // A2
+        .text((2, 0), "Banana") // A3
+        .text((3, 0), "apple pie") // A4 (lowercase, longer)
+        .text((4, 0), "*star") // A5 (literal asterisk)
+        .number((0, 1), 1.0) // B1
+        .number((1, 1), 2.0) // B2
+        .number((2, 1), 4.0) // B3
+        .number((3, 1), 8.0) // B4
+        .number((4, 1), 16.0) // B5
+        .formula((0, 2), "COUNTIF(A1:A5,\"A*\")") // starts A (ci): 3
+        .formula((1, 2), "COUNTIF(A1:A5,\"*e\")") // ends e: Apple, apple pie = 2
+        .formula((2, 2), "COUNTIF(A1:A5,\"?pple\")") // one char + pple: Apple = 1
+        .formula((3, 2), "COUNTIF(A1:A5,\"<>A*\")") // not starting A: Banana, *star = 2
+        .formula((4, 2), "COUNTIF(A1:A5,\"~*star\")") // literal *star = 1
+        .formula((5, 2), "SUMIF(A1:A5,\"A*\",B1:B5)"); // 1+2+8 = 11
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(number_at(&wb, 0, 2), 3.0);
+    assert_eq!(number_at(&wb, 1, 2), 2.0);
+    assert_eq!(number_at(&wb, 2, 2), 1.0);
+    assert_eq!(number_at(&wb, 3, 2), 2.0);
+    assert_eq!(number_at(&wb, 4, 2), 1.0);
+    assert_eq!(number_at(&wb, 5, 2), 11.0);
 }
 
 #[test]

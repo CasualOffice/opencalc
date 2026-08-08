@@ -591,8 +591,24 @@ fn parse_criteria(v: &Value) -> (CritOp, String) {
 }
 
 /// Does `cell` satisfy `op operand`? Numeric when both sides are numeric,
-/// otherwise a case-insensitive text comparison (Excel semantics).
+/// otherwise a case-insensitive text comparison (Excel semantics). For `=`/`<>`
+/// criteria whose operand contains an unescaped `*` or `?`, Excel wildcard
+/// matching is used and applies to **text** cells only.
 fn criterion_matches(cell: &Value, op: CritOp, operand: &str) -> bool {
+    // Wildcard text matching (Excel): `*` = any run, `?` = one char, `~` escapes
+    // the next `*`/`?`/`~`. Wildcards only match text cells, not numbers/blanks.
+    if matches!(op, CritOp::Eq | CritOp::Ne) && has_wildcard(operand) {
+        let matched = match cell {
+            Value::Text(s) => wildcard_match(operand, s),
+            _ => false,
+        };
+        return if matches!(op, CritOp::Ne) {
+            !matched
+        } else {
+            matched
+        };
+    }
+
     let operand_num = operand.trim().parse::<f64>().ok();
     let cell_num = match cell {
         Value::Number(n) => Some(*n),
@@ -604,7 +620,8 @@ fn criterion_matches(cell: &Value, op: CritOp, operand: &str) -> bool {
         (Some(a), Some(b)) => a.partial_cmp(&b),
         _ => {
             let a = cell.as_text().unwrap_or_default().to_uppercase();
-            let b = operand.to_uppercase();
+            // Unescape `~*`/`~?`/`~~` so a criterion can match a literal wildcard.
+            let b = unescape_criteria(operand).to_uppercase();
             Some(a.cmp(&b))
         }
     };
@@ -619,6 +636,99 @@ fn criterion_matches(cell: &Value, op: CritOp, operand: &str) -> bool {
         CritOp::Lt => ordering == Ordering::Less,
         CritOp::Le => ordering != Ordering::Greater,
     }
+}
+
+/// True if `s` contains a `*` or `?` that is not escaped by a preceding `~`.
+fn has_wildcard(s: &str) -> bool {
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '~' => {
+                chars.next(); // the escaped char is literal
+            }
+            '*' | '?' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Remove `~` escapes before `*`/`?`/`~`, leaving other characters untouched.
+fn unescape_criteria(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('~', Some(&n)) if matches!(n, '*' | '?' | '~') => {
+                out.push(n);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Case-insensitive Excel wildcard match of `pattern` against `text`.
+/// `*` matches any run of characters (including empty), `?` matches exactly one
+/// character, and `~` escapes the following `*`/`?`/`~` to a literal.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    enum Tok {
+        Any,
+        One,
+        Lit(char),
+    }
+    // Fold case up front so both pattern literals and text compare case-insensitively.
+    let pat_up = pattern.to_uppercase();
+    let mut toks = Vec::new();
+    let mut chars = pat_up.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '~' => match chars.peek() {
+                Some(&n @ ('*' | '?' | '~')) => {
+                    toks.push(Tok::Lit(n));
+                    chars.next();
+                }
+                _ => toks.push(Tok::Lit('~')),
+            },
+            '*' => toks.push(Tok::Any),
+            '?' => toks.push(Tok::One),
+            other => toks.push(Tok::Lit(other)),
+        }
+    }
+
+    let text: Vec<char> = text.to_uppercase().chars().collect();
+    // Classic linear-time backtracking wildcard match.
+    let (mut ti, mut pi) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None; // (pattern idx after '*', text idx)
+    while ti < text.len() {
+        match toks.get(pi) {
+            Some(Tok::One) => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(Tok::Lit(c)) if *c == text[ti] => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(Tok::Any) => {
+                star = Some((pi + 1, ti));
+                pi += 1;
+            }
+            _ => match star {
+                Some((sp, st)) => {
+                    pi = sp;
+                    ti = st + 1;
+                    star = Some((sp, st + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    while matches!(toks.get(pi), Some(Tok::Any)) {
+        pi += 1;
+    }
+    pi == toks.len()
 }
 
 // --- Range flattening -----------------------------------------------------
