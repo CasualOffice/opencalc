@@ -3172,7 +3172,251 @@ function wireEvents() {
   document.addEventListener("click", closeFlyouts);
   reflowToolbar();
 
+  buildMenuBar();
+
   window.addEventListener("resize", () => { resize(); reflowToolbar(); });
+
+  // ---- Application menu bar (File / Edit / View / …) -----------------------
+  // Declarative menu → item table. Every item delegates to an existing handler
+  // or toolbar control, so there are no parallel implementations to drift.
+  function buildMenuBar() {
+    const bar = document.getElementById("menubar");
+    if (!bar) return;
+    const q = (sel) => document.querySelector(sel);
+    const clickEl = (sel) => () => { const n = q(sel); if (n) n.click(); };
+    const rng = () => effectiveRange();
+    const fmtHas = (k) => {
+      try { return !!JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col))[k]; }
+      catch { return false; }
+    };
+    const gridOn = () => { try { return !wasm.session_gridlines_hidden(state.sheet); } catch { return true; } };
+    const clearContents = () => {
+      try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+      draw();
+    };
+    const nf = (code) => () => setNumberFormat(code);
+
+    const showModal = (title, html) => {
+      document.getElementById("oc-modal-title").textContent = title;
+      document.getElementById("oc-modal-body").innerHTML = html;
+      document.getElementById("oc-modal").hidden = false;
+    };
+    function showShortcuts() {
+      const rows = [
+        ["Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"],
+        ["Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"],
+        ["Bold / Italic / Underline", "Ctrl+B / Ctrl+I / Ctrl+U"],
+        ["Find & replace", "Ctrl+F"],
+        ["Select all", "Ctrl+A"],
+        ["Insert / delete line", "Ctrl++ / Ctrl+−"],
+        ["Edit cell", "F2 / Enter"],
+        ["Name manager", "F3"],
+      ];
+      showModal("Keyboard shortcuts", rows.map(([a, b]) =>
+        `<div class="kb-row"><span>${a}</span><span>${b.replace(/(\S+)/g, "<kbd>$1</kbd>").replace(/<kbd>\/<\/kbd>/g, "/")}</span></div>`).join(""));
+    }
+    function showAbout() {
+      showModal("About OpenCalc",
+        `<p>OpenCalc — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
+         <p style="margin-top:10px;color:var(--muted)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
+    }
+
+    const MENUS = [
+      ["File", [
+        ["New", clickEl("#tb-new")],
+        ["Open…", clickEl("#tb-open")],
+        { sub: "Download", items: [
+          ["Excel (.xlsx)", () => saveAs("xlsx")],
+          ["CSV (.csv)", () => saveAs("csv")],
+          ["Tab-separated (.tsv)", () => saveAs("tsv")],
+          ["Pipe-separated (.psv)", () => saveAs("psv")],
+        ] },
+      ]],
+      ["Edit", [
+        ["Undo", doUndo, "Ctrl+Z"],
+        ["Redo", doRedo, "Ctrl+Shift+Z"],
+        "sep",
+        ["Cut", doCut, "Ctrl+X"],
+        ["Copy", doCopy, "Ctrl+C"],
+        ["Paste", doPaste, "Ctrl+V"],
+        "sep",
+        ["Find & replace…", openFind, "Ctrl+F"],
+        ["Select all", selectAll, "Ctrl+A"],
+        "sep",
+        { sub: "Clear", items: [
+          ["Values", clearContents],
+          ["Formatting", clearFormats],
+          ["All", clearAll],
+        ] },
+      ]],
+      ["View", [
+        { sub: "Freeze", items: [
+          ["Up to selection", clickEl('#freeze-menu [data-fz="sel"]')],
+          ["Top row", clickEl('#freeze-menu [data-fz="row"]')],
+          ["First column", clickEl('#freeze-menu [data-fz="col"]')],
+          ["Unfreeze", clickEl('#freeze-menu [data-fz="none"]')],
+        ] },
+        ["Gridlines", () => { try { wasm.session_set_gridlines_hidden(state.sheet, gridOn()); } catch {} draw(); }, null, gridOn],
+        "sep",
+        ["Settings…", clickEl("#tb-settings")],
+      ]],
+      ["Insert", [
+        ["Rows above", () => tryEdit(() => { const r = rng(); wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
+        ["Rows below", () => tryEdit(() => { const r = rng(); wasm.session_insert_rows(state.sheet, r.r1 + 1, r.r1 - r.r0 + 1); })],
+        ["Columns left", () => tryEdit(() => { const r = rng(); wasm.session_insert_columns(state.sheet, r.c0, r.c1 - r.c0 + 1); })],
+        ["Columns right", () => tryEdit(() => { const r = rng(); wasm.session_insert_columns(state.sheet, r.c1 + 1, r.c1 - r.c0 + 1); })],
+        "sep",
+        ["Delete rows", () => tryEdit(() => { const r = rng(); wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
+        ["Delete columns", () => tryEdit(() => { const r = rng(); wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1); })],
+        "sep",
+        ["Note", clickEl("#tb-note")],
+      ]],
+      ["Format", [
+        ["Bold", clickEl("#tb-bold"), "Ctrl+B", () => fmtHas("b")],
+        ["Italic", clickEl("#tb-italic"), "Ctrl+I", () => fmtHas("i")],
+        ["Underline", clickEl("#tb-underline"), "Ctrl+U", () => fmtHas("u")],
+        ["Strikethrough", clickEl("#tb-strike"), null, () => fmtHas("st")],
+        "sep",
+        { sub: "Alignment", items: [
+          ["Left", () => setAlign("left")],
+          ["Center", () => setAlign("center")],
+          ["Right", () => setAlign("right")],
+          "sep",
+          ["Top", () => setValign("top")],
+          ["Middle", () => setValign("middle")],
+          ["Bottom", () => setValign("bottom")],
+        ] },
+        ["Wrap text", clickEl("#tb-wrap"), null, () => fmtHas("w")],
+        ["Merge cells", clickEl("#tb-merge")],
+        "sep",
+        { sub: "Number", items: [
+          ["Automatic", nf("")],
+          ["Number (0.00)", nf("0.00")],
+          ["Thousands (#,##0)", nf("#,##0")],
+          ["Percent (0%)", nf("0%")],
+          ["Currency", nf("$#,##0.00")],
+          ["Short date", nf("yyyy-mm-dd")],
+          ["Time", nf("h:mm:ss AM/PM")],
+          ["Scientific", nf("0.00E+00")],
+          ["Text", nf("@")],
+        ] },
+        ["Conditional formatting…", clickEl("#tb-cf")],
+        "sep",
+        ["Clear formatting", clearFormats],
+      ]],
+      ["Data", [
+        { sub: "Sort range", items: [
+          ["A → Z", clickEl('#sort-menu [data-sort="asc"]')],
+          ["Z → A", clickEl('#sort-menu [data-sort="desc"]')],
+        ] },
+        ["Filter", clickEl("#tb-filter")],
+        ["Data validation…", clickEl("#tb-dv")],
+        "sep",
+        ["Hide rows", () => tryEdit(() => { const r = rng(); wasm.session_hide_rows(state.sheet, r.r0, r.r1); })],
+        ["Hide columns", () => tryEdit(() => { const r = rng(); wasm.session_hide_cols(state.sheet, r.c0, r.c1); })],
+        ["Unhide rows/columns", () => tryEdit(() => { const r = rng(); wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); })],
+      ]],
+      ["Tools", [
+        ["Settings…", clickEl("#tb-settings")],
+        ["Name manager…", () => openNameManager(160, 120)],
+      ]],
+      ["Help", [
+        ["Keyboard shortcuts", showShortcuts],
+        ["About OpenCalc", showAbout],
+      ]],
+    ];
+
+    const drops = [];
+    const subs = [];
+    const topBtns = [];
+    let openIdx = -1;
+    const closeSubs = () => { for (const s of subs) s.hidden = true; };
+    const closeMenus = () => {
+      for (const d of drops) d.hidden = true;
+      closeSubs();
+      for (const b of topBtns) b.setAttribute("aria-expanded", "false");
+      openIdx = -1;
+    };
+    const positionSub = (sub, btn) => {
+      const r = btn.getBoundingClientRect();
+      sub.style.left = "0px"; sub.style.top = "0px";
+      const sw = sub.offsetWidth, sh = sub.offsetHeight;
+      let left = r.right - 3, top = r.top - 5;
+      if (left + sw > window.innerWidth - 4) left = Math.max(4, r.left - sw + 3);
+      if (top + sh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - 4 - sh);
+      sub.style.left = left + "px"; sub.style.top = top + "px";
+    };
+    const runItem = (action) => {
+      try { action && action(); } catch (err) { status.textContent = `error: ${err}`; }
+      closeMenus();
+    };
+    const renderItems = (container, items, isTop) => {
+      for (const it of items) {
+        if (it === "sep") {
+          const s = document.createElement("div"); s.className = "menu-sep"; container.appendChild(s); continue;
+        }
+        if (it.sub) {
+          const b = document.createElement("button");
+          b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span><span class="mi-caret">&#9656;</span>`;
+          b.querySelector(".mi-label").textContent = it.sub;
+          const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
+          document.body.appendChild(sub); subs.push(sub);
+          renderItems(sub, it.items, false);
+          const openSub = () => { closeSubs(); positionSub(sub, b); sub.hidden = false; };
+          b.addEventListener("mouseenter", openSub);
+          b.addEventListener("click", (e) => { e.stopPropagation(); openSub(); });
+          container.appendChild(b); continue;
+        }
+        const [label, action, key, check] = it;
+        const b = document.createElement("button");
+        b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span>${key ? `<span class="mi-key">${key}</span>` : ""}`;
+        b.querySelector(".mi-label").textContent = label;
+        if (check) b._check = check;
+        if (isTop) b.addEventListener("mouseenter", closeSubs);
+        b.addEventListener("click", (e) => { e.stopPropagation(); runItem(action); });
+        container.appendChild(b);
+      }
+    };
+
+    const openMenu = (i) => {
+      closeMenus();
+      for (const m of menus) m.hidden = true; // close toolbar popovers
+      closeFlyouts();
+      const drop = drops[i];
+      // refresh checkmarks against the focus cell / view state
+      for (const b of drop.querySelectorAll("button")) {
+        if (b._check) b.querySelector(".mi-check").textContent = b._check() ? "✓" : "";
+      }
+      drop.hidden = false;
+      anchorMenu(drop, topBtns[i]);
+      topBtns[i].setAttribute("aria-expanded", "true");
+      openIdx = i;
+    };
+
+    MENUS.forEach(([name, items], i) => {
+      const btn = document.createElement("button");
+      btn.className = "menu-top"; btn.textContent = name;
+      btn.setAttribute("aria-haspopup", "true"); btn.setAttribute("aria-expanded", "false");
+      const drop = document.createElement("div"); drop.className = "menu-drop popmenu"; drop.hidden = true;
+      document.body.appendChild(drop); renderItems(drop, items, true);
+      btn.addEventListener("click", (e) => { e.stopPropagation(); openIdx === i ? closeMenus() : openMenu(i); });
+      btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
+      bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
+    });
+
+    document.addEventListener("click", (e) => {
+      if (openIdx < 0) return;
+      const inMenu = e.target.closest(".menubar, .menu-drop, .menu-sub");
+      if (!inMenu) closeMenus();
+    });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenus(); });
+
+    // Help modal close wiring.
+    const modal = document.getElementById("oc-modal");
+    document.getElementById("oc-modal-x").addEventListener("click", () => { modal.hidden = true; });
+    modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") modal.hidden = true; });
+  }
   // Esc closes the tool panel (when no context menu is open and not editing).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && activePanel && !state.editing && !document.getElementById("sheet-ctx")) {

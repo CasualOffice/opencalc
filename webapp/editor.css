@@ -140,6 +140,60 @@ body {
 }
 /* Sub-menu-wrap buttons inside a flyout keep their normal icon-button size. */
 .tb-flyout .menu-wrap { display: inline-flex; }
+
+/* ---- Application menu bar (File / Edit / View / …) ---- */
+.menubar {
+  display: flex; align-items: stretch; gap: 1px;
+  height: 30px; padding: 0 8px; flex: 0 0 auto;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  -webkit-user-select: none; user-select: none;
+}
+.menu-top {
+  border: 0; background: transparent; color: var(--fg);
+  font: inherit; font-size: 13px; padding: 0 10px; border-radius: 6px;
+  cursor: pointer; display: inline-flex; align-items: center;
+}
+.menu-top:hover, .menu-top[aria-expanded="true"] { background: var(--surface); }
+/* A menu dropdown / submenu reuses .popmenu chrome. Items are full-width rows. */
+.menu-drop { min-width: 208px; }
+.menu-drop button, .menu-sub button {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  text-align: left; white-space: nowrap;
+}
+/* Left rail holds the ✓ for toggle items so labels stay aligned. */
+.mi-check { width: 14px; flex: 0 0 14px; color: var(--accent); font-size: 12px; }
+.mi-label { flex: 1 1 auto; }
+.mi-key { color: var(--faint); font-size: 11.5px; margin-left: 18px; }
+.mi-caret { color: var(--muted); margin-left: 8px; }
+.menu-drop .menu-sep, .menu-sub .menu-sep {
+  height: 1px; margin: 4px 6px; background: var(--border); border: 0;
+}
+.menu-sub { min-width: 176px; }
+
+/* ---- Lightweight modal (Help ▸ shortcuts / about) ---- */
+.oc-modal {
+  position: fixed; inset: 0; z-index: 300; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .38);
+}
+.oc-modal[hidden] { display: none; }
+.oc-modal-box {
+  position: relative; background: var(--card); color: var(--fg);
+  border: 1px solid var(--border-2); border-radius: 14px;
+  padding: 22px 24px; max-width: min(92vw, 460px); max-height: 80vh;
+  overflow: auto; box-shadow: var(--shadow-pop);
+}
+.oc-modal-x {
+  position: absolute; top: 10px; right: 12px; border: 0; background: transparent;
+  color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer;
+}
+.oc-modal-title { margin: 0 0 12px; font-size: 16px; }
+.oc-modal-body { font-size: 13px; line-height: 1.55; }
+.oc-modal-body kbd {
+  font: 11.5px var(--mono); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 5px; padding: 1px 6px;
+}
+.oc-modal-body .kb-row { display: flex; justify-content: space-between; gap: 20px; padding: 3px 0; }
 /* A grouped-pill cluster of icon buttons. */
 .tb-group {
   display: flex; align-items: center; gap: 2px; padding: 2px;
