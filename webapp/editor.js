@@ -26,6 +26,7 @@ const state = {
   headerDrag: null, // "row" | "col" | null — which axis a header drag extends
   editing: false,
   resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
+  freezeDrag: null, // active freeze-divider drag: { axis:"col"|"row", px, py }
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
@@ -131,7 +132,9 @@ function mergeInSel(m) {
 }
 
 // The canvas font string for a cell (family + size from its style, or defaults).
-function cellPx(it) { return it.fs ? Math.round((it.fs * 4) / 3) : 13; }
+// Font size in px: the cell's own size (pt→px at 96dpi), else the 11pt default
+// the toolbar reports for an unstyled cell (kept in sync so "11" isn't a lie).
+function cellPx(it) { return Math.round(((it.fs || 11) * 4) / 3); }
 // Cache the CSS font stack per requested family. font_css_stack (wasm) routes a
 // name through the shared substitution table (Calibri→Carlito, Arial→Liberation
 // Sans, …) + the bundled @font-face fonts, so a cell's font renders as its
@@ -776,15 +779,6 @@ function draw() {
   }
   ctx.restore(); // end body clip
 
-  // Freeze divider lines (a touch darker than gridlines).
-  if (frozen) {
-    ctx.strokeStyle = colors.muted;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    if (F.fc) { ctx.moveTo(F.bodyX0 - 0.5, HH); ctx.lineTo(F.bodyX0 - 0.5, v.h); }
-    if (F.fr) { ctx.moveTo(HW, F.bodyY0 - 0.5); ctx.lineTo(v.w, F.bodyY0 - 0.5); }
-    ctx.stroke();
-  }
 
   // Which columns/rows are covered by the current selection (for header tint).
   const rr = selRect();
@@ -834,12 +828,68 @@ function draw() {
   if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
   drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
   drawHiddenMarkers();
+  drawFreezeDividers(v);
 
   updateNameBox();
   updateScrollbars(v);
   updateStats();
   if (wasm) refreshFormulaBar();
   if (wasm && activePanel) refreshPanel();
+}
+
+const FREEZE_GRAB = 4; // px proximity to the freeze divider that arms a drag
+
+// Prominent, draggable freeze dividers (Sheets-style), drawn on top of the
+// headers. During a drag the line follows the pointer as a live preview.
+function drawFreezeDividers(v) {
+  const F = state.freeze;
+  const drag = state.freezeDrag;
+  const showCol = F.fc > 0 || (drag && drag.axis === "col");
+  const showRow = F.fr > 0 || (drag && drag.axis === "row");
+  if (!showCol && !showRow) return;
+  ctx.save();
+  const line = colors.freezeLine || "#5f6368";
+  if (showCol) {
+    const x = drag && drag.axis === "col" ? drag.px : F.bodyX0;
+    const g = ctx.createLinearGradient(x, 0, x + 7, 0);
+    g.addColorStop(0, "rgba(60,64,72,0.20)"); g.addColorStop(1, "rgba(60,64,72,0)");
+    ctx.fillStyle = g; ctx.fillRect(x, 0, 7, v.h);
+    ctx.strokeStyle = line; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x - 1, 0); ctx.lineTo(x - 1, v.h); ctx.stroke();
+  }
+  if (showRow) {
+    const y = drag && drag.axis === "row" ? drag.py : F.bodyY0;
+    const g = ctx.createLinearGradient(0, y, 0, y + 7);
+    g.addColorStop(0, "rgba(60,64,72,0.20)"); g.addColorStop(1, "rgba(60,64,72,0)");
+    ctx.fillStyle = g; ctx.fillRect(0, y, v.w, 7);
+    ctx.strokeStyle = line; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, y - 1); ctx.lineTo(v.w, y - 1); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Is the pointer on a freeze divider (draggable to change or remove the freeze)?
+// Only in the body region (col divider below the column header, row divider
+// right of the row header), so it never conflicts with header-border resize.
+function freezeHit(px, py) {
+  const F = state.freeze;
+  if (F.fc > 0 && py > HH && Math.abs(px - F.bodyX0) <= FREEZE_GRAB) return { axis: "col" };
+  if (F.fr > 0 && px > HW && Math.abs(py - F.bodyY0) <= FREEZE_GRAB) return { axis: "row" };
+  return null;
+}
+
+// Commit a freeze-divider drag: the new frozen count is the line/column under
+// the pointer; dragging into the header (px<=HW / py<=HH) removes that axis.
+function commitFreezeDrag(axis, px, py) {
+  const F = state.freeze;
+  let fr = F.fr, fc = F.fc;
+  if (axis === "col") {
+    fc = px <= HW + 2 ? 0 : Math.max(0, colAtX(px));
+  } else {
+    fr = py <= HH + 2 ? 0 : Math.max(0, rowAtY(py));
+  }
+  try { wasm.session_set_freeze(state.sheet, fr, fc); } catch (e) { status.textContent = `error: ${e}`; }
+  status.textContent = (fc || fr) ? "freeze updated" : "unfrozen";
 }
 
 // Show Sum/Avg/Count of the selection (only for a multi-cell selection), like
@@ -2644,6 +2694,9 @@ function wireEvents() {
       canvas.focus();
       return;
     }
+    // Dragging the freeze divider (in the body) changes/removes the freeze.
+    const fh = freezeHit(px, py);
+    if (fh) { endInline(); state.freezeDrag = { axis: fh.axis, px, py }; return; }
     // A header boundary starts a column/row resize instead of a selection.
     const hb = boundaryAt(px, py);
     if (hb) {
@@ -2698,6 +2751,7 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    if (state.freezeDrag) { state.freezeDrag.px = px; state.freezeDrag.py = py; draw(); return; }
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
     if (formulaRefDrag) {
@@ -2747,8 +2801,11 @@ function wireEvents() {
       canvas.style.cursor = "crosshair";
       return;
     }
-    const hb = boundaryAt(px, py);
-    canvas.style.cursor = hb ? (hb.axis === "col" ? "col-resize" : "row-resize") : "cell";
+    const fh = freezeHit(px, py);
+    const hb = fh ? null : boundaryAt(px, py);
+    canvas.style.cursor = (fh || hb)
+      ? ((fh || hb).axis === "col" ? "col-resize" : "row-resize")
+      : "cell";
     // Comment tooltip on hover.
     const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
     if (hit && commentCells.has(hit.row + "," + hit.col)) {
@@ -2765,6 +2822,14 @@ function wireEvents() {
     }
   });
   window.addEventListener("mouseup", () => {
+    if (state.freezeDrag) {
+      const d = state.freezeDrag;
+      state.freezeDrag = null;
+      commitFreezeDrag(d.axis, d.px, d.py);
+      renderTabs();
+      draw();
+      return;
+    }
     if (formulaRefDrag) {
       const caret = formulaRefDrag.end;
       formulaRefDrag = null;
