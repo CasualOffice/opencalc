@@ -866,3 +866,35 @@ textarea.inline-edit.tinted::selection {
 .fc-check { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--fg); }
 .fc-borders { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
 .cf-preset.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Name box + its defined-names caret. */
+.name-box { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
+.name-caret {
+  position: absolute; right: 2px; width: 18px; height: 22px; padding: 0; border: 0;
+  background: none; color: var(--icon); cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+}
+.name-caret:hover { color: var(--fg); }
+.formula-bar .name-box .cell-ref { padding-right: 20px; }
+
+/* `fx` is a button now, not decoration; plus the expand caret. */
+button.fx {
+  border: 0; background: none; color: var(--muted); font-style: italic;
+  font-size: 13px; cursor: pointer; padding: 2px 4px; border-radius: 5px;
+}
+button.fx:hover { color: var(--fg); background: var(--card); }
+.fx-expand {
+  border: 0; background: none; color: var(--icon); cursor: pointer; padding: 2px;
+  display: flex; align-items: center;
+}
+.fx-expand[aria-expanded="true"] svg { transform: rotate(180deg); }
+/* Expanded formula bar: a multi-line box for formulas that do not fit on one. */
+.formula-bar.expanded { height: auto; align-items: flex-start; padding-top: 6px; padding-bottom: 6px; }
+.formula-bar.expanded input#formula-input { height: 84px; }
+.fn-list { max-height: 260px; overflow-y: auto; margin: 8px 0; display: flex; flex-direction: column; gap: 2px; }
+.fn-row {
+  text-align: left; padding: 5px 8px; border: 0; border-radius: 5px; background: none;
+  color: var(--fg); font-size: 13px; cursor: pointer;
+}
+.fn-row:hover { background: var(--card); }
+.fn-row.on { background: var(--accent); color: #fff; }

@@ -311,8 +311,16 @@
     </div>
 
     <div class="formula-bar">
-      <input class="cell-ref" id="cell-ref" spellcheck="false" title="Name box — type a cell (B12) or range (A1:C5) and press Enter" aria-label="Name box" value="A1" />
-      <span class="fx" aria-hidden="true">fx</span>
+      <span class="name-box">
+        <input class="cell-ref" id="cell-ref" spellcheck="false" title="Name box — a cell (B12), range (A1:C5), column band (A:C), row band (2:5), Sheet2!B7, or a comma-separated list" aria-label="Name box" value="A1" />
+        <button id="name-box-list" class="name-caret" title="Defined names" aria-label="Defined names" aria-haspopup="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+      </span>
+      <button class="fx" id="fx-insert" title="Insert function" aria-label="Insert function">fx</button>
+      <button class="fx-expand" id="fx-expand" title="Expand the formula bar" aria-label="Expand the formula bar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
       <input id="formula-input" type="text" spellcheck="false" placeholder="value or =formula" />
     </div>
 

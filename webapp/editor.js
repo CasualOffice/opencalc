@@ -1694,6 +1694,7 @@ function select(row, col) {
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
   state.ranges = [];
+  extending = false;
   resetNavRuns();
   ensureVisible();
   draw();
@@ -1745,6 +1746,7 @@ function addRowRange(r) {
 function extend(row, col) {
   state.sel = { row: Math.max(0, row), col: Math.max(0, col) };
   state.selKind = "cells";
+  extending = true;
   ensureVisible();
   draw();
 }
@@ -4671,11 +4673,18 @@ function updateCellMode() {
   if (modeEl.textContent !== mode) modeEl.textContent = mode;
 }
 
+// True while the selection is being extended from the keyboard; cleared the
+// moment the selection is set outright.
+let extending = false;
+
 function updateNameBox() {
   if (document.activeElement === cellRef) return;
   const r = selRect();
   const rows = r.r1 - r.r0 + 1, cols = r.c1 - r.c0 + 1;
-  if ((state.dragging || formulaRefDrag) && (rows > 1 || cols > 1)) {
+  // The size readout belongs to *extending*, however it is being done — dragging
+  // or Shift+arrow. It previously only appeared for the mouse, so a keyboard
+  // selection gave no idea how big it had got.
+  if ((state.dragging || formulaRefDrag || extending) && (rows > 1 || cols > 1)) {
     cellRef.value = `${rows}R x ${cols}C`;
   } else {
     cellRef.value = A1(state.sel.row, state.sel.col);
@@ -4699,24 +4708,174 @@ function parseA1Cell(s) {
   return col === null || row < 0 || !Number.isFinite(row) ? null : { row, col };
 }
 // Jump to a typed cell (B12) or range (A1:C5). Unknown names report to status.
+// Parse what the Name Box accepts into a selection box: `B7`, `A1:C9`, a whole
+// column band `A:C`, or a whole row band `2:5`. Returns null if it is not one of
+// those — a defined name, most likely, which the caller tries next.
+function parseNameRange(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+  const b = usedBounds();
+  const wholeCols = /^\$?([A-Za-z]{1,3})\s*:\s*\$?([A-Za-z]{1,3})$/.exec(t);
+  if (wholeCols) {
+    const a = colFromName(wholeCols[1]), z = colFromName(wholeCols[2]);
+    if (a === null || z === null) return null;
+    return { r0: 0, c0: Math.min(a, z), r1: Math.max(0, b.rows - 1), c1: Math.max(a, z), kind: "cols" };
+  }
+  const wholeRows = /^\$?(\d+)\s*:\s*\$?(\d+)$/.exec(t);
+  if (wholeRows) {
+    const a = parseInt(wholeRows[1], 10) - 1, z = parseInt(wholeRows[2], 10) - 1;
+    if (a < 0 || z < 0) return null;
+    return { r0: Math.min(a, z), c0: 0, r1: Math.max(a, z), c1: Math.max(0, b.cols - 1), kind: "rows" };
+  }
+  const parts = t.split(":");
+  if (parts.length === 2) {
+    const p = parseA1Cell(parts[0]), q = parseA1Cell(parts[1]);
+    if (!p || !q) return null;
+    return {
+      r0: Math.min(p.row, q.row), c0: Math.min(p.col, q.col),
+      r1: Math.max(p.row, q.row), c1: Math.max(p.col, q.col),
+    };
+  }
+  const c = parseA1Cell(t);
+  return c ? { r0: c.row, c0: c.col, r1: c.row, c1: c.col } : null;
+}
+
+// Column letters to a zero-based index, or null.
+function colFromName(letters) {
+  let n = 0;
+  for (const ch of letters.toUpperCase()) {
+    const v = ch.charCodeAt(0) - 64;
+    if (v < 1 || v > 26) return null;
+    n = n * 26 + v;
+  }
+  return n - 1;
+}
+
+// Insert Function: the catalogue, searchable, with each entry's signature and
+// summary. The `fx` beside the formula bar was decorative — the only way to find
+// a function was to already know its name and start typing it.
+function insertFunctionDialog() {
+  if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Insert function";
+  body.textContent = "";
+
+  const search = el("input", "panel-field");
+  search.placeholder = "Search functions";
+  search.spellcheck = false;
+  const list = el("div", "fn-list");
+  const detail = el("div", "panel-hint");
+  body.append(search, list, detail);
+
+  let chosen = null;
+  const render = () => {
+    const q = search.value.trim().toUpperCase();
+    const items = (fnCatalog || []).filter((f) => !q || f.n.includes(q)).slice(0, 200);
+    list.textContent = "";
+    for (const f of items) {
+      const b = el("button", "fn-row", f.n);
+      b.addEventListener("click", () => {
+        chosen = f;
+        list.querySelectorAll(".fn-row").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        detail.textContent = `${f.sig || f.n + "(…)"}${f.d ? " — " + f.d : ""}`;
+      });
+      b.addEventListener("dblclick", () => { chosen = f; ok.click(); });
+      list.appendChild(b);
+    }
+    if (!items.length) list.appendChild(el("div", "panel-hint", "No matching function"));
+  };
+  search.addEventListener("input", render);
+  render();
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Insert");
+  actions.append(cancel, ok);
+  body.appendChild(actions);
+  modal.hidden = false;
+
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  ok.addEventListener("click", () => {
+    const f = chosen || (fnCatalog || [])[0];
+    close();
+    if (!f) { canvas.focus(); return; }
+    // Open an edit on the active cell and drop the call in with the caret
+    // between the parentheses, ready for arguments.
+    beginEdit(inline, "=" + f.n + "()");
+    const at = inline.value.length - 1;
+    inline.setSelectionRange(at, at);
+    updateRefSpans();
+  });
+  search.focus();
+}
+
+// A caret on the Name Box listing the workbook's defined names. They are
+// otherwise only reachable by typing one exactly, which means knowing it exists.
+function openNameBoxList() {
+  closeSheetMenu();
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()); } catch {}
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu";
+  menu.id = "sheet-ctx";
+  if (!names.length) {
+    menu.appendChild(el("div", "panel-hint", "No defined names yet."));
+  } else {
+    for (const n of names) {
+      const b = el("button", "menu-item", n.name || n);
+      b.addEventListener("click", () => { closeSheetMenu(); gotoName(n.name || n); canvas.focus(); });
+      menu.appendChild(b);
+    }
+  }
+  const r = cellRef.getBoundingClientRect();
+  positionMenu(menu, r.left, r.bottom + 2);
+}
+
 function gotoName(v) {
   const s = (v || "").trim();
   if (!s) { updateNameBox(); return; }
-  const parts = s.split(":");
-  if (parts.length === 2) {
-    const a = parseA1Cell(parts[0]), b = parseA1Cell(parts[1]);
-    if (a && b) {
-      state.anchor = { row: a.row, col: a.col };
-      state.sel = { row: b.row, col: b.col };
+
+  // A comma-separated list builds a multi-range selection, as in Excel.
+  if (s.includes(",")) {
+    const parts = s.split(",").map((x) => x.trim()).filter(Boolean);
+    const boxes = parts.map(parseNameRange).filter(Boolean);
+    if (boxes.length === parts.length && boxes.length > 1) {
+      state.ranges = boxes.slice(0, -1);
+      const last = boxes[boxes.length - 1];
+      state.anchor = { row: last.r0, col: last.c0 };
+      state.sel = { row: last.r1, col: last.c1 };
       state.selKind = "cells";
-      state.ranges = [];
       ensureVisible();
       draw();
       return;
     }
-  } else {
-    const c = parseA1Cell(s);
-    if (c) { select(c.row, c.col); return; }
+  }
+
+  // A sheet qualifier moves there first, so `Sheet2!B7` lands on Sheet2.
+  let text = s;
+  const bang = text.lastIndexOf("!");
+  if (bang > 0) {
+    const name = text.slice(0, bang).replace(/^'|'$/g, "");
+    try {
+      const idx = JSON.parse(wasm.session_sheet_names())
+        .findIndex((n) => n.toLowerCase() === name.toLowerCase());
+      if (idx >= 0) { switchSheet(idx); text = text.slice(bang + 1); }
+    } catch {}
+  }
+
+  const box = parseNameRange(text);
+  if (box) {
+    if (box.r0 === box.r1 && box.c0 === box.c1) { select(box.r0, box.c0); return; }
+    state.ranges = [];
+    state.anchor = { row: box.r0, col: box.c0 };
+    state.sel = { row: box.r1, col: box.c1 };
+    state.selKind = box.kind || "cells";
+    ensureVisible();
+    draw();
+    return;
   }
   // An existing defined name → jump to its target range.
   try {
@@ -6491,6 +6650,23 @@ function wireEvents() {
     state.scrollX = state.scrollY = 0;
     renderTabs();
     select(0, 0);
+  });
+  document.getElementById("fx-insert").addEventListener("click", (e) => {
+    e.stopPropagation();
+    insertFunctionDialog();
+  });
+  document.getElementById("fx-expand").addEventListener("click", (e) => {
+    e.stopPropagation();
+    // A long formula is unreadable in a one-line box; expanding gives it room
+    // without opening a dialog that would lose the caret.
+    const bar = document.querySelector(".formula-bar");
+    const on = bar.classList.toggle("expanded");
+    e.currentTarget.setAttribute("aria-expanded", on ? "true" : "false");
+    resize();
+  });
+  document.getElementById("name-box-list").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openNameBoxList();
   });
   document.getElementById("tb-undo").addEventListener("click", doUndo);
   document.getElementById("tb-redo").addEventListener("click", doRedo);
