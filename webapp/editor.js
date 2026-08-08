@@ -866,8 +866,11 @@ function refreshFormulaBar() {
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   document.getElementById("tb-undo").disabled = !wasm.session_can_undo();
   document.getElementById("tb-redo").disabled = !wasm.session_can_redo();
-  // Reflect the focus cell's formatting on the toolbar (like a real spreadsheet).
-  const fmt = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col));
+  // Reflect formatting from the selection's top-left (the representative/active
+  // cell). For a range/row/column selection state.sel is the *moving end*, which
+  // is often an empty corner — reading that left the font/size boxes blank.
+  const pr = selRect();
+  const fmt = JSON.parse(wasm.session_cell_format(state.sheet, pr.r0, pr.c0));
   const press = (id, on) => document.getElementById(id).setAttribute("aria-pressed", on ? "true" : "false");
   press("tb-bold", fmt.b);
   press("tb-italic", fmt.i);

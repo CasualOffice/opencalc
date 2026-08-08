@@ -129,7 +129,9 @@ body {
   width: auto !important; padding: 0 8px !important; gap: 4px;
   font-size: 12px; font-weight: 600; color: var(--icon); white-space: nowrap;
 }
-.tb-collapsed[hidden] { display: none; }
+/* Must out-specify `.toolbar .tb-btn` (same 0,2,0 but declared later), or a
+   hidden collapsed button would still render as a phantom next to its group. */
+.toolbar .tb-collapsed[hidden] { display: none; }
 .tb-collapsed .tbc-caret { width: 9px; height: 6px; opacity: .75; }
 .tb-group[hidden] { display: none; }
 /* Flyout holding a collapsed group's tools, laid out like a mini-toolbar. */
