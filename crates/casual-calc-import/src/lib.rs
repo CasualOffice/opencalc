@@ -18,6 +18,7 @@ mod error;
 mod read;
 mod report;
 mod styles;
+mod theme;
 
 pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
@@ -34,11 +35,13 @@ use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 use a1::{parse_a1, parse_range};
 use read::{RawCell, parse_comments, parse_defined_names, parse_shared_strings, parse_worksheet};
 use styles::{StyleSheet, parse_styles};
+use theme::{ThemePalette, parse_theme};
 
 const WORKBOOK_NAMESPACE: u64 = 0x574b_0000_0000_0000; // "WK"
 const SHEET_NAMESPACE: u64 = 0x5348_0000_0000_0000; // "SH"
 const SHARED_STRINGS_PART: &str = "xl/sharedStrings.xml";
 const STYLES_PART: &str = "xl/styles.xml";
+const THEME_PART: &str = "xl/theme/theme1.xml";
 
 /// The result of importing a package: the model plus its compatibility report.
 #[derive(Debug)]
@@ -67,9 +70,18 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     // Styles: the number-format code per cellXfs index. Pre-intern every xf in
     // order so the style-table order is canonical (cellXfs order) — this is what
     // lets the writer round-trip styles deterministically.
+    // The theme palette must be read first: `styles.xml` states most colors as
+    // a theme slot plus a tint, and those are exactly the colors Excel's
+    // built-in cell styles use.
+    let palette = if package.contains(THEME_PART) {
+        let xml = package.read_part(THEME_PART)?;
+        parse_theme(&xml)?
+    } else {
+        ThemePalette::default()
+    };
     let stylesheet = if package.contains(STYLES_PART) {
         let xml = package.read_part(STYLES_PART)?;
-        parse_styles(&xml)?
+        parse_styles(&xml, &palette)?
     } else {
         StyleSheet::default()
     };
@@ -98,7 +110,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
     for (idx, (name, part)) in sheet_meta.into_iter().enumerate() {
         let xml = package.read_part(&part)?;
-        let worksheet = parse_worksheet(&xml)?;
+        let worksheet = parse_worksheet(&xml, &palette)?;
         let sheet_id = SheetId(sheet_ids.next_id());
         sheet_ids_by_index.push(sheet_id);
         let mut sheet = Sheet::new(sheet_id, name);

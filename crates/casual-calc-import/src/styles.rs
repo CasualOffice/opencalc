@@ -9,6 +9,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
+use crate::theme::{ThemePalette, indexed_color};
 
 /// The resolved styles, one per `cellXfs` entry (indexed by a cell's `s`).
 #[derive(Debug, Default)]
@@ -98,13 +99,30 @@ fn toggle_on(e: &BytesStart<'_>) -> Result<bool, ImportError> {
     Ok(attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true")))
 }
 
-/// Normalize an OOXML `rgb` color (`FFRRGGBB` or `RRGGBB`) to `RRGGBB`.
-fn rgb(e: &BytesStart<'_>) -> Result<Option<String>, ImportError> {
-    Ok(attr(e, b"rgb")?.map(|s| if s.len() == 8 { s[2..].to_owned() } else { s }))
+/// Resolve an OOXML color element to `RRGGBB`, whichever of the three forms it
+/// uses: a literal `rgb` (`FFRRGGBB` or `RRGGBB`), a `theme` slot with an
+/// optional `tint`, or a legacy `indexed` palette entry. Reading only `rgb` —
+/// as this used to — dropped every color Excel's built-in cell styles use,
+/// since those are all theme references.
+fn color(e: &BytesStart<'_>, theme: &ThemePalette) -> Result<Option<String>, ImportError> {
+    if let Some(s) = attr(e, b"rgb")? {
+        return Ok(Some(if s.len() == 8 { s[2..].to_owned() } else { s }));
+    }
+    if let Some(slot) = attr_u32(e, b"theme")? {
+        let tint = attr(e, b"tint")?
+            .and_then(|t| t.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        return Ok(theme.resolve(slot as usize, tint));
+    }
+    if let Some(index) = attr_u32(e, b"indexed")? {
+        return Ok(indexed_color(index as usize));
+    }
+    Ok(None)
 }
 
-/// Parse a `styles.xml` part into the resolved per-`xf` styles.
-pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
+/// Parse a `styles.xml` part into the resolved per-`xf` styles, resolving theme
+/// references against the workbook's palette.
+pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
 
@@ -153,8 +171,8 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                     b"dxfs" => in_dxfs = true,
                     b"dxf" if in_dxfs => dxfs.push(None),
                     b"bgColor" if in_dxfs => {
-                        if let Some(rgb) = attr(e, b"rgb")? {
-                            let hex = rgb.trim();
+                        if let Some(hex) = color(e, theme)? {
+                            let hex = hex.trim();
                             if hex.len() >= 6
                                 && hex.bytes().all(|b| b.is_ascii_hexdigit())
                                 && let Some(last) = dxfs.last_mut()
@@ -181,7 +199,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                         }
                     }
                     b"color" if in_borders => {
-                        if let (Some(edge), Some(c)) = (cur_edge, rgb(e)?)
+                        if let (Some(edge), Some(c)) = (cur_edge, color(e, theme)?)
                             && let Some(border) = borders.last_mut()
                             && let Some(be) = edge_field(border, edge).as_mut()
                         {
@@ -212,7 +230,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                         }
                     }
                     b"color" if in_fonts => {
-                        if let (Some(f), Some(c)) = (fonts.last_mut(), rgb(e)?) {
+                        if let (Some(f), Some(c)) = (fonts.last_mut(), color(e, theme)?) {
                             f.color = Some(c);
                         }
                     }
@@ -236,7 +254,7 @@ pub fn parse_styles(xml: &[u8]) -> Result<StyleSheet, ImportError> {
                         }
                     }
                     b"fgColor" if in_fills => {
-                        if let (Some(fill), Some(c)) = (fills.last_mut(), rgb(e)?) {
+                        if let (Some(fill), Some(c)) = (fills.last_mut(), color(e, theme)?) {
                             fill.color = Some(c);
                         }
                     }
@@ -382,7 +400,7 @@ fn builtin_number_format(id: u32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod builtin_fmt_tests {
-    use super::{builtin_number_format, parse_styles, resolve_format};
+    use super::{ThemePalette, builtin_number_format, parse_styles, resolve_format};
     use std::collections::HashMap;
 
     #[test]
@@ -395,7 +413,7 @@ mod builtin_fmt_tests {
             </fonts>
             <cellXfs count="1"><xf numFmtId="0" fontId="0"/></cellXfs>
         </styleSheet>"#;
-        let ss = parse_styles(xml).expect("parse");
+        let ss = parse_styles(xml, &ThemePalette::default()).expect("parse");
         assert_eq!(ss.default_font_name.as_deref(), Some("Aptos"));
         assert_eq!(ss.default_font_size_hp, Some(24)); // 12pt = 24 half-points
     }

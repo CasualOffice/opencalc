@@ -276,6 +276,59 @@ fn imports_outline_levels_collapsed_and_zoom() {
 }
 
 #[test]
+fn theme_and_indexed_colors_resolve_to_rgb() {
+    // Excel's built-in cell styles state colours as a theme slot plus a tint,
+    // never as literal rgb — reading only `rgb` dropped all of them.
+    const THEME: &[u8] = br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="Office">
+        <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+        <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+        <a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+        <a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+        <a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>
+        <a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6>
+        <a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
+    </a:clrScheme></a:themeElements></a:theme>"#;
+    const STYLES: &[u8] = br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>
+                         <font><color theme="4"/><name val="Calibri"/></font></fonts>
+        <fills count="3"><fill><patternFill patternType="none"/></fill>
+                         <fill><patternFill patternType="gray125"/></fill>
+                         <fill><patternFill patternType="solid"><fgColor theme="0" tint="-0.15"/></patternFill></fill></fills>
+        <borders count="1"><border/></borders>
+        <cellXfs count="3">
+          <xf numFmtId="0" fontId="0" fillId="0"/>
+          <xf numFmtId="0" fontId="1" fillId="0" applyFont="1"/>
+          <xf numFmtId="0" fontId="0" fillId="2" applyFill="1"/>
+        </cellXfs>
+    </styleSheet>"#;
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1"><c r="A1" s="1" t="inlineStr"><is><t>accent1 text</t></is></c>
+                   <c r="B1" s="2" t="inlineStr"><is><t>shaded fill</t></is></c></row>
+    </sheetData></worksheet>"#
+        .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/theme/theme1.xml", THEME),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    let wb = &import.workbook;
+    let sheet = &wb.sheets[0];
+    let style_of = |col: u32| {
+        let id = sheet.cells.get(CellRef::new(0, col)).unwrap().style.unwrap();
+        wb.styles.get(id).unwrap().clone()
+    };
+    // theme="4" is accent1 …
+    assert_eq!(style_of(0).font_color.as_deref(), Some("4472C4"));
+    // … and theme="0" tint="-0.15" is white darkened 15%.
+    assert_eq!(style_of(1).fill_color.as_deref(), Some("D9D9D9"));
+}
+
+#[test]
 fn shared_formula_followers_are_expanded_from_their_master() {
     // Excel's fill-down writes the expression once (on the master, which also
     // carries ref+si) and leaves each follower's <f> empty. Followers used to

@@ -8,6 +8,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
+use crate::theme::{ThemePalette, indexed_color};
 
 const MAX_XML_ELEMENTS: usize = 50_000_000;
 const MAX_XML_DEPTH: usize = 256;
@@ -391,7 +392,7 @@ fn read_sheet_format(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), I
 }
 
 /// Parse a worksheet part's `sheetData`, `mergeCells`, and `sheetView` pane.
-pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
+pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut bounds = Bounds::new();
@@ -445,7 +446,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
-                    b"tabColor" => read_tab_color(&e, &mut result)?,
+                    b"tabColor" => read_tab_color(&e, &mut result, theme)?,
                     b"dataValidation" => {
                         // Only explicit-list dropdowns are modeled.
                         if read_attr(&e, b"type")?.as_deref() == Some("list") {
@@ -507,7 +508,7 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
-                    b"tabColor" => read_tab_color(&e, &mut result)?,
+                    b"tabColor" => read_tab_color(&e, &mut result, theme)?,
                     _ => {}
                 }
             }
@@ -616,8 +617,28 @@ fn read_bool_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<bool>, Impo
 /// Parse `<sheetPr><tabColor rgb="AARRGGBB"/>`. Excel stores an 8-hex ARGB
 /// value; we keep the last six (`RRGGBB`) and drop the alpha. Indexed/theme
 /// colors (no `@rgb`) are ignored — they'd need the theme part to resolve.
-fn read_tab_color(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
-    if let Some(rgb) = read_attr(e, b"rgb")? {
+fn read_tab_color(
+    e: &BytesStart<'_>,
+    result: &mut Worksheet,
+    theme: &ThemePalette,
+) -> Result<(), ImportError> {
+    // A tab colour is an OOXML colour like any other: rgb, theme+tint, or
+    // indexed. Excel's colour picker writes theme references.
+    let resolved = match read_attr(e, b"rgb")? {
+        Some(v) => Some(v),
+        None => match read_attr(e, b"theme")?.and_then(|s| s.parse::<usize>().ok()) {
+            Some(slot) => theme.resolve(
+                slot,
+                read_attr(e, b"tint")?
+                    .and_then(|t| t.parse::<f64>().ok())
+                    .unwrap_or(0.0),
+            ),
+            None => read_attr(e, b"indexed")?
+                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(indexed_color),
+        },
+    };
+    if let Some(rgb) = resolved {
         let hex = rgb.trim();
         if hex.len() >= 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             result.tab_color = Some(hex[hex.len() - 6..].to_ascii_uppercase());

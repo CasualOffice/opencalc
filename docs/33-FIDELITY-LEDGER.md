@@ -48,6 +48,8 @@ evidence").
 | Formula cached value | ● | ● | — | ~ | ● | P2-001 |
 | Number formats (incl. currency/literals) | ● | ● | ● | ● | — | E-001; numfmt literal runs; editor menu + $ / % |
 | Styles: bold/italic/underline/font color/fill | ● | ● | ● | ~ | — | P1A-003b/d (editor toggles + pickers) |
+| Styles: theme / indexed colors | ● | ~ | — | ● | — | `theme1.xml` palette + tint + legacy indexed table resolved on import (the form Excel's built-in cell styles use); export rewrites them as literal rgb, so the theme *linkage* is not yet round-tripped |
+| Shared formulas (`<f t="shared">`) | ● | ~ | — | — | ● | Followers expanded from their master via the AST shifter; the writer emits each expanded formula rather than re-sharing |
 | Styles: horizontal + vertical alignment | ● | ● | ● | ● | — | P1A-003d (`<alignment>`; editor renders + sets both axes) |
 | Styles: borders | ● | ● | ● | ~ | — | P1A-003c (per-edge style+color, interned `<borders>`; editor draws + toggles; PNG borders pending) |
 | Merged ranges | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & merge/unmerge |
