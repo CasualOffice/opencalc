@@ -27,6 +27,17 @@ each audit; this file is the durable backlog.
   still works.
 - Engine correctness: wildcard COUNTIF/SUMIF/AVERAGEIF(S); non-finite → #NUM!;
   missing builtin number-format IDs; Cmd+Shift+Z redo.
+- Font picker: custom searchable combobox (UX-P07) — a native `datalist` is
+  filtered by the input's own text, so the auto-populated box offered one font.
+- **Frozen-pane painting**: selection spans are pane-relative (a body range no
+  longer paints a sliding strip into the frozen band, and no longer vanishes
+  when its start scrolls off); the selection outline / marching ants / fill
+  preview clip per pane; a merge straddling a freeze line is painted as one
+  slice per pane instead of one rect built from a pinned edge and a scrolling
+  edge (which went negative-width and flipped back over the frozen band); merge
+  geometry reads the drawn grid, so auto-row-height no longer makes merges drift
+  from their own cells as you scroll. The in-cell editor follows its cell while
+  scrolling and spans a merged block; a selection containing a merge unmerges it.
 
 ---
 

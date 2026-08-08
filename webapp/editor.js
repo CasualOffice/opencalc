@@ -111,16 +111,30 @@ function screenY(row) { return wasm.session_row_offset_px(state.sheet, row) - st
 // ignore the scroll offset; body lines subtract it. In the no-freeze case this
 // equals screenX/screenY. Used where geometry must line up under frozen panes
 // (merged-cell painting spans across cells, so it can't use per-cell geo).
+// Drawn geometry wins where it exists: measure() grows rows for wrapped text
+// and tall fonts (auto row height), which the engine's offsets know nothing
+// about. Mixing the two made a merge drift from its own cells by the accumulated
+// growth — and since that growth depends on which rows are in the window, the
+// drift changed on every scroll step and the block appeared to slide over the
+// grid. Engine offsets remain the fallback for lines outside the window.
 function fscreenX(col) {
+  const x = colXAt(col);
+  if (x !== undefined) return x;
   const f = state.freeze || { fc: 0 };
   const o = wasm.session_col_offset_px(state.sheet, col);
   return HW + (col < f.fc ? o : o - state.scrollX);
 }
 function fscreenY(row) {
+  const y = rowYAt(row);
+  if (y !== undefined) return y;
   const f = state.freeze || { fr: 0 };
   const o = wasm.session_row_offset_px(state.sheet, row);
   return HH + (row < f.fr ? o : o - state.scrollY);
 }
+// The trailing (right/bottom) edge of a line: from the drawn geometry when the
+// line itself is drawn, else the start of the following line.
+const fscreenXEnd = (col) => (colXAt(col) !== undefined ? colXAt(col) + colWAt(col) : fscreenX(col + 1));
+const fscreenYEnd = (row) => (rowYAt(row) !== undefined ? rowYAt(row) + rowHAt(row) : fscreenY(row + 1));
 // The merge covering (row,col), if any.
 function mergeAt(row, col) {
   return sheetMerges.find((m) => row >= m.r0 && row <= m.r1 && col >= m.c0 && col <= m.c1);
@@ -376,22 +390,40 @@ const colXAt = (col) => (geo.colOf.has(col) ? geo.colX[geo.colOf.get(col)] : und
 const rowYAt = (row) => (geo.rowOf.has(row) ? geo.rowY[geo.rowOf.get(row)] : undefined);
 const firstDrawnCol = () => geo.colIdx[0] ?? 0;
 const firstDrawnRow = () => geo.rowIdx[0] ?? 0;
+// The first drawn line of the *scrolling body* — past the frozen band, which
+// occupies the first fc/fr entries of colIdx/rowIdx.
+const firstBodyCol = () => geo.colIdx[state.freeze.fc] ?? state.firstCol;
+const firstBodyRow = () => geo.rowIdx[state.freeze.fr] ?? state.firstRow;
 
-// The clipped [x, x+w) pixel span covering columns c0..c1 within the grid body.
+// The clipped [x, x+w) pixel span covering columns c0..c1, kept inside the pane
+// those columns belong to. Both limits are pane-relative, which matters twice
+// over when something is frozen: with fractional scroll the first body column
+// is drawn a sliver *behind* the freeze line (so an unclamped span paints a
+// strip into the frozen band that slides as you scroll), and a range whose
+// start has scrolled out must clamp to the body's left edge rather than
+// collapse to zero width (which made the whole selection disappear).
 function spanX(c0, c1, v) {
+  const f = state.freeze;
+  const lo = c0 < f.fc ? HW : f.bodyX0;  // left edge of c0's pane
+  const hi = c1 < f.fc ? f.bodyX0 : v.w; // right edge of c1's pane
+  const first = c0 < f.fc ? firstDrawnCol() : firstBodyCol();
   const xa = colXAt(c0), xb = colXAt(c1);
-  const left = xa !== undefined ? xa : c0 < firstDrawnCol() ? HW : v.w;
-  const right = xb !== undefined ? xb + colWAt(c1) : c1 < firstDrawnCol() ? HW : v.w;
-  const x = Math.max(HW, left);
-  return { x, w: Math.max(0, Math.min(right, v.w) - x) };
+  const left = xa !== undefined ? xa : c0 < first ? lo : hi;
+  const right = xb !== undefined ? xb + colWAt(c1) : c1 < first ? lo : hi;
+  const x = Math.max(lo, left);
+  return { x, w: Math.max(0, Math.min(right, hi) - x) };
 }
 
 function spanY(r0, r1, v) {
+  const f = state.freeze;
+  const lo = r0 < f.fr ? HH : f.bodyY0;
+  const hi = r1 < f.fr ? f.bodyY0 : v.h;
+  const first = r0 < f.fr ? firstDrawnRow() : firstBodyRow();
   const ya = rowYAt(r0), yb = rowYAt(r1);
-  const top = ya !== undefined ? ya : r0 < firstDrawnRow() ? HH : v.h;
-  const bot = yb !== undefined ? yb + rowHAt(r1) : r1 < firstDrawnRow() ? HH : v.h;
-  const y = Math.max(HH, top);
-  return { y, h: Math.max(0, Math.min(bot, v.h) - y) };
+  const top = ya !== undefined ? ya : r0 < first ? lo : hi;
+  const bot = yb !== undefined ? yb + rowHAt(r1) : r1 < first ? lo : hi;
+  const y = Math.max(lo, top);
+  return { y, h: Math.max(0, Math.min(bot, hi) - y) };
 }
 
 // The clip rect of the quadrant a cell belongs to (whole body when no freeze).
@@ -522,18 +554,74 @@ function draw() {
     fn();
     ctx.restore();
   };
-  // Clip covering every quadrant a merge spans — a merge straddling the freeze
-  // boundary must not be clipped to only its top-left cell's pane (which would
-  // hide the body half). Falls back to the whole grid when nothing is frozen.
-  const withMergeQuad = (m, fn) => {
+  // Draw once per pane, clipped to it — for overlays (selection outline, copy
+  // marching ants, drag-fill preview) whose rect may legitimately span more
+  // than one pane, so clipping to a single cell's quadrant would truncate them
+  // while not clipping at all lets them stroke across the frozen bands.
+  const perQuad = (fn) => {
     if (!frozen) { fn(); return; }
-    const x0 = m.c0 < F.fc ? HW : F.bodyX0;
-    const x1 = m.c1 < F.fc ? F.bodyX0 : v.w;
-    const y0 = m.r0 < F.fr ? HH : F.bodyY0;
-    const y1 = m.r1 < F.fr ? F.bodyY0 : v.h;
+    for (const q of quads) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(q.x, q.y, q.w, q.h);
+      ctx.clip();
+      fn();
+      ctx.restore();
+    }
+  };
+  // A merge that straddles a freeze line is not one rectangle but one per pane:
+  // its frozen half is pinned while its body half scrolls, so a single rect
+  // built from a pinned left edge and a scrolling right edge is wrong the
+  // moment they disagree — and once the body half scrolls out it goes
+  // *negative*, which canvas draws as a block flipped back over the frozen
+  // pane, sliding with every wheel tick. Each entry here is one pane's slice:
+  // its clip, its own geometry, and whether it holds the merge's anchor cell
+  // (the half that carries the text).
+  function mergeSlices(m) {
+    const clipRect = { x: HW, y: HH, w: v.w - HW, h: v.h - HH };
+    if (!frozen) {
+      return [{
+        clip: clipRect, anchor: true,
+        x: fscreenX(m.c0), y: fscreenY(m.r0),
+        w: fscreenXEnd(m.c1) - fscreenX(m.c0), h: fscreenYEnd(m.r1) - fscreenY(m.r0),
+      }];
+    }
+    // Per axis: the frozen half spans c0…fc-1 (clamped at the freeze line), the
+    // body half spans max(c0,fc)…c1. Each is measured in its own pane's frame.
+    const xs = [], ys = [];
+    if (m.c0 < F.fc) {
+      const x = fscreenX(m.c0);
+      xs.push({ x, w: Math.min(fscreenXEnd(Math.min(m.c1, F.fc - 1)), F.bodyX0) - x, c0: HW, c1: F.bodyX0, anchor: true });
+    }
+    if (m.c1 >= F.fc) {
+      const x = fscreenX(Math.max(m.c0, F.fc));
+      xs.push({ x, w: fscreenXEnd(m.c1) - x, c0: F.bodyX0, c1: v.w, anchor: m.c0 >= F.fc });
+    }
+    if (m.r0 < F.fr) {
+      const y = fscreenY(m.r0);
+      ys.push({ y, h: Math.min(fscreenYEnd(Math.min(m.r1, F.fr - 1)), F.bodyY0) - y, r0: HH, r1: F.bodyY0, anchor: true });
+    }
+    if (m.r1 >= F.fr) {
+      const y = fscreenY(Math.max(m.r0, F.fr));
+      ys.push({ y, h: fscreenYEnd(m.r1) - y, r0: F.bodyY0, r1: v.h, anchor: m.r0 >= F.fr });
+    }
+    const out = [];
+    for (const sx of xs) {
+      for (const sy of ys) {
+        if (sx.w <= 0 || sy.h <= 0 || sx.c1 <= sx.c0 || sy.r1 <= sy.r0) continue;
+        out.push({
+          clip: { x: sx.c0, y: sy.r0, w: sx.c1 - sx.c0, h: sy.r1 - sy.r0 },
+          anchor: sx.anchor && sy.anchor,
+          x: sx.x, y: sy.y, w: sx.w, h: sy.h,
+        });
+      }
+    }
+    return out;
+  }
+  const withSliceClip = (s, fn) => {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.rect(s.clip.x, s.clip.y, s.clip.w, s.clip.h);
     ctx.clip();
     fn();
     ctx.restore();
@@ -650,31 +738,35 @@ function draw() {
   // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
   // top-left cell's fill + text across the span, outline it.
   for (const m of sheetMerges) {
-    const mx = fscreenX(m.c0), my = fscreenY(m.r0);
-    const mw = fscreenX(m.c1 + 1) - mx, mh = fscreenY(m.r1 + 1) - my;
-    if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
     const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
-    withMergeQuad(m, () => {
-      ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
-      ctx.fillRect(mx, my, mw, mh);
-      if (mergeInSel(m)) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
-      ctx.strokeStyle = colors.grid;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(Math.floor(mx) + 0.5, Math.floor(my) + 0.5, Math.round(mw) - 1, Math.round(mh) - 1);
-      if (it && it.t) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(mx, my, mw, mh);
-        ctx.clip();
-        ctx.font = cellFont(it);
-        ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
-        const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
-        ctx.textAlign = al;
-        const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
-        ctx.fillText(it.t, tx, my + mh / 2);
-        ctx.restore();
-      }
-    });
+    const selected = mergeInSel(m);
+    for (const s of mergeSlices(m)) {
+      const { x: mx, y: my, w: mw, h: mh } = s;
+      if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
+      withSliceClip(s, () => {
+        ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
+        ctx.fillRect(mx, my, mw, mh);
+        if (selected) { ctx.fillStyle = colors.sel; ctx.fillRect(mx, my, mw, mh); }
+        ctx.strokeStyle = colors.grid;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(Math.floor(mx) + 0.5, Math.floor(my) + 0.5, Math.round(mw) - 1, Math.round(mh) - 1);
+        // The text belongs to the anchor's half; the other half of a straddling
+        // merge shows only the fill, as its own pane's slice of the block.
+        if (it && it.t && s.anchor) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(mx, my, mw, mh);
+          ctx.clip();
+          ctx.font = cellFont(it);
+          ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+          const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
+          ctx.textAlign = al;
+          const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
+          ctx.fillText(it.t, tx, my + mh / 2);
+          ctx.restore();
+        }
+      });
+    }
   }
 
   // Range border (multi-cell selections only) + focus-cell border. A single-cell
@@ -685,23 +777,29 @@ function draw() {
   ctx.lineWidth = 2;
   const singleCell = rectSel.r0 === rectSel.r1 && rectSel.c0 === rectSel.c1;
   if (state.selKind === "cells" && !singleCell && sX.w > 0 && sY.h > 0) {
-    ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1);
+    perQuad(() => ctx.strokeRect(sX.x + 1, sY.y + 1, sX.w - 1, sY.h - 1));
   }
   const fm = mergeAt(state.sel.row, state.sel.col);
-  withQuad(state.sel.row, state.sel.col, () => {
-    ctx.strokeStyle = colors.accent;
-    ctx.lineWidth = 2;
-    if (fm) {
-      const bx = fscreenX(fm.c0), by = fscreenY(fm.r0);
-      ctx.strokeRect(bx + 1, by + 1, fscreenX(fm.c1 + 1) - bx - 1, fscreenY(fm.r1 + 1) - by - 1);
-    } else {
+  if (fm) {
+    // One outline per pane the merge occupies, each in that pane's geometry.
+    for (const s of mergeSlices(fm)) {
+      withSliceClip(s, () => {
+        ctx.strokeStyle = colors.accent;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(s.x + 1, s.y + 1, s.w - 1, s.h - 1);
+      });
+    }
+  } else {
+    withQuad(state.sel.row, state.sel.col, () => {
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 2;
       const fx = colXAt(state.sel.col);
       const fy = rowYAt(state.sel.row);
       if (fx !== undefined && fy !== undefined) {
         ctx.strokeRect(fx + 1, fy + 1, colWAt(state.sel.col) - 1, rowHAt(state.sel.row) - 1);
       }
-    }
-  });
+    });
+  }
 
   // Marching-ants outline around the copy/cut source (animated dash offset).
   if (clipMarch && clipMarch.sheet === state.sheet) {
@@ -712,7 +810,7 @@ function draw() {
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]);
       ctx.lineDashOffset = -marchOffset;
-      ctx.strokeRect(mx.x + 0.75, my.y + 0.75, mx.w - 1.5, my.h - 1.5);
+      perQuad(() => ctx.strokeRect(mx.x + 0.75, my.y + 0.75, mx.w - 1.5, my.h - 1.5));
       ctx.setLineDash([]);
       ctx.restore();
     }
@@ -725,7 +823,7 @@ function draw() {
     ctx.strokeStyle = colors.accent;
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
-    ctx.strokeRect(dx.x + 0.5, dy.y + 0.5, dx.w - 1, dy.h - 1);
+    perQuad(() => ctx.strokeRect(dx.x + 0.5, dy.y + 0.5, dx.w - 1, dy.h - 1));
     ctx.setLineDash([]);
   }
 
@@ -841,6 +939,10 @@ function draw() {
   drawHiddenMarkers();
   drawFreezeDividers(v);
 
+  // The in-cell editor is a DOM element over the canvas: keep it on its cell as
+  // the grid scrolls or resizes under it (grid-wrap's overflow clips it once the
+  // cell leaves the viewport), instead of leaving it parked mid-air.
+  if (state.editing) positionInline();
   updateNameBox();
   updateScrollbars(v);
   updateStats();
@@ -1764,8 +1866,12 @@ function buildNotePanel(body) {
 function toggleMerge() {
   const s = effectiveRange();
   try {
-    const m = mergeAt(s.r0, s.c0);
-    if (m && m.r0 === s.r0 && m.c0 === s.c0 && m.r1 === s.r1 && m.c1 === s.c1) {
+    // Any selection that *contains* a merge unmerges it (Excel's rule) — the
+    // exact-match test used here meant selecting a block around a merge silently
+    // re-merged the block instead. The engine already drops every intersecting
+    // merge, so the selection is passed through as-is.
+    const m = sheetMerges.find((mm) => mm.r0 >= s.r0 && mm.c0 >= s.c0 && mm.r1 <= s.r1 && mm.c1 <= s.c1);
+    if (m) {
       wasm.session_unmerge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1);
     } else {
       wasm.session_merge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1);
@@ -2087,15 +2193,26 @@ async function doPaste() {
   } catch { status.textContent = "paste blocked"; }
 }
 
-function startInline(initial) {
-  state.editing = true;
-  const x = colXAt(state.sel.col) ?? HW;
-  const y = rowYAt(state.sel.row) ?? HH;
-  inline.style.display = "block";
+// Place the in-cell editor over the cell being edited. Called on every redraw
+// as well as on open: it is a DOM element over the canvas, so without this it
+// stays parked where the cell *was* while the grid scrolls out from under it.
+// A merged cell gets the whole block, not just its anchor's one-cell box.
+function positionInline() {
+  const m = mergeAt(state.sel.row, state.sel.col);
+  const x = m ? fscreenX(m.c0) : colXAt(state.sel.col) ?? fscreenX(state.sel.col);
+  const y = m ? fscreenY(m.r0) : rowYAt(state.sel.row) ?? fscreenY(state.sel.row);
+  const w = m ? fscreenXEnd(m.c1) - x : colWAt(state.sel.col);
+  const h = m ? fscreenYEnd(m.r1) - y : rowHAt(state.sel.row);
   inline.style.left = x + "px";
   inline.style.top = y + "px";
-  inline.style.width = colWAt(state.sel.col) + "px";
-  inline.style.height = rowHAt(state.sel.row) + "px";
+  inline.style.width = Math.max(0, w) + "px";
+  inline.style.height = Math.max(0, h) + "px";
+}
+
+function startInline(initial) {
+  state.editing = true;
+  inline.style.display = "block";
+  positionInline();
   inline.value =
     initial !== undefined
       ? initial
