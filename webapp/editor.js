@@ -25,6 +25,12 @@ function syncHeaderMetrics() {
 }
 // One indent level, in px — Excel's is about three space-widths.
 const INDENT_PX = 10;
+// Zoom is applied to the *canvas context*, not to the geometry: the grid keeps
+// measuring in engine pixels and only the drawing (and the viewport it has to
+// fill) is scaled. That keeps every offset the engine reports directly
+// comparable with what is drawn — the alternative, scaling column widths and
+// row heights, would put drawn and modelled geometry back out of step.
+const ZOOM_MIN = 0.25, ZOOM_MAX = 2;
 let COL_W = 64;
 let ROW_H = 20;
 
@@ -33,6 +39,7 @@ const state = {
   scrollX: 0, // absolute content pixel offset (left of the viewport)
   scrollY: 0, // absolute content pixel offset (top of the viewport)
   firstRow: 0, // first visible row (derived from scrollY in measure())
+  zoom: 1,     // canvas magnification (Ctrl+wheel / View ▸ Zoom)
   firstCol: 0, // first visible column (derived from scrollX in measure())
   sel: { row: 0, col: 0 }, // focus cell
   anchor: { row: 0, col: 0 }, // selection anchor
@@ -253,7 +260,7 @@ function wrapLines(it, maxW) {
 function measure() {
   syncHeaderMetrics();
   const rect = wrap.getBoundingClientRect();
-  const v = { w: rect.width, h: rect.height };
+  const v = { w: rect.width / state.zoom, h: rect.height / state.zoom };
   if (!wasm) {
     geo.colW = geo.colX = geo.colIdx = geo.rowH = geo.rowY = geo.rowIdx = [];
     geo.colOf = new Map(); geo.rowOf = new Map();
@@ -518,6 +525,16 @@ function setHeaderCollapsed(collapsed) {
   resize(); // the canvas re-fits into (or out of) the reclaimed space
 }
 
+// Set the magnification and re-fit the canvas. Clamped to 25–200%, Excel's
+// range; 100% is exact so Ctrl+0 always lands back on crisp text.
+function setZoom(z) {
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
+  if (next === state.zoom) return;
+  state.zoom = next;
+  resize();
+  status.textContent = `zoom ${Math.round(next * 100)}%`;
+}
+
 function resize() {
   const rect = wrap.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -525,7 +542,7 @@ function resize() {
   canvas.height = Math.floor(rect.height * dpr);
   canvas.style.width = rect.width + "px";
   canvas.style.height = rect.height + "px";
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(dpr * state.zoom, 0, 0, dpr * state.zoom, 0, 0);
   draw();
 }
 
@@ -1818,6 +1835,28 @@ function applySort(s, keys, hasHeader) {
   draw();
 }
 
+// Remove duplicate rows from the selection (or the used area for a lone cell),
+// keeping the first of each. Asks first, since it deletes rows, and reports how
+// many went — "removed 0" is a useful answer too.
+async function removeDuplicates() {
+  const s = sortTarget();
+  const hasHeader = looksLikeHeader(s);
+  const first = hasHeader ? s.r0 + 1 : s.r0;
+  const ok = await confirmModal(
+    "Remove duplicates",
+    `Compare ${colName(s.c0)}${first + 1}:${colName(s.c1)}${s.r1 + 1} and delete rows that repeat an earlier one` +
+      `${hasHeader ? ", keeping the header row" : ""}. Rows below shift up.`,
+    "Remove",
+  );
+  canvas.focus();
+  if (!ok) return;
+  try {
+    const n = wasm.session_remove_duplicates(state.sheet, first, s.c0, s.r1, s.c1);
+    status.textContent = n ? `removed ${n} duplicate ${n === 1 ? "row" : "rows"}` : "no duplicates found";
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+
 // The Sort dialog: choose up to three keys and say whether row 1 is a heading.
 // The single-click A→Z / Z→A menu items stay for the common case; this is for
 // when "sort by region, then by total descending" is what you actually meant.
@@ -2651,13 +2690,16 @@ function positionInline() {
   // cross over once the far half scrolls out and give the box a negative size.
   const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
   const rect = wrap.getBoundingClientRect();
-  const loX = col < f.fc ? HW : f.bodyX0, hiX = m && m.c1 < f.fc ? f.bodyX0 : rect.width;
-  const loY = row < f.fr ? HH : f.bodyY0, hiY = m && m.r1 < f.fr ? f.bodyY0 : rect.height;
+  const z = state.zoom;
+  const loX = col < f.fc ? HW : f.bodyX0, hiX = m && m.c1 < f.fc ? f.bodyX0 : rect.width / z;
+  const loY = row < f.fr ? HH : f.bodyY0, hiY = m && m.r1 < f.fr ? f.bodyY0 : rect.height / z;
   const left = Math.max(loX, x), top = Math.max(loY, y);
-  inline.style.left = left + "px";
-  inline.style.top = top + "px";
-  inline.style.width = Math.max(0, Math.min(x1, hiX) - left) + "px";
-  const boxH = Math.max(0, Math.min(y1, hiY) - top);
+  // Grid units → CSS pixels: the canvas is scaled, this element is not.
+  inline.style.left = left * z + "px";
+  inline.style.top = top * z + "px";
+  inline.style.fontSize = 13 * z + "px";
+  inline.style.width = Math.max(0, Math.min(x1, hiX) - left) * z + "px";
+  const boxH = Math.max(0, Math.min(y1, hiY) - top) * z;
   // Grow past the cell for a multi-line entry (Alt+Enter), the way Excel's
   // in-cell editor does — the value is taller than the cell until it commits.
   inline.style.height = boxH + "px";
@@ -3623,8 +3665,8 @@ function updateResize(px, py) {
 function wireEvents() {
   canvas.addEventListener("mousedown", (e) => {
     const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+    const px = (e.clientX - rect.left) / state.zoom;
+    const py = (e.clientY - rect.top) / state.zoom;
     // While editing a formula at a reference position, clicking a cell inserts
     // its reference instead of moving the selection. preventDefault keeps the
     // inline input focused (no blur/commit); a drag turns it into a range.
@@ -3711,8 +3753,8 @@ function wireEvents() {
   });
   canvas.addEventListener("mousemove", (e) => {
     const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+    const px = (e.clientX - rect.left) / state.zoom;
+    const py = (e.clientY - rect.top) / state.zoom;
     if (state.freezeDrag) { state.freezeDrag.px = px; state.freezeDrag.py = py; draw(); return; }
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
@@ -3885,7 +3927,7 @@ function wireEvents() {
   canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left, py = e.clientY - rect.top;
+    const px = (e.clientX - rect.left) / state.zoom, py = (e.clientY - rect.top) / state.zoom;
     // A right-click in a header targets that row or column. cellAt() returns
     // null over the header strips, so this used to fall through and open the
     // cell menu against whatever was selected *before* — every verb in it then
@@ -3917,8 +3959,8 @@ function wireEvents() {
   });
   canvas.addEventListener("dblclick", (e) => {
     const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+    const px = (e.clientX - rect.left) / state.zoom;
+    const py = (e.clientY - rect.top) / state.zoom;
     // The fill handle: double-click fills down to the neighbouring column's
     // last row. Checked before the header/boundary cases because the handle can
     // sit anywhere in the body.
@@ -3952,6 +3994,12 @@ function wireEvents() {
     "wheel",
     (e) => {
       e.preventDefault();
+      // Ctrl/⌘+wheel zooms, as everywhere else. The step is proportional so it
+      // feels even at both ends of the range.
+      if (e.ctrlKey || e.metaKey) {
+        setZoom(state.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+        return;
+      }
       // Fluid pixel scrolling: move the absolute content offset directly, so the
       // grid glides smoothly instead of snapping a whole row/column at a time.
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? wrap.clientHeight : 1;
@@ -3986,6 +4034,7 @@ function wireEvents() {
       // its left column — the fastest way to copy a formula over a block.
       if (k === "d" && !e.shiftKey) { fillWithin("down"); e.preventDefault(); return; }
       if (k === "r" && !e.shiftKey) { fillWithin("right"); e.preventDefault(); return; }
+      if (k === "0") { setZoom(1); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
@@ -4560,6 +4609,13 @@ function wireEvents() {
         // "headers": that word belongs to the page header this menu bar can
         // collapse, and having both under one name is a coin-flip every time.
         ["Cell markings", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
+        { sub: "Zoom", items: [
+          ["50%", () => setZoom(0.5), null, () => state.zoom === 0.5],
+          ["75%", () => setZoom(0.75), null, () => state.zoom === 0.75],
+          ["100%", () => setZoom(1), "Ctrl+0", () => state.zoom === 1],
+          ["150%", () => setZoom(1.5), null, () => state.zoom === 1.5],
+          ["200%", () => setZoom(2), null, () => state.zoom === 2],
+        ] },
         "sep",
         ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
       ]],
@@ -4617,6 +4673,7 @@ function wireEvents() {
           ["Z → A", clickEl('#sort-menu [data-sort="desc"]')],
           ["Custom sort…", () => sortDialog()],
         ] },
+        ["Remove duplicates…", () => removeDuplicates()],
         ["Filter", clickEl("#tb-filter")],
         ["Data validation…", clickEl("#tb-dv")],
         "sep",

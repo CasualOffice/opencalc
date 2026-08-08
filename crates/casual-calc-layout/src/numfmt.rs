@@ -300,7 +300,11 @@ fn format_scientific(
     plus: bool,
     is_custom_negative: bool,
 ) -> String {
-    let target = if is_custom_negative { value.abs() } else { value };
+    let target = if is_custom_negative {
+        value.abs()
+    } else {
+        value
+    };
     let decimals = decimal_places(mantissa_pat);
     let (prefix, _, suffix) = split_literal_runs(mantissa_pat);
 
@@ -834,7 +838,10 @@ mod tests {
     fn section_colors_are_reported() {
         // The negative section paints red; the positive one says nothing.
         let code = "#,##0;[Red]-#,##0";
-        assert_eq!(format_number_colored(1234.0, code), ("1,234".to_owned(), None));
+        assert_eq!(
+            format_number_colored(1234.0, code),
+            ("1,234".to_owned(), None)
+        );
         assert_eq!(
             format_number_colored(-1234.0, code),
             ("-1,234".to_owned(), Some("FF0000"))

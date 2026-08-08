@@ -107,11 +107,9 @@ pub fn parse_theme(xml: &[u8]) -> Result<ThemePalette, ImportError> {
                     b"clrScheme" => in_scheme = true,
                     b"srgbClr" | b"sysClr" if in_scheme => {
                         // `<a:sysClr>` carries the resolved value in `lastClr`.
-                        let value = attr(e, b"val")?.filter(|v| is_hex6(v)).or(attr(
-                            e,
-                            b"lastClr",
-                        )?
-                        .filter(|v| is_hex6(v)));
+                        let value = attr(e, b"val")?
+                            .filter(|v| is_hex6(v))
+                            .or(attr(e, b"lastClr")?.filter(|v| is_hex6(v)));
                         if let (Some(slot), Some(v)) = (scheme_slot, value) {
                             palette.slots[theme_index(slot)] = v.to_ascii_uppercase();
                         }
@@ -283,7 +281,8 @@ fn xml_err(err: quick_xml::Error) -> ImportError {
 mod tests {
     use super::*;
 
-    const THEME: &[u8] = br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+    const THEME: &[u8] =
+        br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
       <a:themeElements><a:clrScheme name="Office">
         <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
         <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>

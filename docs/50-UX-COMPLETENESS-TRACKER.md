@@ -92,7 +92,7 @@ each audit; this file is the durable backlog.
 | UX-V02 | Autofilter: single global column, checklist-only, fights manual hidden set; no per-header dropdowns/conditions/multi-column | Data | 🔴 | Real per-column filter model (separate from `hidden_rows`); header dropdowns; conditions |
 | UX-V03 | Row-height / column-width numeric dialog missing | Data | ✅ | `sizeDialog()` on the row/column header menu (landed with UX-C01), seeded with the current size and applied across the selected band |
 | UX-V04 | Outline / grouping: model support, zero UX | Data | 🔴 | `session_group_*`/`toggle_collapse`; outline bars; Alt+Shift+arrow |
-| UX-V05 | Remove duplicates — absent | Data | 🔴 | Selection op + dialog |
+| UX-V05 | Remove duplicates — absent | Data | ✅ | `session_remove_duplicates` compares rows on their *displayed* values (two cells reading `1.50` are the same row even if one is a formula), keeps the first of each, deletes bottom-up so indices stay valid, and returns the count. Confirms first, excludes a detected header, reports how many went |
 | UX-FM1 | Conditional formatting: fill-only cell rules; no color scales / data bars / top-bottom / above-avg / duplicates; no Manage Rules; no priority/stop-if-true; font/border effects | Format | 🔴 | Extend `CfRule` + panel + render; Manage-Rules list |
 | UX-FM2 | Format painter — absent | Format | ✅ | Toolbar button picks up the active cell's *resolved* style (`session_copy_style`), so number format, font, fill, borders, alignment and wrap travel together; the next selection is painted. Single click paints once, double-click keeps painting, Escape cancels |
 | UX-FM3 | Custom number-format dialog + currency locale/symbol; expose negative/zero/text sections (engine supports) | Format | 🔴 | Custom Format modal with live preview + currency picker (`[$SYM-locale]`) |
@@ -111,7 +111,7 @@ each audit; this file is the durable backlog.
 | UX-A06 | Menu bar has no keyboard nav / mnemonics; items lack `role=menuitem` | Chrome | 🔴 | Roving tabindex + arrow keys + Alt access |
 | UX-A07 | Toolbar not a roving-tabindex composite (every control a tab stop) | Chrome | 🔴 | Roving tabindex + arrow keys |
 | UX-A08 | Cell context menu missing Insert note / Format cells / Define name / Filter | Chrome | 🔴 | Add verbs to `cellMenu` |
-| UX-NV1 | Zoom (Ctrl+wheel, control, 25–200%) — absent | Nav | 🔴 | `state.zoom` scaling geometry + fonts + DPR |
+| UX-NV1 | Zoom (Ctrl+wheel, control, 25–200%) — absent | Nav | ✅ | Applied to the **canvas transform**, not to the geometry: the grid keeps measuring in engine pixels and only the drawing and the viewport it must fill are scaled, so drawn and modelled geometry stay comparable (scaling widths/heights instead would re-create UX-G01). Pointer coordinates divide by zoom; the in-cell editor is a DOM element so it multiplies. Ctrl+wheel, Ctrl+0, View ▸ Zoom presets |
 | UX-NV2 | Scrollbar track-click paging | Nav | 🔴 | mousedown on track pages toward click |
 | UX-NV3 | Tab-run return on Enter (return to Tab-origin column, row+1) | Nav | 🔴 | Track tab-origin column |
 | UX-NV4 | Enter/Tab wrap inside a multi-cell selection | Nav | 🔴 | **Blocked on a model split, not a keybinding.** `state.sel` is a *corner* of the selection (the block is `anchor`..`sel`), so moving it inside the block shrinks the block. Needs a distinct active-cell/focus separate from the selection corners, with the ~50 `state.sel` readers pointed at an `activeCell()` accessor |

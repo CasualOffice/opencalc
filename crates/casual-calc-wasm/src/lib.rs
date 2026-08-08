@@ -1571,7 +1571,8 @@ pub fn session_cells(
             // A number format may name the colour of its own output
             // (`#,##0;[Red]-#,##0`); that is a deliberate instruction about
             // this value, so it wins over the style's font colour, as in Excel.
-            let fc = display_color(wb, cell).or_else(|| style.and_then(|s| s.font_color.as_deref()));
+            let fc =
+                display_color(wb, cell).or_else(|| style.and_then(|s| s.font_color.as_deref()));
             if let Some(fc) = fc {
                 extra.push_str(&format!(",\"fc\":{}", json_string(fc)));
             }
@@ -2212,7 +2213,15 @@ pub fn session_sort_range(
     key_col: u32,
     ascending: bool,
 ) -> Result<(), JsError> {
-    session_sort_range_multi(sheet, r0, c0, r1, c1, vec![key_col], vec![u8::from(ascending)])
+    session_sort_range_multi(
+        sheet,
+        r0,
+        c0,
+        r1,
+        c1,
+        vec![key_col],
+        vec![u8::from(ascending)],
+    )
 }
 
 /// Sort a range by up to several key columns, each with its own direction.
@@ -2303,11 +2312,10 @@ pub fn session_sort_range_multi(
             // Each key decides only if the ones before it tied, and carries its
             // own direction — "A→Z by Region, then Z→A by Total".
             for (i, (ka, kb)) in a.keys.iter().zip(b.keys.iter()).enumerate() {
-                let ord = ka
-                    .0
-                    .cmp(&kb.0)
-                    .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(Ordering::Equal))
-                    .then_with(|| ka.2.cmp(&kb.2));
+                let ord =
+                    ka.0.cmp(&kb.0)
+                        .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(Ordering::Equal))
+                        .then_with(|| ka.2.cmp(&kb.2));
                 if ord != Ordering::Equal {
                     return if ascending.get(i).copied().unwrap_or(1) != 0 {
                         ord
@@ -3253,6 +3261,62 @@ pub fn session_copy_style(
     // from a plain cell should do.
     let source = source.unwrap_or_default();
     apply_style_range(sheet, r0, c0, r1, c1, move |st| *st = source.clone())
+}
+
+/// Delete duplicate rows within a range, keeping the first occurrence of each,
+/// and return how many were removed.
+///
+/// Rows are compared on their *displayed* values across the range's columns —
+/// what the user sees is what "duplicate" means; two cells reading `1.50` are
+/// the same row even if one is a formula. Later rows shift up, as with a row
+/// delete, so a table stays contiguous. `first_row` lets the caller exclude a
+/// header.
+#[wasm_bindgen]
+pub fn session_remove_duplicates(
+    sheet: usize,
+    first_row: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<u32, JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dupes: Vec<u32> = Vec::new();
+        if let Some(sh) = session.workbook().sheets.get(sheet) {
+            let wb = session.workbook();
+            for r in first_row..=r1 {
+                let mut key = String::new();
+                for c in c0..=c1 {
+                    if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                        key.push_str(&display_text(wb, cell));
+                    }
+                    key.push('\u{1}'); // separator no cell text can contain
+                }
+                if !seen.insert(key) {
+                    dupes.push(r);
+                }
+            }
+        } else {
+            return Ok(0);
+        }
+        if dupes.is_empty() {
+            return Ok(0);
+        }
+        // Delete bottom-up so each index still refers to the intended row.
+        let mut ops = Vec::with_capacity(dupes.len());
+        for r in dupes.iter().rev() {
+            ops.push(EditOperation::DeleteRows {
+                sheet,
+                at: *r,
+                count: 1,
+            });
+        }
+        let removed = dupes.len() as u32;
+        session.edit(EditOperation::Batch(ops)).map_err(js)?;
+        Ok(removed)
+    })
 }
 
 /// Step the indent of a range by `delta` levels, clamped to Excel's 0–250.

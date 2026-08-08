@@ -348,7 +348,12 @@ fn theme_and_indexed_colors_resolve_to_rgb() {
     let wb = &import.workbook;
     let sheet = &wb.sheets[0];
     let style_of = |col: u32| {
-        let id = sheet.cells.get(CellRef::new(0, col)).unwrap().style.unwrap();
+        let id = sheet
+            .cells
+            .get(CellRef::new(0, col))
+            .unwrap()
+            .style
+            .unwrap();
         wb.styles.get(id).unwrap().clone()
     };
     // theme="4" is accent1 …
@@ -406,7 +411,8 @@ fn column_widths_survive_the_true_spelling_of_ooxml_booleans() {
     // LibreOffice, Apache POI and ExcelJS all write `customWidth="true"` rather
     // than `="1"`. Both are valid `xsd:boolean`; matching only "1" silently
     // dropped every column width, row height and hidden flag in those files.
-    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+    let sheet_xml =
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
         <cols>
           <col min="1" max="1" width="30" customWidth="true"/>
           <col min="2" max="2" width="12" customWidth="1"/>
@@ -418,7 +424,7 @@ fn column_widths_survive_the_true_spelling_of_ooxml_booleans() {
           <row r="2" hidden="true"><c r="A2"><v>2</v></c></row>
         </sheetData>
     </worksheet>"#
-        .to_vec();
+            .to_vec();
     let import = import_package(package_with_sheet(sheet_xml, None)).unwrap();
     let sheet = &import.workbook.sheets[0];
 

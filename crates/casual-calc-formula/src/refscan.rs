@@ -209,10 +209,10 @@ mod tests {
 
     #[test]
     fn string_literals_are_skipped() {
-        assert_eq!(spans(r#"=IF(A1="B2",C3,"D4")"#), vec![
-            (4, 6, 0, 0, 0, 0),
-            (12, 14, 2, 2, 2, 2),
-        ]);
+        assert_eq!(
+            spans(r#"=IF(A1="B2",C3,"D4")"#),
+            vec![(4, 6, 0, 0, 0, 0), (12, 14, 2, 2, 2, 2),]
+        );
         // A doubled quote inside a literal does not end it.
         assert_eq!(spans(r#"="say ""A1"" now"&B2"#), vec![(18, 20, 1, 1, 1, 1)]);
     }
