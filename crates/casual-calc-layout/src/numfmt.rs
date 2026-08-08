@@ -49,6 +49,14 @@ pub fn format_number(value: f64, code: &str) -> String {
     format_number_colored(value, code).0
 }
 
+/// As [`format_number`], but for a workbook using the 1904 date epoch.
+///
+/// Only date and time sections shift; a plain number means the same thing under
+/// either epoch, so the offset cannot simply be added to the value.
+pub fn format_number_1904(value: f64, code: &str) -> String {
+    format_sections(value, code, true).0
+}
+
 /// The colour a format section names, as `RRGGBB`.
 ///
 /// A number format may state the colour of its own output — `#,##0;[Red]-#,##0`
@@ -99,6 +107,10 @@ fn section_color(section: &str) -> Option<&'static str> {
 
 /// Format `value`, also reporting the colour its section names (if any).
 pub fn format_number_colored(value: f64, code: &str) -> (String, Option<&'static str>) {
+    format_sections(value, code, false)
+}
+
+fn format_sections(value: f64, code: &str, date1904: bool) -> (String, Option<&'static str>) {
     let sections = split_sections(code);
     if sections.is_empty()
         || (sections.len() == 1
@@ -139,7 +151,7 @@ pub fn format_number_colored(value: f64, code: &str) -> (String, Option<&'static
         );
     }
     if is_date_or_time(section) {
-        return (format_date_time(value, section), color);
+        return (format_date_time(value, section, date1904), color);
     }
 
     // Literal-only section (e.g. `"-"` or `"Zero"`)
@@ -546,7 +558,14 @@ const WEEKDAYS: [&str; 7] = [
 /// calc engine (serial `25569` == 1970-01-01). The integer part selects the civil
 /// date; the fractional part is the time of day. Rendering never consults a locale
 /// or the wall clock, so it is fully deterministic.
-fn format_date_time(value: f64, section: &str) -> String {
+fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
+    // A 1904 serial names the same instant as `serial + 1462` in the 1900 system
+    // the rest of this function is written against.
+    let value = if date1904 {
+        value + DATE1904_OFFSET as f64
+    } else {
+        value
+    };
     let tokens = parse_date_tokens(section);
     let has_ampm = tokens.iter().any(|t| matches!(t, DateToken::AmPm { .. }));
 
@@ -804,7 +823,27 @@ fn weekday_sun0(serial_days: i64) -> i64 {
 }
 
 /// Convert an Excel (1900-system) serial day number to a civil `(y, m, d)`.
+/// Days between the 1900 and 1904 serial epochs. A 1904 serial plus this is the
+/// same instant expressed in the 1900 system.
+pub const DATE1904_OFFSET: i64 = 1462;
+
 fn serial_to_ymd(serial_days: i64) -> (i64, i64, i64) {
+    // Excel treats 1900 as a leap year — it is not — so serials 1..59 name a
+    // date one day later than a straight count from the 1970 anchor gives, and
+    // serial 60 is the day 1900-02-29 that never existed. Every compatible
+    // reader reproduces this, because the alternative is disagreeing with the
+    // file's own author about what a date means. The anchor below is on the
+    // post-bug side, so only the early serials need correcting.
+    // Serial 60 is the day itself, and no real calendar can produce it, so it
+    // is returned directly.
+    if serial_days == 60 {
+        return (1900, 2, 29);
+    }
+    let serial_days = if serial_days < 60 {
+        serial_days + 1
+    } else {
+        serial_days
+    };
     // Excel serial 25569 == 1970-01-01; shift to the civil-from-days epoch.
     let mut z = serial_days - 25569 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

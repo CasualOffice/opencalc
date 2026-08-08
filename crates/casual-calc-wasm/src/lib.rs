@@ -2011,7 +2011,14 @@ pub fn font_css_stack(name: &str) -> String {
 /// and show the engine's real answer rather than an approximation of it.
 #[wasm_bindgen]
 pub fn format_preview(value: f64, code: &str) -> String {
-    casual_calc_layout::format_number(value, code)
+    // Honour the open workbook's epoch, or a 1904 file's format dialog would
+    // preview dates four years off from what the grid shows.
+    let date1904 = with_session(|s| s.workbook().date1904).unwrap_or(false);
+    if date1904 {
+        casual_calc_layout::format_number_1904(value, code)
+    } else {
+        casual_calc_layout::format_number(value, code)
+    }
 }
 
 /// Likewise for a text value, so a preview shows what the `@` section does.

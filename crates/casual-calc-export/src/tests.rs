@@ -734,3 +734,22 @@ fn sheet_visibility_round_trips() {
         assert_eq!(wb.sheets[0].visibility, state);
     }
 }
+
+#[test]
+fn the_1904_date_epoch_round_trips() {
+    // Dropping this flag is the worst kind of loss: the serials keep their
+    // values while their meaning moves by 1462 days, so every date in the file
+    // is silently wrong from then on.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    assert!(!workbook.date1904, "the sample is a 1900-epoch workbook");
+    let written = write_workbook(&workbook).unwrap();
+    assert!(
+        !xml_of(&written, "xl/workbook.xml").contains("date1904"),
+        "the default epoch is written by omission"
+    );
+
+    workbook.date1904 = true;
+    let written = write_workbook(&workbook).unwrap();
+    assert!(xml_of(&written, "xl/workbook.xml").contains("date1904=\"1\""));
+    assert!(import_package(written).unwrap().workbook.date1904);
+}

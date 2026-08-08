@@ -65,6 +65,16 @@ pub struct Workbook {
     /// order, which is the order `Style::style_ref` indexes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cell_styles: Vec<NamedCellStyle>,
+    /// Whether the workbook counts dates from 1904 rather than 1900 — OOXML
+    /// `<workbookPr date1904="1">`, the legacy Mac Excel epoch.
+    ///
+    /// Serials are stored in the file's own system, so this has to be known to
+    /// display a date at all: read a 1904 workbook as 1900 and every date is
+    /// wrong by 1462 days. Dropping the flag on save is worse still — the
+    /// serials stay put while their meaning shifts, corrupting every date in the
+    /// file permanently.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub date1904: bool,
 }
 
 /// A named cell style: OOXML's `<cellStyle>` entry paired with the
@@ -99,6 +109,7 @@ impl Workbook {
             default_font_size_hp: None,
             theme_colors: Vec::new(),
             cell_styles: Vec::new(),
+            date1904: false,
         }
     }
 

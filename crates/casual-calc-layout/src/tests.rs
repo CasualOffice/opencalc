@@ -290,3 +290,31 @@ fn locale_and_colour_brackets_still_emit_nothing() {
     assert_eq!(format_number(0.5, "[$-409]h:mm"), "12:00");
     assert_eq!(format_number(1.25, "[$-409][h]:mm"), "30:00");
 }
+
+#[test]
+fn the_1904_epoch_shifts_dates_but_not_plain_numbers() {
+    use crate::numfmt::{format_number, format_number_1904};
+
+    // Serial 0 is 1904-01-01 under the Mac epoch and 1900-01-00 under the
+    // default one. Reading a 1904 workbook as 1900 puts every date out by 1462
+    // days — over four years — with nothing to show that it happened.
+    assert_eq!(format_number_1904(0.0, "yyyy-mm-dd"), "1904-01-01");
+    assert_eq!(format_number_1904(1.0, "yyyy-mm-dd"), "1904-01-02");
+    // The same serial under the default epoch. Excel's serial 1 is 1900-01-01,
+    // which only works because it also believes 1900 was a leap year.
+    assert_eq!(format_number(1.0, "yyyy-mm-dd"), "1900-01-01");
+    assert_eq!(format_number(59.0, "yyyy-mm-dd"), "1900-02-28");
+    // Serial 60 is Excel's phantom 1900-02-29. Reproduced rather than corrected:
+    // disagreeing here means disagreeing with the file's author about a date.
+    assert_eq!(format_number(60.0, "yyyy-mm-dd"), "1900-02-29");
+    assert_eq!(format_number(61.0, "yyyy-mm-dd"), "1900-03-01");
+    // The anchor everything else is measured from.
+    assert_eq!(format_number(25569.0, "yyyy-mm-dd"), "1970-01-01");
+    // A plain number means the same under either epoch, so it must not shift.
+    assert_eq!(
+        format_number_1904(1234.5, "0.00"),
+        format_number(1234.5, "0.00")
+    );
+    // Time-of-day is epoch-independent too.
+    assert_eq!(format_number_1904(0.5, "h:mm"), "12:00");
+}

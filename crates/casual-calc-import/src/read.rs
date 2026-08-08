@@ -789,6 +789,27 @@ fn read_tab_color(
 ///
 /// Returns `(name, local_sheet_id, refers_to_text)` per entry; `local_sheet_id`
 /// is the 0-based sheet index for sheet-scoped names.
+/// Whether `workbook.xml` declares the 1904 date system.
+pub fn parse_date1904(xml: &[u8]) -> Result<bool, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) | Event::Empty(e) => {
+                bounds.count()?;
+                if e.local_name().as_ref() == b"workbookPr" {
+                    return Ok(read_bool_attr(&e, b"date1904")?.unwrap_or(false));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(false)
+}
+
 pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, String)>, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();

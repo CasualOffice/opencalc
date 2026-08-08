@@ -35,7 +35,10 @@ use casual_calc_model::{
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
 use a1::{parse_a1, parse_range};
-use read::{RawCell, parse_comments, parse_defined_names, parse_shared_strings, parse_worksheet};
+use read::{
+    RawCell, parse_comments, parse_date1904, parse_defined_names, parse_shared_strings,
+    parse_worksheet,
+};
 use styles::{StyleSheet, parse_styles};
 use theme::{ThemePalette, parse_theme};
 
@@ -439,6 +442,9 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     // Defined names, resolved against the sheet ids assigned above.
     let workbook_part = package.workbook_part().to_owned();
     let workbook_xml = package.read_part(&workbook_part)?;
+    // The date epoch has to be known before any date is displayed, and has to
+    // be written back or the serials silently change meaning.
+    workbook.date1904 = parse_date1904(&workbook_xml)?;
     for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
         match parse_formula(&refers_to) {
             Ok(formula) => {

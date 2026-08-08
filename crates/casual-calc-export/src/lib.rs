@@ -204,7 +204,14 @@ fn root_rels() -> String {
 }
 
 fn workbook_xml(workbook: &Workbook) -> String {
-    let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\"><sheets>");
+    let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
+    // `<workbookPr>` leads CT_Workbook. Written only for the 1904 epoch, since
+    // 1900 is the default — but written it must be, or the serials keep their
+    // values while their meaning shifts by 1462 days.
+    if workbook.date1904 {
+        s.push_str("<workbookPr date1904=\"1\"/>");
+    }
+    s.push_str("<sheets>");
     for (i, sheet) in workbook.sheets.iter().enumerate() {
         // Visible is the schema default, so it is written by omission.
         let state = sheet

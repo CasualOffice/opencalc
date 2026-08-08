@@ -28,7 +28,8 @@ pub use font_substitution::{
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
 pub use numfmt::{
-    adjust_format_decimals, format_general, format_number, format_number_colored, format_text,
+    adjust_format_decimals, format_general, format_number, format_number_1904,
+    format_number_colored, format_text,
 };
 
 use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
@@ -213,6 +214,9 @@ pub fn display_text(workbook: &Workbook, cell: &Cell) -> String {
     match &cell.value {
         CellValue::Empty => String::new(),
         CellValue::Number(n) => match cell_number_format(workbook, cell) {
+            // The epoch is a property of the workbook, so it has to come from
+            // here — a date rendered under the wrong one is out by 1462 days.
+            Some(code) if workbook.date1904 => numfmt::format_number_1904(*n, code),
             Some(code) => format_number(*n, code),
             None => format_general(*n),
         },
