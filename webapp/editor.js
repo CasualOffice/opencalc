@@ -5736,6 +5736,32 @@ function cellMenu(x, y) {
     ["Transpose", false, () => doPasteMode("transpose")],
   ]);
   sep();
+  // Insert/delete *cells*, shifting the rest. References are not rewritten, so
+  // the user is told when that matters rather than discovering it later.
+  const shiftCells = (insert, vertical, label) => () => {
+    const r = effectiveRange();
+    let risky = false;
+    try { risky = wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical); }
+    catch {}
+    const run = () => {
+      tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
+      status.textContent = label.toLowerCase();
+    };
+    if (!risky) { run(); return; }
+    confirmModal(
+      "Formulas reference these cells",
+      "Moving them will not adjust those references — they will keep pointing at the same addresses, which will now hold different cells.",
+      label,
+    ).then((ok) => { if (ok) run(); });
+  };
+  submenu("Insert cells", [
+    ["Shift cells down", false, shiftCells(true, true, "Inserted, shifted down")],
+    ["Shift cells right", false, shiftCells(true, false, "Inserted, shifted right")],
+  ]);
+  submenu("Delete cells", [
+    ["Shift cells up", false, shiftCells(false, true, "Deleted, shifted up")],
+    ["Shift cells left", false, shiftCells(false, false, "Deleted, shifted left")],
+  ]);
   submenu("Insert", [
     ["Row above", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, rows)); }],
     ["Row below", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r1 + 1, rows)); }],

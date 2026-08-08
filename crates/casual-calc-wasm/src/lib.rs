@@ -2359,6 +2359,115 @@ pub fn session_trace(sheet: usize, row: u32, col: u32, deps: bool) -> String {
     .unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Insert or delete a *block* of cells, shifting the rest along one axis.
+///
+/// Unlike a whole row or column insert, this does **not** rewrite formula
+/// references: a reference into the shifted band would need the same
+/// range-aware rewriting the structural ops do, and doing it half-way would be
+/// worse than not doing it. `session_cells_shift_affects_formulas` lets the host
+/// warn first, so the user decides rather than finding out later.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_shift_cells(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    insert: bool,
+    vertical: bool,
+) -> Result<(), JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    let span = if vertical {
+        rr1 - rr0 + 1
+    } else {
+        cc1 - cc0 + 1
+    };
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sh) = session.workbook().sheets.get(sheet) else {
+            return Ok(());
+        };
+        // The cells that move, read before anything is written.
+        let mut moving: Vec<(CellRef, Cell)> = Vec::new();
+        for (at, c) in sh.cells.iter() {
+            let in_band = if vertical {
+                at.col >= cc0 && at.col <= cc1 && at.row >= rr0
+            } else {
+                at.row >= rr0 && at.row <= rr1 && at.col >= cc0
+            };
+            if in_band {
+                moving.push((at, c.clone()));
+            }
+        }
+        // Deleting drops the block itself; inserting keeps everything and pushes
+        // it along.
+        let mut ops: Vec<EditOperation> = Vec::new();
+        for (at, _) in &moving {
+            ops.push(EditOperation::ClearCell { sheet, at: *at });
+        }
+        for (at, c) in moving {
+            let moved = if insert {
+                if vertical {
+                    Some(CellRef::new(at.row + span, at.col))
+                } else {
+                    Some(CellRef::new(at.row, at.col + span))
+                }
+            } else if vertical {
+                if at.row <= rr1 {
+                    None // inside the deleted block
+                } else {
+                    Some(CellRef::new(at.row - span, at.col))
+                }
+            } else if at.col <= cc1 {
+                None
+            } else {
+                Some(CellRef::new(at.row, at.col - span))
+            };
+            if let Some(to) = moved {
+                ops.push(EditOperation::SetCell {
+                    sheet,
+                    at: to,
+                    cell: Some(c),
+                });
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Whether any formula reads a cell that a shift of this block would move — the
+/// question the host has to ask before offering it, since references are not
+/// rewritten.
+#[wasm_bindgen]
+pub fn session_shift_affects_formulas(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    vertical: bool,
+) -> bool {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return false;
+        };
+        let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+        // Any populated cell in the band that something reads.
+        sh.cells.iter().any(|(at, _)| {
+            let in_band = if vertical {
+                at.col >= cc0 && at.col <= cc1 && at.row >= rr0
+            } else {
+                at.row >= rr0 && at.row <= rr1 && at.col >= cc0
+            };
+            in_band && !casual_calc_eval::dependents_of(wb, sheet, at).is_empty()
+        })
+    })
+    .unwrap_or(false)
+}
+
 /// Whole-range statistics for the conditional-format rules that cannot be
 /// decided from a cell alone. Computed once per rule per `session_cells` call.
 #[derive(Default)]
