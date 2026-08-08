@@ -59,6 +59,7 @@ evidence").
 | Frozen panes | ● | ● | ● | ● | — | P1B-001 (import/export) + editor render & freeze control (UX-27) |
 | Defined names | ● | ● | ✗ | — | ✗ | P1B-001 |
 | Date epoch (1904) | ● | ● | — | ● | — | `workbookPr/@date1904`. Serials live in the file's own system, so the flag is read, written, and threaded into date rendering. Excel's phantom 1900 leap day is reproduced rather than corrected |
+| Sheet + cell protection | ● | ● | ● | — | — | `<sheetProtection>` preserved attribute-for-attribute (hashes never regenerated) and the xf `<protection locked/hidden>` flags. Protection is not *enforced* in the editor yet — it round-trips, but a protected sheet is still editable here |
 | Sheet visibility | ● | ● | ● | ● | — | `<sheet state="hidden"|"veryHidden">`; veryHidden is preserved distinctly rather than flattened |
 | Sheet structure | ● | ● | ✗ | ✗ | — | P1B-001 |
 | Whole-package (unedited) | — | ✗ | — | — | — | P1B (retention) |

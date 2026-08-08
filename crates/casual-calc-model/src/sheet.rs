@@ -174,6 +174,9 @@ pub struct Sheet {
     /// The autofilter over a header range, if one is turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
+    /// Sheet protection, if the sheet carries any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<SheetProtection>,
     /// Whether the tab is shown, hidden, or hidden beyond the UI's reach.
     #[serde(default, skip_serializing_if = "SheetVisibility::is_visible")]
     pub visibility: SheetVisibility,
@@ -185,6 +188,40 @@ pub struct Sheet {
     /// only this one is cleared when the filter changes.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub filter_hidden: BTreeSet<u32>,
+}
+
+/// A sheet's `<sheetProtection>`, preserved attribute-for-attribute.
+///
+/// Deliberately untyped. The element carries a dozen permission flags plus a
+/// password hash, salt, algorithm and spin count, and getting any of those
+/// wrong on the way out is worse than not reading them: a regenerated hash
+/// locks the author out of their own sheet, and a dropped flag quietly grants a
+/// permission they withheld. So the attributes travel verbatim, and only the one
+/// flag the UI acts on is interpreted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetProtection {
+    /// Every attribute exactly as read, in a deterministic order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
+}
+
+impl SheetProtection {
+    /// Whether the sheet itself is protected — the `sheet` attribute.
+    pub fn is_enabled(&self) -> bool {
+        self.attrs
+            .get("sheet")
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    }
+
+    /// Protection with only the master flag set, for a sheet the user protects
+    /// here. No password: this cannot invent a hash, and a UI that pretended to
+    /// set one would be claiming a security property it has not got.
+    pub fn enabled() -> Self {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("sheet".to_owned(), "1".to_owned());
+        Self { attrs }
+    }
 }
 
 /// Whether a sheet's tab is shown — OOXML `<sheet state=…>`.
@@ -586,6 +623,7 @@ impl Sheet {
             validations: Vec::new(),
             conditional_formats: Vec::new(),
             comments: Vec::new(),
+            protection: None,
             visibility: SheetVisibility::Visible,
             auto_filter: None,
             filter_hidden: BTreeSet::new(),

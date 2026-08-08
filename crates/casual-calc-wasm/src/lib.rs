@@ -1323,6 +1323,39 @@ pub fn session_set_font_size(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.font_size_hp = hp)
 }
 
+/// Whether each sheet is protected, as a JSON array of 0/1.
+#[wasm_bindgen]
+pub fn session_sheet_protected() -> String {
+    with_session(|s| {
+        let items: Vec<String> = s
+            .workbook()
+            .sheets
+            .iter()
+            .map(|sh| u8::from(sh.protection.as_ref().is_some_and(|p| p.is_enabled())).to_string())
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Turn sheet protection on or off.
+///
+/// Turning it on sets only the master flag: this cannot invent a password hash,
+/// and a UI that pretended to would be claiming a security property it has not
+/// got. Turning it off clears the element — including any hash that came from
+/// the file, which is the honest reading of "unprotect".
+#[wasm_bindgen]
+pub fn session_set_sheet_protected(index: usize, on: bool) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(sh) = session.workbook_mut().sheets.get_mut(index) {
+            sh.protection = on.then(casual_calc_model::SheetProtection::enabled);
+        }
+        Ok(())
+    })
+}
+
 /// Each sheet's visibility as JSON `["visible"|"hidden"|"veryHidden", …]`, so
 /// the host can leave hidden tabs out of the strip while still offering them in
 /// an unhide list.

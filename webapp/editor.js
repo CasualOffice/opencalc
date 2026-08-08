@@ -4507,6 +4507,8 @@ function renderTabs() {
   const names = JSON.parse(wasm.session_sheet_names());
   let vis = [];
   try { vis = JSON.parse(wasm.session_sheet_visibility()); } catch {}
+  let prot = [];
+  try { prot = JSON.parse(wasm.session_sheet_protected()); } catch {}
   if (state.sheet >= names.length) state.sheet = names.length - 1;
   // Never sit on a hidden sheet — the tab is gone, so there would be no way
   // back to a visible one.
@@ -4527,6 +4529,12 @@ function renderTabs() {
     if (tc) {
       b.style.setProperty("--tab-color", "#" + tc);
       b.classList.add("colored");
+    }
+    if (prot[i]) {
+      // A protected sheet reads the same as any other until you try to edit it,
+      // so say so on the tab itself.
+      b.classList.add("protected");
+      b.title = name + " (protected)";
     }
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", i === state.sheet ? "true" : "false");
@@ -4560,6 +4568,48 @@ function renderTabs() {
     } catch (e) { status.textContent = `error: ${e}`; }
   });
   tabsEl.appendChild(add);
+
+  // All-sheets menu. The strip scrolls once there are more tabs than fit, but
+  // scrolling only helps if you already know where you are going — this lists
+  // every sheet, hidden ones included, and jumps straight to it.
+  const all = document.createElement("button");
+  all.className = "sheet-add sheet-all";
+  all.title = "All sheets";
+  all.setAttribute("aria-label", "All sheets");
+  all.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="icon-sm"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>';
+  all.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeSheetMenu();
+    const menu = document.createElement("div");
+    menu.className = "popmenu ctx-menu";
+    menu.id = "sheet-ctx";
+    names.forEach((n, idx) => {
+      const hiddenHere = (vis[idx] || "visible") !== "visible";
+      const b = document.createElement("button");
+      b.className = "menu-item" + (idx === state.sheet ? " on" : "");
+      b.textContent = n + (hiddenHere ? "  (hidden)" : "") + (prot[idx] ? "  🔒" : "");
+      b.addEventListener("click", () => {
+        closeSheetMenu();
+        // Jumping to a hidden sheet reveals it: the alternative is switching to
+        // something with no tab and no way back.
+        if (hiddenHere) {
+          try { wasm.session_set_sheet_visibility(idx, "visible"); } catch {}
+        }
+        switchSheet(idx);
+        renderTabs();
+        draw();
+      });
+      menu.appendChild(b);
+    });
+    const r = all.getBoundingClientRect();
+    positionMenu(menu, r.left, r.top - 4);
+  });
+  tabsEl.appendChild(all);
+
+  // Keep the active tab in view once the strip overflows.
+  const activeTab = tabsEl.querySelector(".sheet-tab.active");
+  if (activeTab) activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 // Reorder sheet tabs, keeping the active sheet tracked through the shift.
@@ -4659,6 +4709,13 @@ function sheetMenu(i, x, y) {
   strip.appendChild(none);
   menu.appendChild(strip);
   menu.appendChild(document.createElement("div")).className = "menu-sep";
+  let prot = [];
+  try { prot = JSON.parse(wasm.session_sheet_protected()); } catch {}
+  item(prot[i] ? "Unprotect sheet" : "Protect sheet", false, () => {
+    try { wasm.session_set_sheet_protected(i, !prot[i]); renderTabs(); draw(); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    status.textContent = prot[i] ? "sheet unprotected" : "sheet protected";
+  });
   item("Hide sheet", false, () => {
     try { wasm.session_set_sheet_visibility(i, "hidden"); renderTabs(); draw(); }
     catch (e) { status.textContent = `${e}`.replace(/^Error:\s*/, ""); }

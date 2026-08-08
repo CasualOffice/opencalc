@@ -59,6 +59,8 @@ struct Xf {
     wrap: bool,
     rotation: u16,
     indent: u8,
+    locked: Option<bool>,
+    formula_hidden: Option<bool>,
     /// `xf/@xfId` — which `cellStyleXfs` entry (and so which named style) this
     /// cell format belongs to. Only meaningful on a `cellXfs` entry.
     xf_id: Option<u32>,
@@ -301,6 +303,8 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             valign: None,
                             wrap: false,
                             indent: 0,
+                            locked: None,
+                            formula_hidden: None,
                             xf_id: attr_u32(e, b"xfId")?,
                         };
                         if in_cellxfs {
@@ -316,6 +320,20 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                                 attr_u32(e, b"xfId")?.unwrap_or(0),
                                 attr_u32(e, b"builtinId")?,
                             ));
+                        }
+                    }
+                    b"protection" if in_cellxfs || in_style_xfs => {
+                        let target = if in_cellxfs {
+                            xfs.last_mut()
+                        } else {
+                            style_xfs.last_mut()
+                        };
+                        if let Some(xf) = target {
+                            let flag = |v: Option<String>| {
+                                v.map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            };
+                            xf.locked = flag(attr(e, b"locked")?);
+                            xf.formula_hidden = flag(attr(e, b"hidden")?);
                         }
                     }
                     b"alignment" if in_cellxfs || in_style_xfs => {
@@ -393,6 +411,9 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             wrap: xf.wrap,
             indent: xf.indent,
             border: (!border.is_empty()).then_some(border),
+            // `None` means the xf said nothing, which OOXML defines as locked.
+            locked: xf.locked,
+            formula_hidden: xf.formula_hidden,
             // A named style's own entry is the definition, not a reference.
             style_ref: None,
         }

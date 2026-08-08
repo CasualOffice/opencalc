@@ -242,6 +242,14 @@ pub struct Style {
     /// Cell borders, if any edge is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Borders>,
+    /// Cell protection: `Some(false)` unlocks the cell, `None` leaves it at
+    /// OOXML's default of locked. Only takes effect while the sheet is
+    /// protected — but dropping it silently unlocks cells the author locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+    /// Whether the formula is hidden from the formula bar on a protected sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_hidden: Option<bool>,
     /// The named cell style this cell belongs to, as an index into
     /// [`crate::Workbook::cell_styles`] — OOXML's `xf/@xfId`.
     ///
@@ -285,6 +293,8 @@ impl Style {
             && self.indent == 0
             && self.border.is_none()
             && self.style_ref.is_none()
+            && self.locked.is_none()
+            && self.formula_hidden.is_none()
     }
 }
 

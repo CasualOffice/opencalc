@@ -325,11 +325,27 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
         flag(ids.border_id != 0, " applyBorder=\"1\""),
         flag(has_align, " applyAlignment=\"1\""),
     ));
-    if !has_align {
+    let has_protection = ids.locked.is_some() || ids.formula_hidden.is_some();
+    if !has_align && !has_protection {
         s.push_str("/>");
         return;
     }
-    s.push_str("><alignment");
+    s.push('>');
+    if has_protection {
+        s.push_str("<protection");
+        if let Some(locked) = ids.locked {
+            s.push_str(&format!(" locked=\"{}\"", u8::from(locked)));
+        }
+        if let Some(hidden) = ids.formula_hidden {
+            s.push_str(&format!(" hidden=\"{}\"", u8::from(hidden)));
+        }
+        s.push_str("/>");
+    }
+    if !has_align {
+        s.push_str("</xf>");
+        return;
+    }
+    s.push_str("<alignment");
     if let Some(align) = ids.align {
         s.push_str(&format!(" horizontal=\"{}\"", align.ooxml()));
     }
@@ -417,6 +433,8 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             wrap: style.wrap,
             indent: style.indent,
             rotation: style.rotation,
+            locked: style.locked,
+            formula_hidden: style.formula_hidden,
         }
     };
     for style in &styles {
@@ -586,6 +604,8 @@ struct StyleIds {
     wrap: bool,
     indent: u8,
     rotation: u16,
+    locked: Option<bool>,
+    formula_hidden: Option<bool>,
 }
 
 /// The per-column attributes coalesced into one `<col>` span: a custom width
@@ -865,6 +885,20 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         s.push_str("</row>");
     }
     s.push_str("</sheetData>");
+
+    // `<sheetProtection>` precedes `<autoFilter>` in the CT_Worksheet sequence.
+    // Attributes are written back exactly as they were read, in sorted order for
+    // determinism — including the password hash, which must never be
+    // regenerated here.
+    if let Some(p) = &sheet.protection
+        && !p.attrs.is_empty()
+    {
+        s.push_str("<sheetProtection");
+        for (k, v) in &p.attrs {
+            s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
+        }
+        s.push_str("/>");
+    }
 
     // <autoFilter> precedes <mergeCells> in the CT_Worksheet sequence.
     if let Some(filter) = &sheet.auto_filter {

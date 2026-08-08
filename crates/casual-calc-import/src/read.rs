@@ -255,6 +255,8 @@ pub struct Worksheet {
     pub validations: Vec<(String, String)>,
     /// Raw conditional-formatting rules, mapped to the model in `lib.rs`.
     pub conditional_formats: Vec<RawCf>,
+    /// `<sheetProtection>` attributes exactly as read, or `None` if absent.
+    pub protection: Option<BTreeMap<String, String>>,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
     pub auto_filter: Option<String>,
     /// Per-column filter rules inside that `<autoFilter>`.
@@ -557,6 +559,9 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             result.merges.push(reference);
                         }
                     }
+                    b"sheetProtection" => {
+                        result.protection = Some(read_protection(&e)?);
+                    }
                     b"pane" => read_pane(&e, &mut result)?,
                     b"sheetView" => read_sheet_view(&e, &mut result)?,
                     b"row" => read_row(&e, &mut result)?,
@@ -630,6 +635,12 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
                     b"tabColor" => read_tab_color(&e, &mut result, theme)?,
+                    // Self-closing in every file that carries it, so this arm is
+                    // the one that actually fires — the Start arm above is for
+                    // the form the schema allows but nobody writes.
+                    b"sheetProtection" => {
+                        result.protection = Some(read_protection(&e)?);
+                    }
                     // A rule with no children — top10, aboveAverage,
                     // duplicateValues — arrives self-closing, so it never reaches
                     // the End handler that pushes the others. Complete it here.
@@ -789,6 +800,21 @@ fn read_tab_color(
 ///
 /// Returns `(name, local_sheet_id, refers_to_text)` per entry; `local_sheet_id`
 /// is the 0-based sheet index for sheet-scoped names.
+/// Every attribute of `<sheetProtection>`, verbatim. The element mixes
+/// permission flags with a password hash, salt and algorithm; inventing or
+/// dropping either is worse than not interpreting them, so nothing here is
+/// interpreted at all.
+fn read_protection(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
+    let mut attrs = BTreeMap::new();
+    for a in e.attributes() {
+        let a = a.map_err(|err| xml_err(quick_xml::Error::from(err)))?;
+        let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
+        let value = a.unescape_value().map_err(xml_err)?.into_owned();
+        attrs.insert(key, value);
+    }
+    Ok(attrs)
+}
+
 /// Whether `workbook.xml` declares the 1904 date system.
 pub fn parse_date1904(xml: &[u8]) -> Result<bool, ImportError> {
     let mut reader = Reader::from_reader(xml);

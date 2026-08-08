@@ -753,3 +753,54 @@ fn the_1904_date_epoch_round_trips() {
     assert!(xml_of(&written, "xl/workbook.xml").contains("date1904=\"1\""));
     assert!(import_package(written).unwrap().workbook.date1904);
 }
+
+#[test]
+fn sheet_and_cell_protection_round_trip() {
+    use casual_calc_model::{CellRef, SheetProtection, Style};
+    use std::collections::BTreeMap;
+
+    // A protected sheet used to come back unprotected, and locked cells came
+    // back unlocked — both silently granting permissions the author withheld.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let mut attrs = BTreeMap::new();
+    attrs.insert("sheet".to_owned(), "1".to_owned());
+    attrs.insert("formatCells".to_owned(), "0".to_owned());
+    // A password hash must survive byte-for-byte: regenerating one would lock
+    // the author out of their own sheet.
+    attrs.insert("algorithmName".to_owned(), "SHA-512".to_owned());
+    attrs.insert("hashValue".to_owned(), "abc123==".to_owned());
+    attrs.insert("saltValue".to_owned(), "zzz999==".to_owned());
+    attrs.insert("spinCount".to_owned(), "100000".to_owned());
+    workbook.sheets[0].protection = Some(SheetProtection {
+        attrs: attrs.clone(),
+    });
+
+    let at = CellRef::new(0, 0);
+    let id = workbook.intern_style(Style {
+        locked: Some(false),
+        formula_hidden: Some(true),
+        ..Default::default()
+    });
+    let sheet = &mut workbook.sheets[0];
+    let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+    cell.style = Some(id);
+    sheet.cells.set(at, cell);
+
+    let written = write_workbook(&workbook).unwrap();
+    let ws = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(ws.contains("<sheetProtection "), "{ws:.400}");
+    assert!(ws.contains("hashValue=\"abc123==\""));
+    assert!(xml_of(&written, "xl/styles.xml").contains("<protection locked=\"0\" hidden=\"1\"/>"));
+
+    let wb = import_package(written).unwrap().workbook;
+    let p = wb.sheets[0]
+        .protection
+        .as_ref()
+        .expect("protection dropped");
+    assert!(p.is_enabled());
+    assert_eq!(p.attrs, attrs, "an attribute was lost or rewritten");
+    let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+    let st = wb.styles.get(round).unwrap();
+    assert_eq!(st.locked, Some(false));
+    assert_eq!(st.formula_hidden, Some(true));
+}

@@ -145,6 +145,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // A hidden sheet that comes back visible exposes data its author put
         // away on purpose, so the state travels with the sheet.
         sheet.visibility = SheetVisibility::from_ooxml(&state);
+        sheet.protection = worksheet
+            .protection
+            .clone()
+            .map(|attrs| casual_calc_model::SheetProtection { attrs });
 
         // Shared formulas: Excel's fill-down writes the expression once, on the
         // group's master cell, and leaves every follower's `<f>` empty. Without
