@@ -67,6 +67,9 @@ struct Xf {
 /// The border edge currently being parsed, so a nested `<color>` attaches to it.
 #[derive(Clone, Copy)]
 enum Edge {
+    /// The single `<diagonal>` element; which way it runs comes from the
+    /// `diagonalUp`/`diagonalDown` flags on `<border>` itself.
+    Diagonal,
     Left,
     Right,
     Top,
@@ -79,6 +82,7 @@ fn edge_field(borders: &mut Borders, edge: Edge) -> &mut Option<BorderEdge> {
         Edge::Right => &mut borders.right,
         Edge::Top => &mut borders.top,
         Edge::Bottom => &mut borders.bottom,
+        Edge::Diagonal => &mut borders.diagonal,
     }
 }
 
@@ -198,12 +202,23 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             }
                         }
                     }
-                    b"border" if in_borders => borders.push(Borders::default()),
-                    b"left" | b"right" | b"top" | b"bottom" if in_borders => {
+                    b"border" if in_borders => {
+                        // The two diagonal directions are attributes of the
+                        // border itself, not of the `<diagonal>` element.
+                        borders.push(Borders {
+                            diagonal_up: attr(e, b"diagonalUp")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+                            diagonal_down: attr(e, b"diagonalDown")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+                            ..Borders::default()
+                        });
+                    }
+                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_borders => {
                         let edge = match e.local_name().as_ref() {
                             b"left" => Edge::Left,
                             b"right" => Edge::Right,
                             b"top" => Edge::Top,
+                            b"diagonal" => Edge::Diagonal,
                             _ => Edge::Bottom,
                         };
                         cur_edge = Some(edge);

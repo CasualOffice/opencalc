@@ -4051,6 +4051,21 @@ pub fn session_set_border(
         if right {
             borders.right = edge();
         }
+        // Diagonals are their own placements: one line description plus the
+        // direction flags, so "both" draws a cross rather than two borders.
+        match kind.as_str() {
+            "diagdown" | "diagup" | "diagboth" => {
+                borders.diagonal = edge();
+                borders.diagonal_down |= kind != "diagup";
+                borders.diagonal_up |= kind != "diagdown";
+            }
+            "nodiag" => {
+                borders.diagonal = None;
+                borders.diagonal_up = false;
+                borders.diagonal_down = false;
+            }
+            _ => {}
+        }
         st.border = (!borders.is_empty()).then_some(borders);
     })
 }
@@ -4073,6 +4088,12 @@ fn border_edges(
         "bottom" => (false, r == r1, false, false),
         "left" => (false, false, c == c0, false),
         "right" => (false, false, false, c == c1),
+        // Excel's composite bottoms: the outline plus a heavier or doubled
+        // bottom edge, which is how a totals row is conventionally ruled.
+        "bottomdouble" | "bottomthick" => (false, r == r1, false, false),
+        "topandbottom" => (r == r0, r == r1, false, false),
+        // Diagonal placements touch no orthogonal edge.
+        "diagdown" | "diagup" | "diagboth" | "nodiag" => (false, false, false, false),
         "inner" => (r > r0, r < r1, c > c0, c < c1),
         "horizontal" => (r > r0, r < r1, false, false),
         "vertical" => (false, false, c > c0, c < c1),
@@ -4093,6 +4114,7 @@ fn full_thin_border() -> Borders {
         right: edge(),
         top: edge(),
         bottom: edge(),
+        ..Borders::default()
     }
 }
 
@@ -4904,6 +4926,14 @@ fn border_json(b: &Borders) -> String {
     edge("r", &b.right);
     edge("t", &b.top);
     edge("b", &b.bottom);
+    // One diagonal line description, plus which way (or ways) it runs.
+    edge("d", &b.diagonal);
+    if b.diagonal_up {
+        parts.push("\"du\":1".to_owned());
+    }
+    if b.diagonal_down {
+        parts.push("\"dd\":1".to_owned());
+    }
     format!("{{{}}}", parts.join(","))
 }
 

@@ -666,3 +666,42 @@ fn rule_priority_and_stop_if_true_round_trip() {
     assert_eq!(back.priority, 7);
     assert!(back.stop_if_true);
 }
+
+#[test]
+fn diagonal_borders_round_trip() {
+    use casual_calc_model::{BorderEdge, Borders, CellRef, Style};
+
+    // The writer used to emit a bare `<diagonal/>`, so a file's diagonal borders
+    // were dropped the moment it was saved.
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let at = CellRef::new(0, 0);
+    let border = Borders {
+        diagonal: Some(BorderEdge {
+            style: "thin".into(),
+            color: Some("FF0000".into()),
+        }),
+        diagonal_up: true,
+        diagonal_down: true,
+        ..Default::default()
+    };
+    // A diagonal on its own is still a border.
+    assert!(!border.is_empty());
+    let id = workbook.intern_style(Style {
+        border: Some(border.clone()),
+        ..Default::default()
+    });
+    let sheet = &mut workbook.sheets[0];
+    let mut cell = sheet.cells.get(at).cloned().unwrap_or_default();
+    cell.style = Some(id);
+    sheet.cells.set(at, cell);
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/styles.xml");
+    assert!(xml.contains("diagonalUp=\"1\""), "{xml}");
+    assert!(xml.contains("diagonalDown=\"1\""));
+    assert!(xml.contains("<diagonal style=\"thin\">"));
+
+    let wb = import_package(written).unwrap().workbook;
+    let round = wb.sheets[0].cells.get(at).unwrap().style.unwrap();
+    assert_eq!(wb.styles.get(round).unwrap().border, Some(border));
+}

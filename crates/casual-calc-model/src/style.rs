@@ -43,12 +43,30 @@ pub struct Borders {
     /// Bottom edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom: Option<BorderEdge>,
+    /// The diagonal line's style and colour, if the cell has one. Which
+    /// diagonals it draws is decided by [`Borders::diagonal_up`] and
+    /// [`Borders::diagonal_down`] — OOXML carries one `<diagonal>` element and
+    /// two flags on `<border>`, so a cell can show both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagonal: Option<BorderEdge>,
+    /// Draw the diagonal from bottom-left to top-right.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagonal_up: bool,
+    /// Draw the diagonal from top-left to bottom-right.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagonal_down: bool,
 }
 
 impl Borders {
     /// Whether no edge carries a line.
     pub fn is_empty(&self) -> bool {
-        self.left.is_none() && self.right.is_none() && self.top.is_none() && self.bottom.is_none()
+        self.left.is_none()
+            && self.right.is_none()
+            && self.top.is_none()
+            && self.bottom.is_none()
+            // A diagonal alone is still a border; without this a cell whose only
+            // border is a diagonal would be treated as unbordered and dropped.
+            && self.diagonal.is_none()
     }
 }
 

@@ -534,10 +534,27 @@ function drawEdge(spec, x0, y0, x1, y1) {
   const color = sep >= 0 ? spec.slice(sep + 1) : "";
   const width = borderWidth(style);
   ctx.strokeStyle = color ? "#" + color : colors.fg;
+  ctx.setLineDash(style === "dashed" || style === "mediumDashed" ? [4, 2] : style === "dotted" ? [1, 2] : []);
+  // A double border is two thin parallel lines, not one thick one — drawing it
+  // heavy makes it indistinguishable from `thick`, which is the very thing it
+  // is chosen over for a totals rule. Offset perpendicular to the edge.
+  if (style === "double") {
+    ctx.lineWidth = 1;
+    const vertical = Math.abs(x1 - x0) < Math.abs(y1 - y0);
+    for (const d of [-1, 1]) {
+      const dx = vertical ? d : 0;
+      const dy = vertical ? 0 : d;
+      ctx.beginPath();
+      ctx.moveTo(Math.floor(x0) + dx + 0.5, Math.floor(y0) + dy + 0.5);
+      ctx.lineTo(Math.floor(x1) + dx + 0.5, Math.floor(y1) + dy + 0.5);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    return;
+  }
   ctx.lineWidth = width;
   // A 1px line lands crisply on a half-pixel; wider lines centre on the edge.
   const off = width === 1 ? 0.5 : 0;
-  ctx.setLineDash(style === "dashed" || style === "mediumDashed" ? [4, 2] : style === "dotted" ? [1, 2] : []);
   ctx.beginPath();
   ctx.moveTo(Math.floor(x0) + off, Math.floor(y0) + off);
   ctx.lineTo(Math.floor(x1) + off, Math.floor(y1) + off);
@@ -1154,6 +1171,12 @@ function draw() {
       drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);
       drawEdge(it.bd.t, x, yTop, x + w, yTop);
       drawEdge(it.bd.b, x, yTop + h, x + w, yTop + h);
+      // Diagonals: one line description, drawn along either corner-to-corner
+      // direction the cell asks for — a cell can carry both, forming a cross.
+      if (it.bd.d) {
+        if (it.bd.dd) drawEdge(it.bd.d, x, yTop, x + w, yTop + h);
+        if (it.bd.du) drawEdge(it.bd.d, x, yTop + h, x + w, yTop);
+      }
     });
   }
 
@@ -3465,7 +3488,12 @@ function adjustDecimals(delta) { formatSel((s) => wasm.session_adjust_decimals(s
 let borderStyle = "thin";
 let borderColor = "";
 function setBorder(kind) {
-  formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, borderStyle, borderColor));
+  // The composite bottoms are defined by their weight, so they carry their own
+  // style rather than whatever the picker happens to be set to.
+  const style = kind === "bottomdouble" ? "double"
+    : kind === "bottomthick" ? "thick"
+    : borderStyle;
+  formatSel((s) => wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, style, borderColor));
 }
 function toggleBorder() { setBorder("all"); }
 
@@ -3524,31 +3552,46 @@ function bdIcon(kind) {
   const seg = {
     top: "M3 3H17", bottom: "M3 17H17", left: "M3 3V17", right: "M17 3V17",
     midH: "M3 10H17", midV: "M10 3V17",
+    diagDown: "M3 3L17 17", diagUp: "M3 17L17 3",
   };
   const bold = {
     all: ["top", "bottom", "left", "right", "midH", "midV"],
     outer: ["top", "bottom", "left", "right"],
     inner: ["midH", "midV"], horizontal: ["midH"], vertical: ["midV"],
     top: ["top"], bottom: ["bottom"], left: ["left"], right: ["right"], none: [],
+    topandbottom: ["top", "bottom"], bottomdouble: ["bottom"], bottomthick: ["bottom"],
+    diagdown: ["diagDown"], diagup: ["diagUp"], diagboth: ["diagDown", "diagUp"], nodiag: [],
   }[kind] || [];
   let faint = "";
   for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--border)" stroke-width="1"/>`;
   let strong = "";
   for (const k of bold) strong += `<path d="${seg[k]}" stroke="currentColor" stroke-width="2"/>`;
-  const clear = kind === "none" ? `<path d="M5 15L15 5" stroke="#e5484d" stroke-width="1.6"/>` : "";
+  const clear = kind === "none" || kind === "nodiag"
+    ? `<path d="M5 15L15 5" stroke="#e5484d" stroke-width="1.6"/>` : "";
+  // The composite bottoms differ only in the weight of that one edge, so the
+  // icon has to say which: a second line for double, a heavier one for thick.
+  if (kind === "bottomdouble") strong += `<path d="M3 14H17" stroke="currentColor" stroke-width="2"/>`;
+  if (kind === "bottomthick") strong += `<path d="M3 16.5H17" stroke="currentColor" stroke-width="3"/>`;
   return `<svg viewBox="0 0 20 20" fill="none" class="icon">${faint}${strong}${clear}</svg>`;
 }
 const BD_TITLES = {
   all: "All borders", inner: "Inner borders", outer: "Outer border",
   horizontal: "Inside horizontal", vertical: "Inside vertical", none: "Clear borders",
   top: "Top border", bottom: "Bottom border", left: "Left border", right: "Right border",
+  topandbottom: "Top and bottom border", bottomdouble: "Bottom double border",
+  bottomthick: "Thick bottom border",
+  diagdown: "Diagonal down", diagup: "Diagonal up", diagboth: "Both diagonals",
+  nodiag: "Clear diagonals",
 };
 // Build the border palette into #border-menu (once).
 function buildBorderMenu() {
   const menu = document.getElementById("border-menu");
   menu.textContent = "";
   const grid = el("div", "bd-grid");
-  for (const kind of ["all", "inner", "outer", "horizontal", "vertical", "none", "top", "bottom", "left", "right"]) {
+  for (const kind of ["all", "inner", "outer", "horizontal", "vertical", "none",
+                      "top", "bottom", "left", "right",
+                      "topandbottom", "bottomdouble", "bottomthick",
+                      "diagdown", "diagup", "diagboth", "nodiag"]) {
     const b = el("button", "bd-cell");
     b.title = BD_TITLES[kind];
     b.setAttribute("aria-label", BD_TITLES[kind]);

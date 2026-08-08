@@ -586,12 +586,21 @@ struct ColAttrs {
 }
 
 fn write_border(s: &mut String, border: &Borders) {
-    s.push_str("<border>");
+    // The diagonal directions are attributes of `<border>`; the line's style and
+    // colour live in the `<diagonal>` child.
+    s.push_str("<border");
+    if border.diagonal_up {
+        s.push_str(" diagonalUp=\"1\"");
+    }
+    if border.diagonal_down {
+        s.push_str(" diagonalDown=\"1\"");
+    }
+    s.push('>');
     write_border_edge(s, "left", &border.left);
     write_border_edge(s, "right", &border.right);
     write_border_edge(s, "top", &border.top);
     write_border_edge(s, "bottom", &border.bottom);
-    s.push_str("<diagonal/>");
+    write_border_edge(s, "diagonal", &border.diagonal);
     s.push_str("</border>");
 }
 
