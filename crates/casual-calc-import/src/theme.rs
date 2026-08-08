@@ -8,10 +8,16 @@
 //!
 //! See ECMA-376 §18.3.1.15 (`color`) and §20.1.6.2 (`clrScheme`).
 
+use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
+
+/// Element and nesting ceilings for the theme part, matching the limits the
+/// other parts are read under.
+const MAX_ELEMENTS: usize = 1_000_000;
+const MAX_DEPTH: usize = 256;
 
 /// The workbook's twelve theme colours as `RRGGBB`, in the order a `theme="N"`
 /// attribute indexes them.
@@ -69,9 +75,31 @@ pub fn parse_theme(xml: &[u8]) -> Result<ThemePalette, ImportError> {
     let mut in_scheme = false;
     // The scheme element currently open, as its index in `<a:clrScheme>` order.
     let mut scheme_slot: Option<usize> = None;
+    // Same element/depth ceilings the other parts are read under: a theme part
+    // is untrusted input like any other, and this one is small by nature.
+    let mut elements = 0usize;
+    let mut depth = 0usize;
 
     loop {
         let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        if let Event::Start(_) | Event::Empty(_) = event {
+            elements += 1;
+            if elements > MAX_ELEMENTS {
+                return Err(ImportError::Ooxml(OoxmlError::TooManyElements {
+                    limit: MAX_ELEMENTS,
+                }));
+            }
+        }
+        match event {
+            Event::Start(_) => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(ImportError::Ooxml(OoxmlError::TooDeep { limit: MAX_DEPTH }));
+                }
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
         match event {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 let name = e.local_name();

@@ -508,6 +508,35 @@ pub fn session_set_gridlines_hidden(sheet: usize, hidden: bool) -> Result<(), Js
     })
 }
 
+/// Whether a sheet hides its row and column headers.
+#[wasm_bindgen]
+pub fn session_headers_hidden(sheet: usize) -> bool {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .is_some_and(|sh| sh.view.hide_headers)
+    })
+    .unwrap_or(false)
+}
+
+/// Show or hide a sheet's row and column headers (undoable). Persisted as
+/// OOXML's `showRowColHeaders`, so the choice survives a save.
+#[wasm_bindgen]
+pub fn session_set_headers_hidden(sheet: usize, hidden: bool) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { view, .. } = &mut op {
+            view.hide_headers = hidden;
+        }
+        session.edit(op).map_err(js)
+    })
+}
+
 /// Set the number of frozen rows/columns on a sheet.
 #[wasm_bindgen]
 pub fn session_set_freeze(sheet: usize, rows: u32, cols: u32) -> Result<(), JsError> {

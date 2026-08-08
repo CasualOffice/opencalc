@@ -57,6 +57,11 @@ pub struct SheetView {
     /// only `true` when the sheet carries `showGridLines="0"`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hide_gridlines: bool,
+    /// Whether the row and column headers are hidden — OOXML's
+    /// `showRowColHeaders="0"`. Shown by default, so this is `false` for a
+    /// normal sheet.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_headers: bool,
 }
 
 fn is_false(value: &bool) -> bool {

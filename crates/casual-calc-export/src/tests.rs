@@ -148,6 +148,24 @@ fn hide_gridlines_round_trips() {
 }
 
 #[test]
+fn hide_headers_round_trips() {
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    // Default: headers shown, and nothing written.
+    assert!(!workbook.sheets[0].view.hide_headers);
+    let written = write_workbook(&workbook).unwrap();
+    assert!(
+        !xml_of(&written, "xl/worksheets/sheet1.xml").contains("showRowColHeaders"),
+        "a normal sheet must not emit showRowColHeaders"
+    );
+
+    workbook.sheets[0].view.hide_headers = true;
+    let written = write_workbook(&workbook).unwrap();
+    assert!(xml_of(&written, "xl/worksheets/sheet1.xml").contains("showRowColHeaders=\"0\""));
+    let wb = import_package(written).unwrap().workbook;
+    assert!(wb.sheets[0].view.hide_headers);
+}
+
+#[test]
 fn outline_levels_and_collapsed_round_trip() {
     use casual_calc_model::OutlinePr;
 

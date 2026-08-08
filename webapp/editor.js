@@ -7,8 +7,22 @@
 const BUILD = "32";
 let init, wasm;
 
-const HW = 46; // row-header width (px)
-const HH = 24; // column-header height (px)
+// Header strip sizes. Zero when the sheet hides its headers (OOXML's
+// showRowColHeaders="0"), which is what makes the grid start at the very
+// top-left corner: everything else measures the body as "past HW/HH", so the
+// whole layout follows from these two numbers.
+const HEADER_W = 46; // row-header width (px)
+const HEADER_H = 24; // column-header height (px)
+let HW = HEADER_W;
+let HH = HEADER_H;
+// Re-read the active sheet's header visibility. Called at the top of measure(),
+// so every frame lays out against the current setting.
+function syncHeaderMetrics() {
+  let hidden = false;
+  try { hidden = !!(wasm && wasm.session_headers_hidden(state.sheet)); } catch {}
+  HW = hidden ? 0 : HEADER_W;
+  HH = hidden ? 0 : HEADER_H;
+}
 let COL_W = 64;
 let ROW_H = 20;
 
@@ -214,6 +228,7 @@ function wrapLines(it, maxW) {
 // scroll, and return `{ w, h }`. Scrolling is fluid: `scrollX/scrollY` are
 // absolute content offsets, so the first visible line can be partially clipped.
 function measure() {
+  syncHeaderMetrics();
   const rect = wrap.getBoundingClientRect();
   const v = { w: rect.width, h: rect.height };
   if (!wasm) {
@@ -657,17 +672,30 @@ function draw() {
       ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
     });
   }
+  // The merges touching each drawn row. Built once per frame so the text pass
+  // can ask "is this cell inside a merge?" with a lookup over the one or two
+  // merges on its row, instead of scanning the whole sheet's merge list for
+  // every cell it paints (which made draw() O(visible cells × total merges),
+  // on the unthrottled wheel-scroll path).
+  const mergesByRow = new Map();
+  for (const m of sheetMerges) {
+    for (const r of geo.rowIdx) {
+      if (r < m.r0 || r > m.r1) continue;
+      const list = mergesByRow.get(r);
+      if (list) list.push(m);
+      else mergesByRow.set(r, [m]);
+    }
+  }
+  const drawnMergeAt = (r, c) => mergesByRow.get(r)?.find((m) => c >= m.c0 && c <= m.c1);
+
   // Cells that hold text — these block a neighbor's overflow. A merged block is
   // occupied over its whole span (not just its anchor), or a neighbour's text
   // would spill across it.
   const occupied = new Set();
   for (const it of items) if (it.t) occupied.add(it.r + "," + it.c);
-  for (const m of sheetMerges) {
-    const cols = geo.colIdx.filter((c) => c >= m.c0 && c <= m.c1);
-    if (!cols.length) continue; // clamped to the viewport: a full-column merge
-    for (const r of geo.rowIdx) { //  would otherwise seed a million entries
-      if (r < m.r0 || r > m.r1) continue;
-      for (const c of cols) occupied.add(r + "," + c);
+  for (const [r, list] of mergesByRow) {
+    for (const c of geo.colIdx) {
+      if (list.some((m) => c >= m.c0 && c <= m.c1)) occupied.add(r + "," + c);
     }
   }
   for (const it of items) {
@@ -676,7 +704,7 @@ function draw() {
     // whole block. Drawing it here too anchors right/centre alignment to the
     // *anchor cell* instead, leaving a fragment outside the block that the
     // merge pass never covers — a ghost of the label beside it.
-    if (sheetMerges.length && mergeAt(it.r, it.c)) continue;
+    if (drawnMergeAt(it.r, it.c)) continue;
     const x = colXAt(it.c);
     const yTop = rowYAt(it.r);
     if (x === undefined || yTop === undefined) continue;
@@ -964,6 +992,9 @@ function draw() {
     (state.selKind === "rows" ? r >= rr.r0 && r <= rr.r1 : state.selKind === "cells" && r >= rr.r0 && r <= rr.r1);
 
   // Headers (painted over the body edges), with the selected band tinted.
+  // A sheet may hide them (OOXML showRowColHeaders="0"); HW/HH are then 0, the
+  // grid runs to the corner, and this whole block is skipped.
+  if (HW || HH) {
   ctx.fillStyle = colors.headerBg;
   ctx.fillRect(0, 0, v.w, HH);
   ctx.fillRect(0, 0, HW, v.h);
@@ -1004,6 +1035,7 @@ function draw() {
   if (F.fr) drawRowHeaders(HH, F.bodyY0 - HH, true);
   drawRowHeaders(F.bodyY0, v.h - F.bodyY0, false);
   drawHiddenMarkers();
+  } // end headers
   drawFreezeDividers(v);
 
   // The in-cell editor is a DOM element over the canvas: keep it on its cell as
@@ -1185,25 +1217,28 @@ function extend(row, col) {
   draw();
 }
 
-function ensureVisible() {
+// Scroll the body just enough to show a cell — the active one by default, or
+// any cell (arrow-key point mode follows the cell it is pointing at, which is
+// not the selection).
+function ensureVisible(row = state.sel.row, col = state.sel.col) {
   if (!wasm) return;
   const rect = wrap.getBoundingClientRect();
   const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
   // The scrolling viewport is what remains right of / below the frozen bands.
   const viewW = rect.width - f.bodyX0;
   const viewH = rect.height - f.bodyY0;
-  const frozenW = fzOffset(state.sel.col, true, f.fc);
-  const frozenH = fzOffset(state.sel.row, false, f.fr);
+  const frozenW = fzOffset(col, true, f.fc);
+  const frozenH = fzOffset(row, false, f.fr);
   // Frozen cells are always visible; only scroll for cells in the body region.
-  if (state.sel.col >= f.fc) {
-    const cL = wasm.session_col_offset_px(state.sheet, state.sel.col) - frozenW;
-    const cW = JSON.parse(wasm.session_col_px(state.sheet, state.sel.col, 1))[0] || COL_W;
+  if (col >= f.fc) {
+    const cL = wasm.session_col_offset_px(state.sheet, col) - frozenW;
+    const cW = JSON.parse(wasm.session_col_px(state.sheet, col, 1))[0] || COL_W;
     if (cL < state.scrollX) state.scrollX = cL;
     else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
   }
-  if (state.sel.row >= f.fr) {
-    const rT = wasm.session_row_offset_px(state.sheet, state.sel.row) - frozenH;
-    const rH = JSON.parse(wasm.session_row_px(state.sheet, state.sel.row, 1))[0] || ROW_H;
+  if (row >= f.fr) {
+    const rT = wasm.session_row_offset_px(state.sheet, row) - frozenH;
+    const rH = JSON.parse(wasm.session_row_px(state.sheet, row, 1))[0] || ROW_H;
     if (rT < state.scrollY) state.scrollY = rT;
     else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
   }
@@ -1472,16 +1507,17 @@ function autofitRow(row) {
   let maxh = ROW_H;
   for (const it of items) {
     if (!it.t) continue;
-    // Match measure()'s per-cell wrap math exactly so autofit and render agree.
-    const lineH = cellLineH(it);
-    let lines;
+    // Match measure()'s per-cell math exactly, or autofit and the renderer
+    // disagree — and since autofit *persists* the height (which pins the row
+    // against further auto-height), a mismatch here is not self-correcting.
     if (it.w) {
       const colW = Math.max(8, colWAt(it.c) - 8);
-      lines = String(it.t).split("\n").flatMap((seg) => wrapLines({ ...it, t: seg }, colW));
+      const lines = String(it.t).split("\n").flatMap((seg) => wrapLines({ ...it, t: seg }, colW));
+      maxh = Math.max(maxh, lines.length * cellLineH(it) + 6);
     } else {
-      lines = String(it.t).split("\n");
+      const lines = String(it.t).split("\n").length;
+      maxh = Math.max(maxh, lines === 1 ? cellPx(it) + 5 : lines * cellLineH(it) + 6);
     }
-    maxh = Math.max(maxh, lines.length * lineH + 6);
   }
   try { wasm.session_set_row_height(state.sheet, row, Math.ceil(maxh)); } catch {}
   draw();
@@ -2267,14 +2303,26 @@ async function doPaste() {
 // A merged cell gets the whole block, not just its anchor's one-cell box.
 function positionInline() {
   const m = mergeAt(state.sel.row, state.sel.col);
-  const x = m ? fscreenX(m.c0) : colXAt(state.sel.col) ?? fscreenX(state.sel.col);
-  const y = m ? fscreenY(m.r0) : rowYAt(state.sel.row) ?? fscreenY(state.sel.row);
-  const w = m ? fscreenXEnd(m.c1) - x : colWAt(state.sel.col);
-  const h = m ? fscreenYEnd(m.r1) - y : rowHAt(state.sel.row);
-  inline.style.left = x + "px";
-  inline.style.top = y + "px";
-  inline.style.width = Math.max(0, w) + "px";
-  inline.style.height = Math.max(0, h) + "px";
+  const row = m ? m.r0 : state.sel.row;
+  const col = m ? m.c0 : state.sel.col;
+  const x = m ? fscreenX(m.c0) : colXAt(col) ?? fscreenX(col);
+  const y = m ? fscreenY(m.r0) : rowYAt(row) ?? fscreenY(row);
+  const x1 = m ? fscreenXEnd(m.c1) : x + colWAt(col);
+  const y1 = m ? fscreenYEnd(m.r1) : y + rowHAt(row);
+  // Clamp to the pane the anchor lives in. Two things go wrong otherwise: the
+  // box is written in raw grid coordinates, so a cell scrolled under the frozen
+  // band or the headers would have the editor floating over them; and a merge
+  // straddling a freeze line has a pinned start and a scrolling end, which
+  // cross over once the far half scrolls out and give the box a negative size.
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  const rect = wrap.getBoundingClientRect();
+  const loX = col < f.fc ? HW : f.bodyX0, hiX = m && m.c1 < f.fc ? f.bodyX0 : rect.width;
+  const loY = row < f.fr ? HH : f.bodyY0, hiY = m && m.r1 < f.fr ? f.bodyY0 : rect.height;
+  const left = Math.max(loX, x), top = Math.max(loY, y);
+  inline.style.left = left + "px";
+  inline.style.top = top + "px";
+  inline.style.width = Math.max(0, Math.min(x1, hiX) - left) + "px";
+  inline.style.height = Math.max(0, Math.min(y1, hiY) - top) + "px";
 }
 
 // --- The edit session -------------------------------------------------------
@@ -2325,6 +2373,7 @@ function endEdit(refocus = true) {
   inline.style.display = "none";
   hideAutocomplete();
   formulaRefDrag = null;
+  pointMode = null;
   inline.classList.remove("invalid");
   fInput.classList.remove("invalid");
   if (refocus && was) canvas.focus();
@@ -2356,6 +2405,76 @@ function updateRefSpans() {
     });
   refSpans = next;
   if (!same) draw();
+}
+
+// Arrow-key point mode: with the caret somewhere a reference may go, the arrow
+// keys build one by moving a pointer over the grid instead of moving the text
+// caret — Excel's "point mode". Shift extends it into a range. The state mirrors
+// `formulaRefDrag`, so insertRef keeps replacing the same span of text.
+let pointMode = null; // {anchor:{row,col}, cur:{row,col}, start, end}
+
+function pointStep(dr, dc, extend) {
+  if (!editSurface) return false;
+  if (!pointMode) {
+    if (!refAcceptable()) return false;
+    // Excel starts from the cell being edited and steps off it.
+    const cur = {
+      row: Math.max(0, state.sel.row + dr),
+      col: Math.max(0, state.sel.col + dc),
+    };
+    const at = editSurface.selectionStart;
+    pointMode = { anchor: cur, cur, start: at, end: at };
+  } else {
+    const cur = {
+      row: Math.max(0, pointMode.cur.row + dr),
+      col: Math.max(0, pointMode.cur.col + dc),
+    };
+    pointMode.cur = cur;
+    if (!extend) pointMode.anchor = cur; // a plain arrow moves the whole point
+  }
+  const a = pointMode.anchor, c = pointMode.cur;
+  const r0 = Math.min(a.row, c.row), r1 = Math.max(a.row, c.row);
+  const c0 = Math.min(a.col, c.col), c1 = Math.max(a.col, c.col);
+  insertRef(r0 === r1 && c0 === c1 ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`);
+  // Keep the cell being pointed at on screen, without disturbing the selection.
+  ensureVisible(c.row, c.col);
+  draw();
+  return true;
+}
+
+// F4 cycles the anchoring of the reference under the caret, in Excel's order:
+// A1 → $A$1 → A$1 → $A1 → A1. A range cycles both endpoints together, and a
+// sheet qualifier is left alone. Returns whether anything was rewritten.
+const A1_PART = /^(\$?)([A-Za-z]+)(\$?)([0-9]+)$/;
+function cycleAnchors() {
+  if (!editSurface) return false;
+  const pos = editSurface.selectionStart;
+  const span = refSpans.find((r) => pos >= r.s && pos <= r.e);
+  if (!span) return false;
+  const text = editSurface.value;
+  const piece = text.slice(span.s, span.e);
+  const bang = piece.lastIndexOf("!"); // keep 'Sheet'! / Sheet! as written
+  const head = bang >= 0 ? piece.slice(0, bang + 1) : "";
+  const parts = (bang >= 0 ? piece.slice(bang + 1) : piece).split(":");
+  const first = A1_PART.exec(parts[0]);
+  if (!first) return false;
+  // 0 = A1, 1 = $A$1, 2 = A$1, 3 = $A1 — the order Excel steps through.
+  const current = first[1] && first[3] ? 1 : first[3] ? 2 : first[1] ? 3 : 0;
+  const next = (current + 1) % 4;
+  const colAbs = next === 1 || next === 3 ? "$" : "";
+  const rowAbs = next === 1 || next === 2 ? "$" : "";
+  const rewritten = parts
+    .map((p) => {
+      const m = A1_PART.exec(p);
+      return m ? `${colAbs}${m[2]}${rowAbs}${m[4]}` : p;
+    })
+    .join(":");
+  editSurface.value = text.slice(0, span.s) + head + rewritten + text.slice(span.e);
+  const caret = span.s + head.length + rewritten.length;
+  editSurface.setSelectionRange(caret, caret);
+  mirrorEdit();
+  updateRefSpans();
+  return true;
 }
 
 // Excel shows the in-progress text on both surfaces at once. Mirror the one
@@ -2573,15 +2692,18 @@ function refAcceptable() {
   return "=+-*/^(,:&<>% ".includes(before[before.length - 1]);
 }
 
-// Insert (or, during a drag, replace) a reference at the caret while editing.
+// Insert a reference at the caret while editing. While a gesture that keeps
+// adjusting the same reference is in progress — a mouse drag, or arrow-key
+// point mode — the previously inserted text is replaced rather than appended.
 function insertRef(text) {
   if (!editSurface) return;
+  const pending = formulaRefDrag ?? pointMode;
   const val = editSurface.value;
-  const start = formulaRefDrag ? formulaRefDrag.start : editSurface.selectionStart;
-  const end = formulaRefDrag ? formulaRefDrag.end : editSurface.selectionStart;
+  const start = pending ? pending.start : editSurface.selectionStart;
+  const end = pending ? pending.end : editSurface.selectionStart;
   editSurface.value = val.slice(0, start) + text + val.slice(end);
   const caret = start + text.length;
-  if (formulaRefDrag) formulaRefDrag.end = caret;
+  if (pending) { pending.end = caret; editSurface.setSelectionRange(caret, caret); }
   else editSurface.setSelectionRange(caret, caret);
   mirrorEdit();
   updateRefSpans();
@@ -3315,6 +3437,10 @@ function wireEvents() {
       // Typing in the formula bar with no edit open starts one.
       if (!editSurface) beginEdit(surface, surface.value);
       surface.classList.remove("invalid");
+      // Typing anything ends point mode and leaves the reference it built in
+      // place — a programmatic value change (insertRef) fires no input event,
+      // so this only trips on real keystrokes.
+      pointMode = null;
       mirrorEdit();
       showAutocomplete();
       updateRefSpans();
@@ -3327,7 +3453,14 @@ function wireEvents() {
         if (e.key === "Enter" || e.key === "Tab") { acceptAutocomplete(); e.preventDefault(); return; }
         if (e.key === "Escape") { hideAutocomplete(); e.preventDefault(); return; }
       }
-      if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
+      // Arrow keys build a reference when the caret sits where one may go
+      // (point mode); everywhere else they move the text caret as usual.
+      const step = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+      if (step && (pointMode || refAcceptable())) {
+        if (pointStep(step[0], step[1], e.shiftKey)) { e.preventDefault(); return; }
+      }
+      if (e.key === "F4") { if (cycleAnchors()) e.preventDefault(); }
+      else if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
       else if (e.key === "Escape") { cancelEdit(); e.preventDefault(); }
       else if (e.key === "Tab") { if (commit(surface.value, false)) select(state.sel.row, state.sel.col + 1); e.preventDefault(); }
     });
@@ -3699,6 +3832,7 @@ function wireEvents() {
       catch { return false; }
     };
     const gridOn = () => { try { return !wasm.session_gridlines_hidden(state.sheet); } catch { return true; } };
+    const headersOn = () => { try { return !wasm.session_headers_hidden(state.sheet); } catch { return true; } };
     const clearContents = () => {
       try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
       draw();
@@ -3766,6 +3900,7 @@ function wireEvents() {
           ["Unfreeze", clickEl('#freeze-menu [data-fz="none"]')],
         ] },
         ["Gridlines", () => { try { wasm.session_set_gridlines_hidden(state.sheet, gridOn()); } catch {} draw(); }, null, gridOn],
+        ["Headers", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
         "sep",
         ["Settings…", clickEl("#tb-settings")],
       ]],

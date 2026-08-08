@@ -44,6 +44,10 @@ const STYLES_PART: &str = "xl/styles.xml";
 const THEME_PART: &str = "xl/theme/theme1.xml";
 /// Relationship type suffix binding a worksheet to its comments part.
 const COMMENTS_REL_SUFFIX: &str = "/comments";
+/// Most areas honoured from one `sqref`. Each area materializes its own model
+/// entry (a validation copies its whole value list), so an adversarial part
+/// with a huge area list must not become unbounded allocation.
+const MAX_SQREF_AREAS: usize = 1024;
 
 /// The result of importing a package: the model plus its compatibility report.
 #[derive(Debug)]
@@ -221,6 +225,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             sheet.view.zoom = zoom;
         }
         sheet.view.hide_gridlines = worksheet.hide_gridlines;
+        sheet.view.hide_headers = worksheet.hide_headers;
         sheet.columns.default = worksheet.col_default;
         sheet.columns.sizes = worksheet.col_sizes;
         sheet.rows.default = worksheet.row_default;
@@ -253,7 +258,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             }
             // An sqref is a space-separated list of areas; taking only the first
             // silently dropped the validation from every other area it covers.
-            for area in sqref.split_whitespace() {
+            // Bounded, because each area copies the value list: a hand-written
+            // sqref with tens of thousands of areas would otherwise turn a small
+            // part into millions of heap strings.
+            for area in sqref.split_whitespace().take(MAX_SQREF_AREAS) {
                 let range =
                     parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)));
                 if let Some(range) = range {
@@ -262,6 +270,13 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                         values: values.clone(),
                     });
                 }
+            }
+            if sqref.split_whitespace().count() > MAX_SQREF_AREAS {
+                report.record(
+                    "dataValidation/sqref",
+                    ModelOutcome::Degraded,
+                    RetentionOutcome::NotRetained,
+                );
             }
         }
 
@@ -293,8 +308,8 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             };
             if let Some(rule) = rule {
                 // One rule per area of the sqref — a cfRule covering "A1:A9 C1:C9"
-                // used to apply to the first area only.
-                for area in raw.sqref.split_whitespace() {
+                // used to apply to the first area only. Bounded as above.
+                for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
                     let Some(range) =
                         parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)))
                     else {

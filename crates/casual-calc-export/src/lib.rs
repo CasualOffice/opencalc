@@ -620,14 +620,20 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         } else {
             String::new()
         };
-        // Grid lines show by default; only emit the attribute to hide them.
+        // Grid lines and headers show by default; only emit an attribute to
+        // hide them, so a normal sheet writes neither.
         let grid_attr = if sheet.view.hide_gridlines {
             " showGridLines=\"0\""
         } else {
             ""
         };
+        let headers_attr = if sheet.view.hide_headers {
+            " showRowColHeaders=\"0\""
+        } else {
+            ""
+        };
         s.push_str(&format!(
-            "<sheetViews><sheetView{grid_attr}{zoom_attr} workbookViewId=\"0\">"
+            "<sheetViews><sheetView{grid_attr}{headers_attr}{zoom_attr} workbookViewId=\"0\">"
         ));
         if sheet.view.frozen_rows != 0 || sheet.view.frozen_cols != 0 {
             let top_left = cell_a1(sheet.view.frozen_rows, sheet.view.frozen_cols);
