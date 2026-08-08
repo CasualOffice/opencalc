@@ -2399,6 +2399,7 @@ function endEdit(refocus = true) {
   refSpans = [];
   inline.style.display = "none";
   hideAutocomplete();
+  hideSignatureTip();
   formulaRefDrag = null;
   pointMode = null;
   inline.classList.remove("invalid");
@@ -2697,6 +2698,89 @@ function renderAutocomplete() {
 
 function hideAutocomplete() { acState = null; if (acEl) acEl.hidden = true; }
 
+// --- Argument hint ----------------------------------------------------------
+// Once the caret is inside a function's parentheses the name list is no longer
+// what you need — the question becomes "which argument am I typing?". This
+// shows the signature with that argument emphasised, the way Excel and Sheets
+// do, and follows the caret through nested calls.
+const sigEl = document.getElementById("sig-tip");
+
+// The innermost call the caret sits inside: its function name and the index of
+// the argument being typed. Commas inside nested calls or string literals do
+// not count, which is the whole difficulty.
+function callAtCaret() {
+  if (!editSurface) return null;
+  const val = editSurface.value;
+  if (!val.startsWith("=")) return null;
+  const upto = val.slice(0, editSurface.selectionStart);
+  const stack = [];
+  let i = 0;
+  while (i < upto.length) {
+    const c = upto[i];
+    if (c === '"') { // skip a "…" literal, doubled quotes and all
+      i += 1;
+      while (i < upto.length) {
+        if (upto[i] === '"') {
+          if (upto[i + 1] === '"') { i += 2; continue; }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "(") {
+      // The word immediately before the paren, if any, names the call.
+      const name = /([A-Za-z][A-Za-z0-9.]*)$/.exec(upto.slice(0, i));
+      stack.push({ name: name ? name[1].toUpperCase() : null, arg: 0 });
+    } else if (c === ")") {
+      stack.pop();
+    } else if (c === "," && stack.length) {
+      stack[stack.length - 1].arg += 1;
+    }
+    i += 1;
+  }
+  for (let s = stack.length - 1; s >= 0; s -= 1) {
+    if (stack[s].name) return stack[s];
+  }
+  return null;
+}
+
+function updateSignatureTip() {
+  // The name list takes precedence: both anchored to the caret would collide,
+  // and while it is open the user is still choosing a function.
+  if (!sigEl) return;
+  const call = acState ? null : callAtCaret();
+  if (!call) { sigEl.hidden = true; return; }
+  if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
+  const fn = fnCatalog.find((f) => f.n === call.name);
+  if (!fn) { sigEl.hidden = true; return; }
+  const inner = /\(([^]*)\)\s*$/.exec(fn.sig);
+  const args = inner ? inner[1].split(",").map((a) => a.trim()) : [];
+  sigEl.textContent = "";
+  const name = document.createElement("span");
+  name.className = "sig-name";
+  name.textContent = fn.n;
+  sigEl.append(name, document.createTextNode("("));
+  args.forEach((a, i) => {
+    if (i) sigEl.append(document.createTextNode(", "));
+    const span = document.createElement("span");
+    // A trailing "…" argument keeps matching once the caret runs past the
+    // named ones, which is what makes SUM(a, b, c, …) highlight sensibly.
+    const variadic = i === args.length - 1 && /^[.…]/.test(a);
+    span.className = "sig-arg" + (i === call.arg || (variadic && call.arg > i) ? " active" : "");
+    span.textContent = a;
+    sigEl.appendChild(span);
+  });
+  sigEl.append(document.createTextNode(")"));
+  sigEl.hidden = false;
+  const r = (editSurface ?? inline).getBoundingClientRect();
+  const w = sigEl.offsetWidth;
+  sigEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - w)) + "px";
+  sigEl.style.top = r.bottom + 2 + "px";
+}
+function hideSignatureTip() { if (sigEl) sigEl.hidden = true; }
+
 function acceptAutocomplete() {
   if (!acState || !editSurface) return;
   const name = acState.matches[acState.idx].n;
@@ -2707,6 +2791,7 @@ function acceptAutocomplete() {
   hideAutocomplete();
   editSurface.focus();
   mirrorEdit();
+  updateSignatureTip();
 }
 
 // Whether the caret sits where a cell reference may be inserted by clicking.
@@ -3470,8 +3555,15 @@ function wireEvents() {
       pointMode = null;
       mirrorEdit();
       showAutocomplete();
+      updateSignatureTip();
       updateRefSpans();
     });
+    // Moving the caret changes which argument you are in, without changing the
+    // text — keyup and click are when the new position is readable.
+    surface.addEventListener("keyup", (e) => {
+      if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") updateSignatureTip();
+    });
+    surface.addEventListener("click", () => updateSignatureTip());
     surface.addEventListener("keydown", (e) => {
       // Autocomplete navigation takes priority when its menu is open.
       if (acState) {

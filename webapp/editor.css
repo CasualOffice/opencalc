@@ -563,6 +563,17 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--faint); }
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; overflow: hidden;
 }
+/* Argument hint: which parameter of the current call is being typed. */
+.sig-tip {
+  position: fixed; z-index: 70; max-width: 420px;
+  background: var(--card); border: 1px solid var(--border-2); border-radius: 8px;
+  padding: 5px 9px; box-shadow: var(--shadow-pop);
+  font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+.sig-tip[hidden] { display: none; }
+.sig-name { color: var(--fg); font-weight: 700; }
+.sig-arg.active { color: var(--fg); font-weight: 700; text-decoration: underline; }
 .ac-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; border-radius: 5px; cursor: pointer; }
 .ac-item.active { background: var(--accent); }
 .ac-item.active .ac-name, .ac-item.active .ac-sig { color: #fff; }

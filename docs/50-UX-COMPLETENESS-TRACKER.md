@@ -73,7 +73,7 @@ each audit; this file is the durable backlog.
 
 | ID | Item | Domain | Status | Fix |
 |----|------|--------|--------|-----|
-| UX-F02 | Arg/signature tooltip inside `()` with active arg bolded, persists | Formula | 🔴 | Caret-anchored tooltip; comma-count active arg; catalog `sig` already present |
+| UX-F02 | Arg/signature tooltip inside `()` with active arg bolded, persists | Formula | ✅ | `callAtCaret()` walks the text to the caret tracking a call stack, so nested calls resolve to the innermost and commas inside string literals or nested parens don't advance the argument. Yields to the name list while that is open; follows the caret on arrow/Home/End/click; a trailing `…` argument stays active past the named ones |
 | UX-F03 | Colored reference highlighting (formula tokens + on-grid range-finder boxes) | Formula | 🟡 | **On-grid boxes done**: `formula_ref_spans()` (engine-side scanner, so a function name is never mistaken for a reference and string literals are skipped) drives one coloured outline per reference in `draw()`, clipped per pane. **Remaining**: tinting the reference *tokens inside the text* to match, which needs an overlay behind the input since a plain `<input>` cannot colour a substring |
 | UX-F04 | Cross-sheet reference picking (click another sheet's cells mid-formula) | Formula | 🔴 | Sheet-tab click during edit → point mode, insert `Sheet!ref`, restore on commit |
 | UX-F05 | F4 anchor cycling ($A$1→A$1→$A1→A1) | Formula | 🔴 | F4 handler rewrites the ref token under caret |
