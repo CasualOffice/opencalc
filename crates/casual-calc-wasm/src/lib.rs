@@ -1548,6 +1548,9 @@ pub fn session_cells(
             if style.is_some_and(|s| s.clip) {
                 extra.push_str(",\"cl\":1");
             }
+            if let Some(ind) = style.map(|s| s.indent).filter(|i| *i > 0) {
+                extra.push_str(&format!(",\"in\":{ind}"));
+            }
             if style.is_some_and(|s| s.strike) {
                 extra.push_str(",\"st\":1");
             }
@@ -2579,6 +2582,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             if st.clip {
                 parts.push("\"cl\":1".to_owned());
             }
+            if st.indent > 0 {
+                parts.push(format!("\"in\":{}", st.indent));
+            }
             if let Some(al) = st.align {
                 parts.push(format!("\"al\":\"{}\"", al.ooxml()));
             }
@@ -3217,6 +3223,51 @@ fn apply_style_range(
     edit: impl Fn(&mut Style),
 ) -> Result<(), JsError> {
     apply_style_range_pos(sheet, r0, c0, r1, c1, move |_, _, st| edit(st))
+}
+
+/// Copy one cell's whole style onto a range, leaving values and formulas alone
+/// — the format painter. Copying the *resolved* style rather than replaying
+/// individual toolbar ops is what makes it faithful: number format, font, fill,
+/// borders, alignment and wrap all travel together.
+#[wasm_bindgen]
+pub fn session_copy_style(
+    sheet: usize,
+    src_row: u32,
+    src_col: u32,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let source = with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.cells.get(CellRef::new(src_row, src_col)))
+            .and_then(|cell| cell.style)
+            .and_then(|id| s.workbook().styles.get(id))
+            .cloned()
+    })
+    .flatten();
+    // An unstyled source clears the target's formatting, which is what painting
+    // from a plain cell should do.
+    let source = source.unwrap_or_default();
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| *st = source.clone())
+}
+
+/// Step the indent of a range by `delta` levels, clamped to Excel's 0–250.
+#[wasm_bindgen]
+pub fn session_adjust_indent(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    delta: i32,
+) -> Result<(), JsError> {
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.indent = (i32::from(st.indent) + delta).clamp(0, 250) as u8;
+    })
 }
 
 /// Like [`apply_style_range`], but the closure also receives the cell's

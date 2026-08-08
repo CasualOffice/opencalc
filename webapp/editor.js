@@ -23,6 +23,8 @@ function syncHeaderMetrics() {
   HW = hidden ? 0 : HEADER_W;
   HH = hidden ? 0 : HEADER_H;
 }
+// One indent level, in px — Excel's is about three space-widths.
+const INDENT_PX = 10;
 let COL_W = 64;
 let ROW_H = 20;
 
@@ -773,7 +775,10 @@ function draw() {
       ctx.clip();
       ctx.font = cellFont(it);
       ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
-      const tx = align === "right" ? x + w - 5 : align === "center" ? x + w / 2 : x + 5;
+      // Indent shifts the text off its leading edge (Excel: ~3 space-widths
+      // per level), so an indented label lines up under its parent.
+      const ind = (it.in || 0) * INDENT_PX;
+      const tx = align === "right" ? x + w - 5 - ind : align === "center" ? x + w / 2 : x + 5 + ind;
       ctx.textAlign = align;
       const block = lines.length * lh;
       let ly = (it.va === "t" ? yTop + 3 : it.va === "b" ? yTop + h - block - 3 : yTop + Math.max(0, (h - block) / 2)) + lh / 2;
@@ -836,9 +841,10 @@ function draw() {
     ctx.clip();
     ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
     let tx;
-    if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5; }
+    const ind = (it.in || 0) * INDENT_PX;
+    if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5 - ind; }
     else if (align === "center") { ctx.textAlign = "center"; tx = x + w / 2; }
-    else { ctx.textAlign = "left"; tx = x + 5; }
+    else { ctx.textAlign = "left"; tx = x + 5 + ind; }
     ctx.fillText(text, tx, y);
     if (it.u || it.st) {
       const lw = Math.min(tw, clipR - clipL - 8);
@@ -1697,6 +1703,41 @@ function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s
 // One three-way choice: "overflow" (spill into empty neighbours), "wrap", or
 // "clip" (stop at the cell edge). Wrap and clip are mutually exclusive, so the
 // engine sets them together rather than exposing two toggles that can disagree.
+// --- Format painter ---------------------------------------------------------
+// Pick up the active cell's formatting, then apply it to the next selection.
+// A single click paints once and disarms; a double-click stays armed so a
+// format can be brushed onto several places, as in Excel. Escape cancels.
+let painter = null; // { row, col, sticky }
+function setPainter(next) {
+  painter = next;
+  const btn = document.getElementById("tb-painter");
+  if (btn) btn.setAttribute("aria-pressed", next ? "true" : "false");
+  canvas.style.cursor = next ? "copy" : "cell";
+}
+function armPainter(sticky) {
+  setPainter({ row: state.sel.row, col: state.sel.col, sticky });
+  status.textContent = sticky
+    ? "format painter: select cells to paint (Esc to stop)"
+    : "format painter: select cells to paint";
+}
+// Apply the picked-up format to a range. Returns whether it painted, so the
+// caller can decide whether the click was consumed.
+function applyPainter(s) {
+  if (!painter) return false;
+  const { row, col, sticky } = painter;
+  try {
+    wasm.session_copy_style(state.sheet, row, col, s.r0, s.c0, s.r1, s.c1);
+    status.textContent = "format applied";
+  } catch (e) { status.textContent = `error: ${e}`; }
+  if (!sticky) setPainter(null);
+  draw();
+  return true;
+}
+
+function setIndent(delta) {
+  formatSel((s) => wasm.session_adjust_indent(state.sheet, s.r0, s.c0, s.r1, s.c1, delta));
+}
+
 function setTextOverflow(mode) {
   formatSel((s) => wasm.session_set_text_overflow(state.sheet, s.r0, s.c0, s.r1, s.c1, mode));
 }
@@ -3807,10 +3848,14 @@ function wireEvents() {
       }
       draw();
     }
+    const wasDragging = state.dragging || state.headerDrag;
     state.dragging = false;
     state.headerDrag = null;
     dragPos = null;
     stopAutoScroll();
+    // The format painter paints whatever was just selected — after the drag
+    // finishes, so brushing across a block applies to the whole block.
+    if (painter && wasDragging) applyPainter(effectiveRange());
   });
 
   // Custom scrollbar thumb dragging.
@@ -3989,7 +4034,10 @@ function wireEvents() {
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
       case " ": if (e.shiftKey) selectRowsSpan(); else startInline(" "); e.preventDefault(); break; // Shift+Space → whole rows
-      case "Escape": if (clipMarch) { stopMarch(); e.preventDefault(); } break;
+      case "Escape":
+        if (painter) { setPainter(null); status.textContent = "format painter off"; e.preventDefault(); }
+        else if (clipMarch) { stopMarch(); e.preventDefault(); }
+        break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
@@ -4180,6 +4228,13 @@ function wireEvents() {
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
   document.getElementById("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
   document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
+  document.getElementById("tb-indent-more").addEventListener("click", () => { setIndent(1); canvas.focus(); });
+  document.getElementById("tb-indent-less").addEventListener("click", () => { setIndent(-1); canvas.focus(); });
+  {
+    const pb = document.getElementById("tb-painter");
+    pb.addEventListener("click", () => { painter ? setPainter(null) : armPainter(false); canvas.focus(); });
+    pb.addEventListener("dblclick", () => { armPainter(true); canvas.focus(); });
+  }
   document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   document.getElementById("tb-percent").addEventListener("click", () => { setNumberFormat("0%"); canvas.focus(); });
   document.getElementById("tb-comma").addEventListener("click", () => { setNumberFormat("#,##0.00"); canvas.focus(); });
