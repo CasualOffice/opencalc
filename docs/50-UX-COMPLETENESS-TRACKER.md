@@ -86,11 +86,11 @@ each audit; this file is the durable backlog.
 | UX-F08 | Error affordances: per-cell error corner marker + hover explanation + trace precedents/dependents | Formula | 🔴 | Mark error cells in `draw()`; reuse comment-tip; expose dep graph |
 | UX-E02 | Formula bar second-class: no Esc-revert, no autocomplete, no ref insert, Enter doesn't advance | Editing | ✅ | All four closed by UX-F01: Escape restores the cell's text, autocomplete and reference insert work from the bar, Enter commits and moves down, Tab commits and moves right, an invalid formula outlines the bar and keeps focus there |
 | UX-E03 | Find: no highlight-all, match-entire-cell, wildcards/regex, Values look-in, all-sheets scope | Editing | 🔴 | Overlay match set; flags on `session_find`; Values via `display_text`; workbook scope |
-| UX-E04 | Ctrl+D / Ctrl+R fill-down/right missing | Editing | 🔴 | Wire to `session_fill` over `selRect()` |
-| UX-E05 | Double-click fill handle to autofill to neighbor extent | Editing | 🔴 | In dblclick, if on `fillHandleRect`, fill to neighbor column data end |
+| UX-E04 | Ctrl+D / Ctrl+R fill-down/right missing | Editing | ✅ | `fillWithin()` fills the selection from its own first row / first column via `session_fill`, so references shift as they do on a drag-fill |
+| UX-E05 | Double-click fill handle to autofill to neighbor extent | Editing | ✅ | `autofillToNeighbour()` — the extent comes from the adjacent column's data edge (left column, else right), which is Excel's rule |
 | UX-V01 | Data validation: list-only + **not enforced**; no number/date/text/custom rules, no input/error messages | Data | 🔴 | Rule kinds + messages in model/API; validate in `session_set_cell`; expand DV panel |
 | UX-V02 | Autofilter: single global column, checklist-only, fights manual hidden set; no per-header dropdowns/conditions/multi-column | Data | 🔴 | Real per-column filter model (separate from `hidden_rows`); header dropdowns; conditions |
-| UX-V03 | Row-height / column-width numeric dialog missing | Data | 🔴 | Add to header/cell menu; call existing `session_set_*` setters |
+| UX-V03 | Row-height / column-width numeric dialog missing | Data | ✅ | `sizeDialog()` on the row/column header menu (landed with UX-C01), seeded with the current size and applied across the selected band |
 | UX-V04 | Outline / grouping: model support, zero UX | Data | 🔴 | `session_group_*`/`toggle_collapse`; outline bars; Alt+Shift+arrow |
 | UX-V05 | Remove duplicates — absent | Data | 🔴 | Selection op + dialog |
 | UX-FM1 | Conditional formatting: fill-only cell rules; no color scales / data bars / top-bottom / above-avg / duplicates; no Manage Rules; no priority/stop-if-true; font/border effects | Format | 🔴 | Extend `CfRule` + panel + render; Manage-Rules list |
@@ -103,7 +103,7 @@ each audit; this file is the durable backlog.
 | UX-FM8 | Indent increase/decrease — model field dead, no UI/API/render | Format | 🔴 | `session_set_indent` + 2 buttons + render padding |
 | UX-FM9 | Text rotation — not even in model | Format | 🔴 | Model field + API + canvas transform |
 | UX-G01 | **Drawn geometry vs engine geometry diverge for auto-grown rows** — `measure()` grows a row for wrapped text, but scroll anchoring (`session_row_at_px`), the frozen-band origin, the scrollbar extent, `ensureVisible` and the row-resize origin all read the engine's un-grown offsets. Symptoms: a hitch at row boundaries while wheel-scrolling, a short scrollbar extent, `ensureVisible` under-scrolling so the selection creeps below the viewport, and a resize drag offset by the accumulated growth | Nav | 🔴 | Narrowed to wrapped rows only now that auto-height respects file-set heights. Either push effective auto-height into the engine (`GridGeometry` already owns it) or keep a prefix-sum of effective heights in `measure()` and derive `fsr`/`subY`/`frozenH`/`contentH`/`rT` from it. Horizontal axis is unaffected — nothing grows `geo.colW` |
-| UX-A01 | Status bar Min/Max never shown (engine computes them); no separate numeric count | Chrome | 🔴 | Extend `updateStats()` with running min/max |
+| UX-A01 | Status bar Min/Max never shown (engine computes them); no separate numeric count | Chrome | ✅ | `session_range_stats` already returned min/max; the bar now folds them across multi-ranges and shows a separate Numbers count when it differs from Count, so a stray text cell in a numeric column is visible |
 | UX-A02 | Cell-mode indicator (Ready/Enter/Edit/Point) + persistent bottom status; Count always-on | Chrome | 🔴 | Left region in `.bottom-bar` |
 | UX-A03 | Canvas invisible to AT: no `role=grid`, no `aria-live` active-cell announce | Chrome | 🔴 | Visually-hidden `aria-live` updated in `select`/`extend` |
 | UX-A04 | Canvas has no focus ring | Chrome | 🔴 | `#grid:focus-visible` ring / inner frame |
@@ -114,7 +114,7 @@ each audit; this file is the durable backlog.
 | UX-NV1 | Zoom (Ctrl+wheel, control, 25–200%) — absent | Nav | 🔴 | `state.zoom` scaling geometry + fonts + DPR |
 | UX-NV2 | Scrollbar track-click paging | Nav | 🔴 | mousedown on track pages toward click |
 | UX-NV3 | Tab-run return on Enter (return to Tab-origin column, row+1) | Nav | 🔴 | Track tab-origin column |
-| UX-NV4 | Enter/Tab wrap inside a multi-cell selection | Nav | 🔴 | Move focus within `effectiveRange`, keep selection |
+| UX-NV4 | Enter/Tab wrap inside a multi-cell selection | Nav | 🔴 | **Blocked on a model split, not a keybinding.** `state.sel` is a *corner* of the selection (the block is `anchor`..`sel`), so moving it inside the block shrinks the block. Needs a distinct active-cell/focus separate from the selection corners, with the ~50 `state.sel` readers pointed at an `activeCell()` accessor |
 
 ## P2 — polish
 

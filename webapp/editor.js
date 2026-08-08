@@ -1156,14 +1156,26 @@ function updateStats() {
   // Fold the per-range stats together (disjoint Ctrl+click ranges; overlaps,
   // which Excel also double-counts, are rare).
   let sum = 0, numeric = 0, count = 0;
+  let min = Infinity, max = -Infinity;
   for (const r of rs) {
     const st = JSON.parse(wasm.session_range_stats(state.sheet, r.r0, r.c0, r.r1, r.c1));
     sum += st.sum || 0; numeric += st.numeric || 0; count += st.count || 0;
+    // The engine has always computed these; the bar just never showed them.
+    if (st.numeric) {
+      if (st.min !== undefined) min = Math.min(min, st.min);
+      if (st.max !== undefined) max = Math.max(max, st.max);
+    }
   }
   const parts = [];
   if (numeric > 0) {
     parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
     parts.push(`Avg: <b>${fmtNum(sum / numeric)}</b>`);
+    if (Number.isFinite(min)) parts.push(`Min: <b>${fmtNum(min)}</b>`);
+    if (Number.isFinite(max)) parts.push(`Max: <b>${fmtNum(max)}</b>`);
+    // Excel distinguishes "how many cells have anything" from "how many are
+    // numbers"; with both shown, a stray text cell in a numeric column is
+    // visible instead of quietly skewing the average.
+    if (numeric !== count) parts.push(`Numbers: <b>${numeric}</b>`);
   }
   parts.push(`Count: <b>${count}</b>`);
   selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
@@ -3464,6 +3476,45 @@ function headerMenu(axis, x, y) {
   positionMenu(menu, x, y);
 }
 
+// Ctrl+D / Ctrl+R: fill the selection from its own first row / first column.
+// The source is that edge, the destination is the rest of the block — which is
+// exactly the drag-fill the handle performs, without the dragging.
+function fillWithin(dir) {
+  const s = effectiveRange();
+  const src = dir === "down"
+    ? { r0: s.r0, c0: s.c0, r1: s.r0, c1: s.c1 }
+    : { r0: s.r0, c0: s.c0, r1: s.r1, c1: s.c0 };
+  if ((dir === "down" && s.r1 <= s.r0) || (dir === "right" && s.c1 <= s.c0)) {
+    status.textContent = "select the cells to fill";
+    return;
+  }
+  try {
+    wasm.session_fill(state.sheet, src.r0, src.c0, src.r1, src.c1, s.r0, s.c0, s.r1, s.c1);
+    status.textContent = dir === "down" ? "filled down" : "filled right";
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+
+// Double-clicking the fill handle fills down to the extent of the neighbouring
+// column's data — Excel's "finish this column" gesture, which beats dragging
+// when the table is a thousand rows long. Uses the column to the left, falling
+// back to the one on the right, as Excel does.
+function autofillToNeighbour() {
+  const s = effectiveRange();
+  const probe = s.c0 > 0 ? s.c0 - 1 : s.c1 + 1;
+  let end = s.r1;
+  try {
+    const edge = JSON.parse(wasm.session_edge(state.sheet, s.r1, probe, 1, 0));
+    end = Math.max(end, edge.row);
+  } catch {}
+  if (end <= s.r1) { status.textContent = "nothing to fill alongside"; return; }
+  try {
+    wasm.session_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, s.r0, s.c0, end, s.c1);
+    status.textContent = `filled to row ${end + 1}`;
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+
 // Live-update the drag-fill target box (extends the source in the dominant axis).
 function updateFill(px, py) {
   const hit = cellAt(px, py);
@@ -3773,6 +3824,13 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    // The fill handle: double-click fills down to the neighbouring column's
+    // last row. Checked before the header/boundary cases because the handle can
+    // sit anywhere in the body.
+    if (fillHandleRect && Math.abs(px - fillHandleRect.x) <= 5 && Math.abs(py - fillHandleRect.y) <= 5) {
+      autofillToNeighbour();
+      return;
+    }
     // Double-clicking a hidden-region marker in a header unhides that band.
     if (py < HH) {
       const m = hiddenColMarks.find((g) => g.x >= HW && Math.abs(px - g.x) <= 5);
@@ -3829,6 +3887,10 @@ function wireEvents() {
       const k = e.key.toLowerCase();
       if (k === "home") { select(0, 0); e.preventDefault(); return; }
       if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
+      // Ctrl+D / Ctrl+R: fill the selection down from its top row / right from
+      // its left column — the fastest way to copy a formula over a block.
+      if (k === "d" && !e.shiftKey) { fillWithin("down"); e.preventDefault(); return; }
+      if (k === "r" && !e.shiftKey) { fillWithin("right"); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
@@ -3861,7 +3923,7 @@ function wireEvents() {
     switch (e.key) {
       case "ArrowUp": move(-1, 0); e.preventDefault(); break;
       case "ArrowDown": move(1, 0); e.preventDefault(); break;
-      case "Enter": select(state.sel.row + 1, state.sel.col); e.preventDefault(); break;
+      case "Enter": select(state.sel.row + (e.shiftKey ? -1 : 1), state.sel.col); e.preventDefault(); break;
       case "ArrowLeft": move(0, -1); e.preventDefault(); break;
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
       case "Tab": select(state.sel.row, state.sel.col + (e.shiftKey ? -1 : 1)); e.preventDefault(); break;
