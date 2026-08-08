@@ -150,6 +150,17 @@ function fontStack(fn) {
   }
   return s;
 }
+// The font families the toolbar picker offers, from the engine's substitution
+// table (single source of truth) — every entry renders as a bundled face, so
+// the list can never offer a family this build would have to guess at. Typed
+// names outside the list still work; they go through the same table.
+let _fontFamilies = null;
+function fontFamilies() {
+  if (!_fontFamilies) {
+    try { _fontFamilies = JSON.parse(wasm.font_families()); } catch { _fontFamilies = []; }
+  }
+  return _fontFamilies;
+}
 function cellFont(it) {
   const weight = it.b ? "600 " : "";
   const slant = it.i ? "italic " : "";
@@ -3163,31 +3174,148 @@ function wireEvents() {
   for (const b of document.querySelectorAll(".tb-align")) {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
-  // Editable font combobox: accept any typed font name (so imported fonts
-  // outside the preset list still display and can be re-applied).
-  const fontInput = document.getElementById("tb-font");
-  fontInput.addEventListener("change", () => setFontName(fontInput.value.trim()));
-  fontInput.addEventListener("focus", () => fontInput.select());
-  fontInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); setFontName(fontInput.value.trim()); canvas.focus(); }
-    else if (e.key === "Escape") { refreshFormulaBar(); canvas.focus(); }
-    e.stopPropagation();
+  // --- Font family / font size comboboxes ----------------------------------
+  // Editable text box + a custom dropdown. NOT a native <input list=datalist>:
+  // Chrome filters datalist options by the input's current text, so as soon as
+  // the box mirrors the selected cell's font the dropdown collapsed to that one
+  // entry ("only Calibri, no other fonts"). This list always opens in full,
+  // narrows as you type, and still accepts any typed value.
+  //
+  // `values`: [{v, label, title}] — v is what gets applied, label what is shown.
+  // `apply(v)`: commits the value. `preview`: render each row in its own face.
+  function wireCombo({ input, caret, menu, values, apply, preview }) {
+    menus.push(menu);
+    const wrap = input.parentElement;
+    let rows = [];       // the currently rendered option buttons
+    let active = -1;     // index into rows of the highlighted option
+    let committed = "";  // last value applied, so blur doesn't re-apply it
+
+    const isOpen = () => !menu.hidden;
+    function close() {
+      menu.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      active = -1;
+    }
+    function highlight(i) {
+      if (!rows.length) return;
+      active = (i + rows.length) % rows.length;
+      rows.forEach((b, n) => b.classList.toggle("active", n === active));
+      rows[active].scrollIntoView({ block: "nearest" });
+    }
+    function choose(v) {
+      input.value = v;
+      committed = v;
+      close();
+      apply(v);
+      canvas.focus();
+    }
+    // Build the option rows, narrowed to `filter` (a substring match, as the
+    // box doubles as the search field). Returns how many rows are showing.
+    function build(filter) {
+      const f = (filter || "").trim().toLowerCase();
+      const all = typeof values === "function" ? values() : values; // lazy: engine-sourced lists
+      const list = f ? all.filter((o) => o.label.toLowerCase().includes(f)) : all;
+      const cur = input.value.trim().toLowerCase();
+      menu.textContent = "";
+      active = -1;
+      rows = list.map((o, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "combo-item";
+        b.setAttribute("role", "option");
+        b.textContent = o.label;
+        b.dataset.v = o.v; // label ≠ value for "Default" (which applies "")
+        if (o.title) b.title = o.title;
+        if (preview) b.style.fontFamily = fontStack(o.v);
+        if (o.v.toLowerCase() === cur) { b.classList.add("checked"); active = i; }
+        // mousedown must not blur the input (blur would close the menu first).
+        b.addEventListener("mousedown", (e) => e.preventDefault());
+        b.addEventListener("click", (e) => { e.stopPropagation(); choose(o.v); });
+        menu.appendChild(b);
+        return b;
+      });
+      return rows.length;
+    }
+    function open(filter) {
+      for (const m of menus) if (m !== menu) m.hidden = true;
+      if (!build(filter)) { close(); return; }
+      menu.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      menu.style.minWidth = wrap.offsetWidth + "px";
+      anchorMenu(menu, wrap);
+      highlight(active < 0 ? 0 : active);
+    }
+
+    // The shared outside-click handler only sets `hidden`, which would leave
+    // aria-expanded stale — close() properly on any click that isn't ours (the
+    // caret and the option rows both stopPropagation).
+    document.addEventListener("click", close);
+    caret.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus
+    caret.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (isOpen()) { close(); return; }
+      input.focus();
+      open(""); // the caret always shows the whole list, never a filtered one
+    });
+    input.addEventListener("focus", () => { committed = input.value; input.select(); });
+    input.addEventListener("input", () => open(input.value));
+    input.addEventListener("blur", () => {
+      close();
+      // Typed-then-clicked-away still commits (the old <input> "change" path),
+      // but only when the text actually changed — otherwise every focus pass
+      // would push a redundant undo entry.
+      if (input.value.trim() !== committed.trim()) { committed = input.value; apply(input.value.trim()); }
+    });
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation(); // the grid's global handler must not see these keys
+      if (e.key === "ArrowDown") { isOpen() ? highlight(active + 1) : open(""); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { if (isOpen()) { highlight(active - 1); e.preventDefault(); } }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        if (isOpen() && rows[active]) choose(rows[active].dataset.v);
+        else { committed = input.value; close(); apply(input.value.trim()); canvas.focus(); }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        // First Escape closes the list, a second reverts the box to the cell.
+        // Order matters: mark the typed text as "committed" so the blur below
+        // doesn't apply it, then blur (refreshFormulaBar skips a focused
+        // control), then let the refresh restore the cell's real value.
+        if (isOpen()) close();
+        else { committed = input.value; canvas.focus(); refreshFormulaBar(); }
+      } else if (e.key === "Tab") close();
+    });
+    return { close };
+  }
+
+  // Font family: every family the engine renders faithfully, each row drawn in
+  // its own face. Substituted families say so in their tooltip rather than
+  // pretending to be the real thing.
+  const kindNote = { exact: "", metric: " — renders as %s (metric-compatible)", generic: " — renders as %s (closest match)" };
+  wireCombo({
+    input: document.getElementById("tb-font"),
+    caret: document.getElementById("tb-font-caret"),
+    menu: document.getElementById("font-menu"),
+    values: () => [{ v: "", label: "Default", title: "Clear the font (use the workbook default)" }].concat(
+      fontFamilies().map((f) => ({
+        v: f.n,
+        label: f.n,
+        title: f.n + (kindNote[f.k] || "").replace("%s", f.f),
+      }))),
+    apply: (v) => setFontName(v.trim()),
+    preview: true,
   });
-  // Editable font-size combobox: accept any typed size, clamped to Excel's
-  // 1–409 pt range; a blank/zero clears the explicit size. Enter commits and
-  // returns focus to the grid; focus selects all for quick replacement.
-  const sizeInput = document.getElementById("tb-size");
-  const commitSize = () => {
-    const raw = parseFloat(sizeInput.value);
-    const pts = Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0;
-    setFontSize(pts);
-  };
-  sizeInput.addEventListener("change", commitSize);
-  sizeInput.addEventListener("focus", () => sizeInput.select());
-  sizeInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); commitSize(); canvas.focus(); }
-    else if (e.key === "Escape") { refreshFormulaBar(); canvas.focus(); }
-    e.stopPropagation();
+  // Font size: the Excel ladder, but any typed size is accepted and clamped to
+  // Excel's 1–409 pt range; a blank/zero clears the explicit size.
+  wireCombo({
+    input: document.getElementById("tb-size"),
+    caret: document.getElementById("tb-size-caret"),
+    menu: document.getElementById("size-menu"),
+    values: [{ v: "", label: "Default", title: "Clear the size (use the workbook default)" }]
+      .concat(SIZE_LADDER.map((n) => ({ v: String(n), label: String(n) }))), // same ladder as A▲/A▼
+    apply: (v) => {
+      const raw = parseFloat(v);
+      setFontSize(Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0);
+    },
   });
   document.getElementById("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -3250,7 +3378,10 @@ function wireEvents() {
       if (!c.flyout.hidden) anchorMenu(c.flyout, c.btn);
     });
   }
-  document.addEventListener("click", closeFlyouts);
+  // A click *inside* a flyout must not dismiss it — the flyout holds the live
+  // controls of the collapsed group (the font box, color swatches, …), and
+  // clicking into one would otherwise close the panel out from under it.
+  document.addEventListener("click", (e) => { if (!e.target.closest(".tb-flyout")) closeFlyouts(); });
   reflowToolbar();
 
   buildMenuBar();

@@ -95,7 +95,7 @@ each audit; this file is the durable backlog.
 | UX-P04 | Paste-special: arithmetic ops + full dialog (Ctrl+Alt+V) | Editing | 🔴 | extend `session_clip_paste_mode` + dialog |
 | UX-P05 | Undo/redo labels; F2 caret-at-end; inline arrows commit+move (enter mode); Shift+Tab-left while editing; column-value autocomplete | Editing | 🔴 | per audit-2 P2 list |
 | UX-P06 | Autofill: growth series, date stepping, Ctrl copy↔series toggle, fill-options popup | Editing | 🔴 | `mode` arg + popup |
-| UX-P07 | Font picker searchable + rendered in-face; grow/shrink ladder beyond 72 | Format | 🔴 | custom dropdown via `font_css_stack` |
+| UX-P07 | Font picker searchable + rendered in-face; grow/shrink ladder beyond 72 | Format | ✅ | Custom combobox replaces `<input list=datalist>` (a datalist is filtered by the input's own text, so an auto-populated box offered exactly one font). List comes from the engine (`font_families()` ← `PICKER_FAMILIES`); rows preview in-face, substitutes say so in the tooltip. A▲/A▼ already stepped past 72 |
 | UX-P08 | Borders: 13 placements incl. composite bottoms + diagonals; line-color swatch reflects pick | Format | 🔴 | add presets + diagonal model/render |
 | UX-P09 | Date `[h]/[m]/[s]` elapsed time dropped; English-only month/day | Format | 🔴 | special-case brackets before drop |
 | UX-P10 | numfmt/align submenu checkmarks; %/comma toggle back to General | Format/Chrome | 🔴 | `check` predicates; toggle logic |
@@ -105,7 +105,7 @@ each audit; this file is the durable backlog.
 | UX-P14 | Text-to-columns | Data | 🔴 | reuse `casual-calc-io` delimiter split |
 | UX-P15 | Import/export UX: progress + friendly errors; CSV encoding (BOM/UTF-16) fallback; CSV active-sheet-only warning; date/leading-zero fidelity | Chrome/Fidelity | 🔴 | modal + `read_delimited` detection |
 | UX-P16 | Format Cells dialog (Ctrl+1) consolidating number/font/border/fill/align | Chrome | 🔴 | modal (shell exists) → `session_set_*` |
-| UX-P17 | `prefers-reduced-motion`; freeze-line theming; collapsed-flyout self-dismiss on input click | Chrome | 🔴 | media query; `freezeLine` token; `flyout` stopPropagation |
+| UX-P17 | `prefers-reduced-motion`; freeze-line theming; ~~collapsed-flyout self-dismiss on input click~~ (fixed with UX-P07) | Chrome | 🟡 | media query; `freezeLine` token |
 
 ---
 

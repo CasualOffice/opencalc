@@ -1459,6 +1459,33 @@ pub fn font_css_stack(name: &str) -> String {
     casual_calc_layout::css_stack(name)
 }
 
+/// The font families to offer in a host's font picker, as JSON
+/// `[{n,f,k}, …]` — name, the bundled family it renders as, and the fidelity
+/// of that match (`"exact"` / `"metric"` / `"generic"`). Sourced from the
+/// shared substitution table so the picker can never offer a family this build
+/// cannot render faithfully; the editor still accepts any typed name.
+#[wasm_bindgen]
+pub fn font_families() -> String {
+    use casual_calc_layout::SubstituteKind;
+    let items: Vec<String> = casual_calc_layout::PICKER_FAMILIES
+        .iter()
+        .filter_map(|name| {
+            let sub = casual_calc_layout::substitute(name)?;
+            let kind = match sub.kind {
+                SubstituteKind::Bundled => "exact",
+                SubstituteKind::MetricCompatible => "metric",
+                SubstituteKind::Generic => "generic",
+            };
+            Some(format!(
+                "{{\"n\":{},\"f\":{},\"k\":\"{kind}\"}}",
+                json_string(name),
+                json_string(sub.family.name)
+            ))
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 /// The editable input for a cell (formula text with `=`, or the raw value).
 #[wasm_bindgen]
 pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {

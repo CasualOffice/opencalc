@@ -192,6 +192,56 @@ pub fn css_stack(requested: &str) -> String {
     }
 }
 
+/// The family names a host's font picker should offer, in the order to show
+/// them (alphabetical, as Excel and Sheets list non-theme fonts).
+///
+/// Every entry is a name the table resolves explicitly, so a user can
+/// only pick a family this build renders faithfully — either a bundled face or
+/// a metric-compatible / fixed-generic substitute. Aliases that exist only to
+/// catch what a `.xlsx` may *declare* (`Nimbus Sans`, `Arimo`, the bare CSS
+/// generics, …) are deliberately absent: they resolve correctly on import but
+/// are not something to offer as a choice. Arbitrary typed names still work —
+/// [`substitute`] classifies them — the picker list is a convenience, not a
+/// whitelist.
+pub const PICKER_FAMILIES: &[&str] = &[
+    "Andale Mono",
+    "Arial",
+    "Arial Black",
+    "Arial Narrow",
+    "Book Antiqua",
+    "Caladea",
+    "Calibri",
+    "Cambria",
+    "Carlito",
+    "Cascadia Code",
+    "Cascadia Mono",
+    "Century Gothic",
+    "Consolas",
+    "Constantia",
+    "Courier New",
+    "Garamond",
+    "Georgia",
+    "Helvetica",
+    "Helvetica Neue",
+    "Liberation Mono",
+    "Liberation Sans",
+    "Liberation Serif",
+    "Lucida Console",
+    "Menlo",
+    "Monaco",
+    "Open Sans",
+    "PT Serif",
+    "Palatino Linotype",
+    "Roboto",
+    "SF Mono",
+    "Segoe UI",
+    "Tahoma",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Ubuntu",
+    "Verdana",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +262,28 @@ mod tests {
             "Liberation Mono"
         );
         assert_eq!(substitute("Cambria").unwrap().family.name, "Caladea");
+    }
+
+    #[test]
+    fn picker_families_are_all_explicitly_known() {
+        // A picker entry must resolve through the explicit table, never the
+        // substring heuristic — otherwise the UI would offer a family whose
+        // metrics are a guess.
+        for name in PICKER_FAMILIES {
+            let key = name.to_ascii_lowercase();
+            assert!(
+                known_family(&key).is_some(),
+                "picker family {name:?} is not in the substitution table"
+            );
+        }
+    }
+
+    #[test]
+    fn picker_families_are_sorted_and_unique() {
+        let mut sorted = PICKER_FAMILIES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, PICKER_FAMILIES.to_vec());
     }
 
     #[test]

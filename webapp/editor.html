@@ -82,20 +82,28 @@
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group controls" id="tbg-font" data-collapse="6">
-        <input id="tb-font" class="tb-select tb-font" type="text" list="tb-font-list"
-               title="Font (type any font)" aria-label="Font" placeholder="Default" />
-        <datalist id="tb-font-list">
-          <option>Calibri</option><option>Arial</option><option>Aptos</option>
-          <option>Times New Roman</option><option>Georgia</option><option>Verdana</option>
-          <option>Courier New</option><option>Helvetica</option><option>Tahoma</option>
-        </datalist>
-        <input id="tb-size" class="tb-select tb-size" type="text" inputmode="decimal"
-               list="tb-size-list" title="Font size (type any size)" aria-label="Font size" placeholder="11" />
-        <datalist id="tb-size-list">
-          <option>8</option><option>9</option><option>10</option><option>11</option>
-          <option>12</option><option>14</option><option>16</option><option>18</option>
-          <option>20</option><option>24</option><option>28</option><option>36</option><option>48</option><option>72</option>
-        </datalist>
+        <!-- Custom comboboxes, not <input list=datalist>: a native datalist is
+             FILTERED by the input's own text, so once these boxes mirror the
+             selected cell ("Calibri" / "11") their dropdowns offered that one
+             entry and nothing else. wireCombo() builds the lists below. -->
+        <div class="menu-wrap tb-combo">
+          <input id="tb-font" class="tb-select tb-font" type="text" spellcheck="false" autocomplete="off"
+                 title="Font (type any font)" aria-label="Font" placeholder="Default"
+                 role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="font-menu" />
+          <button id="tb-font-caret" class="tb-combo-caret" tabindex="-1" aria-label="Show fonts" title="Show fonts">
+            <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg>
+          </button>
+          <div id="font-menu" class="popmenu combo-menu font-menu" role="listbox" aria-label="Font" hidden></div>
+        </div>
+        <div class="menu-wrap tb-combo">
+          <input id="tb-size" class="tb-select tb-size" type="text" inputmode="decimal" autocomplete="off"
+                 title="Font size (type any size)" aria-label="Font size" placeholder="11"
+                 role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="size-menu" />
+          <button id="tb-size-caret" class="tb-combo-caret" tabindex="-1" aria-label="Show sizes" title="Show sizes">
+            <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg>
+          </button>
+          <div id="size-menu" class="popmenu combo-menu" role="listbox" aria-label="Font size" hidden></div>
+        </div>
         <button id="tb-size-up" class="tb-btn glyph" title="Increase font size" aria-label="Increase font size">A&#9650;</button>
         <button id="tb-size-down" class="tb-btn glyph" title="Decrease font size" aria-label="Decrease font size">A&#9660;</button>
       </div>
