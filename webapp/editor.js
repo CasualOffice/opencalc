@@ -3655,6 +3655,7 @@ const findCase = document.getElementById("find-case");
 const findWhole = document.getElementById("find-whole");
 const findValues = document.getElementById("find-values");
 const findAllSheets = document.getElementById("find-all-sheets");
+const findWildcards = document.getElementById("find-wildcards");
 const findState = { matches: [], idx: -1 };
 
 function openFind() { findBar.hidden = false; findInput.focus(); findInput.select(); runFind(); }
@@ -3664,7 +3665,8 @@ function runFind() {
   findState.matches = q
     ? JSON.parse(wasm.session_find_opts(
         state.sheet, q, findCase.checked,
-        findWhole.checked, findValues.checked, findAllSheets.checked))
+        findWhole.checked, findValues.checked, findAllSheets.checked,
+        findWildcards.checked))
     : [];
   findState.idx = findState.matches.length ? 0 : -1;
   if (findState.idx >= 0) gotoMatch();
@@ -5488,7 +5490,7 @@ function wireEvents() {
     else if (e.key === "Escape") { closeFind(); e.preventDefault(); }
   });
   replaceInput.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFind(); });
-  for (const box of [findCase, findWhole, findValues, findAllSheets]) {
+  for (const box of [findCase, findWhole, findValues, findAllSheets, findWildcards]) {
     box.addEventListener("change", runFind);
   }
   document.getElementById("find-next").addEventListener("click", () => findStep(1));

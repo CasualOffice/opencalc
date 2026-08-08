@@ -316,7 +316,7 @@ fn contains_ci(hay: &str, needle: &str, match_case: bool) -> bool {
 /// All cells whose display text contains `query`, as JSON `[{r,c}, …]`.
 #[wasm_bindgen]
 pub fn session_find(sheet: usize, query: &str, match_case: bool) -> String {
-    session_find_opts(sheet, query, match_case, false, false, false)
+    session_find_opts(sheet, query, match_case, false, false, false, false)
 }
 
 /// Search a sheet — or the whole workbook — with the options a find bar offers.
@@ -335,6 +335,7 @@ pub fn session_find_opts(
     whole_cell: bool,
     in_values: bool,
     all_sheets: bool,
+    wildcards: bool,
 ) -> String {
     with_session(|s| {
         let wb = s.workbook();
@@ -346,7 +347,18 @@ pub fn session_find_opts(
         } else {
             vec![sheet]
         };
+        // With wildcards on, `?` and `*` are pattern syntax. Excel matches the
+        // whole cell against the pattern, so a substring search wraps it in `*`
+        // rather than falling back to a literal `contains`.
+        let pattern = if wildcards && !whole_cell {
+            format!("*{query}*")
+        } else {
+            query.to_owned()
+        };
         let matches = |haystack: &str| {
+            if wildcards {
+                return casual_calc_model::wildcard_match(&pattern, haystack, !match_case);
+            }
             if whole_cell {
                 if match_case {
                     haystack == query

@@ -330,16 +330,19 @@ impl FilterOp {
     }
 }
 
-/// Match `text` against an OOXML filter pattern, where `*` is any run of
-/// characters and `?` is exactly one. Comparison is case-insensitive, as it is
-/// in Excel.
+/// Match `text` against a pattern where `*` is any run of characters and `?` is
+/// exactly one — the wildcard language shared by OOXML filters and Excel's Find.
+///
+/// `fold_case` makes the comparison case-insensitive, which is what filters
+/// always want and what Find wants unless "match case" is on.
 ///
 /// Iterative with a backtrack point rather than recursive, so a pathological
 /// pattern like `*a*a*a*…` against a long string cannot blow the stack or go
 /// exponential — it stays O(text × pattern) in the worst case.
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.to_lowercase().chars().collect();
-    let t: Vec<char> = text.to_lowercase().chars().collect();
+pub fn wildcard_match(pattern: &str, text: &str, fold_case: bool) -> bool {
+    let fold = |s: &str| if fold_case { s.to_lowercase() } else { s.to_owned() };
+    let p: Vec<char> = fold(pattern).chars().collect();
+    let t: Vec<char> = fold(text).chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
     // Where to resume if the current `*` guess turns out too short.
     let (mut star, mut retry) = (usize::MAX, 0usize);
@@ -376,8 +379,8 @@ impl CustomFilter {
     /// on a text column still behaves sensibly.
     pub fn matches(&self, text: &str, num: Option<f64>) -> bool {
         match self.op {
-            FilterOp::Equal => wildcard_match(&self.value, text),
-            FilterOp::NotEqual => !wildcard_match(&self.value, text),
+            FilterOp::Equal => wildcard_match(&self.value, text, true),
+            FilterOp::NotEqual => !wildcard_match(&self.value, text, true),
             _ => {
                 let ord = match (num, self.value.trim().parse::<f64>()) {
                     (Some(a), Ok(b)) => a.partial_cmp(&b),
