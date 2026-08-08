@@ -276,6 +276,50 @@ fn imports_outline_levels_collapsed_and_zoom() {
 }
 
 #[test]
+fn shared_formula_followers_are_expanded_from_their_master() {
+    // Excel's fill-down writes the expression once (on the master, which also
+    // carries ref+si) and leaves each follower's <f> empty. Followers used to
+    // import as a cached constant with no formula at all.
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1"><c r="A1"><v>10</v></c><c r="B1"><f t="shared" ref="B1:B3" si="0">A1*$D$1+$A2</f><v>10</v></c></row>
+        <row r="2"><c r="A2"><v>20</v></c><c r="B2"><f t="shared" si="0"/><v>20</v></c></row>
+        <row r="3"><c r="A3"><v>30</v></c><c r="B3"><f t="shared" si="0"/><v>30</v></c></row>
+    </sheetData></worksheet>"#
+        .to_vec();
+    let import = import_package(package_with_sheet(sheet_xml, None)).unwrap();
+    let wb = &import.workbook;
+    let sheet = &wb.sheets[0];
+
+    let formula_at = |row: u32| {
+        let cell = sheet.cells.get(CellRef::new(row, 1)).unwrap();
+        let handle = cell.formula.expect("follower kept its formula");
+        wb.formula(handle).unwrap().to_string()
+    };
+    // The master is unchanged; each follower is shifted by its row delta, and
+    // the `$`-anchored parts stay put ($D$1 entirely, $A2's column only).
+    assert_eq!(formula_at(0), "((A1*$D$1)+$A2)");
+    assert_eq!(formula_at(1), "((A2*$D$1)+$A3)");
+    assert_eq!(formula_at(2), "((A3*$D$1)+$A4)");
+}
+
+#[test]
+fn multi_area_sqref_applies_to_every_area() {
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+        <dataValidations>
+          <dataValidation type="list" sqref="A1:A3 C1:C3"><formula1>"yes,no"</formula1></dataValidation>
+        </dataValidations>
+    </worksheet>"#
+        .to_vec();
+    let import = import_package(package_with_sheet(sheet_xml, None)).unwrap();
+    let sheet = &import.workbook.sheets[0];
+    // One validation per area, not just the first.
+    assert_eq!(sheet.validations.len(), 2);
+    assert_eq!(sheet.validations[0].range.start.col, 0);
+    assert_eq!(sheet.validations[1].range.start.col, 2);
+}
+
+#[test]
 fn column_widths_survive_the_true_spelling_of_ooxml_booleans() {
     // LibreOffice, Apache POI and ExcelJS all write `customWidth="true"` rather
     // than `="1"`. Both are valid `xsd:boolean`; matching only "1" silently

@@ -657,11 +657,26 @@ function draw() {
       ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
     });
   }
-  // Cells that hold text — these block a neighbor's overflow.
+  // Cells that hold text — these block a neighbor's overflow. A merged block is
+  // occupied over its whole span (not just its anchor), or a neighbour's text
+  // would spill across it.
   const occupied = new Set();
   for (const it of items) if (it.t) occupied.add(it.r + "," + it.c);
+  for (const m of sheetMerges) {
+    const cols = geo.colIdx.filter((c) => c >= m.c0 && c <= m.c1);
+    if (!cols.length) continue; // clamped to the viewport: a full-column merge
+    for (const r of geo.rowIdx) { //  would otherwise seed a million entries
+      if (r < m.r0 || r > m.r1) continue;
+      for (const c of cols) occupied.add(r + "," + c);
+    }
+  }
   for (const it of items) {
     if (!it.t) continue;
+    // Merged text belongs to the merge pass below, which lays it out across the
+    // whole block. Drawing it here too anchors right/centre alignment to the
+    // *anchor cell* instead, leaving a fragment outside the block that the
+    // merge pass never covers — a ghost of the label beside it.
+    if (sheetMerges.length && mergeAt(it.r, it.c)) continue;
     const x = colXAt(it.c);
     const yTop = rowYAt(it.r);
     if (x === undefined || yTop === undefined) continue;

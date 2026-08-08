@@ -22,9 +22,11 @@ mod styles;
 pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
 
-use casual_calc_formula::parse as parse_formula;
+use std::collections::HashMap;
+
+use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
-    Cell, CellComment, CellRange, CellValue, CfRule, ConditionalFormat, DataValidation,
+    Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat, DataValidation,
     DefinedName, ErrorValue, Id, IdGenerator, Sheet, SheetId, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
@@ -101,6 +103,27 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         sheet_ids_by_index.push(sheet_id);
         let mut sheet = Sheet::new(sheet_id, name);
 
+        // Shared formulas: Excel's fill-down writes the expression once, on the
+        // group's master cell, and leaves every follower's `<f>` empty. Without
+        // expanding them a filled column imports as one formula plus a stack of
+        // cached constants — the formulas are simply gone. Collect the masters
+        // first (document order puts them before their followers, but a
+        // pre-pass keeps that from being load-bearing).
+        let mut shared_masters: HashMap<u32, (CellRef, Expr)> = HashMap::new();
+        for raw in &worksheet.cells {
+            let (Some(si), Some(text)) = (raw.shared_index, raw.formula.as_deref()) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            if let Some(at) = parse_a1(&raw.reference)
+                && let Ok(expr) = parse_formula(text)
+            {
+                shared_masters.entry(si).or_insert((at, expr));
+            }
+        }
+
         for raw in worksheet.cells {
             let Some(cell_ref) = parse_a1(&raw.reference) else {
                 report.record(
@@ -117,8 +140,8 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             {
                 cell.style = Some(*style_id);
             }
-            if let Some(text) = &raw.formula {
-                match parse_formula(text) {
+            match raw.formula.as_deref() {
+                Some(text) if !text.trim().is_empty() => match parse_formula(text) {
                     Ok(expr) => {
                         cell.formula = Some(workbook.store_formula(expr));
                         report.record("f", ModelOutcome::Mapped, RetentionOutcome::NotApplicable);
@@ -127,7 +150,39 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                         // Cached value kept; the formula text did not parse.
                         report.record("f", ModelOutcome::Degraded, RetentionOutcome::NotRetained);
                     }
+                },
+                // An empty `<f>` is a shared-formula follower: rebuild it from
+                // its master, shifted by the row/column delta. `$` anchors stay
+                // put — the same copy/fill semantics the shifter gives the UI.
+                Some(_) => {
+                    let rebuilt = raw.shared_index.and_then(|si| shared_masters.get(&si)).map(
+                        |(at, expr)| {
+                            shift_references(
+                                expr,
+                                i64::from(cell_ref.row) - i64::from(at.row),
+                                i64::from(cell_ref.col) - i64::from(at.col),
+                            )
+                        },
+                    );
+                    match rebuilt {
+                        Some(expr) => {
+                            cell.formula = Some(workbook.store_formula(expr));
+                            report.record(
+                                "f",
+                                ModelOutcome::Mapped,
+                                RetentionOutcome::NotApplicable,
+                            );
+                        }
+                        None => {
+                            report.record(
+                                "f",
+                                ModelOutcome::Degraded,
+                                RetentionOutcome::NotRetained,
+                            );
+                        }
+                    }
                 }
+                None => {}
             }
             if !cell.is_blank() {
                 sheet.cells.set(cell_ref, cell);
@@ -182,13 +237,17 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             if values.is_empty() {
                 continue;
             }
-            let Some(first) = sqref.split_whitespace().next() else {
-                continue;
-            };
-            let range =
-                parse_range(first).or_else(|| parse_a1(first).map(|c| CellRange::new(c, c)));
-            if let Some(range) = range {
-                sheet.validations.push(DataValidation { range, values });
+            // An sqref is a space-separated list of areas; taking only the first
+            // silently dropped the validation from every other area it covers.
+            for area in sqref.split_whitespace() {
+                let range =
+                    parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)));
+                if let Some(range) = range {
+                    sheet.validations.push(DataValidation {
+                        range,
+                        values: values.clone(),
+                    });
+                }
             }
         }
 
@@ -199,14 +258,6 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             let Some(fill) = raw
                 .dxf_id
                 .and_then(|id| stylesheet.dxf_fills.get(id).cloned().flatten())
-            else {
-                continue;
-            };
-            let Some(first) = raw.sqref.split_whitespace().next() else {
-                continue;
-            };
-            let Some(range) =
-                parse_range(first).or_else(|| parse_a1(first).map(|c| CellRange::new(c, c)))
             else {
                 continue;
             };
@@ -227,9 +278,20 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 _ => None,
             };
             if let Some(rule) = rule {
-                sheet
-                    .conditional_formats
-                    .push(ConditionalFormat { range, rule, fill });
+                // One rule per area of the sqref — a cfRule covering "A1:A9 C1:C9"
+                // used to apply to the first area only.
+                for area in raw.sqref.split_whitespace() {
+                    let Some(range) =
+                        parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)))
+                    else {
+                        continue;
+                    };
+                    sheet.conditional_formats.push(ConditionalFormat {
+                        range,
+                        rule: rule.clone(),
+                        fill: fill.clone(),
+                    });
+                }
             }
         }
 

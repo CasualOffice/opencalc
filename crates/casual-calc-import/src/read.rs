@@ -31,6 +31,10 @@ pub struct RawCell {
     pub inline: Option<String>,
     /// The `<f>` formula text, if present.
     pub formula: Option<String>,
+    /// The shared-formula group (`<f t="shared" si="N">`). The group's master
+    /// carries the expression text; every follower's `<f>` is empty and must be
+    /// rebuilt from the master, shifted by the cell delta.
+    pub shared_index: Option<u32>,
 }
 
 fn read_attr(
@@ -422,8 +426,10 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                     b"v" => in_value = true,
                     b"f" => {
                         in_formula = true;
+                        let si = read_attr(&e, b"si")?.and_then(|s| s.parse().ok());
                         if let Some(cell) = current.as_mut() {
                             cell.formula.get_or_insert_with(String::new);
+                            cell.shared_index = si;
                         }
                     }
                     b"is" => in_inline = true,
@@ -481,9 +487,13 @@ pub fn parse_worksheet(xml: &[u8]) -> Result<Worksheet, ImportError> {
                             ..RawCell::default()
                         });
                     }
+                    // A follower of a shared formula: `<f t="shared" si="N"/>`
+                    // with no text of its own.
                     b"f" => {
+                        let si = read_attr(&e, b"si")?.and_then(|s| s.parse().ok());
                         if let Some(cell) = current.as_mut() {
                             cell.formula.get_or_insert_with(String::new);
+                            cell.shared_index = si;
                         }
                     }
                     b"mergeCell" => {
