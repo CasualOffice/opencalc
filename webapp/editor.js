@@ -136,6 +136,11 @@ function readColors() {
     // Distinct from the selection tint: a find hit and the active cell must not
     // read as the same thing.
     findHit: css("--find-tint") || "rgba(245,158,11,.28)",
+    // Read from the theme rather than hardcoded: the freeze divider sits on the
+    // grid, so it has to darken and lighten with it. `colors.freezeLine` was
+    // already consulted at the draw site but never populated here, so the
+    // fallback was always what showed.
+    freezeLine: css("--freeze-line") || "#5f6368",
   };
 }
 
@@ -3611,6 +3616,7 @@ function buildBorderMenu() {
   const sw = el("div", "bd-swatches");
   for (const c of ["", "000000", "2f6df6", "e5484d", "16a34a", "f59e0b", "8b5cf6", "64748b"]) {
     const b = el("button", "bd-color" + (c === borderColor ? " on" : ""));
+    b.dataset.color = c;
     if (c) { b.style.background = "#" + c; b.title = "#" + c; }
     else { b.textContent = "A"; b.title = "Automatic color"; }
     b.addEventListener("click", (e) => {
@@ -3618,6 +3624,8 @@ function buildBorderMenu() {
       borderColor = c;
       sw.querySelectorAll(".bd-color").forEach((x) => x.classList.remove("on"));
       b.classList.add("on");
+      const btn = document.getElementById("tb-border");
+      btn.style.setProperty("--bd-color", c ? "#" + c : "currentColor");
     });
     sw.appendChild(b);
   }
@@ -3740,9 +3748,19 @@ let marchRaf = 0;
 let marchLast = 0;
 function marchTick(t) {
   if (!clipMarch) { marchRaf = 0; return; }
+  // Reduced motion: keep the dashed outline, drop the crawl. It marks the copy
+  // source just as well standing still, and stopping the loop also stops a
+  // repaint every 80 ms.
+  if (REDUCED_MOTION.matches) { marchRaf = 0; return; }
   if (t - marchLast > 80) { marchOffset = (marchOffset + 1) % 8; marchLast = t; draw(); }
   marchRaf = requestAnimationFrame(marchTick);
 }
+// Honour `prefers-reduced-motion`: the marching ants are decoration, and the
+// dashed outline says the same thing standing still.
+const REDUCED_MOTION = window.matchMedia
+  ? window.matchMedia("(prefers-reduced-motion: reduce)")
+  : { matches: false };
+
 function startMarch(s, cut) {
   clipMarch = { sheet: state.sheet, r0: s.r0, c0: s.c0, r1: s.r1, c1: s.c1, cut };
   if (!marchRaf) marchRaf = requestAnimationFrame(marchTick);
@@ -5536,6 +5554,19 @@ function wireEvents() {
   // Border palette: custom toggle (its placement buttons apply and close, but
   // the style select and color swatches must not), built once here.
   buildBorderMenu();
+  // The palette is built once, so its "current pick" marks would go stale the
+  // moment anything changed them. Re-sync on every open, and mirror the colour
+  // onto the toolbar button so the choice is visible without opening the menu.
+  function syncBorderPicks() {
+    const menu = document.getElementById("border-menu");
+    for (const sw of menu.querySelectorAll(".bd-color")) {
+      sw.classList.toggle("on", (sw.dataset.color || "") === borderColor);
+    }
+    const sel = menu.querySelector(".bd-style");
+    if (sel) sel.value = borderStyle;
+    const btn = document.getElementById("tb-border");
+    btn.style.setProperty("--bd-color", borderColor ? "#" + borderColor : "currentColor");
+  }
   {
     const btn = document.getElementById("tb-border");
     const menu = document.getElementById("border-menu");
@@ -5545,8 +5576,9 @@ function wireEvents() {
       const open = menu.hidden;
       for (const m of menus) m.hidden = true;
       menu.hidden = !open;
-      if (!menu.hidden) anchorMenu(menu, btn);
+      if (!menu.hidden) { syncBorderPicks(); anchorMenu(menu, btn); }
     });
+    syncBorderPicks();
   }
   // Styled tooltips over the chrome (converts native titles, incl. the border
   // palette just built above).

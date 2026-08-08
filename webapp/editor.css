@@ -31,6 +31,7 @@
    Editor" design system. The editor never depends on the marketing style.css.
    `--surface` is the grouped-pill background; `--card` is popovers/panels. */
 :root {
+  --freeze-line: #5f6368;
   --bg: #ffffff;
   --fg: #0b0d12;
   --icon: #454b57;        /* default toolbar icon */
@@ -58,6 +59,7 @@
    hasn't forced light. Duplicated because CSS can't share a declaration block
    across a media query and an attribute selector. */
 :root[data-theme="dark"] {
+  --freeze-line: #8b95a5;
   --bg: #0f1216;
   --fg: #e7ebf0;
   --icon: #b3bccb;
@@ -80,6 +82,7 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    --freeze-line: #8b95a5;
     --bg: #0f1216;
     --fg: #e7ebf0;
     --icon: #b3bccb;
@@ -787,3 +790,23 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .cf-rule-swatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--border); flex: 0 0 auto; }
 .cf-rule-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cf-rule-row .oc-btn { padding: 3px 8px; font-size: 12px; }
+
+/* The border button carries the chosen line colour as an underline, so the pick
+   is visible without opening the palette. */
+#tb-border { position: relative; }
+#tb-border::after {
+  content: ""; position: absolute; left: 6px; right: 6px; bottom: 4px; height: 2px;
+  background: var(--bd-color, currentColor); border-radius: 1px;
+}
+
+/* One place for the whole reduced-motion contract, rather than a media query per
+   animated element. The marching-ants crawl is stopped in JS, since a canvas
+   animation is a timer rather than a CSS transition. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
