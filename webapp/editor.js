@@ -1835,6 +1835,88 @@ function applySort(s, keys, hasHeader) {
   draw();
 }
 
+// The custom number-format dialog. The engine understands far more codes than
+// the preset menu offers — scientific, section colours, a text section — and
+// without somewhere to type one, none of that is reachable. Previews against
+// the active cell's own value, so you can see what the code does to *your*
+// data before applying it.
+function customFormatDialog() {
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent = "Custom number format";
+  body.textContent = "";
+
+  let current = "";
+  let sample = 1234.567;
+  let sampleText = "";
+  try {
+    const fmt = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col));
+    current = fmt.nf || "";
+    const it = JSON.parse(wasm.session_cells(state.sheet, state.sel.row, state.sel.col, state.sel.row, state.sel.col))[0];
+    if (it && it.n) sample = parseFloat(wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col)) || sample;
+    else if (it && it.t) sampleText = it.t;
+  } catch {}
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "cf-code";
+  input.spellcheck = false;
+  input.value = current;
+  input.placeholder = "#,##0.00;[Red]-#,##0.00";
+  const preview = el("div", "cf-preview");
+  const hint = el("p", "cf-hint",
+    "Sections are separated by ; — positive;negative;zero;text. [Red] colours a section, @ stands for the text value.");
+
+  const render = () => {
+    const code = input.value.trim();
+    try {
+      preview.textContent = code
+        ? (sampleText
+            ? wasm.format_preview_text(sampleText, code)
+            : wasm.format_preview(sample, code))
+        : String(sampleText || sample);
+      preview.classList.remove("bad");
+    } catch {
+      preview.textContent = "—";
+      preview.classList.add("bad");
+    }
+  };
+  input.addEventListener("input", render);
+  render();
+
+  const presets = el("div", "cf-presets");
+  for (const [label, code] of [
+    ["Red negatives", "#,##0.00;[Red]-#,##0.00"],
+    ["Thousands", "#,##0"],
+    ["Scientific", "0.00E+00"],
+    ["Accounting-ish", "$#,##0.00;[Red]($#,##0.00);\"-\""],
+    ["Text", "@"],
+    ["Suffix", "0\" kg\""],
+  ]) {
+    const b = el("button", "cf-preset", label);
+    b.title = code;
+    b.addEventListener("click", () => { input.value = code; render(); input.focus(); });
+    presets.appendChild(b);
+  }
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Apply");
+  actions.append(cancel, ok);
+  body.append(el("p", "oc-confirm-text", "Format code"), input, preview, presets, hint, actions);
+  modal.hidden = false;
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", () => { const code = input.value.trim(); close(); canvas.focus(); setNumberFormat(code); });
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") ok.click();
+    else if (e.key === "Escape") { close(); canvas.focus(); }
+  });
+  input.focus();
+  input.select();
+}
+
 // Remove duplicate rows from the selection (or the used area for a lone cell),
 // keeping the first of each. Asks first, since it deletes rows, and reports how
 // many went — "removed 0" is a useful answer too.
@@ -2318,6 +2400,49 @@ function confirmModal(title, message, confirmLabel = "OK") {
     ok.addEventListener("click", () => done(true));
     ok.focus();
   });
+}
+
+// Excel's four merge verbs. "Across" merges each row of the selection
+// separately — the one people reach for on a header band — and "& center"
+// is a merge plus a centre, which is how it is nearly always used.
+async function mergeVariant(kind) {
+  const s = effectiveRange();
+  if (kind === "none") {
+    try { wasm.session_unmerge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+    catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+    return;
+  }
+  if (kind === "across") {
+    if (s.c1 <= s.c0) { status.textContent = "select more than one column"; return; }
+    // Count what every row would bury and ask once, rather than per row or —
+    // worse — not at all: merging across is still merging, and UX-M01's rule is
+    // that data is never discarded without saying so.
+    let hidden = 0;
+    for (let r = s.r0; r <= s.r1; r += 1) {
+      try { hidden += wasm.session_merge_hidden_count(state.sheet, r, s.c0, r, s.c1); } catch {}
+    }
+    if (hidden > 0) {
+      const ok = await confirmModal(
+        "Merge across",
+        `Each row keeps only its leftmost value. ${hidden} other ${hidden === 1 ? "value" : "values"} will be discarded.`,
+        "Merge across",
+      );
+      canvas.focus();
+      if (!ok) return;
+    }
+    for (let r = s.r0; r <= s.r1; r += 1) {
+      try {
+        if (hidden > 0) wasm.session_merge_cells_discarding(state.sheet, r, s.c0, r, s.c1);
+        else wasm.session_merge_cells(state.sheet, r, s.c0, r, s.c1);
+      } catch (e) { status.textContent = `error: ${e}`; }
+    }
+    status.textContent = `merged ${s.r1 - s.r0 + 1} rows across`;
+    draw();
+    return;
+  }
+  await toggleMerge();
+  if (kind === "center") setAlign("center");
 }
 
 async function toggleMerge() {
@@ -4235,7 +4360,8 @@ function wireEvents() {
       if (open) { buildColorMenu(menu, onPick, noneLabel); menu.hidden = false; anchorMenu(menu, btn); }
     });
   }
-  wirePopup("tb-numfmt", "numfmt-menu", (b) => setNumberFormat(b.dataset.nf));
+  wirePopup("tb-numfmt", "numfmt-menu", (b) =>
+    (b.dataset.nf === "__custom__" ? customFormatDialog() : setNumberFormat(b.dataset.nf)));
   // Border palette: custom toggle (its placement buttons apply and close, but
   // the style select and color swatches must not), built once here.
   buildBorderMenu();
@@ -4255,6 +4381,7 @@ function wireEvents() {
   // palette just built above).
   initTooltips();
   wirePopup("tb-wrap", "wrap-menu", (b) => setTextOverflow(b.dataset.ov));
+  wirePopup("tb-merge", "merge-menu", (b) => mergeVariant(b.dataset.mg));
   wirePopup("tb-valign", "valign-menu", (b) => setValign(b.dataset.va));
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) =>
@@ -4276,7 +4403,6 @@ function wireEvents() {
   document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
   document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
   document.getElementById("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
-  document.getElementById("tb-merge").addEventListener("click", () => { toggleMerge(); canvas.focus(); });
   document.getElementById("tb-indent-more").addEventListener("click", () => { setIndent(1); canvas.focus(); });
   document.getElementById("tb-indent-less").addEventListener("click", () => { setIndent(-1); canvas.focus(); });
   {
@@ -4663,6 +4789,7 @@ function wireEvents() {
           ["Scientific", nf("0.00E+00")],
           ["Text", nf("@")],
         ] },
+        ["Custom number format…", () => customFormatDialog()],
         ["Conditional formatting…", clickEl("#tb-cf")],
         "sep",
         ["Clear formatting", clearFormats],

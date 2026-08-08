@@ -1631,6 +1631,20 @@ pub fn font_css_stack(name: &str) -> String {
     casual_calc_layout::css_stack(name)
 }
 
+/// Format `value` with `code`, for a live preview while a format is being
+/// typed. Pure — it touches no session — so the dialog can call it per keystroke
+/// and show the engine's real answer rather than an approximation of it.
+#[wasm_bindgen]
+pub fn format_preview(value: f64, code: &str) -> String {
+    casual_calc_layout::format_number(value, code)
+}
+
+/// Likewise for a text value, so a preview shows what the `@` section does.
+#[wasm_bindgen]
+pub fn format_preview_text(text: &str, code: &str) -> String {
+    casual_calc_layout::format_text(text, code).unwrap_or_else(|| text.to_owned())
+}
+
 /// The font families to offer in a host's font picker, as JSON
 /// `[{n,f,k}, …]` — name, the bundled family it renders as, and the fidelity
 /// of that match (`"exact"` / `"metric"` / `"generic"`). Sourced from the
@@ -2592,6 +2606,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             }
             if st.indent > 0 {
                 parts.push(format!("\"in\":{}", st.indent));
+            }
+            if let Some(nf) = st.number_format.as_deref() {
+                parts.push(format!("\"nf\":{}", json_string(nf)));
             }
             if let Some(al) = st.align {
                 parts.push(format!("\"al\":\"{}\"", al.ooxml()));

@@ -247,6 +247,26 @@ body {
 .oc-btn:hover { border-color: var(--border-hover); }
 .oc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .oc-btn.primary:hover { filter: brightness(1.06); }
+/* Custom number-format dialog: code field, live preview, quick presets. */
+.cf-code {
+  width: 100%; box-sizing: border-box; height: 34px; padding: 0 10px; margin-bottom: 10px;
+  border: 1px solid var(--border-2); border-radius: 8px;
+  background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+}
+.cf-code:focus { outline: none; border-color: var(--accent); }
+.cf-preview {
+  min-height: 34px; display: flex; align-items: center; justify-content: flex-end;
+  padding: 0 10px; margin-bottom: 12px; border-radius: 8px;
+  background: var(--surface); font-family: var(--mono); font-size: 14px;
+}
+.cf-preview.bad { color: #e5484d; }
+.cf-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.cf-preset {
+  padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border-2);
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; cursor: pointer;
+}
+.cf-preset:hover { border-color: var(--accent); color: var(--accent); }
+.cf-hint { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 /* Sort dialog: a header checkbox and up to three "sort by / then by" rows. */
 .sort-head { display: flex; align-items: center; gap: 7px; margin: 0 0 12px; cursor: pointer; }
 .sort-keys { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
