@@ -945,3 +945,15 @@ button.fx:hover { color: var(--fg); background: var(--card); }
   padding: 1px 8px;
 }
 .cmt-author { margin-bottom: 6px; }
+
+/* Table banding (FC-08). Faint by design: a band is a reading aid, and one
+   strong enough to compete with a cell's own fill or a conditional format
+   makes the user's formatting harder to see rather than easier. */
+:root {
+  --table-header: rgba(47, 109, 246, 0.16);
+  --table-band: rgba(127, 140, 170, 0.09);
+}
+:root[data-theme="dark"], .theme-dark {
+  --table-header: rgba(96, 145, 255, 0.20);
+  --table-band: rgba(148, 163, 184, 0.10);
+}

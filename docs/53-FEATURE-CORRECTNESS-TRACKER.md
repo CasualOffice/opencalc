@@ -57,7 +57,7 @@ many mutate; `UNDO` how many are reversible.
 | Sheet visibility | 2 | 1 | 1 | ✅ | n/a | correct |
 | Sheet protection | 2 | 1 | 1 | ✅ | ❌ | correct |
 | Hyperlinks | 3 | 1 | 1 | ✅ | ✅ | correct |
-| **Tables (ListObjects)** | **0** | 0 | 0 | ✅ | ❌ | **FC-08** |
+| Tables (ListObjects) | 5 | 3 | 3 | ✅ | ✅ | correct |
 | **Print setup** | **0** | 0 | 0 | ✅ | ❌ | **FC-09** |
 | **Charts, drawings, images** | **0** | 0 | 0 | ✅ | ❌ | **FC-10** |
 | Rich text runs | — | — | — | ✅ | ✅ | correct (render) |
@@ -96,7 +96,7 @@ Opening a workbook preserves them; the user cannot make one.
 | ID | Feature | Sev | Status | Note |
 | --- | --- | --- | --- | --- |
 | FC-07 | Hyperlinks: insert, edit, follow, remove | P1 | ✅ | Insert/edit dialog, underline + accent cue on the grid, hover tooltip, click to follow, and remove — all through `SheetMetadata`, so the whole thing is undoable. **The dialog offers both destinations rather than a mode switch**, because the schema treats `r:id` and `location` as independent and a link may carry both ("open that document at this anchor"); making the user pick one would model the feature more narrowly than the format does. Following is guarded three ways so it cannot hijack ordinary work: not while picking a formula reference, not with a modifier held (Ctrl-click selects a linked cell without leaving), and not on a cell that is already selected — that is a drag or a rename starting, not a request to navigate. External targets open with `noopener`, or the opened page can reach back through `window.opener` and navigate this one. Internal anchors resolve through `parseNameRange`, the same parser the name box uses, so a link accepts exactly the references a user can type. Verified in-browser end to end including undo removing the link and redo restoring it. |
-| FC-08 | Tables: Ctrl+T, banded rows, header filter buttons, totals row | P1 | 🔴 | model + structured references done; zero UI |
+| FC-08 | Tables: Ctrl+T, banded rows, header filter buttons, totals row | P1 | ✅ | Ctrl+T and a context-menu command create a table; header shading and banded rows are painted; "Convert to range" removes one. All through `SheetMetadata`, so creating or removing a table is a single undo step. **The header question is asked, not guessed**: whether the first row is a header decides the column *names*, and a structured reference resolves by name — a wrong guess leaves every `Table[Column]` pointing at the wrong column while still resolving, which is silent. Empty headers become `Column1…`, duplicates get a suffix, and the table name is made unique across the workbook, all for the same reason: a duplicate name resolves to whichever came first and reads the wrong data. A single-cell selection expands to the surrounding block via `session_block_bounds` rather than asking the user to select the table first. Bands count from the first *data* row, so a header does not shift the stripe pattern by one. Band colours are theme-derived and deliberately faint — a band strong enough to compete with a cell's own fill makes the user's formatting harder to see, not easier. Verified in-browser: Ctrl+T on one cell, then `=SUM(Table[Amount])` resolving to 450 against the table the UI had just made. |
 | FC-09 | Print setup: margins, orientation, headers/footers, breaks | P2 | 🔴 | carried verbatim; a UI means modelling it properly first |
 | FC-10 | Charts, drawings, images | P2 | 🔴 | retained byte for byte; not drawn, not editable |
 

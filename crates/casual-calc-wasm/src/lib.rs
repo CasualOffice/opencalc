@@ -24,8 +24,8 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Hyperlink, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint,
-    Underline, VAlign, Workbook,
+    FilterRule, HAlign, Hyperlink, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, Table,
+    ThemeTint, Underline, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -1115,6 +1115,280 @@ pub fn session_hyperlink_cells(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32)
                 }
             }
         }
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The contiguous block of populated cells around `(row, col)`, as JSON
+/// `{r0,c0,r1,c1}`, or `null` when the cell is empty.
+///
+/// What Ctrl+T uses when the selection is a single cell: asking someone to
+/// select the whole table first is work the app can do, and doing it here means
+/// the same rule applies wherever a block is needed.
+#[wasm_bindgen]
+pub fn session_block_bounds(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "null".to_owned();
+        };
+        let filled = |r: u32, c: u32| {
+            sh.cells
+                .get(CellRef::new(r, c))
+                .is_some_and(|cell| !cell.value.is_empty() || cell.formula.is_some())
+        };
+        if !filled(row, col) {
+            return "null".to_owned();
+        }
+        // Walk out along the row and column, then square the block off. A
+        // ragged region grows to its bounding box, which is what a user means
+        // by "this table" even when one corner is blank.
+        let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
+        while r0 > 0 && (c0..=c1).any(|c| filled(r0 - 1, c)) {
+            r0 -= 1;
+        }
+        while c0 > 0 && (r0..=r1).any(|r| filled(r, c0 - 1)) {
+            c0 -= 1;
+        }
+        // Bounded so a pathological sheet cannot make this walk forever.
+        let limit = 1_048_576u32;
+        while r1 + 1 < limit && (c0..=c1).any(|c| filled(r1 + 1, c)) {
+            r1 += 1;
+        }
+        while c1 + 1 < 16_384 && (r0..=r1).any(|r| filled(r, c1 + 1)) {
+            c1 += 1;
+        }
+        format!("{{\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}")
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Create a table over a range — Excel's Ctrl+T.
+///
+/// The header row's cells become the column names, because a structured
+/// reference resolves by name: `Sales[Amount]` finds its column through the
+/// header text, so a table whose columns disagree with their headers has
+/// formulas pointing at nothing. Empty or duplicate headers are filled in, for
+/// the same reason.
+#[wasm_bindgen]
+pub fn session_create_table(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    name: &str,
+    has_headers: bool,
+) -> Result<String, JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    // A name must be unique across the workbook: structured references are
+    // resolved by name alone, so two tables sharing one makes every reference
+    // to it ambiguous.
+    let taken: Vec<String> = with_session(|s| {
+        s.workbook()
+            .sheets
+            .iter()
+            .flat_map(|sh| sh.tables.iter().map(|t| t.name.to_ascii_lowercase()))
+            .collect()
+    })
+    .unwrap_or_default();
+    let base = {
+        let trimmed = name.trim();
+        if trimmed.is_empty() { "Table" } else { trimmed }
+    };
+    let mut final_name = base.to_owned();
+    let mut n = 1;
+    while taken.contains(&final_name.to_ascii_lowercase()) {
+        n += 1;
+        final_name = format!("{base}{n}");
+    }
+
+    // Column names come from the header cells when there is a header row.
+    let headers: Vec<String> = with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return Vec::new();
+        };
+        (cc0..=cc1)
+            .map(|c| {
+                if !has_headers {
+                    return String::new();
+                }
+                sh.cells
+                    .get(CellRef::new(rr0, c))
+                    .map(|cell| value_text(s.workbook(), &cell.value))
+                    .unwrap_or_default()
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let mut names: Vec<String> = Vec::new();
+    for (i, header) in headers.iter().enumerate() {
+        let mut candidate = header.trim().to_owned();
+        if candidate.is_empty() {
+            candidate = format!("Column{}", i + 1);
+        }
+        // Duplicates get a suffix rather than being left to collide: a
+        // reference to a duplicated name would resolve to whichever came first,
+        // silently reading the wrong column.
+        let mut unique = candidate.clone();
+        let mut k = 1;
+        while names
+            .iter()
+            .any(|n: &String| n.eq_ignore_ascii_case(&unique))
+        {
+            k += 1;
+            unique = format!("{candidate}{k}");
+        }
+        names.push(unique);
+    }
+
+    let id = with_session(|s| {
+        s.workbook()
+            .sheets
+            .iter()
+            .flat_map(|sh| sh.tables.iter().map(|t| t.id))
+            .max()
+            .unwrap_or(0)
+            + 1
+    })
+    .unwrap_or(1);
+
+    let created = final_name.clone();
+    let columns: Vec<casual_calc_model::TableColumn> = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| casual_calc_model::TableColumn {
+            id: i as u32 + 1,
+            name: n,
+            totals_row_function: None,
+            totals_row_label: None,
+            calculated_column_formula: None,
+            totals_row_formula: None,
+        })
+        .collect();
+    edit_sheet_metadata(sheet, move |_, data| {
+        data.tables.push(Table {
+            id,
+            name: final_name.clone(),
+            display_name: final_name,
+            range: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+            header_row_count: u32::from(has_headers),
+            totals_row_count: 0,
+            columns,
+            // Excel turns the filter buttons on with the table; without them
+            // the header row looks like an ordinary row that happens to be
+            // shaded.
+            auto_filter_ref: Some(range_a1_string(rr0, cc0, rr1, cc1)),
+            style: [
+                ("name".to_owned(), "TableStyleMedium2".to_owned()),
+                ("showRowStripes".to_owned(), "1".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            attrs: Default::default(),
+        });
+    })?;
+    Ok(created)
+}
+
+/// `A1:B2` for a range, for the places OOXML wants a `ref` string.
+fn range_a1_string(r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    let cell = |r: u32, c: u32| format!("{}{}", casual_calc_formula::column_to_letters(c), r + 1);
+    format!("{}:{}", cell(r0, c0), cell(r1, c1))
+}
+
+/// Remove the table covering a cell, leaving its values in place — Excel's
+/// "Convert to Range".
+#[wasm_bindgen]
+pub fn session_remove_table(sheet: usize, row: u32, col: u32) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        data.tables.retain(|t| {
+            !(row >= t.range.start.row
+                && row <= t.range.end.row
+                && col >= t.range.start.col
+                && col <= t.range.end.col)
+        });
+    })
+}
+
+/// Turn a table's totals row on or off, growing or shrinking its range.
+#[wasm_bindgen]
+pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(t) = data.tables.iter_mut().find(|t| {
+            row >= t.range.start.row
+                && row <= t.range.end.row
+                && col >= t.range.start.col
+                && col <= t.range.end.col
+        }) {
+            let had = t.totals_row_count;
+            t.totals_row_count = u32::from(on);
+            // The totals row is *inside* the table's range, so switching it
+            // must move the bottom edge — leaving the range alone would make
+            // the last data row read as the totals row.
+            match (had, t.totals_row_count) {
+                (0, 1) => t.range.end.row += 1,
+                (1, 0) => t.range.end.row = t.range.end.row.saturating_sub(1),
+                _ => {}
+            }
+        }
+    })
+}
+
+/// The table covering a cell as JSON, or `null` — drives the UI's state.
+#[wasm_bindgen]
+pub fn session_table_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(t) = s.workbook().sheets.get(sheet).and_then(|sh| {
+            sh.tables.iter().find(|t| {
+                row >= t.range.start.row
+                    && row <= t.range.end.row
+                    && col >= t.range.start.col
+                    && col <= t.range.end.col
+            })
+        }) else {
+            return "null".to_owned();
+        };
+        format!(
+            "{{\"name\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"headers\":{},\"totals\":{},\"stripes\":{}}}",
+            json_string(&t.name),
+            t.range.start.row,
+            t.range.start.col,
+            t.range.end.row,
+            t.range.end.col,
+            t.header_row_count,
+            t.totals_row_count,
+            t.style.get("showRowStripes").map(String::as_str).unwrap_or("0"),
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Every table on a sheet, for painting bands and header buttons in one pass.
+#[wasm_bindgen]
+pub fn session_tables(sheet: usize) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = sh
+            .tables
+            .iter()
+            .map(|t| {
+                format!(
+                    "{{\"name\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"headers\":{},\"totals\":{},\"stripes\":{}}}",
+                    json_string(&t.name),
+                    t.range.start.row,
+                    t.range.start.col,
+                    t.range.end.row,
+                    t.range.end.col,
+                    t.header_row_count,
+                    t.totals_row_count,
+                    t.style.get("showRowStripes").map(String::as_str).unwrap_or("0"),
+                )
+            })
+            .collect();
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())

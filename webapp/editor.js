@@ -82,6 +82,9 @@ let commentCells = new Set(); // "r,c" of cells with a note in view (for hover t
 // screenful of links costs one call, and so the click handler can tell in O(1)
 // whether a click is on a link before doing anything slower.
 let linkCells = new Set();
+// Tables on the current sheet, refreshed each draw. Held so the header
+// filter-button hit test does not have to ask the engine on every mousedown.
+let tablesInView = [];
 let errorCells = new Set();   // "r,c" of cells holding an error value, likewise
 
 // What each spreadsheet error actually means, in the terms that caused it.
@@ -143,6 +146,11 @@ function readColors() {
     // Distinct from the selection tint: a find hit and the active cell must not
     // read as the same thing.
     findHit: css("--find-tint") || "rgba(245,158,11,.28)",
+    // Table banding. Deliberately faint and theme-derived: a band is a reading
+    // aid, and one strong enough to compete with a fill or a conditional
+    // format would make the user's own formatting harder to see, not easier.
+    tableHeader: css("--table-header") || "rgba(47,109,246,.16)",
+    tableBand: css("--table-band") || "rgba(127,140,170,.09)",
     // Read from the theme rather than hardcoded: the freeze divider sits on the
     // grid, so it has to darken and lighten with it. `colors.freezeLine` was
     // already consulted at the draw site but never populated here, so the
@@ -1488,6 +1496,39 @@ function draw() {
       ctx.closePath();
       ctx.fill();
     });
+  }
+
+  // Tables: header shading and banded rows. Painted before the cell content so
+  // the text sits on top, and before the hyperlink underlines so a linked cell
+  // inside a table still shows its rule.
+  tablesInView = [];
+  if (wasm) {
+    try { tablesInView = JSON.parse(wasm.session_tables(state.sheet)); } catch {}
+    for (const t of tablesInView) {
+      for (let r = t.r0; r <= t.r1; r++) {
+        const ry = rowYAt(r);
+        if (ry === undefined) continue;
+        const rh = rowHAt(r);
+        const isHeader = t.headers > 0 && r === t.r0;
+        const isTotals = t.totals > 0 && r === t.r1;
+        // Bands count from the first *data* row, so a header does not shift
+        // the stripe pattern by one and make the first data row look banded
+        // when it should not be.
+        const dataIndex = r - t.r0 - (t.headers > 0 ? 1 : 0);
+        const banded = t.stripes === "1" && !isHeader && !isTotals && dataIndex % 2 === 1;
+        if (!isHeader && !isTotals && !banded) continue;
+        for (let c = t.c0; c <= t.c1; c++) {
+          const cx = colXAt(c);
+          if (cx === undefined) continue;
+          withQuad(r, c, () => {
+            ctx.fillStyle = isHeader || isTotals
+              ? colors.tableHeader
+              : colors.tableBand;
+            ctx.fillRect(cx, ry, colWAt(c), rh);
+          });
+        }
+      }
+    }
   }
 
   // Hyperlinks: underline them and tint them, which is the only cue that a
@@ -4124,6 +4165,59 @@ function followHyperlink(row, col) {
   return false;
 }
 
+// Turn the selection into a table, or convert one back to a range.
+//
+// The header question is asked rather than guessed: whether the first row is a
+// header decides the column names, and a wrong guess leaves every structured
+// reference pointing at the wrong column — silently, since the formulas still
+// resolve.
+async function tableDialog() {
+  let existing = null;
+  try {
+    existing = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col));
+  } catch {}
+  if (existing) {
+    const ok = await confirmModal(
+      `Convert "${existing.name}" to a range`,
+      "The values and formatting stay. The table's name goes, so any formula "
+        + "written as " + existing.name + "[Column] will stop resolving.",
+      "Convert to range",
+    );
+    if (!ok) return;
+    try {
+      wasm.session_remove_table(state.sheet, state.sel.row, state.sel.col);
+      status.textContent = "converted to a range";
+    } catch (e) { status.textContent = `error: ${e}`; }
+    draw();
+    return;
+  }
+
+  const r = effectiveRange();
+  // A single cell means "the block around it", as Ctrl+T does — asking someone
+  // to select the whole table first is work the app can do.
+  let bounds = r;
+  if (r.r0 === r.r1 && r.c0 === r.c1) {
+    try {
+      const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
+      if (blk) bounds = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
+    } catch {}
+  }
+  const ok = await confirmModal(
+    `Create a table from ${A1(bounds.r0, bounds.c0)}:${A1(bounds.r1, bounds.c1)}`,
+    "The first row becomes the column headers, which is what a structured "
+      + "reference like Table1[Amount] resolves against.",
+    "My table has headers",
+  );
+  if (!ok) return;
+  try {
+    const name = wasm.session_create_table(
+      state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, "Table", true);
+    select(bounds.r0, bounds.c0);
+    status.textContent = `created ${name}`;
+  } catch (e) { status.textContent = `error: ${e}`; }
+  draw();
+}
+
 // A yes/no question in the shared modal. Resolves true only on the confirm
 // button; Escape, the ✕ and the backdrop all mean "no", because this is only
 // used to guard destructive steps.
@@ -6371,6 +6465,15 @@ function cellMenu(x, y) {
     false,
     () => hyperlinkDialog(),
   );
+  item(
+    (() => {
+      let t = null;
+      try { t = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
+      return t ? "Convert to range…" : "Create table…";
+    })(),
+    false,
+    () => tableDialog(),
+  );
   item("Define name…", false, () => {
     const r = canvas.getBoundingClientRect();
     openNameManager(r.left + 120, r.top + 90);
@@ -7028,6 +7131,8 @@ function wireEvents() {
       if (e.key === "PageDown") { const n = JSON.parse(wasm.session_sheet_names()).length; if (state.sheet < n - 1) switchSheet(state.sheet + 1); e.preventDefault(); return; }
       if (e.key === "PageUp") { if (state.sheet > 0) switchSheet(state.sheet - 1); e.preventDefault(); return; }
       const k = e.key.toLowerCase();
+      // Ctrl+T creates a table over the selection, as in Excel.
+      if (k === "t") { tableDialog(); e.preventDefault(); return; }
       if (k === "home") { select(0, 0); e.preventDefault(); return; }
       if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
       // Ctrl+D / Ctrl+R: fill the selection down from its top row / right from

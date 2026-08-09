@@ -16,7 +16,7 @@ use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ConditionalFormat,
     DataValidation, DefinedName, Hyperlink, Sheet, SheetProtection, SheetView, SheetVisibility,
-    StyleId, Workbook,
+    StyleId, Table, Workbook,
 };
 
 mod structural;
@@ -110,6 +110,8 @@ pub struct SheetMetadata {
     pub protection: Option<SheetProtection>,
     /// Hyperlinks.
     pub hyperlinks: Vec<Hyperlink>,
+    /// Tables (ListObjects).
+    pub tables: Vec<Table>,
 }
 
 impl SheetMetadata {
@@ -134,6 +136,7 @@ impl SheetMetadata {
             visibility: sheet.visibility,
             protection: sheet.protection.clone(),
             hyperlinks: sheet.hyperlinks.clone(),
+            tables: sheet.tables.clone(),
         }
     }
 
@@ -168,6 +171,7 @@ impl SheetMetadata {
             visibility: std::mem::replace(&mut sheet.visibility, self.visibility),
             protection: std::mem::replace(&mut sheet.protection, self.protection),
             hyperlinks: std::mem::replace(&mut sheet.hyperlinks, self.hyperlinks),
+            tables: std::mem::replace(&mut sheet.tables, self.tables),
         }
     }
 }
