@@ -1447,3 +1447,62 @@ fn gradient_and_pattern_fills_round_trip() {
     assert_eq!(style_of(2).fill_color.as_deref(), Some("112233"));
     assert_eq!(style_of(2).fill_pattern, None);
 }
+
+#[test]
+fn print_setup_round_trips_verbatim() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/sharedStrings.xml", SHARED),
+        ("xl/styles.xml", STYLES),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>
+              <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+              <printOptions horizontalCentered="1" gridLines="1"/>
+              <pageMargins left="0.25" right="0.25" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+              <pageSetup paperSize="9" orientation="landscape" scale="80" fitToWidth="1" fitToHeight="0"/>
+              <headerFooter differentFirst="1"><oddHeader>&amp;CQuarterly &amp;A</oddHeader><oddFooter>&amp;LPage &amp;P of &amp;N</oddFooter></headerFooter>
+              <rowBreaks count="2" manualBreakCount="2"><brk id="10" max="16383" man="1"/><brk id="20" max="16383" man="1"/></rowBreaks>
+              <colBreaks count="1" manualBreakCount="1"><brk id="3" max="1048575" man="1"/></colBreaks>
+            </worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let print = &wb.sheets[0].print;
+    assert_eq!(print.margins.get("left").map(String::as_str), Some("0.25"));
+    assert_eq!(
+        print.page.get("orientation").map(String::as_str),
+        Some("landscape")
+    );
+    assert_eq!(
+        print.options.get("gridLines").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        print.setup_pr.get("fitToPage").map(String::as_str),
+        Some("1")
+    );
+    // Header/footer bodies are element text, not attributes; the `&` codes are
+    // Excel's field syntax and must survive unescaped-then-reescaped.
+    assert_eq!(
+        print
+            .header_footer_text
+            .get("oddHeader")
+            .map(String::as_str),
+        Some("&CQuarterly &A")
+    );
+    // `<brk>` is identical under rowBreaks and colBreaks, so only the enclosing
+    // element says which list it joins — getting that wrong silently moves a
+    // page break from a row to a column.
+    assert_eq!(print.row_breaks.len(), 2);
+    assert_eq!(print.col_breaks.len(), 1);
+    assert_eq!(print.col_breaks[0].get("id").map(String::as_str), Some("3"));
+
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].print, wb.sheets[0].print);
+}

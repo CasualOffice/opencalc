@@ -1058,6 +1058,19 @@ fn any_theme_link(workbook: &Workbook) -> bool {
         .any(|s| s.font_theme.is_some() || s.fill_theme.is_some())
 }
 
+/// A self-closing element carrying attributes that travel verbatim. Nothing is
+/// written when there are none, so an untouched sheet gains no empty elements.
+fn write_attr_element(s: &mut String, name: &str, attrs: &BTreeMap<String, String>) {
+    if attrs.is_empty() {
+        return;
+    }
+    s.push_str(&format!("<{name}"));
+    for (key, value) in attrs {
+        s.push_str(&format!(" {key}=\"{}\"", escape_attr(value)));
+    }
+    s.push_str("/>");
+}
+
 /// One `<gradientFill>` with its stops.
 fn gradient_fill_xml(g: &GradientFill) -> String {
     let mut s = String::from("<gradientFill");
@@ -1212,11 +1225,12 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
 
     // `<sheetPr>` is first in the CT_Worksheet sequence, and within it the schema
-    // order is `tabColor` then `outlinePr`. Excel stores the tab color as 8-hex
+    // order is `tabColor`, `outlinePr`, then `pageSetUpPr`. Excel stores the tab color as 8-hex
     // ARGB; the model keeps `RRGGBB`, so we prepend an opaque `FF` alpha on the
     // way out. `<outlinePr>` is emitted only for non-default summary positions.
     let has_outline_pr = !sheet.outline.is_default();
-    if sheet.tab_color.is_some() || has_outline_pr {
+    let has_setup_pr = !sheet.print.setup_pr.is_empty();
+    if sheet.tab_color.is_some() || has_outline_pr || has_setup_pr {
         s.push_str("<sheetPr>");
         if let Some(rgb) = &sheet.tab_color {
             s.push_str(&format!(
@@ -1234,6 +1248,7 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             }
             s.push_str("/>");
         }
+        write_attr_element(&mut s, "pageSetUpPr", &sheet.print.setup_pr);
         s.push_str("</sheetPr>");
     }
 
@@ -1572,6 +1587,55 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             s.push_str("/>");
         }
         s.push_str("</hyperlinks>");
+    }
+
+    // Print layout. CT_Worksheet is an xsd:sequence here, unlike the font
+    // types, so this order is required rather than conventional: printOptions,
+    // pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks.
+    let print = &sheet.print;
+    write_attr_element(&mut s, "printOptions", &print.options);
+    write_attr_element(&mut s, "pageMargins", &print.margins);
+    write_attr_element(&mut s, "pageSetup", &print.page);
+    if !print.header_footer.is_empty() || !print.header_footer_text.is_empty() {
+        s.push_str("<headerFooter");
+        for (k, v) in &print.header_footer {
+            s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
+        }
+        s.push('>');
+        // Child order within CT_HeaderFooter is also a sequence.
+        for tag in [
+            "oddHeader",
+            "oddFooter",
+            "evenHeader",
+            "evenFooter",
+            "firstHeader",
+            "firstFooter",
+        ] {
+            if let Some(text) = print.header_footer_text.get(tag) {
+                s.push_str(&format!("<{tag}>{}</{tag}>", escape_text(text)));
+            }
+        }
+        s.push_str("</headerFooter>");
+    }
+    for (tag, breaks) in [
+        ("rowBreaks", &print.row_breaks),
+        ("colBreaks", &print.col_breaks),
+    ] {
+        if breaks.is_empty() {
+            continue;
+        }
+        let manual = breaks
+            .iter()
+            .filter(|b| b.get("man").is_some_and(|v| v == "1" || v == "true"))
+            .count();
+        s.push_str(&format!(
+            "<{tag} count=\"{}\" manualBreakCount=\"{manual}\">",
+            breaks.len()
+        ));
+        for brk in breaks {
+            write_attr_element(&mut s, "brk", brk);
+        }
+        s.push_str(&format!("</{tag}>"));
     }
 
     // Legacy drawing ref (the VML holding note markers) — last in the sequence.

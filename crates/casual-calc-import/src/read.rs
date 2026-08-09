@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_model::{OutlinePr, RunFont, TextRun, Underline, VertAlign};
+use casual_calc_model::{OutlinePr, PrintSetup, RunFont, TextRun, Underline, VertAlign};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -470,6 +470,8 @@ pub struct Worksheet {
     pub conditional_formats: Vec<RawCf>,
     /// `<sheetProtection>` attributes exactly as read, or `None` if absent.
     pub protection: Option<BTreeMap<String, String>>,
+    /// Print layout, carried through verbatim.
+    pub print: PrintSetup,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
     pub auto_filter: Option<String>,
     /// Per-column filter rules inside that `<autoFilter>`.
@@ -754,6 +756,11 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
     let mut bounds = Bounds::new();
 
     let mut result = Worksheet::default();
+    // `<brk>` is identical under `<rowBreaks>` and `<colBreaks>`; only the
+    // enclosing element says which list it belongs to.
+    let mut in_col_breaks = false;
+    // Header/footer strings are element text, not attributes.
+    let mut header_footer_tag: Option<String> = None;
     let mut current: Option<RawCell> = None;
     let mut in_value = false;
     let mut in_formula = false;
@@ -812,6 +819,29 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
+                        }
+                    }
+                    b"colBreaks" => in_col_breaks = true,
+                    b"rowBreaks" => in_col_breaks = false,
+                    b"oddHeader" | b"oddFooter" | b"evenHeader" | b"evenFooter"
+                    | b"firstHeader" | b"firstFooter" => {
+                        header_footer_tag =
+                            Some(String::from_utf8_lossy(e.local_name().as_ref()).into_owned());
+                    }
+                    b"pageMargins" => result.print.margins = read_attrs(&e)?,
+                    b"pageSetup" => result.print.page = read_attrs(&e)?,
+                    b"printOptions" => result.print.options = read_attrs(&e)?,
+                    b"pageSetUpPr" => result.print.setup_pr = read_attrs(&e)?,
+                    b"headerFooter" => result.print.header_footer = read_attrs(&e)?,
+                    b"brk" => {
+                        // `<brk>` appears under both `<rowBreaks>` and
+                        // `<colBreaks>`; which list it joins is decided by the
+                        // enclosing element, tracked in `in_col_breaks`.
+                        let attrs = read_attrs(&e)?;
+                        if in_col_breaks {
+                            result.print.col_breaks.push(attrs);
+                        } else {
+                            result.print.row_breaks.push(attrs);
                         }
                     }
                     b"sheetProtection" => {
@@ -900,6 +930,22 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             display: read_attr(&e, b"display")?,
                         });
                     }
+                    // All childless, so they arrive here rather than in the
+                    // `Start` dispatch. Reading them only there is why the
+                    // first version of this saw no print settings at all.
+                    b"pageMargins" => result.print.margins = read_attrs(&e)?,
+                    b"pageSetup" => result.print.page = read_attrs(&e)?,
+                    b"printOptions" => result.print.options = read_attrs(&e)?,
+                    b"pageSetUpPr" => result.print.setup_pr = read_attrs(&e)?,
+                    b"headerFooter" => result.print.header_footer = read_attrs(&e)?,
+                    b"brk" => {
+                        let attrs = read_attrs(&e)?;
+                        if in_col_breaks {
+                            result.print.col_breaks.push(attrs);
+                        } else {
+                            result.print.row_breaks.push(attrs);
+                        }
+                    }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
@@ -931,6 +977,16 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                 }
             }
             Event::Text(e) => {
+                // Header and footer strings are element text, not attributes.
+                if let Some(tag) = header_footer_tag.clone() {
+                    let text = e.unescape().map_err(xml_err)?.into_owned();
+                    result
+                        .print
+                        .header_footer_text
+                        .entry(tag)
+                        .and_modify(|v| v.push_str(&text))
+                        .or_insert(text);
+                }
                 if in_dv_formula1 && let Some(raw) = dv.as_mut() {
                     raw.formula1.push_str(&e.unescape().map_err(xml_err)?);
                 } else if in_dv_formula2 && let Some(raw) = dv.as_mut() {
@@ -958,6 +1014,17 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
             }
             Event::End(e) => {
                 bounds.close();
+                if matches!(
+                    e.local_name().as_ref(),
+                    b"oddHeader"
+                        | b"oddFooter"
+                        | b"evenHeader"
+                        | b"evenFooter"
+                        | b"firstHeader"
+                        | b"firstFooter"
+                ) {
+                    header_footer_tag = None;
+                }
                 match e.local_name().as_ref() {
                     b"v" => in_value = false,
                     b"f" => in_formula = false,
@@ -1085,6 +1152,11 @@ fn read_tab_color(
 /// dropping either is worse than not interpreting them, so nothing here is
 /// interpreted at all.
 fn read_protection(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
+    read_attrs(e)
+}
+
+/// Every attribute of an element, by local name, in a deterministic order.
+fn read_attrs(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
     let mut attrs = BTreeMap::new();
     for a in e.attributes() {
         let a = a.map_err(|err| xml_err(quick_xml::Error::from(err)))?;

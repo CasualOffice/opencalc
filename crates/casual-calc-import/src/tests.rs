@@ -511,3 +511,113 @@ fn import_is_deterministic() {
         .unwrap();
     assert_eq!(first, second);
 }
+
+/// Every childless element the worksheet reader dispatches on must be handled
+/// in the `Event::Empty` arm, not only in `Event::Start`.
+///
+/// This has been the single most repeated defect in the importer: `<cfRule>`,
+/// `<sheetProtection>`, `<person>`, `<hyperlink>` and the whole print-setup
+/// group were each written into the `Start` dispatch alone, and each read as
+/// *absent* from every real file, because a writer self-closes an element with
+/// no children. It is invisible in review — the arm is right there — and shows
+/// up only as a construct that silently fails to import.
+///
+/// So the schema decides. An element whose complexType declares no child
+/// elements can always be written self-closed, and must therefore appear in the
+/// `Empty` dispatch.
+#[test]
+fn childless_elements_are_handled_in_the_empty_dispatch() {
+    use std::collections::HashSet;
+
+    let src = include_str!("read.rs");
+    let start_of = |needle: &str| src.find(needle).expect("dispatch block not found");
+
+    // The worksheet reader's two dispatch blocks, in source order.
+    let ws = start_of("pub fn parse_worksheet(");
+    let empty = src[ws..].find("Event::Empty(e) => {").expect("empty arm") + ws;
+    let end = src[empty..]
+        .find("Event::Eof")
+        .map_or(src.len(), |i| i + empty);
+
+    let names = |slice: &str| -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut rest = slice;
+        while let Some(i) = rest.find("b\"") {
+            rest = &rest[i + 2..];
+            if let Some(j) = rest.find('"') {
+                let name = &rest[..j];
+                // Attribute reads look the same; keep only match arms.
+                if rest[j..]
+                    .trim_start_matches('"')
+                    .trim_start()
+                    .starts_with("=>")
+                    || rest[j..]
+                        .trim_start_matches('"')
+                        .trim_start()
+                        .starts_with('|')
+                {
+                    out.insert(name.to_owned());
+                }
+                rest = &rest[j..];
+            }
+        }
+        out
+    };
+    let in_start = names(&src[ws..empty]);
+    let in_empty = names(&src[empty..end]);
+
+    // Elements known to carry children, which legitimately appear only in the
+    // `Start` dispatch.
+    let has_children: HashSet<&str> = [
+        "worksheet",
+        "sheetData",
+        "row",
+        "c",
+        "is",
+        "f",
+        "v",
+        "cols",
+        "mergeCells",
+        "sheetViews",
+        "sheetView",
+        "dataValidations",
+        "dataValidation",
+        "formula1",
+        "formula2",
+        "conditionalFormatting",
+        "autoFilter",
+        "filterColumn",
+        "filters",
+        "customFilters",
+        "sheetPr",
+        "hyperlinks",
+        "rowBreaks",
+        "colBreaks",
+        "extLst",
+        "headerFooter",
+        "oddHeader",
+        "oddFooter",
+        "evenHeader",
+        "evenFooter",
+        "firstHeader",
+        "firstFooter",
+        "t",
+        "si",
+        "r",
+        "rPr",
+        "sst",
+        "outlinePr",
+    ]
+    .into_iter()
+    .collect();
+
+    let missing: Vec<&String> = in_start
+        .iter()
+        .filter(|n| !has_children.contains(n.as_str()) && !in_empty.contains(*n))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these childless elements are dispatched only on Start, so a self-closed \
+         one is silently ignored: {missing:?}"
+    );
+}

@@ -241,6 +241,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // A hidden sheet that comes back visible exposes data its author put
         // away on purpose, so the state travels with the sheet.
         sheet.visibility = SheetVisibility::from_ooxml(&state);
+        sheet.print = worksheet.print.clone();
         sheet.protection = worksheet
             .protection
             .clone()

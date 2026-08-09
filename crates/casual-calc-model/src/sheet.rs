@@ -174,6 +174,9 @@ pub struct Sheet {
     /// Hyperlinks over cells or ranges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hyperlinks: Vec<Hyperlink>,
+    /// Print layout, carried through verbatim.
+    #[serde(default, skip_serializing_if = "PrintSetup::is_empty")]
+    pub print: PrintSetup,
     /// The autofilter over a header range, if one is turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
@@ -485,6 +488,63 @@ impl AutoFilter {
     /// Whether any column currently narrows the rows.
     pub fn is_active(&self) -> bool {
         !self.rules.is_empty()
+    }
+}
+
+/// Everything about how a sheet prints: margins, page setup, print options,
+/// headers and footers, and manual page breaks.
+///
+/// Held **verbatim** rather than modelled attribute by attribute, on the same
+/// reasoning as [`SheetProtection`]. Between them these elements carry some
+/// forty attributes; the editor has no print UI, so interpreting them would be
+/// forty chances to write one back subtly wrong in exchange for nothing a user
+/// can see. Carried through untouched, a workbook's print layout survives
+/// exactly as its author left it — which is the whole requirement.
+///
+/// When a print UI arrives, the attributes it acts on get interpreted then, one
+/// at a time, exactly as `SheetProtection::is_enabled` does for the one flag
+/// that matters today.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrintSetup {
+    /// `<pageMargins>` attributes as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub margins: BTreeMap<String, String>,
+    /// `<pageSetup>` attributes as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub page: BTreeMap<String, String>,
+    /// `<printOptions>` attributes as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
+    /// `<pageSetUpPr>` attributes, which live under `<sheetPr>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub setup_pr: BTreeMap<String, String>,
+    /// `<headerFooter>` attributes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_footer: BTreeMap<String, String>,
+    /// The header/footer strings by element name (`oddHeader`, `evenFooter`, …),
+    /// which are element *text* rather than attributes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_footer_text: BTreeMap<String, String>,
+    /// Manual row breaks: each `<brk>`'s attributes, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_breaks: Vec<BTreeMap<String, String>>,
+    /// Manual column breaks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub col_breaks: Vec<BTreeMap<String, String>>,
+}
+
+impl PrintSetup {
+    /// Whether the sheet carries no print settings at all.
+    pub fn is_empty(&self) -> bool {
+        self.margins.is_empty()
+            && self.page.is_empty()
+            && self.options.is_empty()
+            && self.setup_pr.is_empty()
+            && self.header_footer.is_empty()
+            && self.header_footer_text.is_empty()
+            && self.row_breaks.is_empty()
+            && self.col_breaks.is_empty()
     }
 }
 
@@ -929,6 +989,7 @@ impl Sheet {
             conditional_formats: Vec::new(),
             comments: Vec::new(),
             hyperlinks: Vec::new(),
+            print: PrintSetup::default(),
             protection: None,
             visibility: SheetVisibility::Visible,
             auto_filter: None,
