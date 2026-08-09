@@ -1,6 +1,15 @@
-# ECMA-376 Part 1 (5th ed, Dec 2016) §18.17.7 predefined function names.
-# Extracted from the standard's section headings by tools/fidelity-audit/functions.py.
-# 349 of 356 sections parsed cleanly; the remainder are pdftotext layout casualties.
+# ECMA-376 Part 1 (5th ed, December 2016) §18.17.7 — the predefined function
+# library, all 356 sections.
+#
+# Names come from the prose cross-references (`COS (§18.17.7.50)`) in
+# preference to the section headings. Both are in the standard, but PDF text
+# extraction renders parts of the contents list as a column of numbers
+# followed by a column of names, which silently mis-pairs them: a
+# heading-only pass duplicated COLUMN and ROWS and lost NOT, ROW and TRIM.
+# A cross-reference carries the name and the section number in one string, so
+# layout cannot scramble it.
+# Two overrides: §223 is N (a one-letter name the cross-reference regex
+# cannot match) and §330 is TRIMMEAN (TRIM 329 / TRIMMEAN 330 / TRUE 331).
 ABS
 ACCRINT
 ACCRINTM
@@ -50,6 +59,7 @@ CONCATENATE
 CONFIDENCE
 CONVERT
 CORREL
+COS
 COSH
 COUNT
 COUNTA
@@ -74,6 +84,7 @@ CUBEVALUE
 CUMIPMT
 CUMPRINC
 DATE
+DATEDIF
 DATEVALUE
 DAVERAGE
 DAY
@@ -87,12 +98,14 @@ DEC2HEX
 DEC2OCT
 DEGREES
 DELTA
+DEVSQ
 DGET
 DISC
 DMAX
 DMIN
 DOLLAR
 DOLLARDE
+DOLLARFR
 DPRODUCT
 DSTDEV
 DSTDEVP
@@ -100,13 +113,13 @@ DSUM
 DURATION
 DVAR
 DVARP
-ECMA
+ECMA.CEILING
 EDATE
 EFFECT
 EOMONTH
 ERF
 ERFC
-ERROR
+ERROR.TYPE
 EVEN
 EXACT
 EXP
@@ -126,12 +139,14 @@ FORECAST
 FREQUENCY
 FTEST
 FV
+FVSCHEDULE
 GAMMADIST
 GAMMAINV
 GAMMALN
 GCD
 GEOMEAN
 GESTEP
+GETPIVOTDATA
 GROWTH
 HARMEAN
 HEX2BIN
@@ -176,9 +191,10 @@ ISLOGICAL
 ISNA
 ISNONTEXT
 ISNUMBER
-ISO
+ISO.CEILING
 ISODD
 ISPMT
+ISREF
 ISTEXT
 JIS
 KURT
@@ -198,6 +214,7 @@ LOGNORMDIST
 LOOKUP
 LOWER
 MATCH
+MAX
 MAXA
 MDETERM
 MDURATION
@@ -219,10 +236,13 @@ N
 NA
 NEGBINOMDIST
 NETWORKDAYS
+NETWORKDAYS.INTL
 NOMINAL
+NORMDIST
 NORMINV
 NORMSDIST
 NORMSINV
+NOT
 NOW
 NPER
 NPV
@@ -241,6 +261,7 @@ PERCENTILE
 PERCENTRANK
 PERMUT
 PHONETIC
+PI
 PMT
 POISSON
 POWER
@@ -269,6 +290,7 @@ ROMAN
 ROUND
 ROUNDDOWN
 ROUNDUP
+ROW
 ROWS
 RSQ
 RTD
@@ -316,6 +338,7 @@ TINV
 TODAY
 TRANSPOSE
 TREND
+TRIM
 TRIMMEAN
 TRUE
 TRUNC
@@ -334,6 +357,7 @@ WEEKDAY
 WEEKNUM
 WEIBULL
 WORKDAY
+WORKDAY.INTL
 XIRR
 XNPV
 YEAR
@@ -341,3 +365,4 @@ YEARFRAC
 YIELD
 YIELDDISC
 YIELDMAT
+ZTEST
