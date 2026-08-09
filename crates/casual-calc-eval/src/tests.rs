@@ -1769,3 +1769,115 @@ fn erf_and_erfc_are_complementary() {
     // The two-argument form is the integral between bounds.
     assert!((num("ERF(0,1)") - num("ERF(1)")).abs() < 1e-12);
 }
+
+#[test]
+fn the_annuity_family_is_one_equation_rearranged() {
+    // A 30-year loan at 6% nominal: PMT, then PV and FV recovered from it. If
+    // any of the three had a sign or factor wrong these would not agree.
+    let mut b = Builder::new();
+    b.formula((0, 0), "PMT(0.06/12,360,200000)")
+        .formula((1, 0), "PV(0.06/12,360,A1)")
+        .formula((2, 0), "FV(0.06/12,360,A1,200000)")
+        .formula((3, 0), "NPER(0.06/12,A1,200000)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // A borrower pays out, so the payment is negative.
+    assert!(n(0) < 0.0, "PMT is a cash outflow");
+    assert!((n(0) + 1_199.101_050_305_53).abs() < 1e-6);
+    // PV of that payment stream is the loan back again.
+    assert!((n(1) - 200_000.0).abs() < 1e-6);
+    // ...and the loan is fully repaid, so the final balance is zero.
+    assert!(n(2).abs() < 1e-6);
+    assert!((n(3) - 360.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_zero_rate_annuity_is_a_limit_not_an_error() {
+    // An interest-free loan is an ordinary thing to model, and the annuity
+    // factor's (1+r)^n - 1 over r is 0/0 there. Rejecting it would make PMT
+    // fail on the simplest case anyone tries.
+    assert!((num("PMT(0,10,1000)") + 100.0).abs() < 1e-9);
+    assert!((num("FV(0,10,-100)") - 1000.0).abs() < 1e-9);
+    assert!((num("NPER(0,-100,1000)") - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn ipmt_and_ppmt_split_the_payment() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "PMT(0.05,10,10000)")
+        .formula((1, 0), "IPMT(0.05,1,10,10000)")
+        .formula((2, 0), "PPMT(0.05,1,10,10000)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // The first period's interest is simply the rate on the whole balance.
+    assert!((n(1) + 500.0).abs() < 1e-9);
+    // Interest plus principal is the payment, by definition.
+    assert!((n(1) + n(2) - n(0)).abs() < 1e-9);
+}
+
+#[test]
+fn irr_and_npv_are_inverse() {
+    let mut b = Builder::new();
+    for (i, v) in [-1000.0, 300.0, 400.0, 500.0].iter().enumerate() {
+        b.number((i as u32, 0), *v);
+    }
+    b.formula((0, 2), "IRR(A1:A4)")
+        // NPV discounts the first flow by one period, so the initial outlay is
+        // added outside it — the classic shape, and the reason NPV alone does
+        // not equal zero at the IRR.
+        .formula((1, 2), "A1+NPV(C1,A2:A4)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 2) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!(n(0) > 0.0 && n(0) < 1.0);
+    assert!(n(1).abs() < 1e-6, "NPV at the IRR is zero");
+}
+
+#[test]
+fn depreciation_methods_all_exhaust_the_depreciable_base() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "SLN(10000,1000,5)")
+        .formula((1, 0), "SYD(10000,1000,5,1)")
+        .formula((2, 0), "DDB(10000,1000,5,1)")
+        .formula((3, 0), "SYD(10000,1000,5,1)+SYD(10000,1000,5,2)+SYD(10000,1000,5,3)+SYD(10000,1000,5,4)+SYD(10000,1000,5,5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 1800.0).abs() < 1e-9);
+    // First year of sum-of-years'-digits: 5/15 of the base.
+    assert!((n(1) - 3000.0).abs() < 1e-9);
+    assert!((n(2) - 4000.0).abs() < 1e-9);
+    // Every method must depreciate exactly cost - salvage over the full life.
+    assert!((n(3) - 9000.0).abs() < 1e-9);
+}
+
+#[test]
+fn effect_and_nominal_are_inverses() {
+    // Holds regardless of the constants, which is a stronger check than a
+    // recalled figure.
+    assert!((num("NOMINAL(EFFECT(0.08,12),12)") - 0.08).abs() < 1e-12);
+    assert!((num("EFFECT(0.08,12)") - 0.083).abs() < 0.001);
+    assert!((num("RRI(10,1000,2000)") - 2f64.powf(0.1) + 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn dollarde_reads_the_fraction_in_its_own_base() {
+    // 1.02 at sixteenths is 1 + 2/16 = 1.125, not 1.02. The scale is set by the
+    // digit count of the denominator, not by the denominator itself.
+    assert!((num("DOLLARDE(1.02,16)") - 1.125).abs() < 1e-12);
+    assert!((num("DOLLARFR(1.125,16)") - 1.02).abs() < 1e-12);
+}

@@ -74,6 +74,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DAY", "DAY(serial_number)"),
     ("DAYS", "DAYS(end_date, start_date)"),
     ("DAYS360", "DAYS360(start, end, [method])"),
+    ("DB", "DB(cost, salvage, life, period, [month])"),
+    ("DDB", "DDB(cost, salvage, life, period, [factor])"),
     ("DEC2BIN", "DEC2BIN(number, [places])"),
     ("DEC2HEX", "DEC2HEX(number, [places])"),
     ("DEC2OCT", "DEC2OCT(number, [places])"),
@@ -81,7 +83,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
     ("DOLLAR", "DOLLAR(number, [decimals])"),
+    ("DOLLARDE", "DOLLARDE(fractional_dollar, fraction)"),
+    ("DOLLARFR", "DOLLARFR(decimal_dollar, fraction)"),
     ("EDATE", "EDATE(start_date, months)"),
+    ("EFFECT", "EFFECT(nominal_rate, npery)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
     ("ERF", "ERF(lower, [upper])"),
     ("ERFC", "ERFC(x)"),
@@ -99,6 +104,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    ("FV", "FV(rate, nper, pmt, [pv], [type])"),
+    ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
     ("GAMMALN", "GAMMALN(x)"),
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
@@ -118,6 +125,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("INDIRECT", "INDIRECT(ref_text, [a1])"),
     ("INT", "INT(number)"),
     ("INTERCEPT", "INTERCEPT(known_y, known_x)"),
+    ("IPMT", "IPMT(rate, per, nper, pv, [fv], [type])"),
+    ("IRR", "IRR(values, [guess])"),
     ("ISBLANK", "ISBLANK(value)"),
     ("ISERR", "ISERR(value)"),
     ("ISERROR", "ISERROR(value)"),
@@ -129,6 +138,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISNUMBER", "ISNUMBER(value)"),
     ("ISODD", "ISODD(number)"),
     ("ISOWEEKNUM", "ISOWEEKNUM(date)"),
+    ("ISPMT", "ISPMT(rate, per, nper, pv)"),
     ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
     ("KURT", "KURT(number1, …)"),
@@ -151,6 +161,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MIN", "MIN(number1, …)"),
     ("MINA", "MINA(value1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
+    ("MIRR", "MIRR(values, finance_rate, reinvest_rate)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
@@ -159,31 +170,39 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("N", "N(value)"),
     ("NA", "NA()"),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
+    ("NOMINAL", "NOMINAL(effect_rate, npery)"),
     ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
     ("NORMINV", "NORMINV(probability, mean, sd)"),
     ("NORMSDIST", "NORMSDIST(z)"),
     ("NORMSINV", "NORMSINV(probability)"),
     ("NOT", "NOT(logical)"),
+    ("NPER", "NPER(rate, pmt, pv, [fv], [type])"),
+    ("NPV", "NPV(rate, value1, …)"),
     ("OCT2BIN", "OCT2BIN(number, [places])"),
     ("OCT2DEC", "OCT2DEC(number)"),
     ("OCT2HEX", "OCT2HEX(number, [places])"),
     ("ODD", "ODD(number)"),
     ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
+    ("PDURATION", "PDURATION(rate, pv, fv)"),
     ("PEARSON", "PEARSON(array1, array2)"),
     ("PERCENTILE", "PERCENTILE(array, k)"),
     ("PERCENTRANK", "PERCENTRANK(array, x, [significance])"),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
     ("PI", "PI()"),
+    ("PMT", "PMT(rate, nper, pv, [fv], [type])"),
     ("POISSON", "POISSON(x, mean, cumulative)"),
     ("POWER", "POWER(number, power)"),
+    ("PPMT", "PPMT(rate, per, nper, pv, [fv], [type])"),
     ("PRODUCT", "PRODUCT(number1, …)"),
     ("PROPER", "PROPER(text)"),
+    ("PV", "PV(rate, nper, pmt, [fv], [type])"),
     ("QUARTILE", "QUARTILE(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RANK", "RANK(number, ref, [order])"),
+    ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
     ("REPLACE", "REPLACE(old, start, num_chars, new)"),
     ("REPT", "REPT(text, number_times)"),
     ("RIGHT", "RIGHT(text, [num_chars])"),
@@ -192,6 +211,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ROUNDUP", "ROUNDUP(number, num_digits)"),
     ("ROW", "ROW([reference])"),
     ("ROWS", "ROWS(array)"),
+    ("RRI", "RRI(nper, pv, fv)"),
     ("RSQ", "RSQ(known_y, known_x)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
     ("SEC", "SEC(number)"),
@@ -204,6 +224,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SIN", "SIN(number)"),
     ("SINH", "SINH(number)"),
     ("SKEW", "SKEW(number1, …)"),
+    ("SLN", "SLN(cost, salvage, life)"),
     ("SLOPE", "SLOPE(known_y, known_x)"),
     ("SMALL", "SMALL(array, k)"),
     ("SQRT", "SQRT(number)"),
@@ -220,6 +241,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SUMIFS", "SUMIFS(sum_range, range1, criteria1, …)"),
     ("SUMPRODUCT", "SUMPRODUCT(array1, …)"),
     ("SUMSQ", "SUMSQ(number1, …)"),
+    ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
@@ -244,6 +266,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
     ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
     ("WORKDAY", "WORKDAY(start, days, [holidays])"),
+    ("XIRR", "XIRR(values, dates, [guess])"),
+    ("XNPV", "XNPV(rate, values, dates)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
 ];
@@ -562,6 +586,34 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "GESTEP" => eval_delta(ev, sheet, args, false),
         "ERF" => eval_erf(ev, sheet, args),
         "ERFC" => scalar(ev, sheet, args, |x| 1.0 - erf(x)),
+        // The annuity family. All five are the same equation rearranged, so
+        // they share `annuity_factor` rather than repeating the algebra.
+        "PV" => eval_pv(ev, sheet, args),
+        "FV" => eval_fv(ev, sheet, args),
+        "PMT" => eval_pmt(ev, sheet, args),
+        "NPER" => eval_nper(ev, sheet, args),
+        "RATE" => eval_rate(ev, sheet, args),
+        "IPMT" => eval_ipmt(ev, sheet, args, true),
+        "PPMT" => eval_ipmt(ev, sheet, args, false),
+        "ISPMT" => eval_ispmt(ev, sheet, args),
+        "NPV" => eval_npv(ev, sheet, args),
+        "IRR" => eval_irr(ev, sheet, args),
+        "MIRR" => eval_mirr(ev, sheet, args),
+        "XNPV" => eval_xnpv(ev, sheet, args),
+        "XIRR" => eval_xirr(ev, sheet, args),
+        "FVSCHEDULE" => eval_fvschedule(ev, sheet, args),
+        // Depreciation.
+        "SLN" => eval_sln(ev, sheet, args),
+        "SYD" => eval_syd(ev, sheet, args),
+        "DB" => eval_db(ev, sheet, args),
+        "DDB" => eval_ddb(ev, sheet, args),
+        // Rate conversions.
+        "EFFECT" => eval_effect(ev, sheet, args, true),
+        "NOMINAL" => eval_effect(ev, sheet, args, false),
+        "RRI" => eval_rri(ev, sheet, args),
+        "PDURATION" => eval_pduration(ev, sheet, args),
+        "DOLLARDE" => eval_dollar_frac(ev, sheet, args, true),
+        "DOLLARFR" => eval_dollar_frac(ev, sheet, args, false),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -4472,4 +4524,543 @@ fn eval_erf(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         },
         None => Value::Number(erf(lower)),
     }
+}
+
+// --- Financial -------------------------------------------------------------
+
+/// Read up to `max` numeric arguments, filling absent ones from `defaults`.
+fn opt_numbers<const N: usize>(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    required: usize,
+    defaults: [f64; N],
+) -> Result<[f64; N], Value> {
+    if args.len() < required || args.len() > N {
+        return Err(Value::Error(ErrorValue::Value));
+    }
+    let mut out = defaults;
+    for (i, slot) in out.iter_mut().enumerate() {
+        if let Some(arg) = args.get(i) {
+            *slot = ev.eval_expr(sheet, arg).as_number().map_err(Value::Error)?;
+        }
+    }
+    Ok(out)
+}
+
+/// `(1 + rate)^nper`, and the annuity factor `((1+r)^n - 1) / r`.
+///
+/// The zero-rate case is a genuine limit, not an edge case to reject: a
+/// no-interest loan is an ordinary thing to model, and `0/0` here would make
+/// PMT report an error for it.
+fn annuity_factor(rate: f64, nper: f64) -> (f64, f64) {
+    if rate == 0.0 {
+        return (1.0, nper);
+    }
+    let growth = (1.0 + rate).powf(nper);
+    (growth, (growth - 1.0) / rate)
+}
+
+/// `type` is 1 when payments fall at the start of the period, which advances
+/// every payment by one period's interest.
+fn due_factor(rate: f64, kind: f64) -> f64 {
+    if kind != 0.0 { 1.0 + rate } else { 1.0 }
+}
+
+fn eval_fv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, nper, pmt, pv, kind] =
+        match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let (growth, factor) = annuity_factor(rate, nper);
+    Value::Number(-(pv * growth + pmt * due_factor(rate, kind) * factor))
+}
+
+fn eval_pv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, nper, pmt, fv, kind] =
+        match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let (growth, factor) = annuity_factor(rate, nper);
+    Value::Number(-(fv + pmt * due_factor(rate, kind) * factor) / growth)
+}
+
+fn eval_pmt(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, nper, pv, fv, kind] =
+        match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let (growth, factor) = annuity_factor(rate, nper);
+    if factor == 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(-(pv * growth + fv) / (due_factor(rate, kind) * factor))
+}
+
+fn eval_nper(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, pmt, pv, fv, kind] = match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0, 0.0])
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if rate == 0.0 {
+        if pmt == 0.0 {
+            return Value::Error(ErrorValue::Num);
+        }
+        return Value::Number(-(pv + fv) / pmt);
+    }
+    let adjusted = pmt * due_factor(rate, kind);
+    let numerator = adjusted - fv * rate;
+    let denominator = pv * rate + adjusted;
+    if numerator / denominator <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((numerator / denominator).ln() / (1.0 + rate).ln())
+}
+
+/// `RATE` has no closed form, so it is solved numerically.
+///
+/// Newton from the caller's guess, falling back to bisection when Newton
+/// wanders — the derivative is near zero around rate 0, where Newton alone
+/// diverges on exactly the ordinary case of a nearly interest-free loan.
+fn eval_rate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [nper, pmt, pv, fv, kind, guess] =
+        match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0, 0.0, 0.1]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let residual = |rate: f64| {
+        let (growth, factor) = annuity_factor(rate, nper);
+        pv * growth + pmt * due_factor(rate, kind) * factor + fv
+    };
+    let mut rate = guess;
+    for _ in 0..64 {
+        let f = residual(rate);
+        if f.abs() < 1e-10 {
+            return Value::Number(rate);
+        }
+        // Numeric derivative: the analytic one is long and its algebra is a
+        // ready source of sign errors that only show as slow convergence.
+        let h = 1e-7;
+        let slope = (residual(rate + h) - f) / h;
+        if slope.abs() < 1e-14 {
+            break;
+        }
+        let next = rate - f / slope;
+        if !next.is_finite() {
+            break;
+        }
+        rate = next;
+    }
+    // Bisection over a wide bracket, which converges wherever a root exists.
+    let (mut lo, mut hi) = (-0.999_999, 10.0);
+    let (mut flo, fhi) = (residual(lo), residual(hi));
+    if flo * fhi > 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let fmid = residual(mid);
+        if fmid.abs() < 1e-12 {
+            return Value::Number(mid);
+        }
+        if flo * fmid < 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+            flo = fmid;
+        }
+    }
+    Value::Number((lo + hi) / 2.0)
+}
+
+/// The interest (or principal) part of one payment.
+fn eval_ipmt(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], interest: bool) -> Value {
+    let [rate, per, nper, pv, fv, kind] =
+        match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    if per < 1.0 || per > nper {
+        return Value::Error(ErrorValue::Num);
+    }
+    let payment = match eval_pmt_values(rate, nper, pv, fv, kind) {
+        Some(p) => p,
+        None => return Value::Error(ErrorValue::Num),
+    };
+    // The balance carried into this period, which is what the interest accrues
+    // on — computed as the future value of the loan after `per - 1` payments.
+    let (growth, factor) = annuity_factor(rate, per - 1.0);
+    let balance = pv * growth + payment * due_factor(rate, kind) * factor;
+    let mut interest_part = -balance * rate;
+    // A payment due at the start of its period accrues no interest for it.
+    if kind != 0.0 && per > 1.0 {
+        interest_part /= 1.0 + rate;
+    }
+    if kind != 0.0 && per == 1.0 {
+        interest_part = 0.0;
+    }
+    Value::Number(if interest {
+        interest_part
+    } else {
+        payment - interest_part
+    })
+}
+
+fn eval_pmt_values(rate: f64, nper: f64, pv: f64, fv: f64, kind: f64) -> Option<f64> {
+    let (growth, factor) = annuity_factor(rate, nper);
+    let denominator = due_factor(rate, kind) * factor;
+    (denominator != 0.0).then(|| -(pv * growth + fv) / denominator)
+}
+
+/// `ISPMT` — the interest of a straight-line loan, which is *not* the same as
+/// IPMT: the principal repays evenly rather than on an amortization schedule.
+fn eval_ispmt(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, per, nper, pv] = match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if nper == 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(pv * rate * (per / nper - 1.0))
+}
+
+fn eval_npv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let rate = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let flows = match flatten_numbers(ev, sheet, &args[1..]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if rate == -1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // NPV discounts the *first* flow by one period: it treats every value as
+    // arriving at the end of a period, unlike XNPV which dates them.
+    let total: f64 = flows
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v / (1.0 + rate).powi(i as i32 + 1))
+        .sum();
+    Value::Number(total)
+}
+
+fn npv_at(rate: f64, flows: &[f64]) -> f64 {
+    flows
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v / (1.0 + rate).powi(i as i32))
+        .sum()
+}
+
+fn eval_irr(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let flows = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    // Without both signs there is no root, and a solver would wander until it
+    // gave up rather than saying so.
+    if !flows.iter().any(|v| *v > 0.0) || !flows.iter().any(|v| *v < 0.0) {
+        return Value::Error(ErrorValue::Num);
+    }
+    match solve_rate(|r| npv_at(r, &flows)) {
+        Some(r) => Value::Number(r),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// Bisect for a rate where `f` crosses zero, over the range a rate can take.
+fn solve_rate(f: impl Fn(f64) -> f64) -> Option<f64> {
+    let (mut lo, mut hi) = (-0.999_999, 10.0);
+    let (mut flo, fhi) = (f(lo), f(hi));
+    if !flo.is_finite() || !fhi.is_finite() || flo * fhi > 0.0 {
+        return None;
+    }
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let fmid = f(mid);
+        if fmid.abs() < 1e-12 {
+            return Some(mid);
+        }
+        if flo * fmid < 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+            flo = fmid;
+        }
+    }
+    Some((lo + hi) / 2.0)
+}
+
+fn eval_mirr(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let flows = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (finance, reinvest) = match pair_of_numbers(ev, sheet, &args[1..3]) {
+        Ok([a, b]) => (a, b),
+        Err(e) => return e,
+    };
+    let n = flows.len() as f64;
+    if n < 2.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    // Negatives discounted at the finance rate, positives compounded at the
+    // reinvestment rate — the whole point of MIRR over IRR.
+    let negatives: f64 = flows
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v < 0.0)
+        .map(|(i, v)| v / (1.0 + finance).powi(i as i32))
+        .sum();
+    let positives: f64 = flows
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v > 0.0)
+        .map(|(i, v)| v * (1.0 + reinvest).powi((n as i32 - 1) - i as i32))
+        .sum();
+    if negatives == 0.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    Value::Number((-positives / negatives).powf(1.0 / (n - 1.0)) - 1.0)
+}
+
+fn eval_xnpv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let rate = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let (flows, dates) = match dated_flows(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let start = dates[0];
+    Value::Number(
+        flows
+            .iter()
+            .zip(&dates)
+            .map(|(v, d)| v / (1.0 + rate).powf((d - start) / 365.0))
+            .sum(),
+    )
+}
+
+fn eval_xirr(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (flows, dates) = match dated_flows(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !flows.iter().any(|v| *v > 0.0) || !flows.iter().any(|v| *v < 0.0) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let start = dates[0];
+    let f = |rate: f64| -> f64 {
+        flows
+            .iter()
+            .zip(&dates)
+            .map(|(v, d)| v / (1.0 + rate).powf((d - start) / 365.0))
+            .sum()
+    };
+    match solve_rate(f) {
+        Some(r) => Value::Number(r),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// The `(values, dates)` pair XNPV and XIRR share, validated together.
+fn dated_flows(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+) -> Result<(Vec<f64>, Vec<f64>), Value> {
+    // XNPV takes the rate first, XIRR does not.
+    let offset = usize::from(args.len() == 3 && !matches!(args[0], Expr::Range(..)));
+    let flows = flatten_numbers(ev, sheet, &args[offset..offset + 1]).map_err(Value::Error)?;
+    let dates = flatten_numbers(ev, sheet, &args[offset + 1..offset + 2]).map_err(Value::Error)?;
+    if flows.len() != dates.len() || flows.is_empty() {
+        return Err(Value::Error(ErrorValue::Num));
+    }
+    Ok((flows, dates))
+}
+
+fn eval_fvschedule(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let principal = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let schedule = match flatten_numbers(ev, sheet, &args[1..]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    Value::Number(schedule.iter().fold(principal, |acc, r| acc * (1.0 + r)))
+}
+
+fn eval_sln(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [cost, salvage, life] = match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if life == 0.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    Value::Number((cost - salvage) / life)
+}
+
+fn eval_syd(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [cost, salvage, life, per] = match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if life <= 0.0 || per < 1.0 || per > life {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((cost - salvage) * (life - per + 1.0) * 2.0 / (life * (life + 1.0)))
+}
+
+/// `DB` — fixed-declining balance, whose rate is rounded to three decimals.
+///
+/// That rounding is in the definition, not an implementation shortcut: leaving
+/// it out changes every period's figure by a little, which is exactly the kind
+/// of error that survives review.
+fn eval_db(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [cost, salvage, life, period, month] =
+        match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0, 12.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    if cost <= 0.0 || life <= 0.0 || period < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // The rate is rounded to three decimals *by definition*, not as an
+    // implementation shortcut: omitting the rounding shifts every period's
+    // figure slightly, which is the kind of error that survives review.
+    let rate = ((1.0 - (salvage / cost).powf(1.0 / life)) * 1000.0).round() / 1000.0;
+    let first = cost * rate * month / 12.0;
+    if period == 1.0 {
+        return Value::Number(first);
+    }
+    let mut total = first;
+    let mut current = 0.0;
+    for _ in 2..=(period as u64) {
+        current = (cost - total) * rate;
+        total += current;
+    }
+    // The final period covers only the remaining months of the year.
+    if period > life {
+        current = (cost - total + current) * rate * (12.0 - month) / 12.0;
+    }
+    Value::Number(current)
+}
+
+/// `DDB` — double-declining balance, never depreciating below the salvage.
+fn eval_ddb(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [cost, salvage, life, period, factor] =
+        match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0, 2.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    if cost < 0.0 || life <= 0.0 || period < 1.0 || factor <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let mut total = 0.0;
+    let mut current = 0.0;
+    for _ in 1..=(period as u64) {
+        current = ((cost - total) * factor / life)
+            .min(cost - salvage - total)
+            .max(0.0);
+        total += current;
+    }
+    Value::Number(current)
+}
+
+/// `EFFECT` and `NOMINAL`, which are inverses of each other.
+fn eval_effect(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], to_effective: bool) -> Value {
+    let [rate, periods] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let periods = periods.trunc();
+    if rate <= 0.0 || periods < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(if to_effective {
+        (1.0 + rate / periods).powf(periods) - 1.0
+    } else {
+        ((1.0 + rate).powf(1.0 / periods) - 1.0) * periods
+    })
+}
+
+fn eval_rri(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [nper, pv, fv] = match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if nper <= 0.0 || pv <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((fv / pv).powf(1.0 / nper) - 1.0)
+}
+
+fn eval_pduration(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [rate, pv, fv] = match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if rate <= 0.0 || pv <= 0.0 || fv <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((fv.ln() - pv.ln()) / (1.0 + rate).ln())
+}
+
+/// `DOLLARDE` / `DOLLARFR` — prices written as whole units plus a fraction,
+/// as bond quotes are.
+fn eval_dollar_frac(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    to_decimal: bool,
+) -> Value {
+    let [value, fraction] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let fraction = fraction.trunc();
+    if fraction < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let whole = value.trunc();
+    let rest = value - whole;
+    // The fractional part is written in base `fraction` but *positioned* by
+    // decimal digits: at 16ths, 1.02 means 1 + 2/16 and 1.15 means 1 + 15/16.
+    // So the scale is 10^(digits in `fraction`), not the fraction itself.
+    let digits = fraction.log10().floor() + 1.0;
+    let scale = 10f64.powf(digits);
+    Value::Number(if to_decimal {
+        whole + rest * scale / fraction
+    } else {
+        whole + rest * fraction / scale
+    })
 }

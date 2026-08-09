@@ -37,6 +37,38 @@ mistaken for the finish line:
    and statistical rows are gated on the spec's worked examples as test vectors,
    not on my recollection of the formulas.
 
+## Support depth — read this before the percentages
+
+`tools/fidelity-audit/depth.py` classifies every modelled field by how far
+support actually goes. The structural score answers *"does this file come back
+intact"*; it does **not** answer *"does the product support this feature"*, and
+one percentage cannot make both claims.
+
+| Depth | Fields | Share | Meaning |
+| --- | --- | --- | --- |
+| **LIVE** | 132 | 58.7% | something outside import/export reads it — it reaches the screen or an edit path |
+| **ROUND-TRIP** | 70 | 31.1% | a real modelled field the file layer understands, which no renderer or editor code reads. The file survives; the user never sees or edits it |
+| **CARRIED** | 23 | 10.2% | a verbatim attribute map. Round-trips; nothing reads it. We are a faithful courier and nothing more |
+
+Neither of the lower two is dishonest on its own — preservation is the whole
+point of the retention path, and a print layout with no print UI is better
+carried than dropped. **Reporting only the total would be.** Concretely, today:
+
+- **Rich text runs** round-trip perfectly and render as plain text. A cell with
+  bold-red and plain parts imports, saves and reopens correctly, and looks
+  uniform on our canvas.
+- **Gradient fills, superscript/subscript, underline variants, shrink-to-fit,
+  reading order** and the legacy font effects are all modelled and all invisible.
+- **Tables** round-trip with their columns, styles and structured references —
+  and the editor has no Ctrl+T, no banded rows, no filter buttons. The
+  *construct* is supported; the *feature* does not exist.
+- **Print setup and workbook settings** are carried verbatim with no UI at all.
+
+So 95.9% structural means "a real workbook survives a round trip", which was the
+goal of this phase and is worth having. It does not mean the product does 95.9%
+of what Excel does. The renderer and editor work is tracked separately and has
+barely started for anything added after the UX tracker closed.
+
 ## Release signal
 
 `tools/fidelity-audit/status.py` prints all of this; it reads the status column
@@ -50,7 +82,7 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 | Signal | Baseline | Current |
 | --- | --- | --- |
 | Structural coverage | 54.8% | 95.9% |
-| Function coverage | 22.8% | 57.9% |
+| Function coverage | 22.8% | 64.0% |
 | **P0 destructive remaining** | 8 | 0 |
 | P1 visible-loss remaining | 13 | 10 |
 | P2 compatibility remaining | 4 | 2 |
@@ -119,7 +151,7 @@ is how a plausible wrong answer ships.
 | FN-05 | Lookup and reference | 9 | 🟡 | ADDRESS, AREAS, INDIRECT, OFFSET, LOOKUP, HYPERLINK. **The important find was a staleness bug, not a missing function**: the dependency graph cannot see through `INDIRECT`, since walking the arguments of `INDIRECT("A"&B1)` finds B1 but never the cell the formula actually reads — so the result would keep its first answer forever while its target changed. `INDIRECT` and `OFFSET` are now flagged like a defined name (recalculate on any change), and a test edits the target and asserts the formula follows. `ADDRESS` returns a **string**, not a reference, which is why it pairs with INDIRECT. `INDIRECT` on a non-reference string is `#REF!`, distinguishable from the cell being empty, and `a1=FALSE` (R1C1) is refused rather than silently answered in the wrong notation. `OFFSET` larger than one cell is `#VALUE!`, exactly as a bare `A1:B2` is. **TRANSPOSE deliberately not shipped**: it needs array results the engine does not have, and catalogueing it would put it in autocomplete returning a wrong answer. GETPIVOTDATA and RTD also remain open. 4 tests. 36.8% → 38.5% |
 | FN-02 | Text | 17 | 🟡 | CHAR, UNICHAR, CODE, UNICODE, CLEAN, T, FIXED, DOLLAR, NUMBERVALUE. **CHAR/CODE differ from their Unicode twins only by range**, so implementing them as one function would accept `CHAR(955)` and return λ, which Excel refuses — and `CODE("λ")` is `#VALUE!` rather than a code point, because CODE is byte-oriented. **FIXED's negative `decimals` rounds to the left of the point** (`FIXED(1234.5,-2)` is `1,200`); clamping it to zero reads as harmless and quietly gives `1,235`. **`T` does not convert** — a number gives empty text, which is the whole difference from TEXT. `NUMBERVALUE` takes its separators as arguments rather than inferring a locale, so the same text parses identically everywhere. **Still open**: the byte-oriented `*B` variants and the East Asian ASC/JIS/DBCS/PHONETIC/BAHTTEXT, which need real DBCS handling rather than a stub. 4 tests. 38.5% → 40.2% |
 | FN-08 | Statistical and database | 92 | 🟡 | Descriptive statistics (AVEDEV, DEVSQ, GEOMEAN, HARMEAN, MODE, SKEW, KURT, VAR, VARP, PERCENTILE, QUARTILE, PERCENTRANK, TRIMMEAN, COUNTBLANK, STANDARDIZE), regression (CORREL, PEARSON, RSQ, COVAR, SLOPE, INTERCEPT, STEYX, FORECAST) and the first distributions (NORMDIST, NORMINV, NORMSDIST, NORMSINV, EXPONDIST, POISSON, BINOMDIST, FISHER, FISHERINV, GAMMALN). **The discrete distributions sum in log space** — `m^k/k!` and `C(n,k)` both overflow `f64` long before the probability does, so a direct implementation returns NaN for `POISSON(200,300,TRUE)` while the answer is an ordinary number. `SLOPE`/`INTERCEPT` take **y before x**, so a test uses a perfect line where an argument-order slip is unmissable. Mismatched paired ranges are `#N/A`, not zipped to the shorter one, which would silently answer over part of the data. `MODE` of all-distinct values errors rather than returning the first. **`erf` is exact at zero by construction**: the rational approximation gives ~1e-9 there, making `NORMSDIST(0)` read 0.5000000005 — a wart in the first place anyone checks. Two test expectations I wrote from memory were wrong (the sample's mean is 5.5556, not 5; `NORMSDIST(1.96)` is 0.97500210, not 0.975) and were recomputed — the "coverage is not correctness" rule applying to the tests as much as the code. **Still open**: the chi-square, t, F, beta and gamma families, which need incomplete-gamma/beta and their inverses. 7 tests. 40.2% → 49.4% |
-| FN-07 | Financial | 53 | 🔴 | Annuities, depreciation, bonds, coupons, yields. **Day-count conventions decide correctness**; needs the spec's own worked examples as test vectors |
+| FN-07 | Financial | 53 | 🟡 | The annuity family (PV, FV, PMT, NPER, RATE, IPMT, PPMT, ISPMT), cash-flow analysis (NPV, IRR, MIRR, XNPV, XIRR, FVSCHEDULE), depreciation (SLN, SYD, DB, DDB) and the rate conversions (EFFECT, NOMINAL, RRI, PDURATION, DOLLARDE, DOLLARFR). **The five annuity functions are one equation rearranged**, so they share `annuity_factor` rather than repeating the algebra five times with five chances to flip a sign. **A zero rate is a limit, not an edge case to reject**: an interest-free loan is an ordinary thing to model and `((1+r)^n - 1)/r` is 0/0 there, so rejecting it would make PMT fail on the simplest case anyone tries. `RATE` has no closed form — Newton from the caller's guess, falling back to bisection, because the derivative is near zero around rate 0 and Newton alone diverges on exactly the ordinary nearly-interest-free case. Tests check **identities rather than recalled constants**: PV of PMT's stream is the loan back, FV of a fully repaid loan is zero, interest plus principal is the payment, NPV at the IRR is zero, every depreciation method exhausts exactly cost − salvage, and NOMINAL(EFFECT(r)) is r. **Two bugs found in my own first draft**: `DB` had three shadowed `rate` bindings with the first two dead, and `DOLLARDE`'s digit-shifting was invented rather than derived — the scale comes from the *digit count* of the denominator, so 1.02 at sixteenths is 1.125. **Still open**: the bond and coupon family (PRICE, YIELD, DURATION, COUP*, ACCRINT, ODD*), which need day-count conventions. 7 tests. 57.9% → 64.0% |
 | FN-06 | Engineering | 39 | 🟡 | Base conversion (all nine BIN/OCT/DEC/HEX pairs), the bit operations, DELTA, GESTEP, ERF and ERFC. **The trap is two's complement**: a ten-digit value with its top digit set is *negative*, so `BIN2DEC("1111111111")` is -1, not 1023. Parsing unsigned gives a large positive number that looks entirely plausible, and it is the single most likely mistake in these functions — pinned for all three radices. A `places` argument narrower than the value is an error rather than a silent truncation that would change the number, and it is ignored for negatives, since padding a two's-complement form changes its value. The bit operations are bounded at 2^48, which `f64` holds exactly, so a result is never a rounded approximation of the bits asked for. ERF/ERFC are checked against the identity `ERF(x) + ERFC(x) = 1` rather than recalled constants — that holds whatever the approximation's accuracy. **Still open**: complex numbers (the IM* family), Bessel and CONVERT. 4 tests. 53.4% → 57.9% |
 
 ## Working rules
