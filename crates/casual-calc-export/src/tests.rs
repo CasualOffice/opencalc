@@ -1325,3 +1325,51 @@ fn identical_text_with_different_formatting_stays_distinct() {
     assert_eq!(wb.strings.get(bold), Some("Total"));
     assert!(wb.strings.runs(bold).is_some());
 }
+
+#[test]
+fn cell_font_variants_round_trip() {
+    use casual_calc_model::{CellRef, Style, Underline, VertAlign};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let id = wb.intern_style(Style {
+        underline: Some(Underline::DoubleAccounting),
+        vert_align: Some(VertAlign::Subscript),
+        font_family: Some(2),
+        font_scheme: Some("minor".to_owned()),
+        font_charset: Some(1),
+        ..Style::default()
+    });
+    let at = CellRef::new(0, 0);
+    let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+    cell.style = Some(id);
+    wb.sheets[0].cells.set(at, cell);
+
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert!(styles.contains("<u val=\"doubleAccounting\"/>"));
+    assert!(styles.contains("<vertAlign val=\"subscript\"/>"));
+
+    let back = import_package(written).unwrap().workbook;
+    let st = back
+        .styles
+        .get(back.sheets[0].cells.get(at).unwrap().style.unwrap())
+        .unwrap();
+    // A bool would have flattened this to a plain single underline, which is a
+    // visible change to a ledger whose whole purpose is looking a certain way.
+    assert_eq!(st.underline, Some(Underline::DoubleAccounting));
+    assert_eq!(st.vert_align, Some(VertAlign::Subscript));
+    assert_eq!(st.font_family, Some(2));
+    assert_eq!(st.font_scheme.as_deref(), Some("minor"));
+    assert_eq!(st.font_charset, Some(1));
+}
+
+#[test]
+fn u_with_no_val_is_single_and_val_none_is_not_underlined() {
+    // `<u/>` means single; `<u val="none"/>` is the one spelling that means the
+    // font is not underlined at all. Reading the element's presence as truth
+    // would underline the second.
+    use casual_calc_model::Underline;
+    assert_eq!(Underline::from_ooxml(""), Some(Underline::Single));
+    assert_eq!(Underline::from_ooxml("single"), Some(Underline::Single));
+    assert_eq!(Underline::from_ooxml("none"), None);
+}

@@ -24,8 +24,8 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint, VAlign,
-    Workbook,
+    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint, Underline,
+    VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -2143,7 +2143,7 @@ pub fn session_cells(
             if style.is_some_and(|s| s.italic) {
                 extra.push_str(",\"i\":1");
             }
-            if style.is_some_and(|s| s.underline) {
+            if style.is_some_and(|s| s.underline.is_some()) {
                 extra.push_str(",\"u\":1");
             }
             if style.is_some_and(|s| s.wrap) {
@@ -3159,8 +3159,14 @@ pub fn session_toggle_underline(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
-    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.underline);
-    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.underline = target)
+    // The toolbar toggle is binary, so it flips between "no underline" and the
+    // plain single line. A cell already carrying a double or accounting
+    // underline reads as underlined and toggles off, which is what Excel's own
+    // button does — it does not cycle through the variants.
+    let target = !range_all(sheet, r0, c0, r1, c1, |st| st.underline.is_some());
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| {
+        st.underline = target.then_some(Underline::Single)
+    })
 }
 
 /// Set how a range's text behaves when it does not fit its column:
@@ -3830,7 +3836,7 @@ pub fn session_set_font_flags(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| {
         st.bold = bold;
         st.italic = italic;
-        st.underline = underline;
+        st.underline = underline.then_some(Underline::Single);
         st.strike = strike;
     })
 }
@@ -4561,7 +4567,7 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             if st.italic {
                 parts.push("\"i\":1".to_owned());
             }
-            if st.underline {
+            if st.underline.is_some() {
                 parts.push("\"u\":1".to_owned());
             }
             if st.strike {
@@ -4983,7 +4989,7 @@ fn html_cell_css(style: &Style) -> String {
         css.push_str("font-style:italic;");
     }
     let mut deco = String::new();
-    if style.underline {
+    if style.underline.is_some() {
         deco.push_str("underline ");
     }
     if style.strike {

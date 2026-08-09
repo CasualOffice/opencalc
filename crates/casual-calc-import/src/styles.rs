@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 
-use casual_calc_model::{BorderEdge, Borders, HAlign, NamedCellStyle, Style, ThemeTint, VAlign};
+use casual_calc_model::{
+    BorderEdge, Borders, HAlign, NamedCellStyle, Style, ThemeTint, Underline, VAlign, VertAlign,
+};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -34,7 +36,11 @@ pub struct StyleSheet {
 struct Font {
     bold: bool,
     italic: bool,
-    underline: bool,
+    underline: Option<Underline>,
+    vert_align: Option<VertAlign>,
+    family: Option<u32>,
+    scheme: Option<String>,
+    charset: Option<u32>,
     strike: bool,
     color: Option<String>,
     /// The theme slot `color` was resolved from, when it was a theme reference.
@@ -274,7 +280,12 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                     // and `val="none"` is the one value that means no underline.
                     b"u" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
-                            f.underline = !matches!(attr(e, b"val")?.as_deref(), Some("none"));
+                            // `<u/>` with no val is single; `val="none"` is the
+                            // one spelling that means not underlined at all.
+                            f.underline = match attr(e, b"val")?.as_deref() {
+                                Some("none") => None,
+                                other => Underline::from_ooxml(other.unwrap_or("")),
+                            };
                         }
                     }
                     b"strike" if in_fonts => {
@@ -287,6 +298,27 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                         {
                             f.color = Some(c);
                             f.color_theme = slot;
+                        }
+                    }
+                    b"vertAlign" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.vert_align =
+                                VertAlign::from_ooxml(&attr(e, b"val")?.unwrap_or_default());
+                        }
+                    }
+                    b"family" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.family = attr(e, b"val")?.and_then(|v| v.parse().ok());
+                        }
+                    }
+                    b"scheme" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.scheme = attr(e, b"val")?;
+                        }
+                    }
+                    b"charset" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.charset = attr(e, b"val")?.and_then(|v| v.parse().ok());
                         }
                     }
                     b"name" if in_fonts => {
@@ -424,6 +456,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             bold: font.bold,
             italic: font.italic,
             underline: font.underline,
+            vert_align: font.vert_align,
+            font_family: font.family,
+            font_scheme: font.scheme.clone(),
+            font_charset: font.charset,
             strike: font.strike,
             // No SpreadsheetML attribute maps to clip; Excel always spills.
             clip: false,

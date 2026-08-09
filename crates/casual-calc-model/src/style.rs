@@ -236,12 +236,29 @@ pub struct Style {
     /// Italic text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub italic: bool,
-    /// Underlined text.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub underline: bool,
+    /// Underline style, absent when the cell is not underlined.
+    ///
+    /// Not a bool: OOXML's `u/@val` distinguishes single, double and the two
+    /// accounting variants, and a ledger formatted with accounting underlines
+    /// comes back with ordinary ones when the kind is discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<Underline>,
     /// Strikethrough text.
     #[serde(default, skip_serializing_if = "is_false")]
     pub strike: bool,
+    /// Superscript or subscript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vert_align: Option<VertAlign>,
+    /// `font/@family` — the font family class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<u32>,
+    /// `font/@scheme` — `major` or `minor`, tying the font to the theme's own
+    /// major/minor typefaces rather than naming one outright.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_scheme: Option<String>,
+    /// `font/@charset` — the legacy character-set id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_charset: Option<u32>,
     /// Font family name (e.g. `Calibri`, `Arial`), if specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_name: Option<String>,
@@ -364,8 +381,12 @@ impl Style {
         self.number_format.is_none()
             && !self.bold
             && !self.italic
-            && !self.underline
+            && self.underline.is_none()
             && !self.strike
+            && self.vert_align.is_none()
+            && self.font_family.is_none()
+            && self.font_scheme.is_none()
+            && self.font_charset.is_none()
             && self.font_name.is_none()
             && self.font_size_hp.is_none()
             && self.font_color.is_none()

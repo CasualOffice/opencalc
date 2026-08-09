@@ -20,7 +20,8 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint, VAlign, Workbook,
+    ErrorValue, FilterRule, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint, Underline, VAlign,
+    VertAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -537,8 +538,10 @@ fn shared_strings_xml(workbook: &Workbook) -> String {
     s
 }
 
-/// One `<rPr>`. Child order follows CT_RPrElt's sequence, which Excel enforces:
-/// the same children in a different order is a package it refuses to open.
+/// One `<rPr>`. Children are written in the order the schema declares them,
+/// which is what Excel emits — though `CT_RPrElt` is an `xsd:choice`, so the
+/// order is conventional rather than required. Matching it keeps our output
+/// diffable against a file Excel wrote.
 fn run_font_xml(font: &RunFont) -> String {
     let mut s = String::from("<rPr>");
     if font.bold {
@@ -672,7 +675,9 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
     // Font key: (bold, italic, underline, strike, color, name, size_hp).
-    let mut fonts: Vec<FontKey> = vec![(false, false, false, false, None, None, None, None)];
+    let mut fonts: Vec<FontKey> = vec![(
+        false, false, None, false, None, None, None, None, None, None, None, None,
+    )];
     let mut fills: Vec<FillKey> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
@@ -685,10 +690,14 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             style.italic,
             style.underline,
             style.strike,
+            style.vert_align,
             style.font_color.clone(),
             style.font_theme,
             style.font_name.clone(),
             style.font_size_hp,
+            style.font_family,
+            style.font_scheme.clone(),
+            style.font_charset,
         );
         let font_id = fonts
             .iter()
@@ -781,7 +790,21 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (bold, italic, underline, strike, color, color_theme, name, size_hp) in &fonts {
+    for (
+        bold,
+        italic,
+        underline,
+        strike,
+        vert_align,
+        color,
+        color_theme,
+        name,
+        size_hp,
+        family,
+        scheme,
+        charset,
+    ) in &fonts
+    {
         s.push_str("<font>");
         if *bold {
             s.push_str("<b/>");
@@ -789,11 +812,23 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
         if *italic {
             s.push_str("<i/>");
         }
-        if *underline {
-            s.push_str("<u/>");
+        if let Some(u) = underline {
+            s.push_str(&format!("<u val=\"{}\"/>", u.ooxml()));
         }
         if *strike {
             s.push_str("<strike/>");
+        }
+        if let Some(v) = vert_align {
+            s.push_str(&format!("<vertAlign val=\"{}\"/>", v.ooxml()));
+        }
+        if let Some(f) = family {
+            s.push_str(&format!("<family val=\"{f}\"/>"));
+        }
+        if let Some(c) = charset {
+            s.push_str(&format!("<charset val=\"{c}\"/>"));
+        }
+        if let Some(sc) = scheme {
+            s.push_str(&format!("<scheme val=\"{}\"/>", escape_attr(sc)));
         }
         if let Some(c) = color {
             s.push_str(&color_element("color", c, color_theme.as_ref()));
@@ -896,10 +931,14 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
 type FontKey = (
     bool,
     bool,
+    Option<Underline>,
     bool,
-    bool,
+    Option<VertAlign>,
     Option<String>,
     Option<ThemeTint>,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
     Option<String>,
     Option<u32>,
 );
