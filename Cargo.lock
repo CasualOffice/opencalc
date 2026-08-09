@@ -118,6 +118,7 @@ dependencies = [
 name = "casual-calc-io"
 version = "0.0.0"
 dependencies = [
+ "casual-calc-layout",
  "casual-calc-model",
 ]
 

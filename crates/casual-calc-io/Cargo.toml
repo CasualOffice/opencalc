@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
+casual-calc-layout = { path = "../casual-calc-layout" }
 
 [lints]
 workspace = true

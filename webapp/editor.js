@@ -4156,17 +4156,32 @@ function doSave() {
   );
 }
 // Export the active sheet as delimited text (CSV/TSV/PSV).
-function doSaveDelimited(delim, ext) {
+async function doSaveDelimited(delim, ext) {
+  // Delimited text holds one sheet and no formatting. On a multi-sheet workbook
+  // that is a lossy export chosen by someone who may not realise it, so it is
+  // said before the download rather than after.
+  let sheets = 1;
+  try { sheets = JSON.parse(wasm.session_sheet_names()).length; } catch {}
+  if (sheets > 1) {
+    const name = sheetNameAt(state.sheet);
+    const ok = await confirmModal(
+      `.${ext} holds one sheet`,
+      `Only "${name}" will be written — the other ${sheets - 1} sheet${sheets === 2 ? "" : "s"} and all formatting, formulas' styling and merges are not part of a ${ext.toUpperCase()} file.`,
+      `Export "${name}"`,
+    );
+    if (!ok) return false;
+  }
   const text = wasm.session_save_delimited(state.sheet, delim);
-  download(text, "opencalc." + ext, "text/plain;charset=utf-8");
+  // A BOM so spreadsheet apps open it as UTF-8 rather than guessing a codepage
+  // and turning every accented character into mojibake.
+  download("\ufeff" + text, "opencalc." + ext, "text/csv;charset=utf-8");
+  return true;
 }
-function saveAs(fmt) {
+async function saveAs(fmt) {
   try {
-    if (fmt === "xlsx") doSave();
-    else if (fmt === "csv") doSaveDelimited(44, "csv");
-    else if (fmt === "tsv") doSaveDelimited(9, "tsv");
-    else if (fmt === "psv") doSaveDelimited(124, "psv");
-    status.textContent = "downloaded ." + fmt;
+    if (fmt === "xlsx") { doSave(); status.textContent = "downloaded .xlsx"; return; }
+    const delim = fmt === "csv" ? 44 : fmt === "tsv" ? 9 : 124;
+    if (await doSaveDelimited(delim, fmt)) status.textContent = "downloaded ." + fmt;
   } catch (e) { status.textContent = `error: ${e}`; }
 }
 // The TSV we last wrote to the OS clipboard. On paste we compare the OS
@@ -6264,7 +6279,7 @@ function wireEvents() {
       commentTip.hidden = true;
     }
   });
-  window.addEventListener("mouseup", () => {
+  window.addEventListener("mouseup", (e) => {
     if (state.freezeDrag) {
       const d = state.freezeDrag;
       state.freezeDrag = null;
@@ -6952,7 +6967,10 @@ function wireEvents() {
     // A large file takes a moment to parse; say so rather than appearing to
     // have ignored the click.
     status.textContent = `opening ${file.name}…`;
-    await new Promise((r) => requestAnimationFrame(r)); // let that paint first
+    // A macrotask, not `requestAnimationFrame`: rAF does not fire in a
+    // backgrounded tab, so waiting on it here hung the open entirely whenever
+    // the window was not in front.
+    await new Promise((r) => setTimeout(r, 0));
     let bytes = new Uint8Array(await file.arrayBuffer());
     const ext = (file.name.split(".").pop() || "").toLowerCase();
     // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).

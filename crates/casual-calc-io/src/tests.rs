@@ -94,3 +94,97 @@ fn empty_input_yields_empty_sheet() {
     assert!(wb.sheets[0].cells.is_empty());
     assert_eq!(write_delimited(&wb, 0, COMMA), "");
 }
+
+#[test]
+fn leading_zeros_survive_as_text() {
+    let wb = read_delimited(b"007,0042,-0500,0,0.5,0e3", COMMA).unwrap();
+    assert_eq!(text(&wb, 0, 0), "007");
+    assert_eq!(text(&wb, 0, 1), "0042");
+    assert_eq!(text(&wb, 0, 2), "-0500");
+    // A bare zero, a fraction and an exponent are ordinary numbers.
+    assert_eq!(value(&wb, 0, 3), CellValue::Number(0.0));
+    assert_eq!(value(&wb, 0, 4), CellValue::Number(0.5));
+    assert_eq!(value(&wb, 0, 5), CellValue::Number(0.0));
+}
+
+#[test]
+fn zip_code_round_trip_is_a_fixed_point() {
+    let wb = read_delimited(b"07030\r\n", COMMA).unwrap();
+    let written = write_delimited(&wb, 0, COMMA);
+    assert_eq!(written, "07030\r\n");
+    assert_eq!(read_delimited(written.as_bytes(), COMMA).unwrap(), wb);
+}
+
+#[test]
+fn iso_dates_become_serials() {
+    let wb = read_delimited(b"2024-03-05,1900-01-01,1900-03-01,1899-12-31", COMMA).unwrap();
+    let serial = |c: u32| match value(&wb, 0, c) {
+        CellValue::Number(n) => n,
+        other => panic!("expected a serial, got {other:?}"),
+    };
+    assert_eq!(serial(0), 45356.0);
+    assert_eq!(serial(1), 1.0);
+    // 1900-02-29 does not exist, but Excel counts it, so 1900-03-01 is 61.
+    assert_eq!(serial(2), 61.0);
+    // Before the epoch there is no serial; it stays text.
+    assert_eq!(text(&wb, 0, 3), "1899-12-31");
+}
+
+#[test]
+fn iso_date_times_and_times_carry_their_format() {
+    let wb = read_delimited(
+        b"2024-03-05T10:30,2024-03-05 10:30:15,13:45,06:00:30",
+        COMMA,
+    )
+    .unwrap();
+    let fmt = |c: u32| {
+        let style = wb.sheets[0].cells.get(CellRef::new(0, c)).unwrap().style;
+        wb.styles
+            .get(style.unwrap())
+            .unwrap()
+            .number_format
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(fmt(0), "yyyy-mm-dd hh:mm");
+    assert_eq!(fmt(1), "yyyy-mm-dd hh:mm:ss");
+    assert_eq!(fmt(2), "hh:mm");
+    assert_eq!(fmt(3), "hh:mm:ss");
+    let serial = |c: u32| match value(&wb, 0, c) {
+        CellValue::Number(n) => n,
+        other => panic!("expected a serial, got {other:?}"),
+    };
+    assert!((serial(0) - 45356.4375).abs() < 1e-9);
+    assert!((serial(2) - 0.572_916_666_666).abs() < 1e-9);
+}
+
+#[test]
+fn dates_export_as_dates_not_serials() {
+    let wb = read_delimited(b"2024-03-05,2024-03-05T10:30,13:45\r\n", COMMA).unwrap();
+    let written = write_delimited(&wb, 0, COMMA);
+    // The `T` separator normalizes to a space, which is what the number format
+    // renders; both forms read back the same, so the model is still a fixed
+    // point even though the bytes are not identical.
+    assert_eq!(written, "2024-03-05,2024-03-05 10:30,13:45\r\n");
+    assert_eq!(read_delimited(written.as_bytes(), COMMA).unwrap(), wb);
+}
+
+#[test]
+fn ambiguous_and_malformed_dates_stay_text() {
+    // Locale-ambiguous, out of range, and not-quite-ISO forms all stay text
+    // rather than being guessed at.
+    let wb = read_delimited(
+        b"3/5/2024,2024-13-01,2024-02-30,2024-3-5,2024-03-05x",
+        COMMA,
+    )
+    .unwrap();
+    for c in 0..5 {
+        assert!(
+            matches!(
+                value(&wb, 0, c),
+                CellValue::SharedString(_) | CellValue::InlineString(_)
+            ),
+            "column {c} should have stayed text"
+        );
+    }
+}

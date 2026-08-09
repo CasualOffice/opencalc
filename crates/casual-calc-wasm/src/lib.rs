@@ -2468,6 +2468,43 @@ pub fn session_shift_affects_formulas(
     .unwrap_or(false)
 }
 
+/// A one-line summary of what the importer could not fully represent, or empty
+/// when the file came through clean.
+///
+/// The report has existed since the importer did; nothing surfaced it, so a
+/// lossy import looked identical to a faithful one. Anything not fully mapped is
+/// something the user is about to save over, and they should hear it now rather
+/// than discover it when the file reopens elsewhere.
+#[wasm_bindgen]
+pub fn session_import_summary() -> String {
+    with_session(|s| {
+        let report = s.compatibility_report();
+        if report.is_clean() {
+            return String::new();
+        }
+        let mut dropped: Vec<String> = Vec::new();
+        let mut degraded: Vec<String> = Vec::new();
+        for e in report.entries() {
+            match e.model {
+                casual_calc_import::ModelOutcome::Omitted => dropped.push(e.feature),
+                casual_calc_import::ModelOutcome::Degraded => degraded.push(e.feature),
+                casual_calc_import::ModelOutcome::Mapped => {}
+            }
+        }
+        let mut parts = Vec::new();
+        // Named, not counted: "3 features degraded" tells you nothing you can act
+        // on, while "f" tells you to go and look at your formulas.
+        if !dropped.is_empty() {
+            parts.push(format!("not read: {}", dropped.join(", ")));
+        }
+        if !degraded.is_empty() {
+            parts.push(format!("partly read: {}", degraded.join(", ")));
+        }
+        parts.join("; ")
+    })
+    .unwrap_or_default()
+}
+
 /// Whole-range statistics for the conditional-format rules that cannot be
 /// decided from a cell alone. Computed once per rule per `session_cells` call.
 #[derive(Default)]
@@ -2823,6 +2860,19 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
             && let Some(expr) = wb.formula(handle)
         {
             return format!("={expr}");
+        }
+        // A date cell edits as its date, not as serial 45356 — the serial is an
+        // implementation detail, and showing it means editing a date is a
+        // lookup exercise. Only date/time formats get this: Excel shows the
+        // plain number in the formula bar for currency and percentages.
+        if let CellValue::Number(n) = cell.value
+            && let Some(code) = cell
+                .style
+                .and_then(|id| wb.styles.get(id))
+                .and_then(|st| st.number_format.as_deref())
+            && casual_calc_io::is_date_format(code)
+        {
+            return casual_calc_layout::format_number(n, code);
         }
         value_text(wb, &cell.value)
     })
@@ -4394,9 +4444,6 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
                 };
                 parts.push(format!("\"va\":\"{t}\""));
             }
-            if let Some(nf) = &st.number_format {
-                parts.push(format!("\"nf\":{}", json_string(nf)));
-            }
             if let Some(fc) = &st.font_color {
                 parts.push(format!("\"fc\":{}", json_string(fc)));
             }
@@ -5370,11 +5417,48 @@ fn build_set_op(
         .and_then(|id| session.workbook().styles.get(id))
         .and_then(|st| st.number_format.as_deref())
         .is_some_and(is_text_format);
+    // An ISO date becomes a real date, keeping the same rules the importer uses
+    // so that typing a date and pasting one from a file agree. It brings its own
+    // format, since a bare serial displayed as a number is not what was typed.
+    if !text_formatted && let Some((serial, code)) = casual_calc_io::parse_iso_datetime(trimmed) {
+        // An existing date format wins — someone who set dd/mm/yyyy on the
+        // column means it, and retyping a cell should not reset the column.
+        let keep = existing_style
+            .and_then(|id| session.workbook().styles.get(id))
+            .and_then(|st| st.number_format.as_deref())
+            .is_some_and(casual_calc_io::is_date_format);
+        let style = if keep {
+            existing_style
+        } else {
+            let mut style = existing_style
+                .and_then(|id| session.workbook().styles.get(id))
+                .cloned()
+                .unwrap_or_default();
+            style.number_format = Some(code.to_owned());
+            Some(session.workbook_mut().intern_style(style))
+        };
+        let mut cell = Cell::value(CellValue::Number(serial));
+        cell.style = style;
+        return EditOperation::SetCell {
+            sheet,
+            at,
+            cell: Some(cell),
+        };
+    }
+
     let value = match trimmed.parse::<f64>() {
-        Ok(n) if !text_formatted => CellValue::Number(n),
+        Ok(n) if !text_formatted && !has_leading_zero(trimmed) => CellValue::Number(n),
         _ => CellValue::InlineString(session.workbook_mut().intern_string(trimmed)),
     };
     EditOperation::SetValue { sheet, at, value }
+}
+
+/// Whether typed input carries a padding zero (`007`), which means it is an
+/// identifier rather than a quantity and must not be flattened to a number.
+fn has_leading_zero(input: &str) -> bool {
+    let digits = input.strip_prefix(['+', '-']).unwrap_or(input);
+    let mut chars = digits.chars();
+    chars.next() == Some('0') && chars.next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// A cell's editable content: `=formula` for a formula cell, otherwise the
@@ -5525,6 +5609,38 @@ mod tests {
         assert_eq!((clip[1].sr, clip[1].dr), (2, 1));
         assert_eq!((clip[2].sr, clip[2].dr), (3, 2));
         assert_eq!(clip[1].cell.value, CellValue::Number(3.0));
+    }
+
+    /// Typing a date must produce a date, and a date cell must edit as one —
+    /// the serial is an implementation detail that should never surface.
+    #[test]
+    fn typed_dates_and_identifiers_keep_their_meaning() {
+        use super::{
+            session_cell_format, session_cell_input, session_new, session_set_cell,
+            session_set_number_format,
+        };
+        session_new();
+        session_set_cell(0, 0, 0, "2024-03-05").unwrap();
+        session_set_cell(0, 1, 0, "13:45").unwrap();
+        session_set_cell(0, 2, 0, "007").unwrap();
+        session_set_cell(0, 3, 0, "1234.5").unwrap();
+
+        // Round-trips through the formula bar as what was typed.
+        assert_eq!(session_cell_input(0, 0, 0), "2024-03-05");
+        assert_eq!(session_cell_input(0, 1, 0), "13:45");
+        // A padding zero marks an identifier, so it survives.
+        assert_eq!(session_cell_input(0, 2, 0), "007");
+        // A plain number is untouched and keeps showing as a number.
+        assert_eq!(session_cell_input(0, 3, 0), "1234.5");
+        // And the date really is a serial underneath, so arithmetic works.
+        assert!(session_cell_format(0, 0, 0).contains("\"nf\":\"yyyy-mm-dd\""));
+
+        // Retyping a date under a format the user chose keeps their format
+        // rather than resetting the cell to the ISO one.
+        session_set_number_format(0, 4, 0, 4, 0, "dd/mm/yyyy").unwrap();
+        session_set_cell(0, 4, 0, "2024-03-05").unwrap();
+        assert!(session_cell_format(0, 4, 0).contains("\"nf\":\"dd/mm/yyyy\""));
+        assert_eq!(session_cell_input(0, 4, 0), "05/03/2024");
     }
 
     // Drives the real session_* functions (thread-local SESSION/CLIP) natively
