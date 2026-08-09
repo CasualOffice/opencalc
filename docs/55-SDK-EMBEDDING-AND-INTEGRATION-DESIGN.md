@@ -97,8 +97,22 @@ below the WASM bridge, and this mirrors it.
 
 ## 3. The hard part: shipping WebAssembly into someone else's build
 
-This decides more of the design than anything else. Three delivery modes,
-because no single one works everywhere.
+This decides more of the design than anything else.
+
+**Settled constraint: the assets are served from the host's own origin.** Not
+from unpkg, not from a CDN we run, not from `node_modules` at runtime. Two
+reasons, and the second is the one that makes it non-negotiable:
+
+1. A multi-megabyte binary's cache headers should belong to whoever is paying
+   for the traffic and answering for the uptime.
+2. **A Web Worker cannot be constructed from a cross-origin URL.** If the engine
+   is ever to run off the main thread — and for a 1M-cell recalculation it
+   should, see §3d — the worker script and the wasm it instantiates have to be
+   same-origin with the page. Shipping from a CDN would foreclose that, quietly,
+   at the moment it is hardest to undo.
+
+So the question is not *whether* the host serves the assets but how little work
+that costs them. Two modes, both same-origin by construction.
 
 ### 3a. Default — resolved from the module URL
 
@@ -115,7 +129,7 @@ out:** Turbopack (Next.js's default dev bundler) does not treat `.wasm` as an
 asset the way webpack did, so `import.meta.url` resolution does not produce a
 servable file. Next.js is too common to treat as an edge case.
 
-### 3b. Explicit — the host serves the assets
+### 3b. Explicit — the host copies the assets
 
 ```js
 mount(el, { assetsUrl: "/opencalc/" });
@@ -123,8 +137,8 @@ mount(el, { assetsUrl: "/opencalc/" });
 
 The package ships a `dist/assets/` directory (wasm + fonts); the host copies it
 into `public/` — one line in `postinstall`, or a documented `cp`. This is the
-mode we recommend for Next.js and for anyone behind a CDN, because it is the
-only one where the host controls cache headers on a multi-megabyte binary.
+mode we recommend for Next.js, and the one to reach for whenever the default
+does not resolve.
 
 We provide the copy step as a bin: `npx opencalc-assets ./public/opencalc`.
 
@@ -141,7 +155,27 @@ A build variant with the wasm base64'd into the JS. It roughly quadruples parse
 cost and defeats streaming compilation, so it is **not** the default and the
 docs will say why. It exists because "it must work in a CodeSandbox with no
 config" is a real requirement for evaluation, and an evaluation that fails at
-step one never becomes an integration.
+step one never becomes an integration. Same-origin by construction, since there
+is no separate file to fetch.
+
+### 3d. Why this leaves the Web Worker open
+
+Running the engine in a worker keeps a full recalculation off the main thread,
+which is the difference between a grid that stutters on a large workbook and one
+that does not. It needs the worker script and the wasm to be same-origin — which
+§3's constraint guarantees — and it makes every engine call asynchronous.
+
+Since §5e's API is promise-returning in both transports anyway, moving the
+engine into a worker later does **not** change the public surface. That is the
+argument for settling the origin question now and the worker question when the
+performance work demands it: one is a door that closes, the other is not.
+
+What a worker *does* change is how the canvas gets its data. Today the editor
+asks the engine for the visible cells and paints them synchronously inside one
+frame. Across a worker that becomes a round trip, so either the paint waits (a
+frame behind) or the host keeps a small cache of the visible window and
+reconciles. That is a real design job, not a flag, and it belongs to the
+performance increment rather than to this one.
 
 ### Fonts
 
@@ -389,7 +423,54 @@ parallel one, so there is one place where "this edit is not allowed" is decided.
 fewer concept — with `preview` as a documented preset that expands to exactly
 that.
 
-### 5g. Extension points
+### 5g. Localization
+
+Two injection points, because they serve two different people.
+
+**The host supplies it**, for a product that already knows its user's language:
+
+```js
+mount(el, {
+  ui: {
+    locale: "de-DE",
+    // Override or extend the bundled strings. A host with its own glossary
+    // ("Arbeitsmappe" vs "Datei") must be able to match it.
+    messages: { "command.file.save": "Speichern", … },
+  },
+});
+```
+
+**The user chooses it**, from a picker in the footer — next to the sheet tabs and
+the `Ready`/`Calculate` indicator, which is where a status-bar language control
+belongs and where LibreOffice and Google Sheets both put theirs. Off by default,
+because most hosts drive it from their own account settings and a second
+language control that disagrees with the first is worse than none:
+
+```js
+ui: { chrome: { localePicker: true }, locales: ["en-US", "de-DE", "hi-IN"] }
+```
+
+Three things are localizable and they are not the same job:
+
+| | What | Where it lives |
+| --- | --- | --- |
+| UI strings | menus, panels, messages | a JSON message catalogue per locale, lazily fetched from `assetsUrl` so a host ships one language or twenty |
+| Number and date **display** | `1.234,56`, `31.12.2026` | the layout crate's number-format engine, which already resolves month and day names per the format's own language |
+| Function names and argument separators | `SUMME` vs `SUM`, `;` vs `,` | **out of scope, deliberately** — see below |
+
+Excel localizes function names in the UI while storing the English ones in the
+file. Doing that halfway is worse than not doing it: a user who types `SUMME`
+and gets `#NAME?` learns the feature is broken, and a file that stores a
+localized name is unreadable everywhere else. It is a whole increment (a
+per-locale name table, a parser that accepts both, a printer that emits the
+user's language and a writer that emits English) and it should be one, not a
+side effect of shipping a message catalogue.
+
+`ui.locale` also drives `dir="rtl"` for Arabic and Hebrew, which the grid has to
+honour in cell alignment and in the column order — another reason it is engine
+configuration and not a stylesheet.
+
+### 5h. Extension points
 
 - `registerFunction(name, arity, fn)` — a host's own worksheet function. Needs a
   decision: a JS callback means the engine is no longer deterministic or
@@ -397,7 +478,6 @@ that.
   allow it, mark any workbook using one as *host-extended* in the compatibility
   report, and refuse to treat such a recalculation as reproducible.
 - `registerCommand(id, handler)` — put a host action in our menus.
-- `locale` — number/date formatting and UI strings.
 
 **Open question (5):** custom functions vs determinism. I lean toward shipping
 it with the caveat recorded in the report, because every competitor has it and
@@ -562,19 +642,39 @@ fixed-position overlays, and `100vh` measuring the window inside a shadow root.
 
 ---
 
-## 11. Decisions needed
+## 11. Settled, so it is not re-litigated
 
-1. CDN single-file build, or bundler-only?
+- **Telemetry: out of scope for the SDK.** It belongs only to a server-hosted
+  co-editing deployment, which is a different product with a different consent
+  story. Nothing in the embed phones home.
+- **Luckysheet: not researched, and does not need to be.** It became Univer,
+  which is in §1.
+- **Assets are same-origin.** §3, and the reason is the worker in §3d.
+
+---
+
+---
+
+## 12. Decisions needed
+
+1. ~~CDN single-file build, or bundler-only?~~ **Answered: no CDN.** Assets are
+   same-origin with the host, because a Web Worker cannot be built from a
+   cross-origin URL and shipping from a CDN would foreclose the worker before
+   we get to choose. §3.
 2. Both transports, or pick one?
 3. Rename the theme tokens to typed names now?
 4. One change event per operation-with-range, rather than per cell?
 5. Custom JS functions, given they break replayable determinism?
-6. Cross-origin iframe deployment in scope?
+6. ~~Cross-origin iframe deployment in scope?~~ **Answered: no.** A cross-origin
+   frame means *we* host it, which is the thing §3 rules out. The iframe
+   transport, if built, is served from the host's own origin like everything
+   else — so it is an isolation boundary, not a hosting model.
 7. Is `preview` a mode, or a preset over `readOnly` + no chrome?
-8. **Should the engine run in a Web Worker?** Not covered above and it is a real
-   axis: it would keep a 1M-cell recalculation off the main thread and stop the
-   grid freezing, but it makes *every* call async even in the shadow mount and
-   changes how the canvas gets its data. It interacts with the transport
-   decision, so it should be settled alongside §4 rather than after.
+8. **Web Worker: now or later?** Same-origin assets (§3) keep the door open, and
+   the promise-returning API means moving the engine into a worker does not
+   change the public surface. The open part is *when*: it changes how the canvas
+   gets its visible cells, which is a design job rather than a flag. §3d argues
+   for later, with the performance increment. Confirm.
+9. Localized **function names** (`SUMME`) — out of scope for now, per §5g?
 
-Nothing below §10 gets built until these are answered.
+Nothing beyond the prototype in §10 gets built until these are answered.
