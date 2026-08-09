@@ -259,6 +259,24 @@ pub struct Style {
     /// `font/@charset` — the legacy character-set id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_charset: Option<u32>,
+    /// `outline` — the legacy Mac outlined-text effect.
+    ///
+    /// This and its three companions are effects Excel for Mac once offered and
+    /// no current version exposes. They are modelled anyway because a file that
+    /// carries one is usually old and irreplaceable, and dropping it is the
+    /// same silent edit as dropping any other formatting.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub font_outline: bool,
+    /// `shadow` — the legacy shadowed-text effect.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub font_shadow: bool,
+    /// `condense` — legacy tightened letter spacing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub font_condense: bool,
+    /// `extend` — legacy widened letter spacing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub font_extend: bool,
+
     /// Font family name (e.g. `Calibri`, `Arial`), if specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_name: Option<String>,
@@ -404,6 +422,10 @@ impl Style {
             && self.font_family.is_none()
             && self.font_scheme.is_none()
             && self.font_charset.is_none()
+            && !self.font_outline
+            && !self.font_shadow
+            && !self.font_condense
+            && !self.font_extend
             && self.font_name.is_none()
             && self.font_size_hp.is_none()
             && self.font_color.is_none()
@@ -626,6 +648,23 @@ pub struct RunFont {
     /// `charset` — the legacy character-set id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charset: Option<u32>,
+    /// `outline` — the legacy Mac outlined-text effect.
+    ///
+    /// This and its three companions are effects Excel for Mac once offered and
+    /// no current version exposes. They are modelled anyway because a file that
+    /// carries one is usually old and irreplaceable, and dropping it is the
+    /// same silent edit as dropping any other formatting.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub outline: bool,
+    /// `shadow` — the legacy shadowed-text effect.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shadow: bool,
+    /// `condense` — legacy tightened letter spacing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub condense: bool,
+    /// `extend` — legacy widened letter spacing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub extend: bool,
 }
 
 impl RunFont {

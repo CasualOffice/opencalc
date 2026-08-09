@@ -1757,3 +1757,72 @@ fn tables_round_trip_with_their_columns_and_style() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].tables, wb.sheets[0].tables);
 }
+
+#[test]
+fn legacy_font_effects_round_trip_on_fonts_and_runs() {
+    use casual_calc_model::{CellRef, CellValue, RunFont, Style, TextRun};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let id = wb.intern_style(Style {
+        font_outline: true,
+        font_shadow: true,
+        font_condense: true,
+        font_extend: true,
+        ..Style::default()
+    });
+    let at = CellRef::new(0, 0);
+    let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+    cell.style = Some(id);
+    wb.sheets[0].cells.set(at, cell);
+
+    let runs = vec![TextRun {
+        text: "old".to_owned(),
+        font: Some(RunFont {
+            outline: true,
+            shadow: true,
+            ..RunFont::default()
+        }),
+    }];
+    let sid = wb.intern_rich_text(runs.clone());
+    let at2 = CellRef::new(1, 0);
+    let mut cell2 = wb.sheets[0].cells.get(at2).cloned().unwrap();
+    cell2.value = CellValue::SharedString(sid);
+    wb.sheets[0].cells.set(at2, cell2);
+
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    let st = back
+        .styles
+        .get(back.sheets[0].cells.get(at).unwrap().style.unwrap())
+        .unwrap();
+    // No current Excel exposes these, but a file carrying one is usually old
+    // and irreplaceable; dropping it is the same silent edit as dropping any
+    // other formatting.
+    assert!(st.font_outline && st.font_shadow && st.font_condense && st.font_extend);
+    let back_sid = match back.sheets[0].cells.get(at2).unwrap().value {
+        CellValue::SharedString(id) | CellValue::InlineString(id) => id,
+        ref other => panic!("expected a string, got {other:?}"),
+    };
+    assert_eq!(back.strings.runs(back_sid), Some(runs.as_slice()));
+}
+
+#[test]
+fn two_fonts_differing_only_in_a_legacy_effect_stay_distinct() {
+    use casual_calc_model::Style;
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    // The dedup key is a struct precisely so adding a property and forgetting
+    // the key cannot silently merge two different fonts.
+    let plain = wb.intern_style(Style {
+        bold: true,
+        ..Style::default()
+    });
+    let shadowed = wb.intern_style(Style {
+        bold: true,
+        font_shadow: true,
+        ..Style::default()
+    });
+    assert_ne!(plain, shadowed);
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert_eq!(styles.matches("<shadow/>").count(), 1);
+}

@@ -810,6 +810,16 @@ fn run_font_xml(font: &RunFont) -> String {
     if font.strike {
         s.push_str("<strike/>");
     }
+    for (on, tag) in [
+        (font.outline, "outline"),
+        (font.shadow, "shadow"),
+        (font.condense, "condense"),
+        (font.extend, "extend"),
+    ] {
+        if on {
+            s.push_str(&format!("<{tag}/>"));
+        }
+    }
     if let Some(u) = font.underline {
         s.push_str(&format!("<u val=\"{}\"/>", u.ooxml()));
     }
@@ -932,9 +942,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
     // Font key: (bold, italic, underline, strike, color, name, size_hp).
-    let mut fonts: Vec<FontKey> = vec![(
-        false, false, None, false, None, None, None, None, None, None, None, None,
-    )];
+    let mut fonts: Vec<FontKey> = vec![FontKey::default()];
     let mut fills: Vec<FillKey> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
@@ -942,20 +950,24 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     let mut per_style: Vec<StyleIds> = Vec::with_capacity(styles.len());
 
     let mut intern = |style: &Style| {
-        let font_key = (
-            style.bold,
-            style.italic,
-            style.underline,
-            style.strike,
-            style.vert_align,
-            style.font_color.clone(),
-            style.font_theme,
-            style.font_name.clone(),
-            style.font_size_hp,
-            style.font_family,
-            style.font_scheme.clone(),
-            style.font_charset,
-        );
+        let font_key = FontKey {
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            strike: style.strike,
+            vert_align: style.vert_align,
+            color: style.font_color.clone(),
+            color_theme: style.font_theme,
+            name: style.font_name.clone(),
+            size_hp: style.font_size_hp,
+            family: style.font_family,
+            scheme: style.font_scheme.clone(),
+            charset: style.font_charset,
+            outline: style.font_outline,
+            shadow: style.font_shadow,
+            condense: style.font_condense,
+            extend: style.font_extend,
+        };
         let font_id = fonts
             .iter()
             .position(|f| f == &font_key)
@@ -1053,57 +1065,53 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (
-        bold,
-        italic,
-        underline,
-        strike,
-        vert_align,
-        color,
-        color_theme,
-        name,
-        size_hp,
-        family,
-        scheme,
-        charset,
-    ) in &fonts
-    {
+    for font in &fonts {
         s.push_str("<font>");
-        if *bold {
+        if font.bold {
             s.push_str("<b/>");
         }
-        if *italic {
+        if font.italic {
             s.push_str("<i/>");
         }
-        if let Some(u) = underline {
+        if let Some(u) = font.underline {
             s.push_str(&format!("<u val=\"{}\"/>", u.ooxml()));
         }
-        if *strike {
+        if font.strike {
             s.push_str("<strike/>");
         }
-        if let Some(v) = vert_align {
+        for (on, tag) in [
+            (font.outline, "outline"),
+            (font.shadow, "shadow"),
+            (font.condense, "condense"),
+            (font.extend, "extend"),
+        ] {
+            if on {
+                s.push_str(&format!("<{tag}/>"));
+            }
+        }
+        if let Some(v) = font.vert_align {
             s.push_str(&format!("<vertAlign val=\"{}\"/>", v.ooxml()));
         }
-        if let Some(f) = family {
+        if let Some(f) = font.family {
             s.push_str(&format!("<family val=\"{f}\"/>"));
         }
-        if let Some(c) = charset {
+        if let Some(c) = font.charset {
             s.push_str(&format!("<charset val=\"{c}\"/>"));
         }
-        if let Some(sc) = scheme {
+        if let Some(sc) = &font.scheme {
             s.push_str(&format!("<scheme val=\"{}\"/>", escape_attr(sc)));
         }
-        if let Some(c) = color {
-            s.push_str(&color_element("color", c, color_theme.as_ref()));
+        if let Some(c) = &font.color {
+            s.push_str(&color_element("color", c, font.color_theme.as_ref()));
         }
         // Default font is Calibri 11pt (22 half-points) when unset.
         s.push_str(&format!(
             "<sz val=\"{}\"/>",
-            fmt_half_points(size_hp.unwrap_or(22))
+            fmt_half_points(font.size_hp.unwrap_or(22))
         ));
         s.push_str(&format!(
             "<name val=\"{}\"/>",
-            escape_attr(name.as_deref().unwrap_or("Calibri"))
+            escape_attr(font.name.as_deref().unwrap_or("Calibri"))
         ));
         s.push_str("</font>");
     }
@@ -1202,25 +1210,33 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
 
 /// A deduplication key for a `<font>`: (bold, italic, underline, strike, color,
 /// name, size in half-points).
-/// bold, italic, underline, strike, colour, its theme link, name, size.
+/// Everything that distinguishes one `<font>` from another.
 ///
-/// The theme link is part of the key: two cells with the same resolved colour
-/// but different provenance are different fonts, and merging them would silently
-/// unlink one of them from the theme.
-type FontKey = (
-    bool,
-    bool,
-    Option<Underline>,
-    bool,
-    Option<VertAlign>,
-    Option<String>,
-    Option<ThemeTint>,
-    Option<String>,
-    Option<u32>,
-    Option<u32>,
-    Option<String>,
-    Option<u32>,
-);
+/// A struct rather than a tuple: a font has sixteen distinguishing properties
+/// and Rust derives the comparison traits for tuples only up to twelve, so the
+/// tuple form stopped compiling the moment the legacy effects were added. The
+/// named fields are also what keeps the dedup key and the writer in step —
+/// with a tuple, adding a property and forgetting the key silently merges two
+/// different fonts.
+#[derive(Clone, Default, PartialEq)]
+struct FontKey {
+    bold: bool,
+    italic: bool,
+    underline: Option<Underline>,
+    strike: bool,
+    vert_align: Option<VertAlign>,
+    color: Option<String>,
+    color_theme: Option<ThemeTint>,
+    name: Option<String>,
+    size_hp: Option<u32>,
+    family: Option<u32>,
+    scheme: Option<String>,
+    charset: Option<u32>,
+    outline: bool,
+    shadow: bool,
+    condense: bool,
+    extend: bool,
+}
 
 /// Everything that distinguishes one `<fill>` from another.
 ///

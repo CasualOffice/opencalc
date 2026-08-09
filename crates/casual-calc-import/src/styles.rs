@@ -38,6 +38,10 @@ struct Font {
     bold: bool,
     italic: bool,
     underline: Option<Underline>,
+    outline: bool,
+    shadow: bool,
+    condense: bool,
+    extend: bool,
     vert_align: Option<VertAlign>,
     family: Option<u32>,
     scheme: Option<String>,
@@ -314,6 +318,26 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             f.color_theme = slot;
                         }
                     }
+                    b"outline" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.outline = toggle_on(e)?;
+                        }
+                    }
+                    b"shadow" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.shadow = toggle_on(e)?;
+                        }
+                    }
+                    b"condense" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.condense = toggle_on(e)?;
+                        }
+                    }
+                    b"extend" if in_fonts => {
+                        if let Some(f) = fonts.last_mut() {
+                            f.extend = toggle_on(e)?;
+                        }
+                    }
                     b"vertAlign" if in_fonts => {
                         if let Some(f) = fonts.last_mut() {
                             f.vert_align =
@@ -521,6 +545,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             font_family: font.family,
             font_scheme: font.scheme.clone(),
             font_charset: font.charset,
+            font_outline: font.outline,
+            font_shadow: font.shadow,
+            font_condense: font.condense,
+            font_extend: font.extend,
             strike: font.strike,
             // No SpreadsheetML attribute maps to clip; Excel always spills.
             clip: false,

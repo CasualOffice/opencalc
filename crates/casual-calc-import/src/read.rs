@@ -202,6 +202,10 @@ fn read_rpr_child(e: &BytesStart<'_>, font: &mut RunFont) -> Result<(), ImportEr
         b"b" => font.bold = on(e)?,
         b"i" => font.italic = on(e)?,
         b"strike" => font.strike = on(e)?,
+        b"outline" => font.outline = on(e)?,
+        b"shadow" => font.shadow = on(e)?,
+        b"condense" => font.condense = on(e)?,
+        b"extend" => font.extend = on(e)?,
         b"u" => font.underline = Underline::from_ooxml(&read_attr(e, b"val")?.unwrap_or_default()),
         b"vertAlign" => {
             font.vert_align = VertAlign::from_ooxml(&read_attr(e, b"val")?.unwrap_or_default())
