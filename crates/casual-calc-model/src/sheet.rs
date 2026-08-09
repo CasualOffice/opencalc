@@ -235,6 +235,13 @@ pub struct Sheet {
     /// Tables (ListObjects) defined on this sheet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
+    /// Pivot tables whose output block sits on this sheet.
+    ///
+    /// The *source* records may be on another sheet — usually are — which is
+    /// why [`crate::PivotTable`] names its own source sheet rather than
+    /// inheriting this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pivots: Vec<crate::pivot::PivotTable>,
     /// Worksheet elements that name a retained part — `<drawing r:id=…>`,
     /// `<oleObjects>`, `<controls>`, `<picture>`. Kept for the same reason the
     /// workbook keeps `<externalReference>`: the part alone is invisible unless
@@ -1178,6 +1185,7 @@ impl Sheet {
             hyperlinks: Vec::new(),
             print: PrintSetup::default(),
             tables: Vec::new(),
+            pivots: Vec::new(),
             charts: Vec::new(),
             images: Vec::new(),
             sort_state: None,

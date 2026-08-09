@@ -1362,8 +1362,19 @@ pub fn parse_retained_refs(xml: &[u8]) -> Result<Vec<RetainedRef>, ImportError> 
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
             Event::Start(e) | Event::Empty(e) => {
                 bounds.count()?;
-                if e.local_name().as_ref() == b"externalReference" {
-                    out.push(("externalReference".to_owned(), read_attrs(&e)?));
+                match e.local_name().as_ref() {
+                    b"externalReference" => {
+                        out.push(("externalReference".to_owned(), read_attrs(&e)?));
+                    }
+                    // `<pivotCache cacheId r:id>` is what ties a pivot table's
+                    // `cacheId` to the cache part. Dropping it left the parts
+                    // and the relationship in the package with nothing
+                    // declaring them, and Excel reports that as a file needing
+                    // repair rather than as a missing pivot.
+                    b"pivotCache" => {
+                        out.push(("pivotCache".to_owned(), read_attrs(&e)?));
+                    }
+                    _ => {}
                 }
             }
             Event::Eof => break,

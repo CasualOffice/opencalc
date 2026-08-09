@@ -17,6 +17,7 @@ mod chart;
 mod defined_name;
 mod error;
 mod ids;
+mod pivot;
 mod sheet;
 mod store;
 mod strings;
@@ -30,6 +31,9 @@ pub use defined_name::DefinedName;
 pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
+};
+pub use pivot::{
+    PivotAggregate, PivotAxisField, PivotFilterField, PivotSort, PivotTable, PivotValueField,
 };
 pub use sheet::{
     AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat, CustomFilter,

@@ -621,3 +621,103 @@ fn childless_elements_are_handled_in_the_empty_dispatch() {
          one is silently ignored: {missing:?}"
     );
 }
+
+/// A two-sheet package with a real pivot: data on `Data`, the report on
+/// `Report`, and the four parts Excel writes to tie them together.
+///
+/// Hand-built rather than a fixture because the point is the *shape* — which
+/// part names which, and by what indirection — and a fixture hides exactly that.
+fn pivot_package() -> Vec<u8> {
+    const WORKBOOK: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets><pivotCaches><pivotCache cacheId="7" r:id="rId3"/></pivotCaches></workbook>"#;
+    const WORKBOOK_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition1.xml"/></Relationships>"#;
+    const SHEET2_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#;
+    const PIVOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/></Relationships>"#;
+    const CACHE: &[u8] = br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" recordCount="3"><cacheSource type="worksheet"><worksheetSource ref="A1:C4" sheet="Data"/></cacheSource><cacheFields count="3"><cacheField name="Region"><sharedItems><s v="East"/><s v="West"/></sharedItems></cacheField><cacheField name="Product"><sharedItems><s v="Gadget"/><s v="Widget"/></sharedItems></cacheField><cacheField name="Amount"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"/></cacheField></cacheFields></pivotCacheDefinition>"#;
+    const PIVOT: &[u8] = br#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Sales" cacheId="7" colGrandTotals="0"><location ref="A3:C6" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/><pivotFields count="3"><pivotField axis="axisRow" showAll="0" defaultSubtotal="0"/><pivotField axis="axisPage" showAll="0"/><pivotField dataField="1" showAll="0"/></pivotFields><rowFields count="1"><field x="0"/></rowFields><pageFields count="1"><pageField fld="1" item="1" hier="-1"/></pageFields><dataFields count="1"><dataField name="Total" fld="2" subtotal="average" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1"/></pivotTableDefinition>"#;
+
+    let data = sheet_with(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Product</t></is></c><c r="C1" t="inlineStr"><is><t>Amount</t></is></c></row>
+           <row r="2"><c r="A2" t="inlineStr"><is><t>East</t></is></c><c r="B2" t="inlineStr"><is><t>Widget</t></is></c><c r="C2"><v>10</v></c></row>
+           <row r="3"><c r="A3" t="inlineStr"><is><t>West</t></is></c><c r="B3" t="inlineStr"><is><t>Widget</t></is></c><c r="C3"><v>30</v></c></row>
+           <row r="4"><c r="A4" t="inlineStr"><is><t>East</t></is></c><c r="B4" t="inlineStr"><is><t>Gadget</t></is></c><c r="C4"><v>99</v></c></row>"#,
+    );
+    let report = sheet_with("");
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &data),
+        ("xl/worksheets/sheet2.xml", &report),
+        ("xl/worksheets/_rels/sheet2.xml.rels", SHEET2_RELS),
+        ("xl/pivotTables/pivotTable1.xml", PIVOT),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", PIVOT_RELS),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", CACHE),
+    ])
+}
+
+#[test]
+fn a_pivot_is_read_into_the_model_with_its_fields_resolved() {
+    let import = import_package(pivot_package()).unwrap();
+    let wb = &import.workbook;
+    assert!(wb.sheets[0].pivots.is_empty(), "the data sheet has none");
+    let pivot = &wb.sheets[1].pivots[0];
+
+    assert_eq!(pivot.name, "Sales");
+    // The cache says where the records are; the pivot part never does.
+    assert_eq!(pivot.source_sheet, wb.sheets[0].id);
+    assert_eq!(
+        pivot.source,
+        casual_calc_model::CellRange::new(CellRef::new(0, 0), CellRef::new(3, 2))
+    );
+    assert_eq!(pivot.anchor, CellRef::new(2, 0), "from <location ref>");
+
+    // `<rowFields><field x="0"/>` gives the nesting order, and the matching
+    // `<pivotField defaultSubtotal="0">` gives the flag — reading only one of
+    // the two loses either the order or the setting.
+    assert_eq!(pivot.rows.len(), 1);
+    assert_eq!(pivot.rows[0].source_column, 0);
+    assert!(!pivot.rows[0].subtotal);
+    assert!(pivot.cols.is_empty());
+
+    // A page field's `item` is an index into that cache field's shared items,
+    // so resolving it needs the cache as well.
+    assert_eq!(pivot.filters.len(), 1);
+    assert_eq!(pivot.filters[0].source_column, 1);
+    assert_eq!(pivot.filters[0].selected, vec!["Widget".to_owned()]);
+
+    assert_eq!(pivot.values.len(), 1);
+    assert_eq!(pivot.values[0].source_column, 2);
+    assert_eq!(pivot.values[0].name, "Total");
+    assert_eq!(
+        pivot.values[0].aggregate,
+        casual_calc_model::PivotAggregate::Average
+    );
+
+    assert!(pivot.row_grand_totals, "the schema default is on");
+    assert!(!pivot.col_grand_totals, "and this one was turned off");
+    assert_eq!(pivot.style, "PivotStyleLight16");
+    assert_eq!(
+        pivot.part.as_deref(),
+        Some("xl/pivotTables/pivotTable1.xml"),
+        "still written back from its own bytes until it is edited"
+    );
+    // The block Excel already wrote, so the first refresh clears exactly it.
+    assert_eq!(pivot.output.map(|r| r.end), Some(CellRef::new(5, 2)));
+}
+
+#[test]
+fn the_pivot_cache_declaration_survives_the_round_trip() {
+    // `<pivotCaches>` is what binds a pivot table's `cacheId` to the cache
+    // part. It was being dropped: the parts and the relationship were all
+    // retained, with nothing left in workbook.xml declaring them, which Excel
+    // reports as a file needing repair rather than as a missing pivot.
+    let import = import_package(pivot_package()).unwrap();
+    let refs = &import.workbook.retained_refs;
+    assert!(
+        refs.iter().any(|(name, attrs)| name == "pivotCache"
+            && attrs.get("cacheId").map(String::as_str) == Some("7")
+            && attrs.get("id").map(String::as_str) == Some("rId3")),
+        "{refs:?}"
+    );
+}

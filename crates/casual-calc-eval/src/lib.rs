@@ -26,6 +26,7 @@
 mod eval;
 mod functions;
 mod graph;
+pub mod pivot;
 mod ranges;
 
 pub use graph::{dependents_of, precedents_of};
@@ -259,5 +260,7 @@ fn value_to_cell(workbook: &mut Workbook, value: Value) -> CellValue {
     }
 }
 
+#[cfg(test)]
+mod pivot_tests;
 #[cfg(test)]
 mod tests;

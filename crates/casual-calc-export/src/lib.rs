@@ -673,19 +673,13 @@ fn workbook_xml(workbook: &Workbook) -> String {
         ));
     }
     s.push_str("</sheets>");
-    // `<externalReferences>` follows `<sheets>` in CT_Workbook's sequence.
-    if !workbook.retained_refs.is_empty() {
-        s.push_str("<externalReferences>");
-        for (name, attrs) in &workbook.retained_refs {
-            s.push_str(&format!("<{name}"));
-            for (k, v) in attrs {
-                let key = if k == "id" { "r:id" } else { k.as_str() };
-                s.push_str(&format!(" {key}=\"{}\"", escape_attr(v)));
-            }
-            s.push_str("/>");
-        }
-        s.push_str("</externalReferences>");
-    }
+    // `<externalReferences>` follows `<sheets>` in CT_Workbook's sequence;
+    // `<pivotCaches>` comes after `<calcPr>`, so the two kinds of retained
+    // reference are written in different places and each needs its own
+    // synthesized wrapper. Writing a `<pivotCache>` inside `<externalReferences>`
+    // is not a stylistic slip — the sequence is validated, and Excel refuses
+    // the package rather than ignoring the stray child.
+    write_retained_refs(&mut s, workbook, "externalReference", "externalReferences");
     if !workbook.defined_names.is_empty() {
         s.push_str("<definedNames>");
         for name in &workbook.defined_names {
@@ -702,10 +696,37 @@ fn workbook_xml(workbook: &Workbook) -> String {
         }
         s.push_str("</definedNames>");
     }
-    // `<calcPr>` closes the sequence, after `<definedNames>`.
     write_attr_element(&mut s, "calcPr", &workbook.settings.calc);
+    write_retained_refs(&mut s, workbook, "pivotCache", "pivotCaches");
     s.push_str("</workbook>");
     s
+}
+
+/// Write the retained references of one element name inside their wrapper,
+/// which is synthesized because it carries nothing itself and so was never
+/// read.
+fn write_retained_refs(s: &mut String, workbook: &Workbook, element: &str, wrapper: &str) {
+    let refs: Vec<_> = workbook
+        .retained_refs
+        .iter()
+        .filter(|(name, _)| name == element)
+        .collect();
+    if refs.is_empty() {
+        return;
+    }
+    s.push_str(&format!("<{wrapper}>"));
+    for (name, attrs) in refs {
+        s.push_str(&format!("<{name}"));
+        for (k, v) in attrs {
+            // `r:id` collapses to the local name `id` on the way in, since the
+            // reader strips namespace prefixes; it has to be restored or the
+            // reference names an attribute nothing defines.
+            let key = if k == "id" { "r:id" } else { k.as_str() };
+            s.push_str(&format!(" {key}=\"{}\"", escape_attr(v)));
+        }
+        s.push_str("/>");
+    }
+    s.push_str(&format!("</{wrapper}>"));
 }
 
 fn workbook_rels(

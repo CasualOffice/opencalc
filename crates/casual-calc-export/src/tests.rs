@@ -2314,3 +2314,57 @@ fn an_image_is_located_without_copying_its_bytes() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].images, wb.sheets[0].images);
 }
+
+#[test]
+fn a_pivot_cache_is_declared_after_calc_pr_not_among_the_external_references() {
+    // Two retained references of different element names, which CT_Workbook
+    // puts in two different places: `<externalReferences>` right after
+    // `<sheets>`, `<pivotCaches>` after `<calcPr>`. Writing both into one
+    // wrapper is not a cosmetic slip — the sequence is validated, and Excel
+    // refuses the package rather than ignoring the stray child.
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+              <calcPr calcId="191029"/>
+              <pivotCaches><pivotCache cacheId="41" r:id="rId9"/></pivotCaches>
+            </workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+              <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition1.xml"/>
+            </Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+        (
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B2" sheet="Sheet1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let written = write_workbook(&wb).unwrap();
+    let xml = xml_of(&written, "xl/workbook.xml");
+
+    assert!(
+        xml.contains("<pivotCaches><pivotCache cacheId=\"41\" r:id=\"rId9\"/></pivotCaches>"),
+        "{xml}"
+    );
+    assert!(!xml.contains("<externalReferences>"), "{xml}");
+    let calc = xml.find("<calcPr").expect("calcPr");
+    let caches = xml.find("<pivotCaches>").expect("pivotCaches");
+    assert!(calc < caches, "pivotCaches must follow calcPr: {xml}");
+
+    // And it comes back the same, so a second save is not a second edit.
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_refs, wb.retained_refs);
+}

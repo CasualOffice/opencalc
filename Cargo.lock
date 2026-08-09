@@ -209,6 +209,8 @@ dependencies = [
  "casual-calc-model",
  "casual-calc-render",
  "casual-calc-sdk",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
 ]
 

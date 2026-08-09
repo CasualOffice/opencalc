@@ -16,6 +16,7 @@
 mod a1;
 mod chart;
 mod error;
+mod pivot;
 mod read;
 mod report;
 mod styles;
@@ -144,6 +145,110 @@ fn retain_unmodelled(
         .sort_by(|a, b| (&a.source, &a.id).cmp(&(&b.source, &b.id)));
     workbook.retained_rels.dedup();
     Ok(())
+}
+
+/// A worksheet's pivot table.
+const PIVOT_TABLE_REL_SUFFIX: &str = "/pivotTable";
+/// A pivot table's cache, one hop further out.
+const PIVOT_CACHE_REL_SUFFIX: &str = "/pivotCacheDefinition";
+
+/// Read every sheet's pivot tables into the model.
+///
+/// The parts stay retained either way: this makes an imported pivot live —
+/// listed, reconfigurable, refreshable — without changing what is written back
+/// until the user edits it. A pivot that fails to resolve is skipped in
+/// silence for the same reason a chart is: the part is still there and still
+/// written, so the cost is a pivot the panel does not list, not a lost one.
+fn read_pivots(
+    package: &mut SpreadsheetPackage,
+    workbook: &mut Workbook,
+    report: &mut CompatibilityReport,
+) -> Result<(), ImportError> {
+    let limits = OoxmlLimits::default();
+    let sheet_parts: Vec<String> = package.sheets().iter().map(|s| s.part.clone()).collect();
+    let mut next_id = 1u32;
+
+    for (index, part) in sheet_parts.iter().enumerate() {
+        let rels: Vec<_> = package
+            .relationships_of(part, &limits)?
+            .into_iter()
+            .filter(|r| !r.external && r.rel_type.ends_with(PIVOT_TABLE_REL_SUFFIX))
+            .collect();
+        for rel in rels {
+            let target = resolve_part(part, &rel.target);
+            if !package.contains(&target) {
+                continue;
+            }
+            let spec = pivot::parse_pivot_table(&package.read_part(&target)?)?;
+            let cache = match package.related_part(&target, PIVOT_CACHE_REL_SUFFIX, &limits)? {
+                Some(cache_part) if package.contains(&cache_part) => {
+                    pivot::parse_pivot_cache(&package.read_part(&cache_part)?)?
+                }
+                // Without the cache the field indices name nothing, so there is
+                // no definition to reconstruct — only a preserved part.
+                _ => {
+                    report.record(
+                        "pivotTable",
+                        ModelOutcome::Degraded,
+                        RetentionOutcome::Preserved,
+                    );
+                    continue;
+                }
+            };
+
+            let Some((source_sheet, source)) = resolve_pivot_source(workbook, &cache) else {
+                report.record(
+                    "pivotTable",
+                    ModelOutcome::Degraded,
+                    RetentionOutcome::Preserved,
+                );
+                continue;
+            };
+            workbook.sheets[index].pivots.push(pivot::to_model(
+                &spec,
+                &cache,
+                next_id,
+                source_sheet,
+                source,
+                target,
+            ));
+            next_id += 1;
+            report.record(
+                "pivotTable",
+                ModelOutcome::Mapped,
+                RetentionOutcome::Preserved,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Where a cache's records live: a sheet and a rectangle.
+///
+/// `<worksheetSource>` names them either directly (`sheet` + `ref`) or through
+/// a `name`, which is a table or a defined name. Both forms are common — Excel
+/// writes the second whenever the pivot was built from a table — so resolving
+/// only the first would leave every table-sourced pivot unreadable.
+fn resolve_pivot_source(
+    workbook: &Workbook,
+    cache: &pivot::CacheSpec,
+) -> Option<(casual_calc_model::SheetId, casual_calc_model::CellRange)> {
+    if let Some(name) = &cache.name {
+        for sheet in &workbook.sheets {
+            if let Some(table) = sheet.tables.iter().find(|t| &t.name == name) {
+                // Only the header and body: a totals row is a summary of the
+                // records, not one of them, and aggregating it would double
+                // every figure.
+                let mut range = table.range;
+                range.end.row = range.end.row.saturating_sub(table.totals_row_count);
+                return Some((sheet.id, range));
+            }
+        }
+    }
+    let range = cache.range?;
+    let sheet_name = cache.sheet.as_deref()?;
+    let sheet = workbook.sheets.iter().find(|s| s.name == sheet_name)?;
+    Some((sheet.id, range))
 }
 
 /// Relationship types `import_package` already turns into model state.
@@ -879,6 +984,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         });
         report.record("definedName", outcome.0, outcome.1);
     }
+
+    // Pivots last: resolving one needs the sheet ids, and a cache whose source
+    // is a table needs that table already read.
+    read_pivots(&mut package, &mut workbook, &mut report)?;
 
     workbook.validate()?;
     Ok(Import { workbook, report })

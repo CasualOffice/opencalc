@@ -25,8 +25,9 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Hyperlink, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, Table,
-    ThemeTint, Underline, VAlign, VertAlign, Workbook,
+    FilterRule, HAlign, Hyperlink, Id, PivotAggregate, PivotAxisField, PivotFilterField, PivotSort,
+    PivotTable, PivotValueField, Sheet, SheetId, SheetVisibility, Style, StyleId, Table, ThemeTint,
+    Underline, VAlign, VertAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -1997,6 +1998,611 @@ pub fn session_tables(sheet: usize) -> String {
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Pivot tables.
+//
+// The wire shape is deliberately its own type rather than the model's. Fields
+// travel as *offsets into the source range* on both sides, which is what the
+// model stores; sheets travel as indices, because that is what the host knows.
+// Serialising `PivotTable` directly would put a 32-hex-character `SheetId` in
+// front of the UI and make every panel translate it back.
+// ---------------------------------------------------------------------------
+
+/// A pivot's definition as the host sees it.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PivotWire {
+    /// Its position in the sheet's pivot list — the handle every other call
+    /// takes. Ignored on the way in.
+    #[serde(default)]
+    index: usize,
+    name: String,
+    /// Index of the sheet holding the source records.
+    source_sheet: usize,
+    /// The source rectangle, header row included.
+    source: [u32; 4],
+    /// Top-left of the report block.
+    anchor: [u32; 2],
+    #[serde(default)]
+    rows: Vec<AxisWire>,
+    #[serde(default)]
+    cols: Vec<AxisWire>,
+    #[serde(default)]
+    filters: Vec<FilterWire>,
+    #[serde(default)]
+    values: Vec<ValueWire>,
+    #[serde(default = "yes")]
+    row_grand_totals: bool,
+    #[serde(default = "yes")]
+    col_grand_totals: bool,
+    #[serde(default)]
+    style: String,
+    /// The block the last refresh wrote, or `null`. Read-only.
+    #[serde(default)]
+    output: Option<[u32; 4]>,
+    /// Whether this came from a file and still writes back from its own bytes.
+    /// Read-only: it is cleared by refreshing, not by asking.
+    #[serde(default)]
+    imported: bool,
+    /// The source header names, so a panel can label the fields without a
+    /// second call. Read-only.
+    #[serde(default)]
+    fields: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AxisWire {
+    field: u32,
+    #[serde(default)]
+    sort: String,
+    #[serde(default = "yes")]
+    subtotal: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilterWire {
+    field: u32,
+    #[serde(default)]
+    selected: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValueWire {
+    field: u32,
+    #[serde(default)]
+    aggregate: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    number_format: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn sort_token(sort: PivotSort) -> &'static str {
+    match sort {
+        PivotSort::Ascending => "ascending",
+        PivotSort::Descending => "descending",
+        PivotSort::DataSource => "dataSource",
+    }
+}
+
+fn sort_from(token: &str) -> PivotSort {
+    match token {
+        "descending" => PivotSort::Descending,
+        "dataSource" => PivotSort::DataSource,
+        _ => PivotSort::Ascending,
+    }
+}
+
+fn pivot_to_wire(workbook: &Workbook, pivot: &PivotTable, index: usize) -> PivotWire {
+    let rect = |r: CellRange| [r.start.row, r.start.col, r.end.row, r.end.col];
+    PivotWire {
+        index,
+        name: pivot.name.clone(),
+        source_sheet: workbook
+            .sheets
+            .iter()
+            .position(|s| s.id == pivot.source_sheet)
+            .unwrap_or(0),
+        source: rect(pivot.source),
+        anchor: [pivot.anchor.row, pivot.anchor.col],
+        rows: pivot
+            .rows
+            .iter()
+            .map(|f| AxisWire {
+                field: f.source_column,
+                sort: sort_token(f.sort).to_owned(),
+                subtotal: f.subtotal,
+            })
+            .collect(),
+        cols: pivot
+            .cols
+            .iter()
+            .map(|f| AxisWire {
+                field: f.source_column,
+                sort: sort_token(f.sort).to_owned(),
+                subtotal: f.subtotal,
+            })
+            .collect(),
+        filters: pivot
+            .filters
+            .iter()
+            .map(|f| FilterWire {
+                field: f.source_column,
+                selected: f.selected.clone(),
+            })
+            .collect(),
+        values: pivot
+            .values
+            .iter()
+            .map(|v| ValueWire {
+                field: v.source_column,
+                aggregate: v.aggregate.token().to_owned(),
+                name: v.name.clone(),
+                number_format: v.number_format.clone(),
+            })
+            .collect(),
+        row_grand_totals: pivot.row_grand_totals,
+        col_grand_totals: pivot.col_grand_totals,
+        style: pivot.style.clone(),
+        output: pivot.output.map(rect),
+        imported: pivot.part.is_some(),
+        fields: pivot_fields(workbook, pivot),
+    }
+}
+
+/// Every pivot on a sheet, as JSON.
+#[wasm_bindgen]
+pub fn session_pivots(sheet: usize) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<PivotWire> = sh
+            .pivots
+            .iter()
+            .enumerate()
+            .map(|(i, p)| pivot_to_wire(s.workbook(), p, i))
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned())
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The pivot whose report covers a cell, as JSON, or `null`.
+///
+/// This is what makes the panel follow the cursor: clicking anywhere in a
+/// report opens that pivot rather than making the user find it in a list.
+#[wasm_bindgen]
+pub fn session_pivot_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "null".to_owned();
+        };
+        let found = sh.pivots.iter().enumerate().find(|(_, p)| {
+            p.output.is_some_and(|r| {
+                row >= r.start.row && row <= r.end.row && col >= r.start.col && col <= r.end.col
+            })
+        });
+        match found {
+            Some((i, p)) => serde_json::to_string(&pivot_to_wire(s.workbook(), p, i))
+                .unwrap_or_else(|_| "null".to_owned()),
+            None => "null".to_owned(),
+        }
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// The distinct values of one source field, in the order the pivot groups them
+/// — the checklist a page filter shows.
+#[wasm_bindgen]
+pub fn session_pivot_items(sheet: usize, index: usize, field: u32) -> String {
+    with_session(|s| {
+        let Some(p) = s
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.pivots.get(index))
+        else {
+            return "[]".to_owned();
+        };
+        serde_json::to_string(&casual_calc_eval::pivot::field_items(
+            s.workbook(),
+            p,
+            field,
+        ))
+        .unwrap_or_else(|_| "[]".to_owned())
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The source header names for a range, before any pivot exists over it — what
+/// the "create pivot" dialog lists.
+#[wasm_bindgen]
+pub fn session_pivot_fields_for(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let probe = PivotTable::new(
+            0,
+            String::new(),
+            sh.id,
+            CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)),
+            CellRef::new(0, 0),
+        );
+        serde_json::to_string(&pivot_fields(s.workbook(), &probe))
+            .unwrap_or_else(|_| "[]".to_owned())
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+fn pivot_fields(workbook: &Workbook, pivot: &PivotTable) -> Vec<String> {
+    casual_calc_eval::pivot::field_names(workbook, pivot)
+}
+
+/// Create a pivot over `source`, anchored at `(row, col)` on `dest`.
+///
+/// Nothing is on any axis yet, so nothing is written: an empty pivot is a
+/// placeholder for the panel to fill in, and writing a report before the user
+/// has chosen a measure would put a block of nothing on their sheet.
+/// Returns the new pivot's index.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_create_pivot(
+    source_sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    dest: usize,
+    row: u32,
+    col: u32,
+    name: &str,
+) -> Result<usize, JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    if rr1 <= rr0 {
+        return Err(JsError::new(
+            "a pivot needs a header row and at least one row of data under it",
+        ));
+    }
+    let (source_id, taken, next_id) = with_session(|s| {
+        let id = s.workbook().sheets.get(source_sheet).map(|sh| sh.id);
+        let names: Vec<String> = s
+            .workbook()
+            .sheets
+            .iter()
+            .flat_map(|sh| sh.pivots.iter().map(|p| p.name.to_ascii_lowercase()))
+            .collect();
+        let next = s
+            .workbook()
+            .sheets
+            .iter()
+            .flat_map(|sh| sh.pivots.iter().map(|p| p.id))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        (id, names, next)
+    })
+    .ok_or_else(|| JsError::new("no session"))?;
+    let source_id = source_id.ok_or_else(|| JsError::new("no such source sheet"))?;
+
+    // `GETPIVOTDATA` addresses a pivot by name, so two sharing one would make
+    // every reference to it ambiguous.
+    let base = {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            "PivotTable"
+        } else {
+            trimmed
+        }
+    };
+    let mut unique = base.to_owned();
+    let mut n = 1;
+    while taken.contains(&unique.to_ascii_lowercase()) {
+        n += 1;
+        unique = format!("{base}{n}");
+    }
+
+    let pivot = PivotTable::new(
+        next_id,
+        unique,
+        source_id,
+        CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+        CellRef::new(row, col),
+    );
+    let mut index = 0;
+    edit_sheet_metadata(dest, |_, data| {
+        index = data.pivots.len();
+        data.pivots.push(pivot);
+    })?;
+    Ok(index)
+}
+
+/// Replace a pivot's definition and rewrite its report, as one undoable step.
+///
+/// Definition and figures travel together: taking a field off the row axis and
+/// leaving the old rows on screen would show a report that answers a question
+/// nobody asked any more.
+#[wasm_bindgen]
+pub fn session_set_pivot(sheet: usize, index: usize, json: &str) -> Result<String, JsError> {
+    let wire: PivotWire =
+        serde_json::from_str(json).map_err(|e| JsError::new(&format!("bad pivot: {e}")))?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let source_id = session
+            .workbook()
+            .sheets
+            .get(wire.source_sheet)
+            .map(|sh| sh.id)
+            .ok_or_else(|| JsError::new("no such source sheet"))?;
+        let existing = session
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.pivots.get(index))
+            .cloned()
+            .ok_or_else(|| JsError::new("no such pivot"))?;
+
+        let updated = PivotTable {
+            id: existing.id,
+            name: if wire.name.trim().is_empty() {
+                existing.name.clone()
+            } else {
+                wire.name.trim().to_owned()
+            },
+            source_sheet: source_id,
+            source: CellRange::new(
+                CellRef::new(wire.source[0], wire.source[1]),
+                CellRef::new(wire.source[2], wire.source[3]),
+            ),
+            anchor: CellRef::new(wire.anchor[0], wire.anchor[1]),
+            rows: wire
+                .rows
+                .iter()
+                .map(|f| PivotAxisField {
+                    source_column: f.field,
+                    sort: sort_from(&f.sort),
+                    subtotal: f.subtotal,
+                })
+                .collect(),
+            cols: wire
+                .cols
+                .iter()
+                .map(|f| PivotAxisField {
+                    source_column: f.field,
+                    sort: sort_from(&f.sort),
+                    subtotal: f.subtotal,
+                })
+                .collect(),
+            filters: wire
+                .filters
+                .iter()
+                .map(|f| PivotFilterField {
+                    source_column: f.field,
+                    selected: f.selected.clone(),
+                })
+                .collect(),
+            values: wire
+                .values
+                .iter()
+                .map(|v| PivotValueField {
+                    source_column: v.field,
+                    aggregate: PivotAggregate::from_token(&v.aggregate),
+                    name: v.name.clone(),
+                    number_format: v
+                        .number_format
+                        .clone()
+                        .filter(|code| !code.trim().is_empty()),
+                })
+                .collect(),
+            row_grand_totals: wire.row_grand_totals,
+            col_grand_totals: wire.col_grand_totals,
+            style: wire.style.clone(),
+            // Not from the host: the extent is whatever the last refresh
+            // actually wrote, and the retained part is dropped by refreshing,
+            // not by being asked to.
+            output: existing.output,
+            part: existing.part.clone(),
+        };
+        apply_pivot(session, sheet, index, updated)
+    })
+}
+
+/// Recompute a pivot from its source and rewrite the report.
+#[wasm_bindgen]
+pub fn session_refresh_pivot(sheet: usize, index: usize) -> Result<String, JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let existing = session
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.pivots.get(index))
+            .cloned()
+            .ok_or_else(|| JsError::new("no such pivot"))?;
+        apply_pivot(session, sheet, index, existing)
+    })
+}
+
+/// Install a definition and its report as one operation.
+///
+/// The plan is computed against the workbook as it is, then the definition and
+/// every cell it implies go through the transaction layer together. Writing the
+/// cells outside it would leave undo reversing the definition while the figures
+/// stayed, which reads as corruption rather than as an undo.
+fn apply_pivot(
+    session: &mut WorkbookSession,
+    sheet: usize,
+    index: usize,
+    updated: PivotTable,
+) -> Result<String, JsError> {
+    let Some(sh) = session.workbook().sheets.get(sheet).cloned() else {
+        return Err(JsError::new("no such sheet"));
+    };
+    // An empty pivot writes nothing: it is a placeholder the panel is still
+    // filling in, and a block of nothing on the sheet is worse than a wait.
+    if updated.values.is_empty() {
+        let mut data = SheetMetadata::capture(&sh);
+        data.pivots[index] = updated;
+        session
+            .edit(EditOperation::SetSheetMetadata {
+                sheet,
+                data: Box::new(data),
+            })
+            .map_err(js)?;
+        return Ok(String::new());
+    }
+
+    // The planner reads the definition from the workbook, and this one is not
+    // installed yet. It goes in directly, is planned against, and comes straight
+    // back out — rather than planning against a copy of the workbook, which at
+    // the capacity target means duplicating a million cells on every keystroke
+    // in the panel. Nothing between these two lines can fail in a way that
+    // leaves the definition installed: `plan` writes no cell, and its error is
+    // held until the old one is back.
+    let previous = std::mem::replace(
+        &mut session.workbook_mut().sheets[sheet].pivots[index],
+        updated,
+    );
+    let planned = casual_calc_eval::pivot::plan(session.workbook_mut(), sheet, index);
+    let mut committed = std::mem::replace(
+        &mut session.workbook_mut().sheets[sheet].pivots[index],
+        previous,
+    );
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(e) => return Err(JsError::new(&e.to_string())),
+    };
+    // The strings and styles the plan's cells name were interned during it and
+    // are already in the workbook's tables; only the extent still has to be
+    // recorded, and it travels with the definition so undo takes both back.
+    committed.output = Some(plan.range);
+
+    let mut data = SheetMetadata::capture(&sh);
+    data.pivots[index] = committed;
+    let mut ops: Vec<EditOperation> = vec![EditOperation::SetSheetMetadata {
+        sheet,
+        data: Box::new(data),
+    }];
+    for (at, cell) in plan.cells {
+        ops.push(EditOperation::SetCell { sheet, at, cell });
+    }
+    session.edit(EditOperation::Batch(ops)).map_err(js)?;
+    // Detaching drops retained parts, which no operation reverses; done last,
+    // and only once the report is on the sheet.
+    let dropped = casual_calc_eval::pivot::detach(session.workbook_mut(), sheet, index);
+    Ok(dropped.join("\n"))
+}
+
+/// Recompute every pivot in the workbook — Excel's Refresh All.
+///
+/// Deliberately a command rather than something an edit triggers, which is also
+/// Excel's behaviour: a pivot summarizes a snapshot, and having the report move
+/// under the cursor while its source is being typed makes both unreadable.
+///
+/// Returns the pivots that refused, one `name: reason` per line, so the host can
+/// say which and why instead of failing the whole command over one collision.
+#[wasm_bindgen]
+pub fn session_refresh_all_pivots() -> String {
+    let counts: Vec<usize> = with_session(|s| {
+        s.workbook()
+            .sheets
+            .iter()
+            .map(|sh| sh.pivots.len())
+            .collect()
+    })
+    .unwrap_or_default();
+    let mut problems: Vec<String> = Vec::new();
+    for (sheet, count) in counts.iter().enumerate() {
+        for index in 0..*count {
+            let name = with_session(|s| {
+                s.workbook().sheets[sheet]
+                    .pivots
+                    .get(index)
+                    .map(|p| p.name.clone())
+            })
+            .flatten()
+            .unwrap_or_default();
+            if session_refresh_pivot(sheet, index).is_err() {
+                problems.push(name);
+            }
+        }
+    }
+    problems.join("\n")
+}
+
+/// Whether a cell is inside a pivot's report, and so must not be typed into.
+///
+/// Excel refuses the edit rather than letting it stand until the next refresh
+/// wipes it, and so does this: a value that survives until an unrelated action
+/// erases it is worse than one that was never accepted. Returns the pivot's
+/// name, or `""` when the cell is free.
+#[wasm_bindgen]
+pub fn session_pivot_blocks(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| {
+                sh.pivots.iter().find(|p| {
+                    p.output.is_some_and(|r| {
+                        row >= r.start.row
+                            && row <= r.end.row
+                            && col >= r.start.col
+                            && col <= r.end.col
+                    })
+                })
+            })
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// Remove a pivot, clearing the block it wrote.
+#[wasm_bindgen]
+pub fn session_delete_pivot(sheet: usize, index: usize) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sh) = session.workbook().sheets.get(sheet).cloned() else {
+            return Ok(());
+        };
+        let Some(pivot) = sh.pivots.get(index).cloned() else {
+            return Ok(());
+        };
+        let mut data = SheetMetadata::capture(&sh);
+        data.pivots.remove(index);
+        let mut ops: Vec<EditOperation> = vec![EditOperation::SetSheetMetadata {
+            sheet,
+            data: Box::new(data),
+        }];
+        // The report goes with the definition. Leaving the figures behind would
+        // strand a block that looks live, updates from nothing, and quietly
+        // ages.
+        if let Some(range) = pivot.output {
+            for row in range.start.row..=range.end.row {
+                for col in range.start.col..=range.end.col {
+                    ops.push(EditOperation::ClearCell {
+                        sheet,
+                        at: CellRef::new(row, col),
+                    });
+                }
+            }
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
 }
 
 /// A cell's comment text, or `""` if it has none.
