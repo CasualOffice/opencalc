@@ -2108,3 +2108,53 @@ fn a_table_carries_its_own_filter_rules() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].tables, wb.sheets[0].tables);
 }
+
+/// A `definedName` whose target this parser cannot read used to be dropped
+/// outright, so every workbook carrying `Print_Titles` — whose value is a
+/// whole-row reference like `Sheet1!$1:$2` — lost it on save. The name is now
+/// kept verbatim and written back byte for byte.
+#[test]
+fn a_defined_name_the_parser_cannot_read_survives_the_round_trip() {
+    let workbook = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+      <definedNames>
+        <definedName name="_xlnm.Print_Titles" localSheetId="0">Sheet1!$1:$2</definedName>
+        <definedName name="WholeCol">Sheet1!$A:$A</definedName>
+        <definedName name="Rng">Sheet1!$A$1:$A$3</definedName>
+      </definedNames>
+    </workbook>"#;
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", workbook),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+        ),
+    ]);
+
+    let wb = import_package(source).unwrap().workbook;
+    assert_eq!(
+        wb.defined_names.len(),
+        3,
+        "an unreadable target must not cost the whole name: {:?}",
+        wb.defined_names.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    let xml = xml_of(&written, "xl/workbook.xml");
+    // Verbatim, `$` anchors and all — the point of keeping it.
+    assert!(xml.contains("Sheet1!$1:$2"), "{xml}");
+    assert!(xml.contains("Sheet1!$A:$A"), "{xml}");
+    // ...and the readable one still round-trips as before.
+    assert!(xml.contains("Sheet1!$A$1:$A$3"), "{xml}");
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.defined_names, wb.defined_names);
+}

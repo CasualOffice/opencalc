@@ -66,6 +66,18 @@ pub enum Expr {
     Range(CellReference, CellReference),
     /// A defined name.
     Name(String),
+    /// Text this parser cannot read, kept exactly as written.
+    ///
+    /// Only reachable where dropping the expression would lose data that the
+    /// file legitimately contains — today, a `definedName`'s `refersTo`. A name
+    /// whose target failed to parse used to be discarded outright, so every
+    /// workbook carrying `Print_Titles` (`Sheet1!$1:$2`, a whole-row reference
+    /// this parser does not yet support) lost it on save.
+    ///
+    /// It prints back verbatim and evaluates to `#NAME?`: the file survives the
+    /// round trip, and a formula that depends on it fails visibly rather than
+    /// quietly resolving to something else.
+    Raw(String),
     /// A structured (table) reference: `Sales[Amount]`, or `[Amount]` inside
     /// the table itself.
     ///

@@ -189,6 +189,10 @@ impl<'a> Evaluator<'a> {
             Expr::Error(token) => Value::Error(error_from_token(token)),
             Expr::Reference(reference) => self.eval_reference(sheet_index, reference),
             Expr::Range(..) => Value::Error(ErrorValue::Value),
+            // Preserved text this parser cannot read. `#NAME?` is the honest
+            // answer: the reference exists in the file but means nothing here,
+            // and inventing a value would be worse than saying so.
+            Expr::Raw(_) => Value::Error(ErrorValue::Name),
             Expr::Name(name) => self.eval_name(sheet_index, name),
             // A structured reference resolves to a range, so on its own it is
             // as much a #VALUE! as `A1:B2` is; it is the aggregate around it

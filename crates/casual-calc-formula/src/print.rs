@@ -40,6 +40,9 @@ impl fmt::Display for Expr {
             Expr::Error(s) => f.write_str(s),
             Expr::Reference(r) => write!(f, "{r}"),
             Expr::Range(a, b) => write!(f, "{a}:{b}"),
+            // Verbatim: the point of keeping it is that it goes back out
+            // exactly as it came in.
+            Expr::Raw(text) => write!(f, "{text}"),
             Expr::Name(name) => f.write_str(name),
             Expr::StructuredRef { table, spec } => {
                 if let Some(table) = table {

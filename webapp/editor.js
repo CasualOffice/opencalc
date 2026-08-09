@@ -4213,6 +4213,37 @@ function buildPagePanel(body) {
   check("Centre down", "verticalCentered", "options");
   body.appendChild(checks);
 
+  panelLabel(body, "What prints");
+  let scope = {};
+  try { scope = JSON.parse(wasm.session_print_scope(state.sheet)); } catch {}
+  const scopeRow = (label, current, onSet, onClear) => {
+    body.appendChild(el("div", "panel-range", current || "(all of it)"));
+    const row = el("div", "panel-actions");
+    const clear = el("button", "panel-btn-ghost", "Clear");
+    clear.addEventListener("click", () => { onClear(); openPanel("page"); });
+    const set = el("button", "panel-btn-ghost", label);
+    set.addEventListener("click", () => { onSet(); openPanel("page"); });
+    row.append(clear, set);
+    body.appendChild(row);
+  };
+  panelLabel(body, "Print area");
+  scopeRow(
+    "Set from selection",
+    scope.area,
+    () => { const r = effectiveRange();
+      tryEdit(() => wasm.session_set_print_area(state.sheet, r.r0, r.c0, r.r1, r.c1)); },
+    () => tryEdit(() => wasm.session_clear_print_area(state.sheet)),
+  );
+  panelLabel(body, "Repeat rows at the top");
+  scopeRow(
+    "Set from selection",
+    scope.titles,
+    () => { const r = effectiveRange();
+      tryEdit(() => wasm.session_set_print_title_rows(state.sheet, r.r0, r.r1)); },
+    // r1 < r0 clears it — the engine's own signal for "no titles".
+    () => tryEdit(() => wasm.session_set_print_title_rows(state.sheet, 1, 0)),
+  );
+
   panelLabel(body, "Header and footer");
   for (const [key, ph] of [["oddHeader", "Header"], ["oddFooter", "Footer"]]) {
     const i = el("input", "panel-field");

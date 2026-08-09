@@ -773,26 +773,28 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     workbook.settings = parse_workbook_settings(&workbook_xml)?;
     workbook.retained_refs = parse_retained_refs(&workbook_xml)?;
     for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
-        match parse_formula(&refers_to) {
-            Ok(formula) => {
-                let sheet = local_sheet.and_then(|i| sheet_ids_by_index.get(i as usize).copied());
-                workbook.defined_names.push(DefinedName {
-                    name,
-                    sheet,
-                    formula,
-                });
-                report.record(
-                    "definedName",
-                    ModelOutcome::Mapped,
-                    RetentionOutcome::NotApplicable,
-                );
-            }
-            Err(_) => report.record(
-                "definedName",
-                ModelOutcome::Degraded,
-                RetentionOutcome::NotRetained,
+        // A target this parser cannot read is kept verbatim rather than
+        // dropped. Discarding it lost the name from the file entirely, and the
+        // commonest casualty was `Print_Titles`, whose value is a whole-row
+        // reference (`Sheet1!$1:$2`) that the parser does not support — so
+        // every workbook with repeating print titles lost them on save.
+        let (formula, outcome) = match parse_formula(&refers_to) {
+            Ok(formula) => (
+                formula,
+                (ModelOutcome::Mapped, RetentionOutcome::NotApplicable),
             ),
-        }
+            Err(_) => (
+                Expr::Raw(refers_to.clone()),
+                (ModelOutcome::Degraded, RetentionOutcome::Preserved),
+            ),
+        };
+        let sheet = local_sheet.and_then(|i| sheet_ids_by_index.get(i as usize).copied());
+        workbook.defined_names.push(DefinedName {
+            name,
+            sheet,
+            formula,
+        });
+        report.record("definedName", outcome.0, outcome.1);
     }
 
     workbook.validate()?;

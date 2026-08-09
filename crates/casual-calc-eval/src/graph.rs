@@ -220,6 +220,10 @@ fn collect_precedents(
         // any change rather than tracking a narrower dependency, which is
         // conservative and never stale.
         Expr::StructuredRef { .. } => *uses_name = true,
+        // Unreadable text may reference anything, so it is treated as a name:
+        // recalculate on any change rather than track a dependency that cannot
+        // be derived. Conservative, never stale.
+        Expr::Raw(_) => *uses_name = true,
         Expr::Reference(r) => {
             if let Some(si) = resolve_sheet(r, ctx_sheet, workbook) {
                 on_cell((si, r.row, r.col));

@@ -2607,6 +2607,117 @@ pub fn session_set_page_setup(
     })
 }
 
+/// Build a sheet-scoped defined name from an A1 reference, replacing any
+/// existing one of that name on that sheet.
+///
+/// `Print_Area` and `Print_Titles` are ordinary defined names with reserved
+/// names and a sheet scope — that is the whole mechanism, and there is no
+/// separate element for either.
+fn set_sheet_name(sheet: usize, name: &str, refers_to: Option<String>) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(id) = session.workbook().sheets.get(sheet).map(|sh| sh.id) else {
+            return Ok(());
+        };
+        let mut names = session.workbook().defined_names.clone();
+        names.retain(|d| !(d.sheet == Some(id) && d.name == name));
+        if let Some(text) = refers_to {
+            // `Print_Titles` is a whole-row reference (`Sheet1!$1:$2`), which
+            // this parser does not read. Keeping the text verbatim writes
+            // exactly what Excel expects, where refusing would mean the feature
+            // could not exist until the parser grows.
+            let expr = parse(&text).unwrap_or_else(|_| Expr::Raw(text.clone()));
+            names.push(DefinedName {
+                name: name.to_owned(),
+                sheet: Some(id),
+                formula: expr,
+            });
+        }
+        session
+            .edit(EditOperation::SetDefinedNames(names))
+            .map_err(js)
+    })
+}
+
+/// A sheet name as a formula prefix: quoted, with any inner quote doubled.
+///
+/// Unconditional quoting rather than "only when it needs it": the rules for
+/// when a bare name is legal are fiddly, and a wrongly-unquoted name produces a
+/// print area pointing at nothing.
+fn sheet_prefix(name: &str) -> String {
+    format!("'{}'", name.replace('\'', "''"))
+}
+
+/// Set the sheet's print area to a range.
+#[wasm_bindgen]
+pub fn session_set_print_area(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    let Some(name) =
+        with_session(|s| s.workbook().sheets.get(sheet).map(|sh| sh.name.clone())).flatten()
+    else {
+        return Ok(());
+    };
+    let a1 = |r: u32, c: u32| format!("${}${}", casual_calc_formula::column_to_letters(c), r + 1);
+    let refers = format!(
+        "{}!{}:{}",
+        sheet_prefix(&name),
+        a1(r0.min(r1), c0.min(c1)),
+        a1(r0.max(r1), c0.max(c1))
+    );
+    set_sheet_name(sheet, "Print_Area", Some(refers))
+}
+
+/// Clear the sheet's print area, so the whole used region prints again.
+#[wasm_bindgen]
+pub fn session_clear_print_area(sheet: usize) -> Result<(), JsError> {
+    set_sheet_name(sheet, "Print_Area", None)
+}
+
+/// Repeat rows `r0..=r1` at the top of every printed page — Excel's
+/// "Print Titles". Pass `r1 < r0` to clear.
+#[wasm_bindgen]
+pub fn session_set_print_title_rows(sheet: usize, r0: u32, r1: u32) -> Result<(), JsError> {
+    let Some(name) =
+        with_session(|s| s.workbook().sheets.get(sheet).map(|sh| sh.name.clone())).flatten()
+    else {
+        return Ok(());
+    };
+    if r1 < r0 {
+        return set_sheet_name(sheet, "Print_Titles", None);
+    }
+    // A row-only title is written as a whole-row reference, `$1:$2`.
+    let refers = format!("{}!${}:${}", sheet_prefix(&name), r0 + 1, r1 + 1);
+    set_sheet_name(sheet, "Print_Titles", Some(refers))
+}
+
+/// The sheet's print area and title rows as JSON, for the panel.
+#[wasm_bindgen]
+pub fn session_print_scope(sheet: usize) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let id = wb.sheets.get(sheet)?.id;
+        let find = |n: &str| {
+            wb.defined_names
+                .iter()
+                .find(|d| d.sheet == Some(id) && d.name == n)
+                .map(|d| d.formula.to_string())
+        };
+        Some(format!(
+            "{{\"area\":{},\"titles\":{}}}",
+            json_string(&find("Print_Area").unwrap_or_default()),
+            json_string(&find("Print_Titles").unwrap_or_default()),
+        ))
+    })
+    .flatten()
+    .unwrap_or_else(|| "{\"area\":\"\",\"titles\":\"\"}".to_owned())
+}
+
 /// A printable HTML document for a sheet, honouring its page setup.
 ///
 /// A page-setup panel that only edits the file is half a feature: the settings
@@ -2662,6 +2773,37 @@ pub fn session_print_html(sheet: usize) -> String {
         if sh.cells.iter().next().is_none() {
             return String::new(); // nothing to print
         }
+        // `Print_Area` narrows what prints; without one the used region prints.
+        let (mut first_row, mut first_col) = (0u32, 0u32);
+        let named = |n: &str| {
+            wb.defined_names
+                .iter()
+                .find(|d| d.sheet == Some(sh.id) && d.name == n)
+                .map(|d| d.formula.to_string())
+        };
+        if let Some(area) = named("Print_Area")
+            && let Some((a, b)) = area.rsplit('!').next().and_then(|r| r.split_once(':'))
+            && let (Some(start), Some(end)) = (
+                casual_calc_formula::parse_a1(a.trim()),
+                casual_calc_formula::parse_a1(b.trim()),
+            )
+        {
+            first_row = start.row.min(end.row);
+            first_col = start.col.min(end.col);
+            last_row = start.row.max(end.row);
+            last_col = start.col.max(end.col);
+        }
+        // `Print_Titles` repeats rows at the top of every page. In a printed
+        // HTML table that is exactly what `<thead>` does, so the rows go there
+        // rather than being duplicated by hand.
+        let title_rows: Option<(u32, u32)> = named("Print_Titles").and_then(|t| {
+            let rows = t.rsplit('!').next()?.replace('$', "");
+            let (a, b) = rows.split_once(':')?;
+            Some((
+                a.trim().parse::<u32>().ok()?.saturating_sub(1),
+                b.trim().parse::<u32>().ok()?.saturating_sub(1),
+            ))
+        });
 
         let mut out = String::new();
         out.push_str("<!doctype html><meta charset=\"utf-8\"><title>");
@@ -2708,7 +2850,7 @@ pub fn session_print_html(sheet: usize) -> String {
         };
         out.push_str(&hf_html(&hf("oddHeader")));
 
-        let vis_cols: Vec<u32> = (0..=last_col)
+        let vis_cols: Vec<u32> = (first_col..=last_col)
             .filter(|c| !sh.hidden_cols.contains(c))
             .collect();
         out.push_str("<table>");
@@ -2721,8 +2863,36 @@ pub fn session_print_html(sheet: usize) -> String {
             }
             out.push_str("</tr>");
         }
-        for r in 0..=last_row {
+        // The repeated rows first, inside <thead>; the browser puts them at the
+        // top of every page it breaks onto.
+        if let Some((tr0, tr1)) = title_rows {
+            out.push_str("<thead>");
+            for r in tr0..=tr1.min(last_row) {
+                if sh.is_row_hidden(r) {
+                    continue;
+                }
+                out.push_str("<tr>");
+                if headings {
+                    out.push_str(&format!("<th>{}</th>", r + 1));
+                }
+                for &c in &vis_cols {
+                    let cell = sh.cells.get(CellRef::new(r, c));
+                    let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
+                    out.push_str("<td>");
+                    push_html_escaped(&mut out, &text);
+                    out.push_str("</td>");
+                }
+                out.push_str("</tr>");
+            }
+            out.push_str("</thead>");
+        }
+        for r in first_row..=last_row {
             if sh.is_row_hidden(r) {
+                continue;
+            }
+            // A title row is already in the <thead>; printing it again in the
+            // body would show it twice on the first page.
+            if title_rows.is_some_and(|(a, b)| r >= a && r <= b) {
                 continue;
             }
             out.push_str("<tr>");
@@ -7649,5 +7819,64 @@ mod page_setup_tests {
         // `&&` is a literal ampersand and must survive.
         assert_eq!(strip_hf_codes("Profit && Loss"), "Profit & Loss");
         assert_eq!(strip_hf_codes(""), "");
+    }
+}
+
+#[cfg(test)]
+mod print_scope_tests {
+    use super::{
+        session_clear_print_area, session_new, session_print_html, session_print_scope,
+        session_set_cell, session_set_print_area, session_set_print_title_rows,
+    };
+
+    fn grid() {
+        session_new();
+        for r in 0..6u32 {
+            for c in 0..4u32 {
+                session_set_cell(0, r, c, &format!("r{r}c{c}")).unwrap();
+            }
+        }
+    }
+
+    /// `Print_Area` and `Print_Titles` are ordinary sheet-scoped defined names
+    /// — that is the whole mechanism. They were carried verbatim with no way to
+    /// set one and no effect on anything printed.
+    #[test]
+    fn a_print_area_narrows_what_prints_and_clearing_it_restores_the_rest() {
+        grid();
+        session_set_print_area(0, 1, 1, 2, 2).unwrap();
+        let scope = session_print_scope(0);
+        assert!(scope.contains("$B$2:$C$3"), "{scope}");
+
+        let html = session_print_html(0);
+        assert!(html.contains("r1c1"), "inside the area: {html}");
+        assert!(!html.contains("r0c0"), "outside it, above-left: {html}");
+        assert!(!html.contains("r5c3"), "outside it, below-right: {html}");
+
+        session_clear_print_area(0).unwrap();
+        let all = session_print_html(0);
+        assert!(all.contains("r0c0") && all.contains("r5c3"), "{all}");
+    }
+
+    /// Repeated rows go in `<thead>`, which the browser puts at the top of
+    /// every page it breaks onto — and must not also appear in the body, or the
+    /// first page shows them twice.
+    #[test]
+    fn title_rows_are_a_thead_and_are_not_repeated_in_the_body() {
+        grid();
+        session_set_print_title_rows(0, 0, 0).unwrap();
+        let html = session_print_html(0);
+        let head = html.find("<thead>").expect("a thead");
+        let head_end = html.find("</thead>").expect("a closed thead");
+        assert!(html[head..head_end].contains("r0c0"), "{html}");
+        assert_eq!(
+            html.matches("r0c0").count(),
+            1,
+            "the title row must not also be in the body: {html}"
+        );
+
+        // Clearing takes the thead away again.
+        session_set_print_title_rows(0, 1, 0).unwrap();
+        assert!(!session_print_html(0).contains("<thead>"));
     }
 }
