@@ -2878,6 +2878,21 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Recalculate every formula — Excel's F9.
+///
+/// Deliberately **not** an undoable edit and it does not dirty the document:
+/// recalculating produces the values the formulas already imply, so there is
+/// nothing to undo and nothing new to save. Putting it through `session.edit`
+/// would fill the undo stack with steps that change nothing visible.
+#[wasm_bindgen]
+pub fn session_recalculate() {
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            recalculate(session.workbook_mut());
+        }
+    });
+}
+
 /// The charts on a sheet, with their data already resolved, as JSON.
 ///
 /// `[{r0,c0,r1,c1,kind,title,cats:[…],series:[{name,values:[…]}]}]`. The host

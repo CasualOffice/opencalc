@@ -5308,6 +5308,69 @@ function stepFontSize(dir) {
     : ([...SIZE_LADDER].reverse().find((s) => s < cur) ?? Math.max(1, Math.round(cur) - 2));
   setFontSize(next);
 }
+// AutoSum: write =SUM(…) over the run of numbers directly above the cursor, or
+// to its left when there is nothing above.
+//
+// Excel guesses the range and is right nearly every time, which is what makes
+// the shortcut worth having; an AutoSum that made you select the range first
+// would just be typing SUM with extra steps.
+function autoSum() {
+  const r = effectiveRange();
+  // A multi-cell selection means "total each of these columns below itself",
+  // which is Excel's behaviour and the reason it is worth selecting a block.
+  if (r.r1 > r.r0 || r.c1 > r.c0) {
+    tryEdit(() => {
+      for (let c = r.c0; c <= r.c1; c++) {
+        wasm.session_set_cell(state.sheet, r.r1 + 1, c,
+          `=SUM(${A1(r.r0, c)}:${A1(r.r1, c)})`);
+      }
+    });
+    select(r.r1 + 1, r.c0);
+    return;
+  }
+  const { row, col } = state.sel;
+  const numeric = (rr, cc) => {
+    try {
+      const j = JSON.parse(wasm.session_cells(state.sheet, rr, cc, rr, cc));
+      return j.length > 0 && j[0].n === 1;
+    } catch { return false; }
+  };
+  // Excel walks past blanks to the nearest run of numbers, then takes that
+  // whole run. Stopping at the first blank would make AutoSum useless one row
+  // below a table, which is exactly where people press it.
+  const runUp = () => {
+    let r = row - 1;
+    while (r >= 0 && !numeric(r, col)) r--;
+    if (r < 0) return null;
+    const end = r;
+    while (r > 0 && numeric(r - 1, col)) r--;
+    return [r, end];
+  };
+  const runLeft = () => {
+    let c = col - 1;
+    while (c >= 0 && !numeric(row, c)) c--;
+    if (c < 0) return null;
+    const end = c;
+    while (c > 0 && numeric(row, c - 1)) c--;
+    return [c, end];
+  };
+  const up = runUp();
+  if (up) {
+    tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
+      `=SUM(${A1(up[0], col)}:${A1(up[1], col)})`));
+    return;
+  }
+  const left = runLeft();
+  if (left) {
+    tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
+      `=SUM(${A1(row, left[0])}:${A1(row, left[1])})`));
+    return;
+  }
+  // Nothing to total: leave the cell alone and say so, rather than writing
+  // `=SUM()` for the user to puzzle over.
+  status.textContent = "nothing above or to the left to total";
+}
+
 function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
 function adjustDecimals(delta) { formatSel((s) => wasm.session_adjust_decimals(state.sheet, s.r0, s.c0, s.r1, s.c1, delta)); }
 // Current border palette state (chosen line style + color, "" = automatic).
@@ -8111,6 +8174,15 @@ function wireEvents() {
     if (e.altKey && e.key === "ArrowDown" && validationChevron) { openValidationMenu(); e.preventDefault(); return; }
     const mod = e.ctrlKey || e.metaKey;
 
+    // Alt+= — AutoSum. Outside the Ctrl/Cmd branch on purpose: Alt is not one
+    // of those, and putting it there meant the key never fired and the "="
+    // fell through to starting an edit.
+    if (e.altKey && !mod && (e.key === "=" || e.key === "+")) {
+      autoSum();
+      e.preventDefault();
+      return;
+    }
+
     // Keyboard shortcuts.
     if (mod) {
       // Ctrl+Arrow: jump to the data-edge (Excel block-jump).
@@ -8146,7 +8218,51 @@ function wireEvents() {
       // its left column — the fastest way to copy a formula over a block.
       if (k === "d" && !e.shiftKey) { fillWithin("down"); e.preventDefault(); return; }
       if (k === "r" && !e.shiftKey) { fillWithin("right"); e.preventDefault(); return; }
-      if (k === "0") { setZoom(1); e.preventDefault(); return; }
+      // Excel's number-format shortcuts. These are muscle memory for anyone who
+      // uses a spreadsheet daily, and the codes are Excel's own — `0.00` for
+      // Number rather than something tidier, because a file saved here has to
+      // read the same as one saved there.
+      if (e.shiftKey) {
+        const NUMFMT = {
+          "~": "General", "`": "General",
+          "!": "#,##0.00", "1": "#,##0.00",
+          "$": "$#,##0.00", "4": "$#,##0.00",
+          "%": "0%", "5": "0%",
+          "^": "0.00E+00", "6": "0.00E+00",
+          "#": "d-mmm-yy", "3": "d-mmm-yy",
+          "@": "h:mm AM/PM", "2": "h:mm AM/PM",
+        };
+        const code = NUMFMT[e.key] || NUMFMT[k];
+        if (code) { setNumberFormat(code); e.preventDefault(); return; }
+      }
+      // Ctrl+9 hides rows and Ctrl+0 hides columns in Excel. Zoom reset moved
+      // to Ctrl+Alt+0: a shortcut that does something *else* in Excel is worse
+      // than one that is missing, because the finger memory is already wrong.
+      if (k === "0" && e.altKey) { setZoom(1); e.preventDefault(); return; }
+      if (k === "9" && !e.shiftKey) {
+        const r = effectiveRange();
+        tryEdit(() => wasm.session_hide_rows(state.sheet, r.r0, r.r1));
+        e.preventDefault(); return;
+      }
+      if (k === "0" && !e.shiftKey) {
+        const r = effectiveRange();
+        tryEdit(() => wasm.session_hide_cols(state.sheet, r.c0, r.c1));
+        e.preventDefault(); return;
+      }
+      // Ctrl+K — Insert Hyperlink. The menu has advertised this all along
+      // without anything listening for it.
+      if (k === "k") { hyperlinkDialog(); e.preventDefault(); return; }
+      // Ctrl+; stamps today's date, Ctrl+Shift+; the time. Both are *static*
+      // values, not TODAY()/NOW() — that is the whole point of them, and it is
+      // why they need no clock in the calc engine.
+      if (e.key === ";") {
+        const now = new Date();
+        const text = e.shiftKey
+          ? `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`
+          : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        tryEdit(() => wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, text));
+        e.preventDefault(); return;
+      }
       // Ctrl+1 — Format Cells, the shortcut every spreadsheet user already has
       // in their fingers.
       if (k === "1" && !e.shiftKey) { formatCellsDialog(); e.preventDefault(); return; }
@@ -8199,6 +8315,19 @@ function wireEvents() {
         e.preventDefault(); break;
       }
       case "F5": cellRef.focus(); e.preventDefault(); break;
+      // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
+      case "F9":
+        tryEdit(() => wasm.session_recalculate());
+        status.textContent = "recalculated";
+        e.preventDefault();
+        break;
+      case "F11":
+        if (e.shiftKey) {
+          try { switchSheet(wasm.session_add_sheet()); renderTabs(); }
+          catch (err) { statusError(errText(err)); }
+          e.preventDefault();
+        }
+        break;
       case " ": if (e.shiftKey) selectRowsSpan(); else startInline(" "); e.preventDefault(); break; // Shift+Space → whole rows
       case "Escape":
         if (painter) { setPainter(null); status.textContent = "format painter off"; e.preventDefault(); }

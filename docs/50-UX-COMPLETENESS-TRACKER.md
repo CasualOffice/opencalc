@@ -161,3 +161,41 @@ each audit; this file is the durable backlog.
 4. P1 by domain value, then P2.
 
 Each item: implement → verify in-browser → commit → flip status here before starting the next.
+
+## Keyboard shortcut audit — Excel as the benchmark
+
+Every binding checked against Excel's own. What was already right: Ctrl+B/I/U,
+C/X/V, Z/Y, S, F, A, D/R, 1, T, P, backtick, Home/End, PageUp/Down for sheets,
+Space and Shift+Space, Ctrl+Shift+&, Ctrl+Shift+L/E/R, Ctrl+Shift++ / Ctrl+-,
+Ctrl+Arrow and Ctrl+Shift+Arrow (jump/extend to the data edge), F2, Shift+F2,
+F5, Ctrl+Alt+V, Alt+PageUp/Down.
+
+Fixed in this pass:
+
+| Key | Excel | Was | Now |
+| --- | --- | --- | --- |
+| `Ctrl+K` | Insert hyperlink | **advertised in the Insert menu, bound to nothing** | opens the hyperlink dialog |
+| `Ctrl+0` | Hide columns | zoom reset | hides columns; zoom reset moved to `Ctrl+Alt+0` |
+| `Ctrl+9` | Hide rows | — | hides rows |
+| `Ctrl+Shift+~ ! $ % ^ # @` | General / Number / Currency / Percent / Scientific / Date / Time | — | all seven, with Excel's own format codes |
+| `Alt+=` | AutoSum | — | sums the nearest run of numbers above, else to the left |
+| `Ctrl+;` / `Ctrl+Shift+;` | Static date / time | — | both, as literal values |
+| `F9` | Recalculate | — | recalculates |
+| `Shift+F11` | Insert sheet | — | adds a sheet |
+
+Three things worth recording:
+
+- **A shortcut that does something *else* in Excel is worse than one that is
+  missing.** `Ctrl+0` reset the zoom; in Excel it hides columns. Finger memory
+  was already wrong, so it moved rather than staying for convenience.
+- **`Ctrl+K` was in the menu with its shortcut printed beside it and nothing
+  listening.** An advertised key that does nothing is a bug the menu itself
+  hides.
+- **F4 was already implemented and I added it again.** Two handlers on the same
+  element each cycled the reference once, so one press jumped `A1` → `A$1` —
+  two steps, silently wrong. `stopPropagation` does not stop a second listener
+  on the *same* element; only `stopImmediatePropagation` does. The duplicate was
+  deleted, not patched around. Check before adding.
+- AutoSum walks *past* blanks to the nearest run of numbers, as Excel does.
+  Stopping at the first blank makes it useless one row below a table, which is
+  exactly where it gets pressed.
