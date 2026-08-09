@@ -107,6 +107,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CUMPRINC", "CUMPRINC(rate, nper, pv, start, end, type)"),
     ("DATE", "DATE(year, month, day)"),
     ("DATEDIF", "DATEDIF(start, end, unit)"),
+    ("DATEVALUE", "DATEVALUE(date_text)"),
     ("DAVERAGE", "DAVERAGE(database, field, criteria)"),
     ("DAY", "DAY(serial_number)"),
     ("DAYS", "DAYS(end_date, start_date)"),
@@ -260,12 +261,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("N", "N(value)"),
     ("NA", "NA()"),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
+    (
+        "NETWORKDAYS.INTL",
+        "NETWORKDAYS.INTL(start, end, [weekend], [holidays])",
+    ),
     ("NOMINAL", "NOMINAL(effect_rate, npery)"),
     ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
     ("NORMINV", "NORMINV(probability, mean, sd)"),
     ("NORMSDIST", "NORMSDIST(z)"),
     ("NORMSINV", "NORMSINV(probability)"),
     ("NOT", "NOT(logical)"),
+    ("NOW", "NOW()"),
     ("NPER", "NPER(rate, pmt, pv, [fv], [type])"),
     ("NPV", "NPV(rate, value1, …)"),
     ("OCT2BIN", "OCT2BIN(number, [places])"),
@@ -304,6 +310,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("QUARTILE", "QUARTILE(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
+    ("RAND", "RAND()"),
+    ("RANDBETWEEN", "RANDBETWEEN(bottom, top)"),
     ("RANK", "RANK(number, ref, [order])"),
     ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
     (
@@ -364,7 +372,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
     ("TIME", "TIME(hour, minute, second)"),
+    ("TIMEVALUE", "TIMEVALUE(time_text)"),
     ("TINV", "TINV(probability, degrees_freedom)"),
+    ("TODAY", "TODAY()"),
     ("TRIM", "TRIM(text)"),
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
     ("TRUE", "TRUE()"),
@@ -384,6 +394,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
     ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
     ("WORKDAY", "WORKDAY(start, days, [holidays])"),
+    (
+        "WORKDAY.INTL",
+        "WORKDAY.INTL(start, days, [weekend], [holidays])",
+    ),
     ("XIRR", "XIRR(values, dates, [guess])"),
     ("XNPV", "XNPV(rate, values, dates)"),
     ("YEAR", "YEAR(serial_number)"),
@@ -552,6 +566,11 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "ISOWEEKNUM" => eval_isoweeknum(ev, sheet, args),
         "YEARFRAC" => eval_yearfrac(ev, sheet, args),
         "NETWORKDAYS" => eval_workdays(ev, sheet, args, false),
+        "NETWORKDAYS.INTL" => eval_workdays_intl(ev, sheet, args, false),
+        "WORKDAY.INTL" => eval_workdays_intl(ev, sheet, args, true),
+        "DATEVALUE" => eval_datevalue(ev, sheet, args, false),
+        "TIMEVALUE" => eval_datevalue(ev, sheet, args, true),
+        "TODAY" | "NOW" | "RAND" | "RANDBETWEEN" => eval_volatile(ev, sheet, name, args),
         "WORKDAY" => eval_workdays(ev, sheet, args, true),
         "ADDRESS" => eval_address(ev, sheet, args),
         "INDIRECT" => eval_indirect(ev, sheet, args),
@@ -6849,6 +6868,259 @@ fn eval_bond_simple(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Ex
                     ((100.0 + fim * rate * 100.0) / (price + fis * rate * 100.0) - 1.0) / fsm,
                 )
             }
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// The `.INTL` variants of NETWORKDAYS and WORKDAY, where the caller says which
+/// days are the weekend.
+///
+/// `weekend` is either one of Excel's numbered presets or a seven-character
+/// mask starting on **Monday** — `"0000011"` is Saturday and Sunday. The mask
+/// starting on Monday while `WEEKDAY` counts from Sunday is the trap: reading
+/// the mask with a Sunday origin shifts every weekend by a day.
+fn eval_workdays_intl(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], advance: bool) -> Value {
+    if args.len() < 2 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (start, second) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a.trunc() as i64, b.trunc()),
+        Err(e) => return e,
+    };
+
+    // Monday-origin mask, `true` where the day is a weekend.
+    let mut mask = [false, false, false, false, false, true, true];
+    if let Some(arg) = args.get(2) {
+        let value = ev.eval_expr(sheet, arg);
+        match &value {
+            Value::Text(s) if s.len() == 7 && s.bytes().all(|b| b == b'0' || b == b'1') => {
+                for (i, b) in s.bytes().enumerate() {
+                    mask[i] = b == b'1';
+                }
+                if mask.iter().all(|d| *d) {
+                    // Every day a weekend never terminates in WORKDAY and
+                    // counts nothing in NETWORKDAYS; Excel rejects it.
+                    return Value::Error(ErrorValue::Value);
+                }
+            }
+            Value::Number(_) | Value::Bool(_) | Value::Empty => {
+                let code = value.as_number().unwrap_or(1.0) as i64;
+                // 1..=7 are the two-day weekends starting Sat/Sun, 11..=17 the
+                // single-day ones starting Sunday.
+                mask = [false; 7];
+                match code {
+                    1..=7 => {
+                        // Preset 1 is Sat+Sun; each step moves the pair on by a
+                        // day. In Monday-origin indices, 1 → {5,6}.
+                        let first = (code + 3).rem_euclid(7) as usize;
+                        mask[first] = true;
+                        mask[(first + 1) % 7] = true;
+                    }
+                    11..=17 => {
+                        // 11 is Sunday only, which is index 6 Monday-origin.
+                        mask[((code - 11 + 6) % 7) as usize] = true;
+                    }
+                    _ => return Value::Error(ErrorValue::Num),
+                }
+            }
+            Value::Error(e) => return Value::Error(*e),
+            _ => return Value::Error(ErrorValue::Value),
+        }
+    }
+
+    let holidays: Vec<i64> = match args.get(3) {
+        Some(_) => match flatten_numbers(ev, sheet, &args[3..]) {
+            Ok(ns) => ns.into_iter().map(|n| n.trunc() as i64).collect(),
+            Err(e) => return Value::Error(e),
+        },
+        None => Vec::new(),
+    };
+    let is_workday = |serial: i64| {
+        // `weekday_of` is Sunday-origin (0 = Sunday); the mask is Monday-origin.
+        let monday_origin = (weekday_of(serial) + 6) % 7;
+        !mask[monday_origin as usize] && !holidays.contains(&serial)
+    };
+
+    if advance {
+        let mut remaining = second as i64;
+        if remaining == 0 {
+            return Value::Number(start as f64);
+        }
+        let step = if remaining > 0 { 1 } else { -1 };
+        let mut at = start;
+        let mut guard = 0;
+        while remaining != 0 && guard < 4_000_000 {
+            at += step;
+            if is_workday(at) {
+                remaining -= step;
+            }
+            guard += 1;
+        }
+        return Value::Number(at as f64);
+    }
+    let end = second as i64;
+    let (lo, hi) = (start.min(end), start.max(end));
+    let count = (lo..=hi).filter(|d| is_workday(*d)).count() as f64;
+    Value::Number(if end < start { -count } else { count })
+}
+
+/// `DATEVALUE` / `TIMEVALUE` — text to a serial.
+///
+/// Only the unambiguous forms are accepted. `03/04/2024` is 3 April in most of
+/// the world and 4 March in the United States, and there is no locale here to
+/// decide; guessing would silently produce the wrong date a third of the time,
+/// so it is `#VALUE!` instead.
+fn eval_datevalue(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], time: bool) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]) {
+        Value::Error(e) => return Value::Error(e),
+        v => v.as_text().unwrap_or_default(),
+    };
+    let text = text.trim();
+    if time {
+        return match parse_time_text(text) {
+            Some(f) => Value::Number(f),
+            None => Value::Error(ErrorValue::Value),
+        };
+    }
+    match parse_date_text(text) {
+        // A date carries no time of day, so the serial is whole — DATEVALUE
+        // discards any time in the text, as Excel does.
+        Some(serial) => Value::Number(serial as f64),
+        None => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `YYYY-MM-DD` (ISO) or `D-MMM-YYYY` / `MMM D, YYYY`, which name their month.
+fn parse_date_text(text: &str) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let head = text.split_whitespace().next().unwrap_or(text);
+    let iso: Vec<&str> = head.split('-').collect();
+    if iso.len() == 3
+        && iso[0].len() == 4
+        && let (Ok(y), Ok(m), Ok(d)) = (
+            iso[0].parse::<i64>(),
+            iso[1].parse::<i64>(),
+            iso[2].parse::<i64>(),
+        )
+    {
+        return valid_ymd(y, m, d);
+    }
+    // Named-month forms, in either order, with any of space, `-` or `,`.
+    let parts: Vec<String> = text
+        .split(|c: char| c.is_whitespace() || c == '-' || c == ',')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let month = parts
+        .iter()
+        .position(|p| MONTHS.iter().any(|m| p.starts_with(m)))?;
+    let m = MONTHS.iter().position(|m| parts[month].starts_with(m))? as i64 + 1;
+    let others: Vec<i64> = parts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != month)
+        .map(|(_, p)| p.parse::<i64>().unwrap_or(-1))
+        .collect();
+    if others.iter().any(|n| *n < 0) {
+        return None;
+    }
+    // Whichever number cannot be a day is the year; otherwise the year is the
+    // one after the month, as in "May 17, 2024".
+    let (y, d) = if others[0] > 31 {
+        (others[0], others[1])
+    } else {
+        (others[1], others[0])
+    };
+    valid_ymd(if y < 100 { y + 2000 } else { y }, m, d)
+}
+
+/// A serial, or `None` when the date does not exist — 31 February included.
+fn valid_ymd(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) || !(1900..=9999).contains(&y) {
+        return None;
+    }
+    Some(ymd_to_serial(y, m, d))
+}
+
+/// `h:mm[:ss] [AM|PM]` as a fraction of a day.
+fn parse_time_text(text: &str) -> Option<f64> {
+    let lower = text.to_ascii_lowercase();
+    let pm = lower.contains("pm");
+    let am = lower.contains("am");
+    let body = lower.replace("am", "").replace("pm", "");
+    let parts: Vec<&str> = body.trim().split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let h: f64 = parts[0].trim().parse().ok()?;
+    let m: f64 = parts.get(1).map_or(Ok(0.0), |p| p.trim().parse()).ok()?;
+    let s: f64 = parts.get(2).map_or(Ok(0.0), |p| p.trim().parse()).ok()?;
+    if !(0.0..60.0).contains(&m) || !(0.0..60.0).contains(&s) {
+        return None;
+    }
+    // 12 AM is midnight and 12 PM is noon — the one case where adding 12 hours
+    // for PM gives the wrong answer.
+    let hour = if am || pm {
+        if !(1.0..=12.0).contains(&h) {
+            return None;
+        }
+        match (pm, h) {
+            (true, 12.0) => 12.0,
+            (true, _) => h + 12.0,
+            (false, 12.0) => 0.0,
+            (false, _) => h,
+        }
+    } else {
+        if !(0.0..=24.0).contains(&h) {
+            return None;
+        }
+        h
+    };
+    Some((hour * 3600.0 + m * 60.0 + s) / 86400.0)
+}
+
+/// The volatile functions: the clock and the random generator.
+///
+/// Both read state the host supplies rather than the machine's, which is what
+/// keeps a recalculation reproducible — see `Workbook::volatile_now`.
+fn eval_volatile(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    match name {
+        "TODAY" | "NOW" => {
+            if !args.is_empty() {
+                return Value::Error(ErrorValue::Value);
+            }
+            let now = ev.now_serial();
+            Value::Number(if name == "TODAY" { now.floor() } else { now })
+        }
+        "RAND" => {
+            if !args.is_empty() {
+                return Value::Error(ErrorValue::Value);
+            }
+            Value::Number(ev.next_random())
+        }
+        "RANDBETWEEN" => {
+            let [lo, hi] = match pair_of_numbers(ev, sheet, args) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let (lo, hi) = (lo.ceil(), hi.floor());
+            if hi < lo {
+                return Value::Error(ErrorValue::Num);
+            }
+            let span = hi - lo + 1.0;
+            // Both ends inclusive, so the draw is scaled across the whole span
+            // and floored — clamping guards the one-in-2^53 case where the
+            // draw rounds up to exactly 1.
+            Value::Number((lo + (ev.next_random() * span).floor()).min(hi))
         }
         _ => Value::Error(ErrorValue::Name),
     }

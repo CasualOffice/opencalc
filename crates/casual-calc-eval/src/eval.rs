@@ -31,6 +31,14 @@ pub struct Evaluator<'a> {
     /// `COLUMN()` with no argument report. Saved and restored around each
     /// formula so a referenced cell's own formula sees its own address.
     current: Option<(usize, CellRef)>,
+    /// How many random draws have been made this pass.
+    ///
+    /// Mixed into the seed so two `RAND()` calls in one formula differ, which a
+    /// seed alone cannot do. Held here rather than on the workbook because the
+    /// evaluator is the thing with `&mut self` during evaluation — and because
+    /// a counter that resets per pass is what makes a recalculation
+    /// reproducible from its seed.
+    rand_counter: u64,
 }
 
 impl<'a> Evaluator<'a> {
@@ -42,6 +50,7 @@ impl<'a> Evaluator<'a> {
             in_progress: HashSet::new(),
             dirty: None,
             current: None,
+            rand_counter: 0,
         }
     }
 
@@ -54,6 +63,7 @@ impl<'a> Evaluator<'a> {
             in_progress: HashSet::new(),
             dirty: Some(dirty),
             current: None,
+            rand_counter: 0,
         }
     }
 
@@ -283,6 +293,30 @@ impl<'a> Evaluator<'a> {
             Some(name) => self.sheet_index_by_name(name),
             None => Some(default),
         }
+    }
+
+    /// The moment the volatile date functions report, as the host set it.
+    pub(crate) fn now_serial(&self) -> f64 {
+        self.workbook.volatile_now
+    }
+
+    /// The next pseudo-random draw in `[0, 1)`.
+    ///
+    /// SplitMix64 over `(seed, counter)`: small, well-distributed, and — the
+    /// point — a pure function of two numbers the host controls, so a
+    /// recalculation can be reproduced exactly.
+    pub(crate) fn next_random(&mut self) -> f64 {
+        self.rand_counter = self.rand_counter.wrapping_add(1);
+        let mut z = self
+            .workbook
+            .volatile_seed
+            .wrapping_add(self.rand_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // 53 bits is exactly what an f64 mantissa holds, so every value is
+        // representable and the distribution stays uniform.
+        (z >> 11) as f64 / (1u64 << 53) as f64
     }
 
     /// The bounds of a range on `target`, with any unnamed axis narrowed to the

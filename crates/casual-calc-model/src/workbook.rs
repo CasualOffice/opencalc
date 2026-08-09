@@ -170,6 +170,20 @@ pub struct Workbook {
     /// Workbook-level settings, carried through verbatim.
     #[serde(default, skip_serializing_if = "WorkbookSettings::is_empty")]
     pub settings: WorkbookSettings,
+    /// The moment `TODAY()` and `NOW()` report, as a date serial.
+    ///
+    /// Supplied by the host rather than read from a clock here, and **not**
+    /// serialised: it is environment, not document state, and a calc engine
+    /// that reaches for the wall clock cannot be tested or replayed. A test
+    /// sets it and gets the same answer every run.
+    #[serde(skip)]
+    pub volatile_now: f64,
+    /// The seed the random functions draw from, likewise supplied and not
+    /// serialised. Excel rerolls `RAND` on every recalculation; the host
+    /// changes this to ask for that, and leaving it alone reproduces the
+    /// previous values exactly.
+    #[serde(skip)]
+    pub volatile_seed: u64,
     /// Parts kept byte for byte because nothing here models them yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retained_parts: Vec<RetainedPart>,
@@ -230,6 +244,8 @@ impl Workbook {
             default_font_size_hp: None,
             theme_colors: Vec::new(),
             settings: WorkbookSettings::default(),
+            volatile_now: 0.0,
+            volatile_seed: 0,
             retained_parts: Vec::new(),
             retained_rels: Vec::new(),
             retained_refs: Vec::new(),

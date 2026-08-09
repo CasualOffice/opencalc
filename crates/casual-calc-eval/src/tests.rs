@@ -2472,3 +2472,141 @@ fn maturity_instruments_accrue_from_issue() {
     // PRICEMAT and YIELDMAT invert.
     assert!((n(4) - 0.05).abs() < 1e-9, "yieldmat round trip: {}", n(4));
 }
+
+/// The volatile functions read state the *host* supplies, not a clock in the
+/// engine — which is the only reason this test can exist at all.
+#[test]
+fn volatile_functions_read_the_supplied_clock_and_seed() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "TODAY()");
+    b.formula((1, 0), "NOW()");
+    b.formula((2, 0), "RAND()");
+    b.formula((3, 0), "RAND()");
+    b.formula((4, 0), "RANDBETWEEN(1,6)");
+    let mut wb = b.build();
+    // 2024-05-17 at 18:00.
+    wb.volatile_now = 45429.75;
+    wb.volatile_seed = 12345;
+    recalculate(&mut wb);
+
+    let n = |wb: &Workbook, r: u32| match value_at(wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // TODAY drops the time of day; NOW keeps it.
+    assert_eq!(n(&wb, 0), 45429.0);
+    assert!((n(&wb, 1) - 45429.75).abs() < 1e-9);
+    // Two draws in the same pass must differ — a seed alone cannot do that,
+    // which is why the evaluator counts its draws.
+    assert_ne!(n(&wb, 2), n(&wb, 3));
+    for r in [2, 3] {
+        assert!(
+            (0.0..1.0).contains(&n(&wb, r)),
+            "RAND in range: {}",
+            n(&wb, r)
+        );
+    }
+    let die = n(&wb, 4);
+    assert!(
+        (1.0..=6.0).contains(&die) && die.fract() == 0.0,
+        "die {die}"
+    );
+
+    // Same seed, same values: a recalculation is reproducible, which is what
+    // lets a test assert anything about it.
+    let first = (n(&wb, 2), n(&wb, 3), die);
+    recalculate(&mut wb);
+    assert_eq!((n(&wb, 2), n(&wb, 3), n(&wb, 4)), first);
+
+    // A new seed rerolls, which is what F9 asks for.
+    wb.volatile_seed = 999;
+    recalculate(&mut wb);
+    assert_ne!(n(&wb, 2), first.0);
+}
+
+/// `DATEVALUE` takes the unambiguous forms and refuses the rest. `03/04/2024`
+/// is 3 April in most of the world and 4 March in the United States; with no
+/// locale to decide, guessing is wrong a third of the time.
+#[test]
+fn datevalue_refuses_ambiguous_text() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "DATEVALUE(\"2024-05-17\")");
+    b.formula((1, 0), "DATEVALUE(\"17-May-2024\")");
+    b.formula((2, 0), "DATEVALUE(\"May 17, 2024\")");
+    b.formula((3, 0), "DATEVALUE(\"03/04/2024\")");
+    b.formula((4, 0), "DATEVALUE(\"2024-02-31\")");
+    b.formula((5, 0), "TIMEVALUE(\"6:30 PM\")");
+    b.formula((6, 0), "TIMEVALUE(\"12:00 AM\")");
+    b.formula((7, 0), "TIMEVALUE(\"12:00 PM\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let same = value_at(&wb, 0, 0);
+    assert_eq!(value_at(&wb, 1, 0), same, "ISO and D-MMM-YYYY agree");
+    assert_eq!(value_at(&wb, 2, 0), same, "and MMM D, YYYY");
+    assert_eq!(
+        value_at(&wb, 3, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Value),
+        "ambiguous slash form is refused, not guessed"
+    );
+    assert_eq!(
+        value_at(&wb, 4, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Value),
+        "31 February does not exist"
+    );
+    let t = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("{other:?}"),
+    };
+    assert!((t(5) - 18.5 / 24.0).abs() < 1e-9);
+    // The one case where "add 12 for PM" is wrong in both directions.
+    assert_eq!(t(6), 0.0, "12 AM is midnight");
+    assert!((t(7) - 0.5).abs() < 1e-9, "12 PM is noon");
+}
+
+/// The `.INTL` weekend mask starts on **Monday** while `WEEKDAY` counts from
+/// Sunday. Reading the mask with a Sunday origin shifts every weekend by a day.
+#[test]
+fn intl_weekend_mask_is_monday_origin() {
+    let mut b = Builder::new();
+    // 2024-05-13 is a Monday; 2024-05-19 the Sunday that ends the week.
+    b.formula((0, 0), "NETWORKDAYS.INTL(DATE(2024,5,13),DATE(2024,5,19))");
+    // Mask: Sunday only as the weekend → six working days.
+    b.formula(
+        (1, 0),
+        "NETWORKDAYS.INTL(DATE(2024,5,13),DATE(2024,5,19),\"0000001\")",
+    );
+    // Preset 11 is Sunday only, so it must agree with that mask.
+    b.formula(
+        (2, 0),
+        "NETWORKDAYS.INTL(DATE(2024,5,13),DATE(2024,5,19),11)",
+    );
+    // Friday+Saturday weekend (preset 7) → Sunday counts as a work day.
+    b.formula(
+        (3, 0),
+        "NETWORKDAYS.INTL(DATE(2024,5,13),DATE(2024,5,19),7)",
+    );
+    b.formula((4, 0), "WORKDAY.INTL(DATE(2024,5,17),1,\"0000011\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(
+        value_at(&wb, 0, 0),
+        CellValue::Number(5.0),
+        "default Sat+Sun"
+    );
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(6.0));
+    assert_eq!(
+        value_at(&wb, 2, 0),
+        CellValue::Number(6.0),
+        "preset 11 == mask"
+    );
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(5.0));
+    // Friday + 1 working day, weekend Sat/Sun → the following Monday.
+    let CellValue::Number(next) = value_at(&wb, 4, 0) else {
+        panic!("expected a serial");
+    };
+    assert_eq!(
+        next as i64,
+        crate::functions::ymd_to_serial_for_test(2024, 5, 20)
+    );
+}

@@ -2878,6 +2878,25 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Tell the engine what "now" is, as a date serial, and reseed the random
+/// functions.
+///
+/// The engine reads no clock of its own — a calc engine that does cannot be
+/// tested or replayed — so the host supplies it. Called before each
+/// recalculation the user asks for; leaving the seed alone reproduces the
+/// previous `RAND` values exactly, which is what makes an undo of a
+/// recalculation possible.
+#[wasm_bindgen]
+pub fn session_set_clock(now_serial: f64, seed: f64) {
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            let wb = session.workbook_mut();
+            wb.volatile_now = now_serial;
+            wb.volatile_seed = seed as u64;
+        }
+    });
+}
+
 /// Recalculate every formula — Excel's F9.
 ///
 /// Deliberately **not** an undoable edit and it does not dirty the document:

@@ -262,6 +262,13 @@ fn collect_precedents(
             // formula actually reads, so the result would go stale when that
             // cell changed. Flagged like a defined name instead — recalculate
             // on any change, which is conservative and never wrong.
+            // A volatile function depends on nothing in the sheet and changes
+            // anyway, so a dependency-driven recalculation would never reach
+            // it — `=TODAY()` would keep yesterday's date until something
+            // unrelated happened to touch it. Same flag, opposite reason.
+            if matches!(name.as_str(), "TODAY" | "NOW" | "RAND" | "RANDBETWEEN") {
+                *uses_name = true;
+            }
             if matches!(name.as_str(), "INDIRECT" | "OFFSET") {
                 *uses_name = true;
             }

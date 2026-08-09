@@ -3439,6 +3439,23 @@ function toggleSheetProtected() {
   status.textContent = now ? "sheet unprotected" : "sheet protected — locked cells refuse edits";
 }
 
+// Hand the engine the wall clock and, optionally, a fresh random seed.
+//
+// The engine deliberately reads no clock of its own, so nothing volatile works
+// until this has run. Called once at startup and again on every explicit
+// recalculation; `reseed` is what makes RAND reroll rather than repeat.
+let volatileSeed = 1;
+function syncClock(reseed = false) {
+  if (!wasm) return;
+  if (reseed) volatileSeed = (volatileSeed * 1103515245 + 12345) >>> 0;
+  const now = new Date();
+  // Excel's epoch is 1899-12-30, and the serial is local time, not UTC — a
+  // UTC serial puts TODAY() on the wrong day for most of the world's evening.
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  const serial = local.getTime() / 86400000 + 25569;
+  try { wasm.session_set_clock(serial, volatileSeed); } catch {}
+}
+
 // The sheet's display switches, as the engine holds them.
 function viewOptions() {
   try { return JSON.parse(wasm.session_view_options(state.sheet)); }
@@ -8317,7 +8334,9 @@ function wireEvents() {
       case "F5": cellRef.focus(); e.preventDefault(); break;
       // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
       case "F9":
-        tryEdit(() => wasm.session_recalculate());
+        // Reseed on every explicit recalculation, which is what makes RAND
+        // reroll — Excel does the same on F9.
+        tryEdit(() => { syncClock(true); wasm.session_recalculate(); });
         status.textContent = "recalculated";
         e.preventDefault();
         break;
@@ -8758,6 +8777,7 @@ function wireEvents() {
     // `xl/media/image1.png` — so a cache kept across a load shows the previous
     // file's pictures.
     imageCache.clear();
+    syncClock();
     // Open on the sheet the file was left on, not always the first: a workbook
     // records which tab its author was looking at, and a summary sheet at the
     // end is put there deliberately.
@@ -9450,6 +9470,9 @@ async function main() {
   ROW_H = wasm.default_row_px();
   readColors();
   wasm.session_new();
+  // Before anything is evaluated: nothing volatile works until the host has
+  // handed the engine a clock.
+  syncClock(true);
   wireEvents();
   seed();
   renderTabs();
