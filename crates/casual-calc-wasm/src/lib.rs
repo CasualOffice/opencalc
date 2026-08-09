@@ -24,7 +24,8 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, VAlign, Workbook,
+    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint, VAlign,
+    Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -4426,7 +4427,13 @@ fn reapply_filters_after_load(session: &mut WorkbookSession) {
 }
 
 /// Set (or clear, with empty hex) the font color across a range (one undo step).
+///
+/// `theme_slot` is the `theme="N"` index the colour was picked from, or `-1` for
+/// a colour with no theme behind it. Passing the slot is what lets the cell move
+/// when the workbook is re-themed; a colour picked off the theme row but stored
+/// as bare `RRGGBB` stays put forever.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn session_set_font_color(
     sheet: usize,
     r0: u32,
@@ -4434,11 +4441,20 @@ pub fn session_set_font_color(
     r1: u32,
     c1: u32,
     hex: &str,
+    theme_slot: i32,
+    theme_tint: f64,
 ) -> Result<(), JsError> {
     let color = (!hex.is_empty()).then(|| hex.to_owned());
+    let theme = theme_link(theme_slot, theme_tint);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| {
-        st.font_color = color.clone()
+        st.set_font_color(color.clone(), theme)
     })
+}
+
+/// The theme link for a picker's `(slot, tint)`, or `None` when the slot is
+/// negative — the editor's way of saying "this colour is not from the theme".
+fn theme_link(slot: i32, tint: f64) -> Option<ThemeTint> {
+    (slot >= 0).then(|| ThemeTint::from_tint(slot as u32, tint))
 }
 
 /// Set horizontal alignment across a range: `left`/`center`/`right`, or empty to
@@ -4744,7 +4760,9 @@ fn full_thin_border() -> Borders {
 }
 
 /// Set (or clear, with empty hex) the solid fill across a range (one undo step).
+/// See [`session_set_font_color`] for `theme_slot`.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn session_set_fill(
     sheet: usize,
     r0: u32,
@@ -4752,10 +4770,13 @@ pub fn session_set_fill(
     r1: u32,
     c1: u32,
     hex: &str,
+    theme_slot: i32,
+    theme_tint: f64,
 ) -> Result<(), JsError> {
     let fill = (!hex.is_empty()).then(|| hex.to_owned());
+    let theme = theme_link(theme_slot, theme_tint);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| {
-        st.fill_color = fill.clone()
+        st.set_fill_color(fill.clone(), theme)
     })
 }
 

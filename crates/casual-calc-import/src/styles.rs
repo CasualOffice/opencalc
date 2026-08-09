@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use casual_calc_model::{BorderEdge, Borders, HAlign, NamedCellStyle, Style, VAlign};
+use casual_calc_model::{BorderEdge, Borders, HAlign, NamedCellStyle, Style, ThemeTint, VAlign};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -37,6 +37,8 @@ struct Font {
     underline: bool,
     strike: bool,
     color: Option<String>,
+    /// The theme slot `color` was resolved from, when it was a theme reference.
+    color_theme: Option<ThemeTint>,
     name: Option<String>,
     /// Font size in half-points (`sz val` rounded to the nearest half-point).
     size_hp: Option<u32>,
@@ -46,6 +48,8 @@ struct Font {
 struct FillInfo {
     solid: bool,
     color: Option<String>,
+    /// The theme slot `color` was resolved from, when it was a theme reference.
+    color_theme: Option<ThemeTint>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -120,17 +124,30 @@ fn toggle_on(e: &BytesStart<'_>) -> Result<bool, ImportError> {
 /// as this used to — dropped every color Excel's built-in cell styles use,
 /// since those are all theme references.
 fn color(e: &BytesStart<'_>, theme: &ThemePalette) -> Result<Option<String>, ImportError> {
+    Ok(color_ref(e, theme)?.map(|(rgb, _)| rgb))
+}
+
+/// As [`color`], but also reporting the theme slot when the colour came from
+/// one. The slot is what makes a cell follow the workbook when it is re-themed;
+/// resolving to `RRGGBB` and discarding it freezes the cell at today's palette.
+fn color_ref(
+    e: &BytesStart<'_>,
+    theme: &ThemePalette,
+) -> Result<Option<(String, Option<ThemeTint>)>, ImportError> {
     if let Some(s) = attr(e, b"rgb")? {
-        return Ok(Some(if s.len() == 8 { s[2..].to_owned() } else { s }));
+        let rgb = if s.len() == 8 { s[2..].to_owned() } else { s };
+        return Ok(Some((rgb, None)));
     }
     if let Some(slot) = attr_u32(e, b"theme")? {
         let tint = attr(e, b"tint")?
             .and_then(|t| t.parse::<f64>().ok())
             .unwrap_or(0.0);
-        return Ok(theme.resolve(slot as usize, tint));
+        return Ok(theme
+            .resolve(slot as usize, tint)
+            .map(|rgb| (rgb, Some(ThemeTint::from_tint(slot, tint)))));
     }
     if let Some(index) = attr_u32(e, b"indexed")? {
-        return Ok(indexed_color(index as usize));
+        return Ok(indexed_color(index as usize).map(|rgb| (rgb, None)));
     }
     Ok(None)
 }
@@ -264,8 +281,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                         }
                     }
                     b"color" if in_fonts => {
-                        if let (Some(f), Some(c)) = (fonts.last_mut(), color(e, theme)?) {
+                        if let (Some(f), Some((c, slot))) = (fonts.last_mut(), color_ref(e, theme)?)
+                        {
                             f.color = Some(c);
+                            f.color_theme = slot;
                         }
                     }
                     b"name" if in_fonts => {
@@ -288,8 +307,11 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                         }
                     }
                     b"fgColor" if in_fills => {
-                        if let (Some(fill), Some(c)) = (fills.last_mut(), color(e, theme)?) {
+                        if let (Some(fill), Some((c, slot))) =
+                            (fills.last_mut(), color_ref(e, theme)?)
+                        {
                             fill.color = Some(c);
+                            fill.color_theme = slot;
                         }
                     }
                     b"xf" if in_cellxfs || in_style_xfs => {
@@ -405,7 +427,9 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             font_name: font.name,
             font_size_hp: font.size_hp,
             font_color: font.color,
-            fill_color: if fill.solid { fill.color } else { None },
+            font_theme: font.color_theme,
+            fill_color: if fill.solid { fill.color.clone() } else { None },
+            fill_theme: if fill.solid { fill.color_theme } else { None },
             align: xf.align,
             valign: xf.valign,
             wrap: xf.wrap,

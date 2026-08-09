@@ -998,3 +998,119 @@ fn threaded_comment_xml_has_the_shape_excel_expects() {
     let wb_rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
     assert!(wb_rels.contains("persons/person1.xml"));
 }
+
+#[test]
+fn theme_linked_colors_round_trip_as_references() {
+    use casual_calc_model::{Style, ThemeTint};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    // A workbook theme that is *not* the stock one, so resolving against the
+    // wrong palette would show up as a different RGB.
+    wb.theme_colors = vec![
+        "FFFFFF", "1A1A1A", "EEEEEE", "223344", "C0392B", "27AE60", "2980B9", "8E44AD", "F39C12",
+        "16A085", "0563C1", "954F72",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+
+    let mut style = Style::default();
+    style.set_font_color(
+        Some(wb.theme_slot(4).to_owned()),
+        Some(ThemeTint {
+            slot: 4,
+            tint_micro: 0,
+        }),
+    );
+    let plain = wb.intern_style(style);
+
+    let mut tinted = Style::default();
+    // A tinted accent, which is what Excel's own cell styles use.
+    tinted.set_fill_color(
+        Some("D5E8D4".to_owned()),
+        Some(ThemeTint::from_tint(5, -0.499985)),
+    );
+    let tinted_id = wb.intern_style(tinted);
+
+    // A literal colour alongside, which must stay literal.
+    let mut literal = Style::default();
+    literal.set_font_color(Some("FF00FF".to_owned()), None);
+    let literal_id = wb.intern_style(literal);
+
+    for (row, id) in [(0, plain), (1, tinted_id), (2, literal_id)] {
+        let at = casual_calc_model::CellRef::new(row, 0);
+        let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+        cell.style = Some(id);
+        wb.sheets[0].cells.set(at, cell);
+    }
+
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert!(
+        styles.contains("<color theme=\"4\"/>"),
+        "an untinted theme colour writes as a bare slot: {styles}"
+    );
+    assert!(
+        styles.contains("theme=\"5\" tint=\"-0.499985\""),
+        "a tinted theme colour keeps its tint: {styles}"
+    );
+    assert!(
+        styles.contains("rgb=\"FFFF00FF\""),
+        "a literal colour stays literal: {styles}"
+    );
+    // The theme part must ship, or the references resolve against the reader's
+    // default palette instead of this workbook's.
+    let theme = xml_of(&written, "xl/theme/theme1.xml");
+    assert!(theme.contains("<a:accent1><a:srgbClr val=\"C0392B\"/></a:accent1>"));
+    // clrScheme lists dk1 before lt1 while `theme="N"` indexes lt1 first, so
+    // this is the pair most easily written the wrong way round.
+    assert!(theme.contains("<a:dk1><a:srgbClr val=\"1A1A1A\"/></a:dk1>"));
+    assert!(theme.contains("<a:lt1><a:srgbClr val=\"FFFFFF\"/></a:lt1>"));
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(
+        back.theme_colors, wb.theme_colors,
+        "the theme itself survives"
+    );
+    let style_of = |row: u32| {
+        let id = back.sheets[0]
+            .cells
+            .get(casual_calc_model::CellRef::new(row, 0))
+            .unwrap()
+            .style;
+        back.styles.get(id.unwrap()).unwrap().clone()
+    };
+    assert_eq!(
+        style_of(0).font_theme,
+        Some(ThemeTint {
+            slot: 4,
+            tint_micro: 0
+        })
+    );
+    assert_eq!(style_of(0).font_color.as_deref(), Some("C0392B"));
+    assert_eq!(style_of(1).fill_theme.map(|t| t.slot), Some(5));
+    assert_eq!(
+        style_of(2).font_theme,
+        None,
+        "a literal colour gains no link"
+    );
+    assert_eq!(style_of(2).font_color.as_deref(), Some("FF00FF"));
+}
+
+#[test]
+fn setting_a_literal_color_clears_a_stale_theme_link() {
+    use casual_calc_model::{Style, ThemeTint};
+    let mut style = Style::default();
+    style.set_font_color(
+        Some("C0392B".to_owned()),
+        Some(ThemeTint::from_tint(4, 0.0)),
+    );
+    assert!(style.font_theme.is_some());
+    // Repainting with a hand-picked colour must drop the link, or the file
+    // would claim a theme colour while showing a different one.
+    style.set_font_color(Some("123456".to_owned()), None);
+    assert_eq!(style.font_theme, None);
+    // And clearing the colour clears the link with it.
+    style.set_font_color(None, Some(ThemeTint::from_tint(4, 0.0)));
+    assert_eq!(style.font_theme, None);
+}

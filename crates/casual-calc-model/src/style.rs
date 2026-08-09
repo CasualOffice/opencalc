@@ -176,6 +176,52 @@ impl VAlign {
     }
 }
 
+/// A reference to a theme colour: the slot, plus OOXML's shading factor.
+///
+/// The tint is stored as an integer count of millionths rather than an `f64`
+/// because [`Style`] is `Hash + Eq` (styles are deduplicated by value in the
+/// table) and a float is neither. A millionth is far finer than the eye or the
+/// 8-bit channels can express, so nothing visible is lost, and a value written
+/// at this precision re-reads to the same integer — which is what keeps the
+/// round trip a fixed point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThemeTint {
+    /// The `theme="N"` slot index.
+    pub slot: u32,
+    /// The `tint` shading factor, in millionths. `0` is the unshaded slot
+    /// colour; negative darkens, positive lightens.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub tint_micro: i32,
+}
+
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
+impl ThemeTint {
+    /// The number of millionths for a fractional tint, saturating at the ±1
+    /// bounds OOXML allows.
+    #[must_use]
+    pub fn from_tint(slot: u32, tint: f64) -> Self {
+        let clamped = if tint.is_finite() {
+            tint.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            slot,
+            tint_micro: (clamped * 1_000_000.0).round() as i32,
+        }
+    }
+
+    /// The tint as the fraction OOXML writes.
+    #[must_use]
+    pub fn tint(&self) -> f64 {
+        f64::from(self.tint_micro) / 1_000_000.0
+    }
+}
+
 /// A cell's formatting. Extensible; equal styles are deduplicated in the table.
 /// Colors are `"RRGGBB"` hex strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -203,12 +249,27 @@ pub struct Style {
     /// 11pt is stored as `22`; divide by 2 for points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size_hp: Option<u32>,
-    /// Font color as `RRGGBB` hex.
+    /// Font color as `RRGGBB` hex, already resolved.
+    ///
+    /// Always the literal colour to paint, even when it came from the theme —
+    /// so nothing downstream of the model needs the theme to render a cell.
+    /// The provenance, when there is any, lives in [`Style::font_theme`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_color: Option<String>,
-    /// Solid fill (background) color as `RRGGBB` hex.
+    /// The theme slot this font colour came from, if it came from one.
+    ///
+    /// Kept beside the resolved value rather than in place of it: a workbook
+    /// re-themed in Excel is supposed to move its theme-coloured cells with it,
+    /// and a cell that stores only `RRGGBB` will not move. Set through
+    /// [`Style::set_font_color`], which keeps the two from disagreeing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_theme: Option<ThemeTint>,
+    /// Solid fill (background) color as `RRGGBB` hex, already resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
+    /// The theme slot this fill colour came from, if it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_theme: Option<ThemeTint>,
     /// Horizontal alignment (defaults per value type when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<HAlign>,
@@ -275,6 +336,22 @@ fn is_zero_u8(value: &u8) -> bool {
 
 impl Style {
     /// Whether this style carries no formatting.
+    /// Set the font colour, and with it whether the colour is theme-linked.
+    ///
+    /// Always use this rather than assigning the fields: leaving a stale link
+    /// behind writes a file that *says* theme and *shows* something else, and
+    /// the mismatch only surfaces when the workbook is re-themed elsewhere.
+    pub fn set_font_color(&mut self, rgb: Option<String>, theme: Option<ThemeTint>) {
+        self.font_color = rgb;
+        self.font_theme = self.font_color.as_ref().and(theme);
+    }
+
+    /// Set the fill colour and its theme link. See [`Style::set_font_color`].
+    pub fn set_fill_color(&mut self, rgb: Option<String>, theme: Option<ThemeTint>) {
+        self.fill_color = rgb;
+        self.fill_theme = self.fill_color.as_ref().and(theme);
+    }
+
     pub fn is_default(&self) -> bool {
         self.number_format.is_none()
             && !self.bold
@@ -284,7 +361,9 @@ impl Style {
             && self.font_name.is_none()
             && self.font_size_hp.is_none()
             && self.font_color.is_none()
+            && self.font_theme.is_none()
             && self.fill_color.is_none()
+            && self.fill_theme.is_none()
             && self.align.is_none()
             && self.valign.is_none()
             && !self.wrap

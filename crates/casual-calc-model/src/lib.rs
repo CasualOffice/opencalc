@@ -36,9 +36,9 @@ pub use sheet::{
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
-pub use style::{BorderEdge, Borders, HAlign, Style, StyleTable, VAlign};
+pub use style::{BorderEdge, Borders, HAlign, Style, StyleTable, ThemeTint, VAlign};
 pub use value::{CellValue, ErrorValue};
-pub use workbook::{NamedCellStyle, SCHEMA_VERSION, Workbook};
+pub use workbook::{NamedCellStyle, SCHEMA_VERSION, STOCK_THEME_SLOTS, Workbook};
 
 #[cfg(test)]
 mod tests;

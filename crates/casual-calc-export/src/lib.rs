@@ -20,7 +20,7 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, HAlign, Sheet, SheetId, Style, VAlign, Workbook,
+    ErrorValue, FilterRule, HAlign, Sheet, SheetId, Style, ThemeTint, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -31,6 +31,8 @@ const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+/// The DrawingML namespace, used by the theme part.
+const NS_DRAWING: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 /// The 2018 threaded-comments namespace, shared by the persons and
 /// threadedComments parts.
 const NS_TC: &str = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments";
@@ -61,13 +63,13 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     let mut parts: Vec<(String, String)> = vec![
         (
             "[Content_Types].xml".to_owned(),
-            content_types(workbook, has_styles, has_strings),
+            content_types(workbook, has_styles, has_strings, any_theme_link(workbook)),
         ),
         ("_rels/.rels".to_owned(), root_rels()),
         ("xl/workbook.xml".to_owned(), workbook_xml(workbook)),
         (
             "xl/_rels/workbook.xml.rels".to_owned(),
-            workbook_rels(workbook, has_styles, has_strings),
+            workbook_rels(workbook, has_styles, has_strings, any_theme_link(workbook)),
         ),
     ];
     if has_strings {
@@ -78,6 +80,13 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     }
     if has_styles {
         parts.push(("xl/styles.xml".to_owned(), styles_xml(workbook, &dxfs)));
+    }
+    // The theme part goes in whenever a style names a theme slot: without it a
+    // `theme="4"` resolves against the reader's default palette rather than
+    // this workbook's, so the colours would change on reopen.
+    let has_theme = any_theme_link(workbook);
+    if has_theme {
+        parts.push(("xl/theme/theme1.xml".to_owned(), theme_xml(workbook)));
     }
     for i in 0..workbook.sheets.len() {
         parts.push((
@@ -125,7 +134,12 @@ fn package(parts: &[(String, String)]) -> Result<Vec<u8>, ExportError> {
     Ok(writer.finish()?.into_inner())
 }
 
-fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> String {
+fn content_types(
+    workbook: &Workbook,
+    has_styles: bool,
+    has_strings: bool,
+    has_theme: bool,
+) -> String {
     let any_comments = workbook.sheets.iter().any(|s| !s.comments.is_empty());
     let mut s = format!("{DECL}<Types xmlns=\"{NS_CT}\">");
     s.push_str("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>");
@@ -145,6 +159,9 @@ fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
     }
     if has_strings {
         s.push_str("<Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/>");
+    }
+    if has_theme {
+        s.push_str("<Override PartName=\"/xl/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
     }
     for (i, sheet) in workbook.sheets.iter().enumerate() {
         if !sheet.comments.is_empty() {
@@ -407,7 +424,12 @@ fn workbook_xml(workbook: &Workbook) -> String {
     s
 }
 
-fn workbook_rels(workbook: &Workbook, has_styles: bool, has_strings: bool) -> String {
+fn workbook_rels(
+    workbook: &Workbook,
+    has_styles: bool,
+    has_strings: bool,
+    has_theme: bool,
+) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     let mut next_rid = workbook.sheets.len() + 1;
     for i in 0..workbook.sheets.len() {
@@ -426,6 +448,12 @@ fn workbook_rels(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
     if has_strings {
         s.push_str(&format!(
             "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/sharedStrings\" Target=\"sharedStrings.xml\"/>"
+        ));
+        next_rid += 1;
+    }
+    if has_theme {
+        s.push_str(&format!(
+            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/theme\" Target=\"theme/theme1.xml\"/>"
         ));
         next_rid += 1;
     }
@@ -537,8 +565,8 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     // (fontId, fillId, numFmtId) each interned style resolves to. Fill ids 0 and
     // 1 are reserved (none / gray125); font id 0 is the default font.
     // Font key: (bold, italic, underline, strike, color, name, size_hp).
-    let mut fonts: Vec<FontKey> = vec![(false, false, false, false, None, None, None)];
-    let mut fills: Vec<String> = Vec::new();
+    let mut fonts: Vec<FontKey> = vec![(false, false, false, false, None, None, None, None)];
+    let mut fills: Vec<FillKey> = Vec::new();
     let mut num_codes: Vec<String> = Vec::new();
     // Border id 0 is reserved for the empty border; interned borders start at 1.
     let mut borders: Vec<Borders> = Vec::new();
@@ -551,6 +579,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             style.underline,
             style.strike,
             style.font_color.clone(),
+            style.font_theme,
             style.font_name.clone(),
             style.font_size_hp,
         );
@@ -563,8 +592,9 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             });
         let fill_id = match &style.fill_color {
             Some(color) => {
-                2 + fills.iter().position(|f| f == color).unwrap_or_else(|| {
-                    fills.push(color.clone());
+                let key: FillKey = (color.clone(), style.fill_theme);
+                2 + fills.iter().position(|f| *f == key).unwrap_or_else(|| {
+                    fills.push(key.clone());
                     fills.len() - 1
                 })
             }
@@ -643,7 +673,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     }
 
     s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
-    for (bold, italic, underline, strike, color, name, size_hp) in &fonts {
+    for (bold, italic, underline, strike, color, color_theme, name, size_hp) in &fonts {
         s.push_str("<font>");
         if *bold {
             s.push_str("<b/>");
@@ -658,7 +688,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             s.push_str("<strike/>");
         }
         if let Some(c) = color {
-            s.push_str(&format!("<color rgb=\"FF{c}\"/>"));
+            s.push_str(&color_element("color", c, color_theme.as_ref()));
         }
         // Default font is Calibri 11pt (22 half-points) when unset.
         s.push_str(&format!(
@@ -676,9 +706,10 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     s.push_str(&format!("<fills count=\"{}\">", fills.len() + 2));
     s.push_str("<fill><patternFill patternType=\"none\"/></fill>");
     s.push_str("<fill><patternFill patternType=\"gray125\"/></fill>");
-    for color in &fills {
+    for (color, theme) in &fills {
         s.push_str(&format!(
-            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF{color}\"/></patternFill></fill>"
+            "<fill><patternFill patternType=\"solid\">{}</patternFill></fill>",
+            color_element("fgColor", color, theme.as_ref())
         ));
     }
     s.push_str("</fills>");
@@ -749,15 +780,114 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
 
 /// A deduplication key for a `<font>`: (bold, italic, underline, strike, color,
 /// name, size in half-points).
+/// bold, italic, underline, strike, colour, its theme link, name, size.
+///
+/// The theme link is part of the key: two cells with the same resolved colour
+/// but different provenance are different fonts, and merging them would silently
+/// unlink one of them from the theme.
 type FontKey = (
     bool,
     bool,
     bool,
     bool,
     Option<String>,
+    Option<ThemeTint>,
     Option<String>,
     Option<u32>,
 );
+
+/// A solid fill: its resolved colour and the theme slot it came from.
+type FillKey = (String, Option<ThemeTint>);
+
+/// Write a colour element, as a theme reference when the colour is linked to
+/// one and as a literal `rgb` otherwise. Writing `rgb` for a theme colour is
+/// what breaks re-theming: the file then states a fixed colour, and Excel has
+/// no reason to move it when the palette changes.
+fn color_element(tag: &str, rgb: &str, theme: Option<&ThemeTint>) -> String {
+    match theme {
+        Some(t) if t.tint_micro == 0 => format!("<{tag} theme=\"{}\"/>", t.slot),
+        Some(t) => format!(
+            "<{tag} theme=\"{}\" tint=\"{}\"/>",
+            t.slot,
+            fmt_tint(t.tint())
+        ),
+        None => format!("<{tag} rgb=\"FF{}\"/>", escape_attr(rgb)),
+    }
+}
+
+/// The `xl/theme/theme1.xml` part.
+///
+/// Written whenever any style references a theme slot. Without it a `theme="4"`
+/// resolves against whatever palette the reader defaults to, so a re-themed
+/// workbook would come back in Office's stock colours rather than its own — and
+/// our own importer would re-read different RGB than we wrote, which breaks the
+/// round-trip fixed point.
+///
+/// Only `<a:clrScheme>` is meaningful here; the font and format schemes are the
+/// stock Office ones, present because the schema requires them.
+fn theme_xml(workbook: &Workbook) -> String {
+    let slot = |i: usize| workbook.theme_slot(i);
+    // `<a:clrScheme>` lists dk1/lt1/dk2/lt2 before the accents, while a
+    // `theme="N"` attribute indexes lt1/dk1/lt2/dk2 — the first two pairs are
+    // swapped. Emitting them in slot order would invert black and white text.
+    let mut s = format!(
+        "{DECL}<a:theme xmlns:a=\"{NS_DRAWING}\" name=\"Office Theme\"><a:themeElements><a:clrScheme name=\"Office\">"
+    );
+    for (element, index) in [
+        ("dk1", 1),
+        ("lt1", 0),
+        ("dk2", 3),
+        ("lt2", 2),
+        ("accent1", 4),
+        ("accent2", 5),
+        ("accent3", 6),
+        ("accent4", 7),
+        ("accent5", 8),
+        ("accent6", 9),
+        ("hlink", 10),
+        ("folHlink", 11),
+    ] {
+        s.push_str(&format!(
+            "<a:{element}><a:srgbClr val=\"{}\"/></a:{element}>",
+            escape_attr(slot(index))
+        ));
+    }
+    s.push_str("</a:clrScheme>");
+    s.push_str(
+        "<a:fontScheme name=\"Office\">\
+<a:majorFont><a:latin typeface=\"Calibri Light\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont>\
+<a:minorFont><a:latin typeface=\"Calibri\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont>\
+</a:fontScheme>\
+<a:fmtScheme name=\"Office\">\
+<a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst>\
+<a:lnStyleLst><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst>\
+<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>\
+<a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst>\
+</a:fmtScheme>",
+    );
+    s.push_str("</a:themeElements></a:theme>");
+    s
+}
+
+/// Whether any style references a theme colour, and so needs the theme part.
+fn any_theme_link(workbook: &Workbook) -> bool {
+    workbook
+        .styles
+        .iter()
+        .any(|s| s.font_theme.is_some() || s.fill_theme.is_some())
+}
+
+/// A tint as OOXML writes it: plain decimal, no exponent, no trailing zeros.
+fn fmt_tint(tint: f64) -> String {
+    let mut s = format!("{tint:.6}");
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
 
 /// The resolved OOXML style-collection ids a single interned style maps to.
 struct StyleIds {

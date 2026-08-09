@@ -2316,8 +2316,16 @@ function toggleBold() { formatSel((s) => wasm.session_toggle_bold(state.sheet, s
 function toggleItalic() { formatSel((s) => wasm.session_toggle_italic(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function toggleUnderline() { formatSel((s) => wasm.session_toggle_underline(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
 function toggleStrike() { formatSel((s) => wasm.session_toggle_strike(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
-function setFill(hex) { formatSel((s) => wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
-function setFontColor(hex) { formatSel((s) => wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, hex)); }
+// `link` is an optional {slot, tint} from the theme row; -1 means "not from the
+// theme", which is how the engine tells a themed colour from a literal one.
+function setFill(hex, link) {
+  formatSel((s) => wasm.session_set_fill(
+    state.sheet, s.r0, s.c0, s.r1, s.c1, hex, link ? link.slot : -1, link ? link.tint : 0));
+}
+function setFontColor(hex, link) {
+  formatSel((s) => wasm.session_set_font_color(
+    state.sheet, s.r0, s.c0, s.r1, s.c1, hex, link ? link.slot : -1, link ? link.tint : 0));
+}
 
 // A standard color palette (grays row + hue columns at 5 lightness levels),
 // shared by the font- and fill-color popovers, plus recent colors and a custom
@@ -2484,7 +2492,7 @@ function formatCellsDialog() {
         state.sheet, s.r0, s.c0, s.r1, s.c1,
         b.checked, i.checked, u.checked, st.checked);
       if (size.value) wasm.session_set_font_size(state.sheet, s.r0, s.c0, s.r1, s.c1, parseFloat(size.value));
-      wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, col.value.replace("#", ""));
+      wasm.session_set_font_color(state.sheet, s.r0, s.c0, s.r1, s.c1, col.value.replace("#", ""), -1, 0);
     });
   });
 
@@ -2527,7 +2535,7 @@ function formatCellsDialog() {
     col.addEventListener("input", () => { cleared = false; none.classList.remove("on"); });
     page.append(col, none);
     pending.push((s) =>
-      wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, cleared ? "" : col.value.replace("#", "")));
+      wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, cleared ? "" : col.value.replace("#", ""), -1, 0));
   });
 
   addTab("Border", (page) => {
@@ -2669,7 +2677,12 @@ function tintColor(hex, tint) {
 
 function buildColorMenu(menu, onPick, noneLabel) {
   menu.textContent = "";
-  const pick = (hex) => { pushRecent(hex); onPick(hex); menu.hidden = true; canvas.focus(); };
+  // `link` is the theme slot + tint a swatch came from, or null for a colour
+  // with no theme behind it. Carrying it through to the model is what lets a
+  // themed cell follow the workbook when the palette is changed elsewhere; a
+  // theme swatch stored as bare RRGGBB is indistinguishable from a hand-picked
+  // colour and stays put forever.
+  const pick = (hex, link) => { pushRecent(hex); onPick(hex, link || null); menu.hidden = true; canvas.focus(); };
   const none = el("button", "cm-none");
   none.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="icon-sm"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>' +
@@ -2677,15 +2690,17 @@ function buildColorMenu(menu, onPick, noneLabel) {
   none.addEventListener("click", (e) => { e.stopPropagation(); pick(""); });
   menu.appendChild(none);
 
-  const grid = (colors) => {
+  // `links[i]`, when given, is the theme slot + tint that produced `colors[i]`.
+  const grid = (colors, links) => {
     const g = el("div", "cm-grid");
-    for (const c of colors) {
+    colors.forEach((c, i) => {
       const b = el("button", "cm-sw");
       b.style.background = "#" + c;
       b.title = "#" + c;
-      b.addEventListener("click", (e) => { e.stopPropagation(); pick(c); });
+      const link = links && links[i];
+      b.addEventListener("click", (e) => { e.stopPropagation(); pick(c, link); });
       g.appendChild(b);
-    }
+    });
     return g;
   };
   if (recentColors.length) {
@@ -2700,12 +2715,18 @@ function buildColorMenu(menu, onPick, noneLabel) {
   try { theme = JSON.parse(wasm.theme_colors()); } catch {}
   if (theme.length >= 10) {
     const order = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    const base = order.map((i) => theme[i]).filter(Boolean);
+    const slots = order.filter((i) => theme[i]);
+    const base = slots.map((i) => theme[i]);
     menu.appendChild(el("div", "cm-label", "Theme"));
-    menu.appendChild(grid(base));
-    // Excel's tint ladder under the base row: lighter above, darker below.
+    menu.appendChild(grid(base, slots.map((slot) => ({ slot, tint: 0 }))));
+    // Excel's tint ladder under the base row: lighter above, darker below. A
+    // tinted swatch stays linked to its slot — the tint is part of the
+    // reference, not a way out of it.
     for (const t of [0.6, 0.4, -0.25, -0.5]) {
-      menu.appendChild(grid(base.map((c) => tintColor(c, t))));
+      menu.appendChild(grid(
+        base.map((c) => tintColor(c, t)),
+        slots.map((slot) => ({ slot, tint: t })),
+      ));
     }
   }
   menu.appendChild(el("div", "cm-label", "Standard"));

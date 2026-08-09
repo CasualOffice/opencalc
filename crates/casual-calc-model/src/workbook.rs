@@ -18,6 +18,23 @@ use crate::value::CellValue;
 /// upgrade older ones deterministically.
 pub const SCHEMA_VERSION: u32 = 0;
 
+/// The stock Office theme, in `theme="N"` slot order, used for a workbook that
+/// never came from a package or whose theme part was missing.
+pub const STOCK_THEME_SLOTS: [&str; 12] = [
+    "FFFFFF", // 0  background 1 (lt1)
+    "000000", // 1  text 1       (dk1)
+    "E7E6E6", // 2  background 2 (lt2)
+    "44546A", // 3  text 2       (dk2)
+    "4472C4", // 4  accent 1
+    "ED7D31", // 5  accent 2
+    "A5A5A5", // 6  accent 3
+    "FFC000", // 7  accent 4
+    "5B9BD5", // 8  accent 5
+    "70AD47", // 9  accent 6
+    "0563C1", // 10 hyperlink
+    "954F72", // 11 followed hyperlink
+];
+
 /// The normalized workbook: an identity, a schema version, and its sheets in tab
 /// order. Additive fields use `skip_serializing_if` so older snapshots stay
 /// byte-identical as the schema grows.
@@ -114,6 +131,24 @@ impl Workbook {
     }
 
     /// Intern a string into the workbook's table, returning its id.
+    /// The `RRGGBB` for a `theme="N"` slot: this workbook's own if it carries a
+    /// theme, else the stock Office one.
+    ///
+    /// The index is the order a `theme` attribute uses, which is **not** the
+    /// order `<a:clrScheme>` lists: slots 0/1 and 2/3 are swapped relative to
+    /// the scheme's `dk1`/`lt1` and `dk2`/`lt2`. Getting that backwards turns
+    /// black text white.
+    #[must_use]
+    pub fn theme_slot(&self, index: usize) -> &str {
+        self.theme_colors
+            .get(index)
+            .filter(|c| !c.is_empty())
+            .map_or_else(
+                || STOCK_THEME_SLOTS.get(index).copied().unwrap_or("000000"),
+                String::as_str,
+            )
+    }
+
     pub fn intern_string(&mut self, value: &str) -> StringId {
         self.strings.intern(value)
     }
