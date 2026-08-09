@@ -4,8 +4,10 @@ use casual_calc_package::Package;
 
 use crate::error::OoxmlError;
 use crate::limits::OoxmlLimits;
+use std::collections::BTreeMap;
+
 use crate::opc::{
-    Relationship, parse_relationships, parse_sheet_refs, rels_part_for, resolve_target,
+    Relationship, attr_value, parse_relationships, parse_sheet_refs, rels_part_for, resolve_target,
 };
 
 const ROOT_RELS: &str = "_rels/.rels";
@@ -143,6 +145,43 @@ impl SpreadsheetPackage {
         }
         let xml = self.package.read_part(&rels_part)?;
         parse_relationships(&xml, limits)
+    }
+
+    /// The `[Content_Types].xml` `<Override>` map, part path to content type.
+    ///
+    /// A retained part must be re-declared here or the package is invalid, and
+    /// Excel refuses to open it rather than ignoring the undeclared part.
+    pub fn content_type_overrides(&mut self) -> Result<BTreeMap<String, String>, OoxmlError> {
+        let mut out = BTreeMap::new();
+        if !self.package.contains("[Content_Types].xml") {
+            return Ok(out);
+        }
+        let xml = self.package.read_part("[Content_Types].xml")?;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e))
+                | Ok(quick_xml::events::Event::Empty(ref e))
+                    if e.local_name().as_ref() == b"Override" =>
+                {
+                    let name = attr_value(e, b"PartName")?;
+                    let ct = attr_value(e, b"ContentType")?;
+                    if let (Some(name), Some(ct)) = (name, ct) {
+                        out.insert(name, ct);
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        Ok(out)
+    }
+
+    /// Every entry path in the package, in archive order.
+    pub fn entry_names(&self) -> Vec<String> {
+        self.package.entry_names()
     }
 
     /// Consume this inspector, returning the underlying package.

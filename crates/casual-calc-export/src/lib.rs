@@ -124,10 +124,17 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
     }
 
-    package(&parts)
+    package_with_retained(&parts, workbook)
 }
 
-fn package(parts: &[(String, String)]) -> Result<Vec<u8>, ExportError> {
+/// Write the semantic parts, then the retained ones byte for byte.
+///
+/// Retained parts are appended rather than merged into `parts` because they are
+/// raw bytes, not XML we generated: an image or an OLE stream is not a string.
+fn package_with_retained(
+    parts: &[(String, String)],
+    workbook: &Workbook,
+) -> Result<Vec<u8>, ExportError> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -135,6 +142,15 @@ fn package(parts: &[(String, String)]) -> Result<Vec<u8>, ExportError> {
     for (path, content) in parts {
         writer.start_file(path, options)?;
         writer.write_all(content.as_bytes())?;
+    }
+    for retained in &workbook.retained_parts {
+        // A part we also generated wins: retaining a stale copy of something
+        // now modelled would write it twice and let the older one win on read.
+        if parts.iter().any(|(p, _)| p == &retained.path) {
+            continue;
+        }
+        writer.start_file(&retained.path, options)?;
+        writer.write_all(&retained.bytes)?;
     }
     Ok(writer.finish()?.into_inner())
 }
@@ -184,6 +200,17 @@ fn content_types(
     }
     if any_threaded(workbook) {
         s.push_str("<Override PartName=\"/xl/persons/person1.xml\" ContentType=\"application/vnd.ms-excel.person+xml\"/>");
+    }
+    // A retained part must be declared here or the package is invalid, and
+    // Excel refuses to open it rather than ignoring the undeclared part.
+    for retained in &workbook.retained_parts {
+        if let Some(ct) = &retained.content_type {
+            s.push_str(&format!(
+                "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
+                escape_attr(&retained.path),
+                escape_attr(ct)
+            ));
+        }
     }
     s.push_str("</Types>");
     s
@@ -462,6 +489,19 @@ fn workbook_xml(workbook: &Workbook) -> String {
         ));
     }
     s.push_str("</sheets>");
+    // `<externalReferences>` follows `<sheets>` in CT_Workbook's sequence.
+    if !workbook.retained_refs.is_empty() {
+        s.push_str("<externalReferences>");
+        for (name, attrs) in &workbook.retained_refs {
+            s.push_str(&format!("<{name}"));
+            for (k, v) in attrs {
+                let key = if k == "id" { "r:id" } else { k.as_str() };
+                s.push_str(&format!(" {key}=\"{}\"", escape_attr(v)));
+            }
+            s.push_str("/>");
+        }
+        s.push_str("</externalReferences>");
+    }
     if !workbook.defined_names.is_empty() {
         s.push_str("<definedNames>");
         for name in &workbook.defined_names {
@@ -520,6 +560,17 @@ fn workbook_rels(
     if any_threaded(workbook) {
         s.push_str(&format!(
             "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R_PERSON}\" Target=\"persons/person1.xml\"/>"
+        ));
+    }
+    // Retained relationships keep their original ids: the element that names
+    // one — `<externalReference r:id="rId4"/>` — travels verbatim too, and a
+    // re-minted id would point at nothing.
+    for rel in &workbook.retained_rels {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            escape_attr(&rel.id),
+            escape_attr(&rel.rel_type),
+            escape_attr(&rel.target)
         ));
     }
     s.push_str("</Relationships>");

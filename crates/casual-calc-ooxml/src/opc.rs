@@ -88,7 +88,7 @@ fn walk_bounded(
 }
 
 /// Read an attribute value as an owned `String`, matched by local name.
-fn attr_value(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<String>, OoxmlError> {
+pub(crate) fn attr_value(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<String>, OoxmlError> {
     for attr in e.attributes() {
         let attr = attr.map_err(|err| OoxmlError::MalformedXml(err.to_string()))?;
         if attr.key.local_name().as_ref() == local {

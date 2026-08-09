@@ -30,15 +30,16 @@ use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, CommentReply,
     ConditionalFormat, CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue,
-    FilterOp, FilterRule, Id, IdGenerator, Sheet, SheetId, SheetVisibility, StringId, Workbook,
+    FilterOp, FilterRule, Id, IdGenerator, RetainedPart, RetainedRel, Sheet, SheetId,
+    SheetVisibility, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
 use a1::{parse_a1, parse_range};
 use read::{
     RawCell, RawThreadedComment, parse_comments, parse_date1904, parse_defined_names,
-    parse_persons, parse_shared_strings, parse_threaded_comments, parse_workbook_settings,
-    parse_worksheet,
+    parse_persons, parse_retained_refs, parse_shared_strings, parse_threaded_comments,
+    parse_workbook_settings, parse_worksheet,
 };
 use styles::{StyleSheet, parse_styles};
 use theme::{ThemePalette, parse_theme};
@@ -69,6 +70,80 @@ pub struct Import {
     pub workbook: Workbook,
     /// What was mapped, degraded, or omitted.
     pub report: CompatibilityReport,
+}
+
+/// Copy the parts nothing above modelled into the workbook's retention set.
+///
+/// A part is retained when it is reachable from `workbook.xml` by a relationship
+/// whose type we do not handle. The reference element inside `workbook.xml`
+/// (`<externalReference r:id=…>`) travels too: a retained part nothing points at
+/// is invisible to Excel, which is indistinguishable from having dropped it.
+fn retain_unmodelled(
+    package: &mut SpreadsheetPackage,
+    workbook: &mut Workbook,
+) -> Result<(), ImportError> {
+    let workbook_part = package.workbook_part().to_owned();
+    let limits = OoxmlLimits::default();
+    let rels = package.relationships_of(&workbook_part, &limits)?;
+    let content_types = package.content_type_overrides()?;
+
+    for rel in rels {
+        // The types read above are already in the model; retaining them too
+        // would write each part twice.
+        if MODELLED_REL_SUFFIXES
+            .iter()
+            .any(|suffix| rel.rel_type.ends_with(suffix))
+            || rel.external
+        {
+            continue;
+        }
+        let target = resolve_part(&workbook_part, &rel.target);
+        if !package.contains(&target) {
+            continue;
+        }
+        let bytes = package.read_part(&target)?;
+        workbook.retained_parts.push(RetainedPart {
+            content_type: content_types.get(&format!("/{target}")).cloned(),
+            path: target,
+            bytes,
+        });
+        workbook.retained_rels.push(RetainedRel {
+            source: workbook_part.clone(),
+            id: rel.id,
+            rel_type: rel.rel_type,
+            target: rel.target,
+        });
+    }
+    Ok(())
+}
+
+/// Relationship types `import_package` already turns into model state.
+const MODELLED_REL_SUFFIXES: &[&str] = &[
+    "/worksheet",
+    "/sharedStrings",
+    "/styles",
+    "/theme",
+    "/calcChain",
+    PERSONS_REL_SUFFIX,
+];
+
+/// Resolve a relationship target against the part that declared it.
+fn resolve_part(source: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.to_owned();
+    }
+    let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for segment in target.split('/') {
+        match segment {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
 }
 
 /// Fold parsed `<threadedComment>` elements into a sheet's comment list.
@@ -610,6 +685,13 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         workbook.sheets.push(sheet);
     }
 
+    // Retention: keep every part the semantic reader did not consume, plus the
+    // relationship that reaches it and the reference that names it. This is what
+    // separates "we do not model charts" from "we delete charts" — a workbook
+    // people already have work in must survive a save even where we understand
+    // nothing about the feature.
+    retain_unmodelled(&mut package, &mut workbook)?;
+
     // Defined names, resolved against the sheet ids assigned above.
     let workbook_part = package.workbook_part().to_owned();
     let workbook_xml = package.read_part(&workbook_part)?;
@@ -617,6 +699,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     // be written back or the serials silently change meaning.
     workbook.date1904 = parse_date1904(&workbook_xml)?;
     workbook.settings = parse_workbook_settings(&workbook_xml)?;
+    workbook.retained_refs = parse_retained_refs(&workbook_xml)?;
     for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
         match parse_formula(&refers_to) {
             Ok(formula) => {

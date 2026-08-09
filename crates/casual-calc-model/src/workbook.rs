@@ -18,6 +18,48 @@ use crate::value::CellValue;
 /// upgrade older ones deterministically.
 pub const SCHEMA_VERSION: u32 = 0;
 
+/// A part carried through the round trip without being modelled.
+///
+/// This is the **retention** path: external-link caches, drawings, charts,
+/// images, pivot caches and anything else we do not understand yet. Keeping the
+/// bytes is what separates "we do not support charts" from "we delete charts",
+/// and only one of those is acceptable in a file people already have work in.
+///
+/// A retained part is inert. It is never parsed, never edited, and is written
+/// back byte for byte along with the relationship that reaches it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetainedPart {
+    /// The part's path inside the package, e.g. `xl/externalLinks/externalLink1.xml`.
+    pub path: String,
+    /// Its bytes, exactly as read.
+    pub bytes: Vec<u8>,
+    /// The `[Content_Types].xml` override that declares it, when it had one.
+    /// Without this the package is invalid, and Excel refuses to open it rather
+    /// than ignoring the part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+/// An element that names a retained part, as `(element name, attributes)`.
+pub type RetainedRef = (String, BTreeMap<String, String>);
+
+/// A relationship pointing at a retained part, to be re-emitted verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetainedRel {
+    /// The part that declares the relationship (e.g. `xl/workbook.xml`).
+    pub source: String,
+    /// The original relationship id. Kept because the referencing element —
+    /// `<externalReference r:id>`, `<drawing r:id>` — names it, and a re-minted
+    /// id would point at nothing.
+    pub id: String,
+    /// The relationship type URI.
+    pub rel_type: String,
+    /// The target, relative to the source part.
+    pub target: String,
+}
+
 /// Workbook-level settings carried through verbatim.
 ///
 /// Same reasoning as [`crate::SheetProtection`] and [`crate::PrintSetup`]: these
@@ -128,6 +170,18 @@ pub struct Workbook {
     /// Workbook-level settings, carried through verbatim.
     #[serde(default, skip_serializing_if = "WorkbookSettings::is_empty")]
     pub settings: WorkbookSettings,
+    /// Parts kept byte for byte because nothing here models them yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_parts: Vec<RetainedPart>,
+    /// The relationships that reach those parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_rels: Vec<RetainedRel>,
+    /// Elements inside `workbook.xml` that reference a retained part, kept so
+    /// the reference survives alongside the part it names — a retained chart
+    /// nothing points at is invisible, which is indistinguishable from having
+    /// dropped it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_refs: Vec<RetainedRef>,
     /// Named cell styles (`Normal`, `Good`, `Heading 1`, …) in `cellStyleXfs`
     /// order, which is the order `Style::style_ref` indexes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -176,6 +230,9 @@ impl Workbook {
             default_font_size_hp: None,
             theme_colors: Vec::new(),
             settings: WorkbookSettings::default(),
+            retained_parts: Vec::new(),
+            retained_rels: Vec::new(),
+            retained_refs: Vec::new(),
             cell_styles: Vec::new(),
             date1904: false,
         }

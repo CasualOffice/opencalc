@@ -1567,3 +1567,60 @@ fn date1904_wins_over_a_stale_workbook_pr_entry() {
         .workbook;
     assert!(back.date1904);
 }
+
+#[test]
+fn external_references_and_unmodelled_parts_are_retained() {
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+              <Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+              <externalReferences><externalReference r:id="rId9"/></externalReferences>
+            </workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+              <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>
+            </Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+        (
+            "xl/externalLinks/externalLink1.xml",
+            br#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook/></externalLink>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    assert_eq!(wb.retained_parts.len(), 1);
+    assert_eq!(
+        wb.retained_parts[0].path,
+        "xl/externalLinks/externalLink1.xml"
+    );
+    assert_eq!(wb.retained_refs.len(), 1);
+
+    let written = write_workbook(&wb).unwrap();
+    // The part itself survives byte for byte...
+    let link = xml_of(&written, "xl/externalLinks/externalLink1.xml");
+    assert!(link.contains("<externalBook/>"));
+    // ...its content type is re-declared, without which Excel refuses to open
+    // the package rather than ignoring the undeclared part...
+    assert!(xml_of(&written, "[Content_Types].xml").contains("externalLink+xml"));
+    // ...the relationship keeps its original id...
+    assert!(xml_of(&written, "xl/_rels/workbook.xml.rels").contains("Id=\"rId9\""));
+    // ...and the element naming it travels too, because a retained part nothing
+    // points at is invisible, which is the same as having dropped it.
+    assert!(xml_of(&written, "xl/workbook.xml").contains("<externalReference r:id=\"rId9\"/>"));
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_parts, wb.retained_parts);
+    assert_eq!(back.retained_refs, wb.retained_refs);
+}

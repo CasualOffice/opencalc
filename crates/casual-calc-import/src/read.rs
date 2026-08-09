@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_model::{
-    OutlinePr, PrintSetup, RunFont, TextRun, Underline, VertAlign, WorkbookSettings,
+    OutlinePr, PrintSetup, RetainedRef, RunFont, TextRun, Underline, VertAlign, WorkbookSettings,
 };
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
@@ -1213,6 +1213,33 @@ pub fn parse_workbook_settings(xml: &[u8]) -> Result<WorkbookSettings, ImportErr
                     b"fileSharing" => out.file_sharing = read_attrs(&e)?,
                     b"workbookView" => out.views.push(read_attrs(&e)?),
                     _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
+}
+
+/// Elements in `workbook.xml` that name a retained part by `r:id`, as
+/// `(element name, attributes)` in document order.
+///
+/// The part alone is not enough: `<externalReference r:id="rId4"/>` is what ties
+/// the workbook to its external-link cache, and a retained part nothing refers
+/// to is invisible to Excel.
+pub fn parse_retained_refs(xml: &[u8]) -> Result<Vec<RetainedRef>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut out = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) | Event::Empty(e) => {
+                bounds.count()?;
+                if e.local_name().as_ref() == b"externalReference" {
+                    out.push(("externalReference".to_owned(), read_attrs(&e)?));
                 }
             }
             Event::Eof => break,
