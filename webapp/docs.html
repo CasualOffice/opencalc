@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCalc SDK — integration guide</title>
+    <meta name="description" content="Embed a real spreadsheet in your React, Vue or plain-HTML application. Installation, configuration, theming, events and the read-only modes." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+    <style>
+      .doc { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 48px; align-items: start; padding: 40px 0 80px; }
+      @media (max-width: 940px) { .doc { grid-template-columns: 1fr; gap: 20px; } .toc { position: static !important; } }
+      .toc { position: sticky; top: 84px; font-size: 14px; }
+      .toc h4 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 20px 0 8px; }
+      .toc h4:first-child { margin-top: 0; }
+      .toc a { display: block; padding: 4px 0; color: var(--muted); text-decoration: none; }
+      .toc a:hover { color: var(--fg); }
+      .body h2 { font-size: 26px; letter-spacing: -.01em; margin: 44px 0 10px; scroll-margin-top: 84px; }
+      .body h2:first-child { margin-top: 0; }
+      .body h3 { font-size: 17px; margin: 28px 0 8px; scroll-margin-top: 84px; }
+      .body p, .body li { color: var(--muted); line-height: 1.7; }
+      .body li { margin: 4px 0; }
+      .body b, .body strong { color: var(--fg); }
+      .body table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14.5px; }
+      .body th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--border); padding: 8px 10px 8px 0; }
+      .body td { border-bottom: 1px solid var(--line); padding: 10px 10px 10px 0; color: var(--muted); vertical-align: top; }
+      .body td code, .body p code, .body li code { font-size: 13px; background: #f2f4f7; border-radius: 5px; padding: 1px 5px; color: #0b0d12; }
+      pre { background: #0f1216; color: #d7dee9; border-radius: 12px; padding: 16px 18px; overflow: auto; font: 400 13px/1.65 ui-monospace, Menlo, Consolas, monospace; margin: 14px 0; }
+      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; }
+      .callout { border-left: 3px solid var(--accent, #2f6df6); background: #f6f9ff; border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 18px 0; }
+      .callout.warn { border-left-color: #d97706; background: #fffaf0; }
+      .callout p { color: #444c59; }
+      .lede { font-size: 18px; line-height: 1.6; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="./index.html" aria-label="OpenCalc home">
+          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+          OpenCalc
+        </a>
+        <nav class="nav-links">
+          <a href="./index.html#product">Product</a>
+          <a href="./index.html#today">What works</a>
+          <a href="./docs.html">SDK</a>
+          <a href="./embed.html">Embed demo</a>
+          <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="wrap doc">
+      <aside class="toc">
+        <h4>Start</h4>
+        <a href="#install">Installation</a>
+        <a href="#quick">Quick start</a>
+        <a href="#assets">Serving the engine</a>
+        <h4>Configure</h4>
+        <a href="#config">Options</a>
+        <a href="#theming">Theming</a>
+        <a href="#chrome">Chrome and commands</a>
+        <a href="#access">Read-only and preview</a>
+        <a href="#i18n">Localization</a>
+        <h4>Use</h4>
+        <a href="#api">API</a>
+        <a href="#events">Events</a>
+        <h4>Frameworks</h4>
+        <a href="#react">React</a>
+        <a href="#next">Next.js</a>
+        <a href="#vue">Vue and Svelte</a>
+        <h4>Notes</h4>
+        <a href="#limits">Limits and caveats</a>
+      </aside>
+
+      <main class="body">
+        <p class="eyebrow">SDK</p>
+        <h2 id="install">Integration guide</h2>
+        <p class="lede">
+          Put a real spreadsheet in your application — reading and writing
+          <code>.xlsx</code>, 347 worksheet functions, pivot tables and charts —
+          in about five lines. The engine is Rust compiled to WebAssembly and
+          runs entirely in your user's browser.
+        </p>
+
+        <h3>Installation</h3>
+<pre><span class="c"># the editor as a custom element</span>
+npm install @opencalc/sheet
+
+<span class="c"># React bindings (optional — the element works anywhere)</span>
+npm install @opencalc/react
+
+<span class="c"># the engine alone, no DOM and no CSS, for headless work</span>
+npm install @opencalc/engine</pre>
+
+        <h2 id="quick">Quick start</h2>
+<pre><span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
+
+<span class="c">// Anywhere in your markup.</span>
+<span class="c">// &lt;opencalc-sheet id="sheet" style="height: 600px"&gt;&lt;/opencalc-sheet&gt;</span>
+
+<span class="k">const</span> sheet = document.<span class="f">getElementById</span>(<span class="s">"sheet"</span>);
+
+<span class="k">await</span> sheet.<span class="f">open</span>(bytes, <span class="s">"budget.xlsx"</span>);   <span class="c">// an ArrayBuffer or Uint8Array</span>
+<span class="k">const</span> saved = <span class="k">await</span> sheet.<span class="f">save</span>();          <span class="c">// .xlsx bytes back out</span></pre>
+        <p>
+          The element gives itself a shadow root, so your stylesheet cannot
+          reach into it and its stylesheet cannot reach out onto your page. It
+          has no intrinsic height — give it one.
+        </p>
+
+        <h2 id="assets">Serving the engine</h2>
+        <p>
+          The WebAssembly binary and the bundled fonts are served <b>from your
+          own origin</b>. Not from a CDN we run. Two reasons, and the second is
+          the one that matters:
+        </p>
+        <ul>
+          <li>the cache headers on a multi-megabyte binary should belong to whoever pays for the traffic;</li>
+          <li>a Web Worker cannot be constructed from a cross-origin URL, so a CDN would foreclose ever moving the engine off the main thread.</li>
+        </ul>
+
+        <h3>Vite, webpack, Rollup, Parcel</h3>
+        <p>
+          Nothing to do. The package resolves its assets with
+          <code>new URL(…, import.meta.url)</code>, which these bundlers emit as
+          hashed files from your build output.
+        </p>
+
+        <h3>Next.js</h3>
+        <div class="callout warn">
+          <p>
+            <b>Turbopack does not treat <code>.wasm</code> as an emitted
+            asset</b>, so <code>import.meta.url</code> resolution does not
+            produce a servable file. Copy the assets into <code>public/</code>
+            instead — this is what the Next community settled on for every wasm
+            package, not something peculiar to us.
+          </p>
+        </div>
+<pre><span class="c">// package.json</span>
+<span class="s">"postinstall"</span>: <span class="s">"opencalc-assets ./public/opencalc"</span></pre>
+<pre>&lt;opencalc-sheet assets-url=<span class="s">"/opencalc/"</span> /&gt;</pre>
+        <p>
+          Re-run it after upgrading: <code>npm update</code> bumps the
+          JavaScript and leaves <code>public/</code> alone, so the two can
+          drift. The SDK compares their versions at load and fails loudly naming
+          this command, rather than letting you debug a function that "stopped
+          working".
+        </p>
+
+        <h2 id="config">Options</h2>
+<pre><span class="k">await</span> sheet.<span class="f">configure</span>({
+  calculation: <span class="s">"auto"</span>,    <span class="c">// | "manual" — default: whatever the file asks for</span>
+  access: <span class="s">"edit"</span>,          <span class="c">// | "view" | "preview"</span>
+});</pre>
+        <table>
+          <tr><th>Option</th><th>What it does</th></tr>
+          <tr><td><code>calculation</code></td><td>When formulas recompute. Taken from the file's own <code>&lt;calcPr&gt;</code> unless you override it — a workbook saved with calculation off opens that way, because its author turned it off for a reason.</td></tr>
+          <tr><td><code>access</code></td><td>Edit, view-only, or preview. See <a href="#access">below</a> — the last two are not the same thing.</td></tr>
+          <tr><td><code>assets-url</code></td><td>Attribute, not option: read when the element mounts.</td></tr>
+        </table>
+
+        <h2 id="theming">Theming</h2>
+        <p>
+          Themes are CSS custom properties on the element. They are the one
+          thing that crosses a shadow boundary, which is what makes them the
+          API rather than an implementation detail. Names are typed by suffix —
+          <code>Color</code> takes a colour, <code>Shadow</code> a box-shadow,
+          <code>FontFamily</code> a font stack.
+        </p>
+<pre>sheet.<span class="f">theme</span>({ accentColor: <span class="s">"#7c3aed"</span> });        <span class="c">// both schemes</span>
+
+sheet.<span class="f">theme</span>({                                   <span class="c">// per scheme</span>
+  light: { backgroundColor: <span class="s">"#fbf9f4"</span> },
+  dark:  { backgroundColor: <span class="s">"#17150f"</span> },
+});
+
+sheet.<span class="f">setColorScheme</span>(<span class="s">"dark"</span>);                    <span class="c">// | "light" | "auto"</span>
+sheet.<span class="f">resetTheme</span>();                              <span class="c">// back to the defaults</span></pre>
+        <div class="callout">
+          <p>
+            <b>Use the per-scheme form for anything but an accent.</b> Tokens
+            are written as inline custom properties, and an inline style beats
+            every rule in the stylesheet — including the dark-mode block. Set
+            <code>backgroundColor</code> once and you have set it for dark mode
+            too.
+          </p>
+        </div>
+        <p>
+          Calls merge, so you can set one token without restating the rest;
+          <code>resetTheme()</code> clears them. An unknown token name throws,
+          rather than quietly not changing a colour.
+        </p>
+
+        <h2 id="chrome">Chrome and commands</h2>
+        <p>Whole regions:</p>
+<pre>sheet.<span class="f">chrome</span>({ toolbar: <span class="k">false</span>, statusbar: <span class="k">false</span> });</pre>
+        <p>
+          <code>header</code>, <code>menubar</code>, <code>toolbar</code>,
+          <code>formulabar</code>, <code>tabs</code>, <code>statusbar</code>.
+          The app header is <b>off by default</b> when embedded — the brand mark
+          and settings gear belong to our demo page, not to your product.
+        </p>
+        <p>Or individual controls, by id:</p>
+<pre>sheet.<span class="f">commands</span>({
+  hidden: [<span class="s">"file.open"</span>, <span class="s">"insert.pivottable"</span>],
+  disabled: [<span class="s">"insert.chart"</span>],
+});
+
+<span class="k">await</span> sheet.<span class="f">listCommands</span>();   <span class="c">// all 189 ids</span></pre>
+        <p>
+          Hidden and disabled differ on purpose. A capability you have not
+          implemented yet should be <b>disabled</b> — someone who cannot see a
+          thing assumes it does not exist and stops looking. One that makes no
+          sense in your product should be <b>hidden</b>.
+        </p>
+        <p>
+          Ids come from the English label path: <code>Format ▸ Alignment ▸
+          Left</code> is <code>format.alignment.left</code>. Renaming a label
+          renames its id, and we treat that as a breaking change.
+        </p>
+
+        <h2 id="access">Read-only and preview</h2>
+        <p>
+          Two different things. Conflating them gives you both bad outcomes at
+          once: a viewer that reads as a broken editor because it is full of
+          greyed-out menus, and a thumbnail that invites clicking on things it
+          will refuse.
+        </p>
+        <table>
+          <tr><th></th><th><code>view</code></th><th><code>preview</code></th></tr>
+          <tr><td>What it is</td><td>an access level</td><td>a presentation</td></tr>
+          <tr><td>Chrome</td><td>all of it, minus commands that write</td><td>none</td></tr>
+          <tr><td>Select and copy</td><td>yes</td><td>yes</td></tr>
+          <tr><td>Zoom, sheets, find, export</td><td>yes</td><td>no</td></tr>
+          <tr><td>For</td><td>a permission system's read-only</td><td>a thumbnail, a file-list row</td></tr>
+        </table>
+        <div class="callout">
+          <p>
+            Both refuse writes <b>in the engine</b>, not by hiding buttons. A
+            read-only mode enforced only in the UI is read-only right up until
+            somebody calls the API.
+          </p>
+        </div>
+
+        <h2 id="i18n">Localization</h2>
+        <p>
+          Supply a locale, and optionally override individual strings to match
+          your own glossary:
+        </p>
+<pre>sheet.<span class="f">configure</span>({ locale: <span class="s">"de-DE"</span> });</pre>
+        <p>
+          Number and date <b>display</b> already follows the format's own
+          language. Function <i>names</i> are not localized — <code>SUM</code>
+          is <code>SUM</code> everywhere. Doing that halfway is worse than not
+          doing it: someone who types <code>SUMME</code> and gets
+          <code>#NAME?</code> concludes the feature is broken, and a file that
+          stores a localized name is unreadable everywhere else.
+        </p>
+
+        <h2 id="api">API</h2>
+<pre><span class="k">await</span> sheet.ready;                     <span class="c">// resolves once the grid is up</span>
+
+<span class="k">await</span> sheet.<span class="f">open</span>(bytes, name);        <span class="c">// .xlsx, .csv, .tsv, .psv</span>
+<span class="k">await</span> sheet.<span class="f">save</span>();                    <span class="c">// .xlsx bytes</span>
+
+sheet.<span class="f">theme</span>(tokens);  sheet.<span class="f">resetTheme</span>();
+sheet.<span class="f">chrome</span>(regions);  <span class="k">await</span> sheet.<span class="f">commands</span>(rules);
+sheet.<span class="f">setColorScheme</span>(scheme);
+<span class="k">await</span> sheet.<span class="f">configure</span>(options);
+sheet.access;                          <span class="c">// "edit" | "view" | "preview"</span></pre>
+        <p>Everything returns a promise, in every transport.</p>
+
+        <h2 id="events">Events</h2>
+<pre><span class="k">const</span> stop = <span class="k">await</span> sheet.<span class="f">on</span>(<span class="s">"cellsChanged"</span>, (e) =&gt; {
+  <span class="k">if</span> (e.source === <span class="s">"api"</span>) <span class="k">return</span>;   <span class="c">// our own write — do not loop</span>
+  <span class="f">save</span>(e.range);
+});
+
+<span class="c">// before* events can be cancelled</span>
+sheet.<span class="f">on</span>(<span class="s">"beforeCellsChanged"</span>, (e) =&gt; {
+  <span class="k">if</span> (!user.<span class="f">canEdit</span>(e.range)) e.<span class="f">preventDefault</span>();
+});</pre>
+        <table>
+          <tr><th>Event</th><th>Cancellable</th><th>Payload</th></tr>
+          <tr><td><code>beforeCellsChanged</code> / <code>cellsChanged</code></td><td>before only</td><td><code>{ sheet, range, value, source }</code></td></tr>
+          <tr><td><code>selectionChanged</code></td><td>—</td><td><code>{ sheet, range, activeCell }</code></td></tr>
+          <tr><td><code>calculationChanged</code></td><td>—</td><td><code>{ mode, needsRecalculation }</code></td></tr>
+          <tr><td><code>undoStateChanged</code></td><td>—</td><td><code>{ canUndo, canRedo }</code></td></tr>
+        </table>
+        <p>
+          <b>Always check <code>source</code>.</b> A host that persists on
+          change and loads on mount will echo its own writes back to itself
+          forever without it. It is one of <code>user</code>, <code>api</code>,
+          <code>paste</code>, <code>fill</code>, <code>undo</code>,
+          <code>redo</code>, <code>import</code>.
+        </p>
+        <p>
+          One event per <i>operation</i>, carrying a range — a paste of a
+          hundred thousand cells is one event, not a hundred thousand. A
+          listener that throws is caught and logged: your bug in a change
+          handler must not take the grid down with it.
+        </p>
+
+        <h2 id="react">React</h2>
+<pre><span class="k">import</span> { OpenCalcSheet } <span class="k">from</span> <span class="s">"@opencalc/react"</span>;
+
+&lt;OpenCalcSheet
+  style={{ height: 600 }}
+  engine={{ calculation: <span class="s">"manual"</span> }}
+  ui={{ theme: { light: { accentColor: <span class="s">"#7c3aed"</span> } } }}
+  onCellsChanged={handleChange}
+/&gt;</pre>
+        <p>
+          The wrapper exists for three specific reasons, each of which is a bug
+          in someone's React wrapper right now: config objects are new
+          identities every render and must not cause a remount; Strict Mode
+          mounts twice in development; and React's synthetic event system does
+          not carry custom DOM events. On React 19 object props reach a custom
+          element as properties, on 18 they stringify — the wrapper never relies
+          on that, so it behaves the same on both.
+        </p>
+        <p>The whole wrapper is about seventy lines — <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples/react">read it</a> and copy it if you want to change how config is diffed.</p>
+
+        <h2 id="next">Next.js</h2>
+<pre><span class="k">const</span> Sheet = <span class="f">dynamic</span>(() =&gt; <span class="f">import</span>(<span class="s">"./SheetClient"</span>), { ssr: <span class="k">false</span> });</pre>
+        <p>
+          <code>"use client"</code> is not enough on its own: a client component
+          is still rendered on the server for the initial HTML, and the element
+          touches <code>window</code> at import. Plus the asset copy above.
+        </p>
+
+        <h2 id="vue">Vue and Svelte</h2>
+        <p>
+          No wrapper needed — both pass objects to custom elements as properties
+          and listen for DOM events natively.
+        </p>
+<pre><span class="c">&lt;!-- Vue --&gt;</span>
+&lt;opencalc-sheet ref=<span class="s">"sheet"</span> @cellsChanged=<span class="s">"onChange"</span> /&gt;</pre>
+
+        <h2 id="limits">Limits and caveats</h2>
+        <ul>
+          <li><b>Each element is its own engine.</b> The editor keeps state at module scope, so every mount gets its own module and its own wasm heap. Three thumbnails are fine; fifty should be paged in and out rather than mounted at once.</li>
+          <li><b>No collaborative editing in this SDK.</b> It is a single-user view-and-edit surface. Multi-user editing is a server-side product with a different shape.</li>
+          <li><b>A pivot created here exports as its cells</b>, not as a live Excel pivot object. Figures, formatting and layout are all correct and open anywhere; the definition survives in our own snapshot format.</li>
+          <li><b>Custom worksheet functions are not supported yet.</b> A JavaScript callback would make recalculation non-reproducible, which is a guarantee we are not ready to give up quietly.</li>
+          <li><b>Keeping your integration current is yours.</b> No auto-update and nothing phoning home. We publish versions and a changelog.</li>
+        </ul>
+
+        <p style="margin-top:36px">
+          Design rationale, including what was considered and rejected, is in
+          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md">docs/55</a>.
+          Runnable examples are in
+          <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">sdk/examples</a>.
+        </p>
+      </main>
+    </div>
+  </body>
+</html>
