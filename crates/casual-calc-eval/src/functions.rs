@@ -189,6 +189,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    ("FREQUENCY", "FREQUENCY(data_array, bins_array)"),
     ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
     ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
@@ -288,7 +289,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MIN", "MIN(number1, …)"),
     ("MINA", "MINA(value1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
+    ("MINVERSE", "MINVERSE(array)"),
     ("MIRR", "MIRR(values, finance_rate, reinvest_rate)"),
+    ("MMULT", "MMULT(array1, array2)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
@@ -445,6 +448,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TIMEVALUE", "TIMEVALUE(time_text)"),
     ("TINV", "TINV(probability, degrees_freedom)"),
     ("TODAY", "TODAY()"),
+    ("TRANSPOSE", "TRANSPOSE(array)"),
     ("TRIM", "TRIM(text)"),
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
     ("TRUE", "TRUE()"),
@@ -951,6 +955,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             eval_odd_bond(ev, sheet, name, args)
         }
         "MDETERM" => eval_mdeterm(ev, sheet, args),
+        "TRANSPOSE" | "MMULT" | "MINVERSE" | "FREQUENCY" => eval_matrix(ev, sheet, name, args),
         "ACCRINTM" | "PRICEDISC" | "YIELDDISC" | "PRICEMAT" | "YIELDMAT" => {
             eval_bond_simple(ev, sheet, name, args)
         }
@@ -1640,6 +1645,9 @@ fn flatten_numbers(
                 Value::Empty => {}
                 Value::Text(t) => out.push(t.trim().parse::<f64>().map_err(|_| ErrorValue::Value)?),
                 Value::Error(e) => return Err(e),
+                // `eval_expr` collapses an array to its corner, so this cannot
+                // arrive; a block where one number was wanted is #VALUE!.
+                Value::Array { .. } => return Err(ErrorValue::Value),
             }
         }
     }
@@ -3074,6 +3082,7 @@ fn eval_n(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         Value::Bool(b) => Value::Number(if b { 1.0 } else { 0.0 }),
         Value::Error(e) => Value::Error(e),
         Value::Text(_) | Value::Empty => Value::Number(0.0),
+        Value::Array { .. } => Value::Error(ErrorValue::Value),
     }
 }
 
@@ -3089,6 +3098,8 @@ fn eval_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         Value::Text(_) => 2.0,
         Value::Bool(_) => 4.0,
         Value::Error(_) => 16.0,
+        // Excel's own code for an array, which is why TYPE has one.
+        Value::Array { .. } => 64.0,
     };
     Value::Number(code)
 }
@@ -4503,6 +4514,7 @@ fn stat_over_a(
                         Value::Text(_) => values.push(0.0),
                         Value::Error(e) => return Value::Error(e),
                         Value::Empty => {}
+                        Value::Array { .. } => return Value::Error(ErrorValue::Value),
                     }
                 }
             }
@@ -4512,6 +4524,7 @@ fn stat_over_a(
                 Value::Text(_) => values.push(0.0),
                 Value::Error(e) => return Value::Error(e),
                 Value::Empty => {}
+                Value::Array { .. } => return Value::Error(ErrorValue::Value),
             },
         }
     }
@@ -8503,4 +8516,168 @@ fn eval_mdeterm(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         }
     }
     Value::Number(det)
+}
+
+/// The matrix functions that answer with a shape: TRANSPOSE, MMULT, MINVERSE,
+/// and FREQUENCY.
+///
+/// Each returns a [`Value::Array`], which the recalculation pass spills into
+/// the cells below and to the right. They could not exist before that pass did
+/// — a function that can only return one number cannot return a matrix.
+fn grid_numbers(grid: &Grid) -> Result<Vec<f64>, ErrorValue> {
+    grid.cells.iter().map(Value::as_number).collect()
+}
+
+fn eval_matrix(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    match name {
+        "TRANSPOSE" => {
+            if args.len() != 1 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let g = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let mut cells = Vec::with_capacity(g.rows * g.cols);
+            for c in 0..g.cols {
+                for r in 0..g.rows {
+                    cells.push(g.get(r, c).clone());
+                }
+            }
+            Value::Array {
+                rows: g.cols,
+                cols: g.rows,
+                cells,
+            }
+        }
+        "MMULT" => {
+            if args.len() != 2 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let (a, b) = match (
+                eval_range_2d(ev, sheet, &args[0]),
+                eval_range_2d(ev, sheet, &args[1]),
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return Value::Error(e),
+            };
+            // The inner dimensions must agree; Excel answers #VALUE! rather
+            // than padding, and padding would invent data.
+            if a.cols != b.rows || a.rows == 0 || b.cols == 0 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let (av, bv) = match (grid_numbers(&a), grid_numbers(&b)) {
+                (Ok(x), Ok(y)) => (x, y),
+                (Err(e), _) | (_, Err(e)) => return Value::Error(e),
+            };
+            let mut cells = Vec::with_capacity(a.rows * b.cols);
+            for r in 0..a.rows {
+                for c in 0..b.cols {
+                    let mut sum = 0.0;
+                    for k in 0..a.cols {
+                        sum += av[r * a.cols + k] * bv[k * b.cols + c];
+                    }
+                    cells.push(Value::Number(sum));
+                }
+            }
+            Value::Array {
+                rows: a.rows,
+                cols: b.cols,
+                cells,
+            }
+        }
+        "MINVERSE" => {
+            if args.len() != 1 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let g = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let n = g.rows;
+            if n == 0 || n != g.cols {
+                return Value::Error(ErrorValue::Value);
+            }
+            let mut m = match grid_numbers(&g) {
+                Ok(v) => v,
+                Err(e) => return Value::Error(e),
+            };
+            // Gauss–Jordan on [M | I], with partial pivoting for the same
+            // reason MDETERM uses it: a small leading entry amplifies error.
+            let mut inv = vec![0.0; n * n];
+            for i in 0..n {
+                inv[i * n + i] = 1.0;
+            }
+            for col in 0..n {
+                let mut pivot = col;
+                for r in (col + 1)..n {
+                    if m[r * n + col].abs() > m[pivot * n + col].abs() {
+                        pivot = r;
+                    }
+                }
+                if m[pivot * n + col] == 0.0 {
+                    // Singular: there is no inverse, and #NUM! says so rather
+                    // than returning a matrix of infinities.
+                    return Value::Error(ErrorValue::Num);
+                }
+                if pivot != col {
+                    for c in 0..n {
+                        m.swap(col * n + c, pivot * n + c);
+                        inv.swap(col * n + c, pivot * n + c);
+                    }
+                }
+                let d = m[col * n + col];
+                for c in 0..n {
+                    m[col * n + c] /= d;
+                    inv[col * n + c] /= d;
+                }
+                for r in 0..n {
+                    if r == col {
+                        continue;
+                    }
+                    let factor = m[r * n + col];
+                    if factor == 0.0 {
+                        continue;
+                    }
+                    for c in 0..n {
+                        m[r * n + c] -= factor * m[col * n + c];
+                        inv[r * n + c] -= factor * inv[col * n + c];
+                    }
+                }
+            }
+            Value::Array {
+                rows: n,
+                cols: n,
+                cells: inv.into_iter().map(Value::Number).collect(),
+            }
+        }
+        "FREQUENCY" => {
+            if args.len() != 2 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let data = match flatten_numbers(ev, sheet, &args[..1]) {
+                Ok(v) => v,
+                Err(e) => return Value::Error(e),
+            };
+            let mut bins = match flatten_numbers(ev, sheet, &args[1..2]) {
+                Ok(v) => v,
+                Err(e) => return Value::Error(e),
+            };
+            bins.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // One more bucket than there are bins: everything above the last
+            // bin still has to land somewhere, and dropping it would make the
+            // counts not sum to the data.
+            let mut counts = vec![0.0; bins.len() + 1];
+            for v in data {
+                let idx = bins.iter().position(|b| v <= *b).unwrap_or(bins.len());
+                counts[idx] += 1.0;
+            }
+            Value::Array {
+                rows: counts.len(),
+                cols: 1,
+                cells: counts.into_iter().map(Value::Number).collect(),
+            }
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
 }

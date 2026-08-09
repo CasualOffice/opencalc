@@ -207,3 +207,36 @@ That leaves the reachable ceiling at **347 of 356**. The remaining eight —
 FREQUENCY, GROWTH, LINEST, LOGEST, MINVERSE, MMULT, TRANSPOSE, TREND — all
 return arrays, and the engine has no result spilling. That is a design step,
 not a function.
+
+## Array results and spilling
+
+The last functions needing implementation all answer with a *shape*, so the
+engine had to learn to spill before any of them could exist.
+
+`Value::Array` carries a rectangle. Everything that wants one value calls
+`eval_expr`, which collapses an array to its top-left element — Excel's
+implicit intersection. Doing that at the boundary rather than at each call site
+is what kept arrays from leaking into the hundred places that only ever wanted
+a number; exactly one caller, the spilling pass, uses `eval_expr_array`.
+
+Three rules the pass has to get right:
+
+- **A blocked spill refuses and writes nothing.** If any target holds a value
+  the anchor becomes `#SPILL!` and the obstruction is untouched. Silently
+  replacing something a user typed is the one behaviour a spreadsheet must
+  never have.
+- **A shrinking spill releases what it vacates.** Children are cleared
+  wholesale before writing and re-spilled, rather than tracked per anchor: a
+  second bookkeeping structure is a second thing to fall out of step, and
+  clear-and-rewrite cannot drift.
+- **A formula reading *into* a spill range sees it.** Spilled cells are written
+  after evaluation, so on the pass that creates them they do not exist yet.
+  Teaching the dependency graph about extents that are only known once the
+  anchor is evaluated is circular, so the pass simply runs a second time when
+  anything spilled. It terminates — the same inputs give the same extents — and
+  a sheet whose anchor depends on its own spill is circular, so the second
+  pass's answer is taken rather than iterated.
+
+`MDETERM`, `TRANSPOSE`, `MMULT`, `MINVERSE` and `FREQUENCY` are built on it. The
+matrix tests assert the identities that define them — `A × A⁻¹ = I` — rather
+than quoting numbers, which also exercises reading across a spill boundary.

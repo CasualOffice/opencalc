@@ -73,7 +73,15 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Evaluate the cell at `(sheet_index, at)` to a value.
+    /// A formula cell's value in a scalar context; an array collapses to its
+    /// corner, so a cell that *references* a spilling formula reads one value.
     pub fn eval_cell(&mut self, sheet_index: usize, at: CellRef) -> Value {
+        self.eval_cell_array(sheet_index, at).scalar()
+    }
+
+    /// A formula cell's value with an array kept whole — what the spilling pass
+    /// needs, and the only caller that wants it.
+    pub fn eval_cell_array(&mut self, sheet_index: usize, at: CellRef) -> Value {
         let key = (sheet_index, at.row, at.col);
         if let Some(value) = self.memo.get(&key) {
             return value.clone();
@@ -107,7 +115,7 @@ impl<'a> Evaluator<'a> {
                 Some(expr) => {
                     let previous = self.current;
                     self.current = Some((sheet_index, at));
-                    let value = self.eval_expr(sheet_index, expr);
+                    let value = self.eval_expr_array(sheet_index, expr);
                     self.current = previous;
                     value
                 }
@@ -191,7 +199,19 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Evaluate an expression in the context of `sheet_index`.
+    /// Evaluate an expression in a **scalar** context.
+    ///
+    /// An array result collapses to its top-left element — Excel's implicit
+    /// intersection. Doing it here rather than at every call site is what keeps
+    /// arrays from leaking into the hundred places that only ever wanted a
+    /// number; only [`Self::eval_expr_array`] sees the whole block.
     pub fn eval_expr(&mut self, sheet_index: usize, expr: &Expr) -> Value {
+        self.eval_expr_array(sheet_index, expr).scalar()
+    }
+
+    /// Evaluate an expression, keeping an array result whole. Used by the
+    /// spilling pass and by the functions that consume a shape.
+    pub fn eval_expr_array(&mut self, sheet_index: usize, expr: &Expr) -> Value {
         match expr {
             Expr::Number(n) => Value::Number(*n),
             Expr::Bool(b) => Value::Bool(*b),

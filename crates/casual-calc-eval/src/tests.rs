@@ -3205,3 +3205,121 @@ fn mdeterm_computes_determinants_and_detects_singularity() {
         "a non-square array has no determinant"
     );
 }
+
+/// An array result spills into the cells below and to the right, and the
+/// spilled cells are flagged so the next pass can reclaim them.
+#[test]
+fn an_array_result_spills_into_its_neighbours() {
+    use casual_calc_model::CellFlags;
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0).number((0, 1), 2.0);
+    b.number((1, 0), 3.0).number((1, 1), 4.0);
+    b.formula((0, 4), "TRANSPOSE(A1:B2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    // Transposed: E1:F2 holds 1,3 / 2,4.
+    assert_eq!(value_at(&wb, 0, 4), CellValue::Number(1.0));
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 1, 4), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 1, 5), CellValue::Number(4.0));
+
+    let flags = |r: u32, c: u32| {
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(r, c))
+            .map(|cell| cell.flags)
+            .unwrap_or_default()
+    };
+    assert!(flags(0, 4).contains(CellFlags::SPILL_ANCHOR), "the anchor");
+    assert!(flags(0, 5).contains(CellFlags::SPILL_CHILD), "a child");
+    assert!(
+        !flags(0, 5).contains(CellFlags::SPILL_ANCHOR),
+        "a child is not an anchor"
+    );
+}
+
+/// A spill refuses rather than overwrites. Silently replacing a value someone
+/// typed is the one behaviour a spreadsheet must never have.
+#[test]
+fn a_blocked_spill_is_an_error_and_writes_nothing() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0).number((0, 1), 2.0);
+    b.number((1, 0), 3.0).number((1, 1), 4.0);
+    b.formula((0, 4), "TRANSPOSE(A1:B2)");
+    b.text((1, 5), "mine"); // sits inside the spill range
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(
+        value_at(&wb, 0, 4),
+        CellValue::Error(casual_calc_model::ErrorValue::Spill)
+    );
+    // The obstruction is untouched — that is the point.
+    let (CellValue::InlineString(id) | CellValue::SharedString(id)) = value_at(&wb, 1, 5) else {
+        panic!("the blocking value must survive");
+    };
+    assert_eq!(wb.strings.get(id).unwrap_or_default(), "mine");
+}
+
+/// A formula that produces a smaller array than last time must give back the
+/// cells it no longer covers, or the old values linger as ghosts.
+#[test]
+fn a_shrinking_spill_releases_the_cells_it_vacates() {
+    let mut b = Builder::new();
+    for r in 0..3u32 {
+        b.number((r, 0), (r + 1) as f64);
+    }
+    b.formula((0, 4), "TRANSPOSE(A1:A3)"); // 1 row x 3 cols
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 6), CellValue::Number(3.0));
+
+    // Re-point the formula at two cells; the third column must clear.
+    let expr = parse("TRANSPOSE(A1:A2)").unwrap();
+    let handle = wb.store_formula(expr);
+    let mut cell = wb.sheets[0].cells.get(CellRef::new(0, 4)).unwrap().clone();
+    cell.formula = Some(handle);
+    wb.sheets[0].cells.set(CellRef::new(0, 4), cell);
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(2.0));
+    assert_eq!(
+        value_at(&wb, 0, 6),
+        CellValue::Empty,
+        "the vacated cell must not keep its old value"
+    );
+}
+
+/// The matrix functions, checked by the identities that define them rather than
+/// by quoted numbers: a matrix times its inverse is the identity, and
+/// transposing twice is a no-op.
+#[test]
+fn matrix_functions_satisfy_their_identities() {
+    let mut b = Builder::new();
+    b.number((0, 0), 4.0).number((0, 1), 7.0);
+    b.number((1, 0), 2.0).number((1, 1), 6.0);
+    b.formula((0, 4), "MINVERSE(A1:B2)");
+    b.formula((4, 4), "MMULT(A1:B2,E1:F2)");
+    // FREQUENCY has one more bucket than bins, or the counts do not sum to the
+    // data — everything above the last bin still has to land somewhere.
+    b.number((0, 8), 1.0)
+        .number((1, 8), 5.0)
+        .number((2, 8), 9.0);
+    b.number((0, 9), 3.0).number((1, 9), 6.0);
+    b.formula((0, 10), "FREQUENCY(I1:I3,J1:J2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let n = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::Number(v) => v,
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    // A × A⁻¹ = I.
+    assert!((n(4, 4) - 1.0).abs() < 1e-9, "{}", n(4, 4));
+    assert!(n(4, 5).abs() < 1e-9);
+    assert!(n(5, 4).abs() < 1e-9);
+    assert!((n(5, 5) - 1.0).abs() < 1e-9);
+    // Three bins-worth of buckets for two bins: 1 | 5 | 9.
+    assert_eq!((n(0, 10), n(1, 10), n(2, 10)), (1.0, 1.0, 1.0));
+}

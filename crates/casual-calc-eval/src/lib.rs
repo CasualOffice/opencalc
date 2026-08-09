@@ -35,13 +35,30 @@ pub use eval::Evaluator;
 pub use functions::FUNCTIONS;
 pub use value::Value;
 
-use casual_calc_model::{CellRef, CellValue, Workbook};
+use casual_calc_model::{CellFlags, CellRef, CellValue, ErrorValue, Workbook};
 
 /// Recompute every formula cell's cached value in `workbook` (a full recalc).
 ///
 /// Deterministic: evaluation order does not affect results (memoized recursion
 /// over the reference graph), and identical input yields identical cached values.
 pub fn recalculate(workbook: &mut Workbook) {
+    // A spilled cell is written *after* evaluation, so a formula that reads
+    // into a spill range sees nothing on the pass that creates it. Rather than
+    // teach the dependency graph about extents that are only known once the
+    // anchor has been evaluated — which is circular — the pass simply runs
+    // again when something spilled.
+    //
+    // It terminates: the second pass evaluates the same anchors from the same
+    // inputs, so the extents are identical and nothing new appears. A sheet
+    // where an anchor depends on its own spill is circular, and the second
+    // pass's answer is taken rather than iterating towards one.
+    if recalculate_once(workbook) {
+        recalculate_once(workbook);
+    }
+}
+
+/// One evaluate-and-write cycle. Returns whether any array spilled.
+fn recalculate_once(workbook: &mut Workbook) -> bool {
     // Phase 1: compute new values without mutating the workbook.
     let updates = {
         let mut evaluator = Evaluator::new(workbook);
@@ -49,7 +66,9 @@ pub fn recalculate(workbook: &mut Workbook) {
         for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
             for (at, cell) in sheet.cells.iter() {
                 if cell.formula.is_some() {
-                    let value = evaluator.eval_cell(sheet_index, at);
+                    // The array form: only the spilling pass wants the whole
+                    // block, and it is the thing about to run.
+                    let value = evaluator.eval_cell_array(sheet_index, at);
                     updates.push((sheet_index, at, value));
                 }
             }
@@ -57,15 +76,103 @@ pub fn recalculate(workbook: &mut Workbook) {
         updates
     };
 
-    // Phase 2: write the new cached values back (interning any text results).
+    // Phase 2: write the new cached values back (interning any text results),
+    // spilling any array results into their neighbours.
+    clear_spill_children(workbook);
+    let mut spilled = false;
     for (sheet_index, at, value) in updates {
+        spilled |= write_result(workbook, sheet_index, at, value);
+    }
+    spilled
+}
+
+/// Remove every cell that a previous pass filled by spilling.
+///
+/// Done wholesale before writing, because a formula that used to produce a
+/// 3×3 and now produces a 2×2 has to give back the cells it no longer covers.
+/// Tracking which anchor owned which cell would be a second bookkeeping
+/// structure to keep in step with the first; clearing and re-spilling cannot
+/// drift.
+fn clear_spill_children(workbook: &mut Workbook) {
+    for sheet in workbook.sheets.iter_mut() {
+        let children: Vec<CellRef> = sheet
+            .cells
+            .iter()
+            .filter(|(_, c)| c.flags.contains(CellFlags::SPILL_CHILD))
+            .map(|(at, _)| at)
+            .collect();
+        for at in children {
+            sheet.cells.clear(at);
+        }
+    }
+}
+
+/// Write one formula result, spilling an array into the cells below and right.
+///
+/// The spill refuses rather than overwrites: if any target holds something, the
+/// anchor becomes `#SPILL!` and nothing is written. Excel does the same, and
+/// the alternative — silently replacing a value the user typed — is the one
+/// behaviour a spreadsheet must never have.
+/// Returns whether this result spilled into neighbouring cells.
+fn write_result(workbook: &mut Workbook, sheet_index: usize, at: CellRef, value: Value) -> bool {
+    let Value::Array { rows, cols, cells } = value else {
         let cell_value = value_to_cell(workbook, value);
         if let Some(existing) = workbook.sheets[sheet_index].cells.get(at) {
             let mut updated = existing.clone();
             updated.value = cell_value;
+            // No longer an anchor if it ever was.
+            updated.flags.remove(CellFlags::SPILL_ANCHOR);
             workbook.sheets[sheet_index].cells.set(at, updated);
         }
+        return false;
+    };
+    // A 1×1 array is just a value; spilling it would flag a cell for nothing.
+    if rows <= 1 && cols <= 1 {
+        let first = cells.into_iter().next().unwrap_or(Value::Empty);
+        return write_result(workbook, sheet_index, at, first);
     }
+
+    let blocked = {
+        let Some(sheet) = workbook.sheets.get(sheet_index) else {
+            return false;
+        };
+        (0..rows).any(|r| {
+            (0..cols).any(|c| {
+                if r == 0 && c == 0 {
+                    return false; // the anchor itself
+                }
+                let target = CellRef::new(at.row + r as u32, at.col + c as u32);
+                sheet.cells.get(target).is_some_and(|cell| !cell.is_blank())
+            })
+        })
+    };
+    if blocked {
+        write_result(workbook, sheet_index, at, Value::Error(ErrorValue::Spill));
+        return false;
+    }
+
+    for (i, item) in cells.into_iter().enumerate() {
+        let (r, c) = (i / cols, i % cols);
+        let target = CellRef::new(at.row + r as u32, at.col + c as u32);
+        let cell_value = value_to_cell(workbook, item);
+        let sheet = &mut workbook.sheets[sheet_index];
+        if r == 0 && c == 0 {
+            if let Some(existing) = sheet.cells.get(target) {
+                let mut updated = existing.clone();
+                updated.value = cell_value;
+                updated.flags.insert(CellFlags::SPILL_ANCHOR);
+                sheet.cells.set(target, updated);
+            }
+        } else {
+            let mut child = casual_calc_model::Cell::value(cell_value);
+            // Flagged, not merely written: the flag is what tells the next
+            // pass this cell belongs to a spill and may be reclaimed, and what
+            // stops the editor letting someone type over half an array.
+            child.flags.insert(CellFlags::SPILL_CHILD);
+            sheet.cells.set(target, child);
+        }
+    }
+    true
 }
 
 /// Recompute only the formula cells that (transitively) depend on `changed`,
@@ -120,6 +227,12 @@ fn value_to_cell(workbook: &mut Workbook, value: Value) -> CellValue {
         Value::Bool(b) => CellValue::Bool(b),
         Value::Error(e) => CellValue::Error(e),
         Value::Text(s) => CellValue::InlineString(workbook.intern_string(&s)),
+        // `write_result` unwraps arrays before reaching here, so a block at
+        // this point is a value with nowhere to go — its corner is the cell's.
+        Value::Array { cells, .. } => {
+            let first = cells.into_iter().next().unwrap_or(Value::Empty);
+            value_to_cell(workbook, first)
+        }
     }
 }
 
