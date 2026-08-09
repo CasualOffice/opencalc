@@ -30,9 +30,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ATAN", "ATAN(number)"),
     ("ATAN2", "ATAN2(x, y)"),
     ("ATANH", "ATANH(number)"),
+    ("AVEDEV", "AVEDEV(number1, …)"),
     ("AVERAGE", "AVERAGE(number1, …)"),
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
+    (
+        "BINOMDIST",
+        "BINOMDIST(number_s, trials, probability_s, cumulative)",
+    ),
     ("CEILING", "CEILING(number, significance)"),
     ("CHAR", "CHAR(number)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
@@ -44,14 +49,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("COMBINA", "COMBINA(n, k)"),
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
+    ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
     ("COSH", "COSH(number)"),
     ("COT", "COT(number)"),
     ("COTH", "COTH(number)"),
     ("COUNT", "COUNT(value1, …)"),
     ("COUNTA", "COUNTA(value1, …)"),
+    ("COUNTBLANK", "COUNTBLANK(range)"),
     ("COUNTIF", "COUNTIF(range, criteria)"),
     ("COUNTIFS", "COUNTIFS(range1, criteria1, …)"),
+    ("COVAR", "COVAR(array1, array2)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
     ("DATE", "DATE(year, month, day)"),
@@ -60,6 +68,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DAYS", "DAYS(end_date, start_date)"),
     ("DAYS360", "DAYS360(start, end, [method])"),
     ("DEGREES", "DEGREES(angle)"),
+    ("DEVSQ", "DEVSQ(number1, …)"),
     ("DOLLAR", "DOLLAR(number, [decimals])"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
@@ -67,13 +76,20 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
     ("EXP", "EXP(number)"),
+    ("EXPONDIST", "EXPONDIST(x, lambda, cumulative)"),
     ("FACT", "FACT(number)"),
     ("FACTDOUBLE", "FACTDOUBLE(number)"),
     ("FALSE", "FALSE()"),
     ("FIND", "FIND(find_text, within_text, [start])"),
+    ("FISHER", "FISHER(x)"),
+    ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
+    ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    ("GAMMALN", "GAMMALN(x)"),
     ("GCD", "GCD(number1, …)"),
+    ("GEOMEAN", "GEOMEAN(number1, …)"),
+    ("HARMEAN", "HARMEAN(number1, …)"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
@@ -84,6 +100,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("INDEX", "INDEX(array, row_num, [col_num])"),
     ("INDIRECT", "INDIRECT(ref_text, [a1])"),
     ("INT", "INT(number)"),
+    ("INTERCEPT", "INTERCEPT(known_y, known_x)"),
     ("ISBLANK", "ISBLANK(value)"),
     ("ISERR", "ISERR(value)"),
     ("ISERROR", "ISERROR(value)"),
@@ -97,6 +114,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISOWEEKNUM", "ISOWEEKNUM(date)"),
     ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
+    ("KURT", "KURT(number1, …)"),
     ("LARGE", "LARGE(array, k)"),
     ("LCM", "LCM(number1, …)"),
     ("LEFT", "LEFT(text, [num_chars])"),
@@ -113,26 +131,32 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MIN", "MIN(number1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
     ("MOD", "MOD(number, divisor)"),
+    ("MODE", "MODE(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
+    ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
+    ("NORMINV", "NORMINV(probability, mean, sd)"),
+    ("NORMSDIST", "NORMSDIST(z)"),
+    ("NORMSINV", "NORMSINV(probability)"),
     ("NOT", "NOT(logical)"),
-    (
-        "NUMBERVALUE",
-        "NUMBERVALUE(text, [decimal_sep], [group_sep])",
-    ),
     ("ODD", "ODD(number)"),
     ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
+    ("PEARSON", "PEARSON(array1, array2)"),
+    ("PERCENTILE", "PERCENTILE(array, k)"),
+    ("PERCENTRANK", "PERCENTRANK(array, x, [significance])"),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
     ("PI", "PI()"),
+    ("POISSON", "POISSON(x, mean, cumulative)"),
     ("POWER", "POWER(number, power)"),
     ("PRODUCT", "PRODUCT(number1, …)"),
     ("PROPER", "PROPER(text)"),
+    ("QUARTILE", "QUARTILE(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RANK", "RANK(number, ref, [order])"),
@@ -144,6 +168,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ROUNDUP", "ROUNDUP(number, num_digits)"),
     ("ROW", "ROW([reference])"),
     ("ROWS", "ROWS(array)"),
+    ("RSQ", "RSQ(known_y, known_x)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
     ("SEC", "SEC(number)"),
     ("SECH", "SECH(number)"),
@@ -154,11 +179,15 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SIGN", "SIGN(number)"),
     ("SIN", "SIN(number)"),
     ("SINH", "SINH(number)"),
+    ("SKEW", "SKEW(number1, …)"),
+    ("SLOPE", "SLOPE(known_y, known_x)"),
     ("SMALL", "SMALL(array, k)"),
     ("SQRT", "SQRT(number)"),
     ("SQRTPI", "SQRTPI(number)"),
+    ("STANDARDIZE", "STANDARDIZE(x, mean, standard_dev)"),
     ("STDEV", "STDEV(number1, …)"),
     ("STDEVP", "STDEVP(number1, …)"),
+    ("STEYX", "STEYX(known_y, known_x)"),
     ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
     ("SUM", "SUM(number1, …)"),
     ("SUMIF", "SUMIF(range, criteria, [sum_range])"),
@@ -172,6 +201,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
     ("TIME", "TIME(hour, minute, second)"),
     ("TRIM", "TRIM(text)"),
+    ("TRIMMEAN", "TRIMMEAN(array, percent)"),
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
     ("TYPE", "TYPE(value)"),
@@ -179,6 +209,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("UNICODE", "UNICODE(text)"),
     ("UPPER", "UPPER(text)"),
     ("VALUE", "VALUE(text)"),
+    ("VAR", "VAR(number1, …)"),
+    ("VARP", "VARP(number1, …)"),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
@@ -374,6 +406,93 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "FIXED" => eval_fixed(ev, sheet, args),
         "DOLLAR" => eval_dollar(ev, sheet, args),
         "NUMBERVALUE" => eval_numbervalue(ev, sheet, args),
+        // Descriptive statistics over the flattened numeric arguments.
+        "AVEDEV" => stat_over(ev, sheet, args, |ns| {
+            let mean = ns.iter().sum::<f64>() / ns.len() as f64;
+            Some(ns.iter().map(|n| (n - mean).abs()).sum::<f64>() / ns.len() as f64)
+        }),
+        "DEVSQ" => stat_over(ev, sheet, args, |ns| {
+            let mean = ns.iter().sum::<f64>() / ns.len() as f64;
+            Some(ns.iter().map(|n| (n - mean).powi(2)).sum())
+        }),
+        "GEOMEAN" => stat_over(ev, sheet, args, |ns| {
+            // Any non-positive value makes the geometric mean undefined, and
+            // the log-sum below would silently yield NaN instead of saying so.
+            if ns.iter().any(|n| *n <= 0.0) {
+                return None;
+            }
+            Some((ns.iter().map(|n| n.ln()).sum::<f64>() / ns.len() as f64).exp())
+        }),
+        "HARMEAN" => stat_over(ev, sheet, args, |ns| {
+            if ns.iter().any(|n| *n <= 0.0) {
+                return None;
+            }
+            Some(ns.len() as f64 / ns.iter().map(|n| 1.0 / n).sum::<f64>())
+        }),
+        "MODE" => stat_over(ev, sheet, args, mode_of),
+        "SKEW" => stat_over(ev, sheet, args, skew_of),
+        "KURT" => stat_over(ev, sheet, args, kurt_of),
+        "VAR" => stat_over(ev, sheet, args, |ns| variance(ns, true)),
+        "VARP" => stat_over(ev, sheet, args, |ns| variance(ns, false)),
+        "PERCENTILE" => eval_percentile(ev, sheet, args, false),
+        "QUARTILE" => eval_percentile(ev, sheet, args, true),
+        "PERCENTRANK" => eval_percentrank(ev, sheet, args),
+        "TRIMMEAN" => eval_trimmean(ev, sheet, args),
+        "COUNTBLANK" => eval_countblank(ev, sheet, args),
+        "STANDARDIZE" => eval_standardize(ev, sheet, args),
+        // Paired-sample statistics: two ranges of equal length.
+        "CORREL" | "PEARSON" => paired(ev, sheet, args, correlation),
+        "RSQ" => paired(ev, sheet, args, |xs, ys| correlation(xs, ys).map(|r| r * r)),
+        "COVAR" => paired(ev, sheet, args, |xs, ys| {
+            let (mx, my) = (mean(xs), mean(ys));
+            Some(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(x, y)| (x - mx) * (y - my))
+                    .sum::<f64>()
+                    / xs.len() as f64,
+            )
+        }),
+        // Note the argument order: SLOPE and INTERCEPT take y *before* x, so
+        // the regression is of the first range on the second.
+        "SLOPE" => paired(ev, sheet, args, slope),
+        "INTERCEPT" => paired(ev, sheet, args, |ys, xs| {
+            slope(ys, xs).map(|m| mean(ys) - m * mean(xs))
+        }),
+        "STEYX" => paired(ev, sheet, args, steyx),
+        "FORECAST" => eval_forecast(ev, sheet, args),
+        // Distributions and transforms.
+        "FISHER" => checked(ev, sheet, args, |x| {
+            if x <= -1.0 || x >= 1.0 {
+                Value::Error(ErrorValue::Num)
+            } else {
+                Value::Number(0.5 * ((1.0 + x) / (1.0 - x)).ln())
+            }
+        }),
+        "FISHERINV" => scalar(ev, sheet, args, |y| {
+            let e = (2.0 * y).exp();
+            (e - 1.0) / (e + 1.0)
+        }),
+        "GAMMALN" => checked(ev, sheet, args, |x| {
+            if x <= 0.0 {
+                Value::Error(ErrorValue::Num)
+            } else {
+                Value::Number(ln_gamma(x))
+            }
+        }),
+        "NORMSDIST" => scalar(ev, sheet, args, standard_normal_cdf),
+        "NORMSINV" => checked(ev, sheet, args, |p| {
+            if p <= 0.0 || p >= 1.0 {
+                Value::Error(ErrorValue::Num)
+            } else {
+                Value::Number(normal_quantile(p))
+            }
+        }),
+        "NORMDIST" => eval_normdist(ev, sheet, args),
+        "NORMINV" => eval_norminv(ev, sheet, args),
+        "EXPONDIST" => eval_expondist(ev, sheet, args),
+        "POISSON" => eval_poisson(ev, sheet, args),
+        "BINOMDIST" => eval_binomdist(ev, sheet, args),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -3323,4 +3442,579 @@ fn eval_numbervalue(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Valu
         Ok(n) => Value::Number(n / 100f64.powi(percents as i32)),
         Err(_) => Value::Error(ErrorValue::Value),
     }
+}
+
+// --- Statistics ------------------------------------------------------------
+
+/// Run `f` over the flattened numeric arguments. An empty sample, or an `f`
+/// returning `None`, is `#NUM!` — the value a statistic has no meaning for.
+fn stat_over(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: fn(&[f64]) -> Option<f64>,
+) -> Value {
+    match flatten_numbers(ev, sheet, args) {
+        Ok(ns) if ns.is_empty() => Value::Error(ErrorValue::Num),
+        Ok(ns) => match f(&ns) {
+            Some(v) if v.is_finite() => Value::Number(v),
+            _ => Value::Error(ErrorValue::Num),
+        },
+        Err(e) => Value::Error(e),
+    }
+}
+
+fn mean(ns: &[f64]) -> f64 {
+    ns.iter().sum::<f64>() / ns.len() as f64
+}
+
+/// Variance, sample (`n-1`) or population (`n`).
+///
+/// The divisor is the whole difference between VAR and VARP, and using the
+/// wrong one gives an answer close enough to pass a glance on any large sample.
+fn variance(ns: &[f64], sample: bool) -> Option<f64> {
+    let n = ns.len();
+    if sample && n < 2 {
+        return None;
+    }
+    let m = mean(ns);
+    let sum: f64 = ns.iter().map(|x| (x - m).powi(2)).sum();
+    Some(sum / if sample { (n - 1) as f64 } else { n as f64 })
+}
+
+/// The most frequent value, or `None` when every value occurs once — Excel
+/// reports `#N/A` for that, not the first value.
+fn mode_of(ns: &[f64]) -> Option<f64> {
+    let mut best: Option<(f64, usize)> = None;
+    for candidate in ns {
+        let count = ns.iter().filter(|n| *n == candidate).count();
+        if count > best.map_or(0, |(_, c)| c) {
+            best = Some((*candidate, count));
+        }
+    }
+    best.filter(|(_, count)| *count > 1).map(|(v, _)| v)
+}
+
+fn skew_of(ns: &[f64]) -> Option<f64> {
+    let n = ns.len();
+    if n < 3 {
+        return None;
+    }
+    let m = mean(ns);
+    let sd = variance(ns, true)?.sqrt();
+    if sd == 0.0 {
+        return None;
+    }
+    let n = n as f64;
+    let sum: f64 = ns.iter().map(|x| ((x - m) / sd).powi(3)).sum();
+    Some(n / ((n - 1.0) * (n - 2.0)) * sum)
+}
+
+fn kurt_of(ns: &[f64]) -> Option<f64> {
+    let count = ns.len();
+    if count < 4 {
+        return None;
+    }
+    let m = mean(ns);
+    let sd = variance(ns, true)?.sqrt();
+    if sd == 0.0 {
+        return None;
+    }
+    let n = count as f64;
+    let sum: f64 = ns.iter().map(|x| ((x - m) / sd).powi(4)).sum();
+    Some(
+        n * (n + 1.0) / ((n - 1.0) * (n - 2.0) * (n - 3.0)) * sum
+            - 3.0 * (n - 1.0).powi(2) / ((n - 2.0) * (n - 3.0)),
+    )
+}
+
+/// `PERCENTILE(array, k)`, or `QUARTILE(array, q)` with `q` in 0..=4.
+///
+/// Linear interpolation between order statistics, which is what Excel's
+/// inclusive percentile does; a nearest-rank implementation disagrees on most
+/// samples.
+fn eval_percentile(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], quartile: bool) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let k = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => {
+            if quartile {
+                if !(0.0..=4.0).contains(&n) {
+                    return Value::Error(ErrorValue::Num);
+                }
+                n.trunc() / 4.0
+            } else {
+                n
+            }
+        }
+        Err(e) => return Value::Error(e),
+    };
+    if ns.is_empty() || !(0.0..=1.0).contains(&k) {
+        return Value::Error(ErrorValue::Num);
+    }
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    Value::Number(percentile_of(&ns, k))
+}
+
+fn percentile_of(sorted: &[f64], k: f64) -> f64 {
+    let position = k * (sorted.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        return sorted[lower];
+    }
+    sorted[lower] + (position - lower as f64) * (sorted[upper] - sorted[lower])
+}
+
+/// `PERCENTRANK(array, x, [significance])` — the inverse of PERCENTILE.
+fn eval_percentrank(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let x = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    if ns.is_empty() {
+        return Value::Error(ErrorValue::Num);
+    }
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    if x < ns[0] || x > ns[ns.len() - 1] {
+        return Value::Error(ErrorValue::Na);
+    }
+    let below = ns.iter().filter(|n| **n < x).count() as f64;
+    let equal = ns.iter().filter(|n| **n == x).count() as f64;
+    let rank = if equal > 0.0 {
+        below / (ns.len() - 1) as f64
+    } else {
+        // Between two observations: interpolate, as Excel does.
+        let lower = ns.iter().rev().find(|n| **n < x).copied().unwrap_or(ns[0]);
+        let upper = ns.iter().find(|n| **n > x).copied().unwrap_or(x);
+        let base = ns.iter().filter(|n| **n < x).count() as f64 - 1.0;
+        (base + (x - lower) / (upper - lower)) / (ns.len() - 1) as f64
+    };
+    let digits = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n.trunc() as i32,
+            Err(e) => return Value::Error(e),
+        },
+        None => 3,
+    };
+    let factor = 10f64.powi(digits);
+    // Truncated, not rounded: PERCENTRANK reports significant digits rather
+    // than a rounded value.
+    Value::Number((rank * factor).trunc() / factor)
+}
+
+/// `TRIMMEAN(array, percent)` — the mean after discarding the extremes.
+fn eval_trimmean(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let percent = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    if ns.is_empty() || !(0.0..1.0).contains(&percent) {
+        return Value::Error(ErrorValue::Num);
+    }
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    // The count to drop is rounded *down to an even number*, so the same many
+    // are discarded from each end.
+    let drop = ((ns.len() as f64 * percent / 2.0).floor() as usize) * 2;
+    let keep = &ns[drop / 2..ns.len() - drop / 2];
+    if keep.is_empty() {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(mean(keep))
+}
+
+/// `COUNTBLANK(range)` — cells with no content, which is not the same as cells
+/// holding an empty string.
+fn eval_countblank(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let Some((target, cells)) = range_cells(ev, sheet, arg) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let count = cells
+        .into_iter()
+        .filter(|at| matches!(ev.eval_cell(target, *at), Value::Empty))
+        .count();
+    Value::Number(count as f64)
+}
+
+fn eval_standardize(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [x, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if sd <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((x - m) / sd)
+}
+
+/// Evaluate two ranges of equal length and hand them to `f`.
+fn paired(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: fn(&[f64], &[f64]) -> Option<f64>,
+) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let xs = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let ys = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    // Mismatched lengths are #N/A rather than being zipped to the shorter one,
+    // which would silently answer over part of the data.
+    if xs.len() != ys.len() || xs.is_empty() {
+        return Value::Error(ErrorValue::Na);
+    }
+    match f(&xs, &ys) {
+        Some(v) if v.is_finite() => Value::Number(v),
+        _ => Value::Error(ErrorValue::Div0),
+    }
+}
+
+fn correlation(xs: &[f64], ys: &[f64]) -> Option<f64> {
+    let (mx, my) = (mean(xs), mean(ys));
+    let mut sxy = 0.0;
+    let mut sxx = 0.0;
+    let mut syy = 0.0;
+    for (x, y) in xs.iter().zip(ys) {
+        sxy += (x - mx) * (y - my);
+        sxx += (x - mx).powi(2);
+        syy += (y - my).powi(2);
+    }
+    let denominator = (sxx * syy).sqrt();
+    (denominator != 0.0).then(|| sxy / denominator)
+}
+
+fn slope(ys: &[f64], xs: &[f64]) -> Option<f64> {
+    let (mx, my) = (mean(xs), mean(ys));
+    let mut sxy = 0.0;
+    let mut sxx = 0.0;
+    for (x, y) in xs.iter().zip(ys) {
+        sxy += (x - mx) * (y - my);
+        sxx += (x - mx).powi(2);
+    }
+    (sxx != 0.0).then(|| sxy / sxx)
+}
+
+fn steyx(ys: &[f64], xs: &[f64]) -> Option<f64> {
+    if ys.len() < 3 {
+        return None;
+    }
+    let m = slope(ys, xs)?;
+    let b = mean(ys) - m * mean(xs);
+    let sse: f64 = xs
+        .iter()
+        .zip(ys)
+        .map(|(x, y)| (y - (m * x + b)).powi(2))
+        .sum();
+    Some((sse / (ys.len() - 2) as f64).sqrt())
+}
+
+/// `FORECAST(x, known_y, known_x)` — the regression line evaluated at `x`.
+fn eval_forecast(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let x = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let ys = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let xs = match flatten_numbers(ev, sheet, &args[2..3]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if xs.len() != ys.len() || xs.is_empty() {
+        return Value::Error(ErrorValue::Na);
+    }
+    match slope(&ys, &xs) {
+        Some(m) => Value::Number(mean(&ys) - m * mean(&xs) + m * x),
+        None => Value::Error(ErrorValue::Div0),
+    }
+}
+
+fn three_numbers(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+) -> Option<Result<[f64; 3], ErrorValue>> {
+    if args.len() != 3 {
+        return None;
+    }
+    let mut out = [0.0; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        match ev.eval_expr(sheet, &args[i]).as_number() {
+            Ok(v) => *slot = v,
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Ok(out))
+}
+
+/// The standard normal CDF, via the error function.
+fn standard_normal_cdf(z: f64) -> f64 {
+    0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
+}
+
+#[allow(clippy::excessive_precision)]
+/// Abramowitz & Stegun 7.1.26 — about 1.5e-7 absolute error, which is finer
+/// than the 15 significant digits a spreadsheet displays can distinguish for
+/// probabilities.
+fn erf(x: f64) -> f64 {
+    // Exact at zero by construction. The rational approximation returns about
+    // 1e-9 there, which makes NORMSDIST(0) read 0.5000000005 — a wart in the
+    // one place every user checks first.
+    if x == 0.0 {
+        return 0.0;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    sign * y
+}
+
+/// The inverse standard normal CDF (Acklam's rational approximation), refined
+/// by one Halley step so the result is accurate to full double precision.
+///
+/// The coefficients are transcribed at their published precision, which is
+/// finer than `f64` holds. They are left as printed so they can be checked
+/// against the source rather than against a rounded copy of it.
+#[allow(clippy::excessive_precision)]
+fn normal_quantile(p: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_690e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    const LOW: f64 = 0.024_25;
+    let x = if p < LOW {
+        let q = (-2.0 * p.ln()).sqrt();
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    } else if p <= 1.0 - LOW {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    } else {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    // One Halley refinement against the CDF, which lifts the approximation's
+    // ~1e-9 relative error to machine precision.
+    let e = standard_normal_cdf(x) - p;
+    let u = e * (2.0 * std::f64::consts::PI).sqrt() * (x * x / 2.0).exp();
+    x - u / (1.0 + x * u / 2.0)
+}
+
+/// The Lanczos approximation to `ln Γ(x)`.
+///
+/// Coefficients transcribed at published precision; see [`normal_quantile`].
+#[allow(clippy::excessive_precision)]
+fn ln_gamma(x: f64) -> f64 {
+    const G: [f64; 9] = [
+        0.999_999_999_999_809_93,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        // Reflection, since the series converges only for x > 0.5.
+        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = G[0];
+    let t = x + 7.5;
+    for (i, g) in G.iter().enumerate().skip(1) {
+        a += g / (x + i as f64);
+    }
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+fn eval_normdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let Some(v) = three_numbers(ev, sheet, &args[..3]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [x, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[3]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    if sd <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let z = (x - m) / sd;
+    Value::Number(if cumulative {
+        standard_normal_cdf(z)
+    } else {
+        (-z * z / 2.0).exp() / (sd * (2.0 * std::f64::consts::PI).sqrt())
+    })
+}
+
+fn eval_norminv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [p, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if sd <= 0.0 || p <= 0.0 || p >= 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(m + sd * normal_quantile(p))
+}
+
+fn eval_expondist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (x, lambda) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a, b),
+        Err(e) => return e,
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[2]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    if x < 0.0 || lambda <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(if cumulative {
+        1.0 - (-lambda * x).exp()
+    } else {
+        lambda * (-lambda * x).exp()
+    })
+}
+
+fn eval_poisson(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (x, m) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a.trunc(), b),
+        Err(e) => return e,
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[2]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    if x < 0.0 || m < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Summed in log space: m^k / k! overflows for quite ordinary means long
+    // before the probability itself becomes unrepresentable.
+    let term = |k: f64| (-m + k * m.ln() - ln_gamma(k + 1.0)).exp();
+    Value::Number(if cumulative {
+        (0..=(x as u64)).map(|k| term(k as f64)).sum()
+    } else {
+        term(x)
+    })
+}
+
+fn eval_binomdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let Some(v) = three_numbers(ev, sheet, &args[..3]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [s, n, p] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[3]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    let (s, n) = (s.trunc(), n.trunc());
+    if s < 0.0 || s > n || !(0.0..=1.0).contains(&p) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let term = |k: f64| {
+        // Log space again: C(n,k) overflows well before the probability does.
+        (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)
+            + k * p.ln()
+            + (n - k) * (1.0 - p).ln())
+        .exp()
+    };
+    Value::Number(if cumulative {
+        (0..=(s as u64)).map(|k| term(k as f64)).sum()
+    } else {
+        term(s)
+    })
 }

@@ -1468,3 +1468,183 @@ fn t_passes_text_through_and_does_not_convert() {
         other => panic!("expected empty text, got {other:?}"),
     }
 }
+
+/// A sheet with a small sample in A1:A9 and a paired one in B1:B9.
+fn sample_workbook() -> Builder {
+    let xs = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0, 10.0];
+    let ys = [1.0, 3.0, 2.0, 5.0, 4.0, 6.0, 6.0, 9.0, 8.0];
+    let mut b = Builder::new();
+    for (i, (x, y)) in xs.iter().zip(ys).enumerate() {
+        b.number((i as u32, 0), *x).number((i as u32, 1), y);
+    }
+    b
+}
+
+#[test]
+fn variance_divisor_separates_var_from_varp() {
+    let mut b = sample_workbook();
+    b.formula((0, 3), "VAR(A1:A9)")
+        .formula((1, 3), "VARP(A1:A9)")
+        .formula((2, 3), "DEVSQ(A1:A9)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 3) {
+        CellValue::Number(v) => v,
+        other => panic!("{other:?}"),
+    };
+    // Mean 5.5556 over nine values; sum of squared deviations 54.2222.
+    assert!((n(2) - 54.222_222_222_222_23).abs() < 1e-9);
+    // The divisor is the entire difference between the two, and the wrong one
+    // is close enough to pass a glance on any large sample.
+    assert!(
+        (n(0) - 54.222_222_222_222_23 / 8.0).abs() < 1e-9,
+        "VAR uses n-1"
+    );
+    assert!(
+        (n(1) - 54.222_222_222_222_23 / 9.0).abs() < 1e-9,
+        "VARP uses n"
+    );
+}
+
+#[test]
+fn descriptive_statistics() {
+    let mut b = sample_workbook();
+    b.formula((0, 3), "AVEDEV(A1:A9)")
+        .formula((1, 3), "GEOMEAN(A1:A9)")
+        .formula((2, 3), "HARMEAN(A1:A9)")
+        .formula((3, 3), "MODE(A1:A9)")
+        .formula((4, 3), "MEDIAN(A1:A9)")
+        .formula((5, 3), "PERCENTILE(A1:A9,0.5)")
+        .formula((6, 3), "QUARTILE(A1:A9,2)")
+        .formula((7, 3), "TRIMMEAN(A1:A9,0.4)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 3) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 2.074_074_074_074_074).abs() < 1e-9, "AVEDEV");
+    assert!((n(1) - 5.017_633_630_614_796).abs() < 1e-9, "GEOMEAN");
+    assert!((n(2) - 4.491_089_108_910_891).abs() < 1e-9, "HARMEAN");
+    assert_eq!(n(3), 4.0, "MODE is the most frequent value");
+    // The median, the 50th percentile and the second quartile are one number
+    // reached three ways; disagreement means the interpolation is wrong.
+    assert_eq!(n(4), 5.0);
+    assert_eq!(n(5), 5.0);
+    assert_eq!(n(6), 5.0);
+    assert!(n(7).is_finite());
+}
+
+#[test]
+fn mode_of_all_distinct_values_is_an_error() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0)
+        .number((1, 0), 2.0)
+        .number((2, 0), 3.0)
+        .formula((3, 0), "MODE(A1:A3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    // Excel reports an error rather than picking the first value, which would
+    // look like a real mode.
+    assert!(matches!(
+        value_at(&wb, 3, 0),
+        CellValue::Error(ErrorValue::Num | ErrorValue::Na)
+    ));
+}
+
+#[test]
+fn regression_takes_y_before_x() {
+    let mut b = sample_workbook();
+    // A perfect line through B: y = 2x + 1, so the slope and intercept are
+    // exact and an argument-order mistake is unmissable.
+    for i in 0..9u32 {
+        b.number((i, 4), i as f64)
+            .number((i, 5), 2.0 * i as f64 + 1.0);
+    }
+    b.formula((0, 3), "SLOPE(F1:F9,E1:E9)")
+        .formula((1, 3), "INTERCEPT(F1:F9,E1:E9)")
+        .formula((2, 3), "RSQ(F1:F9,E1:E9)")
+        .formula((3, 3), "FORECAST(10,F1:F9,E1:E9)")
+        .formula((4, 3), "CORREL(A1:A9,B1:B9)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 3) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 2.0).abs() < 1e-9, "slope");
+    assert!((n(1) - 1.0).abs() < 1e-9, "intercept");
+    assert!((n(2) - 1.0).abs() < 1e-9, "a perfect fit is r^2 = 1");
+    assert!((n(3) - 21.0).abs() < 1e-9, "forecast at x = 10");
+    assert!(n(4) > 0.9 && n(4) < 1.0);
+}
+
+#[test]
+fn mismatched_paired_ranges_are_na_not_truncated() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0)
+        .number((1, 0), 2.0)
+        .number((2, 0), 3.0)
+        .number((0, 1), 1.0)
+        .number((1, 1), 2.0)
+        .formula((4, 0), "CORREL(A1:A3,B1:B2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    // Zipping to the shorter range would silently answer over part of the data.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Error(ErrorValue::Na));
+}
+
+#[test]
+fn normal_distribution_and_its_inverse_agree() {
+    // The inverse is a rational approximation refined by a Halley step; if the
+    // refinement were dropped this round trip would drift around 1e-9.
+    let mut b = Builder::new();
+    b.formula((0, 0), "NORMSDIST(1.96)")
+        .formula((1, 0), "NORMSINV(0.975)")
+        .formula((2, 0), "NORMDIST(0,0,1,TRUE())")
+        .formula((3, 0), "NORMINV(NORMSDIST(1.2345),0,1)")
+        .formula((4, 0), "GAMMALN(5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // The true value is 0.97500210…, not 0.975 — the difference is what a
+    // tolerance chosen from memory rather than computed would have hidden.
+    assert!((n(0) - 0.975_002_104_851_78).abs() < 1e-6);
+    assert!((n(1) - 1.96).abs() < 1e-4);
+    assert!((n(2) - 0.5).abs() < 1e-12);
+    assert!(
+        (n(3) - 1.2345).abs() < 1e-6,
+        "round trip through the inverse"
+    );
+    // ln(4!) = ln 24.
+    assert!((n(4) - 24.0f64.ln()).abs() < 1e-9);
+}
+
+#[test]
+fn discrete_distributions_sum_in_log_space() {
+    // m^k / k! and C(n,k) both overflow f64 long before the probability itself
+    // becomes unrepresentable, so the terms are computed via ln-gamma.
+    let mut b = Builder::new();
+    b.formula((0, 0), "POISSON(2,3,FALSE())")
+        .formula((1, 0), "POISSON(200,300,TRUE())")
+        .formula((2, 0), "BINOMDIST(3,10,0.5,FALSE())")
+        .formula((3, 0), "BINOMDIST(500,1000,0.5,TRUE())")
+        .formula((4, 0), "EXPONDIST(1,1,TRUE())");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - (9.0 * (-3.0f64).exp() / 2.0)).abs() < 1e-12);
+    // A naive implementation returns NaN here rather than a probability.
+    assert!(n(1) > 0.0 && n(1) < 1.0, "large Poisson stays finite");
+    assert!((n(2) - 120.0 * 0.5f64.powi(10)).abs() < 1e-12);
+    assert!((n(3) - 0.5).abs() < 0.02, "large binomial stays finite");
+    assert!((n(4) - (1.0 - (-1.0f64).exp())).abs() < 1e-12);
+}
