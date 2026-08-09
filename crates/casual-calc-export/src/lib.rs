@@ -20,7 +20,7 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, HAlign, Sheet, SheetId, Style, ThemeTint, VAlign, Workbook,
+    ErrorValue, FilterRule, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint, VAlign, Workbook,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -507,13 +507,74 @@ fn shared_strings_xml(workbook: &Workbook) -> String {
     let count = workbook.strings.len();
     let mut s =
         format!("{DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{count}\" uniqueCount=\"{count}\">");
-    for text in workbook.strings.iter() {
-        s.push_str(&format!(
-            "<si><t xml:space=\"preserve\">{}</t></si>",
-            escape_text(text)
-        ));
+    for (i, text) in workbook.strings.iter().enumerate() {
+        let id = workbook.strings.id_at(i);
+        match id.and_then(|id| workbook.strings.runs(id)) {
+            // Rich text: one `<r>` per run, each carrying its own `<rPr>`.
+            // Writing the flattened `<t>` instead is what loses the formatting.
+            Some(runs) => {
+                s.push_str("<si>");
+                for run in runs {
+                    s.push_str("<r>");
+                    if let Some(font) = &run.font {
+                        s.push_str(&run_font_xml(font));
+                    }
+                    s.push_str(&format!(
+                        "<t xml:space=\"preserve\">{}</t>",
+                        escape_text(&run.text)
+                    ));
+                    s.push_str("</r>");
+                }
+                s.push_str("</si>");
+            }
+            None => s.push_str(&format!(
+                "<si><t xml:space=\"preserve\">{}</t></si>",
+                escape_text(text)
+            )),
+        }
     }
     s.push_str("</sst>");
+    s
+}
+
+/// One `<rPr>`. Child order follows CT_RPrElt's sequence, which Excel enforces:
+/// the same children in a different order is a package it refuses to open.
+fn run_font_xml(font: &RunFont) -> String {
+    let mut s = String::from("<rPr>");
+    if font.bold {
+        s.push_str("<b/>");
+    }
+    if font.italic {
+        s.push_str("<i/>");
+    }
+    if font.strike {
+        s.push_str("<strike/>");
+    }
+    if let Some(u) = font.underline {
+        s.push_str(&format!("<u val=\"{}\"/>", u.ooxml()));
+    }
+    if let Some(v) = font.vert_align {
+        s.push_str(&format!("<vertAlign val=\"{}\"/>", v.ooxml()));
+    }
+    if let Some(sz) = font.size_hp {
+        s.push_str(&format!("<sz val=\"{}\"/>", fmt_half_points(sz)));
+    }
+    if let Some(color) = &font.color {
+        s.push_str(&color_element("color", color, font.color_theme.as_ref()));
+    }
+    if let Some(name) = &font.name {
+        s.push_str(&format!("<rFont val=\"{}\"/>", escape_attr(name)));
+    }
+    if let Some(family) = font.family {
+        s.push_str(&format!("<family val=\"{family}\"/>"));
+    }
+    if let Some(charset) = font.charset {
+        s.push_str(&format!("<charset val=\"{charset}\"/>"));
+    }
+    if let Some(scheme) = &font.scheme {
+        s.push_str(&format!("<scheme val=\"{}\"/>", escape_attr(scheme)));
+    }
+    s.push_str("</rPr>");
     s
 }
 

@@ -152,7 +152,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     if package.contains(SHARED_STRINGS_PART) {
         let xml = package.read_part(SHARED_STRINGS_PART)?;
         for value in parse_shared_strings(&xml)? {
-            shared_ids.push(workbook.intern_string(&value));
+            shared_ids.push(workbook.intern_rich_text(value));
         }
     }
 

@@ -149,6 +149,12 @@ impl Workbook {
             )
     }
 
+    /// Intern rich text — the runs and their formatting — returning its id.
+    /// Collapses to a plain string when no run carries formatting.
+    pub fn intern_rich_text(&mut self, runs: Vec<crate::style::TextRun>) -> StringId {
+        self.strings.intern_rich(runs)
+    }
+
     pub fn intern_string(&mut self, value: &str) -> StringId {
         self.strings.intern(value)
     }

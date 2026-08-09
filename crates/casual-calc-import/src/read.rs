@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_model::OutlinePr;
+use casual_calc_model::{OutlinePr, RunFont, TextRun, Underline, VertAlign};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -90,43 +90,91 @@ impl Bounds {
 
 /// Parse `sharedStrings.xml` into the ordered list of strings. Text within each
 /// `<si>` (including multiple `<r><t>` runs) is concatenated.
-pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, ImportError> {
+pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<Vec<TextRun>>, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut bounds = Bounds::new();
 
-    let mut strings = Vec::new();
-    let mut current: Option<String> = None;
+    let mut strings: Vec<Vec<TextRun>> = Vec::new();
+    let mut current: Option<Vec<TextRun>> = None;
+    let mut run_font: Option<RunFont> = None;
+    let mut in_rpr = false;
+    let mut in_run = false;
     let mut in_text = false;
+    let mut text = String::new();
 
     loop {
-        match reader.read_event_into(&mut buf).map_err(xml_err)? {
-            Event::Start(e) => {
-                bounds.open()?;
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        match event {
+            // `<rPr>`'s children are all childless toggles and values, so they
+            // arrive as `Empty`; folding the two cases keeps one dispatch.
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                if matches!(event, Event::Start(_)) {
+                    bounds.open()?;
+                } else {
+                    bounds.count()?;
+                }
                 match e.local_name().as_ref() {
-                    b"si" => current = Some(String::new()),
-                    b"t" => in_text = true,
+                    b"si" => {
+                        current = Some(Vec::new());
+                        if matches!(event, Event::Empty(_)) {
+                            strings.push(Vec::new());
+                            current = None;
+                        }
+                    }
+                    b"r" => {
+                        in_run = true;
+                        run_font = None;
+                    }
+                    b"rPr" => {
+                        in_rpr = true;
+                        run_font = Some(RunFont::default());
+                    }
+                    b"t" => {
+                        in_text = true;
+                        text.clear();
+                    }
+                    _ if in_rpr => {
+                        if let Some(font) = run_font.as_mut() {
+                            read_rpr_child(e, font)?;
+                        }
+                    }
                     _ => {}
                 }
             }
-            Event::Empty(e) => {
-                bounds.count()?;
-                if e.local_name().as_ref() == b"si" {
-                    strings.push(String::new());
-                }
-            }
             Event::Text(e) => {
-                if in_text && let Some(current) = current.as_mut() {
-                    current.push_str(&e.unescape().map_err(xml_err)?);
+                if in_text {
+                    text.push_str(&e.unescape().map_err(xml_err)?);
                 }
             }
             Event::End(e) => {
                 bounds.close();
                 match e.local_name().as_ref() {
-                    b"t" => in_text = false,
+                    b"rPr" => in_rpr = false,
+                    b"t" => {
+                        in_text = false;
+                        // A `<t>` directly under `<si>` is the whole string; one
+                        // inside `<r>` waits for `</r>` so it can carry its font.
+                        if !in_run && let Some(runs) = current.as_mut() {
+                            runs.push(TextRun {
+                                text: std::mem::take(&mut text),
+                                font: None,
+                            });
+                        }
+                    }
+                    b"r" => {
+                        in_run = false;
+                        if let Some(runs) = current.as_mut() {
+                            let font = run_font.take().filter(|f| !f.is_empty());
+                            runs.push(TextRun {
+                                text: std::mem::take(&mut text),
+                                font,
+                            });
+                        }
+                    }
                     b"si" => {
-                        if let Some(text) = current.take() {
-                            strings.push(text);
+                        if let Some(runs) = current.take() {
+                            strings.push(runs);
                         }
                     }
                     _ => {}
@@ -138,6 +186,44 @@ pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, ImportError> {
         buf.clear();
     }
     Ok(strings)
+}
+
+/// Fold one `<rPr>` child into the run's font.
+fn read_rpr_child(e: &BytesStart<'_>, font: &mut RunFont) -> Result<(), ImportError> {
+    // `<b/>` means bold; `<b val="0"/>` means explicitly not bold. Treating the
+    // element's presence as truth would make the second one bold.
+    let on = |e: &BytesStart<'_>| -> Result<bool, ImportError> {
+        Ok(read_attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+    };
+    match e.local_name().as_ref() {
+        b"b" => font.bold = on(e)?,
+        b"i" => font.italic = on(e)?,
+        b"strike" => font.strike = on(e)?,
+        b"u" => font.underline = Underline::from_ooxml(&read_attr(e, b"val")?.unwrap_or_default()),
+        b"vertAlign" => {
+            font.vert_align = VertAlign::from_ooxml(&read_attr(e, b"val")?.unwrap_or_default())
+        }
+        b"sz" => {
+            font.size_hp = read_attr(e, b"val")?
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|pt| (pt * 2.0).round() as u32);
+        }
+        b"rFont" => font.name = read_attr(e, b"val")?,
+        b"family" => font.family = read_attr(e, b"val")?.and_then(|v| v.parse().ok()),
+        b"scheme" => font.scheme = read_attr(e, b"val")?,
+        b"charset" => font.charset = read_attr(e, b"val")?.and_then(|v| v.parse().ok()),
+        b"color" => {
+            if let Some(rgb) = read_attr(e, b"rgb")? {
+                font.color = Some(if rgb.len() == 8 {
+                    rgb[2..].to_owned()
+                } else {
+                    rgb
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A parsed cell comment: `(cell reference, author, text)`.

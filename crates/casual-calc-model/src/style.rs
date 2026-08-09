@@ -467,3 +467,139 @@ impl From<StyleTable> for Vec<Style> {
         table.entries
     }
 }
+
+/// The underline styles OOXML's `u/@val` allows.
+///
+/// A bool cannot hold this: a ledger formatted with accounting underlines comes
+/// back with ordinary ones, which is a visible change to a document whose whole
+/// point is looking a particular way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Underline {
+    /// A single line under the glyphs.
+    Single,
+    /// Two lines under the glyphs.
+    Double,
+    /// A single line spanning the cell width, as accounting formats use.
+    SingleAccounting,
+    /// Two lines spanning the cell width.
+    DoubleAccounting,
+}
+
+impl Underline {
+    /// The OOXML `val` token.
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            Underline::Single => "single",
+            Underline::Double => "double",
+            Underline::SingleAccounting => "singleAccounting",
+            Underline::DoubleAccounting => "doubleAccounting",
+        }
+    }
+
+    /// Parse a `u/@val` token. `<u/>` with no `val` means single, and `none`
+    /// means the run is not underlined at all.
+    pub fn from_ooxml(token: &str) -> Option<Self> {
+        match token {
+            "single" | "" => Some(Underline::Single),
+            "double" => Some(Underline::Double),
+            "singleAccounting" => Some(Underline::SingleAccounting),
+            "doubleAccounting" => Some(Underline::DoubleAccounting),
+            _ => None,
+        }
+    }
+}
+
+/// Superscript / subscript, OOXML's `vertAlign`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VertAlign {
+    /// Raised and reduced.
+    Superscript,
+    /// Lowered and reduced.
+    Subscript,
+}
+
+impl VertAlign {
+    /// The OOXML `val` token.
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            VertAlign::Superscript => "superscript",
+            VertAlign::Subscript => "subscript",
+        }
+    }
+
+    /// Parse a `vertAlign/@val` token. `baseline` is the absence of one.
+    pub fn from_ooxml(token: &str) -> Option<Self> {
+        match token {
+            "superscript" => Some(VertAlign::Superscript),
+            "subscript" => Some(VertAlign::Subscript),
+            _ => None,
+        }
+    }
+}
+
+/// The character formatting of one text run — OOXML's `<rPr>`.
+///
+/// Deliberately its own type rather than a reuse of [`Style`]: `<rPr>` carries
+/// only font properties, and a run cannot have a fill, a border, an alignment
+/// or a number format. Sharing `Style` would invite code that sets a run's
+/// background and silently loses it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunFont {
+    /// Bold.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    /// Italic.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    /// Struck through.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strike: bool,
+    /// Underline style, absent when the run is not underlined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<Underline>,
+    /// Superscript or subscript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vert_align: Option<VertAlign>,
+    /// Size in half-points, so the type stays `Hash + Eq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_hp: Option<u32>,
+    /// Typeface name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Colour as `RRGGBB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// The theme slot the colour came from, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_theme: Option<ThemeTint>,
+    /// `family` — the font family class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<u32>,
+    /// `scheme` — `major` or `minor`, tying the run to the theme's fonts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// `charset` — the legacy character-set id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charset: Option<u32>,
+}
+
+impl RunFont {
+    /// Whether the run carries no formatting of its own.
+    pub fn is_empty(&self) -> bool {
+        *self == RunFont::default()
+    }
+}
+
+/// One formatted run within a cell's text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextRun {
+    /// The run's characters.
+    pub text: String,
+    /// Its formatting; absent when the run simply inherits the cell's font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<RunFont>,
+}

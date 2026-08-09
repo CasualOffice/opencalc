@@ -1239,3 +1239,89 @@ fn a_sheet_with_links_and_no_notes_still_gets_its_rels_part() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].hyperlinks.len(), 1);
 }
+
+#[test]
+fn rich_text_runs_round_trip() {
+    use casual_calc_model::{CellRef, CellValue, RunFont, TextRun, Underline, VertAlign};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let runs = vec![
+        TextRun {
+            text: "Hello".to_owned(),
+            font: Some(RunFont {
+                bold: true,
+                color: Some("FF0000".to_owned()),
+                size_hp: Some(26),
+                ..RunFont::default()
+            }),
+        },
+        TextRun {
+            text: " world".to_owned(),
+            font: None,
+        },
+        TextRun {
+            text: "2".to_owned(),
+            font: Some(RunFont {
+                vert_align: Some(VertAlign::Superscript),
+                underline: Some(Underline::Double),
+                name: Some("Verdana".to_owned()),
+                ..RunFont::default()
+            }),
+        },
+    ];
+    let id = wb.intern_rich_text(runs.clone());
+    let at = CellRef::new(0, 0);
+    let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+    cell.value = CellValue::SharedString(id);
+    wb.sheets[0].cells.set(at, cell);
+
+    // The flattened text stays available to everything that only wants
+    // characters — rendering, search, CSV export.
+    assert_eq!(wb.strings.get(id), Some("Hello world2"));
+
+    let written = write_workbook(&wb).unwrap();
+    let sst = xml_of(&written, "xl/sharedStrings.xml");
+    assert!(sst.contains("<vertAlign val=\"superscript\"/>"));
+    assert!(sst.contains("<u val=\"double\"/>"));
+
+    let back = import_package(written).unwrap().workbook;
+    let back_id = match back.sheets[0].cells.get(at).unwrap().value {
+        CellValue::SharedString(id) | CellValue::InlineString(id) => id,
+        ref other => panic!("expected a string, got {other:?}"),
+    };
+    assert_eq!(back.strings.runs(back_id), Some(runs.as_slice()));
+}
+
+#[test]
+fn plain_text_does_not_become_rich() {
+    use casual_calc_model::{RunFont, TextRun};
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    // A file that wraps unformatted text in a single <r> must not create a rich
+    // entry: it would write runs back for a string that has no formatting, and
+    // stop deduplicating against the identical plain string.
+    let id = wb.intern_rich_text(vec![TextRun {
+        text: "plain".to_owned(),
+        font: Some(RunFont::default()),
+    }]);
+    assert_eq!(wb.strings.runs(id), None);
+    assert_eq!(id, wb.intern_string("plain"));
+}
+
+#[test]
+fn identical_text_with_different_formatting_stays_distinct() {
+    use casual_calc_model::{RunFont, TextRun};
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let plain = wb.intern_string("Total");
+    let bold = wb.intern_rich_text(vec![TextRun {
+        text: "Total".to_owned(),
+        font: Some(RunFont {
+            bold: true,
+            ..RunFont::default()
+        }),
+    }]);
+    // Interning on text alone would hand the second cell the first one's
+    // formatting — or rather, strip it.
+    assert_ne!(plain, bold);
+    assert_eq!(wb.strings.get(bold), Some("Total"));
+    assert!(wb.strings.runs(bold).is_some());
+}

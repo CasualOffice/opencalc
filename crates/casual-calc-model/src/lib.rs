@@ -36,7 +36,10 @@ pub use sheet::{
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
-pub use style::{BorderEdge, Borders, HAlign, Style, StyleTable, ThemeTint, VAlign};
+pub use style::{
+    BorderEdge, Borders, HAlign, RunFont, Style, StyleTable, TextRun, ThemeTint, Underline, VAlign,
+    VertAlign,
+};
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{NamedCellStyle, SCHEMA_VERSION, STOCK_THEME_SLOTS, Workbook};
 
