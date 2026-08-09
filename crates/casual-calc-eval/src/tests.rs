@@ -3559,3 +3559,196 @@ fn maxifs_and_minifs_of_no_matches_are_zero() {
     assert_eq!(value_at(&wb, 1, 3), CellValue::Number(10.0));
     assert_eq!(value_at(&wb, 2, 3), CellValue::Number(0.0));
 }
+
+/// `LET` binds in order, so a later value may use an earlier name — that is
+/// what makes it worth having over repeating a subexpression.
+#[test]
+fn let_binds_in_order_and_shadows() {
+    let mut b = Builder::new();
+    b.number((0, 0), 10.0);
+    b.formula((0, 2), "LET(x,A1,y,x*2,x+y)"); // 10 + 20
+    b.formula((1, 2), "LET(x,1,LET(x,x+1,x))"); // the inner x wins
+    // A binding shadows a defined name of the same name.
+    b.formula((2, 2), "LET(Rng,7,Rng)");
+    // An even argument count has no calculation to return.
+    b.formula((3, 2), "LET(x,1)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 2), CellValue::Number(30.0));
+    assert_eq!(value_at(&wb, 1, 2), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 2, 2), CellValue::Number(7.0));
+    assert_eq!(
+        value_at(&wb, 3, 2),
+        CellValue::Error(casual_calc_model::ErrorValue::Value)
+    );
+}
+
+/// A `LAMBDA` is called either immediately or through the name it is bound to,
+/// and a named one may call itself.
+#[test]
+fn lambda_applies_inline_and_by_name() {
+    use casual_calc_formula::parse;
+    let mut b = Builder::new();
+    b.formula((0, 0), "LAMBDA(x,x*2)(21)");
+    b.formula((1, 0), "DOUBLE(5)");
+    b.formula((2, 0), "FACT2(5)"); // recursive: 120
+    // Wrong arity is a mistake, not a default.
+    b.formula((3, 0), "DOUBLE(1,2)");
+    // A LAMBDA never called has no value of its own.
+    b.formula((4, 0), "LAMBDA(x,x)");
+    // Currying: a LAMBDA returning a LAMBDA, invoked twice.
+    b.formula((5, 0), "LAMBDA(x,LAMBDA(y,x+y))(3)(4)");
+    let mut wb = b.build();
+    for (name, text) in [
+        ("DOUBLE", "LAMBDA(n,n*2)"),
+        ("FACT2", "LAMBDA(n,IF(n<=1,1,n*FACT2(n-1)))"),
+    ] {
+        wb.defined_names.push(casual_calc_model::DefinedName {
+            name: name.to_owned(),
+            sheet: None,
+            formula: parse(text).unwrap(),
+        });
+    }
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 0), CellValue::Number(42.0));
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(10.0));
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(120.0));
+    assert_eq!(
+        value_at(&wb, 3, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Value)
+    );
+    assert_eq!(
+        value_at(&wb, 4, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Calc)
+    );
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Number(7.0));
+}
+
+/// A recursive LAMBDA with no base case must stop, not take the process down.
+#[test]
+fn runaway_recursion_is_an_error_not_a_crash() {
+    use casual_calc_formula::parse;
+    let mut b = Builder::new();
+    b.formula((0, 0), "FOREVER(1)");
+    let mut wb = b.build();
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "FOREVER".to_owned(),
+        sheet: None,
+        formula: parse("LAMBDA(n,FOREVER(n+1))").unwrap(),
+    });
+    recalculate(&mut wb);
+    assert_eq!(
+        value_at(&wb, 0, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Num)
+    );
+}
+
+/// A defined name must not shadow a builtin: silently preferring the user's
+/// `SUM` would change every existing formula in the file.
+#[test]
+fn a_lambda_cannot_take_over_a_builtin_name() {
+    use casual_calc_formula::parse;
+    let mut b = Builder::new();
+    b.number((0, 0), 2.0).number((1, 0), 3.0);
+    b.formula((0, 2), "SUM(A1:A2)");
+    let mut wb = b.build();
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "SUM".to_owned(),
+        sheet: None,
+        formula: parse("LAMBDA(x,999)").unwrap(),
+    });
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 2), CellValue::Number(5.0));
+}
+
+/// The LAMBDA helpers are why first-class functions matter: a user-defined
+/// function you cannot hand to anything can only ever be called by name.
+#[test]
+fn lambda_helpers_map_reduce_and_scan() {
+    let mut b = Builder::new();
+    for i in 0..4u32 {
+        b.number((i, 0), (i + 1) as f64); // 1..4
+    }
+    b.formula((0, 2), "MAP(A1:A4,LAMBDA(v,v*10))"); // 10,20,30,40
+    b.formula((0, 4), "REDUCE(0,A1:A4,LAMBDA(acc,v,acc+v))"); // 10
+    b.formula((0, 6), "SCAN(0,A1:A4,LAMBDA(acc,v,acc+v))"); // running total
+    b.formula((0, 8), "MAKEARRAY(2,2,LAMBDA(r,c,r*10+c))");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::Number(v) => v,
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    assert_eq!((n(0, 2), n(3, 2)), (10.0, 40.0));
+    assert_eq!(n(0, 4), 10.0, "REDUCE gives the final accumulator");
+    assert_eq!(
+        (n(0, 6), n(1, 6), n(3, 6)),
+        (1.0, 3.0, 10.0),
+        "SCAN gives each"
+    );
+    // MAKEARRAY's lambda takes one-based row and column, as ROW() and COLUMN()
+    // report them.
+    assert_eq!(
+        (n(0, 8), n(0, 9), n(1, 8), n(1, 9)),
+        (11.0, 12.0, 21.0, 22.0)
+    );
+}
+
+/// BYROW and BYCOL hand a whole slice to the lambda, so an aggregate can be
+/// applied to it — and a row-wise result is a column of answers.
+#[test]
+fn byrow_and_bycol_pass_slices() {
+    let mut b = Builder::new();
+    // 1 2 / 3 4
+    b.number((0, 0), 1.0).number((0, 1), 2.0);
+    b.number((1, 0), 3.0).number((1, 1), 4.0);
+    b.formula((0, 3), "BYROW(A1:B2,LAMBDA(r,SUM(r)))"); // 3, 7 down
+    b.formula((4, 3), "BYCOL(A1:B2,LAMBDA(c,SUM(c)))"); // 4, 6 across
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 3), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 1, 3), CellValue::Number(7.0));
+    assert_eq!(value_at(&wb, 4, 3), CellValue::Number(4.0));
+    assert_eq!(value_at(&wb, 4, 4), CellValue::Number(6.0));
+}
+
+/// A spilling formula must survive an unrelated edit elsewhere on the sheet.
+///
+/// It did not: its own spilled cells were counted as obstructions on the next
+/// pass, so the anchor turned itself into `#SPILL!` the moment anything else
+/// was typed. A genuine obstruction still blocks.
+#[test]
+fn a_spill_is_not_blocked_by_its_own_previous_output() {
+    let mut b = Builder::new();
+    for i in 0..4u32 {
+        b.number((i, 0), (i + 1) as f64);
+    }
+    b.formula((0, 2), "TRANSPOSE(A1:A4)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(4.0));
+
+    // Something unrelated, far away, forcing another pass.
+    wb.sheets[0]
+        .cells
+        .set(CellRef::new(20, 20), Cell::value(CellValue::Number(1.0)));
+    recalculate_incremental(&mut wb, &[(0, CellRef::new(20, 20))]);
+    assert_eq!(
+        value_at(&wb, 0, 2),
+        CellValue::Number(1.0),
+        "the anchor must not have turned itself into #SPILL!"
+    );
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(4.0));
+
+    // Real data in the way still blocks — that is the rule this must not break.
+    wb.sheets[0]
+        .cells
+        .set(CellRef::new(0, 4), Cell::value(CellValue::Number(99.0)));
+    recalculate(&mut wb);
+    assert_eq!(
+        value_at(&wb, 0, 2),
+        CellValue::Error(casual_calc_model::ErrorValue::Spill)
+    );
+    assert_eq!(value_at(&wb, 0, 4), CellValue::Number(99.0), "untouched");
+}

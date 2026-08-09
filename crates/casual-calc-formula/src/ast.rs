@@ -66,6 +66,18 @@ pub enum Expr {
     Range(CellReference, CellReference),
     /// A defined name.
     Name(String),
+    /// Calling the result of an expression: `LAMBDA(x, x+1)(5)`.
+    ///
+    /// Distinct from [`Self::Function`], which names a builtin. A `LAMBDA`
+    /// written inline and invoked immediately is how the feature is taught and
+    /// how it is tested before being given a name, so the parser has to accept
+    /// a call where a value is expected.
+    Call {
+        /// What is being called — a `LAMBDA` expression or a defined name.
+        callee: Box<Expr>,
+        /// The arguments.
+        args: Vec<Expr>,
+    },
     /// An argument left out: `XLOOKUP(x, a, b, , -1)`.
     ///
     /// Excel allows any optional argument to be skipped this way, and files

@@ -45,6 +45,16 @@ impl fmt::Display for Expr {
             Expr::Raw(text) => write!(f, "{text}"),
             // Prints as nothing, which is exactly how it was written.
             Expr::Empty => Ok(()),
+            Expr::Call { callee, args } => {
+                write!(f, "{callee}(")?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{a}")?;
+                }
+                f.write_str(")")
+            }
             Expr::Name(name) => f.write_str(name),
             Expr::StructuredRef { table, spec } => {
                 if let Some(table) = table {

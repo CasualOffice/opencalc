@@ -294,3 +294,33 @@ been a plausible wrong answer, and Excel writes the real token.
 Spilling had to be added to the **incremental** recalculation as well as the
 full one. The incremental path is the one an edit takes, so a freshly typed
 `FILTER` showed a single value until it was.
+
+## LET, LAMBDA and the lambda helpers
+
+`LET`, `LAMBDA`, and `MAP` / `REDUCE` / `SCAN` / `BYROW` / `BYCOL` /
+`MAKEARRAY` / `ISOMITTED`.
+
+The evaluator gained a **scope**: a stack, not a map, because shadowing is
+ordinary — `LET(x, 1, LET(x, x+1, x))` is 2, and a lambda parameter may share a
+name with an outer binding. A bound name beats a defined name; a defined name
+never beats a builtin, because silently preferring a user's `SUM` would change
+every existing formula in the file.
+
+`LAMBDA` produces a **first-class value** carrying the bindings it closed over.
+That is what makes `LAMBDA(x, LAMBDA(y, x+y))(3)(4)` equal 7 — the inner one
+still knows `x` — and the same representation is what lets `MAP` and `REDUCE`
+take a function as an argument. Captured by value, because the scope it was
+written in is gone by the time it is called.
+
+Recursion is bounded at 256 frames and reports `#NUM!`. A recursive lambda with
+no base case is a mistake to report, not a process to lose.
+
+Two bugs found by tests rather than by reading:
+
+- `SUM` over a lambda parameter returned the first element. Aggregates flattened
+  through the *scalar* path, so an array-valued name collapsed to its corner and
+  `BYROW(a, LAMBDA(r, SUM(r)))` summed one cell and called it the row total.
+- **A spilling formula turned itself into `#SPILL!` the moment anything else on
+  the sheet was edited.** Its own spilled cells were counted as obstructions on
+  the next pass. A cell flagged `SPILL_CHILD` is output, not data, and no longer
+  blocks; a genuine obstruction still does, and there is a test for both halves.

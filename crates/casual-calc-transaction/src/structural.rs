@@ -481,6 +481,12 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
             name: name.clone(),
             args: args.iter().map(|arg| rewrite_expr(arg, ctx)).collect(),
         },
+        // Both halves hold references that move with an insert or delete: the
+        // callee may be a LAMBDA body full of them.
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(rewrite_expr(callee, ctx)),
+            args: args.iter().map(|arg| rewrite_expr(arg, ctx)).collect(),
+        },
         // Literals and defined names carry no cell coordinates.
         Expr::Number(_) | Expr::Bool(_) | Expr::Text(_) | Expr::Error(_) | Expr::Name(_) => {
             expr.clone()

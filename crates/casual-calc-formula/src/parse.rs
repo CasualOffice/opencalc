@@ -145,10 +145,12 @@ impl Parser {
                 self.advance();
                 let args = self.parse_args()?;
                 self.expect(&Token::RParen)?;
-                Ok(Expr::Function {
+                let call = Expr::Function {
                     name: word.to_ascii_uppercase(),
                     args,
-                })
+                };
+                // `LAMBDA(x, x+1)(5)` — a call on what the call returned.
+                self.maybe_invoke(call)
             }
             Some(Token::Bang) => {
                 self.advance();
@@ -180,6 +182,23 @@ impl Parser {
                 None => Ok(Expr::Name(word)),
             },
         }
+    }
+
+    /// Wrap `callee` in as many invocations as follow it.
+    ///
+    /// A loop rather than a single check, because `LAMBDA(x, LAMBDA(y, x+y))(1)(2)`
+    /// is legal and currying is the reason LAMBDA returns a LAMBDA at all.
+    fn maybe_invoke(&mut self, mut callee: Expr) -> Result<Expr, FormulaError> {
+        while self.peek() == Some(&Token::LParen) {
+            self.advance();
+            let args = self.parse_args()?;
+            self.expect(&Token::RParen)?;
+            callee = Expr::Call {
+                callee: Box::new(callee),
+                args,
+            };
+        }
+        Ok(callee)
     }
 
     fn maybe_range(&mut self, first: CellReference) -> Result<Expr, FormulaError> {

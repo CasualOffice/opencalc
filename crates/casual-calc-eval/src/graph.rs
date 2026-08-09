@@ -226,6 +226,12 @@ fn collect_precedents(
         Expr::Raw(_) => *uses_name = true,
         // Nothing there, so nothing to depend on.
         Expr::Empty => {}
+        Expr::Call { callee, args } => {
+            collect_precedents(callee, ctx_sheet, workbook, on_cell, on_range, uses_name);
+            for a in args {
+                collect_precedents(a, ctx_sheet, workbook, on_cell, on_range, uses_name);
+            }
+        }
         Expr::Reference(r) => {
             if let Some(si) = resolve_sheet(r, ctx_sheet, workbook) {
                 on_cell((si, r.row, r.col));

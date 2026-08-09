@@ -31,6 +31,15 @@ pub struct Evaluator<'a> {
     /// `COLUMN()` with no argument report. Saved and restored around each
     /// formula so a referenced cell's own formula sees its own address.
     current: Option<(usize, CellRef)>,
+    /// Names bound by `LET` and by `LAMBDA` parameters, innermost last.
+    ///
+    /// A stack rather than a map because shadowing is legal and ordinary:
+    /// `LET(x, 1, LET(x, x+1, x))` is 2, and a lambda parameter may share a
+    /// name with an outer binding. Lookup walks from the end.
+    scope: Vec<(String, Value)>,
+    /// Nested lambda applications, to stop a recursive one without a base case
+    /// from taking the stack down with it.
+    depth: u32,
     /// How many random draws have been made this pass.
     ///
     /// Mixed into the seed so two `RAND()` calls in one formula differ, which a
@@ -50,6 +59,8 @@ impl<'a> Evaluator<'a> {
             in_progress: HashSet::new(),
             dirty: None,
             current: None,
+            scope: Vec::new(),
+            depth: 0,
             rand_counter: 0,
         }
     }
@@ -63,6 +74,8 @@ impl<'a> Evaluator<'a> {
             in_progress: HashSet::new(),
             dirty: Some(dirty),
             current: None,
+            scope: Vec::new(),
+            depth: 0,
             rand_counter: 0,
         }
     }
@@ -270,7 +283,23 @@ impl<'a> Evaluator<'a> {
             Expr::StructuredRef { .. } => Value::Error(ErrorValue::Value),
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
             Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
-            Expr::Function { name, args } => call_function(self, sheet_index, name, args),
+            Expr::Function { name, args } if name == "LET" => self.eval_let(sheet_index, args),
+            // A LAMBDA evaluates to a function *value*, capturing whatever is
+            // in scope where it was written. Put in a cell it shows #CALC!,
+            // which happens at the point the value is written rather than here
+            // — a lambda passed to MAP must survive being a value first.
+            Expr::Function { name, args } if name == "LAMBDA" => self.make_lambda(args),
+            Expr::Function { name, args } => {
+                // A defined name bound to a LAMBDA is called like a builtin,
+                // which is the whole point of naming one.
+                if !crate::functions::is_builtin(name)
+                    && let Some(body) = self.lambda_named(name)
+                {
+                    return self.apply_lambda(sheet_index, &body, args);
+                }
+                call_function(self, sheet_index, name, args)
+            }
+            Expr::Call { callee, args } => self.eval_call(sheet_index, callee, args),
         }
     }
 
@@ -285,7 +314,185 @@ impl<'a> Evaluator<'a> {
         self.eval_cell(target_sheet, CellRef::new(reference.row, reference.col))
     }
 
+    /// `LET(name1, value1, …, calculation)`.
+    ///
+    /// Bindings take effect in order, so a later value may use an earlier name
+    /// — that is what makes LET worth having over repeating a subexpression.
+    fn eval_let(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
+        // Pairs then a final calculation, so the count is odd and at least 3.
+        if args.len() < 3 || args.len().is_multiple_of(2) {
+            return Value::Error(ErrorValue::Value);
+        }
+        let bindings = (args.len() - 1) / 2;
+        let mut pushed = 0;
+        for i in 0..bindings {
+            let Expr::Name(name) = &args[i * 2] else {
+                // A binding position that is not a name is a mistake, not a
+                // value to evaluate.
+                self.scope.truncate(self.scope.len() - pushed);
+                return Value::Error(ErrorValue::Value);
+            };
+            let value = self.eval_expr_array(sheet_index, &args[i * 2 + 1]);
+            self.scope.push((name.clone(), value));
+            pushed += 1;
+        }
+        let result = self.eval_expr_array(sheet_index, &args[args.len() - 1]);
+        self.scope.truncate(self.scope.len() - pushed);
+        result
+    }
+
+    /// The LAMBDA a defined name is bound to, if it is bound to one.
+    fn lambda_named(&self, name: &str) -> Option<Expr> {
+        let defined = self
+            .workbook
+            .defined_names
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(name))?;
+        match &defined.formula {
+            Expr::Function { name, .. } if name == "LAMBDA" => Some(defined.formula.clone()),
+            _ => None,
+        }
+    }
+
+    /// Build a function value from a `LAMBDA` expression.
+    fn make_lambda(&mut self, parts: &[Expr]) -> Value {
+        if parts.is_empty() {
+            return Value::Error(ErrorValue::Value);
+        }
+        let mut params = Vec::with_capacity(parts.len() - 1);
+        for p in &parts[..parts.len() - 1] {
+            let Expr::Name(n) = p else {
+                return Value::Error(ErrorValue::Value);
+            };
+            params.push(n.clone());
+        }
+        Value::Lambda(std::rc::Rc::new(crate::value::LambdaValue {
+            params,
+            body: parts[parts.len() - 1].clone(),
+            captured: self.scope.clone(),
+        }))
+    }
+
+    /// Call whatever `callee` denotes.
+    ///
+    /// Evaluating the callee first is what makes currying work: the result of
+    /// `LAMBDA(x, LAMBDA(y, x+y))(3)` is a function value that still knows `x`,
+    /// and the second call applies it.
+    fn eval_call(&mut self, sheet_index: usize, callee: &Expr, args: &[Expr]) -> Value {
+        // A bare name is resolved as a lambda first, so `MYFN(1)` works whether
+        // written as a call or as a function.
+        if let Expr::Name(name) = callee
+            && let Some(body) = self.lambda_named(name)
+        {
+            return self.apply_lambda(sheet_index, &body, args);
+        }
+        match self.eval_expr_array(sheet_index, callee) {
+            Value::Lambda(f) => self.apply_value_lambda(sheet_index, &f, args),
+            Value::Error(e) => Value::Error(e),
+            _ => Value::Error(ErrorValue::Value),
+        }
+    }
+
+    /// Apply an already-built function value.
+    pub(crate) fn apply_value_lambda(
+        &mut self,
+        sheet_index: usize,
+        f: &crate::value::LambdaValue,
+        args: &[Expr],
+    ) -> Value {
+        let values: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr_array(sheet_index, a))
+            .collect();
+        self.apply_lambda_values(sheet_index, f, values)
+    }
+
+    /// Apply a function value to values that are already computed — what the
+    /// LAMBDA helpers need, since they synthesise arguments rather than
+    /// evaluating expressions.
+    pub(crate) fn apply_lambda_values(
+        &mut self,
+        sheet_index: usize,
+        f: &crate::value::LambdaValue,
+        values: Vec<Value>,
+    ) -> Value {
+        const MAX_DEPTH: u32 = 256;
+        if values.len() != f.params.len() {
+            return Value::Error(ErrorValue::Value);
+        }
+        if self.depth >= MAX_DEPTH {
+            return Value::Error(ErrorValue::Num);
+        }
+        // The captured scope replaces the caller's for the duration: a lambda
+        // sees where it was *written*, not where it was called from.
+        let saved = std::mem::replace(&mut self.scope, f.captured.clone());
+        for (param, value) in f.params.iter().zip(values) {
+            self.scope.push((param.clone(), value));
+        }
+        self.depth += 1;
+        let result = self.eval_expr_array(sheet_index, &f.body);
+        self.depth -= 1;
+        self.scope = saved;
+        result
+    }
+
+    /// Bind arguments to a LAMBDA's parameters and evaluate its body.
+    ///
+    /// The last argument of `LAMBDA` is the body; everything before it names a
+    /// parameter. Arguments are evaluated in the *caller's* scope before the
+    /// parameters are bound, or a parameter would shadow the value being
+    /// passed into it.
+    fn apply_lambda(&mut self, sheet_index: usize, lambda: &Expr, args: &[Expr]) -> Value {
+        const MAX_DEPTH: u32 = 256;
+        let Expr::Function { args: parts, .. } = lambda else {
+            return Value::Error(ErrorValue::Value);
+        };
+        if parts.is_empty() {
+            return Value::Error(ErrorValue::Value);
+        }
+        let params = &parts[..parts.len() - 1];
+        let body = &parts[parts.len() - 1];
+        if args.len() != params.len() {
+            return Value::Error(ErrorValue::Value);
+        }
+        if self.depth >= MAX_DEPTH {
+            // A recursive LAMBDA with no base case; Excel reports #NUM! rather
+            // than taking the process down.
+            return Value::Error(ErrorValue::Num);
+        }
+
+        let values: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr_array(sheet_index, a))
+            .collect();
+        let mut pushed = 0;
+        for (param, value) in params.iter().zip(values) {
+            let Expr::Name(name) = param else {
+                self.scope.truncate(self.scope.len() - pushed);
+                return Value::Error(ErrorValue::Value);
+            };
+            self.scope.push((name.clone(), value));
+            pushed += 1;
+        }
+        self.depth += 1;
+        let result = self.eval_expr_array(sheet_index, body);
+        self.depth -= 1;
+        self.scope.truncate(self.scope.len() - pushed);
+        result
+    }
+
     fn eval_name(&mut self, sheet_index: usize, name: &str) -> Value {
+        // A LET binding or a lambda parameter shadows a defined name of the
+        // same name — the inner one is the one the author just wrote, and it is
+        // what every language with scope does.
+        if let Some((_, value)) = self
+            .scope
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound.eq_ignore_ascii_case(name))
+        {
+            return value.clone();
+        }
         let defined = self.workbook.defined_names.iter().find(|d| d.name == name);
         match defined {
             Some(dn) => {

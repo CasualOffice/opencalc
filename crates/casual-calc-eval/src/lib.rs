@@ -142,13 +142,24 @@ fn write_result(workbook: &mut Workbook, sheet_index: usize, at: CellRef, value:
                     return false; // the anchor itself
                 }
                 let target = CellRef::new(at.row + r as u32, at.col + c as u32);
-                sheet.cells.get(target).is_some_and(|cell| !cell.is_blank())
+                sheet.cells.get(target).is_some_and(|cell| {
+                    // A cell filled by a spill is not an obstruction — it is
+                    // this formula's own output from the previous pass, about
+                    // to be reclaimed. Treating it as data made a spilling
+                    // formula turn itself into #SPILL! the next time anything
+                    // on the sheet was edited.
+                    !cell.is_blank() && !cell.flags.contains(CellFlags::SPILL_CHILD)
+                })
             })
         })
     };
     if blocked {
         write_result(workbook, sheet_index, at, Value::Error(ErrorValue::Spill));
-        return false;
+        // Ask for another pass. The obstruction may itself be a spill child of
+        // a formula that has since shrunk, and the wholesale clear at the start
+        // of a pass is what releases it — without this a #SPILL! could outlive
+        // the thing that caused it.
+        return true;
     }
 
     for (i, item) in cells.into_iter().enumerate() {
@@ -236,6 +247,9 @@ fn value_to_cell(workbook: &mut Workbook, value: Value) -> CellValue {
         Value::Bool(b) => CellValue::Bool(b),
         Value::Error(e) => CellValue::Error(e),
         Value::Text(s) => CellValue::InlineString(workbook.intern_string(&s)),
+        // A function stored in a cell has no value to show; Excel puts #CALC!
+        // there, which says "this is not finished" rather than naming a type.
+        Value::Lambda(_) => CellValue::Error(ErrorValue::Calc),
         // `write_result` unwraps arrays before reaching here, so a block at
         // this point is a value with nowhere to go — its corner is the cell's.
         Value::Array { cells, .. } => {

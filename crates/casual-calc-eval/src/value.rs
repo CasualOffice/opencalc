@@ -15,6 +15,13 @@ pub enum Value {
     Text(String),
     /// An error value that propagates.
     Error(ErrorValue),
+    /// A function value: a `LAMBDA` together with the bindings it closed over.
+    ///
+    /// First-class because a LAMBDA that returns a LAMBDA has to carry the
+    /// outer parameter with it — `LAMBDA(x, LAMBDA(y, x+y))(3)(4)` is 7 only if
+    /// the inner one still knows what `x` was. The same representation is what
+    /// lets `MAP` and `REDUCE` take a function as an argument.
+    Lambda(std::rc::Rc<LambdaValue>),
     /// A rectangular block of values, row-major.
     ///
     /// Produced by the functions that answer with a *shape* rather than a
@@ -46,6 +53,21 @@ impl Value {
     }
 }
 
+/// A `LAMBDA`'s parameters, body, and the scope it captured.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LambdaValue {
+    /// Parameter names, in order.
+    pub params: Vec<String>,
+    /// The expression to evaluate once the parameters are bound.
+    pub body: casual_calc_formula::Expr,
+    /// Bindings visible where the LAMBDA was written, captured by value.
+    ///
+    /// By value rather than by reference: the scope it was written in is gone
+    /// by the time it is called, and a lambda that read whatever happened to be
+    /// bound at call time would be a different function each time.
+    pub captured: Vec<(String, Value)>,
+}
+
 /// Format a number the way the engine stringifies it (used by `&` and text ops).
 pub fn number_to_text(n: f64) -> String {
     format!("{n}")
@@ -59,6 +81,9 @@ impl Value {
     /// Coerce to a number (empty → 0, bool → 0/1, text → parsed), or an error.
     pub fn as_number(&self) -> Result<f64, ErrorValue> {
         match self {
+            // A function is not a value of this kind, and there is no
+            // sensible coercion — Excel says #VALUE! too.
+            Value::Lambda(_) => Err(ErrorValue::Value),
             Value::Array { cells, .. } => cells.first().map_or(Ok(0.0), Value::as_number),
             Value::Empty => Ok(0.0),
             Value::Number(n) => Ok(*n),
@@ -71,6 +96,9 @@ impl Value {
     /// Coerce to text (numbers formatted, bool → TRUE/FALSE), or an error.
     pub fn as_text(&self) -> Result<String, ErrorValue> {
         match self {
+            // A function is not a value of this kind, and there is no
+            // sensible coercion — Excel says #VALUE! too.
+            Value::Lambda(_) => Err(ErrorValue::Value),
             Value::Array { cells, .. } => cells
                 .first()
                 .map_or_else(|| Ok(String::new()), Value::as_text),
@@ -85,6 +113,9 @@ impl Value {
     /// Coerce to a truth value for conditionals.
     pub fn as_bool(&self) -> Result<bool, ErrorValue> {
         match self {
+            // A function is not a value of this kind, and there is no
+            // sensible coercion — Excel says #VALUE! too.
+            Value::Lambda(_) => Err(ErrorValue::Value),
             Value::Array { cells, .. } => cells.first().map_or(Ok(false), Value::as_bool),
             Value::Empty => Ok(false),
             Value::Number(n) => Ok(*n != 0.0),

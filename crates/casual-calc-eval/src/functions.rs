@@ -13,6 +13,16 @@ use crate::value::{Value, number_to_text};
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
 const MAX_RANGE_CELLS: u64 = 2_000_000;
 
+/// Whether a name is a builtin, so a defined name cannot shadow one.
+///
+/// A LAMBDA named `SUM` must not replace `SUM` — Excel refuses the name, and
+/// silently preferring the user's would change every existing formula in the
+/// file.
+#[must_use]
+pub fn is_builtin(name: &str) -> bool {
+    FUNCTIONS.binary_search_by(|(n, _)| (*n).cmp(name)).is_ok()
+}
+
 /// The catalog of built-in functions as `(name, signature)`, kept alphabetical.
 /// This is the **single source of truth** for the function list — the host UI
 /// (autocomplete / signature help) reads it via the SDK/WASM instead of keeping
@@ -71,6 +81,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BITOR", "BITOR(number1, number2)"),
     ("BITRSHIFT", "BITRSHIFT(number, shift)"),
     ("BITXOR", "BITXOR(number1, number2)"),
+    ("BYCOL", "BYCOL(array, lambda)"),
+    ("BYROW", "BYROW(array, lambda)"),
     ("CEILING", "CEILING(number, significance)"),
     ("CELL", "CELL(info_type, [reference])"),
     ("CHAR", "CHAR(number)"),
@@ -258,18 +270,21 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISNUMBER", "ISNUMBER(value)"),
     ("ISO.CEILING", "ISO.CEILING(number, [significance])"),
     ("ISODD", "ISODD(number)"),
+    ("ISOMITTED", "ISOMITTED(argument)"),
     ("ISOWEEKNUM", "ISOWEEKNUM(date)"),
     ("ISPMT", "ISPMT(rate, per, nper, pv)"),
     ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
     ("JIS", "JIS(text)"),
     ("KURT", "KURT(number1, …)"),
+    ("LAMBDA", "LAMBDA(parameter, …, calculation)"),
     ("LARGE", "LARGE(array, k)"),
     ("LCM", "LCM(number1, …)"),
     ("LEFT", "LEFT(text, [num_chars])"),
     ("LEFTB", "LEFTB(text, [num_bytes])"),
     ("LEN", "LEN(text)"),
     ("LENB", "LENB(text)"),
+    ("LET", "LET(name1, value1, …, calculation)"),
     ("LINEST", "LINEST(known_y, [known_x], [const], [stats])"),
     ("LN", "LN(number)"),
     ("LOG", "LOG(number, [base])"),
@@ -279,6 +294,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("LOGNORMDIST", "LOGNORMDIST(x, mean, standard_dev)"),
     ("LOOKUP", "LOOKUP(value, vector, [result])"),
     ("LOWER", "LOWER(text)"),
+    ("MAKEARRAY", "MAKEARRAY(rows, columns, lambda)"),
+    ("MAP", "MAP(array, lambda)"),
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
     ("MAXA", "MAXA(value1, …)"),
@@ -387,6 +404,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "RECEIVED",
         "RECEIVED(settlement, maturity, investment, discount, [basis])",
     ),
+    ("REDUCE", "REDUCE(initial_value, array, lambda)"),
     ("REPLACE", "REPLACE(old, start, num_chars, new)"),
     (
         "REPLACEB",
@@ -403,6 +421,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ROWS", "ROWS(array)"),
     ("RRI", "RRI(nper, pv, fv)"),
     ("RSQ", "RSQ(known_y, known_x)"),
+    ("SCAN", "SCAN(initial_value, array, lambda)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
     ("SEARCHB", "SEARCHB(find_text, within_text, [start_num])"),
     ("SEC", "SEC(number)"),
@@ -974,6 +993,13 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             eval_odd_bond(ev, sheet, name, args)
         }
         "MDETERM" => eval_mdeterm(ev, sheet, args),
+        // Both are intercepted by the evaluator, which is the only place with
+        // a scope to bind into; these arms exist so the catalog and the
+        // dispatch table stay in agreement.
+        "LET" | "LAMBDA" => Value::Error(ErrorValue::Value),
+        "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED" => {
+            eval_lambda_helper(ev, sheet, name, args)
+        }
         "LINEST" | "LOGEST" | "TREND" | "GROWTH" => eval_regression(ev, sheet, name, args),
         "TRANSPOSE" | "MMULT" | "MINVERSE" | "FREQUENCY" => eval_matrix(ev, sheet, name, args),
         "ACCRINTM" | "PRICEDISC" | "YIELDDISC" | "PRICEMAT" | "YIELDMAT" => {
@@ -1664,15 +1690,31 @@ fn flatten_numbers(
                 }
             }
         } else {
-            match ev.eval_expr(sheet, arg) {
-                Value::Number(n) => out.push(n),
-                Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
-                Value::Empty => {}
-                Value::Text(t) => out.push(t.trim().parse::<f64>().map_err(|_| ErrorValue::Value)?),
-                Value::Error(e) => return Err(e),
-                // `eval_expr` collapses an array to its corner, so this cannot
-                // arrive; a block where one number was wanted is #VALUE!.
-                Value::Array { .. } => return Err(ErrorValue::Value),
+            // Array-aware: an aggregate over a computed block has to see all of
+            // it. `BYROW(a, LAMBDA(r, SUM(r)))` binds `r` to a whole row, and
+            // taking the corner summed one cell and called it the row total.
+            let mut take = |v: Value| -> Result<(), ErrorValue> {
+                match v {
+                    Value::Number(n) => out.push(n),
+                    Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
+                    Value::Empty => {}
+                    Value::Text(t) => {
+                        out.push(t.trim().parse::<f64>().map_err(|_| ErrorValue::Value)?)
+                    }
+                    Value::Error(e) => return Err(e),
+                    Value::Lambda(_) => return Err(ErrorValue::Value),
+                    Value::Array { .. } => unreachable!("flattened by the caller"),
+                }
+                Ok(())
+            };
+            match ev.eval_expr_array(sheet, arg) {
+                Value::Array { cells, .. } => {
+                    for v in cells {
+                        // One level: an array cannot contain another.
+                        take(v)?;
+                    }
+                }
+                other => take(other)?,
             }
         }
     }
@@ -3123,7 +3165,7 @@ fn eval_n(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         Value::Bool(b) => Value::Number(if b { 1.0 } else { 0.0 }),
         Value::Error(e) => Value::Error(e),
         Value::Text(_) | Value::Empty => Value::Number(0.0),
-        Value::Array { .. } => Value::Error(ErrorValue::Value),
+        Value::Array { .. } | Value::Lambda(_) => Value::Error(ErrorValue::Value),
     }
 }
 
@@ -3141,6 +3183,8 @@ fn eval_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         Value::Error(_) => 16.0,
         // Excel's own code for an array, which is why TYPE has one.
         Value::Array { .. } => 64.0,
+        // 128 is Excel's code for a lambda.
+        Value::Lambda(_) => 128.0,
     };
     Value::Number(code)
 }
@@ -4557,7 +4601,9 @@ fn stat_over_a(
                         Value::Text(_) => values.push(0.0),
                         Value::Error(e) => return Value::Error(e),
                         Value::Empty => {}
-                        Value::Array { .. } => return Value::Error(ErrorValue::Value),
+                        Value::Array { .. } | Value::Lambda(_) => {
+                            return Value::Error(ErrorValue::Value);
+                        }
                     }
                 }
             }
@@ -4567,7 +4613,7 @@ fn stat_over_a(
                 Value::Text(_) => values.push(0.0),
                 Value::Error(e) => return Value::Error(e),
                 Value::Empty => {}
-                Value::Array { .. } => return Value::Error(ErrorValue::Value),
+                Value::Array { .. } | Value::Lambda(_) => return Value::Error(ErrorValue::Value),
             },
         }
     }
@@ -9405,4 +9451,164 @@ fn eval_dynamic(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr])
 /// An argument as a number, falling back when it is absent or unreadable.
 fn ev_number_or(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr, dflt: f64) -> f64 {
     ev.eval_expr(sheet, arg).as_number().unwrap_or(dflt)
+}
+
+/// The LAMBDA helpers: MAP, REDUCE, SCAN, BYROW, BYCOL, MAKEARRAY, ISOMITTED.
+///
+/// These are why LAMBDA is a language feature rather than a curiosity — a
+/// user-defined function you cannot hand to anything can only be called by
+/// name. Each takes a function *value*, so they work with an inline LAMBDA, a
+/// named one, or one returned by another lambda.
+fn lambda_arg(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    arg: &Expr,
+) -> Option<std::rc::Rc<crate::value::LambdaValue>> {
+    match ev.eval_expr_array(sheet, arg) {
+        Value::Lambda(f) => Some(f),
+        _ => None,
+    }
+}
+
+fn eval_lambda_helper(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    match name {
+        "ISOMITTED" => {
+            // True only for an argument that was left out, which is the one
+            // question a lambda cannot otherwise ask about its own call.
+            Value::Bool(matches!(args.first(), Some(Expr::Empty) | None))
+        }
+        "MAKEARRAY" => {
+            if args.len() != 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let rows = ev.eval_expr(sheet, &args[0]).as_number().unwrap_or(0.0) as i64;
+            let cols = ev.eval_expr(sheet, &args[1]).as_number().unwrap_or(0.0) as i64;
+            if rows < 1 || cols < 1 || rows * cols > 1_000_000 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let Some(f) = lambda_arg(ev, sheet, &args[2]) else {
+                return Value::Error(ErrorValue::Value);
+            };
+            let mut cells = Vec::with_capacity((rows * cols) as usize);
+            for r in 1..=rows {
+                for c in 1..=cols {
+                    // One-based, because the lambda is written in spreadsheet
+                    // terms and ROW()/COLUMN() are one-based too.
+                    cells.push(ev.apply_lambda_values(
+                        sheet,
+                        &f,
+                        vec![Value::Number(r as f64), Value::Number(c as f64)],
+                    ));
+                }
+            }
+            Value::Array {
+                rows: rows as usize,
+                cols: cols as usize,
+                cells,
+            }
+        }
+        "MAP" => {
+            if args.len() < 2 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let grid = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let Some(f) = lambda_arg(ev, sheet, &args[args.len() - 1]) else {
+                return Value::Error(ErrorValue::Value);
+            };
+            let cells: Vec<Value> = grid
+                .cells
+                .iter()
+                .map(|v| ev.apply_lambda_values(sheet, &f, vec![v.clone()]))
+                .collect();
+            Value::Array {
+                rows: grid.rows,
+                cols: grid.cols,
+                cells,
+            }
+        }
+        "REDUCE" | "SCAN" => {
+            if args.len() != 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let initial = ev.eval_expr(sheet, &args[0]);
+            let grid = match eval_range_2d(ev, sheet, &args[1]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let Some(f) = lambda_arg(ev, sheet, &args[2]) else {
+                return Value::Error(ErrorValue::Value);
+            };
+            let mut acc = initial;
+            let mut steps = Vec::with_capacity(grid.cells.len());
+            for v in &grid.cells {
+                acc = ev.apply_lambda_values(sheet, &f, vec![acc.clone(), v.clone()]);
+                steps.push(acc.clone());
+            }
+            // REDUCE answers with the final accumulator; SCAN with every one it
+            // passed through, which is what makes a running total possible.
+            if name == "REDUCE" {
+                acc
+            } else {
+                Value::Array {
+                    rows: grid.rows,
+                    cols: grid.cols,
+                    cells: steps,
+                }
+            }
+        }
+        "BYROW" | "BYCOL" => {
+            if args.len() != 2 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let grid = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let Some(f) = lambda_arg(ev, sheet, &args[1]) else {
+                return Value::Error(ErrorValue::Value);
+            };
+            let by_row = name == "BYROW";
+            let outer = if by_row { grid.rows } else { grid.cols };
+            let inner = if by_row { grid.cols } else { grid.rows };
+            let cells: Vec<Value> = (0..outer)
+                .map(|i| {
+                    // Each slice is handed over as an array, so the lambda can
+                    // use SUM or any other aggregate on it.
+                    let slice: Vec<Value> = (0..inner)
+                        .map(|j| {
+                            if by_row {
+                                grid.get(i, j).clone()
+                            } else {
+                                grid.get(j, i).clone()
+                            }
+                        })
+                        .collect();
+                    let arg = Value::Array {
+                        rows: if by_row { 1 } else { inner },
+                        cols: if by_row { inner } else { 1 },
+                        cells: slice,
+                    };
+                    ev.apply_lambda_values(sheet, &f, vec![arg])
+                })
+                .collect();
+            // A row-wise result is a column of answers, and vice versa.
+            if by_row {
+                Value::Array {
+                    rows: outer,
+                    cols: 1,
+                    cells,
+                }
+            } else {
+                Value::Array {
+                    rows: 1,
+                    cols: outer,
+                    cells,
+                }
+            }
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
 }
