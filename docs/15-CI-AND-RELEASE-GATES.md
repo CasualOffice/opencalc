@@ -79,9 +79,16 @@ is a release rather than a silent no-op, but the hyphen is canonical.
 
 Publishing credentials live on the **`release`** GitHub environment, not in
 repository secrets, so a release requires whatever protection rules that
-environment carries. `NPM_TOKEN` is preferred; `PKG_USERNAME`/`PKG_PASS` are
-exchanged for a registry token when it is absent, which cannot work once
-two-factor authentication is required for publishing.
+environment carries. `PKG_PASS` holds an npm access token with **read and write
+on the `@opencalc` scope** — scoped to the org rather than to named packages,
+because a token cannot be granted rights over a package that has never been
+published, which is every package on a first release.
+
+The workflow tries that secret as a token and confirms with `npm whoami` rather
+than guessing at its shape, and only falls back to treating it as an account
+password if that fails. The fallback exists for completeness and stops working
+the moment the account requires two-factor authentication for publishing; the
+token path is the supported one.
 
 ## Future gates (not built yet)
 

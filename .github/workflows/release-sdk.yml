@@ -47,10 +47,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deliberately without `registry-url`: that option scaffolds an .npmrc in
+      # RUNNER_TEMP and points npm at it through NPM_CONFIG_USERCONFIG, which
+      # would silently override anything written to ~/.npmrc later. Auth is
+      # handled in one place below instead.
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install the wasm toolchain
         run: |
@@ -89,14 +92,18 @@ jobs:
           done
           ls -la dist-tarballs
 
-      # npm needs a token. The account credentials are exchanged for one
-      # through the registry's login endpoint — the same thing `npm login
-      # --auth-type=legacy` does, which cannot be scripted because it prompts.
+      # npm publishes with a token, never a password.
       #
-      # If NPM_TOKEN is set it is used instead and this is skipped. That is the
-      # better path: a granular automation token is scoped, revocable, and is
-      # the *only* thing that works once two-factor authentication is required
-      # for publishing.
+      # `PKG_PASS` is expected to hold an access token, so it is tried as one
+      # first and confirmed with `npm whoami` — an empirical check rather than
+      # a guess at the token's shape, because npm has issued several (`npm_…`
+      # granular and automation tokens, bare-UUID classic ones) and will issue
+      # more. Only if that fails is it treated as an account password and
+      # exchanged through the registry's login endpoint, which is what `npm
+      # login --auth-type=legacy` does and cannot be scripted because it
+      # prompts. That fallback stops working the moment the account requires
+      # two-factor authentication for publishing; the token path does not,
+      # which is why it is the one to be on.
       - name: Authenticate to npm
         if: github.event_name == 'push' || inputs.dry_run == false
         env:
@@ -104,40 +111,53 @@ jobs:
           PKG_USERNAME: ${{ secrets.PKG_USERNAME }}
           PKG_PASS: ${{ secrets.PKG_PASS }}
         run: |
-          set -euo pipefail
-          if [ -n "${NPM_TOKEN:-}" ]; then
-            echo "using NPM_TOKEN"
-            token="$NPM_TOKEN"
+          set -uo pipefail
+
+          # Write to whatever file npm actually reads. If something upstream
+          # has set NPM_CONFIG_USERCONFIG, ~/.npmrc is not it.
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+
+          use_token() {
+            echo "::add-mask::$1"
+            {
+              printf 'registry=https://registry.npmjs.org/\n'
+              printf '//registry.npmjs.org/:_authToken=%s\n' "$1"
+            } > "$npmrc"
+            npm whoami >/dev/null 2>&1
+          }
+
+          secret="${NPM_TOKEN:-${PKG_PASS:-}}"
+          if [ -z "$secret" ]; then
+            echo "::error::Neither NPM_TOKEN nor PKG_PASS is set on the 'release' environment."
+            exit 1
+          fi
+
+          if use_token "$secret"; then
+            echo "authenticated with an access token as $(npm whoami)"
           else
-            if [ -z "${PKG_USERNAME:-}" ] || [ -z "${PKG_PASS:-}" ]; then
-              echo "::error::No NPM_TOKEN, and PKG_USERNAME/PKG_PASS are not set on the 'release' environment."
+            echo "not a valid access token — trying it as an account password"
+            if [ -z "${PKG_USERNAME:-}" ]; then
+              echo "::error::PKG_USERNAME is not set, so a password cannot be exchanged either."
               exit 1
             fi
-            echo "exchanging PKG_USERNAME/PKG_PASS for a registry token"
-            body=$(jq -nc --arg n "$PKG_USERNAME" --arg p "$PKG_PASS" \
-              '{name: $n, password: $p}')
+            rm -f "$npmrc"
+            body=$(jq -nc --arg n "$PKG_USERNAME" --arg p "$secret" '{name: $n, password: $p}')
             response=$(curl -sS -w '\n%{http_code}' -X PUT \
-              -H 'Content-Type: application/json' \
-              -d "$body" \
+              -H 'Content-Type: application/json' -d "$body" \
               "https://registry.npmjs.org/-/user/org.couchdb.user:${PKG_USERNAME}")
             status=$(printf '%s' "$response" | tail -n1)
-            payload=$(printf '%s' "$response" | sed '$d')
-            if [ "$status" != "201" ] && [ "$status" != "200" ]; then
-              echo "::error::npm login failed (HTTP ${status})."
-              echo "::error::If this account has two-factor authentication on publishing, a password cannot be used here."
-              echo "::error::Create a granular access token on npmjs.com and add it as the NPM_TOKEN secret."
-              printf '%s\n' "$payload" | head -c 400
+            token=$(printf '%s' "$response" | sed '$d' | jq -r '.token // empty')
+            if [ "$status" != "201" ] && [ "$status" != "200" ] || [ -z "$token" ]; then
+              echo "::error::Could not authenticate to npm (login returned HTTP ${status})."
+              echo "::error::PKG_PASS works neither as an access token nor as a password."
+              echo "::error::Create a granular access token on npmjs.com with **read and write**"
+              echo "::error::on the @opencalc *scope* — not on named packages, which do not exist yet —"
+              echo "::error::and set it as PKG_PASS or NPM_TOKEN on the 'release' environment."
               exit 1
             fi
-            token=$(printf '%s' "$payload" | jq -r '.token // empty')
-            if [ -z "$token" ]; then
-              echo "::error::npm login returned no token."
-              exit 1
-            fi
+            use_token "$token" || { echo "::error::exchanged token was rejected"; exit 1; }
+            echo "authenticated with an exchanged token as $(npm whoami)"
           fi
-          echo "::add-mask::$token"
-          printf '//registry.npmjs.org/:_authToken=%s\n' "$token" >> "$HOME/.npmrc"
-          echo "authenticated as $(npm whoami)"
 
       # Order matters: @opencalc/react pins an exact @opencalc/sheet, so a
       # consumer installing react the moment it appears needs sheet to already
@@ -154,7 +174,14 @@ jobs:
               continue
             fi
             echo "publishing $name@$version"
-            ( cd "sdk/packages/$p" && npm publish --access public )
+            if ! ( cd "sdk/packages/$p" && npm publish --access public ); then
+              echo "::error::Publishing $name failed."
+              echo "::error::On a 403 for a package that does not exist yet, the usual cause is a"
+              echo "::error::granular token scoped to *named packages* rather than to the @opencalc"
+              echo "::error::scope — a token cannot be granted rights over a package that has never"
+              echo "::error::been published. Re-issue it with read/write on the whole scope."
+              exit 1
+            fi
           done
 
       - name: Dry run summary
