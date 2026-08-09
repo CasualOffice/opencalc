@@ -1834,7 +1834,7 @@ function commitFreezeDrag(axis, px, py) {
   } else {
     fr = py <= HH + 2 ? 0 : Math.max(0, rowAtY(py));
   }
-  try { wasm.session_set_freeze(state.sheet, fr, fc); } catch (e) { status.textContent = `error: ${e}`; }
+  try { wasm.session_set_freeze(state.sheet, fr, fc); } catch (e) { statusError(errText(e)); }
   status.textContent = (fc || fr) ? "freeze updated" : "unfrozen";
 }
 
@@ -2239,7 +2239,13 @@ function commit(value, advance) {
     if (advisory) statusError(advisory);
     else status.textContent = "ok";
   } catch (e) {
-    status.textContent = `error: ${e}`;
+    // A refused edit keeps the editor open on its own cell. Advancing would
+    // move the cursor away from the thing that just failed and leave the
+    // message pointing at a cell the user is no longer looking at — which is
+    // how a protected sheet appeared to accept the value.
+    statusError(errText(e));
+    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+    return false;
   }
   endEdit();
   // Move to the next row on Enter as a fresh single-cell selection (reset the
@@ -2642,7 +2648,7 @@ function autofitRow(row) {
 
 // Run a formatting op over the whole selection (every range), then redraw.
 function formatSel(fn) {
-  try { for (const s of allRanges()) fn(s); } catch (e) { status.textContent = `error: ${e}`; }
+  try { for (const s of allRanges()) fn(s); } catch (e) { statusError(errText(e)); }
   draw();
 }
 function toggleBold() { formatSel((s) => wasm.session_toggle_bold(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
@@ -2908,7 +2914,7 @@ function formatCellsDialog() {
     // One try around the lot: a failure part-way through should report once, not
     // once per tab.
     try { for (const apply of pending) apply(s); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     draw();
   });
   ok.focus();
@@ -3113,6 +3119,33 @@ function buildColorMenu(menu, onPick, noneLabel) {
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+// Flip `locked` / `hidden` over the selection. Both are style bits, so this
+// goes through the same undoable range-styling path as bold.
+function setCellProtection(which) {
+  let now = false;
+  try {
+    now = !!JSON.parse(
+      wasm.session_cell_protection(state.sheet, state.sel.row, state.sel.col))[which];
+  } catch {}
+  formatSel((s) => wasm.session_set_cell_protection(
+    state.sheet, s.r0, s.c0, s.r1, s.c1, which, !now));
+  status.textContent = which === "locked"
+    ? (now ? "unlocked — takes effect while the sheet is protected"
+           : "locked — takes effect while the sheet is protected")
+    : (now ? "formula shown" : "formula hidden while the sheet is protected");
+}
+
+// Whether the current sheet is protected, as the engine holds it.
+function sheetProtectedNow() {
+  try { return !!JSON.parse(wasm.session_sheet_protected())[state.sheet]; }
+  catch { return false; }
+}
+function toggleSheetProtected() {
+  const now = sheetProtectedNow();
+  tryEdit(() => wasm.session_set_sheet_protected(state.sheet, !now));
+  status.textContent = now ? "sheet unprotected" : "sheet protected — locked cells refuse edits";
+}
+
 // The sheet's display switches, as the engine holds them.
 function viewOptions() {
   try { return JSON.parse(wasm.session_view_options(state.sheet)); }
@@ -3153,7 +3186,7 @@ function applyPainter(s) {
   try {
     wasm.session_copy_style(state.sheet, row, col, s.r0, s.c0, s.r1, s.c1);
     status.textContent = "format applied";
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   if (!sticky) setPainter(null);
   draw();
   return true;
@@ -3173,7 +3206,7 @@ function setTextOverflow(mode) {
 function setFreeze(kind) {
   if (kind === "gridlines") {
     try { wasm.session_set_gridlines_hidden(state.sheet, !wasm.session_gridlines_hidden(state.sheet)); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     draw();
     return;
   }
@@ -3184,7 +3217,7 @@ function setFreeze(kind) {
   try {
     wasm.session_set_freeze(state.sheet, rows, cols);
     state.scrollX = state.scrollY = 0;
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 // Sort the current selection's rows by the active cell's column. A single-cell
@@ -3243,7 +3276,7 @@ function applySort(s, keys, hasHeader) {
     );
     const by = keys.map((k) => `${colName(k.col)} ${k.asc ? "A→Z" : "Z→A"}`).join(", then ");
     status.textContent = `sorted by ${by}${hasHeader ? " (header kept)" : ""}`;
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 
@@ -3395,7 +3428,7 @@ async function removeDuplicates() {
   try {
     const n = wasm.session_remove_duplicates(state.sheet, first, s.c0, s.r1, s.c1);
     status.textContent = n ? `removed ${n} duplicate ${n === 1 ? "row" : "rows"}` : "no duplicates found";
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 
@@ -3874,7 +3907,7 @@ function openValidationMenu() {
     b.addEventListener("click", () => {
       closeSheetMenu();
       try { wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, val); }
-      catch (e) { status.textContent = `error: ${e}`; }
+      catch (e) { statusError(errText(e)); }
       draw();
     });
     menu.appendChild(b);
@@ -3944,7 +3977,7 @@ function buildTablePanel(body) {
       wasm.session_rename_table(state.sheet, at().r, at().c, want);
       status.textContent = `renamed to ${want}`;
     } catch (e) {
-      status.textContent = `error: ${e}`;
+      statusError(errText(e));
       name.value = t.name;
     }
     draw();
@@ -4276,7 +4309,7 @@ function buildDvPanel(body) {
           state.sheet, s.r0, s.c0, s.r1, s.c1, styleSel.value,
           [errTitle.value, msg.value, promptTitle.value, promptText.value],
           hideDrop.checked);
-      } catch (e) { status.textContent = `error: ${e}`; }
+      } catch (e) { statusError(errText(e)); }
       draw();
     },
     "Remove",
@@ -4355,7 +4388,7 @@ function buildCfPanel(body) {
       else if (kind === "colorscale3") { kind = "colorscale"; txt = `${fill},ffffff,63be7b`; }
       else if (kind === "databar") { txt = fill; }
       try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, rank, bv, txt, fill); }
-      catch (e) { status.textContent = `error: ${e}`; }
+      catch (e) { statusError(errText(e)); }
       draw();
     },
     "Clear",
@@ -4482,7 +4515,7 @@ function buildNotePanel(body) {
     try {
       if (current) wasm.session_reply_comment(state.sheet, state.sel.row, state.sel.col, text, author, commentStamp());
       else wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, text, author, commentStamp());
-    } catch (e) { status.textContent = `error: ${e}`; return; }
+    } catch (e) { statusError(errText(e)); return; }
     ta.value = "";
     current = render();
     refreshPanelButtons();
@@ -4491,7 +4524,7 @@ function buildNotePanel(body) {
   const resolveBtn = button("Resolve", null, () => {
     if (!current) return;
     try { wasm.session_resolve_comment(state.sheet, state.sel.row, state.sel.col, !current.resolved); }
-    catch (e) { status.textContent = `error: ${e}`; return; }
+    catch (e) { statusError(errText(e)); return; }
     current = render();
     refreshPanelButtons();
     draw();
@@ -4557,7 +4590,7 @@ function hyperlinkDialog() {
         clear ? "" : display.value,
       );
       status.textContent = clear ? "link removed" : "link set";
-    } catch (e) { status.textContent = `error: ${e}`; }
+    } catch (e) { statusError(errText(e)); }
     modal.hidden = true;
     draw();
   };
@@ -4675,7 +4708,7 @@ async function tableDialog() {
       state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, "", true);
     select(bounds.r0, bounds.c0);
     status.textContent = `created ${name} — Esc closes the panel`;
-  } catch (e) { status.textContent = `error: ${e}`; return; }
+  } catch (e) { statusError(errText(e)); return; }
   invalidateGrowth();
   draw();
   openPanel("table");
@@ -4738,7 +4771,7 @@ async function mergeVariant(kind) {
   const s = effectiveRange();
   if (kind === "none") {
     try { wasm.session_unmerge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     draw();
     return;
   }
@@ -4764,7 +4797,7 @@ async function mergeVariant(kind) {
       try {
         if (hidden > 0) wasm.session_merge_cells_discarding(state.sheet, r, s.c0, r, s.c1);
         else wasm.session_merge_cells(state.sheet, r, s.c0, r, s.c1);
-      } catch (e) { status.textContent = `error: ${e}`; }
+      } catch (e) { statusError(errText(e)); }
     }
     status.textContent = `merged ${s.r1 - s.r0 + 1} rows across`;
     draw();
@@ -4793,7 +4826,7 @@ async function toggleMerge() {
     canvas.focus();
     if (!ok) return;
     try { wasm.session_merge_cells_discarding(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     draw();
     return;
   }
@@ -4808,7 +4841,7 @@ async function toggleMerge() {
     } else {
       wasm.session_merge_cells(state.sheet, s.r0, s.c0, s.r1, s.c1);
     }
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 function setFontName(name) { formatSel((s) => wasm.session_set_font_name(state.sheet, s.r0, s.c0, s.r1, s.c1, name)); }
@@ -5030,7 +5063,7 @@ function replaceAll() {
   try {
     const n = wasm.session_replace_all(state.sheet, findInput.value, replaceInput.value, findCase.checked);
     status.textContent = `replaced ${n}`;
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   runFind();
 }
 // Replace only the current match, then re-search and jump to the next one.
@@ -5040,7 +5073,7 @@ function replaceOne() {
   try {
     const did = wasm.session_replace_at(state.sheet, m.r, m.c, findInput.value, replaceInput.value, findCase.checked);
     status.textContent = did ? "replaced 1" : "no match here";
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   runFind();
 }
 
@@ -5090,7 +5123,7 @@ async function saveAs(fmt) {
     if (fmt === "xlsx") { doSave(); status.textContent = "downloaded .xlsx"; return; }
     const delim = fmt === "csv" ? 44 : fmt === "tsv" ? 9 : 124;
     if (await doSaveDelimited(delim, fmt)) status.textContent = "downloaded ." + fmt;
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
 }
 // The TSV we last wrote to the OS clipboard. On paste we compare the OS
 // clipboard to this: if it still matches, our richer internal snapshot is
@@ -6223,7 +6256,7 @@ function gotoName(v) {
     const q = /[^A-Za-z0-9_]/.test(sn) ? `'${sn.replace(/'/g, "''")}'` : sn;
     const refers = `${q}!${A1(r.r0, r.c0)}:${A1(r.r1, r.c1)}`;
     try { wasm.session_define_name(s, refers); status.textContent = `defined name “${s}”`; }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     updateNameBox();
     return;
   }
@@ -6574,7 +6607,7 @@ function renderTabs() {
       const i = wasm.session_add_sheet();
       switchSheet(i);
       renderTabs();
-    } catch (e) { status.textContent = `error: ${e}`; }
+    } catch (e) { statusError(errText(e)); }
   });
   tabsEl.appendChild(add);
 
@@ -6624,7 +6657,7 @@ function renderTabs() {
 // Reorder sheet tabs, keeping the active sheet tracked through the shift.
 function moveTab(from, to) {
   if (from < 0 || from === to) return;
-  try { wasm.session_move_sheet(from, to); } catch (e) { status.textContent = `error: ${e}`; return; }
+  try { wasm.session_move_sheet(from, to); } catch (e) { statusError(errText(e)); return; }
 
   if (state.sheet === from) state.sheet = to;
   else {
@@ -6653,7 +6686,7 @@ function renameSheet(i, tabEl) {
     done = true;
     const name = input.value.trim();
     try { if (name && name !== old) wasm.session_rename_sheet(i, name); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     renderTabs();
   };
   input.addEventListener("keydown", (e) => {
@@ -6686,7 +6719,7 @@ function sheetMenu(i, x, y) {
   item("Rename", false, () => renameSheet(i, tabsEl.querySelectorAll(".sheet-tab")[i]));
   item("Duplicate", false, () => {
     try { const n = wasm.session_duplicate_sheet(i); switchSheet(n); renderTabs(); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
   });
   // Tab-color swatch strip.
   const sep = document.createElement("div");
@@ -6701,7 +6734,7 @@ function sheetMenu(i, x, y) {
   const setTabColor = (hex) => {
     closeSheetMenu();
     try { wasm.session_set_tab_color(i, hex); renderTabs(); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
   };
   ["E53935", "FB8C00", "FDD835", "43A047", "1E88E5", "5E35B1", "8E24AA", "546E7A"].forEach((hex) => {
     const sw = document.createElement("button");
@@ -6722,7 +6755,7 @@ function sheetMenu(i, x, y) {
   try { prot = JSON.parse(wasm.session_sheet_protected()); } catch {}
   item(prot[i] ? "Unprotect sheet" : "Protect sheet", false, () => {
     try { wasm.session_set_sheet_protected(i, !prot[i]); renderTabs(); draw(); }
-    catch (e) { status.textContent = `error: ${e}`; }
+    catch (e) { statusError(errText(e)); }
     status.textContent = prot[i] ? "sheet unprotected" : "sheet protected";
   });
   item("Hide sheet", false, () => {
@@ -6753,7 +6786,7 @@ function sheetMenu(i, x, y) {
       if (i <= state.sheet) state.sheet = Math.max(0, state.sheet - 1);
       renderTabs();
       resetView();
-    } catch (e) { status.textContent = `error: ${e}`; }
+    } catch (e) { statusError(errText(e)); }
   });
   positionMenu(menu, x, y);
 }
@@ -6796,6 +6829,14 @@ function refreshValidationPrompt() {
   box.hidden = false;
 }
 
+// A thrown value as a sentence.
+//
+// A `JsError` from the engine stringifies as "Error: …", so interpolating it
+// after the word "error" read "error: Error: this sheet is protected".
+function errText(e) {
+  return String((e && e.message) || e).replace(/^Error:\s*/, "");
+}
+
 // Put a message in the status bar as an error, without going through innerHTML.
 //
 // The wording can come from the file — a data-validation rule carries the
@@ -6810,7 +6851,7 @@ function statusError(text) {
 }
 
 function tryEdit(fn) {
-  try { fn(); } catch (e) { status.textContent = `error: ${e}`; }
+  try { fn(); } catch (e) { statusError(errText(e)); }
   // Any edit can add, remove or re-wrap a grown row, so the growth map — and
   // every offset derived from it — has to be rebuilt.
   invalidateGrowth();
@@ -6983,7 +7024,7 @@ function cellMenu(x, y) {
       try {
         wasm.session_table_totals(state.sheet, state.sel.row, state.sel.col, t.totals === 0);
         status.textContent = t.totals > 0 ? "totals row hidden" : "totals row shown";
-      } catch (e) { status.textContent = `error: ${e}`; }
+      } catch (e) { statusError(errText(e)); }
       draw();
     });
   })();
@@ -7103,7 +7144,7 @@ function fillWithin(dir) {
   try {
     wasm.session_fill(state.sheet, src.r0, src.c0, src.r1, src.c1, s.r0, s.c0, s.r1, s.c1);
     status.textContent = dir === "down" ? "filled down" : "filled right";
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 
@@ -7123,7 +7164,7 @@ function autofillToNeighbour() {
   try {
     wasm.session_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, s.r0, s.c0, end, s.c1);
     status.textContent = `filled to row ${end + 1}`;
-  } catch (e) { status.textContent = `error: ${e}`; }
+  } catch (e) { statusError(errText(e)); }
   draw();
 }
 
@@ -7454,7 +7495,7 @@ function wireEvents() {
           else wasm.session_set_row_height(state.sheet, r.index, px);
         }
         status.textContent = r.scope === "one" ? "resized" : "resized all";
-      } catch (e) { status.textContent = `error: ${e}`; }
+      } catch (e) { statusError(errText(e)); }
       draw();
     }
     if (state.fill) {
@@ -7469,7 +7510,7 @@ function wireEvents() {
           wasm.session_fill_mode(state.sheet, f.src.r0, f.src.c0, f.src.r1, f.src.c1,
                                  d.r0, d.c0, d.r1, d.c1, mode);
           status.textContent = "filled";
-        } catch (err) { status.textContent = `error: ${err}`; }
+        } catch (err) { statusError(errText(err)); }
         state.anchor = { row: d.r0, col: d.c0 };
         state.sel = { row: d.r1, col: d.c1 };
         state.selKind = "cells";
@@ -8291,6 +8332,12 @@ function wireEvents() {
     };
     const gridOn = () => { try { return !wasm.session_gridlines_hidden(state.sheet); } catch { return true; } };
     const viewOn = (k) => { try { return !!viewOptions()[k]; } catch { return false; } };
+    const cellProt = (k) => {
+      try {
+        return !!JSON.parse(
+          wasm.session_cell_protection(state.sheet, state.sel.row, state.sel.col))[k];
+      } catch { return false; }
+    };
     // The active cell's number format and alignment, for the submenu ticks — a
     // menu that never shows what is already applied makes you guess.
     const curFmt = (key) => {
@@ -8426,6 +8473,14 @@ function wireEvents() {
         ["Superscript", () => setVertAlign("superscript"), null, vtIs("superscript")],
         ["Subscript", () => setVertAlign("subscript"), null, vtIs("subscript")],
         "sep",
+        { sub: "Protection", items: [
+          // Both only bite while the sheet is protected, so the sheet switch
+          // sits in the same menu rather than somewhere else entirely.
+          ["Locked", () => setCellProtection("locked"), null, () => cellProt("locked")],
+          ["Hide formula", () => setCellProtection("hidden"), null, () => cellProt("hidden")],
+          "sep",
+          ["Protect this sheet", () => toggleSheetProtected(), null, sheetProtectedNow],
+        ] },
         ["Cell styles…", () => cellStyleGallery()],
         ["Conditional formatting rules…", () => manageCfRules()],
         { sub: "Trace", items: [
@@ -8537,8 +8592,19 @@ function wireEvents() {
       if (top + sh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - 4 - sh);
       sub.style.left = left + "px"; sub.style.top = top + "px";
     };
+    // Tick every item under `root` that has a predicate.
+    //
+    // Called per menu *and* per submenu: a submenu is appended to the body, not
+    // to its parent dropdown, so refreshing only the dropdown left every nested
+    // item — Alignment, Number, Zoom, Text overflow, Protection — permanently
+    // unticked whatever the cell actually had.
+    const refreshChecks = (root) => {
+      for (const b of root.querySelectorAll("button")) {
+        if (b._check) b.querySelector(".mi-check").textContent = b._check() ? "✓" : "";
+      }
+    };
     const runItem = (action) => {
-      try { action && action(); } catch (err) { status.textContent = `error: ${err}`; }
+      try { action && action(); } catch (err) { statusError(errText(err)); }
       closeMenus();
     };
     const renderItems = (container, items, isTop) => {
@@ -8553,7 +8619,7 @@ function wireEvents() {
           const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
           document.body.appendChild(sub); subs.push(sub);
           renderItems(sub, it.items, false);
-          const openSub = () => { closeSubs(); positionSub(sub, b); sub.hidden = false; };
+          const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); sub.hidden = false; };
           b.addEventListener("mouseenter", openSub);
           b.addEventListener("click", (e) => { e.stopPropagation(); openSub(); });
           container.appendChild(b); continue;
@@ -8574,10 +8640,7 @@ function wireEvents() {
       for (const m of menus) m.hidden = true; // close toolbar popovers
       closeFlyouts();
       const drop = drops[i];
-      // refresh checkmarks against the focus cell / view state
-      for (const b of drop.querySelectorAll("button")) {
-        if (b._check) b.querySelector(".mi-check").textContent = b._check() ? "✓" : "";
-      }
+      refreshChecks(drop); // against the focus cell / view state
       drop.hidden = false;
       anchorMenu(drop, topBtns[i]);
       topBtns[i].setAttribute("aria-expanded", "true");

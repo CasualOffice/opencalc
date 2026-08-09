@@ -2409,24 +2409,28 @@ fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<Edi
 /// Insert `count` blank rows before `at` (undoable; rewrites formula refs).
 #[wasm_bindgen]
 pub fn session_insert_rows(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    guard_protected(sheet, at, 0, at.saturating_add(count.max(1) - 1), 0)?;
     commit_edit(EditOperation::InsertRows { sheet, at, count })
 }
 
 /// Delete `count` rows starting at `at` (undoable; rewrites formula refs).
 #[wasm_bindgen]
 pub fn session_delete_rows(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    guard_protected(sheet, at, 0, at.saturating_add(count.max(1) - 1), 0)?;
     commit_edit(EditOperation::DeleteRows { sheet, at, count })
 }
 
 /// Insert `count` blank columns before `at` (undoable; rewrites formula refs).
 #[wasm_bindgen]
 pub fn session_insert_columns(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    guard_protected(sheet, 0, at, 0, at.saturating_add(count.max(1) - 1))?;
     commit_edit(EditOperation::InsertColumns { sheet, at, count })
 }
 
 /// Delete `count` columns starting at `at` (undoable; rewrites formula refs).
 #[wasm_bindgen]
 pub fn session_delete_columns(sheet: usize, at: u32, count: u32) -> Result<(), JsError> {
+    guard_protected(sheet, 0, at, 0, at.saturating_add(count.max(1) - 1))?;
     commit_edit(EditOperation::DeleteColumns { sheet, at, count })
 }
 
@@ -2489,6 +2493,115 @@ pub fn session_sheet_protected() -> String {
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// Set `locked` / `formula_hidden` on a range (one undo step).
+///
+/// `which` is `locked` or `hidden`. Both only bite while the sheet is
+/// protected, which is why the menu says so — a checkbox that appears to do
+/// nothing is worse than no checkbox.
+#[wasm_bindgen]
+pub fn session_set_cell_protection(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    which: &str,
+    on: bool,
+) -> Result<(), JsError> {
+    let which = which.to_owned();
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| match which.as_str() {
+        // `locked` defaults to true in OOXML, so "locked" is written as `None`
+        // and only the unlocked case carries an attribute. That keeps an
+        // untouched workbook byte-identical.
+        "locked" => st.locked = (!on).then_some(false),
+        "hidden" => st.formula_hidden = on.then_some(true),
+        _ => {}
+    })
+}
+
+/// Whether every cell in a range is locked / formula-hidden, as JSON
+/// `{locked, hidden}` — what the menu ticks.
+#[wasm_bindgen]
+pub fn session_cell_protection(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let style = wb
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.cells.get(CellRef::new(row, col)))
+            .and_then(|c| c.style)
+            .and_then(|id| wb.styles.get(id));
+        format!(
+            "{{\"locked\":{},\"hidden\":{}}}",
+            style.and_then(|st| st.locked).unwrap_or(true),
+            style.and_then(|st| st.formula_hidden).unwrap_or(false)
+        )
+    })
+    .unwrap_or_else(|| "{\"locked\":true,\"hidden\":false}".to_owned())
+}
+
+/// Refuse an edit that a protected sheet forbids.
+///
+/// Protection was stored, round-tripped and toggleable — and never enforced, so
+/// a workbook whose author locked its formulas opened fully editable. In OOXML
+/// a cell is locked *by default*: `<protection locked="0">` is what marks the
+/// input cells, so an absent flag means locked, and reading it the other way
+/// round would unlock the whole sheet.
+///
+/// Like Excel, this is a guard on user actions rather than on the data: undo
+/// and redo still replay edits made before the sheet was protected.
+fn guard_protected(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Result<(), JsError> {
+    if protection_blocks(sheet, r0, c0, r1, c1) {
+        return Err(JsError::new(
+            "this sheet is protected — unprotect it to change locked cells",
+        ));
+    }
+    Ok(())
+}
+
+/// The decision behind [`guard_protected`], separated from the refusal.
+///
+/// A `JsError` cannot be constructed off-wasm, so a test that exercised the
+/// guard could only ever panic. The rule is the part worth testing.
+fn protection_blocks(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> bool {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return false;
+        };
+        if !sh.protection.as_ref().is_some_and(|p| p.is_enabled()) {
+            return false;
+        }
+        let locked = |row: u32, col: u32| {
+            sh.cells
+                .get(CellRef::new(row, col))
+                .and_then(|c| c.style)
+                .and_then(|id| wb.styles.get(id))
+                .and_then(|st| st.locked)
+                .unwrap_or(true)
+        };
+        // An empty cell carries no style and is therefore locked, so scanning
+        // the corners is not enough — but scanning a huge range cell by cell is
+        // not either. Any locked cell in the block refuses the whole edit,
+        // which is what Excel does, so the first one found is the answer.
+        (r0..=r1).any(|r| (c0..=c1).any(|c| locked(r, c)))
+    })
+    .unwrap_or(false)
+}
+
+/// Whether a cell's formula is hidden by protection — `<protection hidden="1">`
+/// on a protected sheet. The formula bar shows the value instead.
+fn formula_is_hidden(wb: &Workbook, sheet: &Sheet, at: CellRef) -> bool {
+    sheet.protection.as_ref().is_some_and(|p| p.is_enabled())
+        && sheet
+            .cells
+            .get(at)
+            .and_then(|c| c.style)
+            .and_then(|id| wb.styles.get(id))
+            .and_then(|st| st.formula_hidden)
+            .unwrap_or(false)
 }
 
 /// Turn sheet protection on or off.
@@ -4003,6 +4116,10 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
         };
         if let Some(handle) = cell.formula
             && let Some(expr) = wb.formula(handle)
+            // `<protection hidden="1">` on a protected sheet keeps the formula
+            // out of the formula bar. Carrying the flag through every save
+            // while still showing the formula defeats the only thing it does.
+            && !formula_is_hidden(wb, sheet, CellRef::new(row, col))
         {
             return format!("={expr}");
         }
@@ -4037,6 +4154,7 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
 /// Set a cell from user input (a formula `=…`, a number, or text), then recalc.
 #[wasm_bindgen]
 pub fn session_set_cell(sheet: usize, row: u32, col: u32, input: &str) -> Result<(), JsError> {
+    guard_protected(sheet, row, col, row, col)?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -5953,6 +6071,7 @@ pub fn session_clear_range(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
+    guard_protected(sheet, r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1))?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -5981,6 +6100,7 @@ pub fn session_clear_contents(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
+    guard_protected(sheet, r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1))?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -6024,6 +6144,7 @@ pub fn session_clear_formats(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
+    guard_protected(sheet, r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1))?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -6182,6 +6303,9 @@ fn push_html_escaped(out: &mut String, text: &str) {
 /// Paste tab/newline-separated text starting at a cell (one undo step).
 #[wasm_bindgen]
 pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<(), JsError> {
+    // The paste's extent is not known until it is parsed; the anchor is
+    // enough to refuse a paste onto a protected block, as Excel does.
+    guard_protected(sheet, row, col, row, col)?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -7125,5 +7249,66 @@ mod fill_series_tests {
         session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap(); // A1 down to A3
         assert_eq!(session_cell_input(0, 1, 0), "Sat");
         assert_eq!(session_cell_input(0, 2, 0), "Sun"); // wraps Sat → Sun
+    }
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::{
+        protection_blocks, session_cell_input, session_new, session_set_cell,
+        session_set_cell_protection, session_set_sheet_protected,
+    };
+
+    /// Protection was stored, round-tripped and toggleable — and never
+    /// enforced, so a workbook whose author locked its cells opened fully
+    /// editable. The default matters as much as the guard: OOXML locks a cell
+    /// unless it says otherwise, so an absent flag must read as locked.
+    #[test]
+    fn a_protected_sheet_refuses_a_locked_cell_and_allows_an_unlocked_one() {
+        session_new();
+        session_set_cell(0, 0, 0, "before").unwrap();
+        session_set_sheet_protected(0, true).unwrap();
+
+        // A1 carries no protection attribute at all, which means locked.
+        assert!(
+            protection_blocks(0, 0, 0, 0, 0),
+            "an unmarked cell defaults to locked"
+        );
+
+        // The input cells of a protected sheet are the ones marked unlocked.
+        session_set_cell_protection(0, 0, 0, 0, 0, "locked", false).unwrap();
+        assert!(!protection_blocks(0, 0, 0, 0, 0));
+        session_set_cell(0, 0, 0, "after").unwrap();
+        assert_eq!(session_cell_input(0, 0, 0), "after");
+
+        // A block containing one locked cell is refused whole, as in Excel.
+        assert!(protection_blocks(0, 0, 0, 1, 1), "B2 is still locked");
+
+        // ...and unprotecting releases everything again.
+        session_set_sheet_protected(0, false).unwrap();
+        assert!(!protection_blocks(0, 0, 0, 5, 5));
+    }
+
+    /// `<protection hidden="1">` keeps the formula out of the formula bar while
+    /// the sheet is protected — and only then.
+    #[test]
+    fn a_hidden_formula_is_withheld_only_while_the_sheet_is_protected() {
+        session_new();
+        session_set_cell(0, 0, 0, "=1+1").unwrap();
+        session_set_cell_protection(0, 0, 0, 0, 0, "hidden", true).unwrap();
+        // The engine normalises the formula it stores, so compare with what it
+        // round-trips rather than with what was typed.
+        let shown = session_cell_input(0, 0, 0);
+        assert!(
+            shown.starts_with('='),
+            "the flag alone hides nothing: {shown}"
+        );
+
+        session_set_sheet_protected(0, true).unwrap();
+        assert!(
+            !session_cell_input(0, 0, 0).starts_with('='),
+            "carrying the flag through every save while still showing the \
+             formula defeats the only thing it does"
+        );
     }
 }
