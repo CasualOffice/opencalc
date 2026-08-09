@@ -2343,6 +2343,9 @@ function draw() {
   updateStats();
   if (wasm) refreshFormulaBar();
   if (wasm && activePanel) refreshPanel();
+  // Last, so a host's listener sees the state the frame just painted rather
+  // than the one it started from.
+  if (wasm) emitStateEvents();
 }
 
 const FREEZE_GRAB = 4; // px proximity to the freeze divider that arms a drag
@@ -2731,7 +2734,22 @@ function friendlyFormulaError(err) {
   }
   return m;
 }
-function commit(value, advance) {
+function commit(value, advance, source = "user") {
+  // Cancellable before it is written, and told who is writing. A host without
+  // either cannot enforce its own permissions, and cannot tell its own
+  // programmatic write from a keystroke — so it echoes its change back into its
+  // own store and loops.
+  const at = editHome ?? { sheet: state.sheet, row: state.sel.row, col: state.sel.col };
+  if (!emit("beforeCellsChanged", {
+    sheet: at.sheet,
+    range: { r0: at.row, c0: at.col, r1: at.row, c1: at.col },
+    value,
+    source,
+  })) {
+    statusError("that change was refused by the application");
+    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+    return false;
+  }
   // A cross-sheet pick leaves the view on another sheet; go back before writing,
   // or the value would land on whichever sheet the user happened to end on.
   if (editHome && editHome.sheet !== state.sheet) {
@@ -2809,6 +2827,12 @@ function commit(value, advance) {
     if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
     return false;
   }
+  emit("cellsChanged", {
+    sheet: at.sheet,
+    range: { r0: at.row, c0: at.col, r1: at.row, c1: at.col },
+    value,
+    source,
+  });
   endEdit();
   // Move to the next row on Enter as a fresh single-cell selection (reset the
   // anchor + clear any multi-range, else anchor stays put and paints a ghost
@@ -5392,6 +5416,89 @@ async function pivotDialog() {
   draw();
   openPanel("pivot");
   status.textContent = "drag a field into Values to see the report";
+}
+
+// --- Events ------------------------------------------------------------------
+//
+// `before*` / past-tense pairs, `before*` cancellable, every event carrying a
+// `source`. That is Handsontable's design and it is right for two reasons a
+// host feels immediately: without cancellation it cannot enforce its own
+// permissions, and without a `source` it cannot tell its own programmatic
+// write from a user's keystroke — so it echoes its own change back into its
+// store and loops.
+//
+// Granularity is **one event per operation**, carrying a range. A paste of a
+// hundred thousand cells is one `cellsChanged`, not a hundred thousand of them,
+// which matches how the transaction layer already batches and is the only
+// version that stays usable at size.
+
+const listeners = new Map();
+
+/// Subscribe. Returns an unsubscribe function, so a caller need not keep the
+/// handler around to remove it later.
+export function on(name, handler) {
+  if (!listeners.has(name)) listeners.set(name, new Set());
+  listeners.get(name).add(handler);
+  return () => off(name, handler);
+}
+
+export function off(name, handler) {
+  listeners.get(name)?.delete(handler);
+}
+
+/// Emit, returning false if a `before*` handler cancelled.
+///
+/// A throwing handler must not take the editor down with it: a host's bug in a
+/// change listener would otherwise make the grid unusable, which is a far worse
+/// failure than the one they wrote.
+function emit(name, detail) {
+  const set = listeners.get(name);
+  if (!set || !set.size) return true;
+  let prevented = false;
+  const event = { ...detail, preventDefault: () => { prevented = true; } };
+  for (const handler of [...set]) {
+    try {
+      if (handler(event) === false) prevented = true;
+    } catch (err) {
+      console.error(`[opencalc] ${name} listener threw`, err);
+    }
+  }
+  return !prevented;
+}
+
+/// The last state reported, so a change is only announced when it changed.
+const lastReported = { selection: "", dirty: null, calc: "", undo: "" };
+
+/// Emit whatever has changed since the previous frame.
+///
+/// Polled from `draw()` rather than fired at each mutation site: there are
+/// dozens of those and one of them will always be forgotten, whereas the paint
+/// is the one place everything already funnels through.
+function emitStateEvents() {
+  const r = selRect();
+  const selection = `${state.sheet}:${r.r0},${r.c0},${r.r1},${r.c1}`;
+  if (selection !== lastReported.selection) {
+    lastReported.selection = selection;
+    emit("selectionChanged", {
+      sheet: state.sheet,
+      range: { ...r },
+      activeCell: { row: state.sel.row, col: state.sel.col },
+    });
+  }
+  const calc = `${calcMode()}:${needsRecalc()}`;
+  if (calc !== lastReported.calc) {
+    lastReported.calc = calc;
+    emit("calculationChanged", { mode: calcMode(), needsRecalculation: needsRecalc() });
+  }
+  let undo = "";
+  try { undo = `${wasm.session_can_undo()}:${wasm.session_can_redo()}`; } catch {}
+  if (undo !== lastReported.undo) {
+    lastReported.undo = undo;
+    emit("undoStateChanged", {
+      canUndo: undo.startsWith("true"),
+      canRedo: undo.endsWith("true"),
+    });
+  }
 }
 
 // --- Commands ---------------------------------------------------------------

@@ -215,6 +215,30 @@ class OpenCalcSheet extends HTMLElement {
     return this;
   }
 
+  /// Listen for an event. Returns an unsubscribe function.
+  ///
+  ///   const stop = await sheet.on("cellsChanged", (e) => {
+  ///     if (e.source === "api") return;   // our own write — do not loop
+  ///     save(e.range);
+  ///   });
+  ///
+  /// `before*` events can be cancelled, either by calling `preventDefault()` or
+  /// by returning `false`:
+  ///
+  ///   sheet.on("beforeCellsChanged", (e) => {
+  ///     if (!user.canEdit(e.range)) e.preventDefault();
+  ///   });
+  async on(name, handler) {
+    const editor = await this.ready;
+    return editor.on(name, handler);
+  }
+
+  async off(name, handler) {
+    const editor = await this.ready;
+    editor.off(name, handler);
+    return this;
+  }
+
   /// Every command id in this build.
   async listCommands() {
     const editor = await this.ready;
