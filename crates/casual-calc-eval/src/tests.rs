@@ -1881,3 +1881,70 @@ fn dollarde_reads_the_fraction_in_its_own_base() {
     assert!((num("DOLLARDE(1.02,16)") - 1.125).abs() < 1e-12);
     assert!((num("DOLLARFR(1.125,16)") - 1.02).abs() < 1e-12);
 }
+
+#[test]
+fn complex_numbers_are_text_and_keep_their_suffix() {
+    let text = |t: &str| -> String {
+        let mut b = Builder::new();
+        b.formula((0, 0), t);
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        match value_at(&wb, 0, 0) {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(id).unwrap().to_owned()
+            }
+            other => panic!("{t} gave {other:?}"),
+        }
+    };
+    assert_eq!(text("COMPLEX(3,4)"), "3+4i");
+    assert_eq!(text("COMPLEX(3,-4)"), "3-4i");
+    assert_eq!(text("COMPLEX(0,1)"), "i", "a unit coefficient is a bare i");
+    assert_eq!(text("COMPLEX(5,0)"), "5", "no imaginary part, no suffix");
+    // A workbook written in `j` must not come back in `i`: the suffix is part
+    // of the value, and the first argument's wins for a fold.
+    assert_eq!(text("COMPLEX(1,2,\"j\")"), "1+2j");
+    assert_eq!(text("IMSUM(COMPLEX(1,2,\"j\"),COMPLEX(3,4,\"j\"))"), "4+6j");
+    assert_eq!(text("IMCONJUGATE(\"3+4i\")"), "3-4i");
+    assert_eq!(text("IMPRODUCT(\"3+4i\",\"1+2i\")"), "-5+10i");
+    assert_eq!(text("IMSUB(\"5+6i\",\"2+2i\")"), "3+4i");
+}
+
+#[test]
+fn complex_parsing_handles_bare_and_exponent_forms() {
+    // "3+i" is 3 + 1i, not a parse failure — a bare sign is a coefficient of
+    // one, and Excel writes it that way.
+    assert_eq!(num("IMAGINARY(\"3+i\")"), 1.0);
+    assert_eq!(num("IMAGINARY(\"3-i\")"), -1.0);
+    assert_eq!(num("IMREAL(\"3+i\")"), 3.0);
+    // The split must skip an exponent's sign, or `1e-3+2i` splits in the wrong
+    // place and parses as nonsense.
+    assert!((num("IMREAL(\"1e-3+2i\")") - 0.001).abs() < 1e-12);
+    assert_eq!(num("IMAGINARY(\"1e-3+2i\")"), 2.0);
+    assert_eq!(num("IMREAL(\"7\")"), 7.0);
+    assert_eq!(num("IMAGINARY(\"i\")"), 1.0);
+}
+
+#[test]
+fn complex_identities_hold() {
+    // Checked against identities rather than recalled constants: |3+4i| = 5,
+    // e^(i·pi) = -1, and sqrt(z)^2 = z.
+    assert!((num("IMABS(\"3+4i\")") - 5.0).abs() < 1e-12);
+    let mut b = Builder::new();
+    b.formula((0, 0), "IMREAL(IMEXP(COMPLEX(0,PI())))")
+        .formula((1, 0), "IMREAL(IMPOWER(IMSQRT(\"3+4i\"),2))")
+        .formula((2, 0), "IMAGINARY(IMPOWER(IMSQRT(\"3+4i\"),2))")
+        .formula(
+            (3, 0),
+            "IMREAL(IMDIV(IMPRODUCT(\"3+4i\",\"1+2i\"),\"1+2i\"))",
+        );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) + 1.0).abs() < 1e-12, "e^(i*pi) = -1");
+    assert!((n(1) - 3.0).abs() < 1e-9, "sqrt(z)^2 real part");
+    assert!((n(2) - 4.0).abs() < 1e-9, "sqrt(z)^2 imaginary part");
+    assert!((n(3) - 3.0).abs() < 1e-9, "(z*w)/w = z");
+}

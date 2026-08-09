@@ -52,6 +52,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("COLUMNS", "COLUMNS(array)"),
     ("COMBIN", "COMBIN(n, k)"),
     ("COMBINA", "COMBINA(n, k)"),
+    ("COMPLEX", "COMPLEX(real, i, [suffix])"),
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
     ("CONFIDENCE", "CONFIDENCE(alpha, standard_dev, size)"),
@@ -121,6 +122,26 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
     ("IFS", "IFS(test1, value1, …)"),
+    ("IMABS", "IMABS(inumber)"),
+    ("IMAGINARY", "IMAGINARY(inumber)"),
+    ("IMARGUMENT", "IMARGUMENT(inumber)"),
+    ("IMCONJUGATE", "IMCONJUGATE(inumber)"),
+    ("IMCOS", "IMCOS(inumber)"),
+    ("IMCOSH", "IMCOSH(inumber)"),
+    ("IMDIV", "IMDIV(inumber1, inumber2)"),
+    ("IMEXP", "IMEXP(inumber)"),
+    ("IMLN", "IMLN(inumber)"),
+    ("IMLOG10", "IMLOG10(inumber)"),
+    ("IMLOG2", "IMLOG2(inumber)"),
+    ("IMPOWER", "IMPOWER(inumber, number)"),
+    ("IMPRODUCT", "IMPRODUCT(inumber1, …)"),
+    ("IMREAL", "IMREAL(inumber)"),
+    ("IMSIN", "IMSIN(inumber)"),
+    ("IMSINH", "IMSINH(inumber)"),
+    ("IMSQRT", "IMSQRT(inumber)"),
+    ("IMSUB", "IMSUB(inumber1, inumber2)"),
+    ("IMSUM", "IMSUM(inumber1, …)"),
+    ("IMTAN", "IMTAN(inumber)"),
     ("INDEX", "INDEX(array, row_num, [col_num])"),
     ("INDIRECT", "INDIRECT(ref_text, [a1])"),
     ("INT", "INT(number)"),
@@ -614,6 +635,65 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "PDURATION" => eval_pduration(ev, sheet, args),
         "DOLLARDE" => eval_dollar_frac(ev, sheet, args, true),
         "DOLLARFR" => eval_dollar_frac(ev, sheet, args, false),
+        // Complex numbers. They travel as *text* ("3+4i"), which is why every
+        // one of these parses and re-formats rather than taking a pair of
+        // numbers: the suffix (i or j) is part of the value and must survive.
+        "COMPLEX" => eval_complex(ev, sheet, args),
+        "IMREAL" => complex_part(ev, sheet, args, |c| c.0),
+        "IMAGINARY" => complex_part(ev, sheet, args, |c| c.1),
+        "IMABS" => complex_part(ev, sheet, args, |c| c.0.hypot(c.1)),
+        "IMARGUMENT" => complex_part(ev, sheet, args, |c| c.1.atan2(c.0)),
+        "IMCONJUGATE" => complex_map(ev, sheet, args, |c| (c.0, -c.1)),
+        "IMSUM" => complex_fold(ev, sheet, args, |a, b| (a.0 + b.0, a.1 + b.1), (0.0, 0.0)),
+        "IMPRODUCT" => complex_fold(
+            ev,
+            sheet,
+            args,
+            |a, b| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0),
+            (1.0, 0.0),
+        ),
+        "IMSUB" => complex_pair(ev, sheet, args, |a, b| Some((a.0 - b.0, a.1 - b.1))),
+        "IMDIV" => complex_pair(ev, sheet, args, |a, b| {
+            let d = b.0 * b.0 + b.1 * b.1;
+            (d != 0.0).then(|| ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d))
+        }),
+        "IMEXP" => complex_map(ev, sheet, args, |c| {
+            let e = c.0.exp();
+            (e * c.1.cos(), e * c.1.sin())
+        }),
+        "IMLN" => complex_map(ev, sheet, args, |c| (c.0.hypot(c.1).ln(), c.1.atan2(c.0))),
+        "IMLOG10" => complex_map(ev, sheet, args, |c| {
+            let ln10 = std::f64::consts::LN_10;
+            (c.0.hypot(c.1).ln() / ln10, c.1.atan2(c.0) / ln10)
+        }),
+        "IMLOG2" => complex_map(ev, sheet, args, |c| {
+            let ln2 = std::f64::consts::LN_2;
+            (c.0.hypot(c.1).ln() / ln2, c.1.atan2(c.0) / ln2)
+        }),
+        "IMSQRT" => complex_map(ev, sheet, args, |c| {
+            let r = c.0.hypot(c.1).sqrt();
+            let t = c.1.atan2(c.0) / 2.0;
+            (r * t.cos(), r * t.sin())
+        }),
+        "IMPOWER" => eval_impower(ev, sheet, args),
+        "IMSIN" => complex_map(ev, sheet, args, |c| {
+            (c.0.sin() * c.1.cosh(), c.0.cos() * c.1.sinh())
+        }),
+        "IMCOS" => complex_map(ev, sheet, args, |c| {
+            (c.0.cos() * c.1.cosh(), -c.0.sin() * c.1.sinh())
+        }),
+        "IMSINH" => complex_map(ev, sheet, args, |c| {
+            (c.0.sinh() * c.1.cos(), c.0.cosh() * c.1.sin())
+        }),
+        "IMCOSH" => complex_map(ev, sheet, args, |c| {
+            (c.0.cosh() * c.1.cos(), c.0.sinh() * c.1.sin())
+        }),
+        "IMTAN" => complex_pair_self(ev, sheet, args, |c| {
+            let (sr, si) = (c.0.sin() * c.1.cosh(), c.0.cos() * c.1.sinh());
+            let (cr, ci) = (c.0.cos() * c.1.cosh(), -c.0.sin() * c.1.sinh());
+            let d = cr * cr + ci * ci;
+            (d != 0.0).then(|| ((sr * cr + si * ci) / d, (si * cr - sr * ci) / d))
+        }),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -5063,4 +5143,257 @@ fn eval_dollar_frac(
     } else {
         whole + rest * fraction / scale
     })
+}
+
+// --- Complex numbers -------------------------------------------------------
+//
+// A complex number is *text* in a spreadsheet — "3+4i" — not a value type. So
+// every function here parses its arguments and formats its result, and the
+// imaginary suffix travels with the value: a workbook using `j` throughout must
+// not come back using `i`.
+
+/// A complex number as `(real, imaginary)`. A named pair rather than a struct
+/// because every operation below is arithmetic on two floats and a struct would
+/// add ceremony without adding meaning.
+type Complex = (f64, f64);
+
+/// An operation that can fail — division by zero, in practice.
+type ComplexOp1 = fn(Complex) -> Option<Complex>;
+/// A two-argument operation that can fail.
+type ComplexOp2 = fn(Complex, Complex) -> Option<Complex>;
+/// A total two-argument operation, for the folds.
+type ComplexFold = fn(Complex, Complex) -> Complex;
+
+/// Parse `"3+4i"`, `"-2.5j"`, `"7"` or `"i"` into `(real, imaginary, suffix)`.
+fn parse_complex(text: &str) -> Option<(f64, f64, char)> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Some((0.0, 0.0, 'i'));
+    }
+    let suffix = if t.ends_with('i') {
+        'i'
+    } else if t.ends_with('j') {
+        'j'
+    } else {
+        // No suffix at all: a plain real number.
+        return t.parse::<f64>().ok().map(|r| (r, 0.0, 'i'));
+    };
+    let body = &t[..t.len() - 1];
+    // Split at the sign that separates the parts, skipping a leading sign and
+    // any exponent sign — `1e-3+2i` must not split at the exponent's minus.
+    let bytes = body.as_bytes();
+    let mut split = None;
+    for i in (1..bytes.len()).rev() {
+        let c = bytes[i] as char;
+        if (c == '+' || c == '-') && !matches!(bytes[i - 1] as char, 'e' | 'E') {
+            split = Some(i);
+            break;
+        }
+    }
+    match split {
+        Some(i) => {
+            let real = body[..i].parse::<f64>().ok()?;
+            // "3+i" means 3 + 1i, and "3-i" means 3 - 1i: a bare sign is a
+            // coefficient of one.
+            let imag_text = &body[i..];
+            let imag = match imag_text {
+                "+" => 1.0,
+                "-" => -1.0,
+                other => other.parse::<f64>().ok()?,
+            };
+            Some((real, imag, suffix))
+        }
+        None => {
+            let imag = match body {
+                "" | "+" => 1.0,
+                "-" => -1.0,
+                other => other.parse::<f64>().ok()?,
+            };
+            Some((0.0, imag, suffix))
+        }
+    }
+}
+
+/// Format `(real, imaginary)` the way Excel writes one: the parts that are zero
+/// are omitted, and a unit coefficient is written as a bare `i`.
+fn format_complex(real: f64, imag: f64, suffix: char) -> String {
+    let n = |v: f64| number_to_text(v);
+    if imag == 0.0 {
+        return n(real);
+    }
+    let imag_part = if imag == 1.0 {
+        suffix.to_string()
+    } else if imag == -1.0 {
+        format!("-{suffix}")
+    } else {
+        format!("{}{suffix}", n(imag))
+    };
+    if real == 0.0 {
+        return imag_part;
+    }
+    if imag > 0.0 {
+        format!("{}+{imag_part}", n(real))
+    } else {
+        format!("{}{imag_part}", n(real))
+    }
+}
+
+fn complex_arg(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    expr: &Expr,
+) -> Result<(f64, f64, char), Value> {
+    let text = match ev.eval_expr(sheet, expr) {
+        Value::Text(t) => t,
+        Value::Error(e) => return Err(Value::Error(e)),
+        other => other
+            .as_number()
+            .map(number_to_text)
+            .map_err(Value::Error)?,
+    };
+    parse_complex(&text).ok_or(Value::Error(ErrorValue::Num))
+}
+
+/// A function of one complex number returning a real.
+fn complex_part(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: fn(Complex) -> f64,
+) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match complex_arg(ev, sheet, arg) {
+        Ok((re, im, _)) => Value::Number(f((re, im))),
+        Err(e) => e,
+    }
+}
+
+/// A function of one complex number returning another.
+fn complex_map(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: fn(Complex) -> Complex,
+) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match complex_arg(ev, sheet, arg) {
+        Ok((re, im, suffix)) => {
+            let (r, i) = f((re, im));
+            Value::Text(format_complex(r, i, suffix))
+        }
+        Err(e) => e,
+    }
+}
+
+/// As [`complex_map`], but the operation can fail (a division by zero).
+fn complex_pair_self(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], f: ComplexOp1) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match complex_arg(ev, sheet, arg) {
+        Ok((re, im, suffix)) => match f((re, im)) {
+            Some((r, i)) => Value::Text(format_complex(r, i, suffix)),
+            None => Value::Error(ErrorValue::Div0),
+        },
+        Err(e) => e,
+    }
+}
+
+/// A function of two complex numbers.
+fn complex_pair(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], f: ComplexOp2) -> Value {
+    let [a, b] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let (ar, ai, suffix) = match complex_arg(ev, sheet, a) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (br, bi, _) = match complex_arg(ev, sheet, b) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match f((ar, ai), (br, bi)) {
+        Some((r, i)) => Value::Text(format_complex(r, i, suffix)),
+        None => Value::Error(ErrorValue::Div0),
+    }
+}
+
+/// Fold a variadic list of complex numbers.
+fn complex_fold(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: ComplexFold,
+    identity: Complex,
+) -> Value {
+    if args.is_empty() {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut acc = identity;
+    // The first argument's suffix wins, so a sheet written in `j` stays in `j`.
+    let mut suffix = 'i';
+    for (n, arg) in args.iter().enumerate() {
+        match complex_arg(ev, sheet, arg) {
+            Ok((re, im, s)) => {
+                if n == 0 {
+                    suffix = s;
+                }
+                acc = f(acc, (re, im));
+            }
+            Err(e) => return e,
+        }
+    }
+    Value::Text(format_complex(acc.0, acc.1, suffix))
+}
+
+fn eval_complex(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let [re, im] = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let suffix = match args.get(2) {
+        Some(arg) => match ev.eval_expr(sheet, arg) {
+            Value::Text(t) => match t.as_str() {
+                "i" => 'i',
+                "j" => 'j',
+                // Only i and j are legal; anything else is a typo that would
+                // otherwise produce a value nothing can parse back.
+                _ => return Value::Error(ErrorValue::Value),
+            },
+            Value::Error(e) => return Value::Error(e),
+            _ => return Value::Error(ErrorValue::Value),
+        },
+        None => 'i',
+    };
+    Value::Text(format_complex(re, im, suffix))
+}
+
+fn eval_impower(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (re, im, suffix) = match complex_arg(ev, sheet, &args[0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let power = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let modulus = re.hypot(im);
+    if modulus == 0.0 {
+        return Value::Text(format_complex(0.0, 0.0, suffix));
+    }
+    // De Moivre: (r∠θ)^n = r^n ∠ nθ.
+    let arg = im.atan2(re);
+    let r = modulus.powf(power);
+    let t = arg * power;
+    Value::Text(format_complex(r * t.cos(), r * t.sin(), suffix))
 }
