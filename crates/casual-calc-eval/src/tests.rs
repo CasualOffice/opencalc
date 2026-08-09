@@ -1701,3 +1701,71 @@ fn remaining_distributions() {
     assert!(n(5) >= 0.0 && n(5) <= 6.0);
     assert!((n(6) - 1.959_963_984_540_054 * 2.5 / 50.0f64.sqrt()).abs() < 1e-6);
 }
+
+#[test]
+fn base_conversion_uses_twos_complement_for_negatives() {
+    let text = |t: &str| -> String {
+        let mut b = Builder::new();
+        b.formula((0, 0), t);
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        match value_at(&wb, 0, 0) {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(id).unwrap().to_owned()
+            }
+            other => panic!("{t} gave {other:?}"),
+        }
+    };
+    assert_eq!(text("DEC2BIN(9)"), "1001");
+    assert_eq!(text("DEC2BIN(9,8)"), "00001001");
+    assert_eq!(text("DEC2HEX(255)"), "FF");
+    assert_eq!(text("DEC2OCT(8)"), "10");
+    // A ten-digit value with the top digit set is negative. Parsing it as an
+    // unsigned integer gives 1023 — a plausible-looking wrong answer, and the
+    // single most likely mistake in these functions.
+    assert_eq!(num("BIN2DEC(\"1111111111\")"), -1.0);
+    assert_eq!(text("DEC2BIN(-1)"), "1111111111");
+    assert_eq!(num("HEX2DEC(\"FFFFFFFFFF\")"), -1.0);
+    assert_eq!(num("OCT2DEC(\"7777777777\")"), -1.0);
+    assert_eq!(text("BIN2HEX(\"1111111111\")"), "FFFFFFFFFF");
+    assert_eq!(num("BIN2DEC(\"1001\")"), 9.0);
+}
+
+#[test]
+fn places_cannot_truncate_a_value() {
+    use casual_calc_model::ErrorValue;
+    // Asking for fewer digits than the value needs is an error, not a silent
+    // truncation that would change the number.
+    assert_eq!(err("DEC2BIN(255,4)"), ErrorValue::Num);
+    assert_eq!(err("DEC2BIN(1024)"), ErrorValue::Num);
+}
+
+#[test]
+fn bit_operations_and_step_functions() {
+    use casual_calc_model::ErrorValue;
+    assert_eq!(num("BITAND(12,10)"), 8.0);
+    assert_eq!(num("BITOR(12,10)"), 14.0);
+    assert_eq!(num("BITXOR(12,10)"), 6.0);
+    assert_eq!(num("BITLSHIFT(3,2)"), 12.0);
+    assert_eq!(num("BITRSHIFT(12,2)"), 3.0);
+    // A negative shift reverses direction, which is why the two share a body.
+    assert_eq!(num("BITLSHIFT(12,-2)"), 3.0);
+    // Defined only on non-negative integers.
+    assert_eq!(err("BITAND(-1,1)"), ErrorValue::Num);
+    assert_eq!(num("DELTA(5,5)"), 1.0);
+    assert_eq!(num("DELTA(5,4)"), 0.0);
+    assert_eq!(num("GESTEP(5,4)"), 1.0);
+    assert_eq!(num("GESTEP(3,4)"), 0.0);
+}
+
+#[test]
+fn erf_and_erfc_are_complementary() {
+    // ERF(x) + ERFC(x) = 1 by definition, which holds regardless of the
+    // approximation's accuracy — a stronger check than a recalled constant.
+    for x in ["0.5", "1", "2"] {
+        let sum = num(&format!("ERF({x})")) + num(&format!("ERFC({x})"));
+        assert!((sum - 1.0).abs() < 1e-9, "ERF+ERFC at {x}");
+    }
+    // The two-argument form is the integral between bounds.
+    assert!((num("ERF(0,1)") - num("ERF(1)")).abs() < 1e-12);
+}

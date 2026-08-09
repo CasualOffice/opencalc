@@ -35,6 +35,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEA", "AVERAGEA(value1, …)"),
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
+    ("BIN2DEC", "BIN2DEC(number)"),
+    ("BIN2HEX", "BIN2HEX(number, [places])"),
+    ("BIN2OCT", "BIN2OCT(number, [places])"),
+    ("BITAND", "BITAND(number1, number2)"),
+    ("BITLSHIFT", "BITLSHIFT(number, shift)"),
+    ("BITOR", "BITOR(number1, number2)"),
+    ("BITRSHIFT", "BITRSHIFT(number, shift)"),
+    ("BITXOR", "BITXOR(number1, number2)"),
     ("CEILING", "CEILING(number, significance)"),
     ("CHAR", "CHAR(number)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
@@ -66,11 +74,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DAY", "DAY(serial_number)"),
     ("DAYS", "DAYS(end_date, start_date)"),
     ("DAYS360", "DAYS360(start, end, [method])"),
+    ("DEC2BIN", "DEC2BIN(number, [places])"),
+    ("DEC2HEX", "DEC2HEX(number, [places])"),
+    ("DEC2OCT", "DEC2OCT(number, [places])"),
     ("DEGREES", "DEGREES(angle)"),
+    ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
     ("DOLLAR", "DOLLAR(number, [decimals])"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
+    ("ERF", "ERF(lower, [upper])"),
+    ("ERFC", "ERFC(x)"),
     ("ERROR.TYPE", "ERROR.TYPE(error)"),
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
@@ -88,14 +102,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("GAMMALN", "GAMMALN(x)"),
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
+    ("GESTEP", "GESTEP(number, [step])"),
     ("HARMEAN", "HARMEAN(number1, …)"),
+    ("HEX2BIN", "HEX2BIN(number, [places])"),
+    ("HEX2DEC", "HEX2DEC(number)"),
+    ("HEX2OCT", "HEX2OCT(number, [places])"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
-    (
-        "HYPGEOMDIST",
-        "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)",
-    ),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
@@ -144,16 +158,15 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
-    (
-        "NEGBINOMDIST",
-        "NEGBINOMDIST(number_f, number_s, probability_s)",
-    ),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
     ("NORMINV", "NORMINV(probability, mean, sd)"),
     ("NORMSDIST", "NORMSDIST(z)"),
     ("NORMSINV", "NORMSINV(probability)"),
     ("NOT", "NOT(logical)"),
+    ("OCT2BIN", "OCT2BIN(number, [places])"),
+    ("OCT2DEC", "OCT2DEC(number)"),
+    ("OCT2HEX", "OCT2HEX(number, [places])"),
     ("ODD", "ODD(number)"),
     ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
@@ -526,6 +539,29 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "HYPGEOMDIST" => eval_hypgeomdist(ev, sheet, args),
         "CRITBINOM" => eval_critbinom(ev, sheet, args),
         "CONFIDENCE" => eval_confidence(ev, sheet, args),
+        // Base conversion. Each pair is (from, to) radix; the negative handling
+        // lives in the helpers because it is the part that differs.
+        "BIN2DEC" => base_to_dec(ev, sheet, args, 2),
+        "OCT2DEC" => base_to_dec(ev, sheet, args, 8),
+        "HEX2DEC" => base_to_dec(ev, sheet, args, 16),
+        "DEC2BIN" => dec_to_base(ev, sheet, args, 2),
+        "DEC2OCT" => dec_to_base(ev, sheet, args, 8),
+        "DEC2HEX" => dec_to_base(ev, sheet, args, 16),
+        "BIN2OCT" => base_to_base(ev, sheet, args, 2, 8),
+        "BIN2HEX" => base_to_base(ev, sheet, args, 2, 16),
+        "OCT2BIN" => base_to_base(ev, sheet, args, 8, 2),
+        "OCT2HEX" => base_to_base(ev, sheet, args, 8, 16),
+        "HEX2BIN" => base_to_base(ev, sheet, args, 16, 2),
+        "HEX2OCT" => base_to_base(ev, sheet, args, 16, 8),
+        "BITAND" => bitwise(ev, sheet, args, |a, b| a & b),
+        "BITOR" => bitwise(ev, sheet, args, |a, b| a | b),
+        "BITXOR" => bitwise(ev, sheet, args, |a, b| a ^ b),
+        "BITLSHIFT" => bit_shift(ev, sheet, args, true),
+        "BITRSHIFT" => bit_shift(ev, sheet, args, false),
+        "DELTA" => eval_delta(ev, sheet, args, true),
+        "GESTEP" => eval_delta(ev, sheet, args, false),
+        "ERF" => eval_erf(ev, sheet, args),
+        "ERFC" => scalar(ev, sheet, args, |x| 1.0 - erf(x)),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -4228,4 +4264,212 @@ fn eval_confidence(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value
     }
     // Two-tailed, so the quantile is at 1 - alpha/2.
     Value::Number(normal_quantile(1.0 - alpha / 2.0) * sd / size.trunc().sqrt())
+}
+
+// --- Engineering: base conversion and bit operations -----------------------
+
+/// The widest value the base conversions accept: ten digits in the source
+/// radix, which is the ceiling OOXML sets on all of them.
+const BASE_DIGITS: u32 = 10;
+
+/// Parse `text` in `radix`, honouring the two's-complement convention the
+/// spreadsheet base functions use.
+///
+/// A ten-digit value with the top digit set is negative — `1111111111` in
+/// binary is -1, not 1023. Parsing it as unsigned is the single most likely
+/// mistake here, and it yields a large positive number that looks plausible.
+fn parse_in_base(text: &str, radix: u32) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > BASE_DIGITS as usize {
+        return None;
+    }
+    let magnitude = i64::from_str_radix(text, radix).ok()?;
+    let width = (radix as f64).log2().round() as u32 * BASE_DIGITS;
+    let sign_bit = 1i64 << (width - 1);
+    Some(if magnitude >= sign_bit {
+        magnitude - (sign_bit << 1)
+    } else {
+        magnitude
+    })
+}
+
+/// Format `value` in `radix` with the same two's-complement convention.
+fn format_in_base(value: i64, radix: u32, places: Option<usize>) -> Option<String> {
+    let width = (radix as f64).log2().round() as u32 * BASE_DIGITS;
+    let sign_bit = 1i64 << (width - 1);
+    if value >= sign_bit || value < -sign_bit {
+        return None;
+    }
+    let encoded = if value < 0 {
+        (value + (sign_bit << 1)) as u64
+    } else {
+        value as u64
+    };
+    let digits = match radix {
+        2 => format!("{encoded:b}"),
+        8 => format!("{encoded:o}"),
+        16 => format!("{encoded:X}"),
+        _ => return None,
+    };
+    // A negative value always occupies the full width, so `places` is ignored
+    // for it — padding a two's-complement form would change its value.
+    if value < 0 {
+        return Some(digits);
+    }
+    match places {
+        Some(p) if p < digits.len() => None,
+        Some(p) => Some(format!("{digits:0>p$}")),
+        None => Some(digits),
+    }
+}
+
+fn text_arg(ev: &mut Evaluator<'_>, sheet: usize, expr: &Expr) -> Result<String, Value> {
+    match ev.eval_expr(sheet, expr) {
+        Value::Text(t) => Ok(t),
+        Value::Error(e) => Err(Value::Error(e)),
+        // A binary literal typed as a number reaches here as one, and its
+        // digits are the text we want.
+        other => other.as_number().map(number_to_text).map_err(Value::Error),
+    }
+}
+
+fn base_to_dec(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], radix: u32) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match text_arg(ev, sheet, arg) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match parse_in_base(&text, radix) {
+        Some(v) => Value::Number(v as f64),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+fn places_arg(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Result<Option<usize>, Value> {
+    match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) if n < 0.0 => Err(Value::Error(ErrorValue::Num)),
+            Ok(n) => Ok(Some(n.trunc() as usize)),
+            Err(e) => Err(Value::Error(e)),
+        },
+        None => Ok(None),
+    }
+}
+
+fn dec_to_base(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], radix: u32) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let value = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let places = match places_arg(ev, sheet, args) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match format_in_base(value, radix, places) {
+        Some(text) => Value::Text(text),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+fn base_to_base(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], from: u32, to: u32) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match text_arg(ev, sheet, &args[0]) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let places = match places_arg(ev, sheet, args) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let Some(value) = parse_in_base(&text, from) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    match format_in_base(value, to, places) {
+        Some(text) => Value::Text(text),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// The bitwise operations, which are defined only on non-negative integers
+/// below 2^48 — a range that fits `f64` exactly, so the result is never a
+/// rounded approximation of the bits asked for.
+fn bitwise(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], f: fn(u64, u64) -> u64) -> Value {
+    let [a, b] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let limit = 2f64.powi(48);
+    if a < 0.0 || b < 0.0 || a >= limit || b >= limit || a.fract() != 0.0 || b.fract() != 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(f(a as u64, b as u64) as f64)
+}
+
+fn bit_shift(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], left: bool) -> Value {
+    let [value, shift] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let limit = 2f64.powi(48);
+    if value < 0.0 || value >= limit || value.fract() != 0.0 || shift.abs() > 53.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // A negative shift reverses the direction, which is why the two functions
+    // can share this body.
+    let shift = if left { shift } else { -shift };
+    let result = if shift >= 0.0 {
+        (value as u64) << (shift as u32)
+    } else {
+        (value as u64) >> ((-shift) as u32)
+    };
+    if (result as f64) >= limit {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(result as f64)
+}
+
+/// `DELTA(a, [b])` — 1 when equal; `GESTEP(a, [step])` — 1 when at or above.
+fn eval_delta(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], equality: bool) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let a = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let b = match args.get(1) {
+        Some(arg) => match ev.eval_expr(sheet, arg).as_number() {
+            Ok(n) => n,
+            Err(e) => return Value::Error(e),
+        },
+        None => 0.0,
+    };
+    let hit = if equality { a == b } else { a >= b };
+    Value::Number(if hit { 1.0 } else { 0.0 })
+}
+
+/// `ERF(lower, [upper])` — the error function, or the integral between two
+/// bounds when an upper one is given.
+fn eval_erf(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let lower = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    match args.get(1) {
+        Some(arg) => match ev.eval_expr(sheet, arg).as_number() {
+            Ok(upper) => Value::Number(erf(upper) - erf(lower)),
+            Err(e) => Value::Error(e),
+        },
+        None => Value::Number(erf(lower)),
+    }
 }
