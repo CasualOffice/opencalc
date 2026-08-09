@@ -16,7 +16,7 @@ use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ConditionalFormat,
     DataValidation, DefinedName, Hyperlink, PrintSetup, Sheet, SheetProtection, SheetView,
-    SheetVisibility, StyleId, Table, Workbook,
+    SheetVisibility, SortState, StyleId, Table, Workbook,
 };
 
 mod structural;
@@ -114,6 +114,8 @@ pub struct SheetMetadata {
     pub tables: Vec<Table>,
     /// Page setup, margins, header/footer and manual breaks.
     pub print: PrintSetup,
+    /// The record of how a range was last sorted.
+    pub sort_state: Option<SortState>,
 }
 
 impl SheetMetadata {
@@ -140,6 +142,7 @@ impl SheetMetadata {
             hyperlinks: sheet.hyperlinks.clone(),
             tables: sheet.tables.clone(),
             print: sheet.print.clone(),
+            sort_state: sheet.sort_state.clone(),
         }
     }
 
@@ -176,6 +179,7 @@ impl SheetMetadata {
             hyperlinks: std::mem::replace(&mut sheet.hyperlinks, self.hyperlinks),
             tables: std::mem::replace(&mut sheet.tables, self.tables),
             print: std::mem::replace(&mut sheet.print, self.print),
+            sort_state: std::mem::replace(&mut sheet.sort_state, self.sort_state),
         }
     }
 }

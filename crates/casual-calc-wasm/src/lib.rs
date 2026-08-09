@@ -3046,6 +3046,26 @@ pub fn session_set_sheet_protected(index: usize, on: bool) -> Result<(), JsError
     })
 }
 
+/// The sheet the file was left open on — OOXML's `tabSelected` — or 0.
+///
+/// A workbook remembers which tab its author was looking at, and opening every
+/// file on the first sheet ignores that: a summary sheet at the end is the
+/// whole point of putting it there. A hidden sheet is skipped, because a tab
+/// that cannot be shown cannot be the one to open on.
+#[wasm_bindgen]
+pub fn session_active_sheet() -> usize {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .iter()
+            .position(|sh| {
+                sh.view.tab_selected && sh.visibility == casual_calc_model::SheetVisibility::Visible
+            })
+            .unwrap_or(0)
+    })
+    .unwrap_or(0)
+}
+
 /// Each sheet's visibility as JSON `["visible"|"hidden"|"veryHidden", …]`, so
 /// the host can leave hidden tabs out of the strip while still offering them in
 /// an unhide list.
@@ -5331,6 +5351,48 @@ pub fn session_sort_range_multi(
         }
         if ops.is_empty() {
             return Ok(());
+        }
+        // Record what was sorted. Excel writes `<sortState>` so its own dialog
+        // can reopen showing the keys that were used; sorting here left no
+        // trace, so a file sorted in this app opened in Excel claiming it had
+        // never been sorted. Part of the same undo step as the move.
+        let mut sort = casual_calc_model::SortState::default();
+        sort.attrs.insert(
+            "ref".to_owned(),
+            format!(
+                "{}{}:{}{}",
+                casual_calc_formula::column_to_letters(c0),
+                r0 + 1,
+                casual_calc_formula::column_to_letters(c1),
+                r1 + 1
+            ),
+        );
+        for (i, &key) in key_cols.iter().enumerate() {
+            let mut cond: std::collections::BTreeMap<String, String> = Default::default();
+            cond.insert(
+                "ref".to_owned(),
+                format!(
+                    "{}{}:{}{}",
+                    casual_calc_formula::column_to_letters(key),
+                    r0 + 1,
+                    casual_calc_formula::column_to_letters(key),
+                    r1 + 1
+                ),
+            );
+            // `descending` is the attribute; ascending is the schema default
+            // and is written by leaving it out.
+            if ascending.get(i).copied().unwrap_or(1) == 0 {
+                cond.insert("descending".to_owned(), "1".to_owned());
+            }
+            sort.conditions.push(cond);
+        }
+        if let Some(sh) = session.workbook().sheets.get(sheet).cloned() {
+            let mut data = SheetMetadata::capture(&sh);
+            data.sort_state = Some(sort);
+            ops.push(EditOperation::SetSheetMetadata {
+                sheet,
+                data: Box::new(data),
+            });
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
     })
@@ -7878,5 +7940,34 @@ mod print_scope_tests {
         // Clearing takes the thead away again.
         session_set_print_title_rows(0, 1, 0).unwrap();
         assert!(!session_print_html(0).contains("<thead>"));
+    }
+}
+
+#[cfg(test)]
+mod sort_state_tests {
+    use super::{session_new, session_set_cell, session_sort_range};
+
+    /// Excel writes `<sortState>` so its own dialog can reopen showing the keys
+    /// that were used. Sorting here left no trace, so a file sorted in this app
+    /// opened in Excel claiming it had never been sorted.
+    #[test]
+    fn sorting_records_what_it_sorted() {
+        session_new();
+        for (i, v) in ["3", "1", "2"].iter().enumerate() {
+            session_set_cell(0, i as u32, 0, v).unwrap();
+        }
+        session_sort_range(0, 0, 0, 2, 0, 0, false).unwrap();
+
+        let state = super::with_session(|s| s.workbook().sheets[0].sort_state.clone())
+            .flatten()
+            .expect("a sort leaves a record");
+        assert_eq!(state.attrs.get("ref").map(String::as_str), Some("A1:A3"));
+        assert_eq!(state.conditions.len(), 1);
+        // Ascending is the schema default and is written by omission, so a
+        // descending sort is the one that carries the attribute.
+        assert_eq!(
+            state.conditions[0].get("descending").map(String::as_str),
+            Some("1")
+        );
     }
 }

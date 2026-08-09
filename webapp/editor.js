@@ -8332,7 +8332,10 @@ function wireEvents() {
     } catch (err) { status.textContent = friendlyOpenError(err, file.name, delim !== null); }
     e.target.value = ""; // allow re-opening the same file
     invalidateGrowth();
-    state.sheet = 0;
+    // Open on the sheet the file was left on, not always the first: a workbook
+    // records which tab its author was looking at, and a summary sheet at the
+    // end is put there deliberately.
+    try { state.sheet = wasm.session_active_sheet(); } catch { state.sheet = 0; }
     state.scrollX = state.scrollY = 0;
     renderTabs();
     select(0, 0);
