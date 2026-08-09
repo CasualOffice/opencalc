@@ -53,9 +53,38 @@ OpenDoc's set:
 A weekly workflow re-runs `cargo audit` / `cargo deny` and a bounded seeded
 fuzz campaign against the XLSX package reader.
 
+## Release tags
+
+Releases are triggered by a **component-scoped tag**, never a bare `v0.0.0`.
+This repository ships more than one artefact, and the moment two release
+workflows watch the same tag namespace, tagging either one fires both — a
+failure that is invisible until the day it publishes something nobody meant to.
+
+| Tag | Releases | Workflow |
+| --- | --- | --- |
+| `sdk-v*` | `@opencalc/sheet`, `@opencalc/engine`, `@opencalc/react` on npm | [`release-sdk.yml`](../.github/workflows/release-sdk.yml) |
+| `engine-v*` | the `casual-calc-*` crates on crates.io | reserved |
+| `desktop-v*` | the Tauri desktop app | reserved |
+| `server-v*` | the collaboration server | reserved |
+
+```sh
+git tag sdk-v0.0.0
+git push origin sdk-v0.0.0
+```
+
+The version in the tag must equal the version in the packages; the workflow
+checks and refuses rather than publishing something the repository cannot be
+searched for. `sdk_v*` is accepted alongside `sdk-v*` so a mistyped separator
+is a release rather than a silent no-op, but the hyphen is canonical.
+
+Publishing credentials live on the **`release`** GitHub environment, not in
+repository secrets, so a release requires whatever protection rules that
+environment carries. `NPM_TOKEN` is preferred; `PKG_USERNAME`/`PKG_PASS` are
+exchanged for a registry token when it is absent, which cannot work once
+two-factor authentication is required for publishing.
+
 ## Future gates (not built yet)
 
-- Everything above (no workspace exists).
 - A CSV/ODS interop gate once those adapters land.
 - A memory-ceiling gate asserting the 1M-cell model stays within the
   [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) memory budget.

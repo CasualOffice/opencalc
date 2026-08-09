@@ -44,9 +44,50 @@ function assetBase(el) {
   if (!given) return HERE;
   return new URL(given.endsWith("/") ? given : `${given}/`, document.baseURI);
 }
+/// The release this module was built from. Stamped at pack time; `dev` when
+/// running from the repository, where there is nothing to be out of step with.
+const VERSION = "dev";
+
 /// The cache-buster the dev server stamps on this module, reused for the
 /// editor's own assets so an embedded editor is never a build behind the page.
-const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
+/// Falls back to the release, so a published build scopes its own caching.
+const BUILD = new URL(import.meta.url).searchParams.get("v") || VERSION;
+
+/// Refuse to boot against an engine from a different release.
+///
+/// The JavaScript comes from `node_modules` and the binary comes from wherever
+/// the host copied it, and `npm update` moves one and not the other. The
+/// failure that produces is the expensive kind: the bindings and the engine
+/// disagree about a signature, and you get a wrong answer rather than an error.
+/// So it is checked before anything loads, and the message names the command
+/// that fixes it.
+async function verifyAssets(base) {
+  if (VERSION === "dev") return;
+  let manifest = null;
+  try {
+    const res = await fetch(new URL("opencalc-assets.json", base));
+    if (res.ok) manifest = await res.json();
+  } catch {
+    // Blocked or offline. Absence is not evidence of a skew, so it is not
+    // worth refusing to start over.
+  }
+  if (!manifest) {
+    console.warn(
+      `[opencalc] no opencalc-assets.json beside the engine at ${base}, so it ` +
+        `cannot be checked against @opencalc/sheet ${VERSION}. ` +
+        `Copy a matching set with \`npx opencalc-assets <dir>\`.`,
+    );
+    return;
+  }
+  if (manifest.version !== VERSION) {
+    throw new Error(
+      `[opencalc] version skew: @opencalc/sheet is ${VERSION}, but the engine ` +
+        `assets at ${base} are ${manifest.version}. Re-copy them with ` +
+        `\`npx opencalc-assets <dir>\`, and keep that in your postinstall ` +
+        `script so the two cannot drift again.`,
+    );
+  }
+}
 
 /// The chrome regions a host can show or hide.
 ///
@@ -104,10 +145,10 @@ const assets = new Map();
 function loadAssets(base) {
   const key = String(base);
   if (!assets.has(key)) {
-    assets.set(key, Promise.all([
+    assets.set(key, verifyAssets(base).then(() => Promise.all([
       fetch(new URL(`editor.html?v=${BUILD}`, base)).then((r) => r.text()),
       fetch(new URL(`editor.css?v=${BUILD}`, base)).then((r) => r.text()),
-    ]).then(([html, css]) => {
+    ])).then(([html, css]) => {
       if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
         sharedSheet = new CSSStyleSheet();
         sharedSheet.replaceSync(css);

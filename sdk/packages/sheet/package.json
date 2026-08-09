@@ -1,0 +1,57 @@
+{
+  "name": "@opencalc/sheet",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "An embeddable spreadsheet that reads and writes real .xlsx — 347 worksheet functions, pivot tables and charts, running entirely in the browser as one custom element.",
+  "keywords": [
+    "spreadsheet",
+    "xlsx",
+    "excel",
+    "grid",
+    "data-grid",
+    "formula",
+    "pivot-table",
+    "charts",
+    "webassembly",
+    "wasm",
+    "custom-element",
+    "web-component",
+    "react",
+    "csv",
+    "ooxml"
+  ],
+  "homepage": "https://casualoffice.github.io/opencalc/docs.html",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CasualOffice/opencalc.git",
+    "directory": "sdk/packages/sheet"
+  },
+  "bugs": {
+    "url": "https://github.com/CasualOffice/opencalc/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "CasualOffice",
+  "exports": {
+    ".": "./dist/embed.js",
+    "./dist/*": "./dist/*"
+  },
+  "main": "./dist/embed.js",
+  "module": "./dist/embed.js",
+  "bin": {
+    "opencalc-assets": "./bin/opencalc-assets.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/embed.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

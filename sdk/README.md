@@ -1,4 +1,31 @@
-# `sdk/` — integration examples
+# `sdk/` — the browser SDK
+
+The published packages and the examples that prove they work.
+
+## Packages
+
+Assembled by [`build-packages.mjs`](build-packages.mjs) and published by
+[`release-sdk.yml`](../.github/workflows/release-sdk.yml) on an `sdk-v*` tag.
+
+| Package | Contains |
+| --- | --- |
+| [`packages/sheet`](packages/sheet) | `@opencalc/sheet` — the editor as `<opencalc-sheet>`, plus the engine, the fonts and the `opencalc-assets` CLI |
+| [`packages/react`](packages/react) | `@opencalc/react` — the React wrapper, no build step |
+| [`packages/engine`](packages/engine) | `@opencalc/engine` — the wasm bindings alone, no DOM |
+
+Each package's `dist/` is build output and is not tracked. To produce it:
+
+```sh
+wasm-pack build crates/casual-calc-wasm --release --target web --out-dir pkg
+node sdk/build-packages.mjs
+```
+
+The editor itself lives in [`webapp/`](../webapp) as loose files served
+straight off disk — a build step between typing and seeing is a tax paid on
+every iteration. `build-packages.mjs` is the single place that knows the layout
+the element expects at runtime, which is everything flat beside `embed.js`.
+
+## Examples
 
 Runnable examples of embedding OpenCalc, one directory each. They are small
 enough to read in a sitting and complete enough to copy, and they double as

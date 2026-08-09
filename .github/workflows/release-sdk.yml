@@ -1,0 +1,231 @@
+name: release-sdk
+
+# Publishes the browser SDK to npm: @opencalc/sheet, @opencalc/engine and
+# @opencalc/react.
+#
+# Triggered by a **component-scoped tag**, not a bare `v0.0.0`. This repository
+# will release more than one thing — the desktop shell and a collaboration
+# server are both coming — and once two release workflows watch the same tag
+# namespace, tagging either one fires both. Scoping the tag is the only version
+# of this that keeps working:
+#
+#   sdk-v0.0.0        this workflow — the npm packages
+#   desktop-v0.0.0    reserved — the Tauri app
+#   server-v0.0.0     reserved — the collaboration server
+#   engine-v0.0.0     reserved — the Rust crates on crates.io
+#
+# `sdk_v*` is accepted alongside `sdk-v*` so a mistyped separator is a release
+# rather than a silent no-op, but the hyphen is canonical.
+#
+#   git tag sdk-v0.0.0 && git push origin sdk-v0.0.0
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+      - "sdk_v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-sdk
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # PKG_USERNAME / PKG_PASS live here.
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install the wasm toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+
+      # The engine is the product. Build it before anything decides the release
+      # is going ahead, so a compile error costs a minute rather than a
+      # half-published set of packages.
+      - name: Build the engine to WebAssembly
+        run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir pkg
+
+      - name: Assemble the packages
+        run: node sdk/build-packages.mjs
+
+      # A tag that disagrees with package.json publishes a version nobody can
+      # find from the repository. Checked before publishing, not after.
+      - name: Check the tag against the packaged version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#sdk-v}"
+          tag="${tag#sdk_v}"
+          packaged=$(node -p "require('./sdk/packages/sheet/package.json').version")
+          if [ "$tag" != "$packaged" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${tag}, but the packages are ${packaged}."
+            echo "::error::Bump the three package.json files, or retag."
+            exit 1
+          fi
+          echo "releasing ${packaged}"
+
+      - name: Pack, and show exactly what would be published
+        run: |
+          mkdir -p dist-tarballs
+          for p in sheet engine react; do
+            ( cd "sdk/packages/$p" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist-tarballs" )
+          done
+          ls -la dist-tarballs
+
+      # npm needs a token. The account credentials are exchanged for one
+      # through the registry's login endpoint — the same thing `npm login
+      # --auth-type=legacy` does, which cannot be scripted because it prompts.
+      #
+      # If NPM_TOKEN is set it is used instead and this is skipped. That is the
+      # better path: a granular automation token is scoped, revocable, and is
+      # the *only* thing that works once two-factor authentication is required
+      # for publishing.
+      - name: Authenticate to npm
+        if: github.event_name == 'push' || inputs.dry_run == false
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG_USERNAME: ${{ secrets.PKG_USERNAME }}
+          PKG_PASS: ${{ secrets.PKG_PASS }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "using NPM_TOKEN"
+            token="$NPM_TOKEN"
+          else
+            if [ -z "${PKG_USERNAME:-}" ] || [ -z "${PKG_PASS:-}" ]; then
+              echo "::error::No NPM_TOKEN, and PKG_USERNAME/PKG_PASS are not set on the 'release' environment."
+              exit 1
+            fi
+            echo "exchanging PKG_USERNAME/PKG_PASS for a registry token"
+            body=$(jq -nc --arg n "$PKG_USERNAME" --arg p "$PKG_PASS" \
+              '{name: $n, password: $p}')
+            response=$(curl -sS -w '\n%{http_code}' -X PUT \
+              -H 'Content-Type: application/json' \
+              -d "$body" \
+              "https://registry.npmjs.org/-/user/org.couchdb.user:${PKG_USERNAME}")
+            status=$(printf '%s' "$response" | tail -n1)
+            payload=$(printf '%s' "$response" | sed '$d')
+            if [ "$status" != "201" ] && [ "$status" != "200" ]; then
+              echo "::error::npm login failed (HTTP ${status})."
+              echo "::error::If this account has two-factor authentication on publishing, a password cannot be used here."
+              echo "::error::Create a granular access token on npmjs.com and add it as the NPM_TOKEN secret."
+              printf '%s\n' "$payload" | head -c 400
+              exit 1
+            fi
+            token=$(printf '%s' "$payload" | jq -r '.token // empty')
+            if [ -z "$token" ]; then
+              echo "::error::npm login returned no token."
+              exit 1
+            fi
+          fi
+          echo "::add-mask::$token"
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$token" >> "$HOME/.npmrc"
+          echo "authenticated as $(npm whoami)"
+
+      # Order matters: @opencalc/react pins an exact @opencalc/sheet, so a
+      # consumer installing react the moment it appears needs sheet to already
+      # be resolvable.
+      - name: Publish
+        if: github.event_name == 'push' || inputs.dry_run == false
+        run: |
+          set -euo pipefail
+          for p in sheet engine react; do
+            name=$(node -p "require('./sdk/packages/$p/package.json').name")
+            version=$(node -p "require('./sdk/packages/$p/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "::notice::$name@$version is already published — skipping"
+              continue
+            fi
+            echo "publishing $name@$version"
+            ( cd "sdk/packages/$p" && npm publish --access public )
+          done
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "### Dry run — nothing was published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la dist-tarballs >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./sdk/packages/sheet/package.json').version")
+          cat > notes.md <<EOF
+          ## OpenCalc browser SDK ${version}
+
+          An embeddable spreadsheet that reads and writes real \`.xlsx\` —
+          347 worksheet functions, pivot tables and charts — running entirely in
+          the browser. One custom element, isolated in a shadow root.
+
+          \`\`\`sh
+          npm install @opencalc/sheet
+          \`\`\`
+
+          \`\`\`js
+          import "@opencalc/sheet";                       // <opencalc-sheet style="height:600px">
+
+          const sheet = document.querySelector("opencalc-sheet");
+          await sheet.ready;
+          await sheet.open(bytes, "budget.xlsx");
+          const saved = await sheet.save();
+          \`\`\`
+
+          ### Packages
+
+          | Package | For |
+          | --- | --- |
+          | [\`@opencalc/sheet\`](https://www.npmjs.com/package/@opencalc/sheet) | the editor as a custom element — this is the one most people want |
+          | [\`@opencalc/react\`](https://www.npmjs.com/package/@opencalc/react) | React props and event callbacks over it |
+          | [\`@opencalc/engine\`](https://www.npmjs.com/package/@opencalc/engine) | the engine alone, no DOM and no CSS, for headless work |
+
+          ### Links
+
+          - [Integration guide](https://casualoffice.github.io/opencalc/docs.html) — installation, theming, chrome and commands, read-only, events, CSP, troubleshooting
+          - [Live demo](https://casualoffice.github.io/opencalc/embed.html)
+          - [Runnable examples](https://github.com/CasualOffice/opencalc/tree/main/sdk/examples) — vanilla, React, Next.js, read-only viewer
+          - [Design rationale](https://github.com/CasualOffice/opencalc/blob/main/docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md)
+          - [Changelog](https://github.com/CasualOffice/opencalc/blob/main/CHANGELOG.md)
+
+          ### Serving the engine
+
+          The WebAssembly binary and the bundled fonts are served **from your own
+          origin**, never from a CDN we run — a Web Worker cannot be constructed
+          from a cross-origin URL, and that would foreclose ever moving the engine
+          off the main thread. Vite, webpack, Rollup and Parcel handle this on
+          their own; Next.js needs \`opencalc-assets ./public/opencalc\` in
+          \`postinstall\`.
+
+          ### Alpha
+
+          \`0.0.x\` is a preview. The API works and is documented, but it is not
+          stable — a rename is a minor version until 1.0. Pin what you test
+          against. There is no collaborative editing in this SDK; it is a
+          single-user view-and-edit surface.
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --title "OpenCalc SDK ${version}" \
+            --notes-file notes.md \
+            --prerelease \
+            dist-tarballs/*.tgz

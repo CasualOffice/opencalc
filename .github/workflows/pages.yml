@@ -26,14 +26,32 @@ jobs:
           cargo install wasm-pack --locked
       - name: Build the engine to WebAssembly
         run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir pkg
+      # Copy by listing the directory, not by naming files. The hand-written
+      # list this replaced had drifted: docs.html, embed.html, embed.js and the
+      # whole fonts/ directory were missing, so the SDK guide 404'd on the
+      # deployed site and every cell fell back to a system font — neither of
+      # which shows up locally, where the same files are served straight off
+      # disk.
       - name: Assemble the site
         run: |
           mkdir -p site/pkg
-          cp webapp/index.html webapp/editor.html webapp/app.js webapp/editor.js site/
-          cp webapp/style.css webapp/editor.css site/
+          cp webapp/*.html webapp/*.js webapp/*.css site/
+          cp -r webapp/fonts site/fonts
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm.js site/pkg/
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm_bg.wasm site/pkg/
           cp fixtures/generated/minimal.xlsx site/sample.xlsx
+
+      # The pages that must exist, asserted rather than assumed — a silent
+      # 404 on the deployed site is exactly the failure this job just had.
+      - name: Check the site is complete
+        run: |
+          set -euo pipefail
+          for f in index.html editor.html docs.html embed.html \
+                   editor.js embed.js style.css editor.css \
+                   pkg/casual_calc_wasm_bg.wasm fonts/Carlito-Regular.ttf; do
+            [ -s "site/$f" ] || { echo "::error::site/$f is missing or empty"; exit 1; }
+          done
+          echo "site: $(find site -type f | wc -l) files"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

@@ -1,0 +1,51 @@
+{
+  "name": "@opencalc/react",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "React bindings for @opencalc/sheet — an embeddable spreadsheet that reads and writes real .xlsx, with props for configuration and callbacks for events.",
+  "keywords": [
+    "react",
+    "spreadsheet",
+    "xlsx",
+    "excel",
+    "grid",
+    "data-grid",
+    "formula",
+    "pivot-table",
+    "charts",
+    "webassembly",
+    "opencalc"
+  ],
+  "homepage": "https://casualoffice.github.io/opencalc/docs.html#react",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CasualOffice/opencalc.git",
+    "directory": "sdk/packages/react"
+  },
+  "bugs": {
+    "url": "https://github.com/CasualOffice/opencalc/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "CasualOffice",
+  "exports": {
+    ".": "./index.js"
+  },
+  "main": "./index.js",
+  "module": "./index.js",
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "dependencies": {
+    "@opencalc/sheet": "0.0.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

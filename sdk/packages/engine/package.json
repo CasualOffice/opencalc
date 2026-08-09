@@ -1,0 +1,56 @@
+{
+  "name": "@opencalc/engine",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The OpenCalc spreadsheet engine as WebAssembly — read, recalculate and write .xlsx with no DOM and no CSS. Deterministic, and safe with untrusted files.",
+  "keywords": [
+    "spreadsheet",
+    "xlsx",
+    "excel",
+    "formula",
+    "recalculation",
+    "pivot-table",
+    "webassembly",
+    "wasm",
+    "rust",
+    "headless",
+    "csv",
+    "ooxml",
+    "opencalc"
+  ],
+  "homepage": "https://casualoffice.github.io/opencalc/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CasualOffice/opencalc.git",
+    "directory": "sdk/packages/engine"
+  },
+  "bugs": {
+    "url": "https://github.com/CasualOffice/opencalc/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "CasualOffice",
+  "exports": {
+    ".": {
+      "types": "./casual_calc_wasm.d.ts",
+      "default": "./casual_calc_wasm.js"
+    },
+    "./casual_calc_wasm_bg.wasm": "./casual_calc_wasm_bg.wasm"
+  },
+  "main": "./casual_calc_wasm.js",
+  "module": "./casual_calc_wasm.js",
+  "types": "./casual_calc_wasm.d.ts",
+  "files": [
+    "casual_calc_wasm.js",
+    "casual_calc_wasm.d.ts",
+    "casual_calc_wasm_bg.wasm",
+    "casual_calc_wasm_bg.wasm.d.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

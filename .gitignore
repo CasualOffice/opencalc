@@ -20,4 +20,13 @@ Cargo.lock.orig
 /webapp/sample.xlsx
 /site/
 crates/*/pkg/
+
+# npm package build output — assembled by sdk/build-packages.mjs from webapp/
+# and the wasm build. The package.json, README and bin/ are tracked; what they
+# ship is not.
+/sdk/packages/*/dist/
+/sdk/packages/engine/casual_calc_wasm*
+/sdk/packages/*/*.tgz
+/dist-tarballs/
+node_modules/
 .claude/
