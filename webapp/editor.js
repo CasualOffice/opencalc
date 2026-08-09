@@ -2,9 +2,16 @@
 // layout + display text, and recalculates; this file draws the grid and text on
 // a canvas and routes edits back to the engine.
 // The glue + wasm binary are loaded in main() with a build tag on the URL so a
-// rebuilt engine is never shadowed by a stale browser cache. Bump BUILD (or let
-// the dev server send no-store) to force a fresh fetch.
-const BUILD = "32";
+// rebuilt engine is never shadowed by a stale browser cache.
+//
+// The tag is this file's own cache-buster, which the dev server stamps from the
+// file's mtime. It was a hand-pinned constant, which meant a rebuilt engine
+// kept the same module URL and Chrome went on serving the previous glue from
+// its module map — `no-store` does not evict an ES module that is already
+// resolved. The same mistake cost an afternoon of testing a fix that had never
+// reached the browser; deriving the tag rather than remembering to bump it is
+// what stops it recurring.
+const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
 let init, wasm;
 
 // Header strip sizes. Zero when the sheet hides its headers (OOXML's
@@ -4430,6 +4437,438 @@ function refreshTablePanel() {
   buildTablePanel(body);
 }
 
+// --- Pivot panel -----------------------------------------------------------
+//
+// Excel's PivotTable Fields pane, in one column: a field list you drag from,
+// four areas you drag into, and the options underneath.
+//
+// The panel holds no state of its own. Every change rebuilds the whole
+// definition from the DOM, sends it as one `session_set_pivot`, and redraws
+// from what came back — so the panel cannot drift from the workbook, and each
+// change is one undo step covering both the layout and the figures it produced.
+//
+// Which pivot is being edited is remembered rather than looked up from the
+// cursor, because a pivot with nothing on its axes has written nothing yet and
+// so covers no cell to find it by.
+let panelPivot = null;
+
+const PIVOT_AREAS = [
+  ["filters", "Filters"],
+  ["cols", "Columns"],
+  ["rows", "Rows"],
+  ["values", "Values"],
+];
+
+const PIVOT_AGGREGATES = [
+  ["sum", "Sum"], ["count", "Count"], ["countNums", "Count numbers"],
+  ["average", "Average"], ["max", "Max"], ["min", "Min"],
+  ["product", "Product"], ["stdDev", "StdDev"], ["stdDevp", "StdDevp"],
+  ["var", "Var"], ["varp", "Varp"],
+];
+
+// Sort cycles rather than opening a menu: three states, one button, and the
+// glyph says which one it is in.
+const PIVOT_SORTS = [
+  ["ascending", "↑", "A→Z / smallest first"],
+  ["descending", "↓", "Z→A / largest first"],
+  ["dataSource", "⇅", "source order"],
+];
+
+// The name of the pivot whose report covers a cell, or "" — the guard the
+// editor checks before letting anything be typed there.
+function pivotBlocks(row, col) {
+  try { return wasm.session_pivot_blocks(state.sheet, row, col); } catch { return ""; }
+}
+
+function pivotAt(row, col) {
+  try {
+    return JSON.parse(wasm.session_pivot_at(state.sheet, row, col));
+  } catch { return null; }
+}
+
+function currentPivot() {
+  if (!panelPivot) return null;
+  try {
+    const all = JSON.parse(wasm.session_pivots(panelPivot.sheet));
+    return all[panelPivot.index] || null;
+  } catch { return null; }
+}
+
+// Send the whole definition. `p` is the object `session_pivots` handed out,
+// mutated in place by whichever control was touched.
+function applyPivot(p) {
+  try {
+    wasm.session_set_pivot(panelPivot.sheet, panelPivot.index, JSON.stringify(p));
+    status.textContent = p.values.length ? "pivot refreshed" : "add a field to Values";
+  } catch (e) {
+    statusError(errText(e));
+  }
+  invalidateGrowth();
+  draw();
+  refreshPivotPanel();
+}
+
+function refreshPivotPanel() {
+  if (activePanel !== "pivot") return;
+  const body = document.getElementById("side-panel-body");
+  body.textContent = "";
+  buildPivotPanel(body);
+}
+
+// Where a field currently sits, so the field list can grey out what is in use.
+function pivotPlacement(p, field) {
+  for (const [key] of PIVOT_AREAS) {
+    if (p[key].some((f) => f.field === field)) return key;
+  }
+  return null;
+}
+
+function buildPivotPanel(body) {
+  const p = currentPivot();
+  if (!p) {
+    body.appendChild(el("div", "panel-note",
+      "Select a cell inside a pivot table, or Insert ▸ PivotTable."));
+    return;
+  }
+
+  panelLabel(body, "Name");
+  const name = el("input", "panel-field");
+  name.type = "text";
+  name.value = p.name;
+  name.addEventListener("change", () => {
+    const want = name.value.trim();
+    if (!want || want === p.name) { name.value = p.name; return; }
+    p.name = want;
+    applyPivot(p);
+  });
+  name.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.stopPropagation(); name.blur(); }
+    else if (e.key === "Escape") { e.stopPropagation(); name.value = p.name; name.blur(); }
+  });
+  body.appendChild(name);
+
+  const src = el("div", "panel-range",
+    `${sheetNameAt(p.sourceSheet) || "?"}!${A1(p.source[0], p.source[1])}:${A1(p.source[2], p.source[3])}`);
+  body.appendChild(src);
+  if (p.imported) {
+    body.appendChild(el("div", "panel-note",
+      "From the file. Refreshing rewrites it in OpenCalc's layout and replaces "
+      + "the definition Excel saved."));
+  }
+
+  // --- the field list, and the four areas ---------------------------------
+  panelLabel(body, "Fields");
+  const list = el("div", "pivot-fields");
+  p.fields.forEach((label, index) => {
+    const chip = el("div", "pivot-chip pivot-chip-src", label || `Column${index + 1}`);
+    chip.draggable = true;
+    const where = pivotPlacement(p, index);
+    if (where) chip.classList.add("in-use");
+    chip.title = where ? `in ${where}` : "drag into an area below";
+    chip.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/plain", JSON.stringify({ from: "fields", field: index }));
+      e.dataTransfer.effectAllowed = "copy";
+    });
+    // Double-click is the keyboard-free shortcut Excel has too: it drops the
+    // field where its type suggests — numbers summarize, text groups.
+    chip.addEventListener("dblclick", () => {
+      if (where) return;
+      const target = pivotFieldIsNumeric(p, index) ? "values" : "rows";
+      pivotAdd(p, target, index, p[target].length);
+    });
+    list.appendChild(chip);
+  });
+  body.appendChild(list);
+
+  for (const [key, title] of PIVOT_AREAS) {
+    panelLabel(body, title);
+    const zone = el("div", "pivot-zone");
+    zone.dataset.area = key;
+    if (!p[key].length) zone.appendChild(el("div", "pivot-zone-empty", "drag a field here"));
+    p[key].forEach((f, i) => zone.appendChild(pivotChip(p, key, f, i)));
+    zone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      zone.classList.add("over");
+    });
+    zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zone.classList.remove("over");
+      let payload;
+      try { payload = JSON.parse(e.dataTransfer.getData("text/plain")); } catch { return; }
+      pivotDrop(p, key, payload, pivotDropIndex(zone, e.clientY));
+    });
+    body.appendChild(zone);
+  }
+
+  // --- options -------------------------------------------------------------
+  panelLabel(body, "Totals");
+  for (const [key, label] of [["rowGrandTotals", "Grand total row"],
+                              ["colGrandTotals", "Grand total column"]]) {
+    const row = el("label", "panel-check");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !!p[key];
+    box.addEventListener("change", () => { p[key] = box.checked; applyPivot(p); });
+    row.appendChild(box);
+    row.appendChild(el("span", null, label));
+    body.appendChild(row);
+  }
+
+  panelLabel(body, "Style");
+  const style = el("select", "panel-select");
+  for (const [label, value] of TABLE_STYLES) {
+    const o = el("option", null, label);
+    o.value = value;
+    style.appendChild(o);
+  }
+  style.value = p.style || "TableStyleMedium2";
+  style.addEventListener("change", () => { p.style = style.value; applyPivot(p); });
+  body.appendChild(style);
+
+  panelActions(body, "Refresh", () => {
+    try {
+      wasm.session_refresh_pivot(panelPivot.sheet, panelPivot.index);
+      status.textContent = "pivot refreshed";
+    } catch (e) { statusError(errText(e)); }
+    invalidateGrowth();
+    draw();
+    refreshPivotPanel();
+  }, "Delete", async () => {
+    if (!await confirmModal("Delete pivot table",
+      `Delete “${p.name}” and the report it wrote?`, "Delete")) return;
+    tryEdit(() => wasm.session_delete_pivot(panelPivot.sheet, panelPivot.index));
+    panelPivot = null;
+    refreshPivotPanel();
+  });
+}
+
+// Whether a field's data reads as numbers, which is what decides whether a
+// double-click summarizes it or groups by it — Excel's own rule.
+function pivotFieldIsNumeric(p, field) {
+  let items = [];
+  try {
+    items = JSON.parse(wasm.session_pivot_items(panelPivot.sheet, panelPivot.index, field));
+  } catch { return false; }
+  if (!items.length) return false;
+  return items.every((v) => v === "(blank)" || (v.trim() !== "" && !Number.isNaN(Number(v))));
+}
+
+// One placed field: its name, the controls its area gives it, and a remove
+// button.
+function pivotChip(p, area, f, index) {
+  const chip = el("div", "pivot-chip pivot-chip-set");
+  chip.draggable = true;
+  chip.dataset.index = String(index);
+  chip.addEventListener("dragstart", (e) => {
+    e.dataTransfer.setData("text/plain", JSON.stringify({ from: area, field: f.field, index }));
+    e.dataTransfer.effectAllowed = "move";
+  });
+  chip.appendChild(el("span", "pivot-chip-name", p.fields[f.field] || `Column${f.field + 1}`));
+
+  if (area === "rows" || area === "cols") {
+    const cur = PIVOT_SORTS.findIndex(([v]) => v === (f.sort || "ascending"));
+    const [, glyph, hint] = PIVOT_SORTS[cur < 0 ? 0 : cur];
+    const sort = el("button", "pivot-mini", glyph);
+    sort.title = `Sort: ${hint}`;
+    sort.addEventListener("click", () => {
+      f.sort = PIVOT_SORTS[((cur < 0 ? 0 : cur) + 1) % PIVOT_SORTS.length][0];
+      applyPivot(p);
+    });
+    chip.appendChild(sort);
+    // The innermost field's subtotal would restate the line above it, so it is
+    // never emitted — and a switch that does nothing is worse than no switch.
+    if (index < p[area].length - 1) {
+      const sub = el("button", "pivot-mini" + (f.subtotal ? " on" : ""), "Σ");
+      sub.title = f.subtotal ? "Subtotals on" : "Subtotals off";
+      sub.addEventListener("click", () => { f.subtotal = !f.subtotal; applyPivot(p); });
+      chip.appendChild(sub);
+    }
+  } else if (area === "values") {
+    const agg = el("select", "pivot-agg");
+    for (const [value, label] of PIVOT_AGGREGATES) {
+      const o = el("option", null, label);
+      o.value = value;
+      agg.appendChild(o);
+    }
+    agg.value = f.aggregate || "sum";
+    agg.addEventListener("change", () => { f.aggregate = agg.value; applyPivot(p); });
+    chip.appendChild(agg);
+  } else {
+    const shown = !f.selected.length ? "(All)"
+      : f.selected.length === 1 ? f.selected[0]
+        : `(${f.selected.length} items)`;
+    const pick = el("button", "pivot-mini pivot-mini-wide", shown + " ▾");
+    pick.title = "Choose which values to include";
+    pick.addEventListener("click", () => pivotItemPicker(p, f, chip));
+    chip.appendChild(pick);
+  }
+
+  const remove = el("button", "pivot-mini pivot-remove", "✕");
+  remove.title = "Remove from " + area;
+  remove.addEventListener("click", () => { p[area].splice(index, 1); applyPivot(p); });
+  chip.appendChild(remove);
+  return chip;
+}
+
+// The page filter's checklist, inline under its chip rather than in a popup:
+// the panel is already a narrow column, and a floating list over it would cover
+// the thing being filtered.
+function pivotItemPicker(p, f, chip) {
+  const open = chip.parentElement.querySelector(".pivot-items");
+  if (open) { open.remove(); return; }
+  let items = [];
+  try {
+    items = JSON.parse(wasm.session_pivot_items(panelPivot.sheet, panelPivot.index, f.field));
+  } catch { /* an unreadable source lists nothing */ }
+  const box = el("div", "pivot-items");
+  const chosen = new Set(f.selected);
+
+  const all = el("label", "panel-check");
+  const allBox = el("input");
+  allBox.type = "checkbox";
+  // Empty means every value, which is the `(All)` state — not "none selected".
+  allBox.checked = chosen.size === 0;
+  allBox.addEventListener("change", () => { f.selected = []; applyPivot(p); });
+  all.appendChild(allBox);
+  all.appendChild(el("span", null, "(All)"));
+  box.appendChild(all);
+
+  for (const item of items) {
+    const row = el("label", "panel-check");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = chosen.size === 0 || chosen.has(item);
+    cb.addEventListener("change", () => {
+      const next = chosen.size === 0 ? new Set(items) : new Set(chosen);
+      if (cb.checked) next.add(item); else next.delete(item);
+      // Everything ticked is the same as nothing chosen, and storing it as
+      // `(All)` keeps the pivot following values added to the source later.
+      f.selected = next.size === items.length ? [] : [...next];
+      applyPivot(p);
+    });
+    row.appendChild(cb);
+    row.appendChild(el("span", null, item));
+    box.appendChild(row);
+  }
+  chip.after(box);
+}
+
+// Which slot a drop lands in: above the first chip whose midpoint is below the
+// pointer. Order is the nesting order, so this is not cosmetic — dropping
+// Region above Product is a different report from the other way round.
+function pivotDropIndex(zone, clientY) {
+  const chips = [...zone.querySelectorAll(".pivot-chip-set")];
+  for (let i = 0; i < chips.length; i++) {
+    const box = chips[i].getBoundingClientRect();
+    if (clientY < box.top + box.height / 2) return i;
+  }
+  return chips.length;
+}
+
+function pivotDrop(p, area, payload, at) {
+  if (payload.from === "fields") {
+    if (pivotPlacement(p, payload.field)) {
+      status.textContent = "that field is already in use — drag it out first";
+      return;
+    }
+    pivotAdd(p, area, payload.field, at);
+    return;
+  }
+  // Moving between (or within) areas: take it out first, then put it back, so
+  // a reorder inside one area lands where the pointer says rather than one slot
+  // late.
+  const [moved] = p[payload.from].splice(payload.index, 1);
+  if (!moved) return;
+  const index = payload.from === area && payload.index < at ? at - 1 : at;
+  pivotInsert(p, area, moved, index);
+  applyPivot(p);
+}
+
+function pivotAdd(p, area, field, at) {
+  pivotInsert(p, area, { field }, at);
+  applyPivot(p);
+}
+
+// A field carries what its new area needs and drops what it does not: an
+// aggregate is meaningless on the row axis, and a sort order is meaningless on
+// a measure.
+function pivotInsert(p, area, f, at) {
+  const entry = area === "values"
+    ? { field: f.field, aggregate: f.aggregate || "sum", name: "", numberFormat: f.numberFormat || null }
+    : area === "filters"
+      ? { field: f.field, selected: f.selected || [] }
+      : { field: f.field, sort: f.sort || "ascending", subtotal: f.subtotal !== false };
+  p[area].splice(Math.max(0, Math.min(at, p[area].length)), 0, entry);
+}
+
+// Insert ▸ PivotTable: build one over the block under the cursor, on a new
+// sheet.
+//
+// A new sheet is Excel's own default and the only destination that cannot
+// collide with something already on the grid. Nothing else is asked: every
+// choice a dialog would make is in the panel, live, and one undo step away.
+async function pivotDialog() {
+  const here = pivotAt(state.sel.row, state.sel.col);
+  if (here) { panelPivot = { sheet: state.sheet, index: here.index }; openPanel("pivot"); return; }
+
+  const r = effectiveRange();
+  let bounds = r;
+  if (r.r0 === r.r1 && r.c0 === r.c1) {
+    try {
+      const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
+      if (blk) bounds = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
+    } catch { /* fall through to the selection */ }
+  }
+  if (bounds.r1 <= bounds.r0) {
+    statusError("select a table with a header row and at least one row of data");
+    return;
+  }
+  const source = state.sheet;
+  let dest;
+  try {
+    dest = wasm.session_add_sheet();
+    const index = wasm.session_create_pivot(
+      source, bounds.r0, bounds.c0, bounds.r1, bounds.c1, dest, 0, 0, "");
+    panelPivot = { sheet: dest, index };
+  } catch (e) { statusError(errText(e)); return; }
+  renderTabs();
+  switchSheet(dest);
+  invalidateGrowth();
+  draw();
+  openPanel("pivot");
+  status.textContent = "drag a field into Values to see the report";
+}
+
+// Alt+F5 — recompute the pivot under the cursor from its source.
+function refreshPivotHere() {
+  const here = pivotAt(state.sel.row, state.sel.col);
+  if (!here) { status.textContent = "no pivot table here"; return; }
+  try {
+    wasm.session_refresh_pivot(state.sheet, here.index);
+    status.textContent = `refreshed ${here.name}`;
+  } catch (e) { statusError(errText(e)); }
+  invalidateGrowth();
+  draw();
+  refreshPivotPanel();
+}
+
+// Ctrl+Alt+F5 — every pivot in the workbook.
+//
+// One refusal does not fail the command: the others are still worth
+// recomputing, and the ones that could not are named rather than counted.
+function refreshAllPivots() {
+  let problems = "";
+  try { problems = wasm.session_refresh_all_pivots(); }
+  catch (e) { statusError(errText(e)); return; }
+  invalidateGrowth();
+  draw();
+  refreshPivotPanel();
+  const failed = problems.split("\n").filter(Boolean);
+  if (failed.length) statusError(`could not refresh: ${failed.join(", ")}`);
+  else status.textContent = "pivots refreshed";
+}
+
 // Page setup: everything OOXML records about printing a sheet, all of which was
 // being carried through every save with nothing able to change it.
 //
@@ -4592,6 +5031,7 @@ function openPanel(tool) {
     tool === "dv" ? "Data validation"
       : tool === "cf" ? "Conditional formatting"
       : tool === "table" ? "Table"
+      : tool === "pivot" ? "PivotTable fields"
       : tool === "page" ? "Page setup"
       : "Comments";
   const body = document.getElementById("side-panel-body");
@@ -4599,6 +5039,7 @@ function openPanel(tool) {
   if (tool === "dv") buildDvPanel(body);
   else if (tool === "cf") buildCfPanel(body);
   else if (tool === "table") buildTablePanel(body);
+  else if (tool === "pivot") buildPivotPanel(body);
   else if (tool === "page") buildPagePanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
@@ -4636,6 +5077,16 @@ function refreshPanel() {
     if (key !== shown) {
       document.getElementById("side-panel-body").dataset.table = key;
       refreshTablePanel();
+    }
+  } else if (activePanel === "pivot") {
+    // Clicking into a different pivot's report re-targets the panel. Clicking
+    // outside every report does not: a pivot with nothing on its axes has
+    // written no cells to be found by, and dropping the panel the moment the
+    // cursor moved would make it unusable exactly when it is being set up.
+    const here = pivotAt(state.sel.row, state.sel.col);
+    if (here && (!panelPivot || panelPivot.sheet !== state.sheet || panelPivot.index !== here.index)) {
+      panelPivot = { sheet: state.sheet, index: here.index };
+      refreshPivotPanel();
     }
   } else if (activePanel === "note" && panelNote) {
     const addr = A1(state.sel.row, state.sel.col);
@@ -5804,6 +6255,15 @@ let editMode = "Enter";
 let editHome = null;
 
 function beginEdit(surface, initial, caretAtEnd = false) {
+  // A pivot's report is written by the engine and rewritten on every refresh.
+  // Excel refuses the edit rather than letting a typed value stand until an
+  // unrelated action wipes it, and so does this — a value that survives only
+  // until something else erases it is worse than one never accepted.
+  const owner = pivotBlocks(state.sel.row, state.sel.col);
+  if (owner) {
+    statusError(`this cell is part of the pivot table “${owner}” — change it in the fields panel`);
+    return;
+  }
   editSurface = surface;
   state.editing = true;
   // Where this edit will be written. Reference picking may walk to another
@@ -8332,7 +8792,14 @@ function wireEvents() {
         else startInline(undefined, true);
         e.preventDefault(); break;
       }
-      case "F5": cellRef.focus(); e.preventDefault(); break;
+      // Plain F5 is Go To (the name box). Alt+F5 refreshes the pivot under the
+      // cursor and Ctrl+Alt+F5 refreshes every one, both Excel's bindings.
+      case "F5":
+        if (e.altKey && (e.ctrlKey || e.metaKey)) refreshAllPivots();
+        else if (e.altKey) refreshPivotHere();
+        else cellRef.focus();
+        e.preventDefault();
+        break;
       // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
       case "F9":
         // Reseed on every explicit recalculation, which is what makes RAND
@@ -9080,6 +9547,7 @@ function wireEvents() {
         // The context menu and Ctrl+T both reach this, but neither is somewhere
         // you look for a feature you have not met yet.
         ["Table…", () => tableDialog(), "Ctrl+T"],
+        ["PivotTable…", () => pivotDialog()],
         ["Hyperlink…", () => hyperlinkDialog(), "Ctrl+K"],
       ]],
       ["Format", [
@@ -9160,6 +9628,10 @@ function wireEvents() {
         ["Filter", () => toggleFilter()],
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Data validation…", clickEl("#tb-dv")],
+        "sep",
+        ["PivotTable fields…", () => pivotDialog()],
+        ["Refresh pivot", () => refreshPivotHere(), "Alt+F5"],
+        ["Refresh all pivots", () => refreshAllPivots(), "Ctrl+Alt+F5"],
         "sep",
         ["Hide rows", () => tryEdit(() => { const r = rng(); wasm.session_hide_rows(state.sheet, r.r0, r.r1); })],
         ["Hide columns", () => tryEdit(() => { const r = rng(); wasm.session_hide_cols(state.sheet, r.c0, r.c1); })],

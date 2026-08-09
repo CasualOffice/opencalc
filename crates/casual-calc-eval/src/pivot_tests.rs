@@ -738,3 +738,51 @@ fn a_refused_refresh_leaves_an_imported_pivot_exactly_as_it_arrived() {
     );
     assert_eq!(wb.retained_parts.len(), 3);
 }
+
+#[test]
+fn the_report_widens_its_columns_but_never_narrows_one() {
+    // `Sum of Amount` in a default-width column reads as `Sum of Am`: a header
+    // is clipped only because the cell beside it is occupied, which in a report
+    // is always. Excel widens on every update and so does this.
+    let mut wb = workbook();
+    let mut p = pivot(&wb);
+    p.rows.push(axis(0));
+    p.values.push(sum(3));
+    // One column already far wider than the report needs, by the user's hand.
+    wb.sheets[1].columns.sizes.insert(0, 6000);
+    wb.sheets[1].pivots.push(p);
+    let plan = pivot::plan(&mut wb, 1, 0).expect("plan");
+
+    let widths: std::collections::BTreeMap<u32, i64> = plan.widths.into_iter().collect();
+    assert!(
+        !widths.contains_key(&0),
+        "a column the user widened keeps its width: {widths:?}"
+    );
+    let measure = widths[&1];
+    assert!(
+        measure > casual_calc_layout::DEFAULT_COL_WIDTH,
+        "`Sum of Amount` needs more than the default {} twips, got {measure}",
+        casual_calc_layout::DEFAULT_COL_WIDTH
+    );
+    // 13 characters plus two of room, in OOXML's own character unit:
+    // (15 * 7 + 5) * 15.
+    assert_eq!(measure, 1650);
+}
+
+#[test]
+fn a_runaway_label_does_not_push_the_report_off_the_screen() {
+    let mut wb = workbook();
+    let long = "x".repeat(400);
+    let id = wb.intern_string(&long);
+    wb.sheets[0]
+        .cells
+        .set(CellRef::new(1, 0), Cell::value(CellValue::SharedString(id)));
+    let mut p = pivot(&wb);
+    p.rows.push(axis(0));
+    p.values.push(sum(3));
+    wb.sheets[1].pivots.push(p);
+    let plan = pivot::plan(&mut wb, 1, 0).expect("plan");
+    let widths: std::collections::BTreeMap<u32, i64> = plan.widths.into_iter().collect();
+    // Capped at 40 characters: (40 * 7 + 5) * 15.
+    assert_eq!(widths[&0], 4275);
+}

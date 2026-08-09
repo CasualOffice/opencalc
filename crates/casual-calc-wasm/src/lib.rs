@@ -2491,6 +2491,12 @@ fn apply_pivot(
 
     let mut data = SheetMetadata::capture(&sh);
     data.pivots[index] = committed;
+    // Column widths ride in the same metadata bundle rather than as their own
+    // operations: one Ctrl+Z after a layout change must not give back a column
+    // width and leave the report changed.
+    for (col, width) in plan.widths {
+        data.columns.sizes.insert(col, width);
+    }
     let mut ops: Vec<EditOperation> = vec![EditOperation::SetSheetMetadata {
         sheet,
         data: Box::new(data),

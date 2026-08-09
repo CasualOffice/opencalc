@@ -831,6 +831,50 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 
 .panel-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); margin: 4px 0; }
 
+/* Pivot fields panel: a source list you drag from, four areas you drag into.
+   The areas keep a minimum height whether or not they hold anything, so a
+   drop target exists before there is a chip to aim beside. */
+.pivot-fields { display: flex; flex-wrap: wrap; gap: 5px; }
+.pivot-zone {
+  display: flex; flex-direction: column; gap: 5px;
+  min-height: 34px; padding: 6px; box-sizing: border-box;
+  border: 1px dashed var(--border-2); border-radius: 8px; background: var(--surface);
+}
+.pivot-zone.over { border-color: var(--accent); border-style: solid; background: var(--bg); }
+.pivot-zone-empty { font-size: 12px; color: var(--muted); padding: 2px 3px; }
+.pivot-chip {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12.5px; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border-2); border-radius: 7px;
+  padding: 4px 7px; cursor: grab; user-select: none;
+}
+.pivot-chip:active { cursor: grabbing; }
+.pivot-chip-src.in-use { opacity: .45; }
+.pivot-chip-set { justify-content: space-between; }
+.pivot-chip-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pivot-mini {
+  flex: 0 0 auto; min-width: 22px; height: 22px; padding: 0 5px;
+  font-size: 12px; line-height: 1; cursor: pointer;
+  border: 1px solid var(--border-2); border-radius: 6px;
+  background: var(--surface); color: var(--muted);
+}
+.pivot-mini:hover { color: var(--fg); border-color: var(--accent); }
+.pivot-mini.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pivot-mini-wide { max-width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pivot-remove:hover { color: var(--danger, #c0392b); border-color: currentColor; }
+.pivot-agg {
+  flex: 0 0 auto; max-width: 104px; height: 22px; font-size: 12px;
+  border: 1px solid var(--border-2); border-radius: 6px;
+  background: var(--surface); color: var(--fg);
+}
+/* The page-filter checklist sits inline under its chip rather than floating:
+   the panel is already a narrow column, and a popup over it would cover the
+   thing being filtered. */
+.pivot-items {
+  max-height: 190px; overflow-y: auto; padding: 4px 6px;
+  border: 1px solid var(--border-2); border-radius: 7px; background: var(--bg);
+}
+
 /* Reference tinting: a mirror element renders the formula text with coloured
    reference tokens, exactly behind the editing surface. The surface keeps its
    caret and selection but draws its own glyphs transparent, so what you see is

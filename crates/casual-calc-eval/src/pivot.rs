@@ -897,7 +897,31 @@ pub struct PivotPlan {
     /// Every cell the refresh touches: the new contents, or `None` where the
     /// previous report reached and this one does not.
     pub cells: Vec<(CellRef, Option<Cell>)>,
+    /// Column widths (twips) wide enough for the report, as `(column, width)`.
+    ///
+    /// Excel widens a pivot's columns on every update, and without it
+    /// `Average of Amount` reads as `Average`: a header is only clipped
+    /// because the cell beside it is occupied, which in a report is always.
+    /// Part of the plan rather than a follow-up call so it lands in the same
+    /// undoable step — one `Ctrl+Z` after a layout change should not give back
+    /// a column width.
+    pub widths: Vec<(u32, i64)>,
 }
+
+/// Twips wide enough for `chars` characters at the default font.
+///
+/// The inverse of the writer's `twips_to_col_chars`: OOXML measures a column
+/// in characters, so counting them is the format's own unit rather than an
+/// approximation of pixels. Real glyph metrics would be closer still, but they
+/// live in the host and this is only ever used to make a column *wider* than
+/// the default that would otherwise clip.
+fn width_for_chars(chars: usize) -> i64 {
+    (((chars.min(MAX_AUTOFIT_CHARS) as f64) * 7.0 + 5.0) * 15.0).round() as i64
+}
+
+/// The widest a report column is grown to. A stray long label should not push
+/// the rest of the report off the screen.
+const MAX_AUTOFIT_CHARS: usize = 40;
 
 /// Work out what a refresh would write, interning the strings and styles it
 /// needs but touching no cell.
@@ -1018,9 +1042,45 @@ pub fn plan(
     }
     cells.sort_by_key(|(at, _)| *at);
 
+    // Column widths, from the longest text each report column holds. Only ever
+    // wider than what is there: a column the user widened by hand keeps its
+    // width, and one they narrowed is theirs to have narrowed.
+    let default_width = workbook.sheets[sheet_index]
+        .columns
+        .default
+        .unwrap_or(casual_calc_layout::DEFAULT_COL_WIDTH);
+    let mut longest: BTreeMap<u32, usize> = BTreeMap::new();
+    for cell in &report.cells {
+        let text = match &cell.value {
+            Value::Text(s) => s.chars().count(),
+            Value::Number(n) => match cell.number_format.as_deref() {
+                Some(code) => casual_calc_layout::format_number(*n, code).chars().count(),
+                None => casual_calc_layout::format_general(*n).chars().count(),
+            },
+            _ => 0,
+        };
+        let slot = longest.entry(cell.at.col).or_default();
+        *slot = (*slot).max(text);
+    }
+    let widths = longest
+        .into_iter()
+        // Two characters of room. One is not enough: every header and total in
+        // a report is bold, which is wider than the character unit assumes, and
+        // a caption that ends exactly on the column edge reads as clipped even
+        // when it is not.
+        .map(|(col, chars)| (col, width_for_chars(chars + 2)))
+        .filter(|(col, width)| {
+            *width
+                > workbook.sheets[sheet_index]
+                    .columns
+                    .size(*col, default_width)
+        })
+        .collect();
+
     Ok(PivotPlan {
         range: report.range,
         cells,
+        widths,
     })
 }
 
@@ -1052,6 +1112,12 @@ pub fn refresh(
                 workbook.sheets[sheet_index].cells.clear(*at);
             }
         }
+    }
+    for (col, width) in &plan.widths {
+        workbook.sheets[sheet_index]
+            .columns
+            .sizes
+            .insert(*col, *width);
     }
     // Only now, once the report is actually on the sheet: a refused refresh
     // must leave an imported pivot exactly as it arrived, retained part and
