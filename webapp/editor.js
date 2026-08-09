@@ -1027,6 +1027,36 @@ function draw() {
     ctx.restore();
   };
 
+  // Manual page breaks, as the dashed rules Excel draws. A break that is only
+  // visible once you print is a break you set by accident and never find.
+  if (wasm) {
+    let brk = { rows: [], cols: [] };
+    try { brk = JSON.parse(wasm.session_page_breaks(state.sheet)); } catch {}
+    if (brk.rows.length || brk.cols.length) {
+      ctx.save();
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      for (const r of brk.rows) {
+        const y = rowYAt(r);
+        if (y === undefined) continue;
+        ctx.beginPath();
+        ctx.moveTo(HW, y + 0.5);
+        ctx.lineTo(canvas.clientWidth, y + 0.5);
+        ctx.stroke();
+      }
+      for (const c of brk.cols) {
+        const x = colXAt(c);
+        if (x === undefined) continue;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, HH);
+        ctx.lineTo(x + 0.5, canvas.clientHeight);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   // Tables: header shading and banded rows.
   //
   // This has to run before the cell pass, not after it: the fills are opaque,
@@ -8553,6 +8583,14 @@ function wireEvents() {
         ] },
         "sep",
         ["Page setup…", () => openPanel("page")],
+        // Excel inserts both a row and a column break at the active cell, and
+        // only the one that applies for a whole-row/column selection.
+        ["Page break here", () => {
+          const r = effectiveRange();
+          const rowAt = state.selKind === "cols" ? 0xffffffff : r.r0;
+          const colAt = state.selKind === "rows" ? 0xffffffff : r.c0;
+          tryEdit(() => wasm.session_toggle_page_break(state.sheet, rowAt, colAt));
+        }],
         ["Print…", () => printSheet(), "Ctrl+P"],
       ]],
       ["Edit", [

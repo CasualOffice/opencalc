@@ -2718,6 +2718,72 @@ pub fn session_print_scope(sheet: usize) -> String {
     .unwrap_or_else(|| "{\"area\":\"\",\"titles\":\"\"}".to_owned())
 }
 
+/// A sheet's manual page breaks as JSON `{rows:[…],cols:[…]}` — zero-based
+/// indices of the row/column each break sits *before*.
+///
+/// OOXML stores `<brk id>` one-based, matching the row number a user sees;
+/// everything else here is zero-based, so the conversion happens at this
+/// boundary rather than being repeated by each caller.
+#[wasm_bindgen]
+pub fn session_page_breaks(sheet: usize) -> String {
+    with_session(|s| {
+        let p = &s.workbook().sheets.get(sheet)?.print;
+        let ids = |breaks: &[std::collections::BTreeMap<String, String>]| {
+            let mut out: Vec<u32> = breaks
+                .iter()
+                .filter_map(|b| b.get("id")?.parse::<u32>().ok())
+                .filter_map(|id| id.checked_sub(1))
+                .collect();
+            out.sort_unstable();
+            out.dedup();
+            out
+        };
+        let fmt = |v: Vec<u32>| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        Some(format!(
+            "{{\"rows\":[{}],\"cols\":[{}]}}",
+            fmt(ids(&p.row_breaks)),
+            fmt(ids(&p.col_breaks))
+        ))
+    })
+    .flatten()
+    .unwrap_or_else(|| "{\"rows\":[],\"cols\":[]}".to_owned())
+}
+
+/// Add or remove a manual page break before `row` and/or before `col`.
+///
+/// Excel's "Insert Page Break" on a cell inserts both at once; on a whole-row
+/// or whole-column selection it inserts only the one that makes sense. Passing
+/// a `u32::MAX` for either axis skips it, which is how the host says "rows
+/// only". A break already there is removed, so the command is a toggle.
+#[wasm_bindgen]
+pub fn session_toggle_page_break(sheet: usize, row: u32, col: u32) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        let toggle = |breaks: &mut Vec<std::collections::BTreeMap<String, String>>, at: u32| {
+            if at == u32::MAX || at == 0 {
+                // A break before the first line is what the page edge already
+                // is; Excel refuses it rather than writing one that does
+                // nothing.
+                return;
+            }
+            let id = (at + 1).to_string();
+            if let Some(i) = breaks.iter().position(|b| b.get("id") == Some(&id)) {
+                breaks.remove(i);
+                return;
+            }
+            let mut brk: std::collections::BTreeMap<String, String> = Default::default();
+            brk.insert("id".to_owned(), id);
+            // `man="1"` is what distinguishes a break the user asked for from
+            // one Excel computed; without it the break is discarded on the next
+            // repagination.
+            brk.insert("man".to_owned(), "1".to_owned());
+            breaks.push(brk);
+            breaks.sort_by_key(|b| b.get("id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0));
+        };
+        toggle(&mut data.print.row_breaks, row);
+        toggle(&mut data.print.col_breaks, col);
+    })
+}
+
 /// A printable HTML document for a sheet, honouring its page setup.
 ///
 /// A page-setup panel that only edits the file is half a feature: the settings
@@ -2817,6 +2883,13 @@ pub fn session_print_html(sheet: usize) -> String {
             inches("bottom", 0.75),
             inches("left", 0.7),
         ));
+        // A manual row break starts a new printed page at that row.
+        let row_breaks: std::collections::BTreeSet<u32> = p
+            .row_breaks
+            .iter()
+            .filter_map(|b| b.get("id")?.parse::<u32>().ok())
+            .filter_map(|id| id.checked_sub(1))
+            .collect();
         out.push_str(
             "body{margin:0;font:11pt Calibri,Arial,sans-serif;color:#000;background:#fff}\
              table{border-collapse:collapse;table-layout:fixed}\
@@ -2895,7 +2968,11 @@ pub fn session_print_html(sheet: usize) -> String {
             if title_rows.is_some_and(|(a, b)| r >= a && r <= b) {
                 continue;
             }
-            out.push_str("<tr>");
+            if row_breaks.contains(&r) {
+                out.push_str("<tr style=\"break-before:page\">");
+            } else {
+                out.push_str("<tr>");
+            }
             if headings {
                 out.push_str(&format!("<th>{}</th>", r + 1));
             }
@@ -7969,5 +8046,55 @@ mod sort_state_tests {
             state.conditions[0].get("descending").map(String::as_str),
             Some("1")
         );
+    }
+}
+
+#[cfg(test)]
+mod page_break_tests {
+    use super::{
+        session_new, session_page_breaks, session_print_html, session_set_cell,
+        session_toggle_page_break,
+    };
+
+    /// `<brk id>` is one-based, matching the row number a user sees, while
+    /// everything else here is zero-based. Getting that boundary wrong puts
+    /// every break one row out.
+    #[test]
+    fn a_break_toggles_and_reports_zero_based() {
+        session_new();
+        session_toggle_page_break(0, 4, 2).unwrap();
+        assert_eq!(session_page_breaks(0), r#"{"rows":[4],"cols":[2]}"#);
+
+        // The same command again removes it.
+        session_toggle_page_break(0, 4, 2).unwrap();
+        assert_eq!(session_page_breaks(0), r#"{"rows":[],"cols":[]}"#);
+
+        // A break before the first line is the page edge; Excel does not write
+        // one, and nor should this.
+        session_toggle_page_break(0, 0, 0).unwrap();
+        assert_eq!(session_page_breaks(0), r#"{"rows":[],"cols":[]}"#);
+
+        // u32::MAX means "not this axis", so a whole-row selection sets no
+        // column break.
+        session_toggle_page_break(0, 3, u32::MAX).unwrap();
+        assert_eq!(session_page_breaks(0), r#"{"rows":[3],"cols":[]}"#);
+    }
+
+    #[test]
+    fn a_row_break_starts_a_new_printed_page() {
+        session_new();
+        for r in 0..4u32 {
+            session_set_cell(0, r, 0, &format!("r{r}")).unwrap();
+        }
+        session_toggle_page_break(0, 2, u32::MAX).unwrap();
+        let html = session_print_html(0);
+        assert_eq!(
+            html.matches("break-before:page").count(),
+            1,
+            "exactly the one break: {html}"
+        );
+        // ...and it is on the row the break sits before, not the one after.
+        let at = html.find("break-before:page").expect("a break");
+        assert!(html[at..].contains("r2"), "{html}");
     }
 }
