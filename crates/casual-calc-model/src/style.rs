@@ -311,6 +311,14 @@ pub struct Style {
     /// Whether the formula is hidden from the formula bar on a protected sheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formula_hidden: Option<bool>,
+    /// The cell's value was entered with a leading apostrophe, forcing a
+    /// numeric-looking string to stay text.
+    ///
+    /// Dropping this is silent corruption rather than lost formatting: a part
+    /// number like `0123` reopens as the number 123, and nothing on screen says
+    /// the value changed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
     /// The named cell style this cell belongs to, as an index into
     /// [`crate::Workbook::cell_styles`] — OOXML's `xf/@xfId`.
     ///
@@ -374,6 +382,7 @@ impl Style {
             && self.style_ref.is_none()
             && self.locked.is_none()
             && self.formula_hidden.is_none()
+            && !self.quote_prefix
     }
 }
 

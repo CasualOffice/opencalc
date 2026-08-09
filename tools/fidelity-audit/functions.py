@@ -9,7 +9,8 @@ that file for how. Usage: functions.py <spec-functions.txt>
 import pathlib, re, sys
 
 root = pathlib.Path(__file__).resolve().parents[2]
-spec = {l.strip() for l in open(sys.argv[1]) if l.strip()}
+# Skip the provenance header, or the comment lines inflate the denominator.
+spec = {l.strip() for l in open(sys.argv[1]) if l.strip() and not l.startswith("#")}
 src = (root / "crates/casual-calc-eval/src/functions.rs").read_text()
 ours = set(re.findall(r'"([A-Z][A-Z0-9._]*)"\s*=>', src))
 ours |= set(re.findall(r'\("([A-Z][A-Z0-9._]*)"\s*,', src))

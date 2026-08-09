@@ -65,6 +65,8 @@ struct Xf {
     indent: u8,
     locked: Option<bool>,
     formula_hidden: Option<bool>,
+    /// `xf/@quotePrefix` — the value was typed with a leading apostrophe.
+    quote_prefix: bool,
     /// `xf/@xfId` — which `cellStyleXfs` entry (and so which named style) this
     /// cell format belongs to. Only meaningful on a `cellXfs` entry.
     xf_id: Option<u32>,
@@ -327,6 +329,8 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             indent: 0,
                             locked: None,
                             formula_hidden: None,
+                            quote_prefix: attr(e, b"quotePrefix")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
                             xf_id: attr_u32(e, b"xfId")?,
                         };
                         if in_cellxfs {
@@ -438,6 +442,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             // `None` means the xf said nothing, which OOXML defines as locked.
             locked: xf.locked,
             formula_hidden: xf.formula_hidden,
+            quote_prefix: xf.quote_prefix,
             // A named style's own entry is the definition, not a reference.
             style_ref: None,
         }

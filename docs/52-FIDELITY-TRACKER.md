@@ -37,15 +37,36 @@ mistaken for the finish line:
    and statistical rows are gated on the spec's worked examples as test vectors,
    not on my recollection of the formulas.
 
-## Targets
+## Release signal
 
-| Axis | Baseline | Current | Target | Measured by |
-| --- | --- | --- | --- | --- |
-| Structural | 54.8% | 54.8% | **>90%** | `tools/fidelity-audit/score.py` |
-| Functions | 22.8% | 32.3% | **100%** | `tools/fidelity-audit/functions.py` |
+`tools/fidelity-audit/status.py` prints all of this; it reads the status column
+below, so the tracker and the signal cannot drift apart.
 
-Both numbers come from a tool, so a row cannot be called done on an opinion.
-Re-run both after every row and record the new figure in the note.
+**Coverage alone is a poor gate.** Going 54.8% → 70% by implementing obscure
+attributes matters far less than eliminating the last construct that silently
+deletes somebody's work, and a single percentage cannot tell those apart. So the
+destructive-loss counts sit beside it and are what actually gate a milestone.
+
+| Signal | Baseline | Current |
+| --- | --- | --- |
+| Structural coverage | 54.8% | 54.8% |
+| Function coverage | 22.8% | 32.3% |
+| **P0 destructive remaining** | 8 | 7 |
+| P1 visible-loss remaining | 13 | 13 |
+| P2 compatibility remaining | 4 | 4 |
+
+## Milestones
+
+| Milestone | Structural | P0 | P1 | Functions | Also |
+| --- | --- | --- | --- | --- | --- |
+| **Alpha fidelity** | 75%+ | 0 | — | 50%+ | |
+| **Beta / daily use** | 90%+ | 0 | ~0 | 75%+ | |
+| **Excel alternative** | 98–100% | 0 | 0 | 100% | charts preserve + render · pivots preserve then model · drawings preserve + edit · formula correctness validated against a spec corpus |
+
+The ordering is deliberate: **P0 goes to zero before coverage is chased.** A
+release that scores 90% while still dropping one construct on save is worse than
+one that scores 75% and loses nothing, because the first kind of failure is
+invisible until someone reopens the file.
 
 ## Structural
 
@@ -54,7 +75,7 @@ Re-run both after every row and record the new figure in the note.
 | FID-01 | Hyperlinks: `hyperlink`, `hyperlinks`, and the sheet rels that hold the targets | P0 | 🔴 | model + read/write + rels part |
 | FID-02 | Rich text runs: `r`/`rPr` in `CT_Rst` — per-character formatting in a cell | P0 | 🔴 | `sst`, `comments`, inline strings; touches the renderer |
 | FID-03 | Tables / ListObjects: `xl/tables/*`, `tableParts`, `tableColumn(s)`, `tableStyleInfo`, `calculatedColumnFormula`, `totalsRowFormula` | P0 | 🔴 | also unblocks structured references |
-| FID-04 | `xf/@quotePrefix` — the marker forcing a numeric-looking value to stay text | P0 | 🔴 | one attribute, silent corruption without it |
+| FID-04 | `xf/@quotePrefix` — the marker forcing a numeric-looking value to stay text | P0 | ✅ | Modelled as `Style::quote_prefix`, read from `xf/@quotePrefix` and written back. Typing `'0123` now sets the marker rather than merely forcing text this once: without it the cell saves as a plain string and Excel re-reads it as the number 123 on the next open, which is the silent half of the corruption. The formula bar shows the apostrophe back, or opening the cell and pressing Enter would commit the bare text and drop the marker again. **Found while implementing**: `applyProtection` was never written, so the `<protection>` child carrying `locked`/`hidden` was being emitted and then ignored by Excel — the flag is what makes the child count, so cell protection had been round-tripping into a file that quietly disregards it. 2 tests |
 | FID-05 | `vertAlign` — superscript and subscript | P0 | 🔴 | font + run level |
 | FID-06 | `u/@val` — double / accounting underline variants | P0 | 🔴 | currently collapses to a bool |
 | FID-07 | Gradient fills: `gradientFill`, `stop` | P0 | 🔴 | cell loses its background entirely today |
@@ -79,20 +100,27 @@ Re-run both after every row and record the new figure in the note.
 
 ## Function library
 
-Batched by cluster. Each batch is implemented against the semantics in
-ECMA-376 §18.17.7, with tests for the cases where a spreadsheet deviates from
-the obvious implementation — those are the ones that bite.
+Batched by cluster and **ordered by practical workbook impact**, not by how
+much of the spec each covers. Reference semantics — `INDIRECT`, `OFFSET`,
+`LOOKUP`, `ADDRESS`, `TRANSPOSE` — appear in ordinary workbooks constantly,
+while Bessel functions and complex arithmetic almost never do, so engineering
+goes last despite being 39 functions of easy wins.
+
+Each batch is implemented against the semantics in ECMA-376 §18.17.7, with tests
+for the cases where a spreadsheet deviates from the obvious implementation.
+Those are the ones that bite: wrapping the Rust standard library and moving on
+is how a plausible wrong answer ships.
 
 | ID | Cluster | Count | Status | Note |
 | --- | --- | --- | --- | --- |
 | FN-01 | Math and trigonometry | 41 | ✅ | Trig with its reciprocals and hyperbolics, inverse/log family, EVEN/ODD/MROUND/QUOTIENT, combinatorics, GCD/LCM, SUMSQ, SERIESSUM, PI. Three real traps: **ATAN2 takes x then y**, the reverse of every maths library, so forwarding in order mirrors every angle about the diagonal while still looking plausible; domain failures are **#NUM!, not NaN** (`ASIN(2)`, `LN(-1)`) and zero denominators are #DIV/0!, since a NaN in a cell compares and formats as nonsense; and **COMBIN accumulates term by term**, because `n!/(k!(n-k)!)` overflows f64 long before the answer does and returns #NUM! for COMBIN(100,2)=4950. Also EVEN(0)=0 and ODD(0)=1 against the general round-away rule, and FACT(171) is #NUM! not infinity. 9 tests. 22.8% → 32.3% |
-| FN-02 | Text | 17 | 🔴 | CHAR, CODE, CLEAN, DOLLAR, FIXED, NUMBERVALUE, UNICHAR, UNICODE, T, plus the byte-oriented `*B` variants and the East Asian ASC/JIS/DBCS/PHONETIC/BAHTTEXT |
-| FN-03 | Date and time | 16 | 🔴 | NOW, TODAY, TIME, TIMEVALUE, DATEVALUE, HOUR, MINUTE, SECOND, DATEDIF, DAYS360, WEEKNUM, ISOWEEKNUM, NETWORKDAYS(.INTL), WORKDAY(.INTL). Needs a clock seam so tests stay deterministic |
 | FN-04 | Logical and information | 8 | 🔴 | TRUE, FALSE, N, TYPE, ISREF, ERROR.TYPE, CELL, INFO |
+| FN-03 | Date and time | 16 | 🔴 | NOW, TODAY, TIME, TIMEVALUE, DATEVALUE, HOUR, MINUTE, SECOND, DATEDIF, DAYS360, WEEKNUM, ISOWEEKNUM, NETWORKDAYS(.INTL), WORKDAY(.INTL). Needs a clock seam so tests stay deterministic |
 | FN-05 | Lookup and reference | 9 | 🔴 | ADDRESS, AREAS, INDIRECT, OFFSET, LOOKUP, TRANSPOSE, HYPERLINK, GETPIVOTDATA, RTD |
-| FN-06 | Engineering | 39 | 🔴 | Base conversion (BIN/OCT/DEC/HEX), bit operations, complex numbers (IM*), Bessel, ERF/ERFC, CONVERT, DELTA, GESTEP |
-| FN-07 | Financial | 53 | 🔴 | Annuities, depreciation, bonds, coupons, yields. **Day-count conventions decide correctness**; needs the spec's own worked examples as test vectors |
+| FN-02 | Text | 17 | 🔴 | CHAR, CODE, CLEAN, DOLLAR, FIXED, NUMBERVALUE, UNICHAR, UNICODE, T, plus the byte-oriented `*B` variants and the East Asian ASC/JIS/DBCS/PHONETIC/BAHTTEXT |
 | FN-08 | Statistical and database | 92 | 🔴 | Descriptive statistics, distributions and their inverses, regression, the D* family. The distribution inverses need real numerics, not closed forms |
+| FN-07 | Financial | 53 | 🔴 | Annuities, depreciation, bonds, coupons, yields. **Day-count conventions decide correctness**; needs the spec's own worked examples as test vectors |
+| FN-06 | Engineering | 39 | 🔴 | Base conversion (BIN/OCT/DEC/HEX), bit operations, complex numbers (IM*), Bessel, ERF/ERFC, CONVERT, DELTA, GESTEP |
 
 ## Working rules
 

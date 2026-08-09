@@ -519,7 +519,16 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
         flag(ids.border_id != 0, " applyBorder=\"1\""),
         flag(has_align, " applyAlignment=\"1\""),
     ));
+    if ids.quote_prefix {
+        s.push_str(" quotePrefix=\"1\"");
+    }
     let has_protection = ids.locked.is_some() || ids.formula_hidden.is_some();
+    if has_protection {
+        // Excel honours a <protection> child only when applyProtection says to.
+        // Writing the child without the flag stores the setting and ignores it,
+        // which is indistinguishable from losing it.
+        s.push_str(" applyProtection=\"1\"");
+    }
     if !has_align && !has_protection {
         s.push_str("/>");
         return;
@@ -631,6 +640,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             rotation: style.rotation,
             locked: style.locked,
             formula_hidden: style.formula_hidden,
+            quote_prefix: style.quote_prefix,
         }
     };
     for style in &styles {
@@ -902,6 +912,7 @@ struct StyleIds {
     rotation: u16,
     locked: Option<bool>,
     formula_hidden: Option<bool>,
+    quote_prefix: bool,
 }
 
 /// The per-column attributes coalesced into one `<col>` span: a custom width

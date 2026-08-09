@@ -2991,6 +2991,16 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
         // implementation detail, and showing it means editing a date is a
         // lookup exercise. Only date/time formats get this: Excel shows the
         // plain number in the formula bar for currency and percentages.
+        // A quote-prefixed cell edits with its apostrophe: without it, opening
+        // the cell and pressing Enter would commit the bare text and drop the
+        // marker, turning the value numeric again.
+        let quoted = cell
+            .style
+            .and_then(|id| wb.styles.get(id))
+            .is_some_and(|st| st.quote_prefix);
+        if quoted {
+            return format!("'{}", value_text(wb, &cell.value));
+        }
         if let CellValue::Number(n) = cell.value
             && let Some(code) = cell
                 .style
@@ -4569,6 +4579,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             if st.rotation > 0 {
                 parts.push(format!("\"rot\":{}", st.rotation));
             }
+            if st.quote_prefix {
+                parts.push("\"qp\":1".to_owned());
+            }
             if let Some(nf) = st.number_format.as_deref() {
                 parts.push(format!("\"nf\":{}", json_string(nf)));
             }
@@ -5542,6 +5555,28 @@ fn build_set_op(
         return EditOperation::ClearCell { sheet, at };
     }
 
+    // A leading apostrophe forces the rest to be text, however numeric it
+    // looks, and is not part of the value. The marker has to be recorded on the
+    // style (`quotePrefix`), not merely obeyed here: without it the cell saves
+    // as a plain string and Excel re-reads `0123` as the number 123 the next
+    // time the file is opened.
+    if let Some(body) = trimmed.strip_prefix('\'') {
+        let mut style = existing_style
+            .and_then(|id| session.workbook().styles.get(id))
+            .cloned()
+            .unwrap_or_default();
+        style.quote_prefix = true;
+        let style = session.workbook_mut().intern_style(style);
+        let text = session.workbook_mut().intern_string(body);
+        let mut cell = Cell::value(CellValue::InlineString(text));
+        cell.style = Some(style);
+        return EditOperation::SetCell {
+            sheet,
+            at,
+            cell: Some(cell),
+        };
+    }
+
     if let Some(body) = trimmed.strip_prefix('=')
         && let Ok(expr) = parse(body)
     {
@@ -5780,6 +5815,12 @@ mod tests {
         assert_eq!(session_cell_input(0, 3, 0), "1234.5");
         // And the date really is a serial underneath, so arithmetic works.
         assert!(session_cell_format(0, 0, 0).contains("\"nf\":\"yyyy-mm-dd\""));
+
+        // A leading apostrophe forces text and records the marker, so the
+        // value survives a save instead of reverting to a number on reopen.
+        session_set_cell(0, 5, 0, "'0123").unwrap();
+        assert_eq!(session_cell_input(0, 5, 0), "'0123");
+        assert!(session_cell_format(0, 5, 0).contains("\"qp\":1"));
 
         // Retyping a date under a format the user chose keeps their format
         // rather than resetting the cell to the ISO one.

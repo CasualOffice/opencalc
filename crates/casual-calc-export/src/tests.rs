@@ -1114,3 +1114,54 @@ fn setting_a_literal_color_clears_a_stale_theme_link() {
     style.set_font_color(None, Some(ThemeTint::from_tint(4, 0.0)));
     assert_eq!(style.font_theme, None);
 }
+
+#[test]
+fn quote_prefix_and_protection_flags_round_trip() {
+    use casual_calc_model::{CellRef, Style};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let mut style = Style {
+        quote_prefix: true,
+        ..Style::default()
+    };
+    let quoted = wb.intern_style(style.clone());
+    style = Style {
+        locked: Some(false),
+        formula_hidden: Some(true),
+        ..Style::default()
+    };
+    let protected = wb.intern_style(style);
+    for (row, id) in [(0, quoted), (1, protected)] {
+        let at = CellRef::new(row, 0);
+        let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+        cell.style = Some(id);
+        wb.sheets[0].cells.set(at, cell);
+    }
+
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert!(styles.contains("quotePrefix=\"1\""));
+    // Excel honours a <protection> child only when applyProtection says to, so
+    // writing the child without the flag stores the setting and ignores it —
+    // indistinguishable from having lost it.
+    assert!(
+        styles.contains("applyProtection=\"1\""),
+        "protection without applyProtection is silently ignored: {styles}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    let style_of = |row: u32| {
+        let id = back.sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .unwrap()
+            .style;
+        back.styles.get(id.unwrap()).unwrap().clone()
+    };
+    assert!(
+        style_of(0).quote_prefix,
+        "a quote prefix must survive a save"
+    );
+    assert_eq!(style_of(1).locked, Some(false));
+    assert_eq!(style_of(1).formula_hidden, Some(true));
+}
