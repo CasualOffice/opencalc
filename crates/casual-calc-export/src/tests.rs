@@ -2694,3 +2694,84 @@ fn a_degenerate_anchor_keeps_no_trailing_offset() {
     );
     assert!(chart.to_offset.is_zero(), "{:?}", chart.to_offset);
 }
+
+#[test]
+fn deleting_an_imported_chart_takes_its_anchor_with_it() {
+    // The chart part and its relationship go when the chart does, but the
+    // anchor naming that relationship lives in the retained drawing's bytes.
+    // Left behind it points at a relationship that does not exist, and Excel
+    // reports the file as needing repair rather than as a chart it cannot draw.
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+              <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rId7"/></worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/drawings/drawing1.xml",
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <xdr:twoCellAnchor>
+                <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+                <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                <xdr:graphicFrame><a:graphic><a:graphicData><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame>
+              </xdr:twoCellAnchor>
+              <xdr:twoCellAnchor>
+                <xdr:sp><xdr:txBody>a text box nothing here models</xdr:txBody></xdr:sp>
+              </xdr:twoCellAnchor>
+            </xdr:wsDr>"#,
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/charts/chart1.xml",
+            br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#,
+        ),
+    ]);
+    let mut wb = import_package(source).unwrap().workbook;
+    assert_eq!(wb.sheets[0].charts.len(), 1);
+
+    // Delete it the way the host does: the chart, its part, and the
+    // relationship reaching it.
+    wb.sheets[0].charts.clear();
+    wb.retained_parts
+        .retain(|p| p.path != "xl/charts/chart1.xml");
+    wb.retained_rels
+        .retain(|r| !r.target.ends_with("charts/chart1.xml"));
+
+    let written = write_workbook(&wb).unwrap();
+    let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
+    assert!(
+        !drawing.contains("rId1"),
+        "the anchor names a relationship that is gone: {drawing}"
+    );
+    // ...and only that anchor. The text box has no relationship at all, which
+    // is exactly the content this must never touch.
+    assert!(
+        drawing.contains("a text box nothing here models"),
+        "{drawing}"
+    );
+    // One anchor left, counted by its closing tag.
+    assert_eq!(
+        drawing.matches("</xdr:twoCellAnchor>").count(),
+        1,
+        "{drawing}"
+    );
+    // The package must still be readable, and must no longer carry the chart.
+    let back = import_package(written).unwrap().workbook;
+    assert!(back.sheets[0].charts.is_empty());
+}

@@ -176,7 +176,11 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     }
 
     for built in &chart_builds {
-        if built.chart_parts.is_empty() {
+        // An empty path is the placeholder for a sheet that contributed
+        // nothing. A sheet can still contribute a drawing with no chart parts:
+        // that is the rebuild that clears an anchor left dangling by a deleted
+        // or edited imported chart.
+        if built.drawing_part.is_empty() {
             continue;
         }
         parts.push((built.drawing_part.clone(), built.drawing_xml.clone()));

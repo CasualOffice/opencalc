@@ -119,6 +119,10 @@ fn resolve_rel_target(source: &str, target: &str) -> String {
 ///
 /// `first_chart` is the 1-based number of this sheet's first chart part, so
 /// numbering runs across the workbook the way Excel's does.
+///
+/// Also returns a rebuilt drawing for a sheet with *no* authored charts, when
+/// its retained one holds an anchor whose relationship has gone — which is what
+/// deleting or editing an imported chart leaves behind.
 pub fn build(
     workbook: &Workbook,
     sheet: &Sheet,
@@ -126,9 +130,6 @@ pub fn build(
     first_chart: usize,
 ) -> Option<SheetCharts> {
     let charts = authored(sheet);
-    if charts.is_empty() {
-        return None;
-    }
     let sheet_part = format!("xl/worksheets/sheet{}.xml", sheet_index + 1);
     let existing = retained_drawing(workbook, &sheet_part);
     let drawing_part = existing.as_ref().map_or_else(
@@ -166,12 +167,29 @@ pub fn build(
         anchors.push_str(&anchor_xml(chart, &rel_ids[i], n));
     }
 
-    let drawing_xml = match retained_bytes(workbook, &drawing_part) {
-        Some(bytes) => splice(&bytes, &anchors),
+    // Every relationship the drawing will actually have once it is written.
+    let known: Vec<String> = workbook
+        .retained_rels
+        .iter()
+        .filter(|r| r.source == drawing_part)
+        .map(|r| r.id.clone())
+        .chain(rel_ids.iter().cloned())
+        .collect();
+    let retained = retained_bytes(workbook, &drawing_part);
+    let drawing_xml = match &retained {
+        Some(bytes) => splice(&strip_dangling_anchors(bytes, &known), &anchors),
         None => format!(
             "{DECL}<xdr:wsDr xmlns:xdr=\"{NS_XDR}\" xmlns:a=\"{NS_A}\">{anchors}</xdr:wsDr>"
         ),
     };
+    // Nothing to add and nothing to clean up: leave the retained drawing to be
+    // written back byte for byte, which is what it deserves when untouched.
+    if charts.is_empty() && retained.as_deref() == Some(drawing_xml.as_str()) {
+        return None;
+    }
+    if charts.is_empty() && retained.is_none() {
+        return None;
+    }
 
     let mut rels = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     for rel in workbook
@@ -228,6 +246,88 @@ fn retained_bytes(workbook: &Workbook, path: &str) -> Option<String> {
         .iter()
         .find(|p| p.path == path)
         .and_then(|p| String::from_utf8(p.bytes.clone()).ok())
+}
+
+/// Drop any anchor whose `r:id` no longer resolves.
+///
+/// An imported chart that is edited or deleted loses its part and the
+/// relationship reaching it, but its anchor lives inside the retained drawing's
+/// bytes — which are not rewritten. Left alone, that anchor names a
+/// relationship that does not exist, and Excel reports the file as needing
+/// repair rather than simply drawing nothing.
+///
+/// Only whole elements are removed, and only when their id is definitely
+/// dangling. An anchor with no `r:id` at all is a shape or a text box, which is
+/// exactly the content this must not touch. Anything that does not parse
+/// cleanly is left as it was: leaving a stale anchor is a bad outcome, and
+/// corrupting a drawing is a worse one.
+fn strip_dangling_anchors(existing: &str, known: &[String]) -> String {
+    const OPENERS: [&str; 3] = ["twoCellAnchor", "oneCellAnchor", "absoluteAnchor"];
+    let mut out = String::with_capacity(existing.len());
+    let mut rest = existing;
+    // The next anchor element, whichever kind and whatever namespace prefix.
+    let next_anchor = |haystack: &str| -> Option<(usize, &'static str)> {
+        OPENERS
+            .iter()
+            .filter_map(|n| haystack.find(&format!("<{n}")).map(|i| (i, *n)))
+            .chain(
+                OPENERS
+                    .iter()
+                    .filter_map(|n| haystack.find(&format!(":{n}")).map(|i| (i, *n))),
+            )
+            .min_by_key(|(i, _)| *i)
+    };
+    while let Some((start, name)) = next_anchor(rest) {
+        // Back up to the `<` that opens it, so a prefixed name is included.
+        let Some(open) = rest[..=start].rfind('<') else {
+            break;
+        };
+        // The search for the closing tag starts *past* the opening one. Two
+        // near misses on the way here: `name>` alone matches the opening tag,
+        // and `/name>` misses the real close because the namespace prefix sits
+        // between the slash and the name (`</xdr:twoCellAnchor>`). Either way
+        // the "anchor" came out as a one-tag fragment holding no `r:id`, so
+        // nothing was ever stripped.
+        let Some(gt) = rest[open..].find('>') else {
+            break;
+        };
+        let after_open = open + gt + 1;
+        let Some(end_rel) = rest[after_open..].find(&format!("{name}>")) else {
+            // No closing tag: not something to edit.
+            break;
+        };
+        let end = after_open + end_rel + name.len() + 1;
+        let block = &rest[open..end];
+        let dangling = anchor_rel_ids(block)
+            .iter()
+            .any(|id| !known.iter().any(|k| k == id));
+        out.push_str(&rest[..open]);
+        if !dangling {
+            out.push_str(block);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `r:id` / `r:embed` an anchor names.
+fn anchor_rel_ids(block: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in ["r:id=\"", "r:embed=\""] {
+        let mut rest = block;
+        while let Some(at) = rest.find(key) {
+            let after = &rest[at + key.len()..];
+            match after.find('"') {
+                Some(close) => {
+                    ids.push(after[..close].to_owned());
+                    rest = &after[close..];
+                }
+                None => break,
+            }
+        }
+    }
+    ids
 }
 
 /// Insert `anchors` just before the drawing's closing tag.
