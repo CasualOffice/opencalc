@@ -166,3 +166,27 @@ Carried over from the UX tracker, because they are what made it converge:
 4. **A trap found is a test written.** Every case where a spreadsheet deviates
    from the obvious implementation gets a test that pins it, with the reason in
    the assertion message.
+
+## The function audit was under-reporting, and the catalog had holes
+
+`functions.py` scraped `functions.rs` for `"NAME" =>` and `("NAME",`. Both
+patterns are wrong in ways that only show up once the code grows:
+
+- A multi-alternative dispatch arm — `"PRICE" | "YIELD" | "DURATION" =>` —
+  has `=>` after the **last** name only, so the first two were invisible.
+- `rustfmt` wraps a long catalog entry across lines, putting the `(` nowhere
+  near the quote, so those entries were invisible too.
+
+Fifteen implemented functions were reported missing. That is the failure mode
+that matters: an audit which under-reports sends you to rewrite work already
+done. It now parses the `FUNCTIONS` array directly — the crate documents that
+array as the single source of truth, so the audit should read *it* rather than
+guess from the file.
+
+Fixing the instrument then exposed a real defect. Six functions — BINOMDIST,
+FINV, HYPGEOMDIST, NEGBINOMDIST, NUMBERVALUE, SWITCH — **dispatched but were
+not in the catalog**. They worked when typed and were invisible everywhere
+else: no autocomplete, no signature help, absent from this audit. There was a
+test that every catalog entry dispatches, and none for the converse. Both exist
+now, and the new one was verified by removing an entry and watching it name the
+function.

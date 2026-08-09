@@ -2789,3 +2789,55 @@ fn bahttext_handles_the_thai_irregular_forms() {
     assert_eq!(t(4), "ศูนย์บาทถ้วน");
     assert_eq!(t(5), "หนึ่งบาทยี่สิบห้าสตางค์", "satang replace ถ้วน");
 }
+
+/// The converse of `every_cataloged_function_dispatches`, which was missing —
+/// and six functions had slipped through the gap.
+///
+/// A function that dispatches but is not in the catalog works when typed and is
+/// invisible everywhere else: no autocomplete, no signature help, and absent
+/// from the coverage audit. The catalog is documented as the single source of
+/// truth, so nothing may dispatch without being in it.
+#[test]
+fn every_dispatched_function_is_in_the_catalog() {
+    let src = include_str!("functions.rs");
+    let catalog: std::collections::HashSet<&str> =
+        crate::FUNCTIONS.iter().map(|(n, _)| *n).collect();
+
+    // The dispatch arms, including every alternative of a multi-name arm —
+    // `"PRICE" | "YIELD" | "DURATION" =>` names three functions, not one.
+    let mut missing: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let Some(arrow) = line.find("=>") else {
+            continue;
+        };
+        let head = &line[..arrow];
+        if !head.trim_start().starts_with('"') {
+            continue; // not a string-literal match arm
+        }
+        for part in head.split('|') {
+            let part = part.trim();
+            let Some(name) = part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+                continue;
+            };
+            // Function names only: the same match syntax is used for DATEDIF's
+            // unit strings ("D", "YM"), which are arguments, not functions.
+            if name.len() < 2
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.')
+            {
+                continue;
+            }
+            if !catalog.contains(name) && !missing.iter().any(|m| m == name) {
+                missing.push(name.to_owned());
+            }
+        }
+    }
+    // DATEDIF's units are two letters and look exactly like function names, so
+    // they are named rather than pattern-matched away.
+    missing.retain(|n| !matches!(n.as_str(), "MD" | "YD" | "YM"));
+    assert!(
+        missing.is_empty(),
+        "dispatched but not in the catalog: {missing:?}"
+    );
+}

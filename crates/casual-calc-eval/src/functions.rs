@@ -50,6 +50,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BIN2DEC", "BIN2DEC(number)"),
     ("BIN2HEX", "BIN2HEX(number, [places])"),
     ("BIN2OCT", "BIN2OCT(number, [places])"),
+    (
+        "BINOMDIST",
+        "BINOMDIST(number_s, trials, probability_s, cumulative)",
+    ),
     ("BITAND", "BITAND(number1, number2)"),
     ("BITLSHIFT", "BITLSHIFT(number, shift)"),
     ("BITOR", "BITOR(number1, number2)"),
@@ -165,6 +169,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FDIST", "FDIST(x, degrees_freedom1, degrees_freedom2)"),
     ("FIND", "FIND(find_text, within_text, [start])"),
     ("FINDB", "FINDB(find_text, within_text, [start_num])"),
+    ("FINV", "FINV(probability, deg_freedom1, deg_freedom2)"),
     ("FISHER", "FISHER(x)"),
     ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
@@ -186,6 +191,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
+    (
+        "HYPGEOMDIST",
+        "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)",
+    ),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
@@ -271,6 +280,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
+    (
+        "NEGBINOMDIST",
+        "NEGBINOMDIST(number_f, number_s, probability_s)",
+    ),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     (
         "NETWORKDAYS.INTL",
@@ -285,6 +298,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("NOW", "NOW()"),
     ("NPER", "NPER(rate, pmt, pv, [fv], [type])"),
     ("NPV", "NPV(rate, value1, …)"),
+    (
+        "NUMBERVALUE",
+        "NUMBERVALUE(text, [decimal_separator], [group_separator])",
+    ),
     ("OCT2BIN", "OCT2BIN(number, [places])"),
     ("OCT2DEC", "OCT2DEC(number)"),
     ("OCT2HEX", "OCT2HEX(number, [places])"),
@@ -378,6 +395,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SUMX2MY2", "SUMX2MY2(array_x, array_y)"),
     ("SUMX2PY2", "SUMX2PY2(array_x, array_y)"),
     ("SUMXMY2", "SUMXMY2(array_x, array_y)"),
+    (
+        "SWITCH",
+        "SWITCH(expression, value1, result1, …, [default])",
+    ),
     ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
     ("TAN", "TAN(number)"),
