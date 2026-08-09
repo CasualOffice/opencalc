@@ -2542,6 +2542,265 @@ pub fn session_cell_protection(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_else(|| "{\"locked\":true,\"hidden\":false}".to_owned())
 }
 
+/// A sheet's page setup as JSON, flattened to `group.attribute` keys.
+///
+/// Every one of these was read, written and carried verbatim with nothing able
+/// to change it: a sheet imported as landscape could only ever be saved as
+/// landscape. The groups are the OOXML elements — `page` is `<pageSetup>`,
+/// `margins` is `<pageMargins>`, `options` is `<printOptions>`, `setupPr` is
+/// `<pageSetUpPr>`, and `hf` is `<headerFooter>`'s child *text*.
+#[wasm_bindgen]
+pub fn session_page_setup(sheet: usize) -> String {
+    with_session(|s| {
+        let p = &s.workbook().sheets.get(sheet)?.print;
+        let mut items: Vec<String> = Vec::new();
+        let mut push = |group: &str, map: &std::collections::BTreeMap<String, String>| {
+            for (k, v) in map {
+                items.push(format!(
+                    "{}:{}",
+                    json_string(&format!("{group}.{k}")),
+                    json_string(v)
+                ));
+            }
+        };
+        push("page", &p.page);
+        push("margins", &p.margins);
+        push("options", &p.options);
+        push("setupPr", &p.setup_pr);
+        push("hf", &p.header_footer_text);
+        Some(format!("{{{}}}", items.join(",")))
+    })
+    .flatten()
+    .unwrap_or_else(|| "{}".to_owned())
+}
+
+/// Write page-setup attributes (one undo step).
+///
+/// `keys` are the same `group.attribute` names `session_page_setup` reports; an
+/// empty value removes the attribute, because OOXML's defaults are meaningful
+/// and writing `orientation=""` is not the same as leaving it out.
+#[wasm_bindgen]
+pub fn session_set_page_setup(
+    sheet: usize,
+    keys: Vec<String>,
+    values: Vec<String>,
+) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        for (key, value) in keys.iter().zip(values.iter()) {
+            let Some((group, attr)) = key.split_once('.') else {
+                continue;
+            };
+            let map = match group {
+                "page" => &mut data.print.page,
+                "margins" => &mut data.print.margins,
+                "options" => &mut data.print.options,
+                "setupPr" => &mut data.print.setup_pr,
+                "hf" => &mut data.print.header_footer_text,
+                _ => continue,
+            };
+            if value.is_empty() {
+                map.remove(attr);
+            } else {
+                map.insert(attr.to_owned(), value.clone());
+            }
+        }
+    })
+}
+
+/// A printable HTML document for a sheet, honouring its page setup.
+///
+/// A page-setup panel that only edits the file is half a feature: the settings
+/// are invisible until the workbook is opened somewhere else. This renders what
+/// they describe — paper size and orientation as an `@page` rule, the margins,
+/// the header and footer text, and whether grid lines and row/column headings
+/// are printed.
+///
+/// Rows and columns the sheet hides are left out, as they are when Excel
+/// prints. The range is the used region unless `Print_Area` names one.
+#[wasm_bindgen]
+pub fn session_print_html(sheet: usize) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return String::new();
+        };
+        let p = &sh.print;
+        let attr = |m: &std::collections::BTreeMap<String, String>, k: &str| {
+            m.get(k).cloned().unwrap_or_default()
+        };
+        let on = |m: &std::collections::BTreeMap<String, String>, k: &str| {
+            matches!(m.get(k).map(String::as_str), Some("1") | Some("true"))
+        };
+        let inches = |k: &str, fallback: f64| {
+            p.margins
+                .get(k)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(fallback)
+        };
+
+        // `paperSize` is an enum of numbered stock sizes; only the two in
+        // everyday use are named here, and anything else falls back to `auto`
+        // so the printer decides rather than this guessing wrong.
+        let paper = match attr(&p.page, "paperSize").as_str() {
+            "1" | "" => "letter",
+            "9" => "A4",
+            "8" => "A3",
+            "11" => "A5",
+            "5" => "legal",
+            _ => "auto",
+        };
+        let landscape = attr(&p.page, "orientation") == "landscape";
+        let grid = on(&p.options, "gridLines");
+        let headings = on(&p.options, "headings");
+        let centre_h = on(&p.options, "horizontalCentered");
+
+        let (mut last_row, mut last_col) = (0u32, 0u32);
+        for (at, _) in sh.cells.iter() {
+            last_row = last_row.max(at.row);
+            last_col = last_col.max(at.col);
+        }
+        if sh.cells.iter().next().is_none() {
+            return String::new(); // nothing to print
+        }
+
+        let mut out = String::new();
+        out.push_str("<!doctype html><meta charset=\"utf-8\"><title>");
+        push_html_escaped(&mut out, &sh.name);
+        out.push_str("</title><style>");
+        out.push_str(&format!(
+            "@page{{size:{paper}{};margin:{}in {}in {}in {}in;}}",
+            if landscape { " landscape" } else { "" },
+            inches("top", 0.75),
+            inches("right", 0.7),
+            inches("bottom", 0.75),
+            inches("left", 0.7),
+        ));
+        out.push_str(
+            "body{margin:0;font:11pt Calibri,Arial,sans-serif;color:#000;background:#fff}\
+             table{border-collapse:collapse;table-layout:fixed}\
+             td,th{padding:1px 4px;white-space:pre;overflow:hidden}\
+             th{font-weight:600;background:#f0f0f0;text-align:center}\
+             .hf{font-size:9pt;color:#444}",
+        );
+        if grid || headings {
+            out.push_str("td,th{border:1px solid #b0b0b0}");
+        }
+        if centre_h {
+            out.push_str("table{margin-left:auto;margin-right:auto}");
+        }
+        out.push_str("</style>");
+
+        let hf = |key: &str| p.header_footer_text.get(key).cloned().unwrap_or_default();
+        // `&L`/`&C`/`&R` split a header into its three cells, and the rest of
+        // the field codes are dropped rather than printed as literal text.
+        let hf_html = |raw: &str| {
+            if raw.is_empty() {
+                return String::new();
+            }
+            let cleaned = strip_hf_codes(raw);
+            if cleaned.trim().is_empty() {
+                return String::new();
+            }
+            let mut h = String::from("<div class=\"hf\">");
+            push_html_escaped(&mut h, &cleaned);
+            h.push_str("</div>");
+            h
+        };
+        out.push_str(&hf_html(&hf("oddHeader")));
+
+        let vis_cols: Vec<u32> = (0..=last_col)
+            .filter(|c| !sh.hidden_cols.contains(c))
+            .collect();
+        out.push_str("<table>");
+        if headings {
+            out.push_str("<tr><th></th>");
+            for &c in &vis_cols {
+                out.push_str("<th>");
+                push_html_escaped(&mut out, &casual_calc_formula::column_to_letters(c));
+                out.push_str("</th>");
+            }
+            out.push_str("</tr>");
+        }
+        for r in 0..=last_row {
+            if sh.is_row_hidden(r) {
+                continue;
+            }
+            out.push_str("<tr>");
+            if headings {
+                out.push_str(&format!("<th>{}</th>", r + 1));
+            }
+            for &c in &vis_cols {
+                let cell = sh.cells.get(CellRef::new(r, c));
+                let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
+                let css = cell
+                    .and_then(|cl| cl.style)
+                    .and_then(|id| wb.styles.get(id))
+                    .map(html_cell_css)
+                    .unwrap_or_default();
+                if css.is_empty() {
+                    out.push_str("<td>");
+                } else {
+                    out.push_str(&format!("<td style=\"{css}\">"));
+                }
+                push_html_escaped(&mut out, &text);
+                out.push_str("</td>");
+            }
+            out.push_str("</tr>");
+        }
+        out.push_str("</table>");
+        out.push_str(&hf_html(&hf("oddFooter")));
+        out
+    })
+    .unwrap_or_default()
+}
+
+/// Strip OOXML header/footer field codes, keeping the text between them.
+///
+/// The codes are things like `&L` (left section), `&P` (page number) and
+/// `&"Arial,Bold"` (font). Printing them literally would put `&L&"Calibri"Sales`
+/// at the top of the page, which is worse than dropping them.
+fn strip_hf_codes(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            // A quoted font name: skip to the closing quote.
+            Some('"') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c == '"' {
+                        break;
+                    }
+                }
+            }
+            // `&&` is a literal ampersand.
+            Some('&') => {
+                chars.next();
+                out.push('&');
+            }
+            // A point size is `&` followed by digits.
+            Some(d) if d.is_ascii_digit() => {
+                while chars.peek().is_some_and(char::is_ascii_digit) {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            // Every other code is a single letter. `&L`/`&C`/`&R` separate the
+            // three sections, so they become a gap rather than nothing.
+            Some(_) => {
+                chars.next();
+                out.push(' ');
+            }
+            None => {}
+        }
+    }
+    out.trim().to_owned()
+}
+
 /// Refuse an edit that a protected sheet forbids.
 ///
 /// Protection was stored, round-tripped and toggleable — and never enforced, so
@@ -7310,5 +7569,85 @@ mod protection_tests {
             "carrying the flag through every save while still showing the \
              formula defeats the only thing it does"
         );
+    }
+}
+
+#[cfg(test)]
+mod page_setup_tests {
+    use super::{
+        session_new, session_page_setup, session_print_html, session_set_cell,
+        session_set_page_setup, strip_hf_codes,
+    };
+
+    /// Every print attribute was carried verbatim with nothing able to change
+    /// it, so a sheet imported as landscape could only ever be saved that way.
+    #[test]
+    fn page_setup_round_trips_through_the_flattened_keys() {
+        session_new();
+        session_set_page_setup(
+            0,
+            vec![
+                "page.orientation".to_owned(),
+                "margins.top".to_owned(),
+                "options.gridLines".to_owned(),
+            ],
+            vec!["landscape".to_owned(), "1.25".to_owned(), "1".to_owned()],
+        )
+        .unwrap();
+        let json = session_page_setup(0);
+        assert!(
+            json.contains("\"page.orientation\":\"landscape\""),
+            "{json}"
+        );
+        assert!(json.contains("\"margins.top\":\"1.25\""), "{json}");
+
+        // An empty value removes the attribute rather than writing "": OOXML's
+        // defaults are meaningful, and `orientation=""` is not `orientation`
+        // absent.
+        session_set_page_setup(0, vec!["page.orientation".to_owned()], vec![String::new()])
+            .unwrap();
+        assert!(
+            !session_page_setup(0).contains("page.orientation"),
+            "an empty value must remove the attribute"
+        );
+    }
+
+    #[test]
+    fn the_printable_page_honours_orientation_margins_and_headings() {
+        session_new();
+        session_set_cell(0, 0, 0, "Widget").unwrap();
+        session_set_page_setup(
+            0,
+            vec![
+                "page.orientation".to_owned(),
+                "page.paperSize".to_owned(),
+                "margins.left".to_owned(),
+                "options.headings".to_owned(),
+            ],
+            vec![
+                "landscape".to_owned(),
+                "9".to_owned(),
+                "1.5".to_owned(),
+                "1".to_owned(),
+            ],
+        )
+        .unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("size:A4 landscape"), "{html}");
+        assert!(html.contains("1.5in"), "{html}");
+        // Headings on means the A/1 strips are printed, so the letter is there.
+        assert!(html.contains("<th>A</th>"), "{html}");
+        assert!(html.contains("Widget"), "{html}");
+    }
+
+    /// Field codes are markup, not text. Printing them literally would put
+    /// `&L&"Calibri"Sales` at the top of the page.
+    #[test]
+    fn header_field_codes_are_stripped_not_printed() {
+        assert_eq!(strip_hf_codes("&LSales&C&P"), "Sales");
+        assert_eq!(strip_hf_codes("&\"Arial,Bold\"&14Report"), "Report");
+        // `&&` is a literal ampersand and must survive.
+        assert_eq!(strip_hf_codes("Profit && Loss"), "Profit & Loss");
+        assert_eq!(strip_hf_codes(""), "");
     }
 }

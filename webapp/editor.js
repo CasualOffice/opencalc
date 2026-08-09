@@ -3919,7 +3919,7 @@ function openValidationMenu() {
 // One right-docked panel, tool-switched. It stays open while you keep selecting
 // cells; the "Apply to range" readout tracks the live selection, and Apply acts
 // on whatever is selected at click time.
-let activePanel = null;        // 'dv' | 'cf' | 'note' | 'table' | null
+let activePanel = null;        // 'dv' | 'cf' | 'note' | 'table' | 'page' | null
 let panelRangeEls = [];        // range readouts to keep in sync on selection change
 let panelNote = null;          // { ta, addrEl, cell } while the note panel is open
 
@@ -4119,6 +4119,128 @@ function refreshTablePanel() {
   buildTablePanel(body);
 }
 
+// Page setup: everything OOXML records about printing a sheet, all of which was
+// being carried through every save with nothing able to change it.
+//
+// Applied on change, one `session_set_page_setup` call each, so every switch is
+// its own undo step and the panel never holds state the workbook does not.
+function buildPagePanel(body) {
+  const get = () => { try { return JSON.parse(wasm.session_page_setup(state.sheet)); } catch { return {}; } };
+  let cur = get();
+  const set = (pairs) => {
+    tryEdit(() => wasm.session_set_page_setup(
+      state.sheet, Object.keys(pairs), Object.values(pairs).map((v) => String(v))));
+    cur = get();
+  };
+
+  panelLabel(body, "Orientation");
+  const orient = el("select", "panel-select");
+  for (const [v, t] of [["portrait", "Portrait"], ["landscape", "Landscape"]]) {
+    const o = el("option", null, t); o.value = v; orient.appendChild(o);
+  }
+  orient.value = cur["page.orientation"] || "portrait";
+  orient.addEventListener("change", () => set({ "page.orientation": orient.value }));
+  body.appendChild(orient);
+
+  panelLabel(body, "Paper");
+  const paper = el("select", "panel-select");
+  // `paperSize` is a numbered enum; these are the sizes people actually pick.
+  for (const [v, t] of [["1", "Letter"], ["5", "Legal"], ["8", "A3"], ["9", "A4"], ["11", "A5"]]) {
+    const o = el("option", null, t); o.value = v; paper.appendChild(o);
+  }
+  paper.value = cur["page.paperSize"] || "1";
+  paper.addEventListener("change", () => set({ "page.paperSize": paper.value }));
+  body.appendChild(paper);
+
+  panelLabel(body, "Scale");
+  const scaleWrap = el("div", "oc-totals-grid");
+  const scale = el("input", "panel-field");
+  scale.type = "number"; scale.min = "10"; scale.max = "400";
+  scale.value = cur["page.scale"] || "100";
+  scale.addEventListener("change", () => set({
+    "page.scale": scale.value,
+    // Scaling and fit-to-page are alternatives in Excel; setting one has to
+    // clear the other or the file asks for both and the reader picks.
+    "setupPr.fitToPage": "",
+  }));
+  scaleWrap.append(el("span", "oc-totals-col", "Percent"), scale);
+  const fitW = el("input", "panel-field");
+  fitW.type = "number"; fitW.min = "0";
+  fitW.value = cur["page.fitToWidth"] || "1";
+  const fitH = el("input", "panel-field");
+  fitH.type = "number"; fitH.min = "0";
+  fitH.value = cur["page.fitToHeight"] || "1";
+  const fitOn = () => set({
+    "setupPr.fitToPage": "1",
+    "page.fitToWidth": fitW.value,
+    "page.fitToHeight": fitH.value,
+    "page.scale": "",
+  });
+  fitW.addEventListener("change", fitOn);
+  fitH.addEventListener("change", fitOn);
+  scaleWrap.append(el("span", "oc-totals-col", "Fit to width"), fitW);
+  scaleWrap.append(el("span", "oc-totals-col", "Fit to height"), fitH);
+  body.appendChild(scaleWrap);
+
+  panelLabel(body, "Margins (inches)");
+  const mg = el("div", "oc-totals-grid");
+  for (const [key, label, dflt] of [
+    ["top", "Top", "0.75"], ["bottom", "Bottom", "0.75"],
+    ["left", "Left", "0.7"], ["right", "Right", "0.7"],
+  ]) {
+    const i = el("input", "panel-field");
+    i.type = "number"; i.step = "0.05"; i.min = "0";
+    i.value = cur["margins." + key] || dflt;
+    i.addEventListener("change", () => set({ ["margins." + key]: i.value }));
+    mg.append(el("span", "oc-totals-col", label), i);
+  }
+  body.appendChild(mg);
+
+  panelLabel(body, "Print");
+  const checks = el("div", "oc-table-checks");
+  const check = (label, key, group) => {
+    const l = el("label", "oc-check");
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.checked = cur[group + "." + key] === "1" || cur[group + "." + key] === "true";
+    i.addEventListener("change", () => set({ [group + "." + key]: i.checked ? "1" : "" }));
+    l.append(i, document.createTextNode(" " + label));
+    checks.appendChild(l);
+  };
+  check("Gridlines", "gridLines", "options");
+  check("Row/column headings", "headings", "options");
+  check("Centre across", "horizontalCentered", "options");
+  check("Centre down", "verticalCentered", "options");
+  body.appendChild(checks);
+
+  panelLabel(body, "Header and footer");
+  for (const [key, ph] of [["oddHeader", "Header"], ["oddFooter", "Footer"]]) {
+    const i = el("input", "panel-field");
+    i.placeholder = ph + " — &L left, &C centre, &R right, &P page";
+    i.value = cur["hf." + key] || "";
+    i.addEventListener("change", () => set({ ["hf." + key]: i.value }));
+    body.appendChild(i);
+  }
+
+  panelActions(body, "Print…", () => printSheet(), "Close", () => closePanel());
+}
+
+// Open the sheet as a printable page and hand it to the browser's print dialog.
+//
+// A separate window rather than a print stylesheet over the app: the grid is a
+// canvas, so there is nothing for a stylesheet to lay out across pages.
+function printSheet() {
+  let html = "";
+  try { html = wasm.session_print_html(state.sheet); } catch (e) { statusError(errText(e)); return; }
+  if (!html) { status.textContent = "nothing to print"; return; }
+  const w = window.open("", "_blank");
+  if (!w) { statusError("the browser blocked the print window"); return; }
+  w.document.write(html);
+  w.document.close();
+  // Printing before the document has laid out gives a blank first page.
+  w.addEventListener("load", () => { w.focus(); w.print(); });
+}
+
 function openPanel(tool) {
   const panel = document.getElementById("side-panel");
   activePanel = tool;
@@ -4128,12 +4250,14 @@ function openPanel(tool) {
     tool === "dv" ? "Data validation"
       : tool === "cf" ? "Conditional formatting"
       : tool === "table" ? "Table"
+      : tool === "page" ? "Page setup"
       : "Comments";
   const body = document.getElementById("side-panel-body");
   body.textContent = "";
   if (tool === "dv") buildDvPanel(body);
   else if (tool === "cf") buildCfPanel(body);
   else if (tool === "table") buildTablePanel(body);
+  else if (tool === "page") buildPagePanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
   resize(); // the grid narrows — refit the canvas to its new width
@@ -7689,6 +7813,9 @@ function wireEvents() {
       if (k === "t") { tableDialog(); e.preventDefault(); return; }
       // Excel's Ctrl+` — show formulas instead of results.
       if (k === "`") { setViewOption("formulas"); e.preventDefault(); return; }
+      // Print the sheet, not the app: the grid is a canvas, so the browser's
+      // own print of this page would produce one clipped screenshot.
+      if (k === "p") { printSheet(); e.preventDefault(); return; }
       if (k === "home") { select(0, 0); e.preventDefault(); return; }
       if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
       // Ctrl+D / Ctrl+R: fill the selection down from its top row / right from
@@ -8390,6 +8517,9 @@ function wireEvents() {
           ["Tab-separated (.tsv)", () => saveAs("tsv")],
           ["Pipe-separated (.psv)", () => saveAs("psv")],
         ] },
+        "sep",
+        ["Page setup…", () => openPanel("page")],
+        ["Print…", () => printSheet(), "Ctrl+P"],
       ]],
       ["Edit", [
         ["Undo", doUndo, "Ctrl+Z"],
