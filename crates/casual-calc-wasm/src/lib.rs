@@ -705,6 +705,10 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
             .iter()
             .find(|v| v.covers(row, col))
             .filter(|v| v.kind == casual_calc_model::DvKind::List && !v.values.is_empty())
+            // `showDropDown="1"` *hides* the in-cell list, as the schema
+            // defines it. A file that asked for a typed-only list was still
+            // getting a chevron.
+            .filter(|v| !v.hide_dropdown)
         {
             Some(v) => {
                 let items: Vec<String> = v.values.iter().map(|x| json_string(x)).collect();
@@ -724,13 +728,21 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
 /// Excel, only for typed entry: fill and paste are not gated).
 ///
 /// An empty input always passes: clearing a cell is not entering a bad value.
+///
+/// Returns `""` when the value is allowed, otherwise JSON
+/// `{"style":"stop"|"warning"|"information","title":…,"text":…}`.
+///
+/// The style matters and used to be dropped: only `stop` refuses the entry.
+/// `warning` asks whether to keep it and `information` merely says so — turning
+/// either into a hard block is a different rule from the one the author wrote,
+/// and there is no way for the user to get past it.
 #[wasm_bindgen]
 pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    with_session(|s| {
+    let out = with_session(|s| {
         let Some(sh) = s.workbook().sheets.get(sheet) else {
             return String::new();
         };
@@ -793,7 +805,132 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
             }
         )
     })
+    .unwrap_or_default();
+    if out.is_empty() {
+        return out;
+    }
+    let (style, title) = with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.validations.iter().find(|v| v.covers(row, col)))
+            .map(|r| {
+                (
+                    r.error_style.clone().unwrap_or_else(|| "stop".to_owned()),
+                    r.error_title.clone(),
+                )
+            })
+    })
+    .flatten()
+    .unwrap_or_else(|| ("stop".to_owned(), String::new()));
+    format!(
+        "{{\"style\":{},\"title\":{},\"text\":{}}}",
+        json_string(&style),
+        json_string(&title),
+        json_string(&out)
+    )
+}
+
+/// The input hint on a cell — Excel's "Input Message" — as JSON
+/// `{"title":…,"text":…}`, or `""` where the cell has none.
+///
+/// Shown when the cell is selected, which is the whole point of it: a rule that
+/// only speaks up after you have typed something wrong explains the constraint
+/// too late.
+#[wasm_bindgen]
+pub fn session_validation_prompt(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let rule = s
+            .workbook()
+            .sheets
+            .get(sheet)?
+            .validations
+            .iter()
+            .find(|v| v.covers(row, col))?;
+        if rule.prompt_title.is_empty() && rule.prompt_text.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{{\"title\":{},\"text\":{}}}",
+            json_string(&rule.prompt_title),
+            json_string(&rule.prompt_text)
+        ))
+    })
+    .flatten()
     .unwrap_or_default()
+}
+
+/// The wording and flags on the rule covering a cell, as JSON, or `""` when the
+/// cell has no rule. The panel loads this so editing a rule keeps the author's
+/// wording instead of blanking it on the next Apply.
+#[wasm_bindgen]
+pub fn session_validation_messages(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let r = s
+            .workbook()
+            .sheets
+            .get(sheet)?
+            .validations
+            .iter()
+            .find(|v| v.covers(row, col))?;
+        Some(format!(
+            "{{\"style\":{},\"errorTitle\":{},\"errorText\":{},\
+             \"promptTitle\":{},\"promptText\":{},\"hideDropdown\":{}}}",
+            json_string(r.error_style.as_deref().unwrap_or("stop")),
+            json_string(&r.error_title),
+            json_string(&r.error_text),
+            json_string(&r.prompt_title),
+            json_string(&r.prompt_text),
+            r.hide_dropdown,
+        ))
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// Set the messages and the dropdown flag on the rules covering a range,
+/// leaving the rule itself alone.
+///
+/// Separate from `session_set_validation` because they are separate decisions:
+/// Excel has an "Input Message" and an "Error Alert" tab precisely so wording
+/// can be changed without redefining what is allowed.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_set_validation_messages(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    style: &str,
+    titles: Vec<String>,
+    hide_dropdown: bool,
+) -> Result<(), JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    // `titles` is [error title, error text, prompt title, prompt text] — four
+    // strings of the same kind, which read worse as four positional arguments
+    // than as the list they are.
+    let get = |i: usize| titles.get(i).cloned().unwrap_or_default();
+    let (et, ex, pt, px) = (get(0), get(1), get(2), get(3));
+    let style = style.to_owned();
+    edit_sheet_metadata(sheet, move |_, data| {
+        for v in data.validations.iter_mut() {
+            if v.range.start.row <= rr1
+                && v.range.end.row >= rr0
+                && v.range.start.col <= cc1
+                && v.range.end.col >= cc0
+            {
+                // `stop` is the schema default, so writing it back as `None`
+                // keeps an untouched file byte-identical.
+                v.error_style = (!style.is_empty() && style != "stop").then(|| style.clone());
+                v.error_title = et.clone();
+                v.error_text = ex.clone();
+                v.prompt_title = pt.clone();
+                v.prompt_text = px.clone();
+                v.hide_dropdown = hide_dropdown;
+            }
+        }
+    })
 }
 
 /// Set a non-list validation over a range: `kind` and `op` are the OOXML tokens,
@@ -1355,6 +1492,123 @@ pub fn session_remove_table(sheet: usize, row: u32, col: u32) -> Result<(), JsEr
     })
 }
 
+/// The `SUBTOTAL` function number for a `totalsRowFunction` name.
+///
+/// The 10x codes ignore rows the filter has hidden, which is the whole point of
+/// a table total: filter to one region and the total follows. Excel writes the
+/// same codes.
+fn totals_subtotal_code(func: &str) -> Option<u32> {
+    Some(match func {
+        "average" => 101,
+        "count" => 103,
+        "countNums" => 102,
+        "max" => 104,
+        "min" => 105,
+        "stdDev" => 107,
+        "sum" => 109,
+        "var" => 110,
+        _ => return None,
+    })
+}
+
+/// Set a column's totals-row function, writing the formula the choice means.
+///
+/// Excel stores both: `totalsRowFunction="sum"` on the column *and* a real
+/// `SUBTOTAL(109, Table[Column])` in the cell. Recording only the attribute —
+/// which is all the model did — leaves the totals row blank on screen and in
+/// every other reader; writing only the formula loses the choice on save. The
+/// two go together, in one undo step, or an undo leaves them disagreeing.
+///
+/// `func` is an OOXML name (`sum`, `average`, `count`, `countNums`, `max`,
+/// `min`, `stdDev`, `var`) or empty to clear the cell back to nothing.
+#[wasm_bindgen]
+pub fn session_set_totals_function(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    func: &str,
+) -> Result<(), JsError> {
+    let func = func.to_owned();
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sh) = session.workbook().sheets.get(sheet).cloned() else {
+            return Ok(());
+        };
+        let Some(t) = sh.tables.iter().find(|t| {
+            row >= t.range.start.row
+                && row <= t.range.end.row
+                && col >= t.range.start.col
+                && col <= t.range.end.col
+        }) else {
+            return Ok(());
+        };
+        if t.totals_row_count == 0 {
+            return Err(JsError::new("this table has no totals row"));
+        }
+        let Some(index) = (col.checked_sub(t.range.start.col)).map(|i| i as usize) else {
+            return Ok(());
+        };
+        let Some(column) = t.columns.get(index) else {
+            return Ok(());
+        };
+        let at = CellRef::new(t.range.end.row, col);
+        // The structured reference, not an A1 range: inserting a row into the
+        // table has to widen the total, and only the name does that.
+        let text = match totals_subtotal_code(&func) {
+            Some(code) => format!("=SUBTOTAL({code},{}[{}])", t.name, column.name),
+            None => String::new(),
+        };
+
+        let mut data = SheetMetadata::capture(&sh);
+        if let Some(t) = table_at_mut(&mut data.tables, row, col)
+            && let Some(c) = t.columns.get_mut(index)
+        {
+            c.totals_row_function = (!func.is_empty()).then(|| func.clone());
+            // A label and a function are alternatives on the same cell: Excel
+            // writes one or the other, never both.
+            if !func.is_empty() {
+                c.totals_row_label = None;
+            }
+        }
+        let cell_op = build_set_op(session, sheet, at, &text);
+        session
+            .edit(EditOperation::Batch(vec![
+                EditOperation::SetSheetMetadata {
+                    sheet,
+                    data: Box::new(data),
+                },
+                cell_op,
+            ]))
+            .map_err(js)
+    })
+}
+
+/// The totals-row function on each column of the table under a cell, as a JSON
+/// array of names (empty string where a column has none).
+#[wasm_bindgen]
+pub fn session_totals_functions(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(t) = s.workbook().sheets.get(sheet).and_then(|sh| {
+            sh.tables.iter().find(|t| {
+                row >= t.range.start.row
+                    && row <= t.range.end.row
+                    && col >= t.range.start.col
+                    && col <= t.range.end.col
+            })
+        }) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = t
+            .columns
+            .iter()
+            .map(|c| json_string(c.totals_row_function.as_deref().unwrap_or_default()))
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
 /// Rename the table under a cell.
 ///
 /// A structured reference resolves by name alone, so the new name has to be
@@ -1491,24 +1745,70 @@ fn table_at_mut(tables: &mut [Table], row: u32, col: u32) -> Option<&mut Table> 
 /// Turn a table's totals row on or off, growing or shrinking its range.
 #[wasm_bindgen]
 pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Result<(), JsError> {
-    edit_sheet_metadata(sheet, move |_, data| {
-        if let Some(t) = data.tables.iter_mut().find(|t| {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sh) = session.workbook().sheets.get(sheet).cloned() else {
+            return Ok(());
+        };
+        let Some(t) = sh.tables.iter().find(|t| {
             row >= t.range.start.row
                 && row <= t.range.end.row
                 && col >= t.range.start.col
                 && col <= t.range.end.col
-        }) {
-            let had = t.totals_row_count;
+        }) else {
+            return Ok(());
+        };
+        if (t.totals_row_count > 0) == on {
+            return Ok(());
+        }
+        let first_col = t.range.start.col;
+        let last_col = t.range.end.col;
+        // Turning it on adds a row below; turning it off gives back the one it
+        // occupied, so the cells to write are on different rows in each case.
+        let totals_row = if on {
+            t.range.end.row + 1
+        } else {
+            t.range.end.row
+        };
+
+        let mut data = SheetMetadata::capture(&sh);
+        if let Some(t) = table_at_mut(&mut data.tables, row, col) {
             t.totals_row_count = u32::from(on);
             // The totals row is *inside* the table's range, so switching it
             // must move the bottom edge — leaving the range alone would make
             // the last data row read as the totals row.
-            match (had, t.totals_row_count) {
-                (0, 1) => t.range.end.row += 1,
-                (1, 0) => t.range.end.row = t.range.end.row.saturating_sub(1),
-                _ => {}
+            if on {
+                t.range.end.row += 1;
+            } else {
+                t.range.end.row = t.range.end.row.saturating_sub(1);
+            }
+            if let Some(c) = t.columns.first_mut() {
+                // Excel labels the first column "Total" and leaves the rest for
+                // the user to choose a function for.
+                c.totals_row_label = on.then(|| "Total".to_owned());
+            }
+            if !on {
+                for c in t.columns.iter_mut() {
+                    c.totals_row_function = None;
+                    c.totals_row_label = None;
+                }
             }
         }
+
+        let mut ops = vec![EditOperation::SetSheetMetadata {
+            sheet,
+            data: Box::new(data),
+        }];
+        // Turning the row off has to clear what it held: the range shrinks but
+        // the cells do not move, so a stale "Total" would be left sitting under
+        // the table looking like data.
+        for c in first_col..=last_col {
+            let at = CellRef::new(totals_row, c);
+            let text = if on && c == first_col { "Total" } else { "" };
+            ops.push(build_set_op(session, sheet, at, text));
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)
     })
 }
 
@@ -1587,12 +1887,16 @@ fn table_json(workbook: &Workbook, t: &Table) -> String {
     };
     let style = t.style.get("name").map(String::as_str).unwrap_or_default();
     let c = table_style_colors(workbook, style);
+    // The column names as the model holds them, which is what a structured
+    // reference resolves against — not the header cells' display text, which
+    // can differ once a header is edited.
+    let cols: Vec<String> = t.columns.iter().map(|c| json_string(&c.name)).collect();
     format!(
         "{{\"name\":{},\"style\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\
          \"headers\":{},\"totals\":{},\"stripes\":{},\"colStripes\":{},\
          \"firstCol\":{},\"lastCol\":{},\
          \"headerFill\":{},\"headerText\":{},\"bodyFill\":{},\"bodyText\":{},\
-         \"bandFill\":{},\"border\":{}}}",
+         \"bandFill\":{},\"border\":{},\"cols\":[{}]}}",
         json_string(&t.name),
         json_string(style),
         t.range.start.row,
@@ -1611,6 +1915,7 @@ fn table_json(workbook: &Workbook, t: &Table) -> String {
         json_string(&c.body_text),
         json_string(&c.band_fill),
         json_string(&c.border),
+        cols.join(","),
     )
 }
 

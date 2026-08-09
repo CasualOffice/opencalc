@@ -1634,6 +1634,12 @@ function draw() {
     }
   }
 
+  // The rule's input hint, shown while its cell is selected — Excel's "Input
+  // Message". A constraint explained only after you have typed something wrong
+  // is explained too late, and the wording was being carried through every save
+  // without ever being shown.
+  refreshValidationPrompt();
+
   // Error indicators — a small marker in the top-left of any cell holding an
   // error value, so a broken formula is findable by eye instead of only by
   // reading every cell. Hovering explains it (see the mousemove handler).
@@ -2175,14 +2181,31 @@ function commit(value, advance) {
   // dropdown was previously a suggestion — anything typed over it was accepted,
   // which is the opposite of what a validation is for. Gated on typed entry
   // only, as in Excel: fill and paste are not checked.
+  let advisory = "";
   if (!value.trim().startsWith("=")) {
     let bad = "";
     try { bad = wasm.session_validation_error(state.sheet, state.sel.row, state.sel.col, value); }
     catch {}
     if (bad) {
-      status.innerHTML = `<span class="err">Not allowed here — ${bad}</span>`;
-      if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
-      return false;
+      let alert = { style: "stop", title: "", text: bad };
+      try { alert = JSON.parse(bad); } catch {}
+      const label = alert.title ? `${alert.title} — ${alert.text}` : alert.text;
+      // Only `stop` refuses. `warning` lets the value through after a
+      // confirmation and `information` merely says so — the author chose which,
+      // and blocking all three leaves no way past an advisory rule.
+      if (alert.style === "stop") {
+        statusError(`Not allowed here — ${label}`);
+        if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+        return false;
+      }
+      // `warning` and `information` both let the value through. Excel asks
+      // "continue?" for a warning; this reports it instead, because the commit
+      // path is synchronous and cannot await a dialog. Accepting with a visible
+      // message is the same outcome as answering yes, and the edit is undoable.
+      //
+      // Held until after the commit: the success path ends with "ok", which
+      // would otherwise wipe the only sign the value broke a rule.
+      advisory = label;
     }
   }
   // Reject an unparseable formula instead of silently storing it as text —
@@ -2195,7 +2218,7 @@ function commit(value, advance) {
       // bar — never silently store an unparseable formula as literal text. The
       // red outline and the refocus land on whichever surface was being typed
       // in, so the formula bar reports its own errors like the cell does.
-      status.innerHTML = `<span class="err">Formula error: ${friendlyFormulaError(err)}</span>`;
+      statusError(`Formula error: ${friendlyFormulaError(err)}`);
       if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
       return false;
     }
@@ -2213,7 +2236,8 @@ function commit(value, advance) {
     // A table grows to take in a value typed just below or beside it. Done
     // after the value lands so the engine sees the cell it is growing for.
     try { wasm.session_table_autoexpand(state.sheet, state.sel.row, state.sel.col); } catch {}
-    status.textContent = "ok";
+    if (advisory) statusError(advisory);
+    else status.textContent = "ok";
   } catch (e) {
     status.textContent = `error: ${e}`;
   }
@@ -3972,6 +3996,36 @@ function buildTablePanel(body) {
   check("Last column", !!t.lastCol, (on) => applyTableStyle({ lastCol: on }));
   body.appendChild(checks);
 
+  // One picker per column, only while there is a totals row to put a result
+  // in. Choosing a function writes the SUBTOTAL the choice means — recording
+  // the choice alone leaves the row blank here and in Excel.
+  if (t.totals > 0) {
+    panelLabel(body, "Totals row");
+    let funcs = [];
+    try {
+      funcs = JSON.parse(wasm.session_totals_functions(state.sheet, at().r, at().c));
+    } catch {}
+    const grid = el("div", "oc-totals-grid");
+    for (let c = t.c0; c <= t.c1; c++) {
+      const i = c - t.c0;
+      const lab = el("span", "oc-totals-col", (t.cols && t.cols[i]) || A1(t.r0, c));
+      const sel = el("select", "panel-select");
+      for (const [label, id] of TOTALS_FUNCTIONS) {
+        const o = document.createElement("option");
+        o.value = id;
+        o.textContent = label;
+        if (id === (funcs[i] || "")) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        tryEdit(() => wasm.session_set_totals_function(state.sheet, t.r1, c, sel.value));
+        refreshTablePanel();
+      });
+      grid.append(lab, sel);
+    }
+    body.appendChild(grid);
+  }
+
   const row = el("div", "panel-actions");
   const rm = el("button", "panel-btn-ghost", "Convert to range");
   rm.addEventListener("click", async () => {
@@ -4123,6 +4177,18 @@ function buildDvPanel(body) {
   body.append(inp, listHint, opSel, f1, f2, customHint);
 
   panelLabel(body, "If the value is rejected");
+  // `stop` is the only style that actually refuses the entry; the other two
+  // let the value through. Carrying the attribute without offering it turned
+  // every advisory rule in an opened file into a hard block.
+  const styleSel = el("select", "panel-select");
+  for (const [v, t] of [
+    ["stop", "Stop — refuse the value"],
+    ["warning", "Warning — allow, but say so"],
+    ["information", "Information — allow, with a note"],
+  ]) { const o = el("option", null, t); o.value = v; styleSel.appendChild(o); }
+  const errTitle = el("input", "panel-field");
+  errTitle.placeholder = "Title (optional)";
+  errTitle.spellcheck = false;
   const msg = el("input", "panel-field");
   msg.placeholder = "Optional message";
   msg.spellcheck = false;
@@ -4131,7 +4197,35 @@ function buildDvPanel(body) {
   blank.type = "checkbox";
   blank.checked = true;
   blankWrap.append(blank, document.createTextNode(" allow an empty cell"));
-  body.append(msg, blankWrap);
+  const hideWrap = el("label", "panel-check");
+  const hideDrop = document.createElement("input");
+  hideDrop.type = "checkbox";
+  hideWrap.append(hideDrop, document.createTextNode(" no in-cell dropdown"));
+  body.append(styleSel, errTitle, msg, blankWrap, hideWrap);
+
+  panelLabel(body, "Hint shown when the cell is selected");
+  const promptTitle = el("input", "panel-field");
+  promptTitle.placeholder = "Title (optional)";
+  promptTitle.spellcheck = false;
+  const promptText = el("input", "panel-field");
+  promptText.placeholder = "e.g. Pick a region from the list";
+  promptText.spellcheck = false;
+  body.append(promptTitle, promptText);
+
+  // Load whatever the cell's existing rule says, so the panel edits the rule
+  // rather than silently replacing its wording with blanks on Apply.
+  try {
+    const j = wasm.session_validation_messages(state.sheet, s0.r0, s0.c0);
+    if (j) {
+      const m = JSON.parse(j);
+      styleSel.value = m.style || "stop";
+      errTitle.value = m.errorTitle || "";
+      msg.value = m.errorText || "";
+      promptTitle.value = m.promptTitle || "";
+      promptText.value = m.promptText || "";
+      hideDrop.checked = !!m.hideDropdown;
+    }
+  } catch {}
 
   const sync = () => {
     const k = kindSel.value;
@@ -4165,6 +4259,13 @@ function buildDvPanel(body) {
             state.sheet, s.r0, s.c0, s.r1, s.c1,
             kindSel.value, opSel.value, f1.value, f2.value, blank.checked, msg.value);
         }
+        // Wording and the dropdown flag are a second write over the rule just
+        // created, so the list path gets them too — it takes no message
+        // arguments of its own.
+        wasm.session_set_validation_messages(
+          state.sheet, s.r0, s.c0, s.r1, s.c1, styleSel.value,
+          [errTitle.value, msg.value, promptTitle.value, promptText.value],
+          hideDrop.checked);
       } catch (e) { status.textContent = `error: ${e}`; }
       draw();
     },
@@ -4510,6 +4611,20 @@ function followHyperlink(row, col) {
 // The style names offered in the picker. A small, representative set rather
 // than all sixty Excel ships: every family, and the six accents inside the
 // family people actually use.
+// Excel's totals-row functions. Each writes SUBTOTAL with the matching 10x
+// code, so the total follows the filter rather than counting hidden rows.
+const TOTALS_FUNCTIONS = [
+  ["None", ""],
+  ["Sum", "sum"],
+  ["Average", "average"],
+  ["Count", "count"],
+  ["Count numbers", "countNums"],
+  ["Max", "max"],
+  ["Min", "min"],
+  ["Std dev", "stdDev"],
+  ["Var", "var"],
+];
+
 const TABLE_STYLES = [
   ["None", ""],
   ["Light blue", "TableStyleLight2"],
@@ -6644,6 +6759,44 @@ function positionMenu(menu, x, y) {
   menu.style.left = (x + w > window.innerWidth ? Math.max(4, x - w) : x) + "px";
   menu.style.visibility = "visible";
   setTimeout(() => document.addEventListener("click", closeSheetMenu, { once: true }), 0);
+}
+
+// Show or hide the selected cell's data-validation input hint.
+//
+// A tooltip pinned under the cell rather than a status-bar line: it belongs to
+// the cell, and it has to survive the status bar being used for something else.
+function refreshValidationPrompt() {
+  const box = document.getElementById("dv-prompt");
+  if (!box) return;
+  let hint = "";
+  try {
+    hint = wasm ? wasm.session_validation_prompt(state.sheet, state.sel.row, state.sel.col) : "";
+  } catch {}
+  if (!hint || state.selKind !== "cells") { box.hidden = true; return; }
+  let p;
+  try { p = JSON.parse(hint); } catch { box.hidden = true; return; }
+  box.textContent = "";
+  if (p.title) box.appendChild(el("strong", null, p.title));
+  if (p.text) box.appendChild(el("span", null, p.text));
+  const x = colXAt(state.sel.col), y = rowYAt(state.sel.row);
+  if (x === undefined || y === undefined) { box.hidden = true; return; }
+  const rect = canvas.getBoundingClientRect();
+  box.style.left = `${rect.left + x}px`;
+  box.style.top = `${rect.top + y + rowHAt(state.sel.row) + 4}px`;
+  box.hidden = false;
+}
+
+// Put a message in the status bar as an error, without going through innerHTML.
+//
+// The wording can come from the file — a data-validation rule carries the
+// author's own text — so interpolating it into markup would let a workbook
+// inject nodes into the page.
+function statusError(text) {
+  status.textContent = "";
+  const span = document.createElement("span");
+  span.className = "err";
+  span.textContent = text;
+  status.appendChild(span);
 }
 
 function tryEdit(fn) {
