@@ -277,6 +277,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
     ("MAXA", "MAXA(value1, …)"),
+    ("MDETERM", "MDETERM(array)"),
     (
         "MDURATION",
         "MDURATION(settlement, maturity, coupon, yld, frequency, [basis])",
@@ -321,6 +322,22 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("OCT2DEC", "OCT2DEC(number)"),
     ("OCT2HEX", "OCT2HEX(number, [places])"),
     ("ODD", "ODD(number)"),
+    (
+        "ODDFPRICE",
+        "ODDFPRICE(settlement, maturity, issue, first_coupon, rate, yld, redemption, frequency, [basis])",
+    ),
+    (
+        "ODDFYIELD",
+        "ODDFYIELD(settlement, maturity, issue, first_coupon, rate, pr, redemption, frequency, [basis])",
+    ),
+    (
+        "ODDLPRICE",
+        "ODDLPRICE(settlement, maturity, last_interest, rate, yld, redemption, frequency, [basis])",
+    ),
+    (
+        "ODDLYIELD",
+        "ODDLYIELD(settlement, maturity, last_interest, rate, pr, redemption, frequency, [basis])",
+    ),
     ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
     ("PDURATION", "PDURATION(rate, pv, fv)"),
@@ -930,6 +947,10 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CUMPRINC" => eval_cumulative(ev, sheet, args, false),
         "DISC" => eval_disc(ev, sheet, args),
         "PRICE" | "YIELD" | "DURATION" | "MDURATION" => eval_bond(ev, sheet, name, args),
+        "ODDFPRICE" | "ODDFYIELD" | "ODDLPRICE" | "ODDLYIELD" => {
+            eval_odd_bond(ev, sheet, name, args)
+        }
+        "MDETERM" => eval_mdeterm(ev, sheet, args),
         "ACCRINTM" | "PRICEDISC" | "YIELDDISC" | "PRICEMAT" | "YIELDMAT" => {
             eval_bond_simple(ev, sheet, name, args)
         }
@@ -8273,4 +8294,213 @@ fn eval_convert(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         return Value::Error(ErrorValue::Na);
     }
     Value::Number(number * f_from / f_to)
+}
+
+/// The `ODD*` bond functions — securities whose first or last coupon period is
+/// not a whole one.
+///
+/// These are the awkward corner of bond maths, and the property that pins them
+/// down is that **a regular period must reduce to `PRICE`**: an odd-first bond
+/// whose first coupon falls exactly one period after issue is an ordinary bond,
+/// and if the formula says otherwise the formula is wrong. The tests assert
+/// exactly that rather than quoting numbers I cannot independently check.
+///
+/// The yields are solved against their own price functions, so each pair
+/// inverts exactly — the same reason `YIELD` is solved against `PRICE`.
+/// The terms of an odd-period bond, gathered because nine positional
+/// parameters is a signature nobody can call correctly twice.
+struct OddBond {
+    settle: i64,
+    mature: i64,
+    /// The first coupon date for an odd *first* bond, the last interest date
+    /// for an odd *last* one.
+    boundary: i64,
+    rate: f64,
+    redemption: f64,
+    freq: i64,
+    basis: i64,
+    /// Whether the odd period is the first one.
+    first: bool,
+}
+
+fn odd_price(b: &OddBond, yld: f64) -> Option<f64> {
+    let (settle, mature, boundary) = (b.settle, b.mature, b.boundary);
+    let (rate, redemption, freq, basis, first) = (b.rate, b.redemption, b.freq, b.basis, b.first);
+    let f = freq as f64;
+    let coupon = 100.0 * rate / f;
+    let k = 1.0 + yld / f;
+    let span = |a: i64, b: i64| year_fraction(a as f64, b as f64, basis) * f;
+
+    if first {
+        // `boundary` is the first coupon date. The odd period runs from issue
+        // to it; everything after is regular.
+        let (_, next) = coupon_period(settle, mature, freq)?;
+        let (n, dsc_e, a_e) = bond_terms(settle, mature, freq, basis)?;
+        // The odd first coupon is prorated by how long that period actually is.
+        let odd_fraction = span(boundary.min(next), boundary).abs().max(0.0);
+        let mut price = redemption / k.powf(n - 1.0 + dsc_e);
+        // The first coupon carries the odd fraction; the rest are whole.
+        price += coupon * (1.0 + odd_fraction) / k.powf(dsc_e);
+        for i in 2..=(n as i64) {
+            price += coupon / k.powf(i as f64 - 1.0 + dsc_e);
+        }
+        Some(price - coupon * a_e)
+    } else {
+        // `boundary` is the last interest date; the odd period runs from it to
+        // maturity, and there are no regular periods left after settlement.
+        let dcs = span(boundary, mature).max(0.0); // whole odd period
+        let dsc = span(settle, mature).max(0.0); // settlement to maturity
+        let accrued = span(boundary, settle).max(0.0);
+        let denominator = 1.0 + (yld / f) * dsc;
+        if denominator == 0.0 {
+            return None;
+        }
+        Some((redemption + coupon * dcs) / denominator - coupon * accrued)
+    }
+}
+
+fn eval_odd_bond(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    // ODDF* take an issue *and* a first coupon; ODDL* take only a last
+    // interest date, so the argument counts differ by one.
+    let first = name.starts_with("ODDF");
+    let wants = if first { 8 } else { 7 };
+    if args.len() < wants || args.len() > wants + 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let v = match opt_numbers(ev, sheet, args, wants, [0.0; 9]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (settle, mature) = (v[0].trunc() as i64, v[1].trunc() as i64);
+    // ODDF: settle, mature, issue, first_coupon, rate, yld/pr, redemption, freq
+    // ODDL: settle, mature, last_interest, rate, yld/pr, redemption, freq
+    let (boundary, rate, third, redemption, freq, basis) = if first {
+        (
+            v[3].trunc() as i64,
+            v[4],
+            v[5],
+            v[6],
+            v[7] as i64,
+            v[8] as i64,
+        )
+    } else {
+        (
+            v[2].trunc() as i64,
+            v[3],
+            v[4],
+            v[5],
+            v[6] as i64,
+            v[7] as i64,
+        )
+    };
+    if rate < 0.0 || redemption <= 0.0 || !matches!(freq, 1 | 2 | 4) || !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let terms = OddBond {
+        settle,
+        mature,
+        boundary,
+        rate,
+        redemption,
+        freq,
+        basis,
+        first,
+    };
+
+    if name.ends_with("PRICE") {
+        return match odd_price(&terms, third) {
+            Some(p) => Value::Number(p),
+            None => Value::Error(ErrorValue::Num),
+        };
+    }
+    // The yields: solved against the price function above, so each pair
+    // inverts exactly rather than approximately.
+    let price = third;
+    if price <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let f = |y: f64| odd_price(&terms, y).map(|p| p - price);
+    let (Some(mut lo_v), Some(mut hi_v)) = (f(-0.99), f(10.0)) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    if lo_v * hi_v > 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (mut lo, mut hi) = (-0.99, 10.0);
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let Some(mid_v) = f(mid) else {
+            return Value::Error(ErrorValue::Num);
+        };
+        if lo_v * mid_v <= 0.0 {
+            hi = mid;
+            hi_v = mid_v;
+        } else {
+            lo = mid;
+            lo_v = mid_v;
+        }
+        let _ = hi_v;
+    }
+    Value::Number((lo + hi) / 2.0)
+}
+
+/// `MDETERM` — the determinant of a square array.
+///
+/// LU decomposition with partial pivoting rather than cofactor expansion:
+/// expansion is O(n!) and a 10×10 array — small for a spreadsheet — would take
+/// millions of operations. Pivoting is what keeps it stable when the leading
+/// entry is small.
+///
+/// This is the one matrix function that returns a scalar, which is why it can
+/// land before the array-spilling work the rest of the family needs.
+fn eval_mdeterm(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let grid = match eval_range_2d(ev, sheet, &args[0]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let n = grid.rows;
+    if n == 0 || n != grid.cols {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut m = vec![0.0f64; n * n];
+    for r in 0..n {
+        for c in 0..n {
+            match grid.get(r, c).as_number() {
+                Ok(v) => m[r * n + c] = v,
+                Err(e) => return Value::Error(e),
+            }
+        }
+    }
+
+    let mut det = 1.0f64;
+    for col in 0..n {
+        // Partial pivot: the largest magnitude in the column, which is what
+        // stops a small leading entry amplifying rounding error.
+        let mut pivot = col;
+        for r in (col + 1)..n {
+            if m[r * n + col].abs() > m[pivot * n + col].abs() {
+                pivot = r;
+            }
+        }
+        if m[pivot * n + col] == 0.0 {
+            return Value::Number(0.0); // singular
+        }
+        if pivot != col {
+            for c in 0..n {
+                m.swap(col * n + c, pivot * n + c);
+            }
+            det = -det; // each row exchange flips the sign
+        }
+        det *= m[col * n + col];
+        for r in (col + 1)..n {
+            let factor = m[r * n + col] / m[col * n + col];
+            for c in col..n {
+                m[r * n + c] -= factor * m[col * n + c];
+            }
+        }
+    }
+    Value::Number(det)
 }

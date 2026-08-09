@@ -3101,3 +3101,107 @@ fn convert_handles_temperature_offsets() {
         CellValue::Error(casual_calc_model::ErrorValue::Na)
     );
 }
+
+/// The property that pins the odd-period bonds down: a bond whose "odd" period
+/// is actually regular is an ordinary bond, so `ODDLPRICE` must agree with
+/// `PRICE`. Asserting that beats quoting numbers I cannot independently check.
+#[test]
+fn an_odd_period_that_is_regular_prices_like_an_ordinary_bond() {
+    let mut b = Builder::new();
+    // Settlement 2024-02-15, maturity 2024-11-15, last interest 2024-05-15 —
+    // one regular semi-annual period from last interest to maturity.
+    b.formula(
+        (0, 0),
+        "ODDLPRICE(DATE(2024,8,15),DATE(2025,2,15),DATE(2024,8,15),0.06,0.06,100,2,0)",
+    );
+    // A par bond: coupon equal to yield prices at 100 whatever the schedule.
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let CellValue::Number(p) = value_at(&wb, 0, 0) else {
+        panic!("expected a price: {:?}", value_at(&wb, 0, 0));
+    };
+    assert!(
+        (p - 100.0).abs() < 1e-6,
+        "coupon equal to yield prices at par: {p}"
+    );
+}
+
+/// Each odd yield is solved against its own price function, so the pairs invert
+/// exactly rather than approximately.
+#[test]
+fn odd_bond_yields_invert_their_prices() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "ODDLPRICE(DATE(2024,8,15),DATE(2025,2,15),DATE(2024,5,15),0.06,0.075,100,2,0)",
+    );
+    b.formula(
+        (1, 0),
+        "ODDLYIELD(DATE(2024,8,15),DATE(2025,2,15),DATE(2024,5,15),0.06,A1,100,2,0)",
+    );
+    b.formula(
+        (2, 0),
+        "ODDFPRICE(DATE(2024,3,1),DATE(2029,1,1),DATE(2024,1,1),DATE(2024,7,1),0.06,0.07,100,2,0)",
+    );
+    b.formula(
+        (3, 0),
+        "ODDFYIELD(DATE(2024,3,1),DATE(2029,1,1),DATE(2024,1,1),DATE(2024,7,1),0.06,A3,100,2,0)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!(n(0) > 50.0 && n(0) < 150.0, "a plausible price: {}", n(0));
+    assert!((n(1) - 0.075).abs() < 1e-6, "ODDLYIELD inverts: {}", n(1));
+    assert!(n(2) > 50.0 && n(2) < 150.0, "a plausible price: {}", n(2));
+    assert!((n(3) - 0.07).abs() < 1e-6, "ODDFYIELD inverts: {}", n(3));
+}
+
+/// `MDETERM` by LU with partial pivoting — cofactor expansion is O(n!), and a
+/// 10×10 array is small for a spreadsheet but millions of operations that way.
+#[test]
+fn mdeterm_computes_determinants_and_detects_singularity() {
+    let mut b = Builder::new();
+    // A 3×3 with a known determinant of 1.
+    b.number((0, 0), 2.0)
+        .number((0, 1), -1.0)
+        .number((0, 2), 0.0);
+    b.number((1, 0), -1.0)
+        .number((1, 1), 2.0)
+        .number((1, 2), -1.0);
+    b.number((2, 0), 0.0)
+        .number((2, 1), -1.0)
+        .number((2, 2), 2.0);
+    // A singular matrix: the second row is twice the first.
+    b.number((4, 0), 1.0).number((4, 1), 2.0);
+    b.number((5, 0), 2.0).number((5, 1), 4.0);
+    // A leading zero forces a pivot swap, which must flip the sign.
+    b.number((7, 0), 0.0).number((7, 1), 1.0);
+    b.number((8, 0), 1.0).number((8, 1), 0.0);
+
+    b.formula((0, 4), "MDETERM(A1:C3)");
+    b.formula((1, 4), "MDETERM(A5:B6)");
+    b.formula((2, 4), "MDETERM(A8:B9)");
+    // Not square: a determinant is undefined.
+    b.formula((3, 4), "MDETERM(A1:B3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 4) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 4.0).abs() < 1e-9, "3x3 determinant: {}", n(0));
+    assert!(n(1).abs() < 1e-9, "a singular matrix is zero: {}", n(1));
+    assert!(
+        (n(2) + 1.0).abs() < 1e-9,
+        "the row swap flips the sign: {}",
+        n(2)
+    );
+    assert_eq!(
+        value_at(&wb, 3, 4),
+        CellValue::Error(casual_calc_model::ErrorValue::Value),
+        "a non-square array has no determinant"
+    );
+}
