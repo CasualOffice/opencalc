@@ -21,12 +21,24 @@ const MAX_RANGE_CELLS: u64 = 2_000_000;
 pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ABS", "ABS(number)"),
     (
+        "ACCRINT",
+        "ACCRINT(issue, first_interest, settlement, rate, par, frequency, [basis], [calc_method])",
+    ),
+    (
         "ACCRINTM",
         "ACCRINTM(issue, settlement, rate, par, [basis])",
     ),
     ("ACOS", "ACOS(number)"),
     ("ACOSH", "ACOSH(number)"),
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
+    (
+        "AMORDEGRC",
+        "AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
+    ),
+    (
+        "AMORLINC",
+        "AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
+    ),
     ("AND", "AND(logical1, …)"),
     ("AREAS", "AREAS(reference)"),
     ("ASC", "ASC(text)"),
@@ -428,6 +440,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("VARA", "VARA(value1, …)"),
     ("VARP", "VARP(number1, …)"),
     ("VARPA", "VARPA(value1, …)"),
+    (
+        "VDB",
+        "VDB(cost, salvage, life, start_period, end_period, [factor], [no_switch])",
+    ),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
@@ -805,6 +821,10 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SYD" => eval_syd(ev, sheet, args),
         "DB" => eval_db(ev, sheet, args),
         "DDB" => eval_ddb(ev, sheet, args),
+        "VDB" => eval_vdb(ev, sheet, args),
+        "ACCRINT" => eval_accrint(ev, sheet, args),
+        "AMORLINC" => eval_amor(ev, sheet, args, false),
+        "AMORDEGRC" => eval_amor(ev, sheet, args, true),
         // Rate conversions.
         "EFFECT" => eval_effect(ev, sheet, args, true),
         "NOMINAL" => eval_effect(ev, sheet, args, false),
@@ -7679,4 +7699,160 @@ fn eval_bessel(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) 
     } else {
         Value::Error(ErrorValue::Num)
     }
+}
+
+/// `VDB` — declining-balance depreciation over an arbitrary span of periods,
+/// switching to straight line once that gives more.
+///
+/// The switch is the whole point of the function and the thing `DDB` lacks:
+/// declining balance never reaches the salvage value, so an asset depreciated
+/// purely that way is still on the books at the end of its life. `no_switch`
+/// turns it off for the jurisdictions that require pure declining balance.
+///
+/// Partial periods are handled by prorating the first and last, which is why
+/// `start_period` and `end_period` are floats rather than counts.
+fn eval_vdb(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 5 || args.len() > 7 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let v = match opt_numbers(ev, sheet, args, 5, [0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (cost, salvage, life, start, end, factor) = (v[0], v[1], v[2], v[3], v[4], v[5]);
+    let no_switch = v[6] != 0.0;
+    if cost < 0.0 || salvage < 0.0 || life <= 0.0 || start < 0.0 || end < start || factor <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+
+    // Depreciation for one whole period index, given what is already written
+    // off. Straight line is measured over the periods *remaining*, which is
+    // what makes the two curves cross rather than run parallel.
+    let period_amount = |index: f64, accumulated: f64| -> f64 {
+        let book = cost - accumulated;
+        let declining = (book * factor / life).min(book - salvage).max(0.0);
+        if no_switch {
+            return declining;
+        }
+        let remaining = life - index;
+        let straight = if remaining > 0.0 {
+            ((book - salvage) / remaining).max(0.0)
+        } else {
+            (book - salvage).max(0.0)
+        };
+        declining.max(straight).min((book - salvage).max(0.0))
+    };
+
+    // Walk whole periods, accumulating, and take the fraction of the first and
+    // last that the requested span actually covers.
+    let mut accumulated = 0.0;
+    let mut total = 0.0;
+    let last = end.ceil() as i64;
+    for i in 0..last.max(0) {
+        let idx = i as f64;
+        let amount = period_amount(idx, accumulated);
+        // How much of this period lies inside [start, end].
+        let overlap = (end.min(idx + 1.0) - start.max(idx)).clamp(0.0, 1.0);
+        total += amount * overlap;
+        accumulated += amount;
+    }
+    Value::Number(total)
+}
+
+/// `ACCRINT` — interest accrued on a security that pays periodically.
+///
+/// `calc_method` decides where accrual starts: `TRUE` (the default) from
+/// **issue**, `FALSE` from the first interest date. The difference matters
+/// exactly when settlement is past the first coupon, which is when anyone
+/// bothers to pass the argument.
+fn eval_accrint(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 6 || args.len() > 8 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let v = match opt_numbers(ev, sheet, args, 6, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (issue, first, settle, rate, par, freq) = (v[0], v[1], v[2], v[3], v[4], v[5]);
+    let basis = v[6] as i64;
+    let from_issue = v[7] != 0.0;
+    if rate <= 0.0 || par <= 0.0 || !matches!(freq as i64, 1 | 2 | 4) || !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let start = if from_issue { issue } else { first.max(issue) };
+    if settle <= start {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(par * rate * year_fraction(start, settle, basis))
+}
+
+/// `AMORLINC` and `AMORDEGRC` — the French depreciation systems.
+///
+/// Both prorate the first period from the purchase date to the end of the first
+/// accounting period, which is why they take dates where the other
+/// depreciation functions take counts. `AMORDEGRC` additionally applies a
+/// coefficient set by the asset's life, and forces 50% then 100% in the last
+/// two periods — a rule of the tax code rather than of arithmetic, which is
+/// why it cannot be derived and has to be written down.
+fn eval_amor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], degressive: bool) -> Value {
+    if args.len() < 6 || args.len() > 7 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let v = match opt_numbers(ev, sheet, args, 6, [0.0; 7]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (cost, purchased, first_period, salvage, period, rate) =
+        (v[0], v[1], v[2], v[3], v[4], v[5]);
+    let basis = v[6] as i64;
+    if cost <= 0.0 || rate <= 0.0 || salvage < 0.0 || period < 0.0 || !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let life = 1.0 / rate;
+    let coefficient = if !degressive {
+        1.0
+    } else {
+        // The coefficients are fixed by the life in years, not computed.
+        match life {
+            l if l < 3.0 => 1.0,
+            l if l <= 4.0 => 1.5,
+            l if l <= 5.0 => 2.0,
+            _ => 2.5,
+        }
+    };
+    let effective_rate = rate * coefficient;
+    // The first period runs from purchase to the end of the first accounting
+    // period, so it is a fraction of a year rather than a whole one.
+    let first_fraction = year_fraction(purchased, first_period, basis);
+    let mut book = cost;
+    let mut amount = (cost * effective_rate * first_fraction).round();
+    if period == 0.0 {
+        return Value::Number(amount.min(cost - salvage).max(0.0));
+    }
+    book -= amount;
+    for p in 1..=(period as i64) {
+        let remaining_life = life - first_fraction - (p - 1) as f64;
+        amount = if !degressive {
+            // AMORLINC is *linear*: every full period writes off the same
+            // `cost × rate`. Applying the rate to the declining book instead
+            // makes it degressive, which is the other function.
+            cost * rate
+        } else if remaining_life <= 2.0 {
+            // The last two periods are forced: half, then whatever is left. A
+            // rule of the tax code rather than of arithmetic.
+            if remaining_life <= 1.0 {
+                book - salvage
+            } else {
+                (book - salvage) / 2.0
+            }
+        } else {
+            book * effective_rate
+        };
+        amount = amount.min((book - salvage).max(0.0)).max(0.0);
+        if p as f64 == period {
+            return Value::Number(amount);
+        }
+        book -= amount;
+    }
+    Value::Number(0.0)
 }

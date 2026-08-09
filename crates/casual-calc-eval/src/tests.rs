@@ -2841,3 +2841,111 @@ fn every_dispatched_function_is_in_the_catalog() {
         "dispatched but not in the catalog: {missing:?}"
     );
 }
+
+/// `VDB`'s switch to straight line is the whole point of it: declining balance
+/// never reaches the salvage value, so an asset depreciated purely that way is
+/// still on the books at the end of its life.
+#[test]
+fn vdb_switches_to_straight_line_unless_told_not_to() {
+    let mut b = Builder::new();
+    // Whole life, switching allowed: everything above salvage is written off.
+    b.formula((0, 0), "VDB(10000,1000,5,0,5)");
+    // The switch shows in the *later* periods, not in the lifetime total:
+    // declining balance is already clamped at salvage, so both reach 9000 over
+    // a full life. It also needs a life long enough for straight line to
+    // overtake — over five years at factor 2 it never does, so this uses ten.
+    b.formula((1, 0), "VDB(10000,0,10,7,8)");
+    b.formula((4, 0), "VDB(10000,0,10,7,8,2,TRUE)");
+    // A partial span prorates its end periods.
+    b.formula((2, 0), "VDB(10000,1000,5,0,1)");
+    b.formula((3, 0), "VDB(10000,1000,5,0,0.5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!(
+        (n(0) - 9000.0).abs() < 1e-6,
+        "full life reaches salvage: {}",
+        n(0)
+    );
+    assert!(
+        n(1) > n(4),
+        "switching writes off more in a late period: {} vs {}",
+        n(1),
+        n(4)
+    );
+    // First year at double declining on 10000 over 5 years.
+    assert!((n(2) - 4000.0).abs() < 1e-6, "first period: {}", n(2));
+    assert!((n(3) - 2000.0).abs() < 1e-6, "half of it: {}", n(3));
+}
+
+/// `ACCRINT`'s `calc_method` decides whether interest accrues from issue or
+/// from the first interest date — a difference that only shows once settlement
+/// is past the first coupon, which is when anyone passes the argument.
+#[test]
+fn accrint_calc_method_moves_the_accrual_start() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "ACCRINT(DATE(2024,1,1),DATE(2024,7,1),DATE(2024,10,1),0.06,1000,2,0,TRUE)",
+    );
+    b.formula(
+        (1, 0),
+        "ACCRINT(DATE(2024,1,1),DATE(2024,7,1),DATE(2024,10,1),0.06,1000,2,0,FALSE)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // Nine months at 6% on 1000, 30/360.
+    assert!((n(0) - 45.0).abs() < 1e-9, "from issue: {}", n(0));
+    // Three months, from the first interest date instead.
+    assert!((n(1) - 15.0).abs() < 1e-9, "from first interest: {}", n(1));
+}
+
+/// The French systems prorate their first period from the purchase date, which
+/// is why they take dates where the other depreciation functions take counts.
+#[test]
+fn french_depreciation_prorates_the_first_period() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "AMORLINC(2400,DATE(2024,8,19),DATE(2024,12,31),300,0,0.15,1)",
+    );
+    b.formula(
+        (1, 0),
+        "AMORLINC(2400,DATE(2024,8,19),DATE(2024,12,31),300,1,0.15,1)",
+    );
+    b.formula(
+        (2, 0),
+        "AMORDEGRC(2400,DATE(2024,8,19),DATE(2024,12,31),300,0,0.15,1)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // A part-year at 15% of 2400 — less than a full period's 360.
+    assert!(
+        n(0) > 0.0 && n(0) < 360.0,
+        "first period is partial: {}",
+        n(0)
+    );
+    assert!(
+        (n(1) - 360.0).abs() < 1.0,
+        "a full period follows: {}",
+        n(1)
+    );
+    // The degressive coefficient makes the first period larger, never smaller.
+    assert!(
+        n(2) > n(0),
+        "degressive exceeds linear: {} vs {}",
+        n(2),
+        n(0)
+    );
+}
