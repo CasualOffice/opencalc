@@ -70,12 +70,55 @@ pub struct ChartSeries {
     pub values: String,
 }
 
+/// A frame's offset into the cell it is anchored to, in EMUs.
+///
+/// English Metric Units: 914,400 to the inch, 9,525 to a pixel at 96 dpi.
+/// OOXML's own unit, kept rather than converted because a chart's edge lands
+/// wherever it was dragged, not on a cell boundary. Without this a frame can
+/// only start and end on gridlines: dragging an edge does nothing until it
+/// crosses one, then jumps a whole column, and the chart never sits where it
+/// was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Emu {
+    /// Horizontal offset.
+    pub x: i64,
+    /// Vertical offset.
+    pub y: i64,
+}
+
+impl Emu {
+    /// EMUs in one pixel at 96 dpi.
+    pub const PER_PIXEL: i64 = 9_525;
+
+    /// Whether both axes are zero — the common case, so it is not serialized.
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        self.x == 0 && self.y == 0
+    }
+}
+
 /// A chart anchored on a sheet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartView {
     /// The cells the chart's frame covers, from the drawing's anchor.
+    ///
+    /// Inclusive, like every other range in the model. OOXML's `<xdr:to>` is
+    /// exclusive, so the last covered cell is the one before it; the remainder
+    /// travels in [`Self::to_offset`].
     pub anchor: CellRange,
+    /// How far into [`Self::anchor`]'s first cell the frame's top-left sits.
+    #[serde(default, skip_serializing_if = "Emu::is_zero")]
+    pub from_offset: Emu,
+    /// How far past the last cell's far edge the frame's bottom-right sits.
+    ///
+    /// Zero means the frame ends exactly on the gridline. This is `<xdr:to>`'s
+    /// own offset unchanged: the `to` cell is one past the last covered one, so
+    /// an offset measured into it is the same number as one measured past the
+    /// cell before.
+    #[serde(default, skip_serializing_if = "Emu::is_zero")]
+    pub to_offset: Emu,
     /// What it draws.
     pub kind: ChartKind,
     /// The title, empty when the chart has none.
@@ -109,6 +152,8 @@ impl ChartView {
     pub fn new(anchor: CellRange, kind: ChartKind) -> Self {
         Self {
             anchor,
+            from_offset: Emu::default(),
+            to_offset: Emu::default(),
             kind,
             title: String::new(),
             series: Vec::new(),
@@ -162,8 +207,14 @@ impl ChartKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageView {
-    /// The cells the picture's frame covers.
+    /// The cells the picture's frame covers, inclusive.
     pub anchor: CellRange,
+    /// How far into the first cell the frame's top-left sits.
+    #[serde(default, skip_serializing_if = "Emu::is_zero")]
+    pub from_offset: Emu,
+    /// How far past the last cell's far edge its bottom-right sits.
+    #[serde(default, skip_serializing_if = "Emu::is_zero")]
+    pub to_offset: Emu,
     /// The package path of its media part, e.g. `xl/media/image1.png`.
     pub part: String,
 }

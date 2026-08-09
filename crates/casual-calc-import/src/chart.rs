@@ -9,7 +9,7 @@
 //! projection: the parts themselves are retained byte for byte and written back
 //! from those bytes. A field this parser misses costs a picture, not a file.
 
-use casual_calc_model::{CellRange, CellRef, ChartKind, ChartSeries};
+use casual_calc_model::{CellRange, CellRef, ChartKind, ChartSeries, Emu};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
@@ -20,8 +20,12 @@ use crate::read::{read_attr, xml_err};
 /// it frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawingAnchor {
-    /// The cells the frame spans.
+    /// The cells the frame spans, inclusive.
     pub range: CellRange,
+    /// How far into the first cell the frame's top-left sits.
+    pub from_offset: Emu,
+    /// How far past the last cell's far edge its bottom-right sits.
+    pub to_offset: Emu,
     /// `r:id` of the referenced part, when the anchor frames one.
     pub rel_id: Option<String>,
 }
@@ -46,9 +50,13 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
     // and `<xdr:row>` are element *text*, and both corners use the same element
     // names — so which corner is open has to be tracked.
     let mut corner: Option<bool> = None; // Some(true) = <from>, Some(false) = <to>
-    let mut field: Option<bool> = None; // Some(true) = col, Some(false) = row
+    // Which of the four numbers a corner holds is open: col, row, colOff or
+    // rowOff. The offsets are what let a frame's edge sit anywhere rather than
+    // only on a gridline, so dropping them snapped every chart to whole cells.
+    let mut field: Option<u8> = None; // 0 col, 1 row, 2 colOff, 3 rowOff
     let mut text = String::new();
     let (mut fc, mut fr, mut tc, mut tr) = (0u32, 0u32, 0u32, 0u32);
+    let (mut fcx, mut fcy, mut tcx, mut tcy) = (0i64, 0i64, 0i64, 0i64);
     let mut have_to = false;
     let mut rel_id: Option<String> = None;
     let mut open = false;
@@ -62,6 +70,7 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                     have_to = false;
                     rel_id = None;
                     (fc, fr, tc, tr) = (0, 0, 0, 0);
+                    (fcx, fcy, tcx, tcy) = (0, 0, 0, 0);
                 }
                 b"from" => corner = Some(true),
                 b"to" => {
@@ -69,11 +78,19 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                     have_to = true;
                 }
                 b"col" => {
-                    field = Some(true);
+                    field = Some(0);
                     text.clear();
                 }
                 b"row" => {
-                    field = Some(false);
+                    field = Some(1);
+                    text.clear();
+                }
+                b"colOff" => {
+                    field = Some(2);
+                    text.clear();
+                }
+                b"rowOff" => {
+                    field = Some(3);
                     text.clear();
                 }
                 // `<c:chart r:id>` inside `<a:graphicData>`, and the same
@@ -91,13 +108,19 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                 }
             }
             Event::End(ref e) => match e.local_name().as_ref() {
-                b"col" | b"row" => {
-                    let value: u32 = text.trim().parse().unwrap_or(0);
+                b"col" | b"row" | b"colOff" | b"rowOff" => {
+                    let raw = text.trim();
+                    let cells: u32 = raw.parse().unwrap_or(0);
+                    let emu: i64 = raw.parse().unwrap_or(0);
                     match (corner, field) {
-                        (Some(true), Some(true)) => fc = value,
-                        (Some(true), Some(false)) => fr = value,
-                        (Some(false), Some(true)) => tc = value,
-                        (Some(false), Some(false)) => tr = value,
+                        (Some(true), Some(0)) => fc = cells,
+                        (Some(true), Some(1)) => fr = cells,
+                        (Some(true), Some(2)) => fcx = emu,
+                        (Some(true), Some(3)) => fcy = emu,
+                        (Some(false), Some(0)) => tc = cells,
+                        (Some(false), Some(1)) => tr = cells,
+                        (Some(false), Some(2)) => tcx = emu,
+                        (Some(false), Some(3)) => tcy = emu,
                         _ => {}
                     }
                     field = None;
@@ -115,11 +138,22 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                     } else {
                         (fc + NOMINAL_COLS - 1, fr + NOMINAL_ROWS - 1)
                     };
+                    // A `to` that lands on or before `from` is degenerate; the
+                    // frame collapses to one cell and the leftover offset would
+                    // be measured from the wrong edge, so it is dropped rather
+                    // than applied to a corner it does not belong to.
+                    let degenerate = end_c < fc || end_r < fr;
                     out.push(DrawingAnchor {
                         range: CellRange::new(
                             CellRef::new(fr, fc),
                             CellRef::new(end_r.max(fr), end_c.max(fc)),
                         ),
+                        from_offset: Emu { x: fcx, y: fcy },
+                        to_offset: if degenerate || !have_to {
+                            Emu::default()
+                        } else {
+                            Emu { x: tcx, y: tcy }
+                        },
                         rel_id: rel_id.take(),
                     });
                     open = false;

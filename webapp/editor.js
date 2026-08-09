@@ -114,18 +114,41 @@ function imageFor(part) {
   return null;
 }
 
+// The pixel rectangle an anchored object occupies.
+//
+// Three things this has to get right, each of which was wrong before:
+//
+//  * the far edge is the *trailing* edge of the last row and column, not the
+//    leading one — `colXAt(c1)` drew every frame a column and a row short;
+//  * `fscreen*` rather than the raw accessors, so an edge scrolled out of the
+//    window still has a position. The old code bailed out when the top-left was
+//    not drawn, which made a whole chart vanish the moment its first row
+//    scrolled off the top;
+//  * the EMU offsets, so an edge sits where it was dragged instead of snapping
+//    to the nearest gridline.
+function anchoredRect(o) {
+  const x0 = fscreenX(o.c0) + emuToPx(o.fx || 0);
+  const y0 = fscreenY(o.r0) + emuToPx(o.fy || 0);
+  const x1 = fscreenXEnd(o.c1) + emuToPx(o.tx || 0);
+  const y1 = fscreenYEnd(o.r1) + emuToPx(o.ty || 0);
+  return { x: x0, y: y0, w: Math.max(8, x1 - x0), h: Math.max(8, y1 - y0) };
+}
+/// EMUs per CSS pixel at 96 dpi — OOXML's own constant.
+const EMU_PER_PX = 9525;
+const emuToPx = (emu) => emu / EMU_PER_PX;
+const pxToEmu = (px) => Math.round(px * EMU_PER_PX);
+/// Whether a rectangle is entirely outside the drawable area.
+const offCanvas = (r) =>
+  r.x + r.w < HW || r.y + r.h < HH || r.x > canvas.clientWidth || r.y > canvas.clientHeight;
+
 // Pictures anchored on the sheet, drawn under the charts and over the cells.
 function drawImages() {
   if (!wasm) return;
   let images = [];
   try { images = JSON.parse(wasm.session_images(state.sheet)); } catch { return; }
   for (const im of images) {
-    const x0 = colXAt(im.c0), y0 = rowYAt(im.r0);
-    if (x0 === undefined || y0 === undefined) continue;
-    let x1 = colXAt(im.c1), y1 = rowYAt(im.r1);
-    if (x1 === undefined) x1 = canvas.clientWidth;
-    if (y1 === undefined) y1 = canvas.clientHeight;
-    const w = Math.max(8, x1 - x0), h = Math.max(8, y1 - y0);
+    const { x: x0, y: y0, w, h } = anchoredRect(im);
+    if (offCanvas({ x: x0, y: y0, w, h })) continue;
     const img = imageFor(im.part);
     if (!img) continue;
     ctx.save();
@@ -161,17 +184,13 @@ function drawCharts(withQuad) {
   let charts = [];
   try { charts = JSON.parse(wasm.session_charts(state.sheet)); } catch { return; }
   for (const [index, ch] of charts.entries()) {
-    const x0 = colXAt(ch.c0), y0 = rowYAt(ch.r0);
-    if (x0 === undefined || y0 === undefined) continue;
-    let x1 = colXAt(ch.c1), y1 = rowYAt(ch.r1);
-    // An edge scrolled out of view still has to bound the frame, or a chart
-    // half off-screen collapses to nothing.
-    if (x1 === undefined) x1 = canvas.clientWidth;
-    if (y1 === undefined) y1 = canvas.clientHeight;
-    const w = Math.max(60, x1 - x0), h = Math.max(40, y1 - y0);
+    const { x: x0, y: y0, w, h } = anchoredRect(ch);
     // Kept for hit-testing: a chart floats over cells rather than occupying
-    // them, so clicking one cannot go through the cell grid.
+    // them, so clicking one cannot go through the cell grid. Recorded even
+    // when it is off-screen, so the frame list is a faithful account of where
+    // every chart is rather than of which ones happen to be visible.
     chartFrames.push({ index, x: x0, y: y0, w, h });
+    if (offCanvas({ x: x0, y: y0, w, h })) continue;
     ctx.save();
     ctx.beginPath();
     ctx.rect(x0, y0, w, h);
@@ -4821,20 +4840,41 @@ function chartMouseUp() {
   const index = chartDrag.index;
   chartDrag = null;
   if (!rect || !moved) { draw(); return; }
-  const r0 = rowAtY(Math.max(HH, rect.y));
-  const c0 = colAtX(Math.max(HW, rect.x));
-  // The far corner is the cell the edge lands *in*, so a frame that ends
-  // mid-column still covers that column.
-  const r1 = Math.max(r0, rowAtY(Math.max(HH, rect.y + rect.h - 1)));
-  const c1 = Math.max(c0, colAtX(Math.max(HW, rect.x + rect.w - 1)));
+  // Cell **plus offset**, not the nearest cell. Snapping to gridlines is why a
+  // drag appeared to do nothing until it crossed one and then jumped a whole
+  // column, and why a chart never came to rest where it was dropped.
+  const from = anchorPoint(rect.x, rect.y);
+  // The far corner is measured past the trailing edge of the cell it lands in,
+  // which is what `to_offset` means — and what makes it survive a round trip
+  // through `<xdr:to>`, whose offset is measured into the cell after.
+  const to = anchorPoint(rect.x + rect.w, rect.y + rect.h);
+  let r1 = Math.max(from.row, to.row - 1);
+  let c1 = Math.max(from.col, to.col - 1);
   let def;
   try {
     def = JSON.parse(wasm.session_chart_defs(state.sheet))[index];
   } catch { return; }
   if (!def) return;
-  def.anchor = [r0, c0, r1, c1];
+  def.anchor = [from.row, from.col, r1, c1];
+  def.fromOffset = [pxToEmu(from.dx), pxToEmu(from.dy)];
+  // Degenerate frames get no trailing offset: it would be measured from a cell
+  // edge the frame does not reach.
+  const degenerate = to.row - 1 < from.row || to.col - 1 < from.col;
+  def.toOffset = degenerate ? [0, 0] : [pxToEmu(to.dx), pxToEmu(to.dy)];
   panelChart = { sheet: state.sheet, index };
   applyChart(def);
+}
+
+/// The cell a pixel lands in and how far into it, which is exactly what a
+/// drawing anchor stores.
+function anchorPoint(px, py) {
+  // Clamped once and used for both halves: taking the cell from a clamped
+  // coordinate and the offset from an unclamped one puts the two out of step,
+  // and an edge dragged past the frozen headers lands in the wrong cell by the
+  // amount it overshot.
+  const x = Math.max(HW, px), y = Math.max(HH, py);
+  const row = rowAtY(y), col = colAtX(x);
+  return { row, col, dx: x - fscreenX(col), dy: y - fscreenY(row) };
 }
 
 // Insert ▸ Chart: build one over the block under the cursor.

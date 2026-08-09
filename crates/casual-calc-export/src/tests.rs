@@ -2592,3 +2592,105 @@ fn an_authored_chart_joins_a_retained_drawing_instead_of_replacing_it() {
     assert!(sheet.contains("<drawing r:id=\"rId7\"/>"), "{sheet}");
     assert_eq!(sheet.matches("<drawing ").count(), 1, "{sheet}");
 }
+
+#[test]
+fn a_frames_offsets_survive_the_round_trip_so_a_drag_lands_where_it_was_dropped() {
+    // Without these a frame can only start and end on a gridline: dragging an
+    // edge does nothing until it crosses one, then jumps a whole column, and
+    // the chart never comes to rest where it was dropped.
+    use casual_calc_model::Emu;
+    let mut wb = authored_chart_workbook();
+    wb.sheets[0].charts[0].from_offset = Emu {
+        x: 38_100,
+        y: 19_050,
+    };
+    wb.sheets[0].charts[0].to_offset = Emu {
+        x: 57_150,
+        y: 9_525,
+    };
+
+    let written = write_workbook(&wb).unwrap();
+    let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
+    assert!(
+        drawing.contains("<xdr:colOff>38100</xdr:colOff>"),
+        "{drawing}"
+    );
+    assert!(
+        drawing.contains("<xdr:rowOff>19050</xdr:rowOff>"),
+        "{drawing}"
+    );
+    assert!(
+        drawing.contains("<xdr:colOff>57150</xdr:colOff>"),
+        "{drawing}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    let chart = &back.sheets[0].charts[0];
+    assert_eq!(
+        chart.from_offset,
+        Emu {
+            x: 38_100,
+            y: 19_050
+        }
+    );
+    assert_eq!(
+        chart.to_offset,
+        Emu {
+            x: 57_150,
+            y: 9_525
+        }
+    );
+    // And the cells are unchanged, so the frame as a whole is identical. The
+    // `to` corner is exclusive with its offset measured into the cell after,
+    // which is the same number as one measured past the cell before — write it
+    // against the wrong corner and a saved chart drifts a column each time.
+    assert_eq!(chart.anchor, wb.sheets[0].charts[0].anchor);
+}
+
+#[test]
+fn a_degenerate_anchor_keeps_no_trailing_offset() {
+    // `to` on or before `from` collapses the frame to one cell, and an offset
+    // left over from the original would then be measured from an edge the
+    // frame does not reach.
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rId7"/></worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/drawings/drawing1.xml",
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <xdr:twoCellAnchor>
+                <xdr:from><xdr:col>4</xdr:col><xdr:colOff>1000</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>2000</xdr:rowOff></xdr:from>
+                <xdr:to><xdr:col>4</xdr:col><xdr:colOff>99999</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>88888</xdr:rowOff></xdr:to>
+                <xdr:graphicFrame><a:graphic><a:graphicData><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame>
+              </xdr:twoCellAnchor>
+            </xdr:wsDr>"#,
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/charts/chart1.xml",
+            br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let chart = &wb.sheets[0].charts[0];
+    assert_eq!(chart.anchor.start, casual_calc_model::CellRef::new(2, 4));
+    assert_eq!(chart.anchor.end, casual_calc_model::CellRef::new(2, 4));
+    assert_eq!(
+        chart.from_offset,
+        casual_calc_model::Emu { x: 1000, y: 2000 }
+    );
+    assert!(chart.to_offset.is_zero(), "{:?}", chart.to_offset);
+}

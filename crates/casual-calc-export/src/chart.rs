@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use casual_calc_model::{CellRange, ChartKind, ChartView, RetainedRel, Sheet, Workbook};
+use casual_calc_model::{ChartKind, ChartView, RetainedRel, Sheet, Workbook};
 
 use crate::xml::{escape_attr, escape_text};
 
@@ -163,7 +163,7 @@ pub fn build(
     for (i, chart) in charts.iter().enumerate() {
         let n = first_chart + i;
         chart_parts.push((format!("xl/charts/chart{n}.xml"), chart_xml(chart)));
-        anchors.push_str(&anchor_xml(chart.anchor, &rel_ids[i], n));
+        anchors.push_str(&anchor_xml(chart, &rel_ids[i], n));
     }
 
     let drawing_xml = match retained_bytes(workbook, &drawing_part) {
@@ -250,11 +250,16 @@ fn splice(existing: &str, anchors: &str) -> String {
 }
 
 /// One `<xdr:twoCellAnchor>` framing a chart over its cells.
-fn anchor_xml(range: CellRange, rel_id: &str, n: usize) -> String {
+///
+/// The offsets are what let an edge sit between gridlines. Writing zeroes
+/// instead snapped every frame to whole cells, so a chart never came back the
+/// size it was dragged to.
+fn anchor_xml(chart: &ChartView, rel_id: &str, n: usize) -> String {
+    let range = chart.anchor;
     format!(
         "<xdr:twoCellAnchor>\
-<xdr:from><xdr:col>{}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\
-<xdr:to><xdr:col>{}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\
+<xdr:from><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:from>\
+<xdr:to><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:to>\
 <xdr:graphicFrame macro=\"\">\
 <xdr:nvGraphicFramePr><xdr:cNvPr id=\"{n}\" name=\"Chart {n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>\
 <xdr:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></xdr:xfrm>\
@@ -265,11 +270,17 @@ fn anchor_xml(range: CellRange, rel_id: &str, n: usize) -> String {
 <xdr:clientData/>\
 </xdr:twoCellAnchor>",
         range.start.col,
+        chart.from_offset.x,
         range.start.row,
+        chart.from_offset.y,
         // The `to` corner is exclusive in a drawing anchor: a frame from column
-        // 2 to column 2 has no width at all.
+        // 2 to column 2 has no width at all. Its offset is measured into that
+        // cell, which is the same number as one measured past the cell before —
+        // so `to_offset` travels unchanged.
         range.end.col + 1,
+        chart.to_offset.x,
         range.end.row + 1,
+        chart.to_offset.y,
         escape_attr(rel_id)
     )
 }

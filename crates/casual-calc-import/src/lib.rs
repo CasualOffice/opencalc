@@ -318,6 +318,8 @@ fn read_sheet_drawings(
             let spec = chart::parse_chart(&package.read_part(&target)?)?;
             charts.push(casual_calc_model::ChartView {
                 anchor: anchor.range,
+                from_offset: anchor.from_offset,
+                to_offset: anchor.to_offset,
                 kind: spec
                     .kind
                     .unwrap_or(casual_calc_model::ChartKind::Unsupported),
@@ -335,6 +337,8 @@ fn read_sheet_drawings(
             // copying them here would store every picture twice.
             images.push(casual_calc_model::ImageView {
                 anchor: anchor.range,
+                from_offset: anchor.from_offset,
+                to_offset: anchor.to_offset,
                 part: target,
             });
         }

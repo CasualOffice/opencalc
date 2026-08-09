@@ -2028,6 +2028,12 @@ struct ChartWire {
     /// `r`, `l`, `t`, `b`, `tr`, or absent for no legend.
     #[serde(default)]
     legend: Option<String>,
+    /// The frame's offsets from its anchor cells, in EMU — what lets an edge
+    /// sit between gridlines instead of snapping to one.
+    #[serde(default)]
+    from_offset: [i64; 2],
+    #[serde(default)]
+    to_offset: [i64; 2],
     #[serde(default)]
     x_title: String,
     #[serde(default)]
@@ -2096,6 +2102,8 @@ fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
             })
             .collect(),
         legend: chart.legend.clone(),
+        from_offset: [chart.from_offset.x, chart.from_offset.y],
+        to_offset: [chart.to_offset.x, chart.to_offset.y],
         x_title: chart.x_title.clone(),
         y_title: chart.y_title.clone(),
         imported: chart.part.is_some(),
@@ -2290,6 +2298,14 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
             })
             .collect();
         chart.legend = wire.legend.filter(|p| !p.is_empty());
+        chart.from_offset = casual_calc_model::Emu {
+            x: wire.from_offset[0],
+            y: wire.from_offset[1],
+        };
+        chart.to_offset = casual_calc_model::Emu {
+            x: wire.to_offset[0],
+            y: wire.to_offset[1],
+        };
         chart.x_title = wire.x_title;
         chart.y_title = wire.y_title;
         dropped = chart.detach().unwrap_or_default();
@@ -3748,11 +3764,16 @@ pub fn session_images(sheet: usize) -> String {
             .iter()
             .map(|im| {
                 format!(
-                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"part\":{}}}",
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\
+                     \"fx\":{},\"fy\":{},\"tx\":{},\"ty\":{},\"part\":{}}}",
                     im.anchor.start.row,
                     im.anchor.start.col,
                     im.anchor.end.row,
                     im.anchor.end.col,
+                    im.from_offset.x,
+                    im.from_offset.y,
+                    im.to_offset.x,
+                    im.to_offset.y,
                     json_string(&im.part)
                 )
             })
@@ -3908,6 +3929,7 @@ pub fn session_charts(sheet: usize) -> String {
                 format!(
                     "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"kind\":{},\
                      \"title\":{},\"legend\":{},\"xTitle\":{},\"yTitle\":{},\
+                     \"fx\":{},\"fy\":{},\"tx\":{},\"ty\":{},\
                      \"cats\":[{}],\"series\":[{}]}}",
                     ch.anchor.start.row,
                     ch.anchor.start.col,
@@ -3921,6 +3943,10 @@ pub fn session_charts(sheet: usize) -> String {
                     },
                     json_string(&ch.x_title),
                     json_string(&ch.y_title),
+                    ch.from_offset.x,
+                    ch.from_offset.y,
+                    ch.to_offset.x,
+                    ch.to_offset.y,
                     cats.iter()
                         .map(|t| json_string(t))
                         .collect::<Vec<_>>()
