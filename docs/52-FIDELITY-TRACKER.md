@@ -200,13 +200,21 @@ Named rather than left in a "missing" count, because the difference between
 | --- | --- |
 | `CUBEKPIMEMBER`, `CUBEMEMBER`, `CUBEMEMBERPROPERTY`, `CUBERANKEDMEMBER`, `CUBESET`, `CUBESETCOUNT`, `CUBEVALUE` | Each queries an OLAP cube over a live connection to Analysis Services. There is no cube and no connection; a stub returning anything would be inventing data. |
 | `RTD` | Calls a real-time data server through COM. No COM, no server. |
-| `GETPIVOTDATA` | Reads a pivot table's cache. Pivot tables are retained verbatim and not modelled, so there is nothing to read. Implementable once they are. |
 | `PHONETIC` | Returns the furigana stored in a cell's `<rPh>` runs. Those runs are retained in the file but not parsed, so the only available answer is the base text — which is what Excel returns when there is *no* furigana, and therefore a plausible wrong answer for a cell that has some. |
 
-That leaves the reachable ceiling at **346 of 356 (97.2%)**, and it has been
-reached: every function outside that table is implemented. (An earlier note in
-this file put the ceiling at 347 — that was an arithmetic slip, counting
-PHONETIC as reachable while also listing it as not.)
+That leaves the reachable ceiling at **347 of 356 (97.5%)**, and it has been
+reached: every function outside that table is implemented.
+
+`GETPIVOTDATA` was in that table until PIV-01. It was listed as *not possible*
+rather than *not done* because pivot tables were retained verbatim and not
+modelled, so there was nothing to read — the entry said "implementable once
+they are", and they are. It is the one row this table has ever lost, which is
+the argument for naming exclusions instead of counting them: an honest reason
+tells you what would have to change, and can be checked off when it does.
+
+(An earlier note in this file put the ceiling at 347 while GETPIVOTDATA was
+still excluded — that was an arithmetic slip, counting PHONETIC as reachable
+while also listing it as not. 347 is now right for a different reason.)
 
 ## Array results and spilling
 

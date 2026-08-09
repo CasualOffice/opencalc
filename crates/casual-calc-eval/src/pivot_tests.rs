@@ -786,3 +786,163 @@ fn a_runaway_label_does_not_push_the_report_off_the_screen() {
     // Capped at 40 characters: (40 * 7 + 5) * 15.
     assert_eq!(widths[&0], 4275);
 }
+
+/// A workbook with a live pivot on sheet 1 and a formula cell to hang
+/// `GETPIVOTDATA` on.
+fn with_report() -> Workbook {
+    let mut wb = workbook();
+    let mut p = pivot(&wb);
+    p.rows.push(axis(0));
+    p.cols.push(axis(1));
+    p.values.push(sum(3));
+    p.values.push(PivotValueField {
+        source_column: 3,
+        aggregate: PivotAggregate::Count,
+        name: "Deals".to_owned(),
+        number_format: None,
+    });
+    wb.sheets[1].pivots.push(p);
+    pivot::refresh(&mut wb, 1, 0).expect("refresh");
+    wb
+}
+
+fn ask(wb: &mut Workbook, formula: &str) -> String {
+    let expr = casual_calc_formula::parse(formula).unwrap_or_else(|e| panic!("{formula}: {e}"));
+    let handle = wb.store_formula(expr);
+    let mut cell = Cell::value(CellValue::Empty);
+    cell.formula = Some(handle);
+    let at = CellRef::new(40, 0);
+    wb.sheets[1].cells.set(at, cell);
+    crate::recalculate(wb);
+    match wb.sheets[1].cells.get(at).map(|c| c.value.clone()) {
+        Some(CellValue::Number(n)) => casual_calc_layout::format_general(n),
+        Some(CellValue::Error(e)) => e.to_string(),
+        Some(CellValue::SharedString(id) | CellValue::InlineString(id)) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+#[test]
+fn getpivotdata_reads_a_figure_by_name_not_by_address() {
+    // The whole point: `=B4` breaks the moment the report grows a row, and this
+    // does not, because it names the figure rather than the cell.
+    let mut wb = with_report();
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region","East","Product","Widget")"#
+        ),
+        "80"
+    );
+    // The bare source field names the measure too, as Excel accepts.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Amount",'Report'!A1,"Region","West")"#
+        ),
+        "170"
+    );
+    // A renamed measure answers to its caption.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Deals",'Report'!A1,"Region","East")"#
+        ),
+        "4"
+    );
+}
+
+#[test]
+fn getpivotdata_with_no_criteria_is_the_grand_total() {
+    let mut wb = with_report();
+    assert_eq!(
+        ask(&mut wb, r#"GETPIVOTDATA("Sum of Amount",'Report'!A1)"#),
+        "330"
+    );
+}
+
+#[test]
+fn getpivotdata_says_ref_rather_than_guessing() {
+    let mut wb = with_report();
+    // A cell that is not in any report.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!Z90,"Region","East")"#
+        ),
+        "#REF!"
+    );
+    // A measure the pivot does not carry.
+    assert_eq!(
+        ask(&mut wb, r#"GETPIVOTDATA("Sum of Rep",'Report'!A1)"#),
+        "#REF!"
+    );
+    // An item that does not occur.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region","North")"#
+        ),
+        "#REF!"
+    );
+    // A real field that is not on any axis: the report does not show it, so
+    // answering would report a figure nobody can see.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Rep","Ann")"#
+        ),
+        "#REF!"
+    );
+    // A half-written pair.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region")"#
+        ),
+        "#VALUE!"
+    );
+}
+
+#[test]
+fn getpivotdata_follows_the_source_rather_than_the_written_cell() {
+    // Re-aggregated from the records, not read out of the report — so it is
+    // right even where the two could disagree, and it does not have to
+    // reproduce the layout's rules about where a subtotal sits.
+    let mut wb = with_report();
+    // Overwrite the report cell holding East/Widget with a different number.
+    wb.sheets[1]
+        .cells
+        .set(CellRef::new(2, 2), Cell::value(CellValue::Number(999.0)));
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region","East","Product","Widget")"#
+        ),
+        "80"
+    );
+}
+
+#[test]
+fn getpivotdata_honours_the_pivots_own_page_filter() {
+    let mut wb = workbook();
+    let mut p = pivot(&wb);
+    p.rows.push(axis(0));
+    p.filters.push(PivotFilterField {
+        source_column: 1,
+        selected: vec!["Widget".to_owned()],
+    });
+    p.values.push(sum(3));
+    wb.sheets[1].pivots.push(p);
+    pivot::refresh(&mut wb, 1, 0).expect("refresh");
+    // 50 + 30, not 160: a figure the report does not show is not one to return.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region","East")"#
+        ),
+        "80"
+    );
+}

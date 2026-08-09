@@ -212,6 +212,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
     ("GESTEP", "GESTEP(number, [step])"),
+    (
+        "GETPIVOTDATA",
+        "GETPIVOTDATA(data_field, pivot_table, [field, item], …)",
+    ),
     ("GROWTH", "GROWTH(known_y, [known_x], [new_x], [const])"),
     ("HARMEAN", "HARMEAN(number1, …)"),
     ("HEX2BIN", "HEX2BIN(number, [places])"),
@@ -860,6 +864,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "BITRSHIFT" => bit_shift(ev, sheet, args, false),
         "DELTA" => eval_delta(ev, sheet, args, true),
         "GESTEP" => eval_delta(ev, sheet, args, false),
+        "GETPIVOTDATA" => eval_getpivotdata(ev, sheet, args),
         "ERF" => eval_erf(ev, sheet, args),
         "ERFC" => scalar(ev, sheet, args, |x| 1.0 - erf(x)),
         // The annuity family. All five are the same equation rearranged, so
@@ -9610,5 +9615,68 @@ fn eval_lambda_helper(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[
             }
         }
         _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// `GETPIVOTDATA(data_field, pivot_table, [field, item], …)`.
+///
+/// `pivot_table` is a *reference* rather than a value — any cell inside the
+/// report — so the argument is read from the AST, as `OFFSET` reads its base.
+/// Evaluating it first would hand back whatever number happens to be in that
+/// cell, which is exactly the figure the function is supposed to find by name.
+///
+/// Excel writes this formula for you when you click a pivot cell while building
+/// one, and the reason is worth keeping in mind: `=D7` breaks the moment the
+/// report grows a row, while this keeps pointing at the same *figure*.
+///
+/// With no field/item pairs the answer is the grand total — the same query with
+/// every group left open.
+fn eval_getpivotdata(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    // The pairs are pairs, so an odd tail means one is half-written.
+    if args.len() < 2 || !args.len().is_multiple_of(2) {
+        return Value::Error(ErrorValue::Value);
+    }
+    let measure = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(text) => text,
+        Err(e) => return Value::Error(e),
+    };
+    let Expr::Reference(anchor) = &args[1] else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let Some(at_sheet) = ev.resolve_sheet(&anchor.sheet, sheet) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let workbook = ev.workbook();
+    let Some(pivot) = workbook.sheets.get(at_sheet).and_then(|sh| {
+        sh.pivots.iter().find(|p| {
+            p.output.is_some_and(|r| {
+                anchor.row >= r.start.row
+                    && anchor.row <= r.end.row
+                    && anchor.col >= r.start.col
+                    && anchor.col <= r.end.col
+            })
+        })
+    }) else {
+        // Not a pivot cell. `#REF!` rather than the cell's own value: pointing
+        // this at the wrong place is a mistake to report, not to paper over.
+        return Value::Error(ErrorValue::Ref);
+    };
+
+    let mut criteria: Vec<(String, String)> = Vec::new();
+    for pair in args[2..].chunks(2) {
+        let field = match ev.eval_expr(sheet, &pair[0]).as_text() {
+            Ok(text) => text,
+            Err(e) => return Value::Error(e),
+        };
+        let item = match ev.eval_expr(sheet, &pair[1]).as_text() {
+            Ok(text) => text,
+            Err(e) => return Value::Error(e),
+        };
+        criteria.push((field, item));
+    }
+
+    match crate::pivot::lookup(workbook, pivot, &measure, &criteria) {
+        Ok(value) => value,
+        Err(e) => Value::Error(e),
     }
 }

@@ -24,8 +24,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_model::{
-    Cell, CellRange, CellRef, CellValue, ErrorValue, PivotAggregate, PivotSort, PivotTable, Sheet,
-    Style, Workbook,
+    Cell, CellRange, CellRef, CellValue, ErrorValue, PivotAggregate, PivotSort, PivotTable,
+    PivotValueField, Sheet, Style, Workbook,
 };
 
 use crate::value::{Value, value_from_cell};
@@ -500,6 +500,121 @@ fn read_records(workbook: &Workbook, pivot: &PivotTable) -> Result<Source, Pivot
         row_axes: axes,
         col_axes,
     })
+}
+
+/// The caption a measure is addressed by — its own name, or the one derived
+/// from its aggregate and field as Excel derives it.
+#[must_use]
+pub fn value_caption(workbook: &Workbook, pivot: &PivotTable, value: &PivotValueField) -> String {
+    if !value.name.is_empty() {
+        return value.name.clone();
+    }
+    let field = field_names(workbook, pivot)
+        .get(value.source_column as usize)
+        .cloned()
+        .unwrap_or_default();
+    format!("{} {field}", value.aggregate.caption_prefix())
+}
+
+/// Answer one figure from a pivot without going near its layout — what
+/// `GETPIVOTDATA` asks for.
+///
+/// `measure` names a value field, by its caption (`Sum of Amount`) or by the
+/// bare source field (`Amount`). Each `(field, item)` narrows to one item of
+/// one grouping field; with none, the answer is the grand total, which is
+/// exactly the same query with every group left open.
+///
+/// Deliberately re-aggregated rather than read out of the written report.
+/// Locating a cell means reproducing the layout's rules — which labels are
+/// written, where a subtotal sits — in a second place, and the two would drift.
+/// This asks the source the same question the report asked.
+///
+/// A field that is not on any axis is refused: Excel refuses it too, and
+/// answering would report a figure the report does not show.
+pub fn lookup(
+    workbook: &Workbook,
+    pivot: &PivotTable,
+    measure: &str,
+    criteria: &[(String, String)],
+) -> Result<Value, ErrorValue> {
+    let index = pivot
+        .values
+        .iter()
+        .position(|v| {
+            value_caption(workbook, pivot, v).eq_ignore_ascii_case(measure)
+                || field_names(workbook, pivot)
+                    .get(v.source_column as usize)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(measure))
+        })
+        .ok_or(ErrorValue::Ref)?;
+    let value = &pivot.values[index];
+
+    let names = field_names(workbook, pivot);
+    let Source {
+        records,
+        row_axes,
+        col_axes,
+    } = read_records(workbook, pivot).map_err(|_| ErrorValue::Ref)?;
+
+    // Criteria are matched against the grouping fields by name, then against
+    // the record's own key text — the same rendering the report labels use, so
+    // what a formula names is what a reader sees.
+    let axis_fields: Vec<u32> = pivot
+        .rows
+        .iter()
+        .chain(pivot.cols.iter())
+        .map(|f| f.source_column)
+        .collect();
+    let mut wanted: Vec<(usize, &str)> = Vec::new();
+    for (field, item) in criteria {
+        let column = names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(field))
+            .ok_or(ErrorValue::Ref)?;
+        let slot = axis_fields
+            .iter()
+            .position(|c| *c as usize == column)
+            .ok_or(ErrorValue::Ref)?;
+        wanted.push((slot, item.as_str()));
+    }
+
+    // The axes turn an item's text back into the index the records carry.
+    let axes: Vec<&Axis> = row_axes.iter().chain(col_axes.iter()).collect();
+    let mut targets: Vec<(usize, u32)> = Vec::new();
+    for (slot, item) in wanted {
+        let axis = axes.get(slot).ok_or(ErrorValue::Ref)?;
+        let found = axis
+            .items
+            .iter()
+            .position(|k| key_text(k).eq_ignore_ascii_case(item))
+            .ok_or(ErrorValue::Ref)?;
+        targets.push((slot, found as u32));
+    }
+
+    let row_count = pivot.rows.len();
+    let mut acc = Acc::default();
+    let mut matched = false;
+    for record in &records {
+        let hit = targets.iter().all(|(slot, want)| {
+            let got = if *slot < row_count {
+                record.rows[*slot]
+            } else {
+                record.cols[*slot - row_count]
+            };
+            got == *want
+        });
+        if hit {
+            matched = true;
+            let (num, nonempty) = record.values[index];
+            acc.add(num, nonempty);
+        }
+    }
+    // No record at all is `#REF!`, not an empty aggregate: the report has no
+    // such intersection to point at, and a blank would read as "zero here".
+    if !matched {
+        return Err(ErrorValue::Ref);
+    }
+    Ok(acc.finish(value.aggregate))
 }
 
 /// Accumulate every record into every (row-prefix, column-prefix) pair.
