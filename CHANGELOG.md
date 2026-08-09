@@ -9,6 +9,41 @@ Each entry should cite the driving tracker ID (see
 [docs/14-EXECUTION-TRACKER.md](docs/14-EXECUTION-TRACKER.md)) and, where relevant,
 the design doc or ADR that motivated it.
 
+## sdk-v0.0.0 — 2026-08-10
+
+The first published release: the browser SDK on npm as
+[`@opencalc/sheet`](https://www.npmjs.com/package/@opencalc/sheet),
+[`@opencalc/react`](https://www.npmjs.com/package/@opencalc/react) and
+[`@opencalc/engine`](https://www.npmjs.com/package/@opencalc/engine).
+
+An alpha preview. Everything documented works; the API is not stable, and while
+we are pre-1.0 a rename is a minor version. Pin what you test against.
+
+**Added**
+
+- `opencalc-assets`, a CLI that copies the engine into a directory the host
+  serves — needed because the WebAssembly binary must come from the
+  integrator's own origin, never a CDN we run.
+- A **version check** between the JavaScript and the copied engine. The two
+  drift the moment `npm update` moves one and not the other, and that skew does
+  not fail cleanly: the bindings and the engine disagree about a signature and
+  you get a wrong answer, not an error. The element now refuses to boot and
+  names the command that fixes it. A *missing* manifest only warns — absence is
+  not evidence of a skew.
+- A CSP `nonce` attribute, covering the SDK's one injected `<style>` (the
+  hoisted `@font-face` block), so a host under a strict policy keeps the
+  bundled metric-compatible faces.
+- Releases fire on a **component-scoped tag** — `sdk-v*`, with `engine-v*`,
+  `desktop-v*` and `server-v*` reserved. A bare `v*` would mean tagging any one
+  component fires every release workflow.
+
+**Fixed**
+
+- The deployed site was missing `docs.html`, `embed.html`, `embed.js` and the
+  whole `fonts/` directory: `pages.yml` copied a hand-written file list that
+  had drifted. The SDK guide **404'd on the live site** while working perfectly
+  on localhost, and every cell fell back to a system font.
+
 ## Unreleased
 
 ### 2026-08-10 — Pivot tables, charts, and the embeddable SDK

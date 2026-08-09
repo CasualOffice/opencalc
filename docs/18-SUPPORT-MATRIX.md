@@ -27,7 +27,7 @@ Tier 1 = full test matrix in CI. Tier 2 = build + smoke.
 | Mode | Description | Status |
 | --- | --- | --- |
 | **Web app (WASM)** | Browser editor via `casual-calc-wasm`; calc + import + render run in WASM | ● the editor in `webapp/` is the reference host |
-| **Embeddable browser SDK** | `<opencalc-sheet>` custom element wrapping that editor for third-party pages | ◑ built and documented ([55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md)); **not published to npm** |
+| **Embeddable browser SDK** | `<opencalc-sheet>` custom element wrapping that editor for third-party pages | ● published as [`@opencalc/sheet`](https://www.npmjs.com/package/@opencalc/sheet); designed in [55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md). Alpha — the API is not stable until 1.0 |
 | Embedded SDK (Rust) | `casual-calc-sdk` in any Rust host app | ● `WorkbookSession` open / edit / recalc / render / save, with `SessionConfig` |
 | Headless native | Read/model/calc/write, no rendering surface | ● the same session with no render call |
 | Headless render | + display list → PNG via CPU raster | ◑ frozen panes are not split in the PNG backend (the editor canvas does split them) |
@@ -91,7 +91,7 @@ The measured per-construct register is [51](51-FIDELITY-GAP-AUDIT.md).
 | `edit` / `view` / `preview` access, enforced in the engine | ● |
 | Cancellable `before*` events carrying a `source` | ● |
 | Localization | ◑ menus, submenus and toolbar tooltips only; panels, dialogs and status messages are still English |
-| npm packaging (`@opencalc/sheet`, `/react`, `/engine`) | ○ integrators vendor from `webapp/` |
+| npm packaging (`@opencalc/sheet`, `/react`, `/engine`) | ● published, released by an `sdk-v*` tag ([15](15-CI-AND-RELEASE-GATES.md) §Release tags) |
 | Collaborative editing | ○ Phase 5, blocked on an ADR ([24](24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions). Explicitly **not** in the embeddable SDK |
 
 ## Capacity & performance targets

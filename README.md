@@ -4,6 +4,7 @@
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)](docs/06-ROADMAP-AND-DELIVERY.md)
 [![Rust: MSRV 1.88](https://img.shields.io/badge/rust-MSRV%201.88-black.svg?logo=rust)](rust-toolchain.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![npm: @opencalc/sheet](https://img.shields.io/npm/v/@opencalc/sheet?label=%40opencalc%2Fsheet&color=cb3837&logo=npm)](https://www.npmjs.com/package/@opencalc/sheet)
 
 **A deterministic, embeddable spreadsheet engine written in Rust** — it reads and
 writes `.xlsx`, holds the workbook in a normalized editable model, calculates it,
@@ -157,9 +158,8 @@ reads as a broken editor *and* a thumbnail that invites clicks it will refuse.
 
 Design and rationale: [docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md).
 Runnable examples for vanilla JS, React, Next.js and a read-only viewer:
-[`sdk/`](sdk/). **The npm packages are not published yet** — until they are,
-vendor `embed.js`, `editor.js`, `editor.css`, `editor.html`, `pkg/` and
-`fonts/` from [`webapp/`](webapp/) and serve them yourself.
+[`sdk/`](sdk/). Published as `0.0.x` — an alpha preview, so the API is not
+stable until 1.0 and you should pin what you test against.
 
 ### Embedding it — in a Rust host
 
@@ -206,7 +206,7 @@ that was already a round-trip fixed point.
 | 1E — Browser grid editor (WASM) | cell edit, selection, formatting, structural ops, undo/redo | ✅ done (see the parity + UX trackers) |
 | **2 — Formula & calc engine** | tokenizer/parser, recalc, function library; dependency graph, incremental recalc, spill/array | 🟡 347/356 functions, spilling arrays, `LET`/`LAMBDA` live; persistent incremental graph pending |
 | 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | ✅ all live — conditional formatting (colour scales, data bars), data validation, sheet protection, tables with structured references, multi-key sort, per-column autofilter, print setup, **charts** and **pivot tables**. One named gap: a pivot *created here* exports as its cells rather than as a live Excel pivot ([PIV-02](docs/54-PIVOT-TABLES.md)) |
-| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | 🟡 `SessionConfig` on the Rust side; an embeddable `<opencalc-sheet>` element with theming, chrome/command control, events, access levels and localization ([docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md), [`sdk/`](sdk/)). **Not published to npm yet** — integrators vendor from `webapp/` |
+| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | 🟡 `SessionConfig` on the Rust side; an embeddable `<opencalc-sheet>` element with theming, chrome/command control, events, access levels and localization ([docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md), [`sdk/`](sdk/)), **published to npm** as `@opencalc/sheet` · `/react` · `/engine`. Remaining: a stable API — `0.0.x` is a preview and a rename is still only a minor version |
 | 5 — Collaboration / web | operation model for shared editing | ⬜ blocked on an ADR: operational transform vs CRDT ([docs/24](docs/24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions). Explicitly **not** part of the embeddable SDK, which is single-user |
 | 6 — 1.0 | stable SDK, support guarantees | ⬜ |
 
@@ -279,8 +279,8 @@ improving; the API is not yet stable. Remaining before beta:
 - **frozen panes in the PNG backend** (the editor canvas already splits them);
 - writing a **pivot created here as a live Excel pivot** rather than as its
   cells ([PIV-02](docs/54-PIVOT-TABLES.md));
-- **publishing the SDK to npm** — the element and its whole API work today, but
-  integrators currently vendor the files from `webapp/`;
+- a **stable SDK API** — `0.0.x` is published and works, but a rename is
+  still only a minor version until 1.0;
 - **localization beyond the chrome** — menus, submenus and toolbar tooltips are
   translatable; panels, dialogs and status messages are still English;
 - the **concurrency model for shared editing**, which needs an ADR before code.
