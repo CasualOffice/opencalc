@@ -60,7 +60,7 @@ many mutate; `UNDO` how many are reversible.
 | **Tables (ListObjects)** | **0** | 0 | 0 | ✅ | ❌ | **FC-08** |
 | **Print setup** | **0** | 0 | 0 | ✅ | ❌ | **FC-09** |
 | **Charts, drawings, images** | **0** | 0 | 0 | ✅ | ❌ | **FC-10** |
-| Rich text runs | 0 | 0 | 0 | ✅ | ❌ | **FC-11** |
+| Rich text runs | — | — | — | ✅ | ✅ | correct (render) |
 
 ## Rows
 
@@ -107,7 +107,7 @@ The file is right and the screen is wrong. From
 
 | ID | Feature | Sev | Status | Note |
 | --- | --- | --- | --- | --- |
-| FC-11 | Rich text runs — per-character formatting inside a cell | P1 | 🔴 | round-trips exactly; renders as uniform plain text |
+| FC-11 | Rich text runs — per-character formatting inside a cell | P1 | ✅ | The canvas draws per-run formatting: bold, italic, strike, underline, colour, size, typeface and super/subscript. Runs travel in the existing cell payload and only when the string actually has them — a `runs` key on every cell would bloat a screenful for the overwhelming majority that are plain. **A run inherits rather than replaces**: `<rPr>` carries only what differs, so treating an absent property as a reset would drop the cell's own font on every partially-formatted string. **Measurement is per run too** — each has its own font, so measuring the concatenation with the cell's font gives a width that is wrong wherever they differ, and the overflow scan then borrows the wrong number of neighbouring columns; alignment drifts with it. Super/subscript is drawn smaller and offset by a fraction of the cell size, so it tracks a resized font. Verified by importing a real `.xlsx` with three differing runs rather than by injecting state. LIVE depth 58.7% → 61.3%; fidelity unchanged at 95.9% / P0 0. |
 | FC-12 | Gradient and pattern fills | P1 | 🔴 | modelled; canvas paints solid or nothing |
 | FC-13 | Superscript / subscript, underline variants, legacy font effects | P2 | 🔴 | modelled; canvas draws plain |
 | FC-14 | Shrink-to-fit, reading order, justify-last-line, relative indent | P2 | 🔴 | modelled; layout ignores |

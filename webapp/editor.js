@@ -405,6 +405,65 @@ function cellFont(it) {
   const slant = it.i ? "italic " : "";
   return `${slant}${weight}${cellPx(it)}px ${fontStack(it.fn)}`;
 }
+
+// The font for one rich-text run: the run's own properties where it states
+// them, the cell's where it does not. A run inherits rather than replaces —
+// `<rPr>` carries only what differs, so treating an absent property as a reset
+// would drop the cell's font on every partially-formatted string.
+function runFont(it, run) {
+  const merged = {
+    b: run.b ?? it.b,
+    i: run.i ?? it.i,
+    fn: run.fn ?? it.fn,
+    // Superscript and subscript are drawn smaller, as every renderer does;
+    // the format states the position, not the size.
+    fs: run.fs ?? it.fs,
+  };
+  const px = run.va ? Math.max(7, cellPx(merged) * 0.72) : cellPx(merged);
+  const weight = merged.b ? "600 " : "";
+  const slant = merged.i ? "italic " : "";
+  return `${slant}${weight}${px}px ${fontStack(merged.fn)}`;
+}
+
+// Total width of a rich string, measured run by run — each run has its own
+// font, so measuring the concatenated text with one font gives a width that is
+// wrong wherever the runs differ, and the alignment then drifts.
+function runsWidth(it) {
+  const saved = ctx.font;
+  let total = 0;
+  for (const run of it.runs) {
+    ctx.font = runFont(it, run);
+    total += ctx.measureText(run.t).width;
+  }
+  ctx.font = saved;
+  return total;
+}
+
+// Draw a rich string starting at `x` on baseline `y`, returning the width used.
+function drawRuns(it, x, y) {
+  const saved = ctx.font;
+  const savedFill = ctx.fillStyle;
+  let cursor = x;
+  for (const run of it.runs) {
+    ctx.font = runFont(it, run);
+    ctx.fillStyle = run.fc ? "#" + run.fc : (it.fc ? "#" + it.fc : colors.fg);
+    // Superscript rides above the baseline, subscript below it. The offsets
+    // are fractions of the cell's size so they track a resized font.
+    const shift = run.va === "superscript" ? -cellPx(it) * 0.32
+      : run.va === "subscript" ? cellPx(it) * 0.18
+      : 0;
+    ctx.fillText(run.t, cursor, y + shift);
+    const w = ctx.measureText(run.t).width;
+    if (run.u || run.st) {
+      const ly = run.st ? y + shift - cellPx(it) * 0.28 : y + shift + 2.5;
+      ctx.fillRect(cursor, ly, w, 1);
+    }
+    cursor += w;
+  }
+  ctx.font = saved;
+  ctx.fillStyle = savedFill;
+  return cursor - x;
+}
 function cellLineH(it) { return cellPx(it) + 4; }
 // Baseline y for a single line given the cell's vertical alignment.
 function textY(it, yTop, h, lineH) {
@@ -1136,7 +1195,11 @@ function draw() {
       continue;
     }
     let text = it.t;
-    let tw = ctx.measureText(text).width;
+    // Rich text is measured run by run: each has its own font, so measuring
+    // the concatenation with the cell's font gives a width that is wrong
+    // wherever they differ — and the spill scan below would then borrow the
+    // wrong number of neighbouring columns.
+    let tw = it.runs ? runsWidth(it) : ctx.measureText(text).width;
 
     // Text overflows across adjacent EMPTY cells (Excel behavior). Extend the
     // clip rectangle left/right over blank neighbours until the text fits or a
@@ -1194,6 +1257,19 @@ function draw() {
     if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5 - ind; }
     else if (align === "center") { ctx.textAlign = "center"; tx = x + w / 2; }
     else { ctx.textAlign = "left"; tx = x + 5 + ind; }
+    if (it.runs && text === it.t) {
+      // Rich text: each run carries its own font, so it is drawn piece by
+      // piece. Only when the text is the cell's own — a "#####" overflow
+      // placeholder has no runs to speak of.
+      const total = runsWidth(it);
+      const startX = align === "right" ? tx - total : align === "center" ? tx - total / 2 : tx;
+      const savedAlign = ctx.textAlign;
+      ctx.textAlign = "left";
+      drawRuns(it, startX, y);
+      ctx.textAlign = savedAlign;
+      ctx.restore();
+      continue;
+    }
     ctx.fillText(text, tx, y);
     if (it.u || it.st) {
       const lw = Math.min(tw, clipR - clipL - 8);

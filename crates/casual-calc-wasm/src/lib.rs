@@ -2241,6 +2241,48 @@ pub fn session_cells(
             if let Some(bd) = style.and_then(|s| s.border.as_ref()) {
                 extra.push_str(&format!(",\"bd\":{}", border_json(bd)));
             }
+            // Rich text: the per-run formatting, so the canvas can draw a cell
+            // whose parts differ. Emitted only when the string actually has
+            // runs — the overwhelming majority do not, and a `runs` key on
+            // every cell would bloat a screenful of payload for nothing.
+            if let CellValue::SharedString(id) | CellValue::InlineString(id) = cell.value
+                && let Some(runs) = wb.strings.runs(id)
+            {
+                let parts: Vec<String> = runs
+                    .iter()
+                    .map(|run| {
+                        let mut f = String::new();
+                        if let Some(font) = &run.font {
+                            if font.bold {
+                                f.push_str(",\"b\":1");
+                            }
+                            if font.italic {
+                                f.push_str(",\"i\":1");
+                            }
+                            if font.strike {
+                                f.push_str(",\"st\":1");
+                            }
+                            if font.underline.is_some() {
+                                f.push_str(",\"u\":1");
+                            }
+                            if let Some(v) = font.vert_align {
+                                f.push_str(&format!(",\"va\":\"{}\"", v.ooxml()));
+                            }
+                            if let Some(c) = &font.color {
+                                f.push_str(&format!(",\"fc\":{}", json_string(c)));
+                            }
+                            if let Some(sz) = font.size_hp {
+                                f.push_str(&format!(",\"fs\":{}", sz as f64 / 2.0));
+                            }
+                            if let Some(name) = &font.name {
+                                f.push_str(&format!(",\"fn\":{}", json_string(name)));
+                            }
+                        }
+                        format!("{{\"t\":{}{f}}}", json_string(&run.text))
+                    })
+                    .collect();
+                extra.push_str(&format!(",\"runs\":[{}]", parts.join(",")));
+            }
             items.push(format!(
                 "{{\"r\":{},\"c\":{},\"t\":{},\"a\":\"{align}\"{extra}}}",
                 at.row,
