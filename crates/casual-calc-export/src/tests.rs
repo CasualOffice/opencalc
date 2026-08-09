@@ -1624,3 +1624,67 @@ fn external_references_and_unmodelled_parts_are_retained() {
     assert_eq!(back.retained_parts, wb.retained_parts);
     assert_eq!(back.retained_refs, wb.retained_refs);
 }
+
+#[test]
+fn a_chart_survives_a_save_even_though_nothing_models_it() {
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+              <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+              <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+              <drawing r:id="rId7"/>
+            </worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/drawings/drawing1.xml",
+            br#"<wsDr xmlns="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><twoCellAnchor/></wsDr>"#,
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/charts/chart1.xml",
+            br#"<chartSpace xmlns="http://schemas.openxmlformats.org/drawingml/2006/chart"><chart/></chartSpace>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    // Retention is transitive: the drawing reaches the chart through its own
+    // rels, and keeping the drawing while dropping the chart leaves a reference
+    // to nothing, which Excel reports as a repair.
+    let paths: Vec<&str> = wb.retained_parts.iter().map(|p| p.path.as_str()).collect();
+    assert!(paths.contains(&"xl/drawings/drawing1.xml"), "{paths:?}");
+    assert!(paths.contains(&"xl/charts/chart1.xml"), "{paths:?}");
+
+    let written = write_workbook(&wb).unwrap();
+    assert!(xml_of(&written, "xl/charts/chart1.xml").contains("<chart/>"));
+    // The sheet still points at the drawing, or the chart is in the package and
+    // on no sheet.
+    assert!(xml_of(&written, "xl/worksheets/sheet1.xml").contains("<drawing r:id=\"rId7\"/>"));
+    assert!(xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels").contains("drawing1.xml"));
+    // And the drawing still points at the chart.
+    assert!(xml_of(&written, "xl/drawings/_rels/drawing1.xml.rels").contains("chart1.xml"));
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_parts.len(), wb.retained_parts.len());
+    assert_eq!(back.sheets[0].retained_refs, wb.sheets[0].retained_refs);
+}

@@ -177,6 +177,12 @@ pub struct Sheet {
     /// Print layout, carried through verbatim.
     #[serde(default, skip_serializing_if = "PrintSetup::is_empty")]
     pub print: PrintSetup,
+    /// Worksheet elements that name a retained part — `<drawing r:id=…>`,
+    /// `<oleObjects>`, `<controls>`, `<picture>`. Kept for the same reason the
+    /// workbook keeps `<externalReference>`: the part alone is invisible unless
+    /// something still points at it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_refs: Vec<(String, BTreeMap<String, String>)>,
     /// The autofilter over a header range, if one is turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
@@ -990,6 +996,7 @@ impl Sheet {
             comments: Vec::new(),
             hyperlinks: Vec::new(),
             print: PrintSetup::default(),
+            retained_refs: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,
             auto_filter: None,

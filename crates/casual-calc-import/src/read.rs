@@ -474,6 +474,8 @@ pub struct Worksheet {
     pub protection: Option<BTreeMap<String, String>>,
     /// Print layout, carried through verbatim.
     pub print: PrintSetup,
+    /// Elements naming a retained part, in document order.
+    pub retained_refs: Vec<RetainedRef>,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
     pub auto_filter: Option<String>,
     /// Per-column filter rules inside that `<autoFilter>`.
@@ -818,6 +820,15 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             display: read_attr(&e, b"display")?,
                         });
                     }
+                    // These name a part we keep but do not model. `<drawing>`
+                    // is the one that matters most: without it a retained chart
+                    // is in the package but on no sheet.
+                    b"drawing" | b"picture" | b"oleObjects" | b"controls" => {
+                        result.retained_refs.push((
+                            String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
+                            read_attrs(&e)?,
+                        ));
+                    }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
@@ -947,6 +958,15 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                         } else {
                             result.print.row_breaks.push(attrs);
                         }
+                    }
+                    // These name a part we keep but do not model. `<drawing>`
+                    // is the one that matters most: without it a retained chart
+                    // is in the package but on no sheet.
+                    b"drawing" | b"picture" | b"oleObjects" | b"controls" => {
+                        result.retained_refs.push((
+                            String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
+                            read_attrs(&e)?,
+                        ));
                     }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {

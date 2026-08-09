@@ -20,8 +20,8 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, GradientFill, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint,
-    Underline, VAlign, VertAlign, Workbook, from_micro,
+    ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId, Style,
+    ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -98,7 +98,12 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
     // note markers), and the per-sheet rels that tie them to the worksheet.
     for (i, sheet) in workbook.sheets.iter().enumerate() {
-        if sheet.comments.is_empty() && sheet.hyperlinks.is_empty() {
+        let sheet_part = format!("xl/worksheets/sheet{}.xml", i + 1);
+        let has_retained = workbook
+            .retained_rels
+            .iter()
+            .any(|r| r.source == sheet_part);
+        if sheet.comments.is_empty() && sheet.hyperlinks.is_empty() && !has_retained {
             continue;
         }
         let n = i + 1;
@@ -117,11 +122,37 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         // a sheet with links and no notes still needs it.
         parts.push((
             format!("xl/worksheets/_rels/sheet{n}.xml.rels"),
-            sheet_rels(sheet, n, threaded),
+            sheet_rels(sheet, n, threaded, &workbook.retained_rels),
         ));
     }
     if any_threaded(workbook) {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
+    }
+
+    // A retained part can declare relationships of its own — a drawing names
+    // its charts and images — so every source that is not workbook.xml or a
+    // worksheet needs its `.rels` regenerated too. Without this the chart is in
+    // the package but the drawing no longer reaches it, which Excel reports as
+    // a file needing repair.
+    let mut by_source: BTreeMap<&str, Vec<&RetainedRel>> = BTreeMap::new();
+    for rel in &workbook.retained_rels {
+        by_source.entry(rel.source.as_str()).or_default().push(rel);
+    }
+    for (source, rels) in by_source {
+        if source.ends_with("workbook.xml") || source.contains("/worksheets/") {
+            continue; // written by workbook_rels / sheet_rels
+        }
+        let mut xml = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
+        for rel in rels {
+            xml.push_str(&format!(
+                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+                escape_attr(&rel.id),
+                escape_attr(&rel.rel_type),
+                escape_attr(&rel.target)
+            ));
+        }
+        xml.push_str("</Relationships>");
+        parts.push((rels_path_for(source), xml));
     }
 
     package_with_retained(&parts, workbook)
@@ -382,7 +413,7 @@ fn vml_drawing(sheet: &Sheet) -> String {
 
 /// The `xl/worksheets/_rels/sheet{n}.xml.rels`: links the VML drawing and the
 /// comments part to the worksheet.
-fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool) -> String {
+fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool, retained: &[RetainedRel]) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     if !sheet.comments.is_empty() {
         s.push_str(&format!(
@@ -394,6 +425,18 @@ fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool) -> String {
                 "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
             ));
         }
+    }
+    // Relationships to retained parts (drawings, and through them charts and
+    // images) keep their original ids, because the `<drawing r:id>` element
+    // above names them.
+    let sheet_part = format!("xl/worksheets/sheet{n}.xml");
+    for rel in workbook_rels_for(retained, &sheet_part) {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            escape_attr(&rel.id),
+            escape_attr(&rel.rel_type),
+            escape_attr(&rel.target)
+        ));
     }
     // A hyperlink target is `TargetMode="External"`: without that the URI is
     // read back as a path inside the package and the link is destroyed.
@@ -429,6 +472,19 @@ fn external_targets(sheet: &Sheet) -> Vec<String> {
 /// from the fixed rIds the comment parts use so the two cannot collide.
 fn hyperlink_rel_id(index: usize) -> String {
     format!("rIdHl{}", index + 1)
+}
+
+/// The `.rels` path for a part: `a/b/c.xml` becomes `a/b/_rels/c.xml.rels`.
+fn rels_path_for(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
+}
+
+/// The retained relationships declared by one part.
+fn workbook_rels_for<'a>(rels: &'a [RetainedRel], source: &str) -> Vec<&'a RetainedRel> {
+    rels.iter().filter(|r| r.source == source).collect()
 }
 
 /// Whether any sheet holds a thread that needs the 2018 parts.
@@ -1709,6 +1765,19 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             write_attr_element(&mut s, "brk", brk);
         }
         s.push_str(&format!("</{tag}>"));
+    }
+
+    // `<drawing>` precedes `<legacyDrawing>` in CT_Worksheet's sequence, and
+    // `<oleObjects>`/`<controls>` precede both.
+    for name in ["controls", "oleObjects", "drawing", "picture"] {
+        for (element, attrs) in sheet.retained_refs.iter().filter(|(n, _)| n == name) {
+            s.push_str(&format!("<{element}"));
+            for (k, v) in attrs {
+                let key = if k == "id" { "r:id" } else { k.as_str() };
+                s.push_str(&format!(" {key}=\"{}\"", escape_attr(v)));
+            }
+            s.push_str("/>");
+        }
     }
 
     // Legacy drawing ref (the VML holding note markers) — last in the sequence.
