@@ -2298,3 +2298,177 @@ fn dcount_and_dcounta_differ_on_text() {
     assert_eq!(value_at(&wb, 0, 5), CellValue::Number(1.0));
     assert_eq!(value_at(&wb, 1, 5), CellValue::Number(2.0));
 }
+
+/// The coupon schedule counts **back from maturity**, which is what keeps a
+/// bond's payments on the day of the month it matures. Stepping forward from an
+/// assumed start puts every date a few days out whenever month lengths differ.
+#[test]
+fn coupon_dates_count_back_from_maturity() {
+    let mut b = Builder::new();
+    // Settlement 2024-03-15, maturity 2026-11-30, semi-annual.
+    b.formula((0, 0), "COUPPCD(DATE(2024,3,15),DATE(2026,11,30),2)");
+    b.formula((1, 0), "COUPNCD(DATE(2024,3,15),DATE(2026,11,30),2)");
+    b.formula((2, 0), "COUPNUM(DATE(2024,3,15),DATE(2026,11,30),2)");
+    // A maturity on the 31st keeps the 31st where the month has one.
+    b.formula((3, 0), "COUPPCD(DATE(2024,4,15),DATE(2025,1,31),2)");
+    b.formula((4, 0), "COUPNCD(DATE(2024,4,15),DATE(2025,1,31),2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let ymd = |wb: &Workbook, r: u32| {
+        let CellValue::Number(n) = value_at(wb, r, 0) else {
+            panic!("expected a serial at row {r}: {:?}", value_at(wb, r, 0));
+        };
+        n as i64
+    };
+    let date = |y: i64, m: i64, d: i64| crate::functions::ymd_to_serial_for_test(y, m, d);
+    // Coupons on 30 May and 30 November; settlement in March sits between them.
+    assert_eq!(ymd(&wb, 0), date(2023, 11, 30));
+    assert_eq!(ymd(&wb, 1), date(2024, 5, 30));
+    // Nov-2023 → Nov-2026 inclusive of the period ending at the next coupon.
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(6.0));
+    // 31 Jan maturity: the previous coupon is 31 July, the next 31 January.
+    assert_eq!(ymd(&wb, 3), date(2024, 1, 31));
+    assert_eq!(ymd(&wb, 4), date(2024, 7, 31));
+}
+
+/// On a 30/360 basis a coupon period is 360/frequency days *by definition*, so
+/// the parts must add up to it. Measuring the period from the calendar instead
+/// makes COUPDAYS disagree with COUPDAYBS + COUPDAYSNC.
+#[test]
+fn coupon_day_counts_sum_to_the_period() {
+    let mut b = Builder::new();
+    for (i, basis) in [0, 1, 2, 3, 4].iter().enumerate() {
+        let r = i as u32;
+        b.formula(
+            (r, 0),
+            &format!("COUPDAYBS(DATE(2024,3,15),DATE(2026,11,30),2,{basis})"),
+        );
+        b.formula(
+            (r, 1),
+            &format!("COUPDAYSNC(DATE(2024,3,15),DATE(2026,11,30),2,{basis})"),
+        );
+        b.formula(
+            (r, 2),
+            &format!("COUPDAYS(DATE(2024,3,15),DATE(2026,11,30),2,{basis})"),
+        );
+    }
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    for (i, basis) in [0, 1, 2, 3, 4].iter().enumerate() {
+        let r = i as u32;
+        let num = |c: u32| match value_at(&wb, r, c) {
+            CellValue::Number(n) => n,
+            other => panic!("basis {basis}: {other:?}"),
+        };
+        // Bases 2 and 3 use a fixed year over the frequency, so their nominal
+        // period is not the actual one and the parts need not sum — every other
+        // basis must balance.
+        if matches!(basis, 0 | 1 | 4) {
+            assert!(
+                (num(0) + num(1) - num(2)).abs() < 1e-9,
+                "basis {basis}: {} + {} != {}",
+                num(0),
+                num(1),
+                num(2)
+            );
+        }
+        assert!(num(0) > 0.0 && num(1) > 0.0, "basis {basis} has real parts");
+    }
+}
+
+/// PRICE and YIELD must be exact inverses — YIELD is solved against the very
+/// function PRICE uses, which is the only way to guarantee that rather than
+/// approximate it.
+#[test]
+fn price_and_yield_invert_each_other() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "PRICE(DATE(2024,2,15),DATE(2034,11,15),0.0575,0.065,100,2,0)",
+    );
+    b.formula(
+        (1, 0),
+        "YIELD(DATE(2024,2,15),DATE(2034,11,15),0.0575,A1,100,2,0)",
+    );
+    // A bond yielding its coupon prices at par, whatever the dates.
+    b.formula(
+        (2, 0),
+        "PRICE(DATE(2024,1,1),DATE(2030,1,1),0.05,0.05,100,2,0)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // Priced below par because the yield exceeds the coupon.
+    assert!(n(0) > 80.0 && n(0) < 100.0, "price {}", n(0));
+    assert!((n(1) - 0.065).abs() < 1e-6, "yield round trip: {}", n(1));
+    assert!(
+        (n(2) - 100.0).abs() < 1e-6,
+        "coupon == yield prices at par: {}",
+        n(2)
+    );
+}
+
+/// Modified duration is Macaulay discounted by one period's yield — it answers
+/// "how much does the price move", not "when is the money".
+#[test]
+fn modified_duration_is_macaulay_over_one_plus_periodic_yield() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "DURATION(DATE(2024,1,1),DATE(2030,1,1),0.06,0.08,2,0)",
+    );
+    b.formula(
+        (1, 0),
+        "MDURATION(DATE(2024,1,1),DATE(2030,1,1),0.06,0.08,2,0)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let (CellValue::Number(d), CellValue::Number(m)) = (value_at(&wb, 0, 0), value_at(&wb, 1, 0))
+    else {
+        panic!("expected numbers");
+    };
+    assert!(d > 4.0 && d < 6.0, "duration {d}");
+    assert!((m - d / 1.04).abs() < 1e-9, "modified {m} vs {d}/1.04");
+}
+
+/// The at-maturity instruments accrue from *issue*, not from settlement: the
+/// buyer pays the seller for the part of the term already elapsed.
+#[test]
+fn maturity_instruments_accrue_from_issue() {
+    let mut b = Builder::new();
+    b.formula(
+        (0, 0),
+        "ACCRINTM(DATE(2024,1,1),DATE(2024,7,1),0.06,1000,0)",
+    );
+    b.formula(
+        (1, 0),
+        "PRICEDISC(DATE(2024,1,1),DATE(2025,1,1),0.05,100,0)",
+    );
+    b.formula((2, 0), "YIELDDISC(DATE(2024,1,1),DATE(2025,1,1),95,100,0)");
+    b.formula(
+        (3, 0),
+        "PRICEMAT(DATE(2024,4,1),DATE(2025,1,1),DATE(2024,1,1),0.06,0.05,0)",
+    );
+    b.formula(
+        (4, 0),
+        "YIELDMAT(DATE(2024,4,1),DATE(2025,1,1),DATE(2024,1,1),0.06,A4,0)",
+    );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // Half a year at 6% on 1000, on a 30/360 basis.
+    assert!((n(0) - 30.0).abs() < 1e-9, "accrued {}", n(0));
+    // A 5% discount over exactly one year off 100.
+    assert!((n(1) - 95.0).abs() < 1e-9, "price {}", n(1));
+    assert!((n(2) - (100.0 / 95.0 - 1.0)).abs() < 1e-9, "yield {}", n(2));
+    // PRICEMAT and YIELDMAT invert.
+    assert!((n(4) - 0.05).abs() < 1e-9, "yieldmat round trip: {}", n(4));
+}

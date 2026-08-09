@@ -20,6 +20,10 @@ const MAX_RANGE_CELLS: u64 = 2_000_000;
 /// `call_function` so the two never drift. Add a function in both places.
 pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ABS", "ABS(number)"),
+    (
+        "ACCRINTM",
+        "ACCRINTM(issue, settlement, rate, par, [basis])",
+    ),
     ("ACOS", "ACOS(number)"),
     ("ACOSH", "ACOSH(number)"),
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
@@ -71,6 +75,30 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("COUNTBLANK", "COUNTBLANK(range)"),
     ("COUNTIF", "COUNTIF(range, criteria)"),
     ("COUNTIFS", "COUNTIFS(range1, criteria1, …)"),
+    (
+        "COUPDAYBS",
+        "COUPDAYBS(settlement, maturity, frequency, [basis])",
+    ),
+    (
+        "COUPDAYS",
+        "COUPDAYS(settlement, maturity, frequency, [basis])",
+    ),
+    (
+        "COUPDAYSNC",
+        "COUPDAYSNC(settlement, maturity, frequency, [basis])",
+    ),
+    (
+        "COUPNCD",
+        "COUPNCD(settlement, maturity, frequency, [basis])",
+    ),
+    (
+        "COUPNUM",
+        "COUPNUM(settlement, maturity, frequency, [basis])",
+    ),
+    (
+        "COUPPCD",
+        "COUPPCD(settlement, maturity, frequency, [basis])",
+    ),
     ("COVAR", "COVAR(array1, array2)"),
     ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
@@ -107,6 +135,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DSTDEV", "DSTDEV(database, field, criteria)"),
     ("DSTDEVP", "DSTDEVP(database, field, criteria)"),
     ("DSUM", "DSUM(database, field, criteria)"),
+    (
+        "DURATION",
+        "DURATION(settlement, maturity, coupon, yld, frequency, [basis])",
+    ),
     ("DVAR", "DVAR(database, field, criteria)"),
     ("DVARP", "DVARP(database, field, criteria)"),
     ("ECMA.CEILING", "ECMA.CEILING(number, significance)"),
@@ -210,6 +242,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
     ("MAXA", "MAXA(value1, …)"),
+    (
+        "MDURATION",
+        "MDURATION(settlement, maturity, coupon, yld, frequency, [basis])",
+    ),
     ("MEDIAN", "MEDIAN(number1, …)"),
     ("MID", "MID(text, start_num, num_chars)"),
     ("MIN", "MIN(number1, …)"),
@@ -249,6 +285,18 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("POISSON", "POISSON(x, mean, cumulative)"),
     ("POWER", "POWER(number, power)"),
     ("PPMT", "PPMT(rate, per, nper, pv, [fv], [type])"),
+    (
+        "PRICE",
+        "PRICE(settlement, maturity, rate, yld, redemption, frequency, [basis])",
+    ),
+    (
+        "PRICEDISC",
+        "PRICEDISC(settlement, maturity, discount, redemption, [basis])",
+    ),
+    (
+        "PRICEMAT",
+        "PRICEMAT(settlement, maturity, issue, rate, yld, [basis])",
+    ),
     ("PROB", "PROB(x_range, prob_range, lower, [upper])"),
     ("PRODUCT", "PRODUCT(number1, …)"),
     ("PROPER", "PROPER(text)"),
@@ -340,6 +388,18 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("XNPV", "XNPV(rate, values, dates)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
+    (
+        "YIELD",
+        "YIELD(settlement, maturity, rate, pr, redemption, frequency, [basis])",
+    ),
+    (
+        "YIELDDISC",
+        "YIELDDISC(settlement, maturity, pr, redemption, [basis])",
+    ),
+    (
+        "YIELDMAT",
+        "YIELDMAT(settlement, maturity, issue, rate, pr, [basis])",
+    ),
     ("ZTEST", "ZTEST(array, x, [sigma])"),
 ];
 
@@ -779,6 +839,13 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CUMIPMT" => eval_cumulative(ev, sheet, args, true),
         "CUMPRINC" => eval_cumulative(ev, sheet, args, false),
         "DISC" => eval_disc(ev, sheet, args),
+        "PRICE" | "YIELD" | "DURATION" | "MDURATION" => eval_bond(ev, sheet, name, args),
+        "ACCRINTM" | "PRICEDISC" | "YIELDDISC" | "PRICEMAT" | "YIELDMAT" => {
+            eval_bond_simple(ev, sheet, name, args)
+        }
+        "COUPDAYBS" | "COUPDAYS" | "COUPDAYSNC" | "COUPNCD" | "COUPNUM" | "COUPPCD" => {
+            eval_coupon(ev, sheet, name, args)
+        }
         "INTRATE" => eval_intrate(ev, sheet, args, false),
         "RECEIVED" => eval_intrate(ev, sheet, args, true),
         "TBILLPRICE" => eval_tbill(ev, sheet, args, 0),
@@ -6463,6 +6530,325 @@ fn eval_database(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]
             let var =
                 numbers.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
             Value::Number(if name == "DVARP" { var } else { var.sqrt() })
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// `ymd_to_serial` for tests in sibling modules, which cannot see a private fn.
+#[cfg(test)]
+pub(crate) fn ymd_to_serial_for_test(y: i64, m: i64, d: i64) -> i64 {
+    ymd_to_serial(y, m, d)
+}
+
+/// The coupon period bracketing `settlement`, as `(previous, next)` serials.
+///
+/// Coupons are counted **backwards from maturity**, not forwards from issue —
+/// a bond's last payment lands on its maturity date, and stepping forwards from
+/// an assumed start puts every date a few days out whenever the month lengths
+/// differ. Excel counts back, and so does this.
+///
+/// The day-of-month is taken from maturity and clamped to each month's length,
+/// so a bond maturing on the 31st pays on the 30th in a 30-day month and comes
+/// back to the 31st afterwards, rather than drifting earlier every period.
+fn coupon_period(settlement: i64, maturity: i64, frequency: i64) -> Option<(i64, i64)> {
+    if !matches!(frequency, 1 | 2 | 4) || settlement >= maturity {
+        return None;
+    }
+    let months = 12 / frequency;
+    let (my, mm, md) = serial_to_ymd(maturity);
+    // Step back a period at a time until the date is at or before settlement.
+    // Bounded by the periods in a century, so a nonsensical pair cannot spin.
+    let step = |k: i64| -> i64 {
+        let total = my * 12 + (mm - 1) - k * months;
+        let (y, m) = (total.div_euclid(12), total.rem_euclid(12) + 1);
+        let last = days_in_month(y, m);
+        ymd_to_serial(y, m, md.min(last))
+    };
+    let mut k = 0;
+    while k < 1200 {
+        let date = step(k);
+        if date <= settlement {
+            return Some((date, step(k - 1)));
+        }
+        k += 1;
+    }
+    None
+}
+
+/// The six `COUP*` functions, which all answer questions about the coupon
+/// schedule and therefore all derive from the same one.
+///
+/// On bases 0 and 4 (the 30/360 conventions) a coupon period is 360/frequency
+/// days *by definition* — the whole point of a 30/360 basis is that every
+/// period is the same length — so the period length is not measured from the
+/// calendar. Measuring it would make COUPDAYS disagree with COUPDAYBS +
+/// COUPDAYSNC, which must sum to it.
+fn eval_coupon(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    if args.len() < 3 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let [settle, mature, frequency, basis] =
+        match opt_numbers(ev, sheet, args, 3, [0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let basis = basis as i64;
+    if !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (settle, mature) = (settle.trunc() as i64, mature.trunc() as i64);
+    let Some((prev, next)) = coupon_period(settle, mature, frequency as i64) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    let freq = frequency as i64;
+
+    // 30/360 bases define the period; the others measure it.
+    let period_days = |a: i64, b: i64| -> f64 {
+        match basis {
+            0 => eval_days360_serials(a, b, false).unwrap_or(0) as f64,
+            4 => eval_days360_serials(a, b, true).unwrap_or(0) as f64,
+            _ => (b - a) as f64,
+        }
+    };
+
+    match name {
+        "COUPPCD" => Value::Number(prev as f64),
+        "COUPNCD" => Value::Number(next as f64),
+        "COUPDAYBS" => Value::Number(period_days(prev, settle)),
+        "COUPDAYSNC" => Value::Number(period_days(settle, next)),
+        "COUPDAYS" => Value::Number(match basis {
+            0 | 4 => 360.0 / freq as f64,
+            // Basis 1 measures the actual period; 2 and 3 use their fixed year
+            // divided by the frequency, which is what Excel reports.
+            1 => (next - prev) as f64,
+            2 => 360.0 / freq as f64,
+            _ => 365.0 / freq as f64,
+        }),
+        "COUPNUM" => {
+            // Whole periods from settlement to maturity, counting the one that
+            // ends at `next`.
+            let (my, mm, _) = serial_to_ymd(mature);
+            let (ny, nm, _) = serial_to_ymd(next);
+            let months = (my * 12 + mm) - (ny * 12 + nm);
+            Value::Number((months / (12 / freq)) as f64 + 1.0)
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// The coupon-schedule quantities every bond formula needs: number of periods,
+/// and the settlement's position inside its coupon period.
+///
+/// Returned together because they must come from one schedule — deriving `n`
+/// from one calculation and `dsc/e` from another is how a price and a yield
+/// stop being inverses of each other.
+fn bond_terms(settle: i64, mature: i64, freq: i64, basis: i64) -> Option<(f64, f64, f64)> {
+    let (prev, next) = coupon_period(settle, mature, freq)?;
+    let period = |a: i64, b: i64| -> f64 {
+        match basis {
+            0 => eval_days360_serials(a, b, false).unwrap_or(0) as f64,
+            4 => eval_days360_serials(a, b, true).unwrap_or(0) as f64,
+            _ => (b - a) as f64,
+        }
+    };
+    let e = match basis {
+        0 | 2 | 4 => 360.0 / freq as f64,
+        1 => (next - prev) as f64,
+        _ => 365.0 / freq as f64,
+    };
+    if e <= 0.0 {
+        return None;
+    }
+    let (my, mm, _) = serial_to_ymd(mature);
+    let (ny, nm, _) = serial_to_ymd(next);
+    let n = ((my * 12 + mm) - (ny * 12 + nm)) / (12 / freq) + 1;
+    // `a/e` is how far into the period settlement sits — the accrued fraction.
+    Some((n as f64, period(settle, next) / e, period(prev, settle) / e))
+}
+
+/// The clean price of a bond per 100 face, given a yield.
+///
+/// The last term is the accrued interest: a buyer settling mid-period pays the
+/// seller for the days they held it, and the *clean* price is what is quoted.
+/// Omitting it prices the bond as though coupons only ever land on settlement.
+fn bond_price(
+    rate: f64,
+    yld: f64,
+    redemption: f64,
+    freq: f64,
+    n: f64,
+    dsc_e: f64,
+    a_e: f64,
+) -> f64 {
+    let coupon = 100.0 * rate / freq;
+    let k = 1.0 + yld / freq;
+    let mut price = redemption / k.powf(n - 1.0 + dsc_e);
+    for i in 1..=(n as i64) {
+        price += coupon / k.powf(i as f64 - 1.0 + dsc_e);
+    }
+    price - coupon * a_e
+}
+
+/// The bond functions that need the coupon schedule: PRICE, YIELD, DURATION,
+/// MDURATION.
+///
+/// `YIELD` has no closed form, so it is solved numerically against `bond_price`
+/// — the same function `PRICE` uses, which is what makes the two exact
+/// inverses rather than approximately so.
+fn eval_bond(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    let wants = if matches!(name, "PRICE" | "YIELD") {
+        6
+    } else {
+        5
+    };
+    if args.len() < wants || args.len() > wants + 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let nums = match opt_numbers(ev, sheet, args, wants, [0.0; 7]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (settle, mature) = (nums[0].trunc() as i64, nums[1].trunc() as i64);
+    let (rate, third) = (nums[2], nums[3]);
+    let (redemption, freq, basis) = if wants == 6 {
+        (nums[4], nums[5], nums[6] as i64)
+    } else {
+        (100.0, nums[4], nums[5] as i64)
+    };
+    if rate < 0.0 || freq <= 0.0 || !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let Some((n, dsc_e, a_e)) = bond_terms(settle, mature, freq as i64, basis) else {
+        return Value::Error(ErrorValue::Num);
+    };
+
+    match name {
+        "PRICE" => {
+            if third < 0.0 || redemption <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number(bond_price(rate, third, redemption, freq, n, dsc_e, a_e))
+        }
+        "YIELD" => {
+            let price = third;
+            if price <= 0.0 || redemption <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            // Bisection over a bracket wide enough for any real bond. Slower
+            // than Newton and immune to the derivative blowing up near zero
+            // yield, which is where a bond priced at par sits.
+            let f = |y: f64| bond_price(rate, y, redemption, freq, n, dsc_e, a_e) - price;
+            let (mut lo, mut hi) = (-0.99, 10.0);
+            if f(lo) * f(hi) > 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            for _ in 0..200 {
+                let mid = (lo + hi) / 2.0;
+                if f(lo) * f(mid) <= 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            Value::Number((lo + hi) / 2.0)
+        }
+        "DURATION" | "MDURATION" => {
+            let yld = third;
+            let k = 1.0 + yld / freq;
+            let coupon = 100.0 * rate / freq;
+            let (mut pv_sum, mut weighted) = (0.0, 0.0);
+            for i in 1..=(n as i64) {
+                let periods = i as f64 - 1.0 + dsc_e;
+                let cash = coupon + if i as f64 == n { 100.0 } else { 0.0 };
+                let pv = cash / k.powf(periods);
+                pv_sum += pv;
+                weighted += pv * periods / freq;
+            }
+            if pv_sum == 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            let macaulay = weighted / pv_sum;
+            Value::Number(if name == "DURATION" {
+                macaulay
+            } else {
+                // Modified duration discounts Macaulay by one period's yield —
+                // it answers "how much does the price move", not "when is the
+                // money".
+                macaulay / k
+            })
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// The bond functions that need no coupon schedule, because the instrument has
+/// no coupons or pays only at maturity.
+fn eval_bond_simple(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    let wants = match name {
+        "ACCRINTM" => 4,
+        "PRICEDISC" | "YIELDDISC" => 4,
+        _ => 5, // PRICEMAT, YIELDMAT
+    };
+    if args.len() < wants || args.len() > wants + 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let v = match opt_numbers(ev, sheet, args, wants, [0.0; 6]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let basis = v[wants] as i64;
+    if !(0..=4).contains(&basis) {
+        return Value::Error(ErrorValue::Num);
+    }
+    match name {
+        "ACCRINTM" => {
+            let (issue, settle, rate, par) = (v[0], v[1], v[2], v[3]);
+            if rate <= 0.0 || par <= 0.0 || settle <= issue {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number(par * rate * year_fraction(issue, settle, basis))
+        }
+        "PRICEDISC" => {
+            let (settle, mature, discount, redemption) = (v[0], v[1], v[2], v[3]);
+            if discount <= 0.0 || redemption <= 0.0 || mature <= settle {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number(redemption - discount * redemption * year_fraction(settle, mature, basis))
+        }
+        "YIELDDISC" => {
+            let (settle, mature, price, redemption) = (v[0], v[1], v[2], v[3]);
+            let frac = year_fraction(settle, mature, basis);
+            if price <= 0.0 || redemption <= 0.0 || mature <= settle || frac <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number((redemption / price - 1.0) / frac)
+        }
+        "PRICEMAT" | "YIELDMAT" => {
+            let (settle, mature, issue, rate, fourth) = (v[0], v[1], v[2], v[3], v[4]);
+            if rate < 0.0 || mature <= settle || settle <= issue {
+                return Value::Error(ErrorValue::Num);
+            }
+            // Interest accrues from *issue*, not from settlement: the buyer
+            // pays the seller for the part of the term already elapsed.
+            let fim = year_fraction(issue, mature, basis);
+            let fsm = year_fraction(settle, mature, basis);
+            let fis = year_fraction(issue, settle, basis);
+            if name == "PRICEMAT" {
+                let denom = 1.0 + fsm * fourth;
+                if denom == 0.0 {
+                    return Value::Error(ErrorValue::Num);
+                }
+                Value::Number((100.0 + fim * rate * 100.0) / denom - fis * rate * 100.0)
+            } else {
+                let price = fourth;
+                if price <= 0.0 || fsm <= 0.0 {
+                    return Value::Error(ErrorValue::Num);
+                }
+                Value::Number(
+                    ((100.0 + fim * rate * 100.0) / (price + fis * rate * 100.0) - 1.0) / fsm,
+                )
+            }
         }
         _ => Value::Error(ErrorValue::Name),
     }
