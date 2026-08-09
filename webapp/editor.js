@@ -142,15 +142,25 @@ function drawImages() {
   }
 }
 
+// Chart frames from the last paint, for hit-testing; the selected chart; and
+// the drag in progress. A chart floats over the grid rather than occupying
+// cells, so none of this can come from the cell hit test.
+let chartFrames = [];
+let chartSel = null;
+let chartDrag = null;
+/// Handle radius, and the slop a click gets when aiming at one.
+const CHART_HANDLE = 4;
+
 // Every chart on the sheet, at its anchored cells.
 //
 // A chart is anchored in *cells*, which is why it moves with the rows under it
 // and why this has to be recomputed each frame rather than positioned once.
 function drawCharts(withQuad) {
   if (!wasm) return;
+  chartFrames = [];
   let charts = [];
   try { charts = JSON.parse(wasm.session_charts(state.sheet)); } catch { return; }
-  for (const ch of charts) {
+  for (const [index, ch] of charts.entries()) {
     const x0 = colXAt(ch.c0), y0 = rowYAt(ch.r0);
     if (x0 === undefined || y0 === undefined) continue;
     let x1 = colXAt(ch.c1), y1 = rowYAt(ch.r1);
@@ -159,6 +169,9 @@ function drawCharts(withQuad) {
     if (x1 === undefined) x1 = canvas.clientWidth;
     if (y1 === undefined) y1 = canvas.clientHeight;
     const w = Math.max(60, x1 - x0), h = Math.max(40, y1 - y0);
+    // Kept for hit-testing: a chart floats over cells rather than occupying
+    // them, so clicking one cannot go through the cell grid.
+    chartFrames.push({ index, x: x0, y: y0, w, h });
     ctx.save();
     ctx.beginPath();
     ctx.rect(x0, y0, w, h);
@@ -166,6 +179,68 @@ function drawCharts(withQuad) {
     drawChartFrame(ch, x0, y0, w, h);
     ctx.restore();
   }
+  drawChartSelection();
+}
+
+// The selected chart's outline and its eight handles, plus the live outline
+// while one is being dragged.
+//
+// Drawn after every chart so it is never painted over by a chart stacked on
+// top of the selected one.
+function drawChartSelection() {
+  if (chartDrag) {
+    const r = chartDragRect();
+    if (r) {
+      ctx.save();
+      ctx.strokeStyle = colors.accent || "#4472C4";
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+      ctx.restore();
+    }
+  }
+  if (!chartSel || chartSel.sheet !== state.sheet) return;
+  const frame = chartFrames.find((f) => f.index === chartSel.index);
+  if (!frame) return;
+  ctx.save();
+  ctx.strokeStyle = colors.accent || "#4472C4";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(frame.x + 0.5, frame.y + 0.5, frame.w - 1, frame.h - 1);
+  ctx.fillStyle = colors.bg;
+  for (const [hx, hy] of chartHandlePoints(frame)) {
+    ctx.beginPath();
+    ctx.arc(hx, hy, CHART_HANDLE, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/// The eight resize handles, corners first so a corner wins where two overlap.
+function chartHandlePoints(f) {
+  const mx = f.x + f.w / 2, my = f.y + f.h / 2;
+  return [
+    [f.x, f.y], [f.x + f.w, f.y], [f.x, f.y + f.h], [f.x + f.w, f.y + f.h],
+    [mx, f.y], [mx, f.y + f.h], [f.x, my], [f.x + f.w, my],
+  ];
+}
+
+// The rectangle a drag is currently proposing, in pixels.
+function chartDragRect() {
+  const f = chartFrames.find((x) => x.index === chartDrag.index);
+  if (!f) return null;
+  const dx = chartDrag.px - chartDrag.x0, dy = chartDrag.py - chartDrag.y0;
+  if (chartDrag.handle === null) return { x: f.x + dx, y: f.y + dy, w: f.w, h: f.h };
+  // Which edges the grabbed handle moves. A mid-edge handle moves one.
+  const [hx, hy] = chartHandlePoints(f)[chartDrag.handle];
+  const left = Math.abs(hx - f.x) < 1, right = Math.abs(hx - (f.x + f.w)) < 1;
+  const top = Math.abs(hy - f.y) < 1, bottom = Math.abs(hy - (f.y + f.h)) < 1;
+  let { x, y, w, h } = f;
+  if (left) { x += dx; w -= dx; }
+  if (right) { w += dx; }
+  if (top) { y += dy; h -= dy; }
+  if (bottom) { h += dy; }
+  return { x, y, w: Math.max(24, w), h: Math.max(24, h) };
 }
 
 // One chart: frame, title, then whichever picture its kind calls for.
@@ -196,6 +271,34 @@ function drawChartFrame(ch, x, y, w, h) {
     return;
   }
   const plot = { x: x + 34, y: top, w: w - 44, h: y + h - top - 18 };
+  // The legend takes its side out of the plot before anything is drawn, or the
+  // bars run underneath it. Two or more series without one are unreadable —
+  // three grey rectangles and no way to tell which is which.
+  const legend = ch.legend ? legendBox(ch, series, x, y, w, h, plot) : null;
+  if (plot.w < 20 || plot.h < 20) return;
+  if (legend) drawLegend(series, legend);
+  // Axis titles sit outside the plot, so they come off it too.
+  if (ch.xTitle) {
+    ctx.save();
+    ctx.fillStyle = colors.muted || "#888";
+    ctx.font = "10px " + (colors.uiFont || "system-ui, sans-serif");
+    ctx.textAlign = "center";
+    ctx.fillText(ch.xTitle, plot.x + plot.w / 2, y + h - 11);
+    ctx.restore();
+    plot.h -= 11;
+  }
+  if (ch.yTitle) {
+    ctx.save();
+    ctx.fillStyle = colors.muted || "#888";
+    ctx.font = "10px " + (colors.uiFont || "system-ui, sans-serif");
+    ctx.textAlign = "center";
+    ctx.translate(x + 10, plot.y + plot.h / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(ch.yTitle, 0, 0);
+    ctx.restore();
+    plot.x += 10;
+    plot.w -= 10;
+  }
   if (plot.w < 20 || plot.h < 20) return;
 
   if (ch.kind === "pie" || ch.kind === "doughnut") drawPie(ch, series, plot);
@@ -207,6 +310,56 @@ function drawChartFrame(ch, x, y, w, h) {
     ctx.font = "11px " + (colors.uiFont || "system-ui, sans-serif");
     ctx.fillText(`${ch.kind} chart not drawn`, plot.x, plot.y);
   }
+}
+
+/// Reserve the legend's side of the frame, shrinking `plot` to what is left.
+///
+/// Returns the rectangle the legend gets, or `null` when the frame is too small
+/// to give it one — a legend that leaves no room for the plot has cost more
+/// than it explains.
+function legendBox(ch, series, x, y, w, h, plot) {
+  ctx.font = "10px " + (colors.uiFont || "system-ui, sans-serif");
+  const widest = Math.max(
+    24,
+    ...series.map((s, i) => ctx.measureText(s.name || `Series ${i + 1}`).width),
+  );
+  const side = ch.legend;
+  if (side === "r" || side === "l" || side === "tr") {
+    const width = Math.min(widest + 22, Math.floor(w * 0.4));
+    if (plot.w - width < 40) return null;
+    plot.w -= width;
+    const left = side === "l" ? plot.x : plot.x + plot.w + 6;
+    if (side === "l") plot.x += width;
+    return { x: left, y: plot.y, w: width, h: plot.h, rows: true };
+  }
+  const height = 14;
+  if (plot.h - height < 40) return null;
+  plot.h -= height;
+  const topEdge = side === "t" ? plot.y : plot.y + plot.h + 2;
+  if (side === "t") plot.y += height;
+  return { x: plot.x, y: topEdge, w: plot.w, h: height, rows: false };
+}
+
+/// Swatch and name per series, stacked down the side or run across the foot.
+function drawLegend(series, box) {
+  const palette = seriesColors(series.length);
+  ctx.save();
+  ctx.font = "10px " + (colors.uiFont || "system-ui, sans-serif");
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  let cursorX = box.x;
+  series.forEach((s, i) => {
+    const label = s.name || `Series ${i + 1}`;
+    const cy = box.rows ? box.y + 8 + i * 14 : box.y + box.h / 2;
+    const cx = box.rows ? box.x : cursorX;
+    if (box.rows && cy > box.y + box.h) return;
+    ctx.fillStyle = palette[i];
+    ctx.fillRect(cx, cy - 4, 8, 8);
+    ctx.fillStyle = colors.fg;
+    ctx.fillText(label, cx + 12, cy);
+    cursorX = cx + 12 + ctx.measureText(label).width + 10;
+  });
+  ctx.restore();
 }
 
 // Series colours, taken from the workbook's theme accents so a chart matches
@@ -4437,6 +4590,278 @@ function refreshTablePanel() {
   buildTablePanel(body);
 }
 
+// --- Chart panel -----------------------------------------------------------
+//
+// Which chart is being edited is remembered rather than looked up from the
+// cursor: a chart floats over cells rather than occupying them, so the
+// selection is not where it is.
+let panelChart = null;
+
+const CHART_KINDS = [
+  ["column", "Column"], ["bar", "Bar"], ["line", "Line"],
+  ["area", "Area"], ["pie", "Pie"], ["doughnut", "Doughnut"], ["scatter", "Scatter"],
+];
+
+const LEGEND_POSITIONS = [
+  ["", "None"], ["r", "Right"], ["b", "Bottom"], ["t", "Top"], ["l", "Left"],
+];
+
+function chartAt(row, col) {
+  try { return JSON.parse(wasm.session_chart_at(state.sheet, row, col)); } catch { return null; }
+}
+
+function currentChart() {
+  if (!panelChart) return null;
+  try {
+    return JSON.parse(wasm.session_chart_defs(panelChart.sheet))[panelChart.index] || null;
+  } catch { return null; }
+}
+
+function applyChart(c) {
+  try {
+    const dropped = wasm.session_set_chart(panelChart.sheet, panelChart.index, JSON.stringify(c));
+    status.textContent = dropped
+      ? "chart updated — Excel's own chart definition was replaced"
+      : "chart updated";
+  } catch (e) { statusError(errText(e)); }
+  invalidateGrowth();
+  draw();
+  refreshChartPanel();
+}
+
+function refreshChartPanel() {
+  if (activePanel !== "chart") return;
+  const body = document.getElementById("side-panel-body");
+  body.textContent = "";
+  buildChartPanel(body);
+}
+
+function buildChartPanel(body) {
+  const c = currentChart();
+  if (!c) {
+    body.appendChild(el("div", "panel-note", "Select a chart, or Insert ▸ Chart."));
+    return;
+  }
+  if (c.imported) {
+    body.appendChild(el("div", "panel-note",
+      "From the file. Changing anything here replaces the chart definition Excel "
+      + "saved, and the formatting OpenCalc does not model goes with it."));
+  }
+
+  panelLabel(body, "Type");
+  const kind = el("select", "panel-select");
+  for (const [value, label] of CHART_KINDS) {
+    const o = el("option", null, label);
+    o.value = value;
+    kind.appendChild(o);
+  }
+  kind.value = c.kind;
+  kind.addEventListener("change", () => { c.kind = kind.value; applyChart(c); });
+  body.appendChild(kind);
+
+  const textField = (label, get, set) => {
+    panelLabel(body, label);
+    const input = el("input", "panel-field");
+    input.type = "text";
+    input.value = get();
+    const commit = () => { set(input.value); applyChart(c); };
+    input.addEventListener("change", commit);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.stopPropagation(); input.blur(); }
+      else if (e.key === "Escape") { e.stopPropagation(); input.value = get(); input.blur(); }
+    });
+    body.appendChild(input);
+  };
+  textField("Title", () => c.title, (v) => { c.title = v; });
+  textField("Horizontal axis title", () => c.xTitle, (v) => { c.xTitle = v; });
+  textField("Vertical axis title", () => c.yTitle, (v) => { c.yTitle = v; });
+
+  panelLabel(body, "Legend");
+  const legend = el("select", "panel-select");
+  for (const [value, label] of LEGEND_POSITIONS) {
+    const o = el("option", null, label);
+    o.value = value;
+    legend.appendChild(o);
+  }
+  legend.value = c.legend || "";
+  legend.addEventListener("change", () => {
+    c.legend = legend.value || null;
+    applyChart(c);
+  });
+  body.appendChild(legend);
+
+  panelLabel(body, "Series");
+  c.series.forEach((s, i) => {
+    const row = el("div", "chart-series");
+    const name = el("input", "panel-field");
+    name.type = "text";
+    name.placeholder = "name";
+    name.value = s.name;
+    name.addEventListener("change", () => { s.name = name.value; applyChart(c); });
+    const values = el("input", "panel-field");
+    values.type = "text";
+    values.placeholder = "Sheet1!$B$2:$B$9";
+    values.value = s.values;
+    values.addEventListener("change", () => { s.values = values.value; applyChart(c); });
+    const remove = el("button", "pivot-mini pivot-remove", "✕");
+    remove.title = "Remove this series";
+    remove.addEventListener("click", () => {
+      // The last one goes with the chart: a chart plotting nothing is a blank
+      // rectangle nobody can tell from a bug.
+      if (c.series.length === 1) {
+        statusError("a chart needs at least one series — delete the chart instead");
+        return;
+      }
+      c.series.splice(i, 1);
+      applyChart(c);
+    });
+    const head = el("div", "chart-series-head");
+    head.appendChild(name);
+    head.appendChild(remove);
+    row.appendChild(head);
+    row.appendChild(values);
+    body.appendChild(row);
+  });
+
+  const add = el("button", "panel-btn-ghost", "Add series from selection");
+  add.addEventListener("click", () => {
+    const r = effectiveRange();
+    const sheetName = sheetNameAt(state.sheet);
+    c.series.push({
+      name: "",
+      categories: c.series[0] ? c.series[0].categories : null,
+      values: `${/^[A-Za-z_][A-Za-z0-9_.]*$/.test(sheetName) ? sheetName : `'${sheetName.replace(/'/g, "''")}'`}!$${colName(r.c0)}$${r.r0 + 1}:$${colName(r.c1)}$${r.r1 + 1}`,
+    });
+    applyChart(c);
+  });
+  body.appendChild(add);
+
+  panelLabel(body, "Category labels");
+  const cats = el("input", "panel-field");
+  cats.type = "text";
+  cats.placeholder = "Sheet1!$A$2:$A$9";
+  cats.value = c.series[0]?.categories || "";
+  cats.addEventListener("change", () => {
+    // One category reference for the whole chart: OOXML lets each series carry
+    // its own, but a chart whose series are labelled differently plots points
+    // that do not line up, which is a mistake rather than a feature.
+    for (const s of c.series) s.categories = cats.value || null;
+    applyChart(c);
+  });
+  body.appendChild(cats);
+
+  panelActions(body, "Move here", () => {
+    const r = effectiveRange();
+    c.anchor = [r.r0, r.c0, Math.max(r.r1, r.r0 + 8), Math.max(r.c1, r.c0 + 4)];
+    applyChart(c);
+  }, "Delete", async () => {
+    if (!await confirmModal("Delete chart", "Delete this chart?", "Delete")) return;
+    tryEdit(() => wasm.session_delete_chart(panelChart.sheet, panelChart.index));
+    panelChart = null;
+    refreshChartPanel();
+  });
+}
+
+// Where each chart was last painted, in canvas pixels, plus which one is
+// selected.
+//
+// Exposed because a chart is drawn on a canvas and has no DOM node: without
+// this there is no way for an automated check — or a screen reader shim, or a
+// screenshot differ — to say *where* a chart is, and verifying drag and resize
+// means guessing at coordinates and reading the answer off a screenshot. It is
+// a read-only view of state the renderer already computed.
+window.openCalcChartFrames = () => ({
+  frames: chartFrames.map((f) => ({ ...f })),
+  selected: chartSel && chartSel.sheet === state.sheet ? chartSel.index : null,
+  handles: chartSel
+    ? chartHandlePoints(chartFrames.find((f) => f.index === chartSel.index) || { x: 0, y: 0, w: 0, h: 0 })
+    : [],
+});
+
+// A press on a chart or one of its handles. Returns whether it was consumed.
+function chartMouseDown(px, py) {
+  // A handle on the already-selected chart wins over the frame under it: the
+  // handles sit on the border, so a corner is inside both.
+  if (chartSel && chartSel.sheet === state.sheet) {
+    const frame = chartFrames.find((f) => f.index === chartSel.index);
+    if (frame) {
+      const points = chartHandlePoints(frame);
+      for (let i = 0; i < points.length; i++) {
+        const [hx, hy] = points[i];
+        if (Math.abs(px - hx) <= CHART_HANDLE + 3 && Math.abs(py - hy) <= CHART_HANDLE + 3) {
+          chartDrag = { index: chartSel.index, handle: i, x0: px, y0: py, px, py };
+          return true;
+        }
+      }
+    }
+  }
+  // Topmost first: charts overlap, and the one drawn last is the one you see.
+  for (let i = chartFrames.length - 1; i >= 0; i--) {
+    const f = chartFrames[i];
+    if (px >= f.x && px <= f.x + f.w && py >= f.y && py <= f.y + f.h) {
+      chartSel = { sheet: state.sheet, index: f.index };
+      panelChart = { ...chartSel };
+      chartDrag = { index: f.index, handle: null, x0: px, y0: py, px, py };
+      if (activePanel === "chart") refreshChartPanel();
+      draw();
+      return true;
+    }
+  }
+  if (chartSel) { chartSel = null; draw(); }
+  return false;
+}
+
+// Commit a move or resize: pixels become cells, because a chart is anchored in
+// cells and has to move with the rows under it.
+function chartMouseUp() {
+  if (!chartDrag) return;
+  const rect = chartDragRect();
+  const moved = Math.abs(chartDrag.px - chartDrag.x0) > 2
+    || Math.abs(chartDrag.py - chartDrag.y0) > 2;
+  const index = chartDrag.index;
+  chartDrag = null;
+  if (!rect || !moved) { draw(); return; }
+  const r0 = rowAtY(Math.max(HH, rect.y));
+  const c0 = colAtX(Math.max(HW, rect.x));
+  // The far corner is the cell the edge lands *in*, so a frame that ends
+  // mid-column still covers that column.
+  const r1 = Math.max(r0, rowAtY(Math.max(HH, rect.y + rect.h - 1)));
+  const c1 = Math.max(c0, colAtX(Math.max(HW, rect.x + rect.w - 1)));
+  let def;
+  try {
+    def = JSON.parse(wasm.session_chart_defs(state.sheet))[index];
+  } catch { return; }
+  if (!def) return;
+  def.anchor = [r0, c0, r1, c1];
+  panelChart = { sheet: state.sheet, index };
+  applyChart(def);
+}
+
+// Insert ▸ Chart: build one over the block under the cursor.
+//
+// The range is read the way Excel reads it — a text first row is headers, a
+// text first column is labels — so the common case is one click. Everything the
+// guess got wrong is in the panel, live.
+function chartDialog(kind) {
+  const r = effectiveRange();
+  let bounds = r;
+  if (r.r0 === r.r1 && r.c0 === r.c1) {
+    try {
+      const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
+      if (blk) bounds = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
+    } catch { /* fall through to the selection */ }
+  }
+  try {
+    const index = wasm.session_create_chart(
+      state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, kind);
+    panelChart = { sheet: state.sheet, index };
+  } catch (e) { statusError(errText(e)); return; }
+  invalidateGrowth();
+  draw();
+  openPanel("chart");
+  status.textContent = "chart added — drag it to move, or use Move here";
+}
+
 // --- Pivot panel -----------------------------------------------------------
 //
 // Excel's PivotTable Fields pane, in one column: a field list you drag from,
@@ -5032,6 +5457,7 @@ function openPanel(tool) {
       : tool === "cf" ? "Conditional formatting"
       : tool === "table" ? "Table"
       : tool === "pivot" ? "PivotTable fields"
+      : tool === "chart" ? "Chart"
       : tool === "page" ? "Page setup"
       : "Comments";
   const body = document.getElementById("side-panel-body");
@@ -5040,6 +5466,7 @@ function openPanel(tool) {
   else if (tool === "cf") buildCfPanel(body);
   else if (tool === "table") buildTablePanel(body);
   else if (tool === "pivot") buildPivotPanel(body);
+  else if (tool === "chart") buildChartPanel(body);
   else if (tool === "page") buildPagePanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
@@ -8241,6 +8668,15 @@ function wireEvents() {
         return;
       }
     }
+    // A chart: its frame floats over the cells, so it is tested before them or
+    // a click would land on whatever is underneath and the chart could never
+    // be picked up.
+    if (e.button === 0 && chartMouseDown(px, py)) {
+      if (editSurface && !commit(editSurface.value, false)) return;
+      e.preventDefault();
+      canvas.focus();
+      return;
+    }
     // An outline collapse toggle in the gutter.
     const ot = outlineToggleAt(px, py);
     if (ot) {
@@ -8337,6 +8773,7 @@ function wireEvents() {
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) / state.zoom;
     const py = (e.clientY - rect.top) / state.zoom;
+    if (chartDrag) { chartDrag.px = px; chartDrag.py = py; draw(); return; }
     if (state.freezeDrag) { state.freezeDrag.px = px; state.freezeDrag.py = py; draw(); return; }
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
@@ -8451,6 +8888,7 @@ function wireEvents() {
     }
   });
   window.addEventListener("mouseup", (e) => {
+    if (chartDrag) { chartMouseUp(); return; }
     if (state.freezeDrag) {
       const d = state.freezeDrag;
       state.freezeDrag = null;
@@ -8786,7 +9224,20 @@ function wireEvents() {
       case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.sel.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
-      case "Backspace": case "Delete": clearSelection(); e.preventDefault(); break;
+      case "Backspace": case "Delete":
+        // A selected chart is what Delete acts on, as in Excel — the cells
+        // under it are not selected and must not be cleared instead.
+        if (chartSel && chartSel.sheet === state.sheet) {
+          tryEdit(() => wasm.session_delete_chart(chartSel.sheet, chartSel.index));
+          chartSel = null;
+          panelChart = null;
+          if (activePanel === "chart") refreshChartPanel();
+          status.textContent = "chart deleted";
+        } else {
+          clearSelection();
+        }
+        e.preventDefault();
+        break;
       case "F2": {
         if (e.shiftKey) openPanel("note"); // Shift+F2 → note (Excel parity)
         else startInline(undefined, true);
@@ -8819,6 +9270,7 @@ function wireEvents() {
       case "Escape":
         if (painter) { setPainter(null); status.textContent = "format painter off"; e.preventDefault(); }
         else if (clipMarch) { stopMarch(); e.preventDefault(); }
+        else if (chartSel) { chartSel = null; draw(); e.preventDefault(); }
         break;
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
@@ -9548,6 +10000,7 @@ function wireEvents() {
         // you look for a feature you have not met yet.
         ["Table…", () => tableDialog(), "Ctrl+T"],
         ["PivotTable…", () => pivotDialog()],
+        { sub: "Chart", items: CHART_KINDS.map(([kind, label]) => [label, () => chartDialog(kind)]) },
         ["Hyperlink…", () => hyperlinkDialog(), "Ctrl+K"],
       ]],
       ["Format", [

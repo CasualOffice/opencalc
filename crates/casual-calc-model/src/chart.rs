@@ -1,16 +1,26 @@
-//! Charts, as much of one as is needed to draw it.
+//! Charts: what one plots, and where it sits.
 //!
-//! **This is a display projection, not the source of truth.** A chart part is
-//! retained byte for byte and written back from those bytes; what is modelled
-//! here is only what a renderer needs to put something on screen. Nothing
-//! writes a chart from this type, so a field missing from it costs a picture,
-//! never a file.
+//! A chart here is in one of two regimes, and [`ChartView::part`] says which.
 //!
-//! That division is deliberate. A chart part carries hundreds of formatting
-//! elements, and modelling it half-way then writing from the model would lose
-//! every one this does not know about — the exact silent edit retention exists
-//! to prevent. When charts become editable the two halves have to merge, and
-//! that is a design decision to take then, with the writer in hand.
+//! **Read from a file** (`part` is set). The chart part is retained byte for
+//! byte and written back from those bytes; what is modelled is only what a
+//! renderer needs to put something on screen. Nothing here reaches the writer,
+//! so a field this does not know about costs a picture, never a file. A chart
+//! part carries hundreds of formatting elements, and modelling it half-way then
+//! writing from the model would lose every one — the exact silent edit that
+//! retention exists to prevent.
+//!
+//! **Made here** (`part` is `None`). There are no bytes to preserve, so this
+//! type *is* the chart and the writer builds the part from it. Editing an
+//! imported chart moves it into this regime, which is why the two halves never
+//! have to merge: a chart is described by its retained bytes or by this, never
+//! by both. That is [`ChartView::detach`], and it is the same rule a pivot
+//! table follows — a retained part that no longer describes what is on screen
+//! is worse than no part, because a reader believes the part.
+//!
+//! What that costs is stated plainly rather than hidden: editing an imported
+//! chart drops the formatting this type does not model. The alternative is a
+//! file whose chart part and whose chart disagree.
 
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +84,46 @@ pub struct ChartView {
     /// Its series, in plot order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series: Vec<ChartSeries>,
+    /// Where the legend sits — `r`, `l`, `t`, `b`, or `tr`. `None` is no
+    /// legend, which is what a single-series chart usually wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<String>,
+    /// The category (horizontal) axis title, empty when it has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub x_title: String,
+    /// The value (vertical) axis title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub y_title: String,
+    /// The package path of the chart part this was read from.
+    ///
+    /// Set means the part is authoritative and is written back byte for byte;
+    /// `None` means this type is the chart and the writer builds the part from
+    /// it. See the module docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+}
+
+impl ChartView {
+    /// A chart with no series yet, anchored over `anchor`.
+    #[must_use]
+    pub fn new(anchor: CellRange, kind: ChartKind) -> Self {
+        Self {
+            anchor,
+            kind,
+            title: String::new(),
+            series: Vec::new(),
+            legend: None,
+            x_title: String::new(),
+            y_title: String::new(),
+            part: None,
+        }
+    }
+
+    /// Stop writing this chart back from its own bytes, because it has been
+    /// edited and they no longer describe it. Returns the part path to drop.
+    pub fn detach(&mut self) -> Option<String> {
+        self.part.take()
+    }
 }
 
 impl ChartKind {

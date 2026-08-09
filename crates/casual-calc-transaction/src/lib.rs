@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ConditionalFormat,
-    DataValidation, DefinedName, Hyperlink, PivotTable, PrintSetup, Sheet, SheetProtection,
-    SheetView, SheetVisibility, SortState, StyleId, Table, Workbook,
+    AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ChartView,
+    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, PrintSetup, Sheet,
+    SheetProtection, SheetView, SheetVisibility, SortState, StyleId, Table, Workbook,
 };
 
 mod structural;
@@ -112,6 +112,12 @@ pub struct SheetMetadata {
     pub hyperlinks: Vec<Hyperlink>,
     /// Tables (ListObjects).
     pub tables: Vec<Table>,
+    /// Charts anchored on the sheet.
+    ///
+    /// Here for the same reason as the pivots below: a chart is edited through
+    /// the panel, and without a reversible operation those edits wrote straight
+    /// to the workbook, so undo reversed whatever preceded them instead.
+    pub charts: Vec<ChartView>,
     /// Pivot table definitions.
     ///
     /// The definition, not the report: the report is ordinary cells and travels
@@ -147,6 +153,7 @@ impl SheetMetadata {
             protection: sheet.protection.clone(),
             hyperlinks: sheet.hyperlinks.clone(),
             tables: sheet.tables.clone(),
+            charts: sheet.charts.clone(),
             pivots: sheet.pivots.clone(),
             print: sheet.print.clone(),
             sort_state: sheet.sort_state.clone(),
@@ -185,6 +192,7 @@ impl SheetMetadata {
             protection: std::mem::replace(&mut sheet.protection, self.protection),
             hyperlinks: std::mem::replace(&mut sheet.hyperlinks, self.hyperlinks),
             tables: std::mem::replace(&mut sheet.tables, self.tables),
+            charts: std::mem::replace(&mut sheet.charts, self.charts),
             pivots: std::mem::replace(&mut sheet.pivots, self.pivots),
             print: std::mem::replace(&mut sheet.print, self.print),
             sort_state: std::mem::replace(&mut sheet.sort_state, self.sort_state),

@@ -104,10 +104,16 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                 }
                 b"from" | b"to" => corner = None,
                 b"twoCellAnchor" | b"oneCellAnchor" | b"absoluteAnchor" if open => {
+                    // `<xdr:to>` is **exclusive**: with `colOff` zero the
+                    // frame's right edge sits on the left edge of that column,
+                    // so the last column it covers is the one before. Reading
+                    // it as inclusive drew every chart a row and a column too
+                    // large, and — once the writer started emitting anchors —
+                    // would have grown one on every save.
                     let (end_c, end_r) = if have_to {
-                        (tc, tr)
+                        (tc.saturating_sub(1), tr.saturating_sub(1))
                     } else {
-                        (fc + NOMINAL_COLS, fr + NOMINAL_ROWS)
+                        (fc + NOMINAL_COLS - 1, fr + NOMINAL_ROWS - 1)
                     };
                     out.push(DrawingAnchor {
                         range: CellRange::new(
@@ -137,6 +143,12 @@ pub struct ChartSpec {
     pub title: String,
     /// Series in plot order.
     pub series: Vec<ChartSeries>,
+    /// `<c:legendPos val>`, when the chart has a legend.
+    pub legend: Option<String>,
+    /// The category axis title.
+    pub x_title: String,
+    /// The value axis title.
+    pub y_title: String,
 }
 
 /// Parse a chart part.
@@ -166,6 +178,10 @@ pub fn parse_chart(xml: &[u8]) -> Result<ChartSpec, ImportError> {
     // reference to one. The literal is preferred where both appear, because it
     // is what Excel displays without resolving anything.
     let mut in_value = false;
+    // `<c:title>` appears three times over — once for the chart and once inside
+    // each axis — so which axis is open is what tells them apart. Without it
+    // the first axis title becomes the chart's name.
+    let mut axis: Option<&'static str> = None;
 
     loop {
         let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
@@ -174,6 +190,22 @@ pub fn parse_chart(xml: &[u8]) -> Result<ChartSpec, ImportError> {
                 let name = e.local_name();
                 match name.as_ref() {
                     b"barDir" => bar_dir = read_attr(e, b"val")?,
+                    b"catAx" => axis = Some("cat"),
+                    b"valAx" | b"dateAx" | b"serAx" => {
+                        // A scatter chart has two value axes; the first is the
+                        // horizontal one, so it takes the category slot.
+                        axis = Some(
+                            if axis.is_none()
+                                && spec.x_title.is_empty()
+                                && matches!(group.as_deref(), Some("scatterChart"))
+                            {
+                                "cat"
+                            } else {
+                                "val"
+                            },
+                        );
+                    }
+                    b"legendPos" => spec.legend = read_attr(e, b"val")?,
                     b"title" => in_title = true,
                     b"ser" => series = Some(ChartSeries::default()),
                     b"tx" => slot = Some("tx"),
@@ -231,12 +263,21 @@ pub fn parse_chart(xml: &[u8]) -> Result<ChartSpec, ImportError> {
                     in_value = false;
                 }
                 b"t" if in_title => {
-                    if title_text.is_empty() {
-                        title_text = text.clone();
+                    let slot = match axis {
+                        Some("cat") => &mut spec.x_title,
+                        Some("val") => &mut spec.y_title,
+                        _ => &mut title_text,
+                    };
+                    // First run only: a title split across formatting runs
+                    // would otherwise concatenate every one of them, and the
+                    // first is the whole of it in every file Excel writes.
+                    if slot.is_empty() {
+                        *slot = text.clone();
                     }
                     in_value = false;
                 }
                 b"title" => in_title = false,
+                b"catAx" | b"valAx" | b"dateAx" | b"serAx" => axis = None,
                 b"tx" | b"cat" | b"val" | b"xVal" | b"yVal" => slot = None,
                 b"ser" => {
                     if let Some(s) = series.take() {

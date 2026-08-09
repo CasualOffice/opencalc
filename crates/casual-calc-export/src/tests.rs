@@ -2225,7 +2225,13 @@ fn a_chart_is_read_for_display_and_still_round_trips_verbatim() {
     let c = &charts[0];
     // Anchored in cells, which is why a chart moves with the rows under it.
     assert_eq!((c.anchor.start.row, c.anchor.start.col), (1, 4));
-    assert_eq!((c.anchor.end.row, c.anchor.end.col), (16, 11));
+    // `<xdr:to>` says row 16, column 11 — and it is **exclusive**: with
+    // `colOff` zero the frame's right edge sits on the left edge of that
+    // column, so the last cell it covers is the one before. This asserted 16/11
+    // and was wrong: every imported chart drew a row and a column too large.
+    // Invisible until the writer started emitting anchors of its own, at which
+    // point a chart would have grown on every save.
+    assert_eq!((c.anchor.end.row, c.anchor.end.col), (15, 10));
     // `barDir="col"` means columns; bar and column are one element in OOXML.
     assert_eq!(c.kind, casual_calc_model::ChartKind::Column);
     // The title comes from <c:title>, not from the first <a:t> in the part.
@@ -2367,4 +2373,222 @@ fn a_pivot_cache_is_declared_after_calc_pr_not_among_the_external_references() {
     // And it comes back the same, so a second save is not a second edit.
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.retained_refs, wb.retained_refs);
+}
+
+/// A workbook with data and one chart made here rather than read from a file.
+fn authored_chart_workbook() -> casual_calc_model::Workbook {
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, ChartKind, ChartSeries, ChartView, Id, Sheet, SheetId,
+        Workbook,
+    };
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Sales");
+    for (r, (label, n)) in [("Q1", 10.0), ("Q2", 20.0), ("Q3", 30.0)]
+        .iter()
+        .enumerate()
+    {
+        let id = wb.intern_string(label);
+        sheet.cells.set(
+            CellRef::new(r as u32 + 1, 0),
+            Cell::value(CellValue::SharedString(id)),
+        );
+        sheet.cells.set(
+            CellRef::new(r as u32 + 1, 1),
+            Cell::value(CellValue::Number(*n)),
+        );
+    }
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(0, 3), CellRef::new(14, 10)),
+        ChartKind::Column,
+    );
+    chart.title = "Revenue & growth".to_owned();
+    chart.y_title = "Amount".to_owned();
+    chart.legend = Some("r".to_owned());
+    chart.series.push(ChartSeries {
+        name: "Revenue".to_owned(),
+        categories: Some("Sales!$A$2:$A$4".to_owned()),
+        values: "Sales!$B$2:$B$4".to_owned(),
+    });
+    sheet.charts.push(chart);
+    wb.sheets.push(sheet);
+    wb
+}
+
+#[test]
+fn a_chart_made_here_is_written_as_a_real_chart_part() {
+    let written = write_workbook(&authored_chart_workbook()).unwrap();
+
+    // The chart part, with the pieces Excel needs paired: a group naming two
+    // axis ids and two axes carrying them.
+    let chart = xml_of(&written, "xl/charts/chart1.xml");
+    assert!(chart.contains("<c:barChart>"), "{chart}");
+    assert!(chart.contains("<c:barDir val=\"col\"/>"), "{chart}");
+    assert!(chart.contains("<c:f>Sales!$B$2:$B$4</c:f>"), "{chart}");
+    assert!(chart.contains("<c:f>Sales!$A$2:$A$4</c:f>"), "{chart}");
+    assert!(chart.contains("<c:axId val=\"111111111\"/>"), "{chart}");
+    assert!(chart.contains("<c:catAx>"), "{chart}");
+    assert!(chart.contains("<c:valAx>"), "{chart}");
+    assert!(chart.contains("<c:legendPos val=\"r\"/>"), "{chart}");
+    // `&` in a title has to be escaped or the part is not XML at all.
+    assert!(chart.contains("Revenue &amp; growth"), "{chart}");
+
+    // The three references. Any one missing and Excel reports a file needing
+    // repair rather than a chart it cannot draw.
+    assert!(
+        xml_of(&written, "xl/worksheets/sheet1.xml").contains("<drawing r:id="),
+        "the worksheet must name its drawing"
+    );
+    let sheet_rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(
+        sheet_rels.contains("../drawings/drawing1.xml"),
+        "{sheet_rels}"
+    );
+    let drawing_rels = xml_of(&written, "xl/drawings/_rels/drawing1.xml.rels");
+    assert!(
+        drawing_rels.contains("../charts/chart1.xml"),
+        "{drawing_rels}"
+    );
+    let types = xml_of(&written, "[Content_Types].xml");
+    assert!(types.contains("/xl/charts/chart1.xml"), "{types}");
+    assert!(types.contains("/xl/drawings/drawing1.xml"), "{types}");
+
+    // The anchor's `to` corner is exclusive, so a frame ending at column 10
+    // is written as 11 — otherwise the chart is one row and one column short.
+    let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
+    assert!(drawing.contains("<xdr:col>3</xdr:col>"), "{drawing}");
+    assert!(drawing.contains("<xdr:col>11</xdr:col>"), "{drawing}");
+    assert!(drawing.contains("<xdr:row>15</xdr:row>"), "{drawing}");
+}
+
+#[test]
+fn a_chart_made_here_reads_back_as_the_same_chart() {
+    let written = write_workbook(&authored_chart_workbook()).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    let chart = &back.sheets[0].charts[0];
+
+    assert_eq!(chart.kind, casual_calc_model::ChartKind::Column);
+    assert_eq!(chart.title, "Revenue & growth");
+    assert_eq!(chart.y_title, "Amount");
+    assert_eq!(chart.legend.as_deref(), Some("r"));
+    assert_eq!(chart.series.len(), 1);
+    assert_eq!(chart.series[0].name, "Revenue");
+    assert_eq!(chart.series[0].values, "Sales!$B$2:$B$4");
+    assert_eq!(
+        chart.series[0].categories.as_deref(),
+        Some("Sales!$A$2:$A$4")
+    );
+    // The whole frame, not just its corner: `<xdr:to>` is exclusive, so a
+    // writer that emits `end + 1` and a reader that takes it as the end would
+    // grow every chart by a row and a column on each save.
+    assert_eq!(
+        chart.anchor,
+        casual_calc_model::CellRange::new(
+            casual_calc_model::CellRef::new(0, 3),
+            casual_calc_model::CellRef::new(14, 10)
+        )
+    );
+    // Read back from a file, so it is now retained rather than authored — the
+    // part is authoritative until something edits it.
+    assert!(chart.part.is_some());
+}
+
+#[test]
+fn a_pie_gets_no_axes_because_writing_them_is_invalid() {
+    use casual_calc_model::ChartKind;
+    let mut wb = authored_chart_workbook();
+    wb.sheets[0].charts[0].kind = ChartKind::Pie;
+    let chart = xml_of(&write_workbook(&wb).unwrap(), "xl/charts/chart1.xml");
+    assert!(chart.contains("<c:pieChart>"), "{chart}");
+    assert!(!chart.contains("<c:catAx>"), "a pie has no axes: {chart}");
+    assert!(!chart.contains("<c:axId"), "{chart}");
+    // Colour varies per point, not per series, or one series is one colour and
+    // the pie reads as a single disc.
+    assert!(chart.contains("<c:varyColors val=\"1\"/>"), "{chart}");
+}
+
+#[test]
+fn a_scatters_horizontal_axis_is_a_value_axis_not_a_category_axis() {
+    use casual_calc_model::ChartKind;
+    let mut wb = authored_chart_workbook();
+    wb.sheets[0].charts[0].kind = ChartKind::Scatter;
+    let chart = xml_of(&write_workbook(&wb).unwrap(), "xl/charts/chart1.xml");
+    assert!(chart.contains("<c:scatterChart>"), "{chart}");
+    assert!(
+        chart.contains("<c:xVal><c:numRef>"),
+        "numbers, not labels: {chart}"
+    );
+    assert!(chart.contains("<c:yVal><c:numRef>"), "{chart}");
+    // A catAx would space the points evenly and lose the very relationship a
+    // scatter is drawn to show.
+    assert!(!chart.contains("<c:catAx>"), "{chart}");
+    assert_eq!(chart.matches("<c:valAx>").count(), 2, "{chart}");
+}
+
+#[test]
+fn an_authored_chart_joins_a_retained_drawing_instead_of_replacing_it() {
+    // A worksheet may have only one drawing part, so a chart made here on a
+    // sheet that already has one has to go *into* it. Rebuilding that drawing
+    // from the model would delete the text box below, which nothing models.
+    use casual_calc_model::{CellRange, CellRef, ChartKind, ChartSeries, ChartView};
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+              <drawing r:id="rId7"/>
+            </worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/drawings/drawing1.xml",
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor><xdr:sp><xdr:txBody>a text box nothing here models</xdr:txBody></xdr:sp></xdr:twoCellAnchor></xdr:wsDr>"#,
+        ),
+    ]);
+    let mut wb = import_package(source).unwrap().workbook;
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(2, 2), CellRef::new(9, 8)),
+        ChartKind::Line,
+    );
+    chart.series.push(ChartSeries {
+        name: "Added".to_owned(),
+        categories: None,
+        values: "Sheet1!$A$1:$A$1".to_owned(),
+    });
+    wb.sheets[0].charts.push(chart);
+
+    let written = write_workbook(&wb).unwrap();
+    let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
+    assert!(
+        drawing.contains("a text box nothing here models"),
+        "the retained anchors travel untouched: {drawing}"
+    );
+    assert!(
+        drawing.contains("<xdr:graphicFrame"),
+        "and ours is spliced in beside them: {drawing}"
+    );
+    assert_eq!(drawing.matches("</xdr:wsDr>").count(), 1, "{drawing}");
+
+    // The drawing's rels must carry both the retained entries and the new
+    // chart, at ids that do not collide.
+    let rels = xml_of(&written, "xl/drawings/_rels/drawing1.xml.rels");
+    assert!(rels.contains("../charts/chart1.xml"), "{rels}");
+    // The sheet keeps its original `<drawing r:id>`, because the drawing it
+    // names is the one that was extended.
+    let sheet = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<drawing r:id=\"rId7\"/>"), "{sheet}");
+    assert_eq!(sheet.matches("<drawing ").count(), 1, "{sheet}");
 }

@@ -24,10 +24,10 @@ use casual_calc_layout::{
 };
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
-    CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Hyperlink, Id, PivotAggregate, PivotAxisField, PivotFilterField, PivotSort,
-    PivotTable, PivotValueField, Sheet, SheetId, SheetVisibility, Style, StyleId, Table, ThemeTint,
-    Underline, VAlign, VertAlign, Workbook,
+    ChartKind, ChartView, CommentReply, ConditionalFormat, CustomFilter, DataValidation,
+    DefinedName, FilterOp, FilterRule, HAlign, Hyperlink, Id, PivotAggregate, PivotAxisField,
+    PivotFilterField, PivotSort, PivotTable, PivotValueField, Sheet, SheetId, SheetVisibility,
+    Style, StyleId, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -2001,6 +2001,342 @@ pub fn session_tables(sheet: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Charts.
+//
+// A chart read from a file writes back from its own bytes; one made or edited
+// here is written from the model. Editing an imported one moves it into the
+// second regime and drops the part, because a retained part that no longer
+// describes the chart on screen is worse than no part — the same rule a pivot
+// table follows.
+// ---------------------------------------------------------------------------
+
+/// A chart's definition as the host edits it. Distinct from the payload
+/// `session_charts` returns, which carries *resolved values* for drawing.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChartWire {
+    #[serde(default)]
+    index: usize,
+    /// `bar`, `column`, `line`, `area`, `pie`, `doughnut` or `scatter`.
+    kind: String,
+    #[serde(default)]
+    title: String,
+    /// The cells the frame covers, `[r0, c0, r1, c1]`.
+    anchor: [u32; 4],
+    #[serde(default)]
+    series: Vec<SeriesWire>,
+    /// `r`, `l`, `t`, `b`, `tr`, or absent for no legend.
+    #[serde(default)]
+    legend: Option<String>,
+    #[serde(default)]
+    x_title: String,
+    #[serde(default)]
+    y_title: String,
+    /// Whether this still writes back from a retained part. Read-only: it is
+    /// cleared by editing, not by asking.
+    #[serde(default)]
+    imported: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeriesWire {
+    #[serde(default)]
+    name: String,
+    /// The formula naming the category labels, e.g. `Sheet1!$A$2:$A$9`.
+    #[serde(default)]
+    categories: Option<String>,
+    /// The formula naming the plotted values.
+    values: String,
+}
+
+fn chart_kind_token(kind: ChartKind) -> &'static str {
+    match kind {
+        ChartKind::Bar => "bar",
+        ChartKind::Column => "column",
+        ChartKind::Line => "line",
+        ChartKind::Area => "area",
+        ChartKind::Pie => "pie",
+        ChartKind::Doughnut => "doughnut",
+        ChartKind::Scatter => "scatter",
+        ChartKind::Unsupported => "unsupported",
+    }
+}
+
+fn chart_kind_from(token: &str) -> ChartKind {
+    match token {
+        "bar" => ChartKind::Bar,
+        "line" => ChartKind::Line,
+        "area" => ChartKind::Area,
+        "pie" => ChartKind::Pie,
+        "doughnut" => ChartKind::Doughnut,
+        "scatter" => ChartKind::Scatter,
+        _ => ChartKind::Column,
+    }
+}
+
+fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
+    ChartWire {
+        index,
+        kind: chart_kind_token(chart.kind).to_owned(),
+        title: chart.title.clone(),
+        anchor: [
+            chart.anchor.start.row,
+            chart.anchor.start.col,
+            chart.anchor.end.row,
+            chart.anchor.end.col,
+        ],
+        series: chart
+            .series
+            .iter()
+            .map(|s| SeriesWire {
+                name: s.name.clone(),
+                categories: s.categories.clone(),
+                values: s.values.clone(),
+            })
+            .collect(),
+        legend: chart.legend.clone(),
+        x_title: chart.x_title.clone(),
+        y_title: chart.y_title.clone(),
+        imported: chart.part.is_some(),
+    }
+}
+
+/// Every chart's *definition* on a sheet, as JSON.
+#[wasm_bindgen]
+pub fn session_chart_defs(sheet: usize) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<ChartWire> = sh
+            .charts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| chart_to_wire(c, i))
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned())
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The topmost chart whose frame covers a cell, or `null`.
+///
+/// Topmost rather than first: charts overlap, and the one drawn last is the one
+/// a click lands on.
+#[wasm_bindgen]
+pub fn session_chart_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "null".to_owned();
+        };
+        let found = sh.charts.iter().enumerate().rev().find(|(_, c)| {
+            row >= c.anchor.start.row
+                && row <= c.anchor.end.row
+                && col >= c.anchor.start.col
+                && col <= c.anchor.end.col
+        });
+        match found {
+            Some((i, c)) => {
+                serde_json::to_string(&chart_to_wire(c, i)).unwrap_or_else(|_| "null".to_owned())
+            }
+            None => "null".to_owned(),
+        }
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// A1-quote a sheet name for a chart reference, as Excel does.
+///
+/// A name holding a space or an apostrophe has to be quoted or the reference
+/// does not parse — and an unparseable series reference is a chart that draws
+/// nothing, with no message saying why.
+fn quote_sheet(name: &str) -> String {
+    let plain = name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if plain {
+        name.to_owned()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+fn abs_ref(sheet_name: &str, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    format!(
+        "{}!${}${}:${}${}",
+        quote_sheet(sheet_name),
+        casual_calc_formula::column_to_letters(c0),
+        r0 + 1,
+        casual_calc_formula::column_to_letters(c1),
+        r1 + 1
+    )
+}
+
+/// Create a chart over a data range — Excel's Insert ▸ Chart.
+///
+/// The range is read the way Excel reads it: the first column is the category
+/// labels when it holds text, and each remaining column is a series named by
+/// its header. Guessing this is the difference between one click and a dialog
+/// asking four questions the data already answers.
+///
+/// Returns the new chart's index.
+#[wasm_bindgen]
+pub fn session_create_chart(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+) -> Result<usize, JsError> {
+    let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    let kind = chart_kind_from(kind);
+    let built = with_session(|s| {
+        let sh = s.workbook().sheets.get(sheet)?;
+        let name = sh.name.clone();
+        let text_at = |r: u32, c: u32| -> Option<String> {
+            let cell = sh.cells.get(CellRef::new(r, c))?;
+            match cell.value {
+                CellValue::SharedString(_) | CellValue::InlineString(_) => {
+                    Some(value_text(s.workbook(), &cell.value))
+                }
+                _ => None,
+            }
+        };
+        // A header row is one whose cells are text over columns that are not.
+        let has_headers = rr1 > rr0
+            && (cc0..=cc1).any(|c| text_at(rr0, c).is_some())
+            && (cc0..=cc1).any(|c| text_at(rr0 + 1, c).is_none());
+        // A label column is a leading column of text beside numeric ones.
+        let label_col = (cc1 > cc0
+            && text_at(if has_headers { rr0 + 1 } else { rr0 }, cc0).is_some())
+        .then_some(cc0);
+
+        let first_data_row = if has_headers { rr0 + 1 } else { rr0 };
+        let categories = label_col
+            .map(|c| abs_ref(&name, first_data_row, c, rr1, c))
+            // With no label column the categories are the row numbers, which
+            // Excel leaves implicit; a chart with no `<c:cat>` numbers them
+            // 1, 2, 3 by itself.
+            .filter(|_| kind != ChartKind::Scatter || cc1 > cc0);
+
+        let mut series = Vec::new();
+        for c in cc0..=cc1 {
+            if Some(c) == label_col {
+                continue;
+            }
+            series.push(casual_calc_model::ChartSeries {
+                name: if has_headers {
+                    text_at(rr0, c).unwrap_or_default()
+                } else {
+                    String::new()
+                },
+                categories: categories.clone(),
+                values: abs_ref(&name, first_data_row, c, rr1, c),
+            });
+        }
+        Some((series, sh.charts.len()))
+    })
+    .flatten()
+    .ok_or_else(|| JsError::new("no such sheet"))?;
+    let (series, index) = built;
+    if series.is_empty() {
+        return Err(JsError::new("select at least one column of values"));
+    }
+
+    // Placed to the right of the data, eight columns by fifteen rows — Excel's
+    // own default frame, and clear of the range it plots.
+    let anchor = CellRange::new(CellRef::new(rr0, cc1 + 2), CellRef::new(rr0 + 14, cc1 + 9));
+    let mut chart = ChartView::new(anchor, kind);
+    // A legend only earns its space once there is more than one series to tell
+    // apart; Excel adds one at two.
+    if series.len() > 1 {
+        chart.legend = Some("r".to_owned());
+    }
+    chart.series = series;
+    edit_sheet_metadata(sheet, move |_, data| data.charts.push(chart))?;
+    Ok(index)
+}
+
+/// Replace a chart's definition.
+///
+/// This is what detaches an imported chart: the retained part described the
+/// chart as it was, and keeping it would leave the file disagreeing with
+/// itself. Returns the part path dropped, or `""`.
+#[wasm_bindgen]
+pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<String, JsError> {
+    let wire: ChartWire =
+        serde_json::from_str(json).map_err(|e| JsError::new(&format!("bad chart: {e}")))?;
+    let mut dropped = String::new();
+    edit_sheet_metadata(sheet, |_, data| {
+        let Some(chart) = data.charts.get_mut(index) else {
+            return;
+        };
+        chart.kind = chart_kind_from(&wire.kind);
+        chart.title = wire.title;
+        chart.anchor = CellRange::new(
+            CellRef::new(wire.anchor[0], wire.anchor[1]),
+            CellRef::new(wire.anchor[2], wire.anchor[3]),
+        );
+        chart.series = wire
+            .series
+            .into_iter()
+            .map(|s| casual_calc_model::ChartSeries {
+                name: s.name,
+                categories: s.categories.filter(|c| !c.trim().is_empty()),
+                values: s.values,
+            })
+            .collect();
+        chart.legend = wire.legend.filter(|p| !p.is_empty());
+        chart.x_title = wire.x_title;
+        chart.y_title = wire.y_title;
+        dropped = chart.detach().unwrap_or_default();
+    })?;
+    if !dropped.is_empty() {
+        drop_chart_part(&dropped);
+    }
+    Ok(dropped)
+}
+
+/// Remove a chart, and its retained part if it had one.
+#[wasm_bindgen]
+pub fn session_delete_chart(sheet: usize, index: usize) -> Result<(), JsError> {
+    let mut dropped = String::new();
+    edit_sheet_metadata(sheet, |_, data| {
+        if index < data.charts.len() {
+            dropped = data.charts.remove(index).part.unwrap_or_default();
+        }
+    })?;
+    if !dropped.is_empty() {
+        drop_chart_part(&dropped);
+    }
+    Ok(())
+}
+
+/// Stop writing a chart part back, and remove the relationship reaching it.
+///
+/// The drawing keeps its anchor for that chart — it is inside bytes we do not
+/// rewrite — so the anchor is left pointing at a relationship that no longer
+/// exists. Excel treats an unresolvable graphic frame as an empty one and
+/// draws nothing, which is what "this chart is gone" should look like. Removing
+/// the anchor would mean rebuilding the drawing, and that deletes every text
+/// box and shape the model does not know about.
+fn drop_chart_part(path: &str) {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(session) = guard.as_mut() else {
+            return;
+        };
+        let wb = session.workbook_mut();
+        wb.retained_parts.retain(|p| p.path != path);
+        wb.retained_rels
+            .retain(|r| !r.target.ends_with(path.rsplit('/').next().unwrap_or(path)));
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Pivot tables.
 //
 // The wire shape is deliberately its own type rather than the model's. Fields
@@ -3571,13 +3907,20 @@ pub fn session_charts(sheet: usize) -> String {
                     .collect();
                 format!(
                     "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"kind\":{},\
-                     \"title\":{},\"cats\":[{}],\"series\":[{}]}}",
+                     \"title\":{},\"legend\":{},\"xTitle\":{},\"yTitle\":{},\
+                     \"cats\":[{}],\"series\":[{}]}}",
                     ch.anchor.start.row,
                     ch.anchor.start.col,
                     ch.anchor.end.row,
                     ch.anchor.end.col,
                     json_string(chart_kind_name(ch.kind)),
                     json_string(&ch.title),
+                    match &ch.legend {
+                        Some(pos) => json_string(pos),
+                        None => "null".to_owned(),
+                    },
+                    json_string(&ch.x_title),
+                    json_string(&ch.y_title),
                     cats.iter()
                         .map(|t| json_string(t))
                         .collect::<Vec<_>>()

@@ -9,6 +9,7 @@
 //!
 //! See `docs/36-EXPORT-AND-ROUNDTRIP-DESIGN.md`.
 
+mod chart;
 mod error;
 mod xml;
 
@@ -61,10 +62,33 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     let dxfs = collect_dxfs(workbook);
     let has_styles = !workbook.styles.is_empty() || !dxfs.is_empty();
 
+    // Charts made here, before anything that has to reference them: a worksheet
+    // names its drawing, the content types declare both parts, and neither can
+    // be written without knowing which sheets ended up with one. Numbered
+    // across the workbook like tables, so two sheets never claim `chart1.xml`.
+    let mut chart_builds: Vec<chart::SheetCharts> = Vec::new();
+    let mut next_chart = 1;
+    for (i, sheet) in workbook.sheets.iter().enumerate() {
+        if let Some(built) = chart::build(workbook, sheet, i, next_chart) {
+            next_chart += built.chart_parts.len();
+            chart_builds.push(built);
+        } else {
+            // A placeholder keeps the vector index equal to the sheet index,
+            // which is what the worksheet writer looks up by.
+            chart_builds.push(chart::SheetCharts::none());
+        }
+    }
+
     let mut parts: Vec<(String, String)> = vec![
         (
             "[Content_Types].xml".to_owned(),
-            content_types(workbook, has_styles, has_strings, any_theme_link(workbook)),
+            content_types(
+                workbook,
+                has_styles,
+                has_strings,
+                any_theme_link(workbook),
+                &chart_builds,
+            ),
         ),
         ("_rels/.rels".to_owned(), root_rels()),
         ("xl/workbook.xml".to_owned(), workbook_xml(workbook)),
@@ -89,10 +113,10 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     if has_theme {
         parts.push(("xl/theme/theme1.xml".to_owned(), theme_xml(workbook)));
     }
-    for i in 0..workbook.sheets.len() {
+    for (i, built) in chart_builds.iter().enumerate() {
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml(workbook, i, &dxfs),
+            worksheet_xml(workbook, i, &dxfs, built),
         ));
     }
     // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
@@ -107,6 +131,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             && sheet.hyperlinks.is_empty()
             && sheet.tables.is_empty()
             && !has_retained
+            && chart_builds[i].sheet_rel.is_none()
         {
             continue;
         }
@@ -134,6 +159,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 &(0..sheet.tables.len())
                     .map(|j| table_index(workbook, i, j))
                     .collect::<Vec<_>>(),
+                &chart_builds[i],
             ),
         ));
     }
@@ -149,6 +175,18 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
     }
 
+    for built in &chart_builds {
+        if built.chart_parts.is_empty() {
+            continue;
+        }
+        parts.push((built.drawing_part.clone(), built.drawing_xml.clone()));
+        parts.push((
+            rels_path_for(&built.drawing_part),
+            built.drawing_rels.clone(),
+        ));
+        parts.extend(built.chart_parts.iter().cloned());
+    }
+
     // A retained part can declare relationships of its own — a drawing names
     // its charts and images — so every source that is not workbook.xml or a
     // worksheet needs its `.rels` regenerated too. Without this the chart is in
@@ -161,6 +199,15 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     for (source, rels) in by_source {
         if source.ends_with("workbook.xml") || source.contains("/worksheets/") {
             continue; // written by workbook_rels / sheet_rels
+        }
+        // A drawing that took an authored chart already had its rels written,
+        // with the retained entries folded in. Writing them again here would
+        // put two `.rels` at one path and drop the chart relationships.
+        if chart_builds
+            .iter()
+            .any(|b| !b.chart_parts.is_empty() && b.drawing_part == source)
+        {
+            continue;
         }
         let mut xml = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
         for rel in rels {
@@ -211,6 +258,7 @@ fn content_types(
     has_styles: bool,
     has_strings: bool,
     has_theme: bool,
+    charts: &[chart::SheetCharts],
 ) -> String {
     let any_comments = workbook.sheets.iter().any(|s| !s.comments.is_empty());
     let mut s = format!("{DECL}<Types xmlns=\"{NS_CT}\">");
@@ -261,6 +309,15 @@ fn content_types(
                 table_index(workbook, i, j)
             ));
         }
+    }
+    // Charts made here, and the drawing part holding them when the sheet did
+    // not already have one. An undeclared part is not ignored: Excel refuses
+    // the package.
+    for (path, content_type) in chart::content_types(charts) {
+        s.push_str(&format!(
+            "<Override PartName=\"/{}\" ContentType=\"{content_type}\"/>",
+            escape_attr(&path)
+        ));
     }
     for retained in &workbook.retained_parts {
         if let Some(ct) = &retained.content_type {
@@ -447,6 +504,7 @@ fn sheet_rels(
     threaded: bool,
     retained: &[RetainedRel],
     table_part_numbers: &[usize],
+    charts: &chart::SheetCharts,
 ) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     if !sheet.comments.is_empty() {
@@ -477,6 +535,16 @@ fn sheet_rels(
             escape_attr(&rel.id),
             escape_attr(&rel.rel_type),
             escape_attr(&rel.target)
+        ));
+    }
+    // The drawing holding this sheet's authored charts, when the sheet did not
+    // already point at one. A sheet that did keeps its original relationship
+    // above, because the `<drawing r:id>` already written names it.
+    if let Some((id, target)) = &charts.sheet_rel {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/drawing\" Target=\"../{}\"/>",
+            escape_attr(id),
+            escape_attr(target.trim_start_matches("xl/"))
         ));
     }
     // A hyperlink target is `TargetMode="External"`: without that the URI is
@@ -1541,7 +1609,12 @@ fn fmt_half_points(size_hp: u32) -> String {
     }
 }
 
-fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> String {
+fn worksheet_xml(
+    workbook: &Workbook,
+    sheet_index: usize,
+    dxfs: &[String],
+    charts: &chart::SheetCharts,
+) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
 
@@ -2013,6 +2086,14 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
                 s.push_str(&format!(" {key}=\"{}\"", escape_attr(v)));
             }
             s.push_str("/>");
+        }
+        // A sheet that had no drawing gains one for the charts made here. A
+        // sheet that already had one keeps its own element above: its drawing
+        // was spliced rather than replaced, so the reference still holds.
+        if name == "drawing"
+            && let Some((id, _)) = &charts.sheet_rel
+        {
+            s.push_str(&format!("<drawing r:id=\"{}\"/>", escape_attr(id)));
         }
     }
 

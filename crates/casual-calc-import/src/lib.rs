@@ -323,6 +323,12 @@ fn read_sheet_drawings(
                     .unwrap_or(casual_calc_model::ChartKind::Unsupported),
                 title: spec.title,
                 series: spec.series,
+                legend: spec.legend,
+                x_title: spec.x_title,
+                y_title: spec.y_title,
+                // The part stays authoritative until the chart is edited: what
+                // is read here is a fraction of what it holds.
+                part: Some(target),
             });
         } else if rel.rel_type.ends_with(IMAGE_REL_SUFFIX) {
             // Only the path: the bytes are already retained under it, and

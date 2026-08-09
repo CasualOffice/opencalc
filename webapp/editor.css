@@ -831,6 +831,16 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 
 .panel-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); margin: 4px 0; }
 
+/* Chart panel: one block per series, its name and its values reference
+   stacked so a long `Sheet1!$B$2:$B$400` is readable in a narrow column. */
+.chart-series {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px; border: 1px solid var(--border-2); border-radius: 8px;
+  background: var(--surface);
+}
+.chart-series-head { display: flex; gap: 6px; align-items: center; }
+.chart-series-head .panel-field { flex: 1 1 auto; }
+
 /* Pivot fields panel: a source list you drag from, four areas you drag into.
    The areas keep a minimum height whether or not they hold anything, so a
    drop target exists before there is a chip to aim beside. */
