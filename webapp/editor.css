@@ -906,3 +906,42 @@ button.fx:hover { color: var(--fg); background: var(--card); }
   color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer;
 }
 .fill-options:hover { color: var(--fg); border-color: var(--accent); }
+
+/* Comment threads (UX-P12). The thread scrolls on its own so a long
+   conversation never pushes the reply box off the panel — the box you type
+   into has to stay put, or replying to a busy thread means scrolling first. */
+.cmt-thread {
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cmt-entry {
+  border-left: 2px solid var(--border-2);
+  padding: 2px 0 2px 8px;
+}
+/* Replies indent under the opening remark, which is what makes a thread read
+   as a thread rather than as a list of unrelated notes. */
+.cmt-entry:not(.cmt-root) { margin-left: 12px; }
+.cmt-root { border-left-color: var(--accent); }
+.cmt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.cmt-who { font-size: 12px; font-weight: 600; }
+.cmt-when { font-size: 11px; color: var(--faint); }
+.cmt-text { font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.cmt-resolved {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.cmt-author { margin-bottom: 6px; }

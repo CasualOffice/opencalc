@@ -485,17 +485,71 @@ impl AutoFilter {
     }
 }
 
-/// A note attached to a cell.
+/// A comment thread attached to a cell: an opening remark plus any replies.
+///
+/// This models both shapes a spreadsheet has. A classic **note** is a thread
+/// with no replies and no timestamp — that is what `xl/comments{n}.xml` alone
+/// can express. A **threaded comment** adds the timestamp, the replies and the
+/// resolved flag, and lives in the 2018 `threadedComments` parts. Keeping one
+/// type for both means the editor never has to ask which kind a cell has, and a
+/// note that gets its first reply simply becomes a thread rather than migrating
+/// between two representations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CellComment {
-    /// The cell the note is anchored to.
+    /// The cell the thread is anchored to.
     pub at: CellRef,
-    /// The note text.
+    /// The opening remark.
     pub text: String,
     /// The author, if recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// When it was written, as an ISO 8601 UTC timestamp.
+    ///
+    /// Supplied by the caller rather than read from a clock, so that building
+    /// the same workbook twice produces the same bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    /// Whether the thread has been marked resolved.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub resolved: bool,
+    /// Replies, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<CommentReply>,
+}
+
+impl CellComment {
+    /// A plain note on a cell, with no timestamp and no replies.
+    pub fn note(at: CellRef, text: impl Into<String>, author: Option<String>) -> Self {
+        Self {
+            at,
+            text: text.into(),
+            author,
+            created: None,
+            resolved: false,
+            replies: Vec::new(),
+        }
+    }
+
+    /// Whether this thread needs the threaded-comment parts to survive a save.
+    /// A bare note round-trips through `xl/comments{n}.xml` on its own.
+    pub fn is_threaded(&self) -> bool {
+        !self.replies.is_empty() || self.created.is_some() || self.resolved
+    }
+}
+
+/// One reply within a [`CellComment`] thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentReply {
+    /// The reply text.
+    pub text: String,
+    /// The author, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// When it was written, as an ISO 8601 UTC timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
 }
 
 /// A conditional-formatting rule: cells in `range` whose value satisfies `rule`

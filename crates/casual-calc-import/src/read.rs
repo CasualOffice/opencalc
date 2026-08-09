@@ -197,8 +197,119 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
                     b"t" => in_t = false,
                     b"comment" => {
                         in_comment = false;
-                        let author = authors.get(cur_aid).cloned();
+                        // An empty author is the schema's way of saying
+                        // "anonymous"; carrying it as `Some("")` would make an
+                        // unsigned note look signed by nobody in particular.
+                        let author = authors.get(cur_aid).filter(|a| !a.is_empty()).cloned();
                         out.push((cur_ref.clone(), author, cur_text.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
+}
+
+/// One `<threadedComment>` element, before threads are assembled.
+#[derive(Debug, Clone)]
+pub struct RawThreadedComment {
+    /// The cell it is anchored to, in A1 form.
+    pub reference: String,
+    /// This comment's own GUID.
+    pub id: String,
+    /// The GUID of the comment it replies to, if it is a reply.
+    pub parent_id: Option<String>,
+    /// The GUID of the person who wrote it, resolved through the persons part.
+    pub person_id: Option<String>,
+    /// The `dT` timestamp, ISO 8601.
+    pub date: Option<String>,
+    /// Whether the thread is marked resolved (only meaningful on a root).
+    pub done: bool,
+    /// The comment body.
+    pub text: String,
+}
+
+/// Parse an `xl/persons/person{n}.xml` part into `(id, displayName)` pairs.
+pub fn parse_persons(xml: &[u8]) -> Result<Vec<(String, String)>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut out = Vec::new();
+    loop {
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        match event {
+            // `<person>` is childless, so it arrives as `Empty` from every
+            // writer that self-closes it — handling only `Start` would read
+            // the file as having no people at all.
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                if matches!(event, Event::Start(_)) {
+                    bounds.open()?;
+                }
+                if e.local_name().as_ref() == b"person"
+                    && let Some(id) = read_attr(e, b"id")?
+                {
+                    let name = read_attr(e, b"displayName")?.unwrap_or_default();
+                    out.push((id, name));
+                }
+            }
+            Event::End(_) => bounds.close(),
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
+}
+
+/// Parse an `xl/threadedComments/threadedComment{n}.xml` part. The schema is
+/// flat — replies are siblings of their root, linked by `parentId` — so this
+/// returns the elements in document order and leaves threading to the caller.
+pub fn parse_threaded_comments(xml: &[u8]) -> Result<Vec<RawThreadedComment>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut out: Vec<RawThreadedComment> = Vec::new();
+    let mut current: Option<RawThreadedComment> = None;
+    let mut in_text = false;
+
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) => {
+                bounds.open()?;
+                match e.local_name().as_ref() {
+                    b"threadedComment" => {
+                        current = Some(RawThreadedComment {
+                            reference: read_attr(&e, b"ref")?.unwrap_or_default(),
+                            id: read_attr(&e, b"id")?.unwrap_or_default(),
+                            parent_id: read_attr(&e, b"parentId")?,
+                            person_id: read_attr(&e, b"personId")?,
+                            date: read_attr(&e, b"dT")?,
+                            done: read_attr(&e, b"done")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+                            text: String::new(),
+                        });
+                    }
+                    b"text" if current.is_some() => in_text = true,
+                    _ => {}
+                }
+            }
+            Event::Text(e) => {
+                if in_text && let Some(c) = current.as_mut() {
+                    c.text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(e) => {
+                bounds.close();
+                match e.local_name().as_ref() {
+                    b"text" => in_text = false,
+                    b"threadedComment" => {
+                        if let Some(c) = current.take() {
+                            out.push(c);
+                        }
                     }
                     _ => {}
                 }

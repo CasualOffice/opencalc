@@ -31,6 +31,21 @@ const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+/// The 2018 threaded-comments namespace, shared by the persons and
+/// threadedComments parts.
+const NS_TC: &str = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments";
+/// The relationship types for those parts live outside the standard `NS_R`
+/// family, under Microsoft's 2017 extension namespace.
+const NS_R_TC: &str = "http://schemas.microsoft.com/office/2017/10/relationships/threadedComment";
+const NS_R_PERSON: &str = "http://schemas.microsoft.com/office/2017/10/relationships/person";
+/// The author recorded when a comment carries none. Deliberately empty rather
+/// than a stand-in name: both schemas require an author slot, but inventing one
+/// would attribute an anonymous note to somebody, and it would come back on the
+/// next import as a real name the file never held.
+const DEFAULT_AUTHOR: &str = "";
+/// The timestamp written for a thread that has none. Threaded comments require
+/// `dT`, and inventing "now" here would make two saves of one workbook differ.
+const EPOCH_STAMP: &str = "1970-01-01T00:00:00.00";
 const FIRST_CUSTOM_NUM_FMT: u32 = 164;
 const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 
@@ -79,10 +94,20 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         let n = i + 1;
         parts.push((format!("xl/comments{n}.xml"), comments_xml(sheet)));
         parts.push((format!("xl/drawings/vmlDrawing{n}.vml"), vml_drawing(sheet)));
+        let threaded = sheet.comments.iter().any(|c| c.is_threaded());
+        if threaded {
+            parts.push((
+                format!("xl/threadedComments/threadedComment{n}.xml"),
+                threaded_comments_xml(workbook, i),
+            ));
+        }
         parts.push((
             format!("xl/worksheets/_rels/sheet{n}.xml.rels"),
-            sheet_rels(n),
+            sheet_rels(n, threaded),
         ));
+    }
+    if any_threaded(workbook) {
+        parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
     }
 
     package(&parts)
@@ -128,6 +153,15 @@ fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
                 i + 1
             ));
         }
+        if sheet.comments.iter().any(|c| c.is_threaded()) {
+            s.push_str(&format!(
+                "<Override PartName=\"/xl/threadedComments/threadedComment{}.xml\" ContentType=\"application/vnd.ms-excel.threadedcomments+xml\"/>",
+                i + 1
+            ));
+        }
+    }
+    if any_threaded(workbook) {
+        s.push_str("<Override PartName=\"/xl/persons/person1.xml\" ContentType=\"application/vnd.ms-excel.person+xml\"/>");
     }
     s.push_str("</Types>");
     s
@@ -137,13 +171,16 @@ fn content_types(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
 fn comments_xml(sheet: &Sheet) -> String {
     let mut authors: Vec<String> = Vec::new();
     for c in &sheet.comments {
-        let a = c.author.clone().unwrap_or_else(|| "OpenCalc".to_owned());
+        let a = c
+            .author
+            .clone()
+            .unwrap_or_else(|| DEFAULT_AUTHOR.to_owned());
         if !authors.contains(&a) {
             authors.push(a);
         }
     }
     if authors.is_empty() {
-        authors.push("OpenCalc".to_owned());
+        authors.push(DEFAULT_AUTHOR.to_owned());
     }
     let mut s = format!("{DECL}<comments xmlns=\"{NS_MAIN}\"><authors>");
     for a in &authors {
@@ -151,7 +188,10 @@ fn comments_xml(sheet: &Sheet) -> String {
     }
     s.push_str("</authors><commentList>");
     for c in &sheet.comments {
-        let a = c.author.clone().unwrap_or_else(|| "OpenCalc".to_owned());
+        let a = c
+            .author
+            .clone()
+            .unwrap_or_else(|| DEFAULT_AUTHOR.to_owned());
         let aid = authors.iter().position(|x| *x == a).unwrap_or(0);
         s.push_str(&format!(
             "<comment ref=\"{}\" authorId=\"{aid}\"><text><r><t xml:space=\"preserve\">{}</t></r></text></comment>",
@@ -160,6 +200,111 @@ fn comments_xml(sheet: &Sheet) -> String {
         ));
     }
     s.push_str("</commentList></comments>");
+    s
+}
+
+/// Every author named anywhere in the workbook's threads, in first-seen order.
+fn thread_authors(workbook: &Workbook) -> Vec<String> {
+    let mut authors: Vec<String> = Vec::new();
+    let mut note = |a: &Option<String>| {
+        let a = a.clone().unwrap_or_else(|| DEFAULT_AUTHOR.to_owned());
+        if !authors.contains(&a) {
+            authors.push(a);
+        }
+    };
+    for sheet in &workbook.sheets {
+        for c in &sheet.comments {
+            note(&c.author);
+            for r in &c.replies {
+                note(&r.author);
+            }
+        }
+    }
+    authors
+}
+
+/// A stable GUID in Excel's `{8-4-4-4-12}` form, derived from `seed`.
+///
+/// Excel expects a GUID here and does not care which one, so it is derived from
+/// the thread's own coordinates rather than drawn from a random source: writing
+/// the same workbook twice has to produce the same bytes, and a random GUID
+/// would make every save differ from the last for no reason.
+fn stable_guid(seed: &str) -> String {
+    // FNV-1a, run over the seed with four different offsets for 128 bits.
+    let mut out = String::with_capacity(38);
+    let mut hex = String::with_capacity(32);
+    for salt in 0u8..4 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ u64::from(salt);
+        for b in seed.bytes() {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hex.push_str(&format!("{hash:016x}"));
+    }
+    let hex = &hex[..32];
+    out.push('{');
+    for (i, chunk) in [0..8, 8..12, 12..16, 16..20, 20..32]
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push('-');
+        }
+        out.push_str(&hex[chunk]);
+    }
+    out.push('}');
+    out
+}
+
+/// The `xl/persons/person1.xml` part: the people who can be referenced by a
+/// threaded comment's `personId`.
+fn persons_xml(workbook: &Workbook) -> String {
+    let mut s = format!("{DECL}<personList xmlns=\"{NS_TC}\" xmlns:x=\"{NS_MAIN}\">");
+    for a in thread_authors(workbook) {
+        s.push_str(&format!(
+            "<person displayName=\"{}\" id=\"{}\" userId=\"{}\" providerId=\"None\"/>",
+            escape_text(&a),
+            stable_guid(&format!("person:{a}")),
+            escape_text(&a),
+        ));
+    }
+    s.push_str("</personList>");
+    s
+}
+
+/// The `xl/threadedComments/threadedComment{n}.xml` part: the opening remark and
+/// each reply as a sibling `<threadedComment>`, replies pointing at the root
+/// through `parentId` (the schema is flat, not nested).
+fn threaded_comments_xml(workbook: &Workbook, sheet_index: usize) -> String {
+    let sheet = &workbook.sheets[sheet_index];
+    let person = |a: &Option<String>| {
+        stable_guid(&format!(
+            "person:{}",
+            a.as_deref().unwrap_or(DEFAULT_AUTHOR)
+        ))
+    };
+    let mut s = format!("{DECL}<ThreadedComments xmlns=\"{NS_TC}\" xmlns:x=\"{NS_MAIN}\">");
+    for c in sheet.comments.iter().filter(|c| c.is_threaded()) {
+        let reference = cell_a1(c.at.row, c.at.col);
+        let root_id = stable_guid(&format!("tc:{sheet_index}:{reference}"));
+        s.push_str(&format!(
+            "<threadedComment ref=\"{reference}\" dT=\"{}\" personId=\"{}\" id=\"{root_id}\"{}><text>{}</text></threadedComment>",
+            escape_text(c.created.as_deref().unwrap_or(EPOCH_STAMP)),
+            person(&c.author),
+            if c.resolved { " done=\"1\"" } else { "" },
+            escape_text(&c.text),
+        ));
+        for (i, r) in c.replies.iter().enumerate() {
+            s.push_str(&format!(
+                "<threadedComment ref=\"{reference}\" dT=\"{}\" personId=\"{}\" id=\"{}\" parentId=\"{root_id}\"><text>{}</text></threadedComment>",
+                escape_text(r.created.as_deref().unwrap_or(EPOCH_STAMP)),
+                person(&r.author),
+                stable_guid(&format!("tc:{sheet_index}:{reference}:{i}")),
+                escape_text(&r.text),
+            ));
+        }
+    }
+    s.push_str("</ThreadedComments>");
     s
 }
 
@@ -188,13 +333,28 @@ fn vml_drawing(sheet: &Sheet) -> String {
 
 /// The `xl/worksheets/_rels/sheet{n}.xml.rels`: links the VML drawing and the
 /// comments part to the worksheet.
-fn sheet_rels(n: usize) -> String {
+fn sheet_rels(n: usize, threaded: bool) -> String {
+    let tc = if threaded {
+        format!(
+            "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "{DECL}<Relationships xmlns=\"{NS_REL}\">\
 <Relationship Id=\"rId1\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
-<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>\
+<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>{tc}\
 </Relationships>"
     )
+}
+
+/// Whether any sheet holds a thread that needs the 2018 parts.
+fn any_threaded(workbook: &Workbook) -> bool {
+    workbook
+        .sheets
+        .iter()
+        .any(|s| s.comments.iter().any(|c| c.is_threaded()))
 }
 
 fn root_rels() -> String {
@@ -266,6 +426,12 @@ fn workbook_rels(workbook: &Workbook, has_styles: bool, has_strings: bool) -> St
     if has_strings {
         s.push_str(&format!(
             "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/sharedStrings\" Target=\"sharedStrings.xml\"/>"
+        ));
+        next_rid += 1;
+    }
+    if any_threaded(workbook) {
+        s.push_str(&format!(
+            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R_PERSON}\" Target=\"persons/person1.xml\"/>"
         ));
     }
     s.push_str("</Relationships>");

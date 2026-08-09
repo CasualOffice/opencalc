@@ -3532,7 +3532,7 @@ function openPanel(tool) {
   panelRangeEls = [];
   panelNote = null;
   document.getElementById("side-panel-title").textContent =
-    tool === "dv" ? "Data validation" : tool === "cf" ? "Conditional formatting" : "Note";
+    tool === "dv" ? "Data validation" : tool === "cf" ? "Conditional formatting" : "Comments";
   const body = document.getElementById("side-panel-body");
   body.textContent = "";
   if (tool === "dv") buildDvPanel(body);
@@ -3568,8 +3568,10 @@ function refreshPanel() {
     const addr = A1(state.sel.row, state.sel.col);
     if (addr !== panelNote.cell) {
       panelNote.cell = addr;
-      panelNote.addrEl.textContent = addr;
-      try { panelNote.ta.value = wasm.session_comment_at(state.sheet, state.sel.row, state.sel.col); } catch {}
+      // A half-typed reply belongs to the cell it was started on, so moving
+      // away clears it rather than carrying it to someone else's thread.
+      panelNote.ta.value = "";
+      panelNote.refresh();
     }
   }
 }
@@ -3745,31 +3747,151 @@ function buildCfPanel(body) {
   setTimeout(() => a.focus(), 0);
 }
 
+// Who new comments and replies are signed as. There is no account to read a
+// name from in the browser, so it is asked for once and kept; an empty name is
+// allowed and simply leaves the comment unsigned rather than blocking the edit.
+function commentAuthor() {
+  try { return localStorage.getItem("oc-comment-author") || ""; } catch { return ""; }
+}
+function setCommentAuthor(name) {
+  try { localStorage.setItem("oc-comment-author", name); } catch {}
+}
+
+// The timestamp new comments carry, in the shape OOXML wants (`dT`). Produced
+// here rather than in the engine so the engine stays a pure function of its
+// inputs — the same edits always yield the same workbook.
+function commentStamp() {
+  return new Date().toISOString().replace("Z", "").slice(0, 22);
+}
+
+// "3 minutes ago" / "8 Aug 2026" — a thread is read by when things were said
+// relative to now, and an absolute timestamp makes that arithmetic the reader's
+// problem. The full stamp stays on the `title` for anyone who needs it.
+function relativeTime(iso) {
+  if (!iso) return "";
+  const then = Date.parse(iso.endsWith("Z") ? iso : iso + "Z");
+  if (!Number.isFinite(then)) return "";
+  const secs = Math.round((Date.now() - then) / 1000);
+  if (secs < 45) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+  return new Date(then).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function readThread(row, col) {
+  try { return JSON.parse(wasm.session_comment_thread(state.sheet, row, col)); }
+  catch { return null; }
+}
+
 function buildNotePanel(body) {
-  panelLabel(body, "Note on cell");
   const addrEl = el("div", "panel-range", A1(state.sel.row, state.sel.col));
   body.appendChild(addrEl);
+
+  const thread = el("div", "cmt-thread");
+  body.appendChild(thread);
+
   const ta = el("textarea", "panel-field");
-  ta.rows = 4; ta.spellcheck = false; ta.placeholder = "Type a note…";
-  try { ta.value = wasm.session_comment_at(state.sheet, state.sel.row, state.sel.col); } catch {}
+  ta.rows = 3; ta.spellcheck = false;
   body.appendChild(ta);
-  body.appendChild(el("div", "panel-hint", "Notes attach to the active cell. Select another cell to edit its note."));
-  panelNote = { ta, addrEl, cell: A1(state.sel.row, state.sel.col) };
-  panelActions(
-    body,
-    "Save",
-    () => {
-      try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ta.value); }
-      catch (e) { status.textContent = `error: ${e}`; }
-      draw();
-    },
-    "Delete",
-    () => {
-      try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, ""); } catch {}
-      ta.value = "";
-      draw();
+
+  const who = el("input", "panel-field cmt-author");
+  who.type = "text"; who.placeholder = "Your name (optional)";
+  who.value = commentAuthor();
+  who.addEventListener("change", () => setCommentAuthor(who.value.trim()));
+  body.appendChild(who);
+
+  const hint = el("div", "panel-hint", "");
+  body.appendChild(hint);
+
+  // `render` reads the thread back from the model after every change rather
+  // than patching the DOM it just built, so the panel can never drift from
+  // what was actually stored.
+  const render = () => {
+    const row = state.sel.row, col = state.sel.col;
+    const t = readThread(row, col);
+    thread.textContent = "";
+    addrEl.textContent = A1(row, col);
+    const entry = (e, isRoot) => {
+      const box = el("div", "cmt-entry" + (isRoot ? " cmt-root" : ""));
+      const head = el("div", "cmt-head");
+      head.appendChild(el("span", "cmt-who", e.author || "Anonymous"));
+      const when = el("span", "cmt-when", relativeTime(e.created));
+      if (e.created) when.title = e.created;
+      head.appendChild(when);
+      box.appendChild(head);
+      box.appendChild(el("div", "cmt-text", e.text));
+      return box;
+    };
+    if (t) {
+      if (t.resolved) thread.appendChild(el("div", "cmt-resolved", "Resolved"));
+      thread.appendChild(entry(t, true));
+      for (const r of t.replies) thread.appendChild(entry(r, false));
+    } else {
+      thread.appendChild(el("div", "panel-hint", "No comment on this cell yet."));
     }
-  );
+    ta.placeholder = t ? "Reply…" : "Type a comment…";
+    hint.textContent = t
+      ? "Save replies to the thread. Edit rewrites the first comment; Delete removes the whole thread."
+      : "Comments attach to the active cell. Select another cell to see its thread.";
+    return t;
+  };
+  let current = render();
+
+  panelNote = { ta, addrEl, render: () => { current = render(); }, cell: A1(state.sel.row, state.sel.col) };
+
+  const actions = el("div", "panel-actions");
+  const button = (label, cls, fn) => {
+    const b = el("button", cls, label);
+    b.addEventListener("click", fn);
+    actions.appendChild(b);
+    return b;
+  };
+  // The primary verb changes with the thread's state, because "Save" on an
+  // existing thread is ambiguous — it could mean reply or rewrite, and those
+  // are very different things to do to someone else's comment.
+  const primary = button("Save", "primary", () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    const author = who.value.trim();
+    setCommentAuthor(author);
+    try {
+      if (current) wasm.session_reply_comment(state.sheet, state.sel.row, state.sel.col, text, author, commentStamp());
+      else wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, text, author, commentStamp());
+    } catch (e) { status.textContent = `error: ${e}`; return; }
+    ta.value = "";
+    current = render();
+    refreshPanelButtons();
+    draw();
+  });
+  const resolveBtn = button("Resolve", null, () => {
+    if (!current) return;
+    try { wasm.session_resolve_comment(state.sheet, state.sel.row, state.sel.col, !current.resolved); }
+    catch (e) { status.textContent = `error: ${e}`; return; }
+    current = render();
+    refreshPanelButtons();
+    draw();
+  });
+  button("Delete", "danger", () => {
+    try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, "", "", ""); } catch {}
+    ta.value = "";
+    current = render();
+    refreshPanelButtons();
+    draw();
+  });
+  body.appendChild(actions);
+
+  function refreshPanelButtons() {
+    primary.textContent = current ? "Reply" : "Save";
+    resolveBtn.hidden = !current;
+    resolveBtn.textContent = current && current.resolved ? "Reopen" : "Resolve";
+  }
+  refreshPanelButtons();
+  panelNote.refresh = () => { current = render(); refreshPanelButtons(); };
+
   setTimeout(() => ta.focus(), 0);
 }
 
@@ -5882,7 +6004,13 @@ function cellMenu(x, y) {
   // the menu bar, which is a long way to go for something the right-click is
   // already asking about.
   item("Format cells…", false, () => formatCellsDialog());
-  item("Insert note", false, () => togglePanel("note"));
+  // The verb reflects what is actually there, so the menu is not offering to
+  // insert a comment onto a cell that already has a thread.
+  item(
+    readThread(state.sel.row, state.sel.col) ? "Show comments" : "Insert comment",
+    false,
+    () => { if (activePanel !== "note") togglePanel("note"); else panelNote?.refresh(); },
+  );
   item("Define name…", false, () => {
     const r = canvas.getBoundingClientRect();
     openNameManager(r.left + 120, r.top + 90);
@@ -6266,11 +6394,16 @@ function wireEvents() {
       commentTip.style.top = (py + 8) + "px";
       commentTip.hidden = false;
     } else if (hit && commentCells.has(hit.row + "," + hit.col)) {
-      let text = "";
-      try { text = wasm.session_comment_at(state.sheet, hit.row, hit.col); } catch {}
-      if (text) {
-        commentTip.textContent = text;
-        commentTip.style.whiteSpace = "";
+      // The hover shows the whole thread, not just the opening remark: a reply
+      // is usually the part that answers the question the cell raises, and
+      // hiding it behind "open the panel" makes the indicator half-useful.
+      const t = readThread(hit.row, hit.col);
+      if (t && t.text) {
+        const line = (e) => (e.author ? `${e.author}: ` : "") + e.text;
+        const lines = [line(t), ...t.replies.map(line)];
+        if (t.resolved) lines.unshift("✓ Resolved");
+        commentTip.textContent = lines.join("\n");
+        commentTip.style.whiteSpace = "pre-line";
         commentTip.style.left = (px + 14) + "px";
         commentTip.style.top = (py + 8) + "px";
         commentTip.hidden = false;

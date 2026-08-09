@@ -30,9 +30,9 @@ pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
 pub use sheet::{
-    AutoFilter, AxisSizing, CellComment, CfRule, ConditionalFormat, CustomFilter, DataValidation,
-    DvKind, DvOperator, FilterOp, FilterRule, OutlinePr, Sheet, SheetProtection, SheetView,
-    SheetVisibility, wildcard_match,
+    AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat, CustomFilter,
+    DataValidation, DvKind, DvOperator, FilterOp, FilterRule, OutlinePr, Sheet, SheetProtection,
+    SheetView, SheetVisibility, wildcard_match,
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;

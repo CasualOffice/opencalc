@@ -23,8 +23,8 @@ use casual_calc_layout::{
 };
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
-    ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp, FilterRule, HAlign, Id,
-    Sheet, SheetId, SheetVisibility, Style, StyleId, VAlign, Workbook,
+    CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
+    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -966,23 +966,105 @@ pub fn session_clear_cf(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Res
     })
 }
 
-/// Set (or, with empty text, remove) a cell's comment/note.
+/// Set (or, with empty text, remove) a cell's comment. Replaces the whole
+/// thread, so any replies go with it — this is the "edit the note" path.
+///
+/// `author` and `created` may be empty, which leaves a plain note. `created` is
+/// passed in as an ISO 8601 string rather than read from a clock here so the
+/// core stays deterministic: the same sequence of edits produces the same bytes.
 #[wasm_bindgen]
-pub fn session_set_comment(sheet: usize, row: u32, col: u32, text: &str) -> Result<(), JsError> {
+pub fn session_set_comment(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    text: &str,
+    author: &str,
+    created: &str,
+) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.comments
-                .retain(|c| !(c.at.row == row && c.at.col == col));
+            // Editing keeps the replies that were already on the thread; only
+            // an empty text (a delete) drops them.
+            let existing = sh
+                .comments
+                .iter()
+                .position(|c| c.at.row == row && c.at.col == col);
             let text = text.trim();
-            if !text.is_empty() {
-                sh.comments.push(CellComment {
-                    at: CellRef::new(row, col),
-                    text: text.to_owned(),
-                    author: None,
-                });
+            if text.is_empty() {
+                if let Some(i) = existing {
+                    sh.comments.remove(i);
+                }
+                return Ok(());
             }
+            let mut thread = match existing {
+                Some(i) => sh.comments.remove(i),
+                None => CellComment::note(CellRef::new(row, col), "", None),
+            };
+            thread.text = text.to_owned();
+            if !author.is_empty() {
+                thread.author = Some(author.to_owned());
+            }
+            if !created.is_empty() {
+                thread.created = Some(created.to_owned());
+            }
+            sh.comments.push(thread);
+        }
+        Ok(())
+    })
+}
+
+/// Append a reply to the thread on a cell. A no-op if the cell has no thread —
+/// a reply without an opening remark has nothing to attach to.
+#[wasm_bindgen]
+pub fn session_reply_comment(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    text: &str,
+    author: &str,
+    created: &str,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if let Some(thread) = session.workbook_mut().sheets.get_mut(sheet).and_then(|sh| {
+            sh.comments
+                .iter_mut()
+                .find(|c| c.at.row == row && c.at.col == col)
+        }) {
+            thread.replies.push(CommentReply {
+                text: text.to_owned(),
+                author: (!author.is_empty()).then(|| author.to_owned()),
+                created: (!created.is_empty()).then(|| created.to_owned()),
+            });
+        }
+        Ok(())
+    })
+}
+
+/// Mark a cell's thread resolved or reopened.
+#[wasm_bindgen]
+pub fn session_resolve_comment(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    resolved: bool,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        if let Some(thread) = session.workbook_mut().sheets.get_mut(sheet).and_then(|sh| {
+            sh.comments
+                .iter_mut()
+                .find(|c| c.at.row == row && c.at.col == col)
+        }) {
+            thread.resolved = resolved;
         }
         Ok(())
     })
@@ -1004,6 +1086,49 @@ pub fn session_comment_at(sheet: usize, row: u32, col: u32) -> String {
             .unwrap_or_default()
     })
     .unwrap_or_default()
+}
+
+/// A cell's whole thread as JSON, or `null` if it has none:
+/// `{"text","author","created","resolved",replies:[{"text","author","created"}]}`.
+#[wasm_bindgen]
+pub fn session_comment_thread(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(thread) = s.workbook().sheets.get(sheet).and_then(|sh| {
+            sh.comments
+                .iter()
+                .find(|c| c.at.row == row && c.at.col == col)
+        }) else {
+            return "null".to_owned();
+        };
+        let entry = |text: &str, author: &Option<String>, created: &Option<String>| {
+            format!(
+                "{{\"text\":{},\"author\":{},\"created\":{}}}",
+                json_string(text),
+                author.as_deref().map_or("null".to_owned(), json_string),
+                created.as_deref().map_or("null".to_owned(), json_string),
+            )
+        };
+        let replies: Vec<String> = thread
+            .replies
+            .iter()
+            .map(|r| entry(&r.text, &r.author, &r.created))
+            .collect();
+        format!(
+            "{{\"text\":{},\"author\":{},\"created\":{},\"resolved\":{},\"replies\":[{}]}}",
+            json_string(&thread.text),
+            thread
+                .author
+                .as_deref()
+                .map_or("null".to_owned(), json_string),
+            thread
+                .created
+                .as_deref()
+                .map_or("null".to_owned(), json_string),
+            thread.resolved,
+            replies.join(",")
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
 }
 
 /// The commented cells within a range as JSON `[{r,c}, …]` — the editor draws a

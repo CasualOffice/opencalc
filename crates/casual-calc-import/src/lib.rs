@@ -24,20 +24,20 @@ pub use error::ImportError;
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
 pub use theme::stock_theme_slots;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
 use casual_calc_model::{
-    AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, ConditionalFormat,
-    CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue, FilterOp,
-    FilterRule, Id, IdGenerator, Sheet, SheetId, SheetVisibility, StringId, Workbook,
+    AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, CommentReply,
+    ConditionalFormat, CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue,
+    FilterOp, FilterRule, Id, IdGenerator, Sheet, SheetId, SheetVisibility, StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
 use a1::{parse_a1, parse_range};
 use read::{
-    RawCell, parse_comments, parse_date1904, parse_defined_names, parse_shared_strings,
-    parse_worksheet,
+    RawCell, RawThreadedComment, parse_comments, parse_date1904, parse_defined_names,
+    parse_persons, parse_shared_strings, parse_threaded_comments, parse_worksheet,
 };
 use styles::{StyleSheet, parse_styles};
 use theme::{ThemePalette, parse_theme};
@@ -49,6 +49,13 @@ const STYLES_PART: &str = "xl/styles.xml";
 const THEME_PART: &str = "xl/theme/theme1.xml";
 /// Relationship type suffix binding a worksheet to its comments part.
 const COMMENTS_REL_SUFFIX: &str = "/comments";
+/// Relationship type suffix binding a worksheet to its threaded-comments part.
+/// Deliberately distinct from [`COMMENTS_REL_SUFFIX`]: the two are matched by
+/// suffix, and `…/threadedComment` does not end in `/comments`, so a package
+/// carrying both binds each to the right reader.
+const THREADED_COMMENTS_REL_SUFFIX: &str = "/threadedComment";
+/// Relationship type suffix binding the workbook to its persons part.
+const PERSONS_REL_SUFFIX: &str = "/person";
 /// Most areas honoured from one `sqref`. Each area materializes its own model
 /// entry (a validation copies its whole value list), so an adversarial part
 /// with a huge area list must not become unbounded allocation.
@@ -61,6 +68,77 @@ pub struct Import {
     pub workbook: Workbook,
     /// What was mapped, degraded, or omitted.
     pub report: CompatibilityReport,
+}
+
+/// Fold parsed `<threadedComment>` elements into a sheet's comment list.
+///
+/// The schema is flat: a root and its replies are siblings sharing a `ref`,
+/// linked by `parentId`. Replies are attached in document order, which is the
+/// order Excel writes and reads them.
+///
+/// A cell that already has a legacy note is **replaced**, not appended to: Excel
+/// writes both parts for the same thread so that readers predating the 2018
+/// schema still see something, and keeping both would show the opening remark
+/// twice.
+fn merge_threaded_comments(
+    sheet: &mut Sheet,
+    raw: Vec<RawThreadedComment>,
+    persons: &BTreeMap<String, String>,
+) {
+    let author_of = |person_id: &Option<String>| -> Option<String> {
+        person_id
+            .as_ref()
+            .and_then(|id| persons.get(id))
+            .filter(|name| !name.is_empty())
+            .cloned()
+    };
+
+    // Roots first, so a reply can never arrive before the thread it joins even
+    // if a writer emitted them out of order.
+    let (roots, replies): (Vec<_>, Vec<_>) = raw.into_iter().partition(|c| c.parent_id.is_none());
+
+    let mut index_of: HashMap<String, usize> = HashMap::new();
+    for root in roots {
+        let Some(at) = parse_a1(&root.reference) else {
+            continue;
+        };
+        let thread = CellComment {
+            at,
+            text: root.text,
+            author: author_of(&root.person_id),
+            created: root.date,
+            resolved: root.done,
+            replies: Vec::new(),
+        };
+        // Replace the legacy note for this cell if one was already read.
+        match sheet
+            .comments
+            .iter()
+            .position(|c| c.at.row == at.row && c.at.col == at.col)
+        {
+            Some(i) => {
+                sheet.comments[i] = thread;
+                index_of.insert(root.id, i);
+            }
+            None => {
+                index_of.insert(root.id, sheet.comments.len());
+                sheet.comments.push(thread);
+            }
+        }
+    }
+
+    for reply in replies {
+        // A reply whose parent is missing has nowhere to go; dropping it is the
+        // only option that does not invent a thread the file never had.
+        let Some(&i) = reply.parent_id.as_ref().and_then(|p| index_of.get(p)) else {
+            continue;
+        };
+        sheet.comments[i].replies.push(CommentReply {
+            text: reply.text,
+            author: author_of(&reply.person_id),
+            created: reply.date,
+        });
+    }
 }
 
 /// Import a SpreadsheetML package into the normalized model.
@@ -133,6 +211,24 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         .iter()
         .map(|s| (s.name.clone(), s.part.clone(), s.state.clone()))
         .collect();
+
+    // The persons part is workbook-level and shared by every sheet's threads,
+    // so it is read once here rather than per sheet.
+    let workbook_part_name = package.workbook_part().to_owned();
+    let persons: BTreeMap<String, String> = match package
+        .related_part(
+            &workbook_part_name,
+            PERSONS_REL_SUFFIX,
+            &OoxmlLimits::default(),
+        )?
+        .filter(|p| package.contains(p))
+    {
+        Some(part) => {
+            let pxml = package.read_part(&part)?;
+            parse_persons(&pxml)?.into_iter().collect()
+        }
+        None => BTreeMap::new(),
+    };
 
     let mut sheet_ids = IdGenerator::new(SHEET_NAMESPACE);
     let mut sheet_ids_by_index: Vec<SheetId> = Vec::new();
@@ -455,9 +551,23 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                 if !text.is_empty()
                     && let Some(at) = parse_a1(&reference)
                 {
-                    sheet.comments.push(CellComment { at, text, author });
+                    sheet.comments.push(CellComment::note(at, text, author));
                 }
             }
+        }
+
+        // Threaded comments (the 2018 parts) carry the timestamps, the replies
+        // and the resolved flag. Excel writes a legacy note alongside them for
+        // readers that predate the schema, so a cell can appear in both parts —
+        // the threaded one is the fuller record and replaces what the legacy
+        // pass just read, rather than adding a duplicate beside it.
+        let threaded_part = package
+            .related_part(&part, THREADED_COMMENTS_REL_SUFFIX, &OoxmlLimits::default())?
+            .filter(|p| package.contains(p));
+        if let Some(threaded_part) = threaded_part {
+            let txml = package.read_part(&threaded_part)?;
+            let raw = parse_threaded_comments(&txml)?;
+            merge_threaded_comments(&mut sheet, raw, &persons);
         }
 
         workbook.sheets.push(sheet);

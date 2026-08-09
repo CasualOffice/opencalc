@@ -313,16 +313,8 @@ fn cell_comments_round_trip() {
     use casual_calc_model::{CellComment, CellRef};
     let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
     workbook.sheets[0].comments = vec![
-        CellComment {
-            at: CellRef::new(0, 0),
-            text: "First note".to_owned(),
-            author: Some("sachin".to_owned()),
-        },
-        CellComment {
-            at: CellRef::new(3, 2),
-            text: "Needs <review> & sign-off".to_owned(),
-            author: None,
-        },
+        CellComment::note(CellRef::new(0, 0), "First note", Some("sachin".to_owned())),
+        CellComment::note(CellRef::new(3, 2), "Needs <review> & sign-off", None),
     ];
     let written = write_workbook(&workbook).unwrap();
     let comments = import_package(written).unwrap().workbook.sheets[0]
@@ -334,9 +326,10 @@ fn cell_comments_round_trip() {
     assert_eq!(comments[0].author.as_deref(), Some("sachin"));
     assert_eq!(comments[1].at, CellRef::new(3, 2));
     assert_eq!(comments[1].text, "Needs <review> & sign-off");
-    // OOXML requires every note to carry an author; a `None` author is written
-    // as our sentinel and comes back attributed to it.
-    assert_eq!(comments[1].author.as_deref(), Some("OpenCalc"));
+    // OOXML requires every note to occupy a slot in the authors list, but an
+    // empty one means anonymous — so an unsigned note stays unsigned rather
+    // than coming back attributed to a name the file never held.
+    assert_eq!(comments[1].author, None);
 }
 
 #[test]
@@ -846,4 +839,162 @@ fn non_list_validations_round_trip() {
     assert_eq!(back.len(), 2);
     assert_eq!(back[0], whole, "the number rule changed on the way through");
     assert_eq!(back[1], custom);
+}
+
+#[test]
+fn threaded_comments_round_trip() {
+    use casual_calc_model::{CellComment, CellRef, CommentReply};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0].comments.push(CellComment {
+        at: CellRef::new(1, 2),
+        text: "Is this figure final?".to_owned(),
+        author: Some("Ana".to_owned()),
+        created: Some("2026-08-08T09:15:00.00".to_owned()),
+        resolved: false,
+        replies: vec![
+            CommentReply {
+                text: "Checking with finance.".to_owned(),
+                author: Some("Bo".to_owned()),
+                created: Some("2026-08-08T09:40:00.00".to_owned()),
+            },
+            CommentReply {
+                text: "Confirmed.".to_owned(),
+                author: Some("Ana".to_owned()),
+                created: Some("2026-08-08T11:02:00.00".to_owned()),
+            },
+        ],
+    });
+    // A plain note alongside it, which must stay a plain note.
+    wb.sheets[0]
+        .comments
+        .push(CellComment::note(CellRef::new(3, 0), "just a note", None));
+
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].comments, wb.sheets[0].comments);
+}
+
+#[test]
+fn resolved_flag_and_authorless_thread_round_trip() {
+    use casual_calc_model::{CellComment, CellRef, CommentReply};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0].comments.push(CellComment {
+        at: CellRef::new(0, 0),
+        text: "done with this".to_owned(),
+        author: None,
+        created: Some("2026-01-02T03:04:05.00".to_owned()),
+        resolved: true,
+        replies: vec![CommentReply {
+            text: "agreed".to_owned(),
+            author: None,
+            created: Some("2026-01-02T03:05:00.00".to_owned()),
+        }],
+    });
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    let thread = &back.sheets[0].comments[0];
+    assert!(thread.resolved, "the resolved flag must survive a save");
+    assert_eq!(thread.replies.len(), 1);
+    // And an unsigned thread stays unsigned rather than acquiring a name.
+    assert_eq!(thread.author, None);
+}
+
+#[test]
+fn writing_is_deterministic_with_threads() {
+    use casual_calc_model::{CellComment, CellRef};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0].comments.push(CellComment {
+        at: CellRef::new(0, 0),
+        text: "hello".to_owned(),
+        author: Some("Ana".to_owned()),
+        created: Some("2026-08-08T09:15:00.00".to_owned()),
+        resolved: false,
+        replies: Vec::new(),
+    });
+    // Threaded comments need GUIDs; if those came from a random source, two
+    // saves of one workbook would differ and every commit would show churn.
+    assert_eq!(write_workbook(&wb).unwrap(), write_workbook(&wb).unwrap());
+}
+
+#[test]
+fn a_plain_note_does_not_pull_in_the_threaded_parts() {
+    use casual_calc_model::{CellComment, CellRef};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0]
+        .comments
+        .push(CellComment::note(CellRef::new(0, 0), "note", None));
+    let written = write_workbook(&wb).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&written)).unwrap();
+    let names: Vec<String> = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains("threadedComment")),
+        "a note with no replies or timestamp needs only the legacy part: {names:?}"
+    );
+    assert!(!names.iter().any(|n| n.contains("persons")));
+}
+
+#[test]
+fn threaded_comment_xml_has_the_shape_excel_expects() {
+    use casual_calc_model::{CellComment, CellRef, CommentReply};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0].comments.push(CellComment {
+        at: CellRef::new(0, 0),
+        text: "root".to_owned(),
+        author: Some("Ana".to_owned()),
+        created: Some("2026-08-08T09:15:00.00".to_owned()),
+        resolved: true,
+        replies: vec![CommentReply {
+            text: "reply".to_owned(),
+            author: Some("Bo".to_owned()),
+            created: Some("2026-08-08T09:40:00.00".to_owned()),
+        }],
+    });
+    let written = write_workbook(&wb).unwrap();
+    let tc = xml_of(&written, "xl/threadedComments/threadedComment1.xml");
+    let persons = xml_of(&written, "xl/persons/person1.xml");
+
+    // Replies are siblings carrying parentId, not nested children.
+    assert_eq!(tc.matches("<threadedComment ").count(), 2);
+    assert!(tc.contains("ref=\"A1\""));
+    assert!(tc.contains("dT=\"2026-08-08T09:15:00.00\""));
+    assert!(tc.contains("done=\"1\""));
+    assert!(tc.contains("parentId="), "a reply must point at its root");
+    assert!(tc.contains("<text>reply</text>"));
+
+    // The reply's parentId must be the root's id, or Excel drops the reply.
+    let root_id = tc
+        .split("id=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .to_owned();
+    assert!(tc.contains(&format!("parentId=\"{root_id}\"")));
+
+    // Both people are declared, and personId resolves into that list.
+    assert!(persons.contains("displayName=\"Ana\""));
+    assert!(persons.contains("displayName=\"Bo\""));
+    for person_id in tc.split("personId=\"").skip(1) {
+        let id = person_id.split('"').next().unwrap();
+        assert!(
+            persons.contains(&format!("id=\"{id}\"")),
+            "personId {id} is not in the persons part"
+        );
+    }
+
+    // And the parts are actually declared, or Excel treats the package as
+    // corrupt rather than silently ignoring them.
+    let types = xml_of(&written, "[Content_Types].xml");
+    assert!(types.contains("threadedcomments+xml"));
+    assert!(types.contains("person+xml"));
+    let rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(rels.contains("threadedComment1.xml"));
+    let wb_rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert!(wb_rels.contains("persons/person1.xml"));
 }
