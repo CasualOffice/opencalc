@@ -347,11 +347,15 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <!-- The grid is a canvas, so assistive tech cannot read it structurally.
-           role/label say what it is, and #grid-live (below) announces the active
-           cell as it moves — an announcer, not a full accessibility tree. -->
+      <!-- The grid is a canvas, so nothing in it reaches the accessibility
+           tree on its own. #grid-a11y is a DOM mirror of the *visible* cells,
+           owned by the canvas, giving assistive tech real rows and cells to
+           navigate structurally; aria-activedescendant points at the mirrored
+           active cell so focus never has to leave the canvas. #grid-live still
+           carries the running commentary a live region is better at. -->
       <canvas id="grid" tabindex="0" role="grid" aria-label="Spreadsheet grid"
-              aria-describedby="grid-live"></canvas>
+              aria-owns="grid-a11y" aria-describedby="grid-live"></canvas>
+      <div id="grid-a11y" class="sr-only" aria-hidden="false"></div>
       <div id="grid-live" class="sr-only" role="status" aria-live="polite"></div>
       <!-- A textarea, not an input: Alt+Enter puts a hard line break in a cell,
            which an <input> cannot hold. Enter still commits. -->

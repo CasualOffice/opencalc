@@ -1494,6 +1494,8 @@ function draw() {
   if (editSurface === inline) positionInline();
   updateNameBox();
   announceCell();
+  rebuildA11yGrid();
+  updateGridCounts();
   updateCellMode();
   updateScrollbars(v);
   updateStats();
@@ -4824,10 +4826,9 @@ const A1 = (row, col) => colName(col) + (row + 1);
 // Reflect the selection into the name box unless the user is typing in it. While
 // drag-selecting a block, show Excel's "3R x 2C" size readout.
 // --- Assistive announcements + cell mode -----------------------------------
-// The grid is a canvas: nothing in it is in the accessibility tree. This
-// announces the active cell and what it holds as the selection moves, so the
-// grid is at least navigable with a screen reader — an announcer, not a full
-// grid tree.
+// The structural tree is `rebuildA11yGrid` below; this is the running
+// commentary beside it. A live region is what announces a *change* — moving the
+// selection, growing it — which a static tree cannot do on its own.
 const liveEl = document.getElementById("grid-live");
 const modeEl = document.getElementById("cell-mode");
 let lastAnnounced = "";
@@ -4849,6 +4850,129 @@ function announceCell() {
   if (msg === lastAnnounced) return;
   lastAnnounced = msg;
   liveEl.textContent = msg;
+}
+
+// --- The accessibility tree ------------------------------------------------
+//
+// A DOM mirror of the cells currently on screen. The canvas cannot expose
+// anything structurally, so without this a screen reader has a live region and
+// nothing else: no way to read across a row, no column headers, no sense of
+// where in the sheet you are.
+//
+// Only the visible window is mirrored — a million cells of DOM would defeat the
+// point of drawing to a canvas at all. That is invisible to the reader because
+// every cell carries its **absolute** `aria-rowindex`/`aria-colindex` against
+// the sheet's declared counts, which is what those attributes exist for: "row
+// 4,201 of 1,048,576" stays true when only rows 4,190–4,230 are in the DOM.
+//
+// It mirrors `geo.rowIdx`/`geo.colIdx` — the indices the renderer just drew —
+// so a hidden or filtered-out row is absent from the mirror for the same reason
+// it is absent from the screen, without a second notion of what is visible.
+const a11yEl = document.getElementById("grid-a11y");
+let a11ySignature = "";
+
+// Caps so an unusually large window cannot make the rebuild expensive. Past the
+// cap the reader still gets the cells nearest the top-left of the view, which is
+// where navigation is.
+const A11Y_MAX_ROWS = 60;
+const A11Y_MAX_COLS = 40;
+
+const a11yCellId = (row, col) => `a11y-${row}-${col}`;
+
+function rebuildA11yGrid() {
+  if (!a11yEl || !wasm || !geo.rowIdx || !geo.colIdx) return;
+  const rows = geo.rowIdx.slice(0, A11Y_MAX_ROWS);
+  const cols = geo.colIdx.slice(0, A11Y_MAX_COLS);
+  if (!rows.length || !cols.length) return;
+
+  const sel = selRect();
+  const active = a11yCellId(state.sel.row, state.sel.col);
+
+  // Rebuilding identical DOM every frame churns the accessibility tree and
+  // makes some readers re-announce the whole grid, so only rebuild when what
+  // the mirror shows has actually changed. The cell payload is part of the
+  // signature, so an edit refreshes it without needing an edit counter.
+  const signature = [
+    state.sheet, rows[0], rows[rows.length - 1], cols[0], cols[cols.length - 1],
+    sel.r0, sel.c0, sel.r1, sel.c1, geoItems.length,
+  ].join(",") + "|" + JSON.stringify(geoItems);
+  if (signature === a11ySignature) {
+    canvas.setAttribute("aria-activedescendant", active);
+    return;
+  }
+  a11ySignature = signature;
+
+  const byKey = new Map();
+  for (const it of geoItems) byKey.set(it.r + "," + it.c, it.t);
+
+  const frag = document.createDocumentFragment();
+  // A header row of column letters, so "column D" is something the reader can
+  // say rather than something the user has to count to.
+  const head = el("div", null);
+  head.setAttribute("role", "row");
+  head.setAttribute("aria-rowindex", "1");
+  const corner = el("div", null, "");
+  corner.setAttribute("role", "columnheader");
+  corner.setAttribute("aria-colindex", "1");
+  head.appendChild(corner);
+  for (const c of cols) {
+    const h = el("div", null, colName(c));
+    h.setAttribute("role", "columnheader");
+    // +2: the row-header column is index 1, and ARIA indices are 1-based.
+    h.setAttribute("aria-colindex", String(c + 2));
+    head.appendChild(h);
+  }
+  frag.appendChild(head);
+
+  for (const r of rows) {
+    const row = el("div", null);
+    row.setAttribute("role", "row");
+    // +2: the column-header row is index 1.
+    row.setAttribute("aria-rowindex", String(r + 2));
+    const rh = el("div", null, String(r + 1));
+    rh.setAttribute("role", "rowheader");
+    rh.setAttribute("aria-colindex", "1");
+    row.appendChild(rh);
+    for (const c of cols) {
+      const text = byKey.get(r + "," + c);
+      const cell = el("div", null, text || "");
+      cell.id = a11yCellId(r, c);
+      cell.setAttribute("role", "gridcell");
+      cell.setAttribute("aria-colindex", String(c + 2));
+      // A cell with no accessible name is skipped outright by some readers, so
+      // an empty one says it is empty instead of vanishing from the row and
+      // making the columns misalign as they are read across.
+      if (!text) cell.setAttribute("aria-label", `${A1(r, c)} empty`);
+      if (r >= sel.r0 && r <= sel.r1 && c >= sel.c0 && c <= sel.c1) {
+        cell.setAttribute("aria-selected", "true");
+      }
+      row.appendChild(cell);
+    }
+    frag.appendChild(row);
+  }
+
+  a11yEl.textContent = "";
+  a11yEl.appendChild(frag);
+  canvas.setAttribute("aria-activedescendant", active);
+}
+
+// The counts a reader phrases "row 12 of N" against.
+//
+// Deliberately the **navigable** extent, not the used range: the same
+// `+30 rows / +8 columns` past the data that the scrollbars offer. Counting
+// only used rows would announce "row 40 of 6" the moment anyone scrolled below
+// the data, since the mirror covers the screen and the screen goes further than
+// the data does. The +1 on each is the header row and column, which are part of
+// the grid as far as ARIA is concerned.
+function updateGridCounts() {
+  if (!wasm) return;
+  try {
+    const b = usedBounds();
+    const lastRow = geo.rowIdx?.length ? geo.rowIdx[geo.rowIdx.length - 1] + 1 : 0;
+    const lastCol = geo.colIdx?.length ? geo.colIdx[geo.colIdx.length - 1] + 1 : 0;
+    canvas.setAttribute("aria-rowcount", String(Math.max(b.rows + 30, lastRow) + 1));
+    canvas.setAttribute("aria-colcount", String(Math.max(b.cols + 8, lastCol) + 1));
+  } catch {}
 }
 
 // Excel's status-bar mode word. Ready → Enter (typing a fresh value) → Edit
