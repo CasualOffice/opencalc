@@ -3859,11 +3859,46 @@ fn base64_encode(bytes: &[u8]) -> String {
 pub fn session_set_clock(now_serial: f64, seed: f64) {
     SESSION.with(|cell| {
         if let Some(session) = cell.borrow_mut().as_mut() {
-            let wb = session.workbook_mut();
-            wb.volatile_now = now_serial;
-            wb.volatile_seed = seed as u64;
+            // Through the SDK rather than poking the model: the environment is
+            // configuration, and setting it has to settle the volatile
+            // functions that read it — a NOW() still showing yesterday beside a
+            // clock that has visibly moved is worse than the cost of the pass.
+            session.set_environment(casual_calc_sdk::Environment {
+                now: now_serial,
+                seed: seed as u64,
+            });
         }
     });
+}
+
+/// The calculation mode in force: `"auto"` or `"manual"`.
+///
+/// Resolved from the file's own `<calcPr calcMode>` on open, so a workbook
+/// saved with calculation turned off opens that way.
+#[wasm_bindgen]
+pub fn session_calculation_mode() -> String {
+    with_session(|s| s.calculation_mode().token().to_owned()).unwrap_or_else(|| "auto".to_owned())
+}
+
+/// Switch calculation mode — Excel's Formulas ▸ Calculation Options.
+///
+/// Switching to automatic settles anything outstanding at once, and either way
+/// the choice is recorded so a save carries it.
+#[wasm_bindgen]
+pub fn session_set_calculation_mode(mode: &str) {
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.set_calculation_mode(casual_calc_sdk::CalculationMode::from_token(mode));
+        }
+    });
+}
+
+/// Whether an edit has changed a value that has not been recalculated — what
+/// Excel shows as "Calculate" in the status bar. Always false in automatic
+/// mode.
+#[wasm_bindgen]
+pub fn session_needs_recalculation() -> bool {
+    with_session(|s| s.needs_recalculation()).unwrap_or(false)
 }
 
 /// Recalculate every formula — Excel's F9.
@@ -3876,7 +3911,9 @@ pub fn session_set_clock(now_serial: f64, seed: f64) {
 pub fn session_recalculate() {
     SESSION.with(|cell| {
         if let Some(session) = cell.borrow_mut().as_mut() {
-            recalculate(session.workbook_mut());
+            // The SDK's, not the engine's: it also clears the outstanding flag,
+            // which is the whole point of pressing Calculate in manual mode.
+            session.recalculate();
         }
     });
 }

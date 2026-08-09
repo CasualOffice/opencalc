@@ -137,27 +137,38 @@
           <div class="check-col">
             <h4>Formulas &amp; calc</h4>
             <ul>
-              <li>Tokenizer, Pratt parser and AST</li>
-              <li>56 worksheet functions and growing</li>
-              <li>Autocomplete with signatures</li>
-              <li>Click or drag to insert references</li>
-              <li>Cross-sheet references</li>
-              <li>Validation on entry, errors surfaced</li>
+              <li>347 of the 356 functions in the spec</li>
+              <li>Dynamic arrays that spill — FILTER, SORT, UNIQUE, XLOOKUP</li>
+              <li>LET and LAMBDA, with MAP, REDUCE, SCAN and BYROW</li>
+              <li>Autocomplete with signatures; click or drag to insert refs</li>
+              <li>Cross-sheet and whole-row/column references</li>
+              <li>Automatic or manual calculation, as the file asks</li>
             </ul>
           </div>
           <div class="check-col">
             <h4>Format &amp; structure</h4>
             <ul>
-              <li>Fonts, colors, alignment, borders, wrap</li>
-              <li>Number formats: currency, percent, dates</li>
-              <li>Merged ranges and freeze panes</li>
-              <li>Sort and per-column filter</li>
-              <li>Drag-to-resize, auto-fit, resize-all</li>
-              <li>Multi-sheet tabs and the Name box</li>
+              <li>Fonts, colors, alignment, borders, wrap, rich text</li>
+              <li>Number formats: currency, percent, dates, custom</li>
+              <li>Conditional formatting, data validation, protection</li>
+              <li>Tables with structured references and banding</li>
+              <li>Sort, per-column filter, outlines, freeze panes</li>
+              <li>Page setup, print areas and manual page breaks</li>
+            </ul>
+          </div>
+          <div class="check-col">
+            <h4>Analysis</h4>
+            <ul>
+              <li>Pivot tables — build, filter, refresh, GETPIVOTDATA</li>
+              <li>Drag fields between Rows, Columns, Filters and Values</li>
+              <li>Eleven aggregates, subtotals and grand totals</li>
+              <li>Charts: column, bar, line, area, pie, doughnut, scatter</li>
+              <li>Insert, retitle, move and resize on the grid</li>
+              <li>Charts written as real chart parts, not pictures</li>
             </ul>
           </div>
         </div>
-        <p class="io-note">Reads and writes <b>.xlsx</b> · imports and exports <b>CSV, TSV, PSV</b> · borders, merges, alignment, wrap, column and row sizing, frozen-pane metadata and defined names all survive the round-trip.</p>
+        <p class="io-note">Reads and writes <b>.xlsx</b> · imports and exports <b>CSV, TSV, PSV</b> · formatting, tables, charts, validation, protection, print setup and defined names survive the round-trip — and anything not yet modelled is carried through byte for byte rather than dropped.</p>
       </div>
     </section>
 
@@ -248,18 +259,18 @@ session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span 
           </div>
           <div class="phase">
             <div class="phase-id">Phase 2</div>
-            <div class="phase-body"><div class="phase-title">Formula and calc engine</div><div class="phase-detail">Recalculation and the core function library are live. The incremental dependency graph and the sub-50 ms worst case are the remaining work.</div></div>
+            <div class="phase-body"><div class="phase-title">Formula and calc engine</div><div class="phase-detail">347 of the spec's 356 functions, dynamic arrays, LET and LAMBDA. The nine that are missing each need something this cannot have — a live OLAP cube, a COM server — and are named rather than counted. The incremental dependency graph and the sub-50 ms worst case are the remaining work.</div></div>
             <span class="status prog"><span class="dot"></span>In progress</span>
           </div>
           <div class="phase">
             <div class="phase-id">Phase 3</div>
-            <div class="phase-body"><div class="phase-title">Spreadsheet features</div><div class="phase-detail">Conditional formatting, data validation, tables and structured references, autofilter, charts and pivots.</div></div>
-            <span class="status next"><span class="dot"></span>Next</span>
+            <div class="phase-body"><div class="phase-title">Spreadsheet features</div><div class="phase-detail">Conditional formatting, data validation, protection, tables and structured references, autofilter, print setup, charts and pivot tables — all shipped. A pivot built here still exports as its cells rather than as a live Excel pivot; that part of the writer is deliberately staged.</div></div>
+            <span class="status done"><span class="dot"></span>Done · one gap named</span>
           </div>
           <div class="phase">
             <div class="phase-id">Phase 4–6</div>
-            <div class="phase-body"><div class="phase-title">SDK beta, collaboration, 1.0</div><div class="phase-detail">Stable host surfaces, native and WASM packaging, an operation model for shared editing, then support guarantees.</div></div>
-            <span class="status next"><span class="dot"></span>Planned</span>
+            <div class="phase-body"><div class="phase-title">SDK beta, collaboration, 1.0</div><div class="phase-detail">The host surface now takes a configuration: admission limits for untrusted files, calculation mode, the clock and seed calculations read, and how far undo reaches. Next is the concurrency model for shared editing, then support guarantees.</div></div>
+            <span class="status prog"><span class="dot"></span>In progress</span>
           </div>
         </div>
       </div>

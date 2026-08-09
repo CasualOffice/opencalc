@@ -116,7 +116,13 @@ code { font-family: var(--mono); font-size: .88em; }
 /* What works checklists */
 .today-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 40px; flex-wrap: wrap; }
 .today-sub { color: var(--muted); font-size: 16px; max-width: 46ch; }
-.checks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 48px; }
+/* Auto-fit rather than a fixed three: the list grew a fourth column when
+   pivots and charts shipped, and a hard-coded count silently reflowed the last
+   one onto a row of its own. */
+.checks {
+  display: grid; gap: 20px; margin-top: 48px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
 .check-col { border: 1px solid var(--border); border-radius: 14px; background: #fff; padding: 28px 26px; }
 .check-col h4 { font-size: 13px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
 .check-col ul { list-style: none; margin: 0; padding: 0; }

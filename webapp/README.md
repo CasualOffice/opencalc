@@ -42,7 +42,20 @@ Everything else is the **session** API (`session_*`): open a workbook, read the
 visible cells, edit through undoable operations, recalculate, and write back.
 The editor holds no model of its own — the canvas is drawn from what the session
 reports, so the engine is the single source of truth for values, formatting and
-geometry.
+geometry. That is why features that look like UI live behind `session_*` calls:
+
+- `session_pivots` / `session_set_pivot` / `session_refresh_pivot` — the pivot
+  panel sends a whole definition and redraws from what comes back, so it cannot
+  drift from the model, and each change is one undo step covering both the layout
+  and the figures it produced.
+- `session_chart_defs` / `session_set_chart` — the same for charts, including the
+  anchor, so dragging one on the canvas is an ordinary undoable edit.
+- `session_calculation_mode` / `session_set_calculation_mode` /
+  `session_needs_recalculation` — automatic or manual calculation, taken from the
+  file's own `<calcPr>` on open.
+- `session_spill_owners` — which cells outside the visible window can still be
+  showing text inside it. The editor asks the engine for the visible cells; this
+  is what keeps a long label from vanishing when its own column scrolls off.
 
 Both the browser canvas and the PNG backend draw real glyphs, from bundled
 metric-compatible faces (Carlito for Calibri, Liberation Sans for Arial, and so

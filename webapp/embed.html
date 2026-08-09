@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCalc — embedded in a hostile page</title>
+    <style>
+      /* Deliberately hostile host CSS. Every rule here is something a real
+         design system does, and every one of them would wreck an editor that
+         is merely a `<div>` on the page:
+
+           - inherited typography crosses a shadow boundary, so it is severed
+             by `all: initial` on `:host` in editor.css;
+           - the element selectors below cannot cross it at all;
+           - the generic custom properties are why the editor's tokens are
+             namespaced `--oc-*` — custom properties *do* cross, so a host's
+             `--bg: hotpink` would otherwise repaint the grid. */
+      :root {
+        --bg: hotpink;
+        --fg: lime;
+        --accent: orange;
+        --border: 6px dashed red;
+      }
+      body {
+        margin: 0;
+        font: italic 700 22px/3 "Comic Sans MS", cursive;
+        letter-spacing: .25em;
+        color: darkred;
+        background: #fff7fb;
+        text-align: center;
+        direction: rtl;
+      }
+      button, input, select {
+        all: unset;
+        background: yellow !important;
+        border: 4px solid magenta !important;
+        font-size: 28px !important;
+        padding: 14px !important;
+      }
+      canvas { filter: invert(1) hue-rotate(90deg); border: 8px solid red; }
+      div, span, ul, li { text-transform: uppercase; }
+      * { box-sizing: content-box; }
+
+      .page { padding: 24px; }
+      .frame { height: 78vh; min-height: 520px; text-align: left; direction: ltr; }
+      .controls { display: flex; gap: 10px; justify-content: center; margin: 14px 0; }
+      .controls button {
+        all: revert; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+        border: 1px solid #bbb; background: #fff; font: 500 14px system-ui;
+      }
+      h1 { font: 600 20px/1.4 system-ui; letter-spacing: 0; direction: ltr; }
+      p.note { font: 400 14px/1.6 system-ui; letter-spacing: 0; direction: ltr; color: #555; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <h1>OpenCalc embedded in a page that is actively trying to break it</h1>
+      <p class="note">
+        The page around this sets Comic Sans, right-to-left text, uppercase
+        everything, magenta borders on every control, an inverted canvas filter,
+        and <code>--bg: hotpink</code>. None of it reaches inside.
+      </p>
+
+      <div class="controls">
+        <button id="t-default">Default theme</button>
+        <button id="t-violet">Violet accent</button>
+        <button id="t-paper">Paper</button>
+        <button id="t-dark">Dark</button>
+        <button id="t-manual">Manual calculation</button>
+      </div>
+
+      <opencalc-sheet id="sheet" class="frame"></opencalc-sheet>
+    </div>
+
+    <script type="module">
+      import "./embed.js";
+
+      const sheet = document.getElementById("sheet");
+      const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
+
+      on("t-default", () => {
+        sheet.setColorScheme("auto");
+        sheet.theme({ accent: null, bg: null, surface: null, card: null, fg: null });
+      });
+      on("t-violet", () => sheet.theme({ accent: "#7c3aed", "accent-hover": "#6d28d9" }));
+      on("t-paper", () => {
+        sheet.setColorScheme("light");
+        sheet.theme({ bg: "#fbf9f4", surface: "#f2eee4", card: "#fffdf8", accent: "#8a6a2f" });
+      });
+      on("t-dark", () => sheet.setColorScheme("dark"));
+      on("t-manual", () => sheet.configure({ calculation: "manual" }));
+    </script>
+  </body>
+</html>

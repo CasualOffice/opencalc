@@ -1,0 +1,580 @@
+# 55 — SDK embedding and integration: design
+
+**Status: proposed, not built.** This is the design to agree before implementing,
+per [AGENTS.md](../AGENTS.md) — the embed surface so far was built ad hoc while
+chasing a CSS-isolation report, and that is exactly the do-over this project
+does not accept. What exists today is listed under [What is already
+true](#what-is-already-true); everything else here is a proposal.
+
+The goal, stated plainly: **someone installs a package into their React (or Vue,
+Svelte, plain-HTML) project, and gets a spreadsheet.** The engine is Rust
+compiled to WebAssembly, so "installs a package" has to include getting a
+multi-megabyte `.wasm` binary served from *their* origin by *their* bundler,
+which is the single hardest part of this and the part most wasm libraries get
+wrong.
+
+---
+
+## 1. What comparable products do
+
+Researched rather than recalled, because the conventions here are worth
+matching: a host integrating a spreadsheet has usually integrated one before.
+
+| Product | Mount | Configuration | Theming | Events |
+| --- | --- | --- | --- | --- |
+| **Univer** | `container: 'app'` — a plain element id, light DOM | `createUniver({ locale, locales, theme, presets, plugins })`; presets are pre-composed plugin bundles | theme object; light/dark with design tokens | `univerAPI.addEvent(univerAPI.Event.X, cb)`; ~8 categories, `Before*`/past-tense pairs |
+| **Handsontable** | `new Handsontable(el, options)`, light DOM | one flat options object | CSS themes + variables | hooks named `before*` / `after*`; `before*` can veto by returning `false`; every hook carries a `source` saying who triggered it |
+| **AG Grid** | `createGrid(el, options)` | one options object | **Theming API → CSS custom properties**, `--ag-` prefix, kebab-case, *typed suffixes*: `Color`, `Border`, `Width`, `Height`, `Padding`, `Spacing`, `Shadow`, `FontFamily`, `Duration` | `on<EventName>` options + `api.addEventListener` |
+| **Player.js / Vimeo** (iframe SDKs) | `<iframe>` + `postMessage` | query params + methods | n/a | envelope `{ context, version, method, event, value, listener }`; iframe emits `ready` advertising its `methods` and `events`; `listener` id correlates responses |
+
+Four things worth stealing outright:
+
+1. **AG Grid's typed token suffixes.** `--ag-accent-color` tells you it takes a
+   colour; `--ag-spacing` tells you it takes a length. Our tokens are currently
+   `--oc-bg`, `--oc-accent` — untyped and abbreviated. Renaming is cheap now and
+   impossible after the first release.
+2. **Handsontable's `before*` veto and `source` argument.** A host that cannot
+   cancel an edit cannot enforce its own permissions, and a host that cannot
+   tell *its own* programmatic change from a user's keystroke will loop forever
+   echoing its own writes back to its store.
+3. **Univer's split between a preset and the plugins under it** — one line for
+   the common case, full control when needed.
+4. **Player.js's `ready` handshake that advertises the supported methods and
+   events.** It makes version skew between a host's SDK shim and the embedded
+   build detectable instead of mysterious.
+
+**And one thing to learn from rather than steal.** AG Grid and Handsontable
+both *support* shadow DOM and both carry scars from it: AG Grid has a
+long-standing bug where **mouse drag range selection does not work inside a
+shadow root** ([#2626](https://github.com/ag-grid/ag-grid/issues/2626)), and
+each grid instance duplicates the whole stylesheet unless you point them at a
+shared `themeStyleContainer`
+([#7968](https://github.com/ag-grid/ag-grid/issues/7968)). Handsontable hit the
+same class of problem and ended up telling users to put styles in the document
+head, outside the boundary.
+
+Both are consequences of rendering a grid as **DOM cells**: event retargeting
+across the boundary breaks the drag, and per-instance `<style>` blocks multiply.
+We render the grid to a **canvas** and listen on `window`, which sidesteps the
+first — verified, not assumed: drag-selecting inside the prototype embed
+correctly reports `5R x 4C` with live Sum/Avg/Min/Max. The second applies to us
+exactly as written, and §4a says what to do about it.
+
+Sources: [Univer installation](https://docs.univer.ai/guides/sheets/getting-started/installation),
+[Univer general API](https://docs.univer.ai/guides/sheets/features/core/general-api),
+[Handsontable hooks](https://handsontable.com/docs/javascript-data-grid/api/hooks/),
+[AG Grid theme parameters](https://www.ag-grid.com/javascript-data-grid/theming-parameters/),
+[Player.js spec](https://github.com/embedly/player.js/blob/master/SPEC.rst),
+[MDN postMessage](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage),
+[vite-plugin-wasm](https://www.npmjs.com/package/vite-plugin-wasm),
+[Turbopack `.wasm` handling](https://github.com/vercel/next.js/discussions/75430),
+[React 19 custom-element support](https://react.dev/blog/2024/12/05/react-19),
+[Custom Elements Everywhere](https://custom-elements-everywhere.com/),
+[AG Grid shadow-DOM drag bug](https://github.com/ag-grid/ag-grid/issues/2626),
+[AG Grid style injection in shadow DOM](https://github.com/ag-grid/ag-grid/issues/7968).
+
+---
+
+## 2. Packages
+
+Three, because three different people install them.
+
+| Package | Contains | For |
+| --- | --- | --- |
+| `@opencalc/engine` | the wasm binary, its glue, and a typed JS API over `session_*`. **No DOM, no CSS.** | a server-side or headless host: read a workbook, recalculate, write it back |
+| `@opencalc/sheet` | the editor as a custom element, its stylesheet and fonts. Depends on `@opencalc/engine`. | anyone who wants the grid on screen |
+| `@opencalc/react` | `<OpenCalcSheet />` — props → config, refs → the imperative API, hooks for events | React hosts, which is most of them |
+
+`@opencalc/vue` and `@opencalc/svelte` are the same twenty lines each and can
+follow demand rather than anticipation.
+
+**Why the engine is separate.** A host that wants to convert `.xlsx` to JSON in
+a worker should not download a grid renderer and a font pack to do it. It is
+also the honest layering — the Rust workspace already keeps `casual-calc-sdk`
+below the WASM bridge, and this mirrors it.
+
+---
+
+## 3. The hard part: shipping WebAssembly into someone else's build
+
+This decides more of the design than anything else. Three delivery modes,
+because no single one works everywhere.
+
+### 3a. Default — resolved from the module URL
+
+```js
+new URL("./opencalc_bg.wasm", import.meta.url)
+```
+
+Vite and webpack 5 both understand this and emit the file as an asset with a
+hashed name. It is the mode that needs no configuration, and it is what
+`@opencalc/sheet` uses when the host says nothing.
+
+**Where it fails, and we must say so in the docs rather than let people find
+out:** Turbopack (Next.js's default dev bundler) does not treat `.wasm` as an
+asset the way webpack did, so `import.meta.url` resolution does not produce a
+servable file. Next.js is too common to treat as an edge case.
+
+### 3b. Explicit — the host serves the assets
+
+```js
+mount(el, { assetsUrl: "/opencalc/" });
+```
+
+The package ships a `dist/assets/` directory (wasm + fonts); the host copies it
+into `public/` — one line in `postinstall`, or a documented `cp`. This is the
+mode we recommend for Next.js and for anyone behind a CDN, because it is the
+only one where the host controls cache headers on a multi-megabyte binary.
+
+We provide the copy step as a bin: `npx opencalc-assets ./public/opencalc`.
+
+This is not our invention; it is what the Next.js community converged on for
+every wasm package after Turbopack stopped honouring webpack's asset rules. The
+alternatives people try — an API route that reads from `node_modules`, or a
+webpack config Turbopack ignores — are worse versions of the same idea. Making
+the copy a supported one-liner is the difference between "works on Next" and a
+support thread.
+
+### 3c. Inlined — zero configuration, at a size cost
+
+A build variant with the wasm base64'd into the JS. It roughly quadruples parse
+cost and defeats streaming compilation, so it is **not** the default and the
+docs will say why. It exists because "it must work in a CodeSandbox with no
+config" is a real requirement for evaluation, and an evaluation that fails at
+step one never becomes an integration.
+
+### Fonts
+
+The same problem, quieter. The editor bundles metric-compatible faces (Carlito
+for Calibri and the rest) so a cell renders the same on a machine that has none
+of the originals. They follow `assetsUrl`. A host that would rather not ship
+1.5 MB of fonts can set `fonts: false` and accept that a `.xlsx` written on a
+machine with Calibri will lay out differently — stated as the trade it is.
+
+**Open question (1):** do we also publish a single-file UMD build on a CDN
+(`<script src="https://unpkg.com/@opencalc/sheet">`) for the no-bundler case?
+It is the fastest possible evaluation path and the easiest thing to get subtly
+wrong.
+
+---
+
+## 4. Mount: shadow DOM or iframe
+
+Both are defensible; they fail differently. This is the decision I most want
+agreed before building.
+
+| | Shadow DOM (custom element) | iframe |
+| --- | --- | --- |
+| Host CSS cannot reach in | ✅ (with `all: initial` for inherited properties) | ✅ absolutely |
+| Our CSS cannot leak out | ✅ | ✅ |
+| Host JS cannot reach in | ❌ `el.shadowRoot` is open; `closed` only inconveniences | ✅ real boundary |
+| A host crash takes the editor | ✅ same realm | ❌ survives |
+| API cost | direct calls, shared heap | every call is async + structured-cloned |
+| Passing a 6 MB `.xlsx` | a reference | a transferable `ArrayBuffer` — fine |
+| Focus, keyboard, IME | native | needs care; the host's global hotkeys and ours can both fire |
+| Drag-and-drop a file onto the grid | works | needs bridging |
+| Printing, screenshots, PDF | in-page | awkward |
+| SSR (Next.js) | needs `ssr: false`, as any canvas does | same |
+| Overlay positioning | **our real cost** — see below | free, it is its own viewport |
+| Drag range selection | ✅ verified in the prototype (canvas + `window` listeners) — the thing that breaks DOM-cell grids | ✅ |
+| Stylesheet cost per instance | one parse per element unless shared — §4a | one document each, worse |
+
+**The overlay cost is not hypothetical.** Building the shadow-DOM prototype hit
+it twice in an hour:
+
+- `contain: layout paint` on the host — added for isolation — makes the element
+  a containing block for `position: fixed`, and every menu, tooltip and popover
+  in this editor is fixed and positioned from `getBoundingClientRect()`. Every
+  dropdown opened as far down the page as the element sat. Removed.
+- `100vh` on the editor shell measures the *window* even inside a shadow root,
+  so the editor laid itself out at full window height inside a 500 px slot.
+
+Neither is hard once known. Both are the same class: **the shadow root shares a
+viewport and a stacking context with a page we do not control**, and every
+floating layer has to be right in that shared space forever. An iframe has its
+own viewport and the question never arises.
+
+### 4a. Sharing the stylesheet
+
+The prototype injects a `<style>` into every shadow root, which is exactly the
+duplication AG Grid warns about: four editors on a page parse the stylesheet
+four times. `adoptedStyleSheets` with a single module-level `CSSStyleSheet`
+fixes it — one parse, N roots, and the sheet stays live so a token change
+propagates everywhere at once. Baseline in every browser we target; the
+`<style>` fallback stays for anything older.
+
+**Recommendation: ship both, with one API.** `mount: "shadow" | "iframe"`,
+default `shadow`. The public API is promise-based either way, so switching is
+one config line and a host that hits a stacking-context fight with their own
+modal library has an answer that is not "sorry". The cost is one transport
+adapter — real, but bounded, because §5's command/event surface is the only
+thing that crosses it.
+
+**Open question (2):** is "both" worth the second transport, or do we pick one?
+My inclination is both, precisely because the failure modes are so different
+and neither is rare.
+
+---
+
+## 5. The surface that crosses the boundary
+
+Designed once, transport-independent. In the shadow mount these are direct
+calls; in the iframe mount they are the postMessage protocol in §9. That is the
+whole reason to define them as a *surface* rather than as methods.
+
+### 5a. Commands
+
+Everything the UI can do is a **command with a stable id**. This is what lets a
+host hide or disable individual buttons rather than whole regions — the request
+that started this section.
+
+```
+file.new      file.open      file.save        file.export.csv
+edit.undo     edit.redo      edit.cut         edit.copy        edit.paste
+format.bold   format.italic  format.numfmt    format.painter
+insert.rows   insert.table   insert.chart     insert.pivot
+data.sort     data.filter    data.validation  data.pivot.refresh
+view.freeze   view.gridlines view.zoom
+tools.calculation.auto       tools.calculation.manual          tools.calculate
+```
+
+```js
+ui: {
+  commands: {
+    hidden:   ["file.open", "file.save"],   // gone from menus and toolbar
+    disabled: ["insert.chart"],             // visible, greyed, still discoverable
+  },
+}
+```
+
+Hidden and disabled are different on purpose. A feature a host has not
+implemented yet should be *disabled* — a user who cannot see a thing assumes it
+does not exist and stops looking. A feature that makes no sense in the host's
+product should be *hidden*.
+
+`api.execute("edit.undo")` runs one by id, so a host can put our commands on
+their own toolbar and skip our chrome entirely.
+
+### 5b. Chrome regions
+
+Coarse-grained, for laying out:
+
+```js
+ui: { chrome: { header: false, menubar: true, toolbar: true,
+                formulabar: true, tabs: true, statusbar: true } }
+```
+
+The app header — brand mark, alpha badge, file button, settings gear — is
+**off by default when embedded**. It is this project's demo chrome; an embedded
+editor is the host's product, not ours.
+
+### 5c. Theme tokens
+
+Adopting AG Grid's typed-suffix convention, which means renaming what exists:
+
+| Now | Proposed | Why |
+| --- | --- | --- |
+| `--oc-bg` | `--oc-background-color` | a reader can tell what it takes |
+| `--oc-fg` | `--oc-text-color` | |
+| `--oc-accent` | `--oc-accent-color` | |
+| `--oc-border` | `--oc-border-color` | it is a colour, not a border shorthand — the current name invites `1px solid red` and silently breaks |
+| `--oc-shadow-pop` | `--oc-popover-shadow` | |
+| `--oc-mono` | `--oc-mono-font-family` | |
+
+Set on the host element, where they cross the shadow boundary — custom
+properties are the one thing that does, which is what makes them the theming
+API rather than an implementation detail. `theme()` validates names and throws
+on a typo, because a colour that silently does not change is a bad afternoon.
+
+**Open question (3):** rename now (breaking nothing, since nothing is published)
+or keep the short names? I favour renaming: this is the last cheap moment.
+
+### 5d. Events
+
+`before*` / past-tense pairs, `before*` cancellable, every event carrying a
+`source` — Handsontable's design, and it is right for the reasons in §1.
+
+```js
+sheet.on("beforeCellChange", (e) => {
+  if (e.source === "api") return;           // our own write, do not loop
+  if (!user.canEdit(e.range)) e.preventDefault();
+});
+```
+
+| Event | Cancellable | Payload |
+| --- | --- | --- |
+| `ready` | — | `{ version, methods, events }` |
+| `beforeCellChange` / `cellChanged` | ✅ | `{ sheet, range, values, source }` |
+| `selectionChanged` | — | `{ sheet, range, activeCell }` |
+| `beforeSheetChange` / `sheetChanged` | ✅ | `{ from, to }` |
+| `sheetAdded` / `sheetRemoved` / `sheetRenamed` | ✅ (before) | `{ index, name }` |
+| `beforeOpen` / `opened` | ✅ | `{ name, bytes, report }` — `report` is the compatibility report, which is how a host surfaces "this file had a feature we degraded" |
+| `beforeSave` / `saved` | ✅ | `{ bytes }` |
+| `dirtyChanged` | — | `{ dirty }` — for the host's own "unsaved changes" guard |
+| `calculationChanged` | — | `{ mode, needsRecalculation }` |
+| `undoStateChanged` | — | `{ canUndo, canRedo, undoLabel, redoLabel }` |
+| `commandExecuted` | ✅ (as `beforeCommand`) | `{ id, args }` |
+| `error` | — | `{ code, message, detail }` |
+
+`source` is one of `user`, `api`, `paste`, `fill`, `undo`, `redo`, `import`,
+`recalc`.
+
+**Open question (4):** `beforeCellChange` firing per edit is the useful
+granularity, but a paste of 100 000 cells must not be 100 000 events. Proposal:
+one event per *operation* carrying a range, not per cell — which matches how the
+transaction layer already batches. Confirm that is the right granularity.
+
+### 5e. Imperative API
+
+```js
+const sheet = await mount(el, config);
+
+await sheet.open(bytes, "budget.xlsx");
+const bytes = await sheet.save();               // .xlsx
+const csv   = await sheet.export("csv");
+
+sheet.getCell("Sheet1!B2");                     // { value, formula, format }
+sheet.setCell("Sheet1!B2", "=SUM(A:A)", { source: "api" });
+sheet.getRange("Sheet1!A1:D20");                // 2-D array
+sheet.setRange("Sheet1!A1:D20", values);
+
+sheet.getSelection(); sheet.select("Sheet1!A1:C3");
+sheet.recalculate(); sheet.undo(); sheet.redo();
+sheet.execute("insert.chart", { kind: "column" });
+sheet.theme({ accentColor: "#7c3aed" });
+sheet.chrome({ toolbar: false });
+sheet.destroy();
+```
+
+Everything returns a promise in the iframe transport and a value in the shadow
+transport — so the API is **promise-returning in both**, because an API whose
+shape depends on a config flag is a trap.
+
+### 5f. Read-only, and what it actually means
+
+Two distinct products, and conflating them is how read-only modes end up
+leaky:
+
+| Mode | Grid | Chrome | Engine | For |
+| --- | --- | --- | --- | --- |
+| `readOnly: false` | editable | all | writable | the editor |
+| `readOnly: true` | selectable, scrollable, copyable — **not** editable | editing commands hidden or disabled | writes refused | a viewer someone can still read numbers out of |
+| `preview: true` | selectable and scrollable only | none | writes refused | a thumbnail or an inline preview in a list |
+
+Read-only is **not** "hide the toolbar". Every one of these has to be true or
+it is a suggestion rather than a mode:
+
+- typing, Delete, paste, fill and drag-fill are refused at the point of entry,
+  with the same status message the protection feature already uses;
+- the clipboard still *copies* — a viewer you cannot copy out of is hostile, and
+  copy changes nothing;
+- undo/redo are unavailable because there is nothing to undo;
+- structural edits (insert/delete row, rename sheet, add sheet) are gone;
+- **the engine refuses too.** Nothing may rely on the UI alone: a host that
+  calls `setCell` on a read-only session gets an error, because otherwise
+  "read-only" means "read-only unless you know the API".
+
+That last point is why this belongs in `SessionConfig` on the Rust side and not
+only in `ui`. Proposal: `engine.readOnly` gates the transaction layer, and
+`ui.readOnly` is derived from it rather than being a second switch that can
+disagree.
+
+Sheet protection already models something adjacent — `SheetProtection`, per-cell
+`locked`, and `guard_protected` in the WASM bridge. Read-only is the
+session-wide version and should reuse that refusal path rather than inventing a
+parallel one, so there is one place where "this edit is not allowed" is decided.
+
+**Open question (7):** does `preview` need to be its own mode, or is it
+`readOnly: true` plus `chrome: { …all false }`? I lean to the latter — one
+fewer concept — with `preview` as a documented preset that expands to exactly
+that.
+
+### 5g. Extension points
+
+- `registerFunction(name, arity, fn)` — a host's own worksheet function. Needs a
+  decision: a JS callback means the engine is no longer deterministic or
+  replayable, which is a first-principles guarantee of this project. Proposal:
+  allow it, mark any workbook using one as *host-extended* in the compatibility
+  report, and refuse to treat such a recalculation as reproducible.
+- `registerCommand(id, handler)` — put a host action in our menus.
+- `locale` — number/date formatting and UI strings.
+
+**Open question (5):** custom functions vs determinism. I lean toward shipping
+it with the caveat recorded in the report, because every competitor has it and
+the alternative is that hosts fork the engine.
+
+---
+
+## 6. Configuration, whole
+
+```js
+mount(element, {
+  mount: "shadow",                 // | "iframe"
+  assetsUrl: "/opencalc/",         // §3b; omit for import.meta.url resolution
+
+  engine: {                        // mirrors Rust SessionConfig exactly
+    readOnly: false,               // refused in the engine, not just the UI — §5f
+    calculation: "auto",           // | "manual" | null → take it from the file
+    environment: { now: 45888, seed: 7 },
+    undoDepth: 200,
+    limits: { maxXmlElements: 5_000_000, maxXmlDepth: 128 },
+  },
+
+  ui: {
+    chrome: { header: false },
+    commands: { hidden: ["file.open"], disabled: [] },
+    theme: { accentColor: "#7c3aed" },
+    colorScheme: "auto",           // | "light" | "dark"
+    locale: "en-US",
+  },
+
+  on: { cellChanged, selectionChanged },   // or sheet.on(...) later
+});
+```
+
+`engine` deliberately uses the same names as the Rust `SessionConfig`, so the
+JS docs and the Rust docs describe one thing.
+
+---
+
+## 7. React
+
+```jsx
+import { OpenCalcSheet } from "@opencalc/react";
+
+<OpenCalcSheet
+  ref={ref}
+  style={{ height: 600 }}
+  engine={{ calculation: "manual" }}
+  ui={{ chrome: { header: false }, theme: { accentColor: "#7c3aed" } }}
+  onCellChanged={(e) => save(e)}
+  onReady={(api) => api.open(bytes)}
+/>
+```
+
+**React 19 changed what this wrapper has to do.** It passes Custom Elements
+Everywhere: a prop that matches a property on the element instance is assigned
+as a *property* rather than stringified into an attribute, so `engine={{…}}`
+and `ui={{…}}` arrive as objects. On React 18 and earlier they do not — a
+non-primitive prop becomes `[object Object]` — so the wrapper marshals
+explicitly there. Events need a listener either way, because React's synthetic
+system does not carry custom DOM events. The wrapper therefore has one code
+path that is thin on 19 and does real work on 18, and the support matrix says
+so rather than quietly misbehaving on the older one.
+
+Three more things it must get right, each of which is a bug in someone's React
+wrapper right now:
+
+1. **Not remounting on every render.** Config objects are new identities each
+   render; the wrapper diffs by value and calls the imperative API rather than
+   tearing the element down.
+2. **SSR.** The element touches `window` at import. The package exports a
+   client-only entry and the docs show `next/dynamic` with `ssr: false`.
+3. **Strict Mode double-mount.** `useEffect` runs twice in development; mounting
+   two engines and leaking one is the classic symptom. Mount is idempotent and
+   `destroy()` is real.
+
+---
+
+## 8. What ships where
+
+- **`sdk/` in this repo** — runnable samples, one directory each:
+  `sdk/examples/vanilla`, `sdk/examples/react`, `sdk/examples/next`,
+  `sdk/examples/readonly-viewer`, `sdk/examples/host-toolbar` (our commands on
+  their buttons, all our chrome off). Small enough to read, complete enough to
+  copy. They double as integration tests for the packaging.
+- **A documentation page on the marketing site** — `webapp/docs/` : install,
+  quick start, configuration, theming, events, API reference, framework guides,
+  the wasm-serving recipes per bundler. Generated from the same source as this
+  design where it can be, so the two cannot drift.
+- **This document** — the *why*. The docs page is the *how*.
+
+---
+
+## 9. The postMessage protocol (iframe transport)
+
+Modelled on Player.js, which solved this in public a decade ago.
+
+### Envelope
+
+```jsonc
+{ "oc": 1, "id": 17, "type": "call",   "name": "setCell", "args": [...] }
+{ "oc": 1, "id": 17, "type": "result", "value": ... }
+{ "oc": 1, "id": 17, "type": "error",  "error": { "code": "OC-…", "message": "…" } }
+{ "oc": 1,           "type": "event",  "name": "cellChanged", "value": {...} }
+```
+
+- `oc: 1` is the protocol version and the discriminator. **Every listener drops
+  anything without it**, because a page is full of other people's messages and
+  a shared pipe that trusts its input is an XSS.
+- `id` correlates a result with its call. Monotonic per frame.
+- Cancellable events are a **call in the other direction**: the frame sends
+  `{ type: "event", name: "beforeCellChange", id }` and waits for
+  `{ type: "result", id, value: { prevented: true } }` with a timeout, after
+  which it proceeds. A host that hangs must not freeze the grid.
+
+### Handshake
+
+1. Host creates the iframe with `?origin=<host origin>`.
+2. Frame posts `{ oc: 1, type: "event", name: "ready", value: { version, protocol: 1, methods: [...], events: [...] } }` to that origin — **never `*`**.
+3. Host validates `event.origin` against the frame's own origin and only then
+   begins calling.
+
+Advertising `methods` and `events` is what makes version skew between a host's
+pinned SDK shim and a newer embedded build detectable rather than mysterious.
+
+### Origin discipline
+
+- The host passes its origin in; the frame replies only to that origin.
+- The host checks `event.origin` *and* `event.source === iframe.contentWindow`
+  on every message. Origin alone is not enough when several frames share one
+  origin.
+- No `*`, in either direction, ever.
+
+**Open question (6):** does the iframe transport need to support a *cross-origin*
+deployment (frame served from `cdn.opencalc.dev`), or only same-origin? Cross-
+origin is the stronger isolation story and the harder one: no file drag-and-drop
+without bridging, and clipboard permissions get involved.
+
+---
+
+## 10. What is already true
+
+Built while chasing the CSS report, before this document existed. Listed so the
+proposal is not confused with the state of the tree:
+
+- `SessionConfig` in the Rust SDK: limits, calculation mode, environment, undo
+  depth; `open_with` honours the file's own `<calcPr calcMode>`.
+- `session_calculation_mode` / `session_set_calculation_mode` /
+  `session_needs_recalculation`, and a Tools ▸ Calculation menu with a
+  `Calculate` indicator in the status bar.
+- Every editor token namespaced `--oc-*` (short names — §5c proposes renaming).
+- `setMountRoot()` in `editor.js`: every DOM lookup goes through a mount root,
+  so the same code runs as a page or inside a shadow root.
+- `<opencalc-sheet>` in `webapp/embed.js` with `theme()`, `chrome()`,
+  `setColorScheme()`, `configure()`, `open()`, `save()`.
+- `webapp/embed.html`: the editor inside a page that sets Comic Sans, RTL,
+  uppercase, magenta borders and `--bg: hotpink`, none of which reaches in.
+
+Two defects found and fixed there, both recorded in §4 because they are
+evidence about the transport choice rather than incidents: `contain` breaking
+fixed-position overlays, and `100vh` measuring the window inside a shadow root.
+
+---
+
+## 11. Decisions needed
+
+1. CDN single-file build, or bundler-only?
+2. Both transports, or pick one?
+3. Rename the theme tokens to typed names now?
+4. One change event per operation-with-range, rather than per cell?
+5. Custom JS functions, given they break replayable determinism?
+6. Cross-origin iframe deployment in scope?
+7. Is `preview` a mode, or a preset over `readOnly` + no chrome?
+8. **Should the engine run in a Web Worker?** Not covered above and it is a real
+   axis: it would keep a 1M-cell recalculation off the main thread and stop the
+   grid freezing, but it makes *every* call async even in the shadow mount and
+   changes how the canvas gets its data. It interacts with the transport
+   decision, so it should be settled alongside §4 rather than after.
+
+Nothing below §10 gets built until these are answered.

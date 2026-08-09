@@ -89,3 +89,199 @@ fn blank_session_saves_and_reopens_empty() {
     let reopened = WorkbookSession::open(bytes).unwrap();
     assert!(reopened.workbook().sheets.is_empty());
 }
+
+// --- Configuration ---------------------------------------------------------
+
+use crate::{CalculationMode, Environment, SessionConfig};
+
+/// A session in manual mode over the same A1 / A2=A1*2 sheet.
+fn manual_session() -> WorkbookSession {
+    let mut session = session_with_formula();
+    session.set_calculation_mode(CalculationMode::Manual);
+    session
+}
+
+#[test]
+fn manual_mode_defers_the_calculation_but_not_the_edit() {
+    let mut session = manual_session();
+    assert!(!session.needs_recalculation());
+
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(50.0),
+        })
+        .unwrap();
+
+    // The edit landed — it is calculation that is deferred, not editing.
+    assert_eq!(value(&session, CellRef::new(0, 0)), CellValue::Number(50.0));
+    // ...and the formula still shows the answer its author last saw.
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+    assert!(
+        session.needs_recalculation(),
+        "the host has to be able to say so, the way Excel says Calculate"
+    );
+
+    session.recalculate();
+    assert_eq!(
+        value(&session, CellRef::new(1, 0)),
+        CellValue::Number(100.0)
+    );
+    assert!(!session.needs_recalculation());
+}
+
+#[test]
+fn a_pure_formatting_edit_does_not_make_a_manual_workbook_stale() {
+    // Nothing to recalculate means nothing outstanding: telling the user to
+    // press Calculate after changing a fill would train them to ignore it.
+    let mut session = manual_session();
+    session
+        .edit(EditOperation::SetColumnWidth {
+            sheet: 0,
+            col: 0,
+            width: Some(3000),
+        })
+        .unwrap();
+    assert!(!session.needs_recalculation());
+}
+
+#[test]
+fn switching_back_to_automatic_catches_up_at_once() {
+    let mut session = manual_session();
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(7.0),
+        })
+        .unwrap();
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+
+    session.set_calculation_mode(CalculationMode::Automatic);
+    // The point of the mode is that values are current, so switching to it
+    // while something is outstanding has to settle the arrears.
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(14.0));
+    assert!(!session.needs_recalculation());
+}
+
+#[test]
+fn the_mode_is_written_back_so_it_survives_a_save() {
+    // Turning calculation off and saving must not produce a file that turns
+    // itself back on: the reason it was turned off does not go away when the
+    // file closes.
+    let mut session = session_with_formula();
+    assert!(!session.workbook().settings.calc.contains_key("calcMode"));
+
+    session.set_calculation_mode(CalculationMode::Manual);
+    assert_eq!(
+        session
+            .workbook()
+            .settings
+            .calc
+            .get("calcMode")
+            .map(String::as_str),
+        Some("manual")
+    );
+
+    // `auto` is the schema default, so going back writes it by omission rather
+    // than leaving a difference in a file nobody changed.
+    session.set_calculation_mode(CalculationMode::Automatic);
+    assert!(!session.workbook().settings.calc.contains_key("calcMode"));
+}
+
+#[test]
+fn a_file_saved_in_manual_mode_opens_in_manual_mode_and_is_not_recalculated() {
+    let mut session = session_with_formula();
+    session.set_calculation_mode(CalculationMode::Manual);
+    // A stale cached value, as a manual-mode file legitimately carries: this is
+    // what its author last saw, and opening must not silently replace it.
+    let mut stale = session.workbook().sheets[0]
+        .cells
+        .get(CellRef::new(1, 0))
+        .unwrap()
+        .clone();
+    stale.value = CellValue::Number(999.0);
+    session.workbook_mut().sheets[0]
+        .cells
+        .set(CellRef::new(1, 0), stale);
+    let bytes = session.save().unwrap();
+
+    let reopened = WorkbookSession::open(bytes).unwrap();
+    assert_eq!(reopened.calculation_mode(), CalculationMode::Manual);
+    assert_eq!(
+        value(&reopened, CellRef::new(1, 0)),
+        CellValue::Number(999.0),
+        "opening a manual workbook must not recalculate it"
+    );
+
+    // ...unless the host insists, which is what a headless renderer wants.
+    let bytes = reopened.save().unwrap();
+    let forced = WorkbookSession::open_with(
+        bytes,
+        SessionConfig::new().with_calculation(CalculationMode::Automatic),
+    )
+    .unwrap();
+    assert_eq!(value(&forced, CellRef::new(1, 0)), CellValue::Number(20.0));
+}
+
+#[test]
+fn undo_depth_bounds_what_the_history_keeps() {
+    let mut session = WorkbookSession::blank_with(SessionConfig::new().with_undo_depth(2));
+    session
+        .workbook_mut()
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+    for n in 0..5 {
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(n, 0),
+                value: CellValue::Number(f64::from(n)),
+            })
+            .unwrap();
+    }
+    // Two steps back, then nothing: the oldest entries were dropped, which is
+    // the point of the bound.
+    assert!(session.undo().is_ok());
+    assert!(session.undo().is_ok());
+    assert!(!session.can_undo());
+    // ...and the edits the history forgot are still on the sheet. A bounded
+    // history forgets how to reverse an edit; it never reverses one by itself.
+    assert_eq!(value(&session, CellRef::new(0, 0)), CellValue::Number(0.0));
+    assert_eq!(value(&session, CellRef::new(2, 0)), CellValue::Number(2.0));
+}
+
+#[test]
+fn the_environment_is_supplied_rather_than_sampled() {
+    let mut session =
+        WorkbookSession::blank_with(SessionConfig::new().with_environment(Environment {
+            now: 45_000.0,
+            seed: 7,
+        }));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+    let handle = session
+        .workbook_mut()
+        .store_formula(casual_calc_formula::parse("TODAY()").unwrap());
+    let mut cell = casual_calc_model::Cell::value(CellValue::Empty);
+    cell.formula = Some(handle);
+    sheet.cells.set(CellRef::new(0, 0), cell);
+    session.workbook_mut().sheets.push(sheet);
+    session.recalculate();
+    assert_eq!(
+        value(&session, CellRef::new(0, 0)),
+        CellValue::Number(45_000.0)
+    );
+
+    // Moving the clock moves the answer, and does so at once in automatic mode
+    // — a stale NOW() beside a clock that has visibly advanced is worse than
+    // the cost of the pass.
+    session.set_environment(Environment {
+        now: 45_100.0,
+        seed: 7,
+    });
+    assert_eq!(
+        value(&session, CellRef::new(0, 0)),
+        CellValue::Number(45_100.0)
+    );
+}

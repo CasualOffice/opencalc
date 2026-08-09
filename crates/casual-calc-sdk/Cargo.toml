@@ -13,6 +13,7 @@ casual-calc-export = { path = "../casual-calc-export" }
 casual-calc-import = { path = "../casual-calc-import" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
+casual-calc-ooxml = { path = "../casual-calc-ooxml" }
 casual-calc-render = { path = "../casual-calc-render" }
 casual-calc-transaction = { path = "../casual-calc-transaction" }
 

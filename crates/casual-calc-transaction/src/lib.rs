@@ -636,18 +636,41 @@ fn replace_cell(
 pub struct History {
     undo: Vec<Operation>,
     redo: Vec<Operation>,
+    /// How many undo entries to keep. `None` is unbounded.
+    ///
+    /// Unbounded is right for a short session and wrong for a long one: an
+    /// entry holds a whole inverse operation, and the inverse of a metadata
+    /// edit is a snapshot of the sheet's metadata — so a day of formatting
+    /// tweaks accumulates a copy of the sheet's tables, validations, comments
+    /// and conditional formats per tweak, none of which is ever released.
+    depth: Option<usize>,
 }
 
 impl History {
-    /// A new, empty history.
+    /// A new, empty history with no bound on how far back undo reaches.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A new, empty history keeping at most `depth` undo entries.
+    pub fn with_depth(depth: Option<usize>) -> Self {
+        Self {
+            depth,
+            ..Self::default()
+        }
     }
 
     /// Apply `op`, recording its inverse for undo and clearing the redo stack.
     pub fn apply(&mut self, workbook: &mut Workbook, op: Operation) -> Result<(), TxnError> {
         let inverse = apply(workbook, op)?;
         self.undo.push(inverse);
+        // Oldest first: the entry least likely to be wanted is the one furthest
+        // back. A depth of zero means no undo at all, which is a legitimate
+        // thing for a batch host to ask for.
+        if let Some(depth) = self.depth {
+            let excess = self.undo.len().saturating_sub(depth);
+            self.undo.drain(..excess);
+        }
         self.redo.clear();
         Ok(())
     }

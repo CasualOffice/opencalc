@@ -14,6 +14,47 @@
 const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
 let init, wasm;
 
+// --- Mount root -------------------------------------------------------------
+//
+// Every DOM lookup goes through here rather than through `document`, so the
+// same editor runs as a page *and* inside a shadow root. That is what lets a
+// host embed it without its own stylesheet reaching in: a shadow boundary is
+// the only thing in the platform that actually stops CSS, and it also means the
+// editor's own selectors cannot leak out onto the host's page.
+//
+// `document` is still right for three things and they are left alone:
+// `createElement` (nodes are not scoped), listeners that must catch events
+// anywhere on the page (a mouse-up after the pointer leaves the grid), and the
+// clipboard. Anything that *finds* an element in our markup, or parents a
+// floating layer over it, uses these.
+let ocRoot = document;
+/// The node floating layers (menus, tooltips, submenus) attach to.
+///
+/// Inside a shadow root that is the root itself: appending to `document.body`
+/// would put the menu outside the boundary, where our stylesheet does not reach
+/// and the host's does — so it would come out unstyled and inherit theirs.
+let ocOverlayHost = document.body;
+/// The element carrying `data-theme` and the accent override.
+///
+/// The page's `<html>` when running as a page; the host element when embedded,
+/// so a theme switch inside one embedded editor does not restyle the page
+/// around it — or a second editor beside it.
+let ocThemeHost = document.documentElement;
+
+/// Point the editor at a mount root. Called by the embed wrapper before `main`.
+export function setMountRoot(root) {
+  ocRoot = root;
+  ocOverlayHost = root === document ? document.body : root;
+  ocThemeHost = root === document ? document.documentElement : root.host;
+}
+
+const byId = (id) => ocRoot.getElementById(id);
+const qs = (sel) => ocRoot.querySelector(sel);
+const qsa = (sel) => ocRoot.querySelectorAll(sel);
+/// The focused element *within this mount*. A shadow root reports its own.
+const activeEl = () => ocRoot.activeElement;
+
+
 // Header strip sizes. Zero when the sheet hides its headers (OOXML's
 // showRowColHeaders="0"), which is what makes the grid start at the very
 // top-left corner: everything else measures the body as "past HW/HH", so the
@@ -575,44 +616,52 @@ function selRect() {
 const DEFAULT_SCROLL_DAMP = 0.8; // rows-per-wheel factor; tunable in settings
 let scrollDamp = DEFAULT_SCROLL_DAMP;
 
-const canvas = document.getElementById("grid");
-const ctx = canvas.getContext("2d");
-const wrap = document.getElementById("grid-wrap");
-const inline = document.getElementById("inline-edit");
-const selStats = document.getElementById("sel-stats");
-const vscroll = document.getElementById("vscroll");
-const vthumb = document.getElementById("vthumb");
-const hscroll = document.getElementById("hscroll");
-const hthumb = document.getElementById("hthumb");
-const fInput = document.getElementById("formula-input");
-const cellRef = document.getElementById("cell-ref");
-const commentTip = document.getElementById("comment-tip");
-const status = document.getElementById("tb-status");
+let canvas;
+let ctx;
+let wrap;
+let inline;
+let selStats;
+let vscroll;
+let vthumb;
+let hscroll;
+let hthumb;
+let fInput;
+let cellRef;
+let commentTip;
+let status;
 
-const css = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
+/// A theme token's resolved value.
+///
+/// Read from the mount's own root rather than `document.body`, or an embedded
+/// editor would paint its canvas from the *host page's* tokens while its chrome
+/// used ours.
+const css = (name) =>
+  getComputedStyle(ocRoot === document ? document.body : ocRoot.host)
+    .getPropertyValue(name)
+    .trim();
 let colors = {};
 function readColors() {
   colors = {
-    bg: css("--bg") || "#fff",
-    fg: css("--fg") || "#0b0d12",
-    muted: css("--muted") || "#7b8391",
-    grid: css("--grid") || "#f0f1f4",
-    headerBg: css("--surface") || "#f6f7f9",
-    accent: css("--accent") || "#2f6df6",
-    sel: css("--sel-tint") || "rgba(47,109,246,.10)",
+    bg: css("--oc-bg") || "#fff",
+    fg: css("--oc-fg") || "#0b0d12",
+    muted: css("--oc-muted") || "#7b8391",
+    grid: css("--oc-grid") || "#f0f1f4",
+    headerBg: css("--oc-surface") || "#f6f7f9",
+    accent: css("--oc-accent") || "#2f6df6",
+    sel: css("--oc-sel-tint") || "rgba(47,109,246,.10)",
     // Distinct from the selection tint: a find hit and the active cell must not
     // read as the same thing.
-    findHit: css("--find-tint") || "rgba(245,158,11,.28)",
+    findHit: css("--oc-find-tint") || "rgba(245,158,11,.28)",
     // Table banding. Deliberately faint and theme-derived: a band is a reading
     // aid, and one strong enough to compete with a fill or a conditional
     // format would make the user's own formatting harder to see, not easier.
-    tableHeader: css("--table-header") || "rgba(47,109,246,.16)",
-    tableBand: css("--table-band") || "rgba(127,140,170,.09)",
+    tableHeader: css("--oc-table-header") || "rgba(47,109,246,.16)",
+    tableBand: css("--oc-table-band") || "rgba(127,140,170,.09)",
     // Read from the theme rather than hardcoded: the freeze divider sits on the
     // grid, so it has to darken and lighten with it. `colors.freezeLine` was
     // already consulted at the draw site but never populated here, so the
     // fallback was always what showed.
-    freezeLine: css("--freeze-line") || "#5f6368",
+    freezeLine: css("--oc-freeze-line") || "#5f6368",
   };
 }
 
@@ -1268,8 +1317,8 @@ const HEADER_COLLAPSE_KEY = "oc.headerCollapsed";
 let headerCollapsed = false;
 function setHeaderCollapsed(collapsed) {
   headerCollapsed = collapsed;
-  const hdr = document.querySelector(".app-header");
-  const btn = document.getElementById("hdr-collapse");
+  const hdr = qs(".app-header");
+  const btn = byId("hdr-collapse");
   // A class, not the `hidden` attribute: `.app-header { display: flex }` is a
   // stronger rule than the UA's `[hidden] { display: none }`, so the attribute
   // alone leaves the bar on screen.
@@ -2189,8 +2238,8 @@ function draw() {
       if (lx === undefined || ly === undefined) continue;
       const lw = colWAt(lk.c), lh = rowHAt(lk.r);
       withQuad(lk.r, lk.c, () => {
-        ctx.strokeStyle = getComputedStyle(document.documentElement)
-          .getPropertyValue("--accent").trim() || "#3b82f6";
+        ctx.strokeStyle = getComputedStyle(ocThemeHost)
+          .getPropertyValue("--oc-accent").trim() || "#3b82f6";
         ctx.lineWidth = 1;
         ctx.beginPath();
         // Sit the rule on the text baseline rather than the cell floor, or it
@@ -2395,9 +2444,9 @@ function refreshFormulaBar() {
   // Don't clobber a control the user is actively typing in. Background redraws
   // (e.g. the marching-ants copy animation) call this every frame; without this
   // guard they'd reset the formula bar / font / size boxes mid-keystroke.
-  const active = document.activeElement;
-  if (active === fInput || active === document.getElementById("tb-font") ||
-      active === document.getElementById("tb-size")) return;
+  const active = activeEl();
+  if (active === fInput || active === byId("tb-font") ||
+      active === byId("tb-size")) return;
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   // Name what each will do, rather than leaving "Undo" to mean anything. The
   // label is the engine's, so it always matches the operation on the stack.
@@ -2405,7 +2454,7 @@ function refreshFormulaBar() {
     ["tb-undo", "session_can_undo", "session_undo_label", "Undo", "Ctrl+Z"],
     ["tb-redo", "session_can_redo", "session_redo_label", "Redo", "Ctrl+Shift+Z"],
   ]) {
-    const btn = document.getElementById(id);
+    const btn = byId(id);
     const enabled = wasm[can]();
     btn.disabled = !enabled;
     let what = "";
@@ -2419,17 +2468,17 @@ function refreshFormulaBar() {
   // is often an empty corner — reading that left the font/size boxes blank.
   const pr = selRect();
   const fmt = JSON.parse(wasm.session_cell_format(state.sheet, pr.r0, pr.c0));
-  const press = (id, on) => document.getElementById(id).setAttribute("aria-pressed", on ? "true" : "false");
+  const press = (id, on) => byId(id).setAttribute("aria-pressed", on ? "true" : "false");
   press("tb-bold", fmt.b);
   press("tb-italic", fmt.i);
   press("tb-underline", fmt.u);
   press("tb-strike", fmt.st);
   press("tb-wrap", fmt.w || fmt.cl);
-  for (const b of document.querySelectorAll(".tb-align")) {
+  for (const b of qsa(".tb-align")) {
     b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
   }
-  document.getElementById("tb-font").value = fmt.fn || "";
-  document.getElementById("tb-size").value = fmt.fs ? String(fmt.fs) : "";
+  byId("tb-font").value = fmt.fn || "";
+  byId("tb-size").value = fmt.fs ? String(fmt.fs) : "";
 }
 
 function cellAt(px, py) {
@@ -3201,9 +3250,9 @@ function pushRecent(hex) {
 // to be meaningful. Without this, rules could only be added and cleared
 // wholesale, and which of two overlapping rules won was invisible.
 function manageCfRules() {
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Conditional formatting rules";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Conditional formatting rules";
 
   const close = () => { modal.hidden = true; body.textContent = ""; };
   const render = () => {
@@ -3256,9 +3305,9 @@ function manageCfRules() {
 // place. The toolbar has all of these, but scattered — this is the dialog people
 // reach for when they want to set several at once and see them together.
 function formatCellsDialog() {
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Format cells";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Format cells";
   body.textContent = "";
 
   let cur = {};
@@ -3441,9 +3490,9 @@ function cellStyleGallery() {
   try { styles = JSON.parse(wasm.session_cell_styles()); } catch {}
   if (!styles.length) { status.textContent = "no cell styles available"; return; }
 
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Cell styles";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Cell styles";
   body.textContent = "";
   body.append(el("p", "oc-confirm-text", "Applies the style's formatting and tags the cells with its name."));
 
@@ -3698,7 +3747,7 @@ function setVertAlign(which) { formatSel((s) => wasm.session_toggle_vert_align(s
 let painter = null; // { row, col, sticky }
 function setPainter(next) {
   painter = next;
-  const btn = document.getElementById("tb-painter");
+  const btn = byId("tb-painter");
   if (btn) btn.setAttribute("aria-pressed", next ? "true" : "false");
   canvas.style.cursor = next ? "copy" : "cell";
 }
@@ -3816,9 +3865,9 @@ function applySort(s, keys, hasHeader) {
 // the active cell's own value, so you can see what the code does to *your*
 // data before applying it.
 function customFormatDialog() {
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Custom number format";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Custom number format";
   body.textContent = "";
 
   let current = "";
@@ -3967,9 +4016,9 @@ async function removeDuplicates() {
 // when "sort by region, then by total descending" is what you actually meant.
 function sortDialog() {
   const s = sortTarget();
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Sort range";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Sort range";
   body.textContent = "";
 
   const where = el("p", "oc-confirm-text",
@@ -4362,9 +4411,9 @@ function conditionDialog(col) {
     }
   };
 
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Filter by condition";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Filter by condition";
   body.textContent = "";
 
   const where = el("p", "oc-confirm-text", `Show rows where ${colName(col)}:`);
@@ -4644,7 +4693,7 @@ function applyTableStyle(change) {
 // what the model holds rather than what the last click intended.
 function refreshTablePanel() {
   if (activePanel !== "table") return;
-  const body = document.getElementById("side-panel-body");
+  const body = byId("side-panel-body");
   body.textContent = "";
   buildTablePanel(body);
 }
@@ -4690,7 +4739,7 @@ function applyChart(c) {
 
 function refreshChartPanel() {
   if (activePanel !== "chart") return;
-  const body = document.getElementById("side-panel-body");
+  const body = byId("side-panel-body");
   body.textContent = "";
   buildChartPanel(body);
 }
@@ -5015,7 +5064,7 @@ function applyPivot(p) {
 
 function refreshPivotPanel() {
   if (activePanel !== "pivot") return;
-  const body = document.getElementById("side-panel-body");
+  const body = byId("side-panel-body");
   body.textContent = "";
   buildPivotPanel(body);
 }
@@ -5345,6 +5394,40 @@ async function pivotDialog() {
   status.textContent = "drag a field into Values to see the report";
 }
 
+// --- Calculation mode ------------------------------------------------------
+//
+// Excel's Formulas ▸ Calculation Options. A workbook saved with calculation
+// turned off opens that way, so this is not a preference the editor invents —
+// it is state the file carries and the user has to be able to see and change.
+
+function calcMode() {
+  try { return wasm.session_calculation_mode(); } catch { return "auto"; }
+}
+
+function setCalculationMode(mode) {
+  try { wasm.session_set_calculation_mode(mode); } catch (e) { statusError(errText(e)); return; }
+  invalidateGrowth();
+  draw();
+  status.textContent = mode === "manual"
+    ? "manual calculation — press F9 to calculate"
+    : "automatic calculation";
+}
+
+// F9: recompute everything, and reseed first so RAND rerolls — Excel does the
+// same. Not an undoable edit and it does not dirty the document: the values it
+// produces are the ones the formulas already imply.
+function recalculateNow() {
+  tryEdit(() => { syncClock(true); wasm.session_recalculate(); });
+  status.textContent = "recalculated";
+}
+
+// Whether an edit is waiting on a manual calculation, for the status bar —
+// Excel writes "Calculate" there and it is the only cue that what is on screen
+// is not what the formulas say.
+function needsRecalc() {
+  try { return wasm.session_needs_recalculation(); } catch { return false; }
+}
+
 // Alt+F5 — recompute the pivot under the cursor from its source.
 function refreshPivotHere() {
   const here = pivotAt(state.sel.row, state.sel.col);
@@ -5528,11 +5611,11 @@ function printSheet() {
 }
 
 function openPanel(tool) {
-  const panel = document.getElementById("side-panel");
+  const panel = byId("side-panel");
   activePanel = tool;
   panelRangeEls = [];
   panelNote = null;
-  document.getElementById("side-panel-title").textContent =
+  byId("side-panel-title").textContent =
     tool === "dv" ? "Data validation"
       : tool === "cf" ? "Conditional formatting"
       : tool === "table" ? "Table"
@@ -5540,7 +5623,7 @@ function openPanel(tool) {
       : tool === "chart" ? "Chart"
       : tool === "page" ? "Page setup"
       : "Comments";
-  const body = document.getElementById("side-panel-body");
+  const body = byId("side-panel-body");
   body.textContent = "";
   if (tool === "dv") buildDvPanel(body);
   else if (tool === "cf") buildCfPanel(body);
@@ -5554,7 +5637,7 @@ function openPanel(tool) {
 }
 
 function closePanel() {
-  const panel = document.getElementById("side-panel");
+  const panel = byId("side-panel");
   if (panel.hidden) return;
   panel.hidden = true;
   activePanel = null;
@@ -5579,10 +5662,10 @@ function refreshPanel() {
     // Moving into a different table has to re-target the panel, or renaming
     // would rename whichever table it was opened on.
     const t = currentTable();
-    const shown = document.getElementById("side-panel-body").dataset.table;
+    const shown = byId("side-panel-body").dataset.table;
     const key = t ? `${t.name}@${t.r0},${t.c0}` : "";
     if (key !== shown) {
-      document.getElementById("side-panel-body").dataset.table = key;
+      byId("side-panel-body").dataset.table = key;
       refreshTablePanel();
     }
   } else if (activePanel === "pivot") {
@@ -5983,9 +6066,9 @@ function hyperlinkDialog() {
   const { row, col } = state.sel;
   let existing = null;
   try { existing = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent =
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent =
     existing ? `Edit link on ${A1(row, col)}` : `Insert link on ${A1(row, col)}`;
   body.textContent = "";
 
@@ -6143,9 +6226,9 @@ async function tableDialog() {
 // used to guard destructive steps.
 function confirmModal(title, message, confirmLabel = "OK") {
   return new Promise((resolve) => {
-    const modal = document.getElementById("oc-modal");
-    const body = document.getElementById("oc-modal-body");
-    document.getElementById("oc-modal-title").textContent = title;
+    const modal = byId("oc-modal");
+    const body = byId("oc-modal-body");
+    byId("oc-modal-title").textContent = title;
     body.textContent = "";
     const p = document.createElement("p");
     p.className = "oc-confirm-text";
@@ -6164,7 +6247,7 @@ function confirmModal(title, message, confirmLabel = "OK") {
     // The modal's own ✕ / backdrop wiring just hides it, which would leave this
     // promise pending and its key handler installed forever — so treat those
     // dismissals as "no" here too.
-    const x = document.getElementById("oc-modal-x");
+    const x = byId("oc-modal-x");
     const done = (answer) => {
       modal.hidden = true;
       body.textContent = "";
@@ -6370,9 +6453,9 @@ function initTooltips() {
   tipEl = document.createElement("div");
   tipEl.className = "tooltip";
   tipEl.hidden = true;
-  document.body.appendChild(tipEl);
+  ocOverlayHost.appendChild(tipEl);
   // Promote existing titles to data-tip so the native bubble doesn't also show.
-  for (const node of document.querySelectorAll(".toolbar [title], .app-header [title], .formula-bar [title], .side-panel [title]")) {
+  for (const node of qsa(".toolbar [title], .app-header [title], .formula-bar [title], .side-panel [title]")) {
     tipify(node);
   }
   document.addEventListener("mouseover", (e) => {
@@ -6428,7 +6511,7 @@ function bdIcon(kind) {
     diagdown: ["diagDown"], diagup: ["diagUp"], diagboth: ["diagDown", "diagUp"], nodiag: [],
   }[kind] || [];
   let faint = "";
-  for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--border)" stroke-width="1"/>`;
+  for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--oc-border)" stroke-width="1"/>`;
   let strong = "";
   for (const k of bold) strong += `<path d="${seg[k]}" stroke="currentColor" stroke-width="2"/>`;
   const clear = kind === "none" || kind === "nodiag"
@@ -6450,7 +6533,7 @@ const BD_TITLES = {
 };
 // Build the border palette into #border-menu (once).
 function buildBorderMenu() {
-  const menu = document.getElementById("border-menu");
+  const menu = byId("border-menu");
   menu.textContent = "";
   const grid = el("div", "bd-grid");
   for (const kind of ["all", "inner", "outer", "horizontal", "vertical", "none",
@@ -6484,8 +6567,8 @@ function buildBorderMenu() {
       borderColor = c;
       sw.querySelectorAll(".bd-color").forEach((x) => x.classList.remove("on"));
       b.classList.add("on");
-      const btn = document.getElementById("tb-border");
-      btn.style.setProperty("--bd-color", c ? "#" + c : "currentColor");
+      const btn = byId("tb-border");
+      btn.style.setProperty("--oc-bd-color", c ? "#" + c : "currentColor");
     });
     sw.appendChild(b);
   }
@@ -6507,15 +6590,15 @@ function clearAll() {
   draw();
 }
 // --- Find & replace -------------------------------------------------------
-const findBar = document.getElementById("find-bar");
-const findInput = document.getElementById("find-input");
-const replaceInput = document.getElementById("replace-input");
-const findCount = document.getElementById("find-count");
-const findCase = document.getElementById("find-case");
-const findWhole = document.getElementById("find-whole");
-const findValues = document.getElementById("find-values");
-const findAllSheets = document.getElementById("find-all-sheets");
-const findWildcards = document.getElementById("find-wildcards");
+let findBar;
+let findInput;
+let replaceInput;
+let findCount;
+let findCase;
+let findWhole;
+let findValues;
+let findAllSheets;
+let findWildcards;
 const findState = { matches: [], idx: -1 };
 
 function openFind() { findBar.hidden = false; findInput.focus(); findInput.select(); runFind(); }
@@ -7121,8 +7204,8 @@ const A1 = (row, col) => colName(col) + (row + 1);
 // The structural tree is `rebuildA11yGrid` below; this is the running
 // commentary beside it. A live region is what announces a *change* — moving the
 // selection, growing it — which a static tree cannot do on its own.
-const liveEl = document.getElementById("grid-live");
-const modeEl = document.getElementById("cell-mode");
+let liveEl;
+let modeEl;
 let lastAnnounced = "";
 function announceCell() {
   if (!liveEl || !wasm) return;
@@ -7160,7 +7243,7 @@ function announceCell() {
 // It mirrors `geo.rowIdx`/`geo.colIdx` — the indices the renderer just drew —
 // so a hidden or filtered-out row is absent from the mirror for the same reason
 // it is absent from the screen, without a second notion of what is visible.
-const a11yEl = document.getElementById("grid-a11y");
+let a11yEl;
 let a11ySignature = "";
 
 // Caps so an unusually large window cannot make the rebuild expensive. Past the
@@ -7273,6 +7356,11 @@ function updateCellMode() {
   if (!modeEl) return;
   let mode = "Ready";
   if (editSurface) mode = pointMode || formulaRefDrag ? "Point" : editMode;
+  // In manual mode Excel writes "Calculate" here when an edit is waiting on
+  // one, and it is the only cue that what is on screen is not what the
+  // formulas say. Without it, turning calculation off looks like the sheet has
+  // stopped working.
+  else if (needsRecalc()) mode = "Calculate";
   if (modeEl.textContent !== mode) modeEl.textContent = mode;
 }
 
@@ -7281,7 +7369,7 @@ function updateCellMode() {
 let extending = false;
 
 function updateNameBox() {
-  if (document.activeElement === cellRef) return;
+  if (activeEl() === cellRef) return;
   const r = selRect();
   const rows = r.r1 - r.r0 + 1, cols = r.c1 - r.c0 + 1;
   // The size readout belongs to *extending*, however it is being done — dragging
@@ -7397,7 +7485,7 @@ function reportImportIssues() {
   let summary = "";
   try { summary = wasm.session_import_summary(); } catch {}
   if (!summary) return;
-  const bar = document.getElementById("tb-status");
+  const bar = byId("tb-status");
   bar.innerHTML = `${bar.textContent} — <span class="warn">${summary}</span>`;
 }
 
@@ -7424,7 +7512,7 @@ function fillSelection(mode) {
 let lastFill = null;
 
 function hideFillOptions() {
-  const b = document.getElementById("fill-options");
+  const b = byId("fill-options");
   if (b) b.remove();
 }
 
@@ -7467,7 +7555,7 @@ function showFillOptions(dst) {
     const r = btn.getBoundingClientRect();
     positionMenu(menu, r.left, r.bottom + 2);
   });
-  document.body.appendChild(btn);
+  ocOverlayHost.appendChild(btn);
 }
 
 // Paste Special (Ctrl+Alt+V): what to paste, and what to do with it when it
@@ -7475,9 +7563,9 @@ function showFillOptions(dst) {
 // transpose and the arithmetic combinations.
 function pasteSpecialDialog() {
   if (!wasm.session_clip_has()) { status.textContent = "clipboard is empty"; return; }
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Paste special";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Paste special";
   body.textContent = "";
 
   let what = "all";
@@ -7541,9 +7629,9 @@ function pasteSpecialDialog() {
 // clipboard and no import path.
 function textToColumnsDialog() {
   const s0 = effectiveRange();
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Text to columns";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Text to columns";
   body.textContent = "";
   body.append(el("p", "oc-confirm-text",
     `Split column ${colName(s0.c0)}, rows ${s0.r0 + 1}–${s0.r1 + 1}, into the columns to its right.`));
@@ -7609,9 +7697,9 @@ function textToColumnsDialog() {
 // a function was to already know its name and start typing it.
 function insertFunctionDialog() {
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
-  const modal = document.getElementById("oc-modal");
-  const body = document.getElementById("oc-modal-body");
-  document.getElementById("oc-modal-title").textContent = "Insert function";
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Insert function";
   body.textContent = "";
 
   const search = el("input", "panel-field");
@@ -7804,7 +7892,7 @@ function inStringLiteral(before) {
 let fnCatalog = null;            // lazily-loaded function catalog
 let acState = null;             // active autocomplete: {matches, idx, start}
 let formulaRefDrag = null;      // click/drag ref insertion: {anchor, start, end}
-const acEl = document.getElementById("ac-menu");
+let acEl;
 
 // The function-name token being typed just before the caret, if the caret sits
 // somewhere a function name is valid (after =, an operator, "(", or ",").
@@ -7860,7 +7948,7 @@ function hideAutocomplete() { acState = null; if (acEl) acEl.hidden = true; }
 // what you need — the question becomes "which argument am I typing?". This
 // shows the signature with that argument emphasised, the way Excel and Sheets
 // do, and follows the caret through nested calls.
-const sigEl = document.getElementById("sig-tip");
+let sigEl;
 
 // The innermost call the caret sits inside: its function name and the index of
 // the argument being typed. Commas inside nested calls or string literals do
@@ -7985,7 +8073,7 @@ function insertRef(text) {
   updateRefSpans();
 }
 
-const tabsEl = document.getElementById("sheet-tabs");
+let tabsEl;
 
 // Reset the viewport + selection to the top-left (e.g. on a sheet switch).
 function resetView() {
@@ -8065,7 +8153,7 @@ function renderTabs() {
     let tc = "";
     try { tc = wasm.session_tab_color(i); } catch (_) {}
     if (tc) {
-      b.style.setProperty("--tab-color", "#" + tc);
+      b.style.setProperty("--oc-tab-color", "#" + tc);
       b.classList.add("colored");
     }
     if (prot[i]) {
@@ -8196,7 +8284,7 @@ function renameSheet(i, tabEl) {
 }
 
 function closeSheetMenu() {
-  const m = document.getElementById("sheet-ctx");
+  const m = byId("sheet-ctx");
   if (m) m.remove();
 }
 // Right-click context menu for a sheet tab.
@@ -8292,7 +8380,7 @@ function positionMenu(menu, x, y) {
   menu.style.left = "0px";
   menu.style.top = "0px";
   menu.style.visibility = "hidden";
-  document.body.appendChild(menu);
+  ocOverlayHost.appendChild(menu);
   const h = menu.offsetHeight, w = menu.offsetWidth;
   menu.style.top = (y + h > window.innerHeight ? Math.max(4, y - h) : y) + "px";
   menu.style.left = (x + w > window.innerWidth ? Math.max(4, x - w) : x) + "px";
@@ -8305,7 +8393,7 @@ function positionMenu(menu, x, y) {
 // A tooltip pinned under the cell rather than a status-bar line: it belongs to
 // the cell, and it has to survive the status bar being used for something else.
 function refreshValidationPrompt() {
-  const box = document.getElementById("dv-prompt");
+  const box = byId("dv-prompt");
   if (!box) return;
   let hint = "";
   try {
@@ -9333,10 +9421,7 @@ function wireEvents() {
         break;
       // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
       case "F9":
-        // Reseed on every explicit recalculation, which is what makes RAND
-        // reroll — Excel does the same on F9.
-        tryEdit(() => { syncClock(true); wasm.session_recalculate(); });
-        status.textContent = "recalculated";
+        recalculateNow();
         e.preventDefault();
         break;
       case "F11":
@@ -9463,13 +9548,13 @@ function wireEvents() {
   for (const box of [findCase, findWhole, findValues, findAllSheets, findWildcards]) {
     box.addEventListener("change", runFind);
   }
-  document.getElementById("find-next").addEventListener("click", () => findStep(1));
-  document.getElementById("find-prev").addEventListener("click", () => findStep(-1));
-  document.getElementById("replace-one").addEventListener("click", replaceOne);
-  document.getElementById("replace-all").addEventListener("click", replaceAll);
-  document.getElementById("find-close").addEventListener("click", closeFind);
+  byId("find-next").addEventListener("click", () => findStep(1));
+  byId("find-prev").addEventListener("click", () => findStep(-1));
+  byId("replace-one").addEventListener("click", replaceOne);
+  byId("replace-all").addEventListener("click", replaceAll);
+  byId("find-close").addEventListener("click", closeFind);
 
-  document.getElementById("hdr-open").addEventListener("click", () => document.getElementById("tb-open").click());
+  byId("hdr-open").addEventListener("click", () => byId("tb-open").click());
 
   // Popover menus: click toggles, outside-click / Escape closes, only one open.
   const menus = [];
@@ -9489,8 +9574,8 @@ function wireEvents() {
     menu.style.top = top + "px";
   }
   function wirePopup(btnId, menuId, onItem) {
-    const btn = document.getElementById(btnId);
-    const menu = document.getElementById(menuId);
+    const btn = byId(btnId);
+    const menu = byId(menuId);
     menus.push(menu);
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -9511,8 +9596,8 @@ function wireEvents() {
     ["tb-fontcolor", "fontcolor-menu", setFontColor, "Automatic"],
     ["tb-fillcolor", "fillcolor-menu", setFill, "No fill"],
   ]) {
-    const btn = document.getElementById(btnId);
-    const menu = document.getElementById(menuId);
+    const btn = byId(btnId);
+    const menu = byId(menuId);
     menus.push(menu);
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -9530,18 +9615,18 @@ function wireEvents() {
   // moment anything changed them. Re-sync on every open, and mirror the colour
   // onto the toolbar button so the choice is visible without opening the menu.
   function syncBorderPicks() {
-    const menu = document.getElementById("border-menu");
+    const menu = byId("border-menu");
     for (const sw of menu.querySelectorAll(".bd-color")) {
       sw.classList.toggle("on", (sw.dataset.color || "") === borderColor);
     }
     const sel = menu.querySelector(".bd-style");
     if (sel) sel.value = borderStyle;
-    const btn = document.getElementById("tb-border");
-    btn.style.setProperty("--bd-color", borderColor ? "#" + borderColor : "currentColor");
+    const btn = byId("tb-border");
+    btn.style.setProperty("--oc-bd-color", borderColor ? "#" + borderColor : "currentColor");
   }
   {
-    const btn = document.getElementById("tb-border");
-    const menu = document.getElementById("border-menu");
+    const btn = byId("tb-border");
+    const menu = byId("border-menu");
     menus.push(menu);
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -9562,30 +9647,30 @@ function wireEvents() {
   wirePopup("tb-freeze", "freeze-menu", (b) => setFreeze(b.dataset.fz));
   wirePopup("tb-sort", "sort-menu", (b) =>
     (b.dataset.sort === "custom" ? sortDialog() : sortRange(b.dataset.sort === "desc")));
-  document.getElementById("tb-filter").addEventListener("click", (e) => {
+  byId("tb-filter").addEventListener("click", (e) => {
     e.stopPropagation();
     toggleFilter();
   });
   // Tool side panel: toolbar buttons toggle it; the header ✕ and Esc close it.
-  document.getElementById("tb-dv").addEventListener("click", () => togglePanel("dv"));
-  document.getElementById("tb-cf").addEventListener("click", () => togglePanel("cf"));
-  document.getElementById("tb-note").addEventListener("click", () => togglePanel("note"));
-  document.getElementById("side-panel-close").addEventListener("click", () => closePanel());
+  byId("tb-dv").addEventListener("click", () => togglePanel("dv"));
+  byId("tb-cf").addEventListener("click", () => togglePanel("cf"));
+  byId("tb-note").addEventListener("click", () => togglePanel("note"));
+  byId("side-panel-close").addEventListener("click", () => closePanel());
 
-  document.getElementById("tb-size-up").addEventListener("click", () => { stepFontSize(1); canvas.focus(); });
-  document.getElementById("tb-size-down").addEventListener("click", () => { stepFontSize(-1); canvas.focus(); });
-  document.getElementById("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
-  document.getElementById("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
-  document.getElementById("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
-  document.getElementById("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
-  document.getElementById("tb-indent-more").addEventListener("click", () => { setIndent(1); canvas.focus(); });
-  document.getElementById("tb-indent-less").addEventListener("click", () => { setIndent(-1); canvas.focus(); });
+  byId("tb-size-up").addEventListener("click", () => { stepFontSize(1); canvas.focus(); });
+  byId("tb-size-down").addEventListener("click", () => { stepFontSize(-1); canvas.focus(); });
+  byId("tb-bold").addEventListener("click", () => { toggleBold(); canvas.focus(); });
+  byId("tb-italic").addEventListener("click", () => { toggleItalic(); canvas.focus(); });
+  byId("tb-underline").addEventListener("click", () => { toggleUnderline(); canvas.focus(); });
+  byId("tb-strike").addEventListener("click", () => { toggleStrike(); canvas.focus(); });
+  byId("tb-indent-more").addEventListener("click", () => { setIndent(1); canvas.focus(); });
+  byId("tb-indent-less").addEventListener("click", () => { setIndent(-1); canvas.focus(); });
   {
-    const pb = document.getElementById("tb-painter");
+    const pb = byId("tb-painter");
     pb.addEventListener("click", () => { painter ? setPainter(null) : armPainter(false); canvas.focus(); });
     pb.addEventListener("dblclick", () => { armPainter(true); canvas.focus(); });
   }
-  document.getElementById("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
+  byId("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   // These are toggles, not one-way switches: pressing the button that is already
   // applied returns the cell to General, which is the only way back without
   // hunting through the number menu.
@@ -9596,11 +9681,11 @@ function wireEvents() {
     setNumberFormat(current === code ? "" : code);
     canvas.focus();
   };
-  document.getElementById("tb-percent").addEventListener("click", toggleFormat("0%"));
-  document.getElementById("tb-comma").addEventListener("click", toggleFormat("#,##0.00"));
-  document.getElementById("tb-inc-dec").addEventListener("click", () => { adjustDecimals(1); canvas.focus(); });
-  document.getElementById("tb-dec-dec").addEventListener("click", () => { adjustDecimals(-1); canvas.focus(); });
-  for (const b of document.querySelectorAll(".tb-align")) {
+  byId("tb-percent").addEventListener("click", toggleFormat("0%"));
+  byId("tb-comma").addEventListener("click", toggleFormat("#,##0.00"));
+  byId("tb-inc-dec").addEventListener("click", () => { adjustDecimals(1); canvas.focus(); });
+  byId("tb-dec-dec").addEventListener("click", () => { adjustDecimals(-1); canvas.focus(); });
+  for (const b of qsa(".tb-align")) {
     b.addEventListener("click", () => { setAlign(b.dataset.al); canvas.focus(); });
   }
   // --- Font family / font size comboboxes ----------------------------------
@@ -9721,9 +9806,9 @@ function wireEvents() {
   // pretending to be the real thing.
   const kindNote = { exact: "", metric: " — renders as %s (metric-compatible)", generic: " — renders as %s (closest match)" };
   wireCombo({
-    input: document.getElementById("tb-font"),
-    caret: document.getElementById("tb-font-caret"),
-    menu: document.getElementById("font-menu"),
+    input: byId("tb-font"),
+    caret: byId("tb-font-caret"),
+    menu: byId("font-menu"),
     values: () => [{ v: "", label: "Default", title: "Clear the font (use the workbook default)" }].concat(
       fontFamilies().map((f) => ({
         v: f.n,
@@ -9736,9 +9821,9 @@ function wireEvents() {
   // Font size: the Excel ladder, but any typed size is accepted and clamped to
   // Excel's 1–409 pt range; a blank/zero clears the explicit size.
   wireCombo({
-    input: document.getElementById("tb-size"),
-    caret: document.getElementById("tb-size-caret"),
-    menu: document.getElementById("size-menu"),
+    input: byId("tb-size"),
+    caret: byId("tb-size-caret"),
+    menu: byId("size-menu"),
     values: [{ v: "", label: "Default", title: "Clear the size (use the workbook default)" }]
       .concat(SIZE_LADDER.map((n) => ({ v: String(n), label: String(n) }))), // same ladder as A▲/A▼
     apply: (v) => {
@@ -9746,7 +9831,7 @@ function wireEvents() {
       setFontSize(Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0);
     },
   });
-  document.getElementById("tb-open").addEventListener("change", async (e) => {
+  byId("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     // A large file takes a moment to parse; say so rather than appearing to
@@ -9756,62 +9841,36 @@ function wireEvents() {
     // backgrounded tab, so waiting on it here hung the open entirely whenever
     // the window was not in front.
     await new Promise((r) => setTimeout(r, 0));
-    let bytes = new Uint8Array(await file.arrayBuffer());
-    const ext = (file.name.split(".").pop() || "").toLowerCase();
-    // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
-    const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
-    try {
-      stopMarch();
-      if (delim !== null) {
-        bytes = decodeTextBytes(bytes);
-        wasm.session_open_delimited(bytes, delim);
-      } else {
-        wasm.session_open(bytes);
-      }
-      status.textContent = `opened ${file.name}`;
-      reportImportIssues();
-    } catch (err) { status.textContent = friendlyOpenError(err, file.name, delim !== null); }
+    const ok = openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
     e.target.value = ""; // allow re-opening the same file
-    invalidateGrowth();
-    // Part paths repeat across workbooks — every file has an
-    // `xl/media/image1.png` — so a cache kept across a load shows the previous
-    // file's pictures.
-    imageCache.clear();
-    syncClock();
-    // Open on the sheet the file was left on, not always the first: a workbook
-    // records which tab its author was looking at, and a summary sheet at the
-    // end is put there deliberately.
-    try { state.sheet = wasm.session_active_sheet(); } catch { state.sheet = 0; }
-    state.scrollX = state.scrollY = 0;
-    renderTabs();
-    select(0, 0);
+    return ok;
   });
-  document.getElementById("fx-insert").addEventListener("click", (e) => {
+  byId("fx-insert").addEventListener("click", (e) => {
     e.stopPropagation();
     insertFunctionDialog();
   });
-  document.getElementById("fx-expand").addEventListener("click", (e) => {
+  byId("fx-expand").addEventListener("click", (e) => {
     e.stopPropagation();
     // A long formula is unreadable in a one-line box; expanding gives it room
     // without opening a dialog that would lose the caret.
-    const bar = document.querySelector(".formula-bar");
+    const bar = qs(".formula-bar");
     const on = bar.classList.toggle("expanded");
     e.currentTarget.setAttribute("aria-expanded", on ? "true" : "false");
     resize();
   });
-  document.getElementById("name-box-list").addEventListener("click", (e) => {
+  byId("name-box-list").addEventListener("click", (e) => {
     e.stopPropagation();
     openNameBoxList();
   });
-  document.getElementById("tb-undo").addEventListener("click", doUndo);
-  document.getElementById("tb-redo").addEventListener("click", doRedo);
+  byId("tb-undo").addEventListener("click", doUndo);
+  byId("tb-redo").addEventListener("click", doRedo);
 
   // --- Progressive toolbar collapse (Excel-ribbon style) ---
   // Each group tagged data-collapse=<priority> collapses in-place into its
   // "Label ▾" button — whose flyout holds the group's live tools — whenever the
   // single toolbar row would overflow, lowest priority first. Groups re-expand
   // as the window widens. Never a scrollbar, never a second row.
-  const toolbarEl = document.querySelector(".toolbar");
+  const toolbarEl = qs(".toolbar");
   const collapsibles = [...toolbarEl.querySelectorAll(".tb-group[data-collapse]")]
     .map((groupEl) => ({
       groupEl,
@@ -9857,7 +9916,7 @@ function wireEvents() {
   // past it, arrows move within it. Re-scanned on each interaction because the
   // collapse machinery moves controls in and out of flyouts.
   {
-    const toolbar = document.querySelector(".toolbar");
+    const toolbar = qs(".toolbar");
     const items = () => [...toolbar.querySelectorAll("button, input, select")]
       .filter((el) => !el.disabled && el.offsetParent !== null);
     const rove = (list, at) => {
@@ -9874,7 +9933,7 @@ function wireEvents() {
       for (const el of toolbar.querySelectorAll("button, input, select")) el.tabIndex = -1;
       const list = items();
       if (!list.length) return;
-      const focused = list.findIndex((el) => el === document.activeElement);
+      const focused = list.findIndex((el) => el === activeEl());
       list[Math.max(0, focused)].tabIndex = 0;
     };
     syncStops();
@@ -9882,10 +9941,10 @@ function wireEvents() {
     toolbar.addEventListener("keydown", (e) => {
       // A text field owns its own arrow keys (the font and size boxes), so only
       // step between controls when the caret is not in one.
-      const inField = document.activeElement && document.activeElement.tagName === "INPUT";
+      const inField = activeEl() && activeEl().tagName === "INPUT";
       if (inField && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
       const list = items();
-      const at = list.indexOf(document.activeElement);
+      const at = list.indexOf(activeEl());
       if (at < 0) return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") { rove(list, at + 1); e.preventDefault(); }
       else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { rove(list, at - 1); e.preventDefault(); }
@@ -9899,17 +9958,17 @@ function wireEvents() {
   // Track whether the user is driving by keyboard, so the grid's focus ring
   // appears for them and not on every mouse click (see the CSS note).
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Tab" || e.key.startsWith("Arrow")) document.documentElement.dataset.kbnav = "1";
+    if (e.key === "Tab" || e.key.startsWith("Arrow")) ocThemeHost.dataset.kbnav = "1";
   }, true);
-  window.addEventListener("mousedown", () => { delete document.documentElement.dataset.kbnav; }, true);
+  window.addEventListener("mousedown", () => { delete ocThemeHost.dataset.kbnav; }, true);
 
   buildMenuBar();
 
   // The page-header collapse toggle, kept right-most: buildMenuBar() appends
   // File…Help, so re-append it afterwards rather than relying on markup order.
   {
-    const btn = document.getElementById("hdr-collapse");
-    const bar = document.getElementById("menubar");
+    const btn = byId("hdr-collapse");
+    const bar = byId("menubar");
     if (btn && bar) {
       bar.appendChild(btn);
       btn.addEventListener("click", (e) => {
@@ -9928,9 +9987,9 @@ function wireEvents() {
   // Declarative menu → item table. Every item delegates to an existing handler
   // or toolbar control, so there are no parallel implementations to drift.
   function buildMenuBar() {
-    const bar = document.getElementById("menubar");
+    const bar = byId("menubar");
     if (!bar) return;
-    const q = (sel) => document.querySelector(sel);
+    const q = (sel) => qs(sel);
     const clickEl = (sel) => () => { const n = q(sel); if (n) n.click(); };
     const rng = () => effectiveRange();
     const fmtHas = (k) => {
@@ -9963,9 +10022,9 @@ function wireEvents() {
     const nf = (code) => () => setNumberFormat(code);
 
     const showModal = (title, html) => {
-      document.getElementById("oc-modal-title").textContent = title;
-      document.getElementById("oc-modal-body").innerHTML = html;
-      document.getElementById("oc-modal").hidden = false;
+      byId("oc-modal-title").textContent = title;
+      byId("oc-modal-body").innerHTML = html;
+      byId("oc-modal").hidden = false;
     };
     function showShortcuts() {
       const rows = [
@@ -9984,7 +10043,7 @@ function wireEvents() {
     function showAbout() {
       showModal("About OpenCalc",
         `<p>OpenCalc — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
-         <p style="margin-top:10px;color:var(--muted)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
+         <p style="margin-top:10px;color:var(--oc-muted)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
     }
 
     const MENUS = [
@@ -10189,6 +10248,16 @@ function wireEvents() {
       ["Tools", [
         ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
         ["Name manager…", () => openNameManager(160, 120)],
+        "sep",
+        // Excel's Formulas ▸ Calculation Options. A workbook saved with
+        // calculation off opens that way, so the state has to be visible and
+        // changeable rather than assumed.
+        { sub: "Calculation", items: [
+          ["Automatic", () => setCalculationMode("auto"), null, () => calcMode() === "auto"],
+          ["Manual", () => setCalculationMode("manual"), null, () => calcMode() === "manual"],
+          "sep",
+          ["Calculate now", () => recalculateNow(), "F9"],
+        ] },
       ]],
       ["Help", [
         ["Keyboard shortcuts", showShortcuts],
@@ -10241,7 +10310,7 @@ function wireEvents() {
           b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span><span class="mi-caret">&#9656;</span>`;
           b.querySelector(".mi-label").textContent = it.sub;
           const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
-          document.body.appendChild(sub); subs.push(sub);
+          ocOverlayHost.appendChild(sub); subs.push(sub);
           renderItems(sub, it.items, false);
           const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); sub.hidden = false; };
           b.addEventListener("mouseenter", openSub);
@@ -10299,7 +10368,7 @@ function wireEvents() {
       btn.setAttribute("aria-haspopup", "true"); btn.setAttribute("aria-expanded", "false");
       const drop = document.createElement("div"); drop.className = "menu-drop popmenu"; drop.hidden = true;
       drop.setAttribute("role", "menu");
-      document.body.appendChild(drop); renderItems(drop, items, true);
+      ocOverlayHost.appendChild(drop); renderItems(drop, items, true);
       btn.addEventListener("click", (e) => { e.stopPropagation(); openIdx === i ? closeMenus() : openMenu(i); });
       btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
       bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
@@ -10339,7 +10408,7 @@ function wireEvents() {
       list[((i % n) + n) % n].focus();
     };
     bar.addEventListener("keydown", (e) => {
-      const i = topBtns.indexOf(document.activeElement);
+      const i = topBtns.indexOf(activeEl());
       if (i < 0) return;
       if (e.key === "ArrowRight") { const at = focusTop(i + 1); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
       else if (e.key === "ArrowLeft") { const at = focusTop(i - 1); if (openIdx >= 0) openMenu(at); e.preventDefault(); }
@@ -10356,7 +10425,7 @@ function wireEvents() {
     document.addEventListener("keydown", (e) => {
       if (openIdx < 0) return;
       const list = dropItems();
-      const at = list.indexOf(document.activeElement);
+      const at = list.indexOf(activeEl());
       if (at < 0) return;
       if (e.key === "ArrowDown") { focusItem(list, at + 1); e.preventDefault(); }
       else if (e.key === "ArrowUp") { focusItem(list, at - 1); e.preventDefault(); }
@@ -10378,14 +10447,14 @@ function wireEvents() {
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenus(); });
 
     // Help modal close wiring.
-    const modal = document.getElementById("oc-modal");
-    document.getElementById("oc-modal-x").addEventListener("click", () => { modal.hidden = true; });
+    const modal = byId("oc-modal");
+    byId("oc-modal-x").addEventListener("click", () => { modal.hidden = true; });
     modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") modal.hidden = true; });
   }
   // Esc closes the tool panel (when no context menu is open and not editing).
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && activePanel && !state.editing && !document.getElementById("sheet-ctx")) {
+    if (e.key === "Escape" && activePanel && !state.editing && !byId("sheet-ctx")) {
       closePanel();
     }
   });
@@ -10395,17 +10464,17 @@ function wireEvents() {
 }
 
 function applyTheme(theme) {
-  if (theme === "auto") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
+  if (theme === "auto") delete ocThemeHost.dataset.theme;
+  else ocThemeHost.dataset.theme = theme;
   localStorage.setItem("oc-theme", theme);
   readColors();
   draw();
 }
 
 function applyAccent(color) {
-  document.documentElement.style.setProperty("--accent", color);
+  ocThemeHost.style.setProperty("--oc-accent", color);
   localStorage.setItem("oc-accent", color);
-  for (const b of document.querySelectorAll("#set-accent button")) {
+  for (const b of qsa("#set-accent button")) {
     b.setAttribute("aria-current", b.dataset.c === color ? "true" : "false");
   }
   readColors();
@@ -10413,9 +10482,9 @@ function applyAccent(color) {
 }
 
 function wireSettings() {
-  const gear = document.getElementById("tb-settings");
-  const panel = document.getElementById("settings-panel");
-  const themeSel = document.getElementById("set-theme");
+  const gear = byId("tb-settings");
+  const panel = byId("settings-panel");
+  const themeSel = byId("set-theme");
 
   gear.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -10425,12 +10494,12 @@ function wireSettings() {
     if (!panel.contains(e.target) && e.target !== gear) panel.hidden = true;
   });
   themeSel.addEventListener("change", () => applyTheme(themeSel.value));
-  for (const b of document.querySelectorAll("#set-accent button")) {
+  for (const b of qsa("#set-accent button")) {
     b.addEventListener("click", () => applyAccent(b.dataset.c));
   }
 
-  const scroll = document.getElementById("set-scroll");
-  const scrollVal = document.getElementById("set-scroll-val");
+  const scroll = byId("set-scroll");
+  const scrollVal = byId("set-scroll-val");
   const setScroll = (v, persist) => {
     scrollDamp = v;
     scroll.value = String(v);
@@ -10466,7 +10535,107 @@ function seed() {
   select(0, 0);
 }
 
+
+// Resolve the markup's elements against the mount root.
+//
+// Deferred rather than resolved at import time: an embedded editor sets its
+// mount root *after* the module loads, and a binding taken against `document`
+// before that points at nothing — or, worse, at the same id somewhere in the
+// host's page.
+function bindElements() {
+  canvas = byId("grid");
+  wrap = byId("grid-wrap");
+  inline = byId("inline-edit");
+  selStats = byId("sel-stats");
+  vscroll = byId("vscroll");
+  vthumb = byId("vthumb");
+  hscroll = byId("hscroll");
+  hthumb = byId("hthumb");
+  fInput = byId("formula-input");
+  cellRef = byId("cell-ref");
+  commentTip = byId("comment-tip");
+  status = byId("tb-status");
+  findBar = byId("find-bar");
+  findInput = byId("find-input");
+  replaceInput = byId("replace-input");
+  findCount = byId("find-count");
+  findCase = byId("find-case");
+  findWhole = byId("find-whole");
+  findValues = byId("find-values");
+  findAllSheets = byId("find-all-sheets");
+  findWildcards = byId("find-wildcards");
+  liveEl = byId("grid-live");
+  modeEl = byId("cell-mode");
+  a11yEl = byId("grid-a11y");
+  acEl = byId("ac-menu");
+  sigEl = byId("sig-tip");
+  tabsEl = byId("sheet-tabs");
+  ctx = canvas.getContext("2d");
+}
+
+
+/// Load a workbook from bytes, whatever the host got them from.
+///
+/// Extracted from the file-input handler so an embedded editor opens a
+/// workbook by the same path a picked file does — two implementations of
+/// "open" is two places for the post-load bookkeeping below to be forgotten.
+export function openBytes(raw, name = "workbook.xlsx") {
+  let bytes = raw;
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
+  const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
+  let ok = true;
+  try {
+    stopMarch();
+    if (delim !== null) {
+      bytes = decodeTextBytes(bytes);
+      wasm.session_open_delimited(bytes, delim);
+    } else {
+      wasm.session_open(bytes);
+    }
+    status.textContent = `opened ${name}`;
+    reportImportIssues();
+  } catch (err) {
+    status.textContent = friendlyOpenError(err, name, delim !== null);
+    ok = false;
+  }
+  invalidateGrowth();
+  // Part paths repeat across workbooks — every file has an
+  // `xl/media/image1.png` — so a cache kept across a load shows the previous
+  // file's pictures.
+  imageCache.clear();
+  syncClock();
+  // Open on the sheet the file was left on, not always the first: a workbook
+  // records which tab its author was looking at, and a summary sheet at the
+  // end is put there deliberately.
+  try { state.sheet = wasm.session_active_sheet(); } catch { state.sheet = 0; }
+  state.scrollX = state.scrollY = 0;
+  renderTabs();
+  select(0, 0);
+  return ok;
+}
+
+/// Re-read the theme tokens and repaint.
+///
+/// The canvas caches them: it paints thousands of cells a frame and cannot ask
+/// for a computed style per cell. So a host changing `--oc-accent` restyles the
+/// chrome instantly and would leave the grid on the old colours until something
+/// else forced a repaint — this is what closes that gap.
+export function refreshTheme() {
+  readColors();
+  invalidateGrowth();
+  draw();
+}
+
+/// The raw engine bindings, for a host that needs something the element does
+/// not wrap. Deliberately the same object the editor itself uses: a second
+/// session would be a second workbook.
+export function wasmApi() {
+  return wasm;
+}
+
 async function main() {
+  bindElements();
   const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}`);
   init = mod.default;
   wasm = mod;
@@ -10486,4 +10655,20 @@ async function main() {
   status.textContent = `engine v${wasm.version()}`;
 }
 
-main().catch((err) => { status.textContent = `failed: ${err}`; });
+/// Start the editor against the current mount root.
+///
+/// Exported so an embed wrapper can point the editor at a shadow root first;
+/// the page host below starts it immediately, as it always did.
+export async function start() {
+  return main();
+}
+
+// A page mount starts itself. An embedded one imports this module, calls
+// `setMountRoot`, and then `start` — by which time this has already run against
+// a document with no `#grid` in it, so it is skipped.
+if (byId("grid")) {
+  main().catch((err) => {
+    if (status) status.textContent = `failed: ${err}`;
+    else console.error(err);
+  });
+}

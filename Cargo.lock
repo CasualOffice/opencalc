@@ -180,6 +180,7 @@ dependencies = [
  "casual-calc-import",
  "casual-calc-layout",
  "casual-calc-model",
+ "casual-calc-ooxml",
  "casual-calc-render",
  "casual-calc-transaction",
 ]

@@ -33,6 +33,14 @@ pub struct SpreadsheetPackage {
     package: Package,
     workbook_part: String,
     sheets: Vec<SheetEntry>,
+    /// The bounds this package was admitted under.
+    ///
+    /// Kept because they apply to every part read afterwards, not just to the
+    /// zip: `max_xml_elements` and `max_xml_depth` bound each `.rels` and each
+    /// worksheet. Only `limits.package` reached `Package`, so a caller who
+    /// tightened the XML bounds had them silently ignored from the second part
+    /// onwards — every later reader reached for the defaults instead.
+    limits: OoxmlLimits,
 }
 
 impl SpreadsheetPackage {
@@ -81,7 +89,14 @@ impl SpreadsheetPackage {
             package,
             workbook_part,
             sheets,
+            limits,
         })
+    }
+
+    /// The bounds this package was admitted under, for readers that go on to
+    /// parse further parts from it.
+    pub fn limits(&self) -> &OoxmlLimits {
+        &self.limits
     }
 
     /// The resolved workbook part path (e.g. `xl/workbook.xml`).
