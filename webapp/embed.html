@@ -3,92 +3,355 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenCalc — embedded in a hostile page</title>
+    <title>OpenCalc SDK — embed demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
     <style>
-      /* Deliberately hostile host CSS. Every rule here is something a real
-         design system does, and every one of them would wreck an editor that
-         is merely a `<div>` on the page:
-
-           - inherited typography crosses a shadow boundary, so it is severed
-             by `all: initial` on `:host` in editor.css;
-           - the element selectors below cannot cross it at all;
-           - the generic custom properties are why the editor's tokens are
-             namespaced `--oc-*` — custom properties *do* cross, so a host's
-             `--bg: hotpink` would otherwise repaint the grid. */
       :root {
-        --bg: hotpink;
-        --fg: lime;
-        --accent: orange;
-        --border: 6px dashed red;
+        --ink: #0b0d12; --dim: #5b6270; --line: #e4e7ec; --paper: #fff;
+        --wash: #f7f8fa; --brand: #2f6df6; --code-bg: #0f1216; --code-fg: #d7dee9;
       }
+      * { box-sizing: border-box; }
       body {
-        margin: 0;
-        font: italic 700 22px/3 "Comic Sans MS", cursive;
-        letter-spacing: .25em;
-        color: darkred;
-        background: #fff7fb;
-        text-align: center;
-        direction: rtl;
+        margin: 0; background: var(--wash); color: var(--ink);
+        font: 400 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
       }
-      button, input, select {
-        all: unset;
-        background: yellow !important;
-        border: 4px solid magenta !important;
-        font-size: 28px !important;
-        padding: 14px !important;
-      }
-      canvas { filter: invert(1) hue-rotate(90deg); border: 8px solid red; }
-      div, span, ul, li { text-transform: uppercase; }
-      * { box-sizing: content-box; }
+      a { color: var(--brand); }
+      .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 24px 56px; }
 
-      .page { padding: 24px; }
-      .frame { height: 78vh; min-height: 520px; text-align: left; direction: ltr; }
-      .controls { display: flex; gap: 10px; justify-content: center; margin: 14px 0; }
-      .controls button {
-        all: revert; padding: 8px 14px; border-radius: 8px; cursor: pointer;
-        border: 1px solid #bbb; background: #fff; font: 500 14px system-ui;
+      header.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+      header.top h1 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+      header.top .tag {
+        font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+        color: var(--brand); background: #eaf1ff; border-radius: 999px; padding: 3px 10px;
       }
-      h1 { font: 600 20px/1.4 system-ui; letter-spacing: 0; direction: ltr; }
-      p.note { font: 400 14px/1.6 system-ui; letter-spacing: 0; direction: ltr; color: #555; }
+      header.top p { margin: 0; color: var(--dim); font-size: 14px; flex: 1 1 320px; }
+
+      .layout { display: grid; grid-template-columns: minmax(0, 1fr) 344px; gap: 20px; margin-top: 22px; }
+      @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } }
+
+      .stage {
+        background: var(--paper); border: 1px solid var(--line); border-radius: 14px;
+        overflow: hidden; box-shadow: 0 1px 2px rgba(11,13,18,.04), 0 10px 30px rgba(11,13,18,.05);
+      }
+      .stage-bar {
+        display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+        border-bottom: 1px solid var(--line); background: #fcfcfd;
+      }
+      .dot3 { display: flex; gap: 6px; }
+      .dot3 i { width: 10px; height: 10px; border-radius: 50%; background: #e2e5ea; }
+      .stage-bar code { font-size: 12px; color: var(--dim); font-family: ui-monospace, Menlo, Consolas, monospace; }
+      opencalc-sheet { display: block; height: 640px; }
+
+      aside { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+      .card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+      .card h2 {
+        margin: 0 0 12px; font-size: 11px; font-weight: 650; letter-spacing: .08em;
+        text-transform: uppercase; color: var(--dim);
+      }
+      .row { display: flex; flex-wrap: wrap; gap: 7px; }
+      .row + .row { margin-top: 9px; }
+      button.chip {
+        font: 500 13px/1 inherit; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+        border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+      }
+      button.chip:hover { border-color: #c8cdd6; }
+      button.chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+      button.chip .sw {
+        display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+        margin-right: 7px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.12);
+      }
+      label.check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; padding: 3px 0; }
+
+      pre.code {
+        margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 12px;
+        padding: 14px 16px; overflow: auto; font: 400 12.5px/1.6 ui-monospace, Menlo, Consolas, monospace;
+        max-height: 320px;
+      }
+      pre.code .k { color: #c792ea; } pre.code .s { color: #c3e88d; }
+      pre.code .p { color: #82aaff; } pre.code .c { color: #6b7686; }
+
+      .note { font-size: 13px; color: var(--dim); margin: 10px 0 0; }
+      .note b { color: var(--ink); font-weight: 600; }
+      footer.foot { margin-top: 26px; font-size: 13px; color: var(--dim); }
+
+      /* Injected on demand by the isolation demo — deliberately awful. */
+      body.hostile { font-family: "Comic Sans MS", cursive; }
+      body.hostile .wrap { direction: rtl; }
+      body.hostile :root, body.hostile { --bg: hotpink; --fg: lime; --accent: orange; }
+      body.hostile button, body.hostile input, body.hostile select {
+        background: yellow !important; border: 3px solid magenta !important; text-transform: uppercase;
+      }
+      body.hostile canvas { filter: invert(1) hue-rotate(90deg); }
+      body.hostile div, body.hostile span { letter-spacing: .18em; }
     </style>
   </head>
   <body>
-    <div class="page">
-      <h1>OpenCalc embedded in a page that is actively trying to break it</h1>
-      <p class="note">
-        The page around this sets Comic Sans, right-to-left text, uppercase
-        everything, magenta borders on every control, an inverted canvas filter,
-        and <code>--bg: hotpink</code>. None of it reaches inside.
-      </p>
+    <div class="wrap">
+      <header class="top">
+        <h1>OpenCalc SDK</h1>
+        <span class="tag">Embed demo</span>
+        <p>
+          One custom element, mounted in a shadow root. The panel on the right calls
+          the same public API your application would — the code below updates to match.
+        </p>
+      </header>
 
-      <div class="controls">
-        <button id="t-default">Default theme</button>
-        <button id="t-violet">Violet accent</button>
-        <button id="t-paper">Paper</button>
-        <button id="t-dark">Dark</button>
-        <button id="t-manual">Manual calculation</button>
+      <div class="layout">
+        <div class="stage">
+          <div class="stage-bar">
+            <span class="dot3"><i></i><i></i><i></i></span>
+            <code>&lt;opencalc-sheet&gt;</code>
+          </div>
+          <opencalc-sheet id="sheet"></opencalc-sheet>
+        </div>
+
+        <aside>
+          <div class="card">
+            <h2>Theme</h2>
+            <div class="row" id="themes"></div>
+            <div class="row" id="schemes" style="margin-top:11px"></div>
+          </div>
+
+          <div class="card">
+            <h2>Chrome</h2>
+            <div id="chrome"></div>
+            <p class="note">
+              The app header is <b>off by default</b> when embedded — the brand mark and
+              settings gear belong to this project's own page, not to your product.
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>Engine</h2>
+            <div class="row" id="calc"></div>
+            <p class="note" id="calc-note"></p>
+            <div class="row" id="access" style="margin-top:11px"></div>
+            <p class="note">
+              Read-only is refused <b>in the engine</b>, not by hiding buttons —
+              selecting, scrolling and copying still work. <b>Preview</b> is the
+              same thing with every chrome region off.
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>Isolation</h2>
+            <label class="check">
+              <input type="checkbox" id="hostile" />
+              <span>Make this page hostile</span>
+            </label>
+            <p class="note">
+              Applies Comic Sans, right-to-left, uppercase, magenta controls, an inverted
+              canvas filter and <code>--bg: hotpink</code> to the page. The editor is
+              unaffected: a shadow boundary stops selectors, and <code>all: initial</code>
+              stops the inherited properties that cross it.
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>Your code</h2>
+            <pre class="code" id="code"></pre>
+          </div>
+        </aside>
       </div>
 
-      <opencalc-sheet id="sheet" class="frame"></opencalc-sheet>
+      <footer class="foot">
+        Full integration guide: <a href="./docs.html">SDK documentation</a> ·
+        <a href="./editor.html">standalone editor</a> ·
+        <a href="./index.html">about OpenCalc</a>
+      </footer>
     </div>
 
     <script type="module">
       import "./embed.js";
 
       const sheet = document.getElementById("sheet");
-      const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
 
-      on("t-default", () => {
-        sheet.setColorScheme("auto");
-        sheet.theme({ accent: null, bg: null, surface: null, card: null, fg: null });
+      // Each preset carries both schemes. A preset that only names light
+      // colours looks broken the moment the machine turns dark — which is
+      // exactly why `theme()` takes `{ light, dark }` rather than one map.
+      const THEMES = {
+        Default: null,
+        Violet: {
+          swatch: "#7c3aed",
+          light: { accentColor: "#7c3aed", accentHoverColor: "#6d28d9" },
+          dark: { accentColor: "#a78bfa", accentHoverColor: "#c4b5fd" },
+        },
+        Paper: {
+          swatch: "#8a6a2f",
+          light: {
+            backgroundColor: "#fbf9f4", surfaceColor: "#f2eee4",
+            popoverBackgroundColor: "#fffdf8", accentColor: "#8a6a2f",
+            gridlineColor: "#ece5d8", borderColor: "#e3dbc9",
+          },
+          dark: {
+            backgroundColor: "#17150f", surfaceColor: "#221e15",
+            popoverBackgroundColor: "#1d1a12", accentColor: "#d8b878",
+            gridlineColor: "#2b2519", borderColor: "#332c1d",
+          },
+        },
+        Forest: {
+          swatch: "#0f766e",
+          light: { accentColor: "#0f766e", accentHoverColor: "#115e59", surfaceColor: "#f0f7f5" },
+          dark: { accentColor: "#5eead4", accentHoverColor: "#99f6e4", surfaceColor: "#132420" },
+        },
+      };
+
+      const SCHEMES = ["auto", "light", "dark"];
+      const CHROME = ["header", "menubar", "toolbar", "formulabar", "tabs", "statusbar"];
+
+      const state = {
+        theme: "Default",
+        scheme: "auto",
+        chrome: { header: false },
+        calculation: "auto",
+        access: "edit",
+      };
+
+      // --- controls ---------------------------------------------------------
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = text;
+        return n;
+      };
+
+      const themes = document.getElementById("themes");
+      for (const name of Object.keys(THEMES)) {
+        const b = el("button", "chip");
+        const swatch = el("span", "sw");
+        swatch.style.background = THEMES[name]?.swatch ?? "#2f6df6";
+        b.append(swatch, document.createTextNode(name));
+        b.addEventListener("click", () => {
+          state.theme = name;
+          // `theme()` merges, so a picker has to reset before applying — else
+          // Paper's warm gridlines survive a switch to Forest.
+          const t = THEMES[name];
+          sheet.resetTheme();
+          if (t) sheet.theme({ light: t.light, dark: t.dark });
+          sync();
+        });
+        themes.append(b);
+      }
+
+      const schemes = document.getElementById("schemes");
+      for (const s of SCHEMES) {
+        const b = el("button", "chip", s[0].toUpperCase() + s.slice(1));
+        b.addEventListener("click", () => { state.scheme = s; sheet.setColorScheme(s); sync(); });
+        schemes.append(b);
+      }
+
+      const chrome = document.getElementById("chrome");
+      for (const region of CHROME) {
+        const l = el("label", "check");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = state.chrome[region] ?? true;
+        cb.addEventListener("change", () => {
+          state.chrome[region] = cb.checked;
+          sheet.chrome({ [region]: cb.checked });
+          sync();
+        });
+        l.append(cb, el("span", null, region));
+        chrome.append(l);
+      }
+
+      const calc = document.getElementById("calc");
+      for (const [mode, label] of [["auto", "Automatic"], ["manual", "Manual"]]) {
+        const b = el("button", "chip", label);
+        b.addEventListener("click", async () => {
+          state.calculation = mode;
+          await sheet.configure({ calculation: mode });
+          sync();
+        });
+        calc.append(b);
+      }
+
+      const access = document.getElementById("access");
+      for (const [mode, label] of [["edit", "Editable"], ["readOnly", "Read-only"], ["preview", "Preview"]]) {
+        const b = el("button", "chip", label);
+        b.addEventListener("click", async () => {
+          state.access = mode;
+          if (mode === "preview") {
+            await sheet.configure({ preview: true });
+            for (const r of CHROME) state.chrome[r] = false;
+          } else {
+            await sheet.configure({ readOnly: mode === "readOnly" });
+          }
+          for (const cb of chrome.querySelectorAll("input")) {
+            cb.checked = state.chrome[cb.nextSibling.textContent] ?? true;
+          }
+          sync();
+        });
+        access.append(b);
+      }
+
+      document.getElementById("hostile").addEventListener("change", (e) => {
+        document.body.classList.toggle("hostile", e.target.checked);
       });
-      on("t-violet", () => sheet.theme({ accent: "#7c3aed", "accent-hover": "#6d28d9" }));
-      on("t-paper", () => {
-        sheet.setColorScheme("light");
-        sheet.theme({ bg: "#fbf9f4", surface: "#f2eee4", card: "#fffdf8", accent: "#8a6a2f" });
-      });
-      on("t-dark", () => sheet.setColorScheme("dark"));
-      on("t-manual", () => sheet.configure({ calculation: "manual" }));
+
+      // --- live code --------------------------------------------------------
+      const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+      const hl = (src) =>
+        esc(src)
+          .replace(/(\/\/[^\n]*)/g, '<span class="c">$1</span>')
+          .replace(/("[^"]*")/g, '<span class="s">$1</span>')
+          .replace(/\b(import|from|await|const)\b/g, '<span class="k">$1</span>')
+          .replace(/\b(mount|theme|chrome|configure)\b(?=\()/g, '<span class="p">$1</span>');
+
+      function sync() {
+        for (const b of themes.children) {
+          b.setAttribute("aria-pressed", String(b.textContent.trim() === state.theme));
+        }
+        for (const b of schemes.children) {
+          b.setAttribute("aria-pressed", String(b.textContent.trim().toLowerCase() === state.scheme));
+        }
+        for (const b of calc.children) {
+          const mode = b.textContent === "Manual" ? "manual" : "auto";
+          b.setAttribute("aria-pressed", String(mode === state.calculation));
+        }
+        for (const b of access.children) {
+          const mode = { Editable: "edit", "Read-only": "readOnly", Preview: "preview" }[b.textContent];
+          b.setAttribute("aria-pressed", String(mode === state.access));
+        }
+        document.getElementById("calc-note").textContent =
+          state.calculation === "manual"
+            ? "Edits apply; formulas wait. The status bar reads Calculate until F9."
+            : "Recalculates after every edit that can change a value.";
+
+        const preset = THEMES[state.theme];
+        const hidden = CHROME.filter((r) => (state.chrome[r] ?? true) === false);
+        const lines = [
+          'import "@opencalc/sheet";',
+          "",
+          "<opencalc-sheet id=\"sheet\"></opencalc-sheet>",
+          "",
+          "const sheet = document.getElementById(\"sheet\");",
+        ];
+        if (preset) {
+          const block = (label, set) =>
+            [`  ${label}: {`]
+              .concat(Object.entries(set).map(([k, v]) => `    ${k}: "${v}",`))
+              .concat("  },")
+              .join("\n");
+          lines.push("", "sheet.resetTheme();");
+          lines.push("sheet.theme({", block("light", preset.light), block("dark", preset.dark), "});");
+        }
+        if (state.scheme !== "auto") lines.push("", `sheet.setColorScheme("${state.scheme}");`);
+        if (hidden.length) {
+          lines.push("", "sheet.chrome({");
+          for (const r of hidden) lines.push(`  ${r}: false,`);
+          lines.push("});");
+        }
+        if (state.calculation !== "auto") {
+          lines.push("", `await sheet.configure({ calculation: "${state.calculation}" });`);
+        }
+        if (state.access === "readOnly") lines.push("", "await sheet.configure({ readOnly: true });");
+        if (state.access === "preview") lines.push("", "await sheet.configure({ preview: true });");
+        document.getElementById("code").innerHTML = hl(lines.join("\n"));
+      }
+
+      sync();
     </script>
   </body>
 </html>

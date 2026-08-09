@@ -285,3 +285,45 @@ fn the_environment_is_supplied_rather_than_sampled() {
         CellValue::Number(45_100.0)
     );
 }
+
+#[test]
+fn a_read_only_session_refuses_every_write_path() {
+    // Not "hides the toolbar": a read-only mode enforced only in the UI is
+    // read-only until someone calls the API.
+    let mut session = WorkbookSession::blank_with(SessionConfig::new().read_only());
+    session
+        .workbook_mut()
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+
+    let write = || EditOperation::SetValue {
+        sheet: 0,
+        at: CellRef::new(0, 0),
+        value: CellValue::Number(1.0),
+    };
+    assert!(matches!(
+        session.edit(write()),
+        Err(crate::SdkError::ReadOnly)
+    ));
+    // ...including the path that bypasses undo, which is exactly where a
+    // documented bypass would undo the whole mode.
+    assert!(matches!(
+        session.apply_raw(write()),
+        Err(crate::SdkError::ReadOnly)
+    ));
+    assert!(session.is_read_only());
+    // Nothing was written, and nothing was recorded to undo.
+    assert_eq!(value(&session, CellRef::new(0, 0)), CellValue::Empty);
+    assert!(!session.can_undo());
+}
+
+#[test]
+fn a_read_only_session_still_reads_recalculates_and_saves() {
+    // A viewer that cannot compute or export is not a viewer, it is a picture.
+    let mut session = session_with_formula();
+    session.config_mut().read_only = true;
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+    session.recalculate();
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+    assert!(session.save().is_ok());
+}

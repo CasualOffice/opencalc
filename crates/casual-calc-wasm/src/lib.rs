@@ -3871,6 +3871,25 @@ pub fn session_set_clock(now_serial: f64, seed: f64) {
     });
 }
 
+/// Whether this session refuses edits.
+#[wasm_bindgen]
+pub fn session_read_only() -> bool {
+    with_session(|s| s.is_read_only()).unwrap_or(false)
+}
+
+/// Open the workbook for reading only, or release it.
+///
+/// Enforced in the engine, not by hiding chrome: the host hides what it likes,
+/// but an edit that reaches the session is refused whatever the UI is showing.
+#[wasm_bindgen]
+pub fn session_set_read_only(on: bool) {
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.config_mut().read_only = on;
+        }
+    });
+}
+
 /// The calculation mode in force: `"auto"` or `"manual"`.
 ///
 /// Resolved from the file's own `<calcPr calcMode>` on open, so a workbook

@@ -103,6 +103,14 @@ pub struct SessionConfig {
     /// holds a whole inverse operation, and a metadata edit's inverse is a
     /// snapshot of the sheet's metadata.
     pub undo_depth: Option<usize>,
+    /// Refuse every edit — a viewer rather than an editor.
+    ///
+    /// Enforced **here**, not by hiding buttons. A read-only mode that only
+    /// removes the toolbar is read-only until someone calls the API, which
+    /// makes it a suggestion rather than a mode. Reading, selecting, scrolling
+    /// and copying all still work: a viewer you cannot copy out of is hostile,
+    /// and copying changes nothing.
+    pub read_only: bool,
 }
 
 impl SessionConfig {
@@ -140,6 +148,13 @@ impl SessionConfig {
         self.limits = limits;
         self
     }
+
+    /// Open the workbook for reading only.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
 }
 
 /// An error from an SDK operation.
@@ -154,6 +169,8 @@ pub enum SdkError {
     Render(RenderError),
     /// An edit operation failed.
     Edit(TxnError),
+    /// The session is read-only and refused an edit.
+    ReadOnly,
 }
 
 impl core::fmt::Display for SdkError {
@@ -163,6 +180,7 @@ impl core::fmt::Display for SdkError {
             SdkError::Export(e) => write!(f, "{e}"),
             SdkError::Render(e) => write!(f, "{e}"),
             SdkError::Edit(e) => write!(f, "{e}"),
+            SdkError::ReadOnly => f.write_str("this workbook is open for reading only"),
         }
     }
 }
@@ -339,6 +357,12 @@ impl WorkbookSession {
     /// or geometry edits skip recalc entirely; structural edits (insert/delete
     /// rows or columns), which shift references workbook-wide, do a full recalc.
     pub fn edit(&mut self, op: Operation) -> Result<(), SdkError> {
+        // Before anything else, and before the history records a step: a
+        // refused edit must leave no trace, or undo has an entry that undoes
+        // nothing.
+        if self.config.read_only {
+            return Err(SdkError::ReadOnly);
+        }
         let plan = recalc_plan(&op);
         self.history.apply(&mut self.workbook, op)?;
         // Manual mode still applies the edit — it is calculation that is
@@ -405,9 +429,30 @@ impl WorkbookSession {
         }
     }
 
+    /// Whether this session refuses edits.
+    pub fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
+    /// Change the configuration of a live session.
+    ///
+    /// Mutable rather than replace-only because a host toggles read-only far
+    /// more often than it opens a workbook — a preview that becomes editable
+    /// once permissions load should not have to reopen the file to say so.
+    pub fn config_mut(&mut self) -> &mut SessionConfig {
+        &mut self.config
+    }
+
     /// Apply an edit without recording history (e.g. programmatic setup),
     /// returning the inverse operation.
+    ///
+    /// Refused in a read-only session too. This is the path a host reaches for
+    /// when it wants to bypass undo, and a read-only mode with a documented
+    /// bypass is not one.
     pub fn apply_raw(&mut self, op: Operation) -> Result<Operation, SdkError> {
+        if self.config.read_only {
+            return Err(SdkError::ReadOnly);
+        }
         Ok(apply(&mut self.workbook, op)?)
     }
 

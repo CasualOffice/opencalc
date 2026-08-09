@@ -16,8 +16,8 @@
 //   <opencalc-sheet></opencalc-sheet>
 //
 //   const sheet = document.querySelector("opencalc-sheet");
-//   sheet.theme({ accent: "#c026d3", bg: "#fbfbfd" });
-//   sheet.configure({ calculation: "manual" });
+//   sheet.theme({ accentColor: "#c026d3", backgroundColor: "#fbfbfd" });
+//   sheet.configure({ calculation: "manual", readOnly: true });
 //   await sheet.open(bytes);          // an .xlsx as a Uint8Array
 //   const saved = sheet.save();
 //
@@ -40,16 +40,34 @@ const CHROME_DEFAULT = { header: false };
 
 /// The theme tokens a host may set, without the `--oc-` prefix.
 ///
-/// Named rather than open-ended so a typo is a thrown error at the call site
-/// instead of a colour that silently does not change.
+/// Named rather than open-ended so a typo throws at the call site instead of
+/// silently not changing a colour. The names are **typed by suffix** — `Color`
+/// takes a colour, `Shadow` a box-shadow, `FontFamily` a font stack — which is
+/// AG Grid's convention and worth matching: `borderColor` cannot be mistaken
+/// for somewhere to put `1px solid red`.
+///
+/// Accepted in camelCase (`accentColor`) and written as kebab-case custom
+/// properties (`--oc-accent-color`), so the JS reads like JS and the CSS reads
+/// like CSS.
 const TOKENS = [
-  "bg", "fg", "icon", "muted", "faint", "disabled",
-  "border", "border-2", "border-hover", "surface", "card", "grid",
-  "accent", "accent-hover", "accent-ink", "sel-tint", "find-tint",
-  "ok", "danger", "freeze-line", "mono",
-  "table-header", "table-band", "tooltip-bg", "tooltip-fg",
-  "shadow-btn", "shadow-pop",
+  "backgroundColor", "textColor", "mutedTextColor", "faintTextColor",
+  "iconColor", "disabledColor",
+  "borderColor", "borderHoverColor", "controlBorderColor",
+  "surfaceColor", "popoverBackgroundColor", "gridlineColor",
+  "accentColor", "accentHoverColor", "accentContrastColor",
+  "selectionColor", "findHighlightColor", "freezeLineColor",
+  "successColor", "dangerColor",
+  "tableHeaderColor", "tableBandColor",
+  "tooltipBackgroundColor", "tooltipTextColor",
+  "controlShadow", "popoverShadow", "monoFontFamily",
 ];
+
+/// `accentColor` -> `--oc-accent-color`.
+const cssVar = (name) => "--oc-" + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+
+/// The one stylesheet object every mount adopts. Null where constructable
+/// stylesheets are unavailable, in which case each root gets its own `<style>`.
+let sharedSheet = null;
 
 /// Fetch the editor's markup and stylesheet once, however many elements mount.
 let assets = null;
@@ -58,7 +76,13 @@ function loadAssets() {
     assets = Promise.all([
       fetch(new URL(`editor.html?v=${BUILD}`, HERE)).then((r) => r.text()),
       fetch(new URL(`editor.css?v=${BUILD}`, HERE)).then((r) => r.text()),
-    ]).then(([html, css]) => ({ markup: bodyOf(html), css }));
+    ]).then(([html, css]) => {
+      if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
+        sharedSheet = new CSSStyleSheet();
+        sharedSheet.replaceSync(css);
+      }
+      return { markup: bodyOf(html), css };
+    });
   }
   return assets;
 }
@@ -80,11 +104,22 @@ function bodyOf(html) {
 class OpenCalcSheet extends HTMLElement {
   #shell = null;
   #ready = null;
+  /// Host-supplied tokens, kept per scheme — see `theme()`.
+  #tokens = { light: {}, dark: {} };
+  #watchScheme = null;
   #editor = null;
   #chrome = { ...CHROME_DEFAULT };
 
   connectedCallback() {
     if (!this.#ready) this.#ready = this.#mount();
+    // Follow the OS while no explicit scheme is set, so a host that supplied a
+    // dark palette gets it when the user's machine turns dark at sunset.
+    if (!this.#watchScheme) {
+      this.#watchScheme = matchMedia("(prefers-color-scheme: dark)");
+      this.#watchScheme.addEventListener("change", () => {
+        if (!this.hasAttribute("data-theme")) this.#applyTokens();
+      });
+    }
   }
 
   async #mount() {
@@ -98,9 +133,17 @@ class OpenCalcSheet extends HTMLElement {
     // cell's font render the same on a machine that has none of them.
     hoistFontFaces(css);
 
-    const style = document.createElement("style");
-    style.textContent = css;
-    root.append(style);
+    // One `CSSStyleSheet` shared by every mount rather than a `<style>` each.
+    // This is the duplication AG Grid warns about in shadow DOM: four editors on
+    // a page would otherwise parse the whole stylesheet four times. Adopting a
+    // single sheet also means a change to it reaches every instance at once.
+    if (sharedSheet) {
+      root.adoptedStyleSheets = [sharedSheet];
+    } else {
+      const style = document.createElement("style");
+      style.textContent = css;
+      root.append(style);
+    }
 
     const shell = document.createElement("div");
     shell.className = "editor-body";
@@ -151,25 +194,80 @@ class OpenCalcSheet extends HTMLElement {
     }
   }
 
-  /// Set theme tokens: `{ accent: "#c026d3", bg: "#fff" }`.
+  /// Set theme tokens.
   ///
-  /// Written onto this element, where they cross the shadow boundary as custom
-  /// properties do. Anything not named keeps the editor's own default, so a
-  /// host overrides two colours rather than restating thirty.
+  ///   sheet.theme({ accentColor: "#7c3aed" });                 // both schemes
+  ///   sheet.theme({ light: { backgroundColor: "#fbf9f4" },     // per scheme
+  ///                 dark:  { backgroundColor: "#171512" } });
+  ///
+  /// The per-scheme form exists because the flat one cannot express it. Tokens
+  /// are written as inline custom properties on this element, and an inline
+  /// style beats every rule in the stylesheet — including the dark-mode block.
+  /// So a host that set `backgroundColor` once got that colour in dark mode
+  /// too, and its careful dark palette silently did nothing. Here the element
+  /// keeps both sets and writes whichever the effective scheme calls for,
+  /// re-applying when the scheme changes under it.
+  ///
+  /// Calls **merge**, so setting one token does not restate the other
+  /// twenty-six. `null` clears a single token back to the editor's own
+  /// default, and [`resetTheme`](#resetTheme) clears the lot.
+  ///
+  /// Tokens are validated: a typo throws rather than quietly not changing a
+  /// colour.
   theme(tokens) {
-    for (const [name, value] of Object.entries(tokens)) {
-      if (!TOKENS.includes(name)) {
-        throw new Error(
-          `unknown OpenCalc theme token "${name}" — one of: ${TOKENS.join(", ")}`,
-        );
+    const scoped = tokens && (tokens.light || tokens.dark);
+    if (scoped) {
+      this.#tokens.light = { ...this.#tokens.light, ...(tokens.light ?? {}) };
+      this.#tokens.dark = { ...this.#tokens.dark, ...(tokens.dark ?? {}) };
+    } else {
+      for (const scheme of ["light", "dark"]) {
+        this.#tokens[scheme] = { ...this.#tokens[scheme], ...tokens };
       }
-      if (value === null) this.style.removeProperty(`--oc-${name}`);
-      else this.style.setProperty(`--oc-${name}`, value);
+    }
+    for (const set of [tokens?.light, tokens?.dark, scoped ? null : tokens]) {
+      for (const name of Object.keys(set ?? {})) {
+        if (!TOKENS.includes(name)) {
+          throw new Error(
+            `unknown OpenCalc theme token "${name}" — one of: ${TOKENS.join(", ")}`,
+          );
+        }
+      }
+    }
+    this.#applyTokens();
+    return this;
+  }
+
+  /// Drop every host-supplied token and go back to the editor's own palette.
+  ///
+  /// Needed because `theme()` merges: without this there is no way to undo a
+  /// preset, and a host offering a theme picker would accumulate whatever
+  /// every previously-chosen theme happened to set.
+  resetTheme() {
+    this.#tokens = { light: {}, dark: {} };
+    this.#applyTokens();
+    return this;
+  }
+
+  /// Which scheme is actually in force: the attribute if set, else the host's
+  /// `prefers-color-scheme`.
+  get #effectiveScheme() {
+    const attr = this.getAttribute("data-theme");
+    if (attr === "light" || attr === "dark") return attr;
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  #applyTokens() {
+    const set = this.#tokens[this.#effectiveScheme];
+    // Every known token is cleared first, so switching schemes does not leave
+    // the other one's colours behind on tokens the new set does not mention.
+    for (const name of TOKENS) this.style.removeProperty(cssVar(name));
+    for (const [name, value] of Object.entries(set)) {
+      if (value !== null && value !== undefined) this.style.setProperty(cssVar(name), value);
     }
     // The canvas caches the resolved tokens: it paints thousands of cells a
-    // frame and cannot re-read the computed style for each. Without this the
-    // chrome would restyle instantly and the grid would keep the old colours
-    // until something else forced a repaint.
+    // frame and cannot re-read a computed style per cell. Without this the
+    // chrome restyles instantly and the grid keeps the old colours until
+    // something else forces a repaint.
     this.#editor?.refreshTheme?.();
   }
 
@@ -180,16 +278,33 @@ class OpenCalcSheet extends HTMLElement {
   setColorScheme(scheme) {
     if (scheme === "auto") this.removeAttribute("data-theme");
     else this.setAttribute("data-theme", scheme);
-    this.#editor?.refreshTheme?.();
+    // Re-applies the per-scheme tokens, not merely the stylesheet's.
+    this.#applyTokens();
+    return this;
   }
 
   /// Engine configuration — the host-facing knobs, by the same names the Rust
   /// `SessionConfig` uses.
   ///
-  ///   { calculation: "auto" | "manual" }
+  ///   {
+  ///     calculation: "auto" | "manual",
+  ///     readOnly: boolean,          // refused in the engine, not by hiding chrome
+  ///   }
+  ///
+  /// `preview: true` is shorthand for a read-only sheet with no chrome at all —
+  /// a thumbnail someone can still scroll and copy out of. One concept rather
+  /// than two, so the two cannot disagree.
   async configure(options = {}) {
     const editor = await this.ready;
-    if (options.calculation) editor.wasmApi().session_set_calculation_mode(options.calculation);
+    if (options.calculation) {
+      editor.wasmApi().session_set_calculation_mode(options.calculation);
+    }
+    if (options.preview) {
+      editor.setReadOnly(true);
+      this.chrome(Object.fromEntries(CHROME.map((r) => [r, false])));
+    } else if (options.readOnly !== undefined) {
+      editor.setReadOnly(options.readOnly);
+    }
     return this;
   }
 

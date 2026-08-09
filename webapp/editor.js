@@ -642,26 +642,26 @@ const css = (name) =>
 let colors = {};
 function readColors() {
   colors = {
-    bg: css("--oc-bg") || "#fff",
-    fg: css("--oc-fg") || "#0b0d12",
-    muted: css("--oc-muted") || "#7b8391",
-    grid: css("--oc-grid") || "#f0f1f4",
-    headerBg: css("--oc-surface") || "#f6f7f9",
-    accent: css("--oc-accent") || "#2f6df6",
-    sel: css("--oc-sel-tint") || "rgba(47,109,246,.10)",
+    bg: css("--oc-background-color") || "#fff",
+    fg: css("--oc-text-color") || "#0b0d12",
+    muted: css("--oc-muted-text-color") || "#7b8391",
+    grid: css("--oc-gridline-color") || "#f0f1f4",
+    headerBg: css("--oc-surface-color") || "#f6f7f9",
+    accent: css("--oc-accent-color") || "#2f6df6",
+    sel: css("--oc-selection-color") || "rgba(47,109,246,.10)",
     // Distinct from the selection tint: a find hit and the active cell must not
     // read as the same thing.
-    findHit: css("--oc-find-tint") || "rgba(245,158,11,.28)",
+    findHit: css("--oc-find-highlight-color") || "rgba(245,158,11,.28)",
     // Table banding. Deliberately faint and theme-derived: a band is a reading
     // aid, and one strong enough to compete with a fill or a conditional
     // format would make the user's own formatting harder to see, not easier.
-    tableHeader: css("--oc-table-header") || "rgba(47,109,246,.16)",
-    tableBand: css("--oc-table-band") || "rgba(127,140,170,.09)",
+    tableHeader: css("--oc-table-header-color") || "rgba(47,109,246,.16)",
+    tableBand: css("--oc-table-band-color") || "rgba(127,140,170,.09)",
     // Read from the theme rather than hardcoded: the freeze divider sits on the
     // grid, so it has to darken and lighten with it. `colors.freezeLine` was
     // already consulted at the draw site but never populated here, so the
     // fallback was always what showed.
-    freezeLine: css("--oc-freeze-line") || "#5f6368",
+    freezeLine: css("--oc-freeze-line-color") || "#5f6368",
   };
 }
 
@@ -2239,7 +2239,7 @@ function draw() {
       const lw = colWAt(lk.c), lh = rowHAt(lk.r);
       withQuad(lk.r, lk.c, () => {
         ctx.strokeStyle = getComputedStyle(ocThemeHost)
-          .getPropertyValue("--oc-accent").trim() || "#3b82f6";
+          .getPropertyValue("--oc-accent-color").trim() || "#3b82f6";
         ctx.lineWidth = 1;
         ctx.beginPath();
         // Sit the rule on the text baseline rather than the cell floor, or it
@@ -5421,6 +5421,21 @@ function recalculateNow() {
   status.textContent = "recalculated";
 }
 
+/// Whether the session refuses edits.
+function readOnly() {
+  try { return wasm.session_read_only(); } catch { return false; }
+}
+
+/// Open the workbook for reading only, or release it.
+export function setReadOnly(on) {
+  try { wasm.session_set_read_only(!!on); } catch (e) { statusError(errText(e)); return; }
+  // Editing chrome is pointless in a viewer, but hiding it is the *host's*
+  // call — the engine's refusal is what makes the mode real, so here we only
+  // repaint and let the mode word say so.
+  invalidateGrowth();
+  draw();
+}
+
 // Whether an edit is waiting on a manual calculation, for the status bar —
 // Excel writes "Calculate" there and it is the only cue that what is on screen
 // is not what the formulas say.
@@ -6511,7 +6526,7 @@ function bdIcon(kind) {
     diagdown: ["diagDown"], diagup: ["diagUp"], diagboth: ["diagDown", "diagUp"], nodiag: [],
   }[kind] || [];
   let faint = "";
-  for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--oc-border)" stroke-width="1"/>`;
+  for (const k in seg) faint += `<path d="${seg[k]}" stroke="var(--oc-border-color)" stroke-width="1"/>`;
   let strong = "";
   for (const k of bold) strong += `<path d="${seg[k]}" stroke="currentColor" stroke-width="2"/>`;
   const clear = kind === "none" || kind === "nodiag"
@@ -6568,7 +6583,7 @@ function buildBorderMenu() {
       sw.querySelectorAll(".bd-color").forEach((x) => x.classList.remove("on"));
       b.classList.add("on");
       const btn = byId("tb-border");
-      btn.style.setProperty("--oc-bd-color", c ? "#" + c : "currentColor");
+      btn.style.setProperty("--oc-x-border-swatch", c ? "#" + c : "currentColor");
     });
     sw.appendChild(b);
   }
@@ -6845,6 +6860,13 @@ let editMode = "Enter";
 let editHome = null;
 
 function beginEdit(surface, initial, caretAtEnd = false) {
+  // A read-only session refuses the write anyway; refusing here means the user
+  // is told before typing rather than after, which is the difference between a
+  // mode and a trap.
+  if (readOnly()) {
+    statusError("this workbook is open for reading only");
+    return;
+  }
   // A pivot's report is written by the engine and rewritten on every refresh.
   // Excel refuses the edit rather than letting a typed value stand until an
   // unrelated action wipes it, and so does this — a value that survives only
@@ -7360,6 +7382,7 @@ function updateCellMode() {
   // one, and it is the only cue that what is on screen is not what the
   // formulas say. Without it, turning calculation off looks like the sheet has
   // stopped working.
+  else if (readOnly()) mode = "Read-only";
   else if (needsRecalc()) mode = "Calculate";
   if (modeEl.textContent !== mode) modeEl.textContent = mode;
 }
@@ -8153,7 +8176,7 @@ function renderTabs() {
     let tc = "";
     try { tc = wasm.session_tab_color(i); } catch (_) {}
     if (tc) {
-      b.style.setProperty("--oc-tab-color", "#" + tc);
+      b.style.setProperty("--oc-x-tab-color", "#" + tc);
       b.classList.add("colored");
     }
     if (prot[i]) {
@@ -9565,11 +9588,29 @@ function wireEvents() {
     const r = btn.getBoundingClientRect();
     menu.style.left = "0px";
     menu.style.top = "0px";
+    menu.style.maxHeight = "";
     const mw = menu.offsetWidth, mh = menu.offsetHeight;
     let left = r.left;
-    let top = r.bottom + 4;
     if (left + mw > window.innerWidth - 4) left = Math.max(4, window.innerWidth - 4 - mw);
-    if (top + mh > window.innerHeight - 4) top = Math.max(4, r.top - 4 - mh);
+
+    // Below the button if it fits, above if that fits better, and **clamped**
+    // if neither does.
+    //
+    // It used to flip up unconditionally and clamp the result to 4px, which put
+    // the tallest menu — Format — at the very top of the page, nowhere near the
+    // button that opened it. Embedding made it routine rather than rare: an
+    // editor half-way down a page has little room below and a menu taller than
+    // the space above it.
+    const below = window.innerHeight - 4 - (r.bottom + 4);
+    const above = r.top - 8;
+    let top;
+    if (mh <= below || below >= above) {
+      top = r.bottom + 4;
+      if (mh > below) menu.style.maxHeight = Math.max(120, below) + "px";
+    } else {
+      top = Math.max(4, r.top - 4 - Math.min(mh, above));
+      if (mh > above) menu.style.maxHeight = Math.max(120, above) + "px";
+    }
     menu.style.left = left + "px";
     menu.style.top = top + "px";
   }
@@ -9622,7 +9663,7 @@ function wireEvents() {
     const sel = menu.querySelector(".bd-style");
     if (sel) sel.value = borderStyle;
     const btn = byId("tb-border");
-    btn.style.setProperty("--oc-bd-color", borderColor ? "#" + borderColor : "currentColor");
+    btn.style.setProperty("--oc-x-border-swatch", borderColor ? "#" + borderColor : "currentColor");
   }
   {
     const btn = byId("tb-border");
@@ -10043,7 +10084,7 @@ function wireEvents() {
     function showAbout() {
       showModal("About OpenCalc",
         `<p>OpenCalc — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
-         <p style="margin-top:10px;color:var(--oc-muted)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
+         <p style="margin-top:10px;color:var(--oc-muted-text-color)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
     }
 
     const MENUS = [
@@ -10472,7 +10513,7 @@ function applyTheme(theme) {
 }
 
 function applyAccent(color) {
-  ocThemeHost.style.setProperty("--oc-accent", color);
+  ocThemeHost.style.setProperty("--oc-accent-color", color);
   localStorage.setItem("oc-accent", color);
   for (const b of qsa("#set-accent button")) {
     b.setAttribute("aria-current", b.dataset.c === color ? "true" : "false");
@@ -10618,13 +10659,23 @@ export function openBytes(raw, name = "workbook.xlsx") {
 /// Re-read the theme tokens and repaint.
 ///
 /// The canvas caches them: it paints thousands of cells a frame and cannot ask
-/// for a computed style per cell. So a host changing `--oc-accent` restyles the
+/// for a computed style per cell. So a host changing `--oc-accent-color` restyles the
 /// chrome instantly and would leave the grid on the old colours until something
 /// else forced a repaint — this is what closes that gap.
 export function refreshTheme() {
   readColors();
   invalidateGrowth();
   draw();
+}
+
+/// Re-measure and repaint after the element's box changed.
+///
+/// Hiding a chrome region gives the grid more room, and the canvas is sized in
+/// device pixels from a measured box — so without this the grid keeps the old
+/// height and leaves a gap where the toolbar used to be.
+export function relayout() {
+  invalidateGrowth();
+  resize();
 }
 
 /// The raw engine bindings, for a host that needs something the element does
