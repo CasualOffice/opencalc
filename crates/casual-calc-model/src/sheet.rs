@@ -171,6 +171,9 @@ pub struct Sheet {
     /// Cell comments / notes, keyed by cell address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<CellComment>,
+    /// Hyperlinks over cells or ranges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hyperlinks: Vec<Hyperlink>,
     /// The autofilter over a header range, if one is turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<AutoFilter>,
@@ -483,6 +486,35 @@ impl AutoFilter {
     pub fn is_active(&self) -> bool {
         !self.rules.is_empty()
     }
+}
+
+/// A hyperlink over a cell or range.
+///
+/// A link is external, internal, or both. An **external** one resolves through
+/// the worksheet's relationships to a URI; an **internal** one carries a
+/// `location` naming somewhere in this workbook (`Sheet2!A1`, or a defined
+/// name) and needs no relationship at all. Modelling them as one type with two
+/// optional destinations matches the schema, where `r:id` and `location` are
+/// independent attributes — a link can carry both, meaning "open this document
+/// at that anchor".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Hyperlink {
+    /// The cells the link covers. Often a single cell, but a range is legal.
+    pub range: CellRange,
+    /// The external target URI, resolved from the relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// An anchor within the target, or within this workbook when there is no
+    /// external target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Hover text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
+    /// The `display` attribute Excel writes alongside the cell's own text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 /// A comment thread attached to a cell: an opening remark plus any replies.
@@ -896,6 +928,7 @@ impl Sheet {
             validations: Vec::new(),
             conditional_formats: Vec::new(),
             comments: Vec::new(),
+            hyperlinks: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,
             auto_filter: None,

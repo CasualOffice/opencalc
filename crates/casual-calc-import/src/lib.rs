@@ -556,6 +556,41 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
             }
         }
 
+        // Hyperlinks: the `ref` and `location` are in the worksheet, but an
+        // external target lives in the sheet's relationships and is reachable
+        // only through the link's own `r:id`. Resolving the two here keeps the
+        // model free of relationship ids, which are a packaging detail with no
+        // meaning once the file is open.
+        if !worksheet.hyperlinks.is_empty() {
+            let rels = package.relationships_of(&part, &OoxmlLimits::default())?;
+            for raw in &worksheet.hyperlinks {
+                let Some(range) = parse_range(&raw.reference) else {
+                    continue;
+                };
+                let target = raw.rel_id.as_ref().and_then(|id| {
+                    rels.iter()
+                        .find(|r| &r.id == id)
+                        // Only an external relationship is a link destination;
+                        // an internal one points at a part in the package,
+                        // which is not something to navigate to.
+                        .filter(|r| r.external)
+                        .map(|r| r.target.clone())
+                });
+                if target.is_none() && raw.location.is_none() {
+                    // Neither destination resolved, so there is nothing to link
+                    // to; keeping it would render as a dead link.
+                    continue;
+                }
+                sheet.hyperlinks.push(casual_calc_model::Hyperlink {
+                    range,
+                    target,
+                    location: raw.location.clone(),
+                    tooltip: raw.tooltip.clone(),
+                    display: raw.display.clone(),
+                });
+            }
+        }
+
         // Threaded comments (the 2018 parts) carry the timestamps, the replies
         // and the resolved flag. Excel writes a legacy note alongside them for
         // readers that predate the schema, so a cell can appear in both parts —

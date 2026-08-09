@@ -15,6 +15,13 @@ pub struct Relationship {
     pub rel_type: String,
     /// The target part, relative to the source part (`Target`).
     pub target: String,
+    /// `TargetMode`: `External` when the target is a URI rather than a part in
+    /// this package.
+    ///
+    /// Essential for hyperlinks, where it is the only thing distinguishing a
+    /// web address from a path inside the zip. Resolving an external target as
+    /// a part path silently mangles the URL.
+    pub external: bool,
 }
 
 /// A `<sheet>` reference from `workbook.xml`, before its part is resolved.
@@ -105,10 +112,13 @@ pub fn parse_relationships(
             let id = attr_value(e, b"Id")?.unwrap_or_default();
             let rel_type = attr_value(e, b"Type")?.unwrap_or_default();
             let target = attr_value(e, b"Target")?.unwrap_or_default();
+            let external =
+                attr_value(e, b"TargetMode")?.is_some_and(|m| m.eq_ignore_ascii_case("External"));
             rels.push(Relationship {
                 id,
                 rel_type,
                 target,
+                external,
             });
         }
         Ok(())

@@ -1165,3 +1165,77 @@ fn quote_prefix_and_protection_flags_round_trip() {
     assert_eq!(style_of(1).locked, Some(false));
     assert_eq!(style_of(1).formula_hidden, Some(true));
 }
+
+#[test]
+fn hyperlinks_round_trip_with_their_targets() {
+    use casual_calc_model::{CellRange, CellRef, Hyperlink};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let cell = |r: u32, c: u32| CellRange {
+        start: CellRef::new(r, c),
+        end: CellRef::new(r, c),
+    };
+    wb.sheets[0].hyperlinks = vec![
+        Hyperlink {
+            range: cell(0, 0),
+            target: Some("https://example.com/a?x=1&y=2".to_owned()),
+            location: None,
+            tooltip: Some("Open the report".to_owned()),
+            display: Some("Report".to_owned()),
+        },
+        // Internal: no relationship at all, just a location in this workbook.
+        Hyperlink {
+            range: cell(1, 0),
+            target: None,
+            location: Some("Sheet1!A5".to_owned()),
+            tooltip: None,
+            display: None,
+        },
+        // A second cell pointing at the *same* external address.
+        Hyperlink {
+            range: cell(2, 0),
+            target: Some("https://example.com/a?x=1&y=2".to_owned()),
+            location: None,
+            tooltip: None,
+            display: None,
+        },
+    ];
+
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    // Without TargetMode="External" the URI is re-read as a path inside the
+    // package, which destroys the link.
+    assert!(rels.contains("TargetMode=\"External\""));
+    assert_eq!(
+        rels.matches("/hyperlink\"").count(),
+        1,
+        "two cells sharing an address need one relationship, not two: {rels}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].hyperlinks, wb.sheets[0].hyperlinks);
+}
+
+#[test]
+fn a_sheet_with_links_and_no_notes_still_gets_its_rels_part() {
+    use casual_calc_model::{CellRange, CellRef, Hyperlink};
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    assert!(wb.sheets[0].comments.is_empty());
+    wb.sheets[0].hyperlinks = vec![Hyperlink {
+        range: CellRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(0, 0),
+        },
+        target: Some("https://example.com".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    }];
+    let written = write_workbook(&wb).unwrap();
+    // The rels part used to be written only for comments; a link's target lives
+    // nowhere else, so without it the destination is simply gone.
+    let rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(rels.contains("https://example.com"));
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].hyperlinks.len(), 1);
+}

@@ -97,22 +97,26 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
     // note markers), and the per-sheet rels that tie them to the worksheet.
     for (i, sheet) in workbook.sheets.iter().enumerate() {
-        if sheet.comments.is_empty() {
+        if sheet.comments.is_empty() && sheet.hyperlinks.is_empty() {
             continue;
         }
         let n = i + 1;
-        parts.push((format!("xl/comments{n}.xml"), comments_xml(sheet)));
-        parts.push((format!("xl/drawings/vmlDrawing{n}.vml"), vml_drawing(sheet)));
         let threaded = sheet.comments.iter().any(|c| c.is_threaded());
-        if threaded {
-            parts.push((
-                format!("xl/threadedComments/threadedComment{n}.xml"),
-                threaded_comments_xml(workbook, i),
-            ));
+        if !sheet.comments.is_empty() {
+            parts.push((format!("xl/comments{n}.xml"), comments_xml(sheet)));
+            parts.push((format!("xl/drawings/vmlDrawing{n}.vml"), vml_drawing(sheet)));
+            if threaded {
+                parts.push((
+                    format!("xl/threadedComments/threadedComment{n}.xml"),
+                    threaded_comments_xml(workbook, i),
+                ));
+            }
         }
+        // Written for hyperlinks too: their targets live only in this part, so
+        // a sheet with links and no notes still needs it.
         parts.push((
             format!("xl/worksheets/_rels/sheet{n}.xml.rels"),
-            sheet_rels(n, threaded),
+            sheet_rels(sheet, n, threaded),
         ));
     }
     if any_threaded(workbook) {
@@ -350,20 +354,53 @@ fn vml_drawing(sheet: &Sheet) -> String {
 
 /// The `xl/worksheets/_rels/sheet{n}.xml.rels`: links the VML drawing and the
 /// comments part to the worksheet.
-fn sheet_rels(n: usize, threaded: bool) -> String {
-    let tc = if threaded {
-        format!(
-            "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        "{DECL}<Relationships xmlns=\"{NS_REL}\">\
-<Relationship Id=\"rId1\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
-<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>{tc}\
-</Relationships>"
-    )
+fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool) -> String {
+    let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
+    if !sheet.comments.is_empty() {
+        s.push_str(&format!(
+            "<Relationship Id=\"rId1\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
+<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>"
+        ));
+        if threaded {
+            s.push_str(&format!(
+                "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
+            ));
+        }
+    }
+    // A hyperlink target is `TargetMode="External"`: without that the URI is
+    // read back as a path inside the package and the link is destroyed.
+    for (i, target) in external_targets(sheet).iter().enumerate() {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
+            hyperlink_rel_id(i),
+            escape_attr(target)
+        ));
+    }
+    s.push_str("</Relationships>");
+    s
+}
+
+/// The distinct external targets a sheet links to, in first-use order.
+///
+/// Deduplicated because a workbook linking to the same address from fifty cells
+/// should carry one relationship, not fifty; Excel writes it that way and the
+/// rels part is otherwise mostly repetition.
+fn external_targets(sheet: &Sheet) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in &sheet.hyperlinks {
+        if let Some(target) = &link.target
+            && !out.contains(target)
+        {
+            out.push(target.clone());
+        }
+    }
+    out
+}
+
+/// The relationship id for the nth external hyperlink target. Numbered apart
+/// from the fixed rIds the comment parts use so the two cannot collide.
+fn hyperlink_rel_id(index: usize) -> String {
+    format!("rIdHl{}", index + 1)
 }
 
 /// Whether any sheet holds a thread that needs the 2018 parts.
@@ -1334,6 +1371,32 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             s.push_str("</dataValidation>");
         }
         s.push_str("</dataValidations>");
+    }
+
+    // `<hyperlinks>` sits after `dataValidations` and before `printOptions` in
+    // CT_Worksheet's sequence; out of order the package fails validation.
+    if !sheet.hyperlinks.is_empty() {
+        let targets = external_targets(sheet);
+        s.push_str("<hyperlinks>");
+        for link in &sheet.hyperlinks {
+            s.push_str(&format!("<hyperlink ref=\"{}\"", range_a1(&link.range)));
+            if let Some(target) = &link.target
+                && let Some(i) = targets.iter().position(|t| t == target)
+            {
+                s.push_str(&format!(" r:id=\"{}\"", hyperlink_rel_id(i)));
+            }
+            if let Some(location) = &link.location {
+                s.push_str(&format!(" location=\"{}\"", escape_attr(location)));
+            }
+            if let Some(display) = &link.display {
+                s.push_str(&format!(" display=\"{}\"", escape_attr(display)));
+            }
+            if let Some(tooltip) = &link.tooltip {
+                s.push_str(&format!(" tooltip=\"{}\"", escape_attr(tooltip)));
+            }
+            s.push_str("/>");
+        }
+        s.push_str("</hyperlinks>");
     }
 
     // Legacy drawing ref (the VML holding note markers) — last in the sequence.

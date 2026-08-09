@@ -4,7 +4,9 @@ use casual_calc_package::Package;
 
 use crate::error::OoxmlError;
 use crate::limits::OoxmlLimits;
-use crate::opc::{parse_relationships, parse_sheet_refs, rels_part_for, resolve_target};
+use crate::opc::{
+    Relationship, parse_relationships, parse_sheet_refs, rels_part_for, resolve_target,
+};
 
 const ROOT_RELS: &str = "_rels/.rels";
 const OFFICE_DOCUMENT_SUFFIX: &str = "/officeDocument";
@@ -123,6 +125,24 @@ impl SpreadsheetPackage {
             .find(|r| r.rel_type.ends_with(rel_type_suffix))
             .map(|r| resolve_target(part, &r.target));
         Ok(target)
+    }
+
+    /// Every relationship declared by a part, by id.
+    ///
+    /// [`related_part`](Self::related_part) finds the one relationship of a
+    /// given type; a worksheet's hyperlinks each name their own `r:id`, so they
+    /// need the whole table rather than a lookup by type.
+    pub fn relationships_of(
+        &mut self,
+        part: &str,
+        limits: &OoxmlLimits,
+    ) -> Result<Vec<Relationship>, OoxmlError> {
+        let rels_part = rels_part_for(part);
+        if !self.package.contains(&rels_part) {
+            return Ok(Vec::new());
+        }
+        let xml = self.package.read_part(&rels_part)?;
+        parse_relationships(&xml, limits)
     }
 
     /// Consume this inspector, returning the underlying package.

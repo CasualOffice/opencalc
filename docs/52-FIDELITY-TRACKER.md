@@ -49,9 +49,9 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 
 | Signal | Baseline | Current |
 | --- | --- | --- |
-| Structural coverage | 54.8% | 54.8% |
+| Structural coverage | 54.8% | 55.8% |
 | Function coverage | 22.8% | 32.3% |
-| **P0 destructive remaining** | 8 | 7 |
+| **P0 destructive remaining** | 8 | 6 |
 | P1 visible-loss remaining | 13 | 13 |
 | P2 compatibility remaining | 4 | 4 |
 
@@ -72,7 +72,7 @@ invisible until someone reopens the file.
 
 | ID | Construct | Sev | Status | Note |
 | --- | --- | --- | --- | --- |
-| FID-01 | Hyperlinks: `hyperlink`, `hyperlinks`, and the sheet rels that hold the targets | P0 | 🔴 | model + read/write + rels part |
+| FID-01 | Hyperlinks: `hyperlink`, `hyperlinks`, and the sheet rels that hold the targets | P0 | ✅ | Modelled as `Sheet::hyperlinks`, read and written with the sheet rels that carry the targets. A link is external, internal, or both, matching the schema where `r:id` and `location` are independent — one type with two optional destinations rather than an enum, since a link can legitimately carry both ("open that document at this anchor"). Relationship ids stay out of the model: they are a packaging detail with no meaning once the file is open, so the target is resolved on import and re-minted on export. **Three things this turned up.** `Relationship` had no `TargetMode`, which is the only thing separating a URL from a path inside the zip — resolving an external target as a part path mangles it silently. The sheet rels part was written *only* when a sheet had comments, so a sheet with links and no notes had nowhere to put its targets. And `<hyperlink>` is childless, so it arrives as `Event::Empty`; the worksheet walk keeps separate `Start` and `Empty` arms, and handling it only in `Start` would have read a workbook full of links as having none — the same trap that has now bitten four times. Targets are deduplicated: fifty cells linking to one address write one relationship. 2 tests. Structural 54.8% → 55.8% |
 | FID-02 | Rich text runs: `r`/`rPr` in `CT_Rst` — per-character formatting in a cell | P0 | 🔴 | `sst`, `comments`, inline strings; touches the renderer |
 | FID-03 | Tables / ListObjects: `xl/tables/*`, `tableParts`, `tableColumn(s)`, `tableStyleInfo`, `calculatedColumnFormula`, `totalsRowFormula` | P0 | 🔴 | also unblocks structured references |
 | FID-04 | `xf/@quotePrefix` — the marker forcing a numeric-looking value to stay text | P0 | ✅ | Modelled as `Style::quote_prefix`, read from `xf/@quotePrefix` and written back. Typing `'0123` now sets the marker rather than merely forcing text this once: without it the cell saves as a plain string and Excel re-reads it as the number 123 on the next open, which is the silent half of the corruption. The formula bar shows the apostrophe back, or opening the cell and pressing Enter would commit the bare text and drop the marker again. **Found while implementing**: `applyProtection` was never written, so the `<protection>` child carrying `locked`/`hidden` was being emitted and then ignored by Excel — the flag is what makes the child count, so cell protection had been round-tripping into a file that quietly disregards it. 2 tests |

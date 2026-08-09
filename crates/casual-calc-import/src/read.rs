@@ -322,6 +322,21 @@ pub fn parse_threaded_comments(xml: &[u8]) -> Result<Vec<RawThreadedComment>, Im
     Ok(out)
 }
 
+/// One `<hyperlink>` before its `r:id` is resolved against the sheet rels.
+#[derive(Debug, Clone)]
+pub struct RawHyperlink {
+    /// The `ref` range the link covers.
+    pub reference: String,
+    /// The relationship id naming an external target, when there is one.
+    pub rel_id: Option<String>,
+    /// An anchor inside the target, or inside this workbook.
+    pub location: Option<String>,
+    /// Hover text.
+    pub tooltip: Option<String>,
+    /// The `display` attribute.
+    pub display: Option<String>,
+}
+
 /// A parsed worksheet: its cells, merged ranges, frozen panes, and axis sizing.
 #[derive(Debug, Default)]
 pub struct Worksheet {
@@ -329,6 +344,8 @@ pub struct Worksheet {
     pub cells: Vec<RawCell>,
     /// Merged-range references (`A1:B2`).
     pub merges: Vec<String>,
+    /// Hyperlinks, still holding their relationship ids.
+    pub hyperlinks: Vec<RawHyperlink>,
     /// Frozen panes as `(frozen_rows, frozen_cols)`, if any.
     pub frozen: Option<(u32, u32)>,
     /// Default column width (twips), from `sheetFormatPr/@defaultColWidth`.
@@ -690,6 +707,22 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     }
                     b"is" => in_inline = true,
                     b"t" if in_inline => in_inline_text = true,
+                    // `<hyperlink>` is childless and self-closing in practice; the
+
+                    // worksheet walk folds Start and Empty together, so one arm covers it.
+                    b"hyperlink" => {
+                        result.hyperlinks.push(RawHyperlink {
+                            reference: read_attr(&e, b"ref")?.unwrap_or_default(),
+
+                            rel_id: read_attr(&e, b"id")?,
+
+                            location: read_attr(&e, b"location")?,
+
+                            tooltip: read_attr(&e, b"tooltip")?,
+
+                            display: read_attr(&e, b"display")?,
+                        });
+                    }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
@@ -767,6 +800,19 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             cell.formula.get_or_insert_with(String::new);
                             cell.shared_index = si;
                         }
+                    }
+                    // `<hyperlink>` is childless, so every writer self-closes
+                    // it and it only ever arrives here, never in the `Start`
+                    // dispatch. Handling it there alone would read a workbook
+                    // full of links as having none.
+                    b"hyperlink" => {
+                        result.hyperlinks.push(RawHyperlink {
+                            reference: read_attr(&e, b"ref")?.unwrap_or_default(),
+                            rel_id: read_attr(&e, b"id")?,
+                            location: read_attr(&e, b"location")?,
+                            tooltip: read_attr(&e, b"tooltip")?,
+                            display: read_attr(&e, b"display")?,
+                        });
                     }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
