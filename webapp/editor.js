@@ -1239,6 +1239,17 @@ function draw() {
       ctx.restore();
       continue;
     }
+    // Superscript / subscript on the *cell* font: drawn smaller and offset,
+    // and applied before measuring so the spill scan and alignment use the size
+    // actually drawn rather than the nominal one.
+    let supShift = 0;
+    if (it.sup) {
+      const px = Math.max(6, cellPx(it) * 0.72);
+      const weight = it.b ? "600 " : "";
+      const slant = it.i ? "italic " : "";
+      ctx.font = `${slant}${weight}${px}px ${fontStack(it.fn)}`;
+      supShift = it.sup === "superscript" ? -cellPx(it) * 0.32 : cellPx(it) * 0.18;
+    }
     let text = it.t;
     // Rich text is measured run by run: each has its own font, so measuring
     // the concatenation with the cell's font gives a width that is wrong
@@ -1330,13 +1341,27 @@ function draw() {
       ctx.restore();
       continue;
     }
-    ctx.fillText(text, tx, y);
+    ctx.fillText(text, tx, y + supShift);
     if (it.u || it.st) {
       const lw = Math.min(tw, clipR - clipL - 8);
       const lx = align === "right" ? tx - lw : align === "center" ? tx - lw / 2 : tx;
       ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth = 1;
-      if (it.u) { ctx.beginPath(); ctx.moveTo(lx, y + 7.5); ctx.lineTo(lx + lw, y + 7.5); ctx.stroke(); }
+      if (it.u) {
+        ctx.beginPath();
+        ctx.moveTo(lx, y + 7.5);
+        ctx.lineTo(lx + lw, y + 7.5);
+        ctx.stroke();
+        // A double or accounting underline is a second rule below the first.
+        // Drawing one line for all four kinds is what made a ledger's
+        // accounting underline read as an ordinary one.
+        if (it.uk === "double" || it.uk === "doubleAccounting") {
+          ctx.beginPath();
+          ctx.moveTo(lx, y + 10.5);
+          ctx.lineTo(lx + lw, y + 10.5);
+          ctx.stroke();
+        }
+      }
       if (it.st) { ctx.beginPath(); ctx.moveTo(lx, y); ctx.lineTo(lx + lw, y); ctx.stroke(); }
     }
     ctx.restore();
