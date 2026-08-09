@@ -131,6 +131,17 @@
           </div>
 
           <div class="card">
+            <h2>Language</h2>
+            <div class="row" id="locales"></div>
+            <p class="note">
+              Keyed by command id, which comes from the <b>English</b> label — so
+              translating never renumbers the command API. A key with no
+              translation falls back to English, which is why only part of this
+              menu changes.
+            </p>
+          </div>
+
+          <div class="card">
             <h2>Isolation</h2>
             <label class="check">
               <input type="checkbox" id="hostile" />
@@ -196,12 +207,27 @@
       const SCHEMES = ["auto", "light", "dark"];
       const CHROME = ["header", "menubar", "toolbar", "formulabar", "tabs", "statusbar"];
 
+      // A deliberately tiny German catalogue: enough to show that menus,
+      // submenus and the menu bar all follow, and that anything without a key
+      // stays in English rather than showing the key.
+      const DE = {
+        "command.file": "Datei", "command.edit": "Bearbeiten", "command.view": "Ansicht",
+        "command.insert": "Einfügen", "command.format": "Format", "command.data": "Daten",
+        "command.tools": "Extras", "command.help": "Hilfe",
+        "command.edit.undo": "Rückgängig", "command.edit.redo": "Wiederholen",
+        "command.edit.copy": "Kopieren", "command.edit.cut": "Ausschneiden",
+        "command.edit.paste": "Einfügen", "command.edit.select-all": "Alles auswählen",
+        "command.file.new": "Neu", "command.file.open": "Öffnen",
+        "command.insert.chart": "Diagramm", "command.insert.pivottable": "Pivot-Tabelle",
+      };
+
       const state = {
         theme: "Default",
         scheme: "auto",
         chrome: { header: false },
         calculation: "auto",
         access: "edit",
+        locale: "en-US",
       };
 
       // --- controls ---------------------------------------------------------
@@ -263,6 +289,17 @@
         calc.append(b);
       }
 
+      const locales = document.getElementById("locales");
+      for (const [code, label] of [["en-US", "English"], ["de-DE", "Deutsch"]]) {
+        const b = el("button", "chip", label);
+        b.addEventListener("click", async () => {
+          state.locale = code;
+          await sheet.configure({ messages: { "de-DE": DE }, locale: code });
+          sync();
+        });
+        locales.append(b);
+      }
+
       const access = document.getElementById("access");
       const ACCESS = [
         ["edit", "Edit"],
@@ -318,6 +355,10 @@
           b.setAttribute("aria-pressed", String(mode === state.access));
         }
         document.getElementById("access-note").textContent = ACCESS_NOTE[state.access];
+        for (const b of locales.children) {
+          const code = b.textContent === "Deutsch" ? "de-DE" : "en-US";
+          b.setAttribute("aria-pressed", String(code === state.locale));
+        }
         document.getElementById("calc-note").textContent =
           state.calculation === "manual"
             ? "Edits apply; formulas wait. The status bar reads Calculate until F9."
@@ -349,6 +390,10 @@
         }
         if (state.calculation !== "auto") {
           lines.push("", `await sheet.configure({ calculation: "${state.calculation}" });`);
+        }
+        if (state.locale !== "en-US") {
+          lines.push("", `await sheet.configure({`, `  locale: "${state.locale}",`,
+            "  messages: { \"de-DE\": { \"command.format.bold\": \"Fett\", … } },", "});");
         }
         if (state.access !== "edit") {
           lines.push("", `await sheet.configure({ access: "${state.access}" });`);

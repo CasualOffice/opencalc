@@ -198,7 +198,8 @@ sheet.<span class="f">resetTheme</span>();                              <span cl
 <pre>sheet.<span class="f">chrome</span>({ toolbar: <span class="k">false</span>, statusbar: <span class="k">false</span> });</pre>
         <p>
           <code>header</code>, <code>menubar</code>, <code>toolbar</code>,
-          <code>formulabar</code>, <code>tabs</code>, <code>statusbar</code>.
+          <code>formulabar</code>, <code>tabs</code>, <code>statusbar</code>,
+          <code>localePicker</code>.
           The app header is <b>off by default</b> when embedded — the brand mark
           and settings gear belong to our demo page, not to your product.
         </p>
@@ -245,15 +246,49 @@ sheet.<span class="f">resetTheme</span>();                              <span cl
         </div>
 
         <h2 id="i18n">Localization</h2>
+        <p>Two injection points, because they serve two different people.</p>
+        <p><b>You supply it</b>, when your product already knows the user's language:</p>
+<pre><span class="k">await</span> sheet.<span class="f">configure</span>({
+  locale: <span class="s">"de-DE"</span>,
+  messages: {
+    <span class="s">"de-DE"</span>: {
+      <span class="s">"command.file"</span>: <span class="s">"Datei"</span>,
+      <span class="s">"command.edit.undo"</span>: <span class="s">"Rückgängig"</span>,
+      <span class="s">"tip.toolbar.bold"</span>: <span class="s">"Fett"</span>,
+    },
+  },
+});</pre>
+        <p><b>The user chooses it</b>, from a control in the footer — off by default, because most hosts drive the language from their own account settings and a second control that disagrees with the first is worse than none:</p>
+<pre>sheet.<span class="f">chrome</span>({ localePicker: <span class="k">true</span> });</pre>
+
+        <h3>Message keys</h3>
         <p>
-          Supply a locale, and optionally override individual strings to match
-          your own glossary:
+          Keyed by <b>command id</b> — <code>command.format.alignment.left</code>
+          for a menu item, <code>tip.toolbar.bold</code> for a toolbar tooltip.
+          Ids come from the <i>English</i> label, so translating never renumbers
+          the command API: <code>format.bold</code> stays <code>format.bold</code>
+          for a German host and your <code>commands({ hidden })</code> lists keep
+          matching.
         </p>
-<pre>sheet.<span class="f">configure</span>({ locale: <span class="s">"de-DE"</span> });</pre>
         <p>
-          Number and date <b>display</b> already follows the format's own
-          language. Function <i>names</i> are not localized — <code>SUM</code>
-          is <code>SUM</code> everywhere. Doing that halfway is worse than not
+          A key with no translation falls back to the English string, so a
+          partial catalogue degrades to "some of it is translated" rather than
+          to visible keys. Alt mnemonics are recomputed per language — the
+          File menu is <code>Alt+F</code> in English and Datei is
+          <code>Alt+D</code> in German.
+        </p>
+
+        <div class="callout warn">
+          <p>
+            <b>Coverage today: menus, submenus and toolbar tooltips.</b> Panels,
+            dialogs and status messages are still English regardless of locale —
+            their catalogues are not written yet. Number and date <i>display</i>
+            already follows the format's own language and always has.
+          </p>
+        </div>
+        <p>
+          Function <i>names</i> are not localized — <code>SUM</code> is
+          <code>SUM</code> everywhere. Doing that halfway is worse than not
           doing it: someone who types <code>SUMME</code> and gets
           <code>#NAME?</code> concludes the feature is broken, and a file that
           stores a localized name is unreadable everywhere else.

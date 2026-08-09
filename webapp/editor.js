@@ -5418,6 +5418,141 @@ async function pivotDialog() {
   status.textContent = "drag a field into Values to see the report";
 }
 
+// --- Localization -------------------------------------------------------------
+//
+// Two injection points, because they serve two different people: a host that
+// already knows its user's language supplies one, and a user who wants to
+// choose picks from the footer.
+//
+// Messages are keyed by **command id**, which is derived from the *English*
+// label. That is deliberate and load-bearing: translating the labels must not
+// renumber the command API, so `commandId()` always sees English and only the
+// rendered text changes. Getting this backwards would mean `format.bold`
+// becoming `format.fett` for a German host, and every `commands({hidden})` list
+// silently ceasing to match.
+//
+// What is covered today: menu items, submenu headings and toolbar tooltips —
+// the labels a user reads constantly. Panels and dialogs are still English
+// until their catalogues are written; a missing key falls back to the English
+// string rather than showing a key, so partial coverage degrades to "some of it
+// is translated" rather than to gibberish.
+
+let locale = "en-US";
+const messages = new Map();
+
+/// Look a message up, falling back to the English text it was keyed from.
+function t(key, fallback) {
+  return messages.get(locale)?.[key] ?? fallback;
+}
+
+/// Install a catalogue. Merges, so a host can override three strings without
+/// restating the language.
+export function setMessages(forLocale, map) {
+  messages.set(forLocale, { ...(messages.get(forLocale) ?? {}), ...map });
+  relabel();
+}
+
+export function setLocale(next) {
+  locale = next || "en-US";
+  syncLocalePicker();
+  relabel();
+}
+
+/// Show or hide the footer language control, and fill it.
+export function setLocalePicker(on) {
+  const box = byId("locale-picker");
+  if (box) box.hidden = !on;
+  syncLocalePicker();
+}
+
+function syncLocalePicker() {
+  const select = byId("locale-select");
+  if (!select) return;
+  const locales = availableLocales();
+  if (select.options.length !== locales.length) {
+    select.textContent = "";
+    for (const code of locales) {
+      const option = document.createElement("option");
+      option.value = code;
+      // The language's own name where the platform knows it, because a picker
+      // that lists "German" to a German speaker is a picker for someone else.
+      let label = code;
+      try {
+        label = new Intl.DisplayNames([code], { type: "language" }).of(code.split("-")[0]) ?? code;
+      } catch { /* an unknown tag keeps its code, which is still choosable */ }
+      option.textContent = label;
+      select.append(option);
+    }
+    select.onchange = () => setLocale(select.value);
+  }
+  select.value = locale;
+}
+
+export function getLocale() {
+  return locale;
+}
+
+/// The locales a catalogue has been supplied for, plus the built-in one.
+export function availableLocales() {
+  return ["en-US", ...[...messages.keys()].filter((l) => l !== "en-US")].sort();
+}
+
+/// Which menu each Alt mnemonic opens. Rebuilt whenever the labels change,
+/// because a translated menu bar has different letters free.
+const menuMnemonics = new Map();
+
+/// Label the top-level menu bar and assign its Alt mnemonics.
+///
+/// Not always the first letter: File and Format both start with F, so the
+/// naive rule left Format unreachable *and* advertising a shortcut belonging to
+/// File. Take the first character not already claimed — which is how Windows
+/// menus have always assigned these, and which has to be recomputed per
+/// language rather than baked in at build time.
+function relabelMenubar() {
+  menuMnemonics.clear();
+  for (const btn of qsa(".menubar .menu-top")) {
+    const english = btn.dataset.ocLabel ?? btn.textContent;
+    const name = t(`command.${btn.dataset.ocCommand}`, english);
+    const index = Number(btn.dataset.ocMenuIndex ?? -1);
+    let at = [...name].findIndex((ch) => !menuMnemonics.has(ch.toLowerCase()));
+    if (at < 0) at = 0; // every letter taken: no mnemonic, but still labelled
+    const key = name[at].toLowerCase();
+    if (!menuMnemonics.has(key) && index >= 0) menuMnemonics.set(key, index);
+    // The letter is wrapped so it can be underlined without changing layout.
+    // Built as nodes rather than markup: a translated label is host-supplied
+    // text and must not be able to inject elements.
+    btn.textContent = "";
+    btn.append(name.slice(0, at));
+    const mn = document.createElement("span");
+    mn.className = "mn";
+    mn.textContent = name[at];
+    btn.append(mn, name.slice(at + 1));
+    btn.setAttribute("aria-keyshortcuts", `Alt+${name[at].toUpperCase()}`);
+  }
+}
+
+/// Re-render every label that came from a catalogue.
+///
+/// Cheaper and far less error-prone than rebuilding the menus: each labelled
+/// node remembers its English source in a data attribute, so relabelling is a
+/// pass over the DOM rather than a teardown.
+function relabel() {
+  relabelMenubar();
+  for (const node of qsa("[data-oc-label]")) {
+    if (node.classList.contains("menu-top")) continue; // handled above
+    const id = node.dataset.ocCommand;
+    const english = node.dataset.ocLabel;
+    const text = id ? t(`command.${id}`, english) : english;
+    const slot = node.querySelector(".mi-label");
+    if (slot) slot.textContent = text;
+    else node.textContent = text;
+  }
+  for (const node of qsa("[data-oc-tip]")) {
+    node.title = t(`tip.${node.dataset.ocCommand ?? node.id}`, node.dataset.ocTip);
+  }
+  updateCellMode();
+}
+
 // --- Events ------------------------------------------------------------------
 //
 // `before*` / past-tense pairs, `before*` cancellable, every event carrying a
@@ -10590,7 +10725,9 @@ function wireEvents() {
         if (it.sub) {
           const b = document.createElement("button");
           b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span><span class="mi-caret">&#9656;</span>`;
-          b.querySelector(".mi-label").textContent = it.sub;
+          b.dataset.ocLabel = it.sub;
+          b.querySelector(".mi-label").textContent =
+            t(`command.${commandId(path, it.sub)}`, it.sub);
           const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
           ocOverlayHost.appendChild(sub); subs.push(sub);
           b.dataset.ocCommand = commandId(path, it.sub);
@@ -10604,8 +10741,9 @@ function wireEvents() {
         const [label, action, key, check] = it;
         const b = document.createElement("button");
         b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span>${key ? `<span class="mi-key">${key}</span>` : ""}`;
-        b.querySelector(".mi-label").textContent = label;
         b.dataset.ocCommand = commandId(path, label);
+        b.dataset.ocLabel = label;
+        b.querySelector(".mi-label").textContent = t(`command.${b.dataset.ocCommand}`, label);
         if (check) b._check = check;
         if (isTop) b.addEventListener("mouseenter", closeSubs);
         b.addEventListener("click", (e) => { e.stopPropagation(); runItem(action); });
@@ -10630,22 +10768,11 @@ function wireEvents() {
     // Alt is held, as on Windows — a permanently underlined letter reads as a
     // link, and on a Mac Alt is a compose key, so the hint stays out of the way
     // until it is relevant.
-    const mnemonics = new Map();
     MENUS.forEach(([name, items], i) => {
       const btn = document.createElement("button");
       btn.className = "menu-top";
-      // Not always the first letter: File and Format both start with F, so the
-      // first-letter rule left Format unreachable *and* advertising a shortcut
-      // that belonged to File. Take the first character not already claimed —
-      // which is how Windows menus have always assigned these.
-      let at = [...name].findIndex((ch) => !mnemonics.has(ch.toLowerCase()));
-      if (at < 0) at = 0; // every letter taken: no mnemonic, but still labelled
-      const key = name[at].toLowerCase();
-      if (!mnemonics.has(key)) mnemonics.set(key, i);
-      // The letter is wrapped so it can be underlined without changing layout.
-      btn.innerHTML =
-        `${name.slice(0, at)}<span class="mn">${name[at]}</span>${name.slice(at + 1)}`;
-      btn.setAttribute("aria-keyshortcuts", `Alt+${name[at].toUpperCase()}`);
+      btn.dataset.ocLabel = name;
+      btn.dataset.ocMenuIndex = String(i);
       btn.setAttribute("role", "menuitem");
       // Roving tabindex: the bar is one tab stop, not nine — Tab moves past it,
       // arrows move within it, which is what a menubar is supposed to do.
@@ -10661,13 +10788,16 @@ function wireEvents() {
       btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
       bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
     });
+    // Labels and mnemonics together, because the second is derived from the
+    // first: translating a menu changes which letters are free.
+    relabelMenubar();
 
     // Alt+letter opens the matching menu; holding Alt alone reveals which letter
     // each menu answers to.
     document.addEventListener("keydown", (e) => {
       if (e.key === "Alt") { bar.classList.add("show-mnemonics"); return; }
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
-      const i = mnemonics.get((e.key || "").toLowerCase());
+      const i = menuMnemonics.get((e.key || "").toLowerCase());
       if (i === undefined) return;
       e.preventDefault();
       openMenu(i);
@@ -10976,6 +11106,12 @@ async function main() {
   for (const node of qsa("[id^='tb-']")) {
     if (!node.dataset.ocCommand) node.dataset.ocCommand = `toolbar.${node.id.slice(3)}`;
   }
+  // Tooltips are the toolbar's only text, so they are what a translated
+  // toolbar translates. The English one is kept as the fallback.
+  for (const node of qsa("[title]")) {
+    if (!node.dataset.ocTip) node.dataset.ocTip = node.title;
+  }
+  relabel();
   seed();
   renderTabs();
   resize();

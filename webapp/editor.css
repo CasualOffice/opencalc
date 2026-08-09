@@ -182,6 +182,12 @@ body {
 .oc-hide-statusbar .bottom-bar { display: none; }
 /* The tabs live inside the bottom bar, so hiding them alone keeps the bar. */
 .oc-hide-tabs .sheet-tabs { display: none; }
+.oc-hide-localepicker .locale-picker { display: none; }
+.locale-picker select {
+  font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
+  border: 1px solid var(--oc-control-border-color); background: var(--oc-bg, transparent);
+  color: var(--oc-muted-text-color);
+}
 
 /* A command the host hid, or read-only removed. `hidden` alone loses to the
    `display:flex` these controls carry. */

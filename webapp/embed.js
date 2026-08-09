@@ -53,8 +53,13 @@ const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
 /// The app header is off by default: the brand mark, the alpha badge, the file
 /// button and the settings gear belong to *this* project's demo page, and an
 /// embedded editor is the host's product, not ours.
-const CHROME = ["header", "menubar", "toolbar", "formulabar", "tabs", "statusbar"];
-const CHROME_DEFAULT = { header: false };
+const CHROME = [
+  "header", "menubar", "toolbar", "formulabar", "tabs", "statusbar", "localePicker",
+];
+// The header is this project's own branding; the language picker is off
+// because most hosts drive the language from their account settings, and a
+// second control that disagrees with the first is worse than none.
+const CHROME_DEFAULT = { header: false, localePicker: false };
 
 /// The theme tokens a host may set, without the `--oc-` prefix.
 ///
@@ -230,7 +235,8 @@ class OpenCalcSheet extends HTMLElement {
       // asked for" — which by then was preview's own all-off, so the chrome
       // never came back.
       const shown = this.#access === "preview" ? false : this.#chrome[name] ?? true;
-      this.#shell.classList.toggle(`oc-hide-${name}`, !shown);
+      this.#shell.classList.toggle(`oc-hide-${name.toLowerCase()}`, !shown);
+      if (name === "localePicker") this.#editor?.setLocalePicker?.(shown);
     }
   }
 
@@ -376,7 +382,14 @@ class OpenCalcSheet extends HTMLElement {
   ///   {
   ///     calculation: "auto" | "manual",
   ///     access: "edit" | "view" | "preview",
+  ///     locale: "de-DE",
+  ///     messages: { "de-DE": { "command.format.bold": "Fett" } },
   ///   }
+  ///
+  /// Messages are keyed by **command id**, which is derived from the English
+  /// label — so translating a menu never renumbers the command API. A missing
+  /// key falls back to the English string, which means a partial catalogue
+  /// degrades to "some of it is translated" rather than to visible keys.
   ///
   /// **`edit`** — the editor.
   ///
@@ -405,6 +418,12 @@ class OpenCalcSheet extends HTMLElement {
     if (options.calculation) {
       editor.wasmApi().session_set_calculation_mode(options.calculation);
     }
+    // Catalogues before the locale, or switching to a language whose strings
+    // have not arrived yet falls back to English and then never re-renders.
+    for (const [code, map] of Object.entries(options.messages ?? {})) {
+      editor.setMessages(code, map);
+    }
+    if (options.locale) editor.setLocale(options.locale);
     // `readOnly` / `preview` booleans remain as sugar over the same axis, so
     // there is one source of truth and they cannot disagree.
     let access = options.access;

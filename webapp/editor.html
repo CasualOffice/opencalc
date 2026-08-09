@@ -386,6 +386,13 @@
     <div class="bottom-bar">
       <div class="sheet-tabs" id="sheet-tabs" role="tablist" aria-label="Sheets"></div>
       <span class="cell-mode" id="cell-mode" aria-live="off">Ready</span>
+      <!-- Off unless a host turns it on: most drive the language from their own
+           account settings, and a second control that disagrees with the first
+           is worse than none. -->
+      <label class="locale-picker" id="locale-picker" hidden>
+        <span class="sr-only">Language</span>
+        <select id="locale-select" aria-label="Language"></select>
+      </label>
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
     </div>
 
