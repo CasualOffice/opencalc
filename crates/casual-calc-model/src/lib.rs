@@ -41,7 +41,7 @@ pub use style::{
     ThemeTint, Underline, VAlign, VertAlign, from_micro, to_micro,
 };
 pub use value::{CellValue, ErrorValue};
-pub use workbook::{NamedCellStyle, SCHEMA_VERSION, STOCK_THEME_SLOTS, Workbook};
+pub use workbook::{NamedCellStyle, SCHEMA_VERSION, STOCK_THEME_SLOTS, Workbook, WorkbookSettings};
 
 #[cfg(test)]
 mod tests;

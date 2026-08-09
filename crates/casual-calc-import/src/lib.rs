@@ -37,7 +37,8 @@ use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 use a1::{parse_a1, parse_range};
 use read::{
     RawCell, RawThreadedComment, parse_comments, parse_date1904, parse_defined_names,
-    parse_persons, parse_shared_strings, parse_threaded_comments, parse_worksheet,
+    parse_persons, parse_shared_strings, parse_threaded_comments, parse_workbook_settings,
+    parse_worksheet,
 };
 use styles::{StyleSheet, parse_styles};
 use theme::{ThemePalette, parse_theme};
@@ -615,6 +616,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     // The date epoch has to be known before any date is displayed, and has to
     // be written back or the serials silently change meaning.
     workbook.date1904 = parse_date1904(&workbook_xml)?;
+    workbook.settings = parse_workbook_settings(&workbook_xml)?;
     for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
         match parse_formula(&refers_to) {
             Ok(formula) => {

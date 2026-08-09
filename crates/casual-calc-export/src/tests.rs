@@ -1506,3 +1506,64 @@ fn print_setup_round_trips_verbatim() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].print, wb.sheets[0].print);
 }
+
+#[test]
+fn workbook_settings_round_trip_verbatim() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <fileVersion appName="xl" lastEdited="7" lowestEdited="7" rupBuild="26925"/>
+              <workbookPr defaultThemeVersion="166925"/>
+              <workbookProtection lockStructure="1" workbookAlgorithmName="SHA-512" workbookHashValue="abc123" workbookSaltValue="salt" workbookSpinCount="100000"/>
+              <bookViews><workbookView xWindow="0" yWindow="0" windowWidth="20000" windowHeight="9000" activeTab="0"/></bookViews>
+              <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+              <calcPr calcId="191029" iterate="1" iterateCount="50" fullCalcOnLoad="1"/>
+            </workbook>"#,
+        ),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let st = &wb.settings;
+    assert_eq!(st.calc.get("iterateCount").map(String::as_str), Some("50"));
+    // A regenerated hash locks the author out of their own workbook, so these
+    // travel byte for byte rather than being re-derived.
+    assert_eq!(
+        st.protection.get("workbookHashValue").map(String::as_str),
+        Some("abc123")
+    );
+    assert_eq!(st.views.len(), 1);
+    assert_eq!(
+        st.file_version.get("appName").map(String::as_str),
+        Some("xl")
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.settings, wb.settings);
+    assert!(!back.date1904);
+}
+
+#[test]
+fn date1904_wins_over_a_stale_workbook_pr_entry() {
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    // A carried-through map that still says 1904 while the interpreted flag says
+    // otherwise must not win: every serial would shift by 1462 days.
+    wb.settings
+        .workbook_pr
+        .insert("date1904".to_owned(), "1".to_owned());
+    wb.date1904 = false;
+    let back = import_package(write_workbook(&wb).unwrap())
+        .unwrap()
+        .workbook;
+    assert!(!back.date1904);
+
+    wb.date1904 = true;
+    let back = import_package(write_workbook(&wb).unwrap())
+        .unwrap()
+        .workbook;
+    assert!(back.date1904);
+}

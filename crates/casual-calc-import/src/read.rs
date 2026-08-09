@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_model::{OutlinePr, PrintSetup, RunFont, TextRun, Underline, VertAlign};
+use casual_calc_model::{
+    OutlinePr, PrintSetup, RunFont, TextRun, Underline, VertAlign, WorkbookSettings,
+};
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -1186,6 +1188,39 @@ pub fn parse_date1904(xml: &[u8]) -> Result<bool, ImportError> {
         buf.clear();
     }
     Ok(false)
+}
+
+/// Read the workbook-level settings that travel verbatim.
+///
+/// `date1904` is deliberately *not* removed from `workbookPr`: it is interpreted
+/// into `Workbook::date1904` for display, and also written back from here, so
+/// the two agree. Splitting responsibility for one attribute is how it ends up
+/// written twice or not at all.
+pub fn parse_workbook_settings(xml: &[u8]) -> Result<WorkbookSettings, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut out = WorkbookSettings::default();
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) | Event::Empty(e) => {
+                bounds.count()?;
+                match e.local_name().as_ref() {
+                    b"calcPr" => out.calc = read_attrs(&e)?,
+                    b"fileVersion" => out.file_version = read_attrs(&e)?,
+                    b"workbookPr" => out.workbook_pr = read_attrs(&e)?,
+                    b"workbookProtection" => out.protection = read_attrs(&e)?,
+                    b"fileSharing" => out.file_sharing = read_attrs(&e)?,
+                    b"workbookView" => out.views.push(read_attrs(&e)?),
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
 }
 
 pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, String)>, ImportError> {

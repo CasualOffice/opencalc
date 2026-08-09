@@ -420,11 +420,31 @@ fn root_rels() -> String {
 
 fn workbook_xml(workbook: &Workbook) -> String {
     let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
-    // `<workbookPr>` leads CT_Workbook. Written only for the 1904 epoch, since
-    // 1900 is the default — but written it must be, or the serials keep their
-    // values while their meaning shifts by 1462 days.
+    // CT_Workbook's sequence: fileVersion, fileSharing, workbookPr, bookViews,
+    // sheets, … calcPr. The settings travel verbatim; only `date1904` is
+    // interpreted, and it is merged back in here so the two cannot disagree —
+    // written even when the map already holds it, since a workbook built from
+    // scratch has no map at all but may still be on the 1904 epoch.
+    let settings = &workbook.settings;
+    write_attr_element(&mut s, "fileVersion", &settings.file_version);
+    write_attr_element(&mut s, "fileSharing", &settings.file_sharing);
+    let mut workbook_pr = settings.workbook_pr.clone();
     if workbook.date1904 {
-        s.push_str("<workbookPr date1904=\"1\"/>");
+        workbook_pr.insert("date1904".to_owned(), "1".to_owned());
+    } else {
+        // 1900 is the default, so the attribute is written by omission — but a
+        // stale `date1904="1"` left in the map would shift every serial by 1462
+        // days.
+        workbook_pr.remove("date1904");
+    }
+    write_attr_element(&mut s, "workbookPr", &workbook_pr);
+    write_attr_element(&mut s, "workbookProtection", &settings.protection);
+    if !settings.views.is_empty() {
+        s.push_str("<bookViews>");
+        for view in &settings.views {
+            write_attr_element(&mut s, "workbookView", view);
+        }
+        s.push_str("</bookViews>");
     }
     s.push_str("<sheets>");
     for (i, sheet) in workbook.sheets.iter().enumerate() {
@@ -458,6 +478,8 @@ fn workbook_xml(workbook: &Workbook) -> String {
         }
         s.push_str("</definedNames>");
     }
+    // `<calcPr>` closes the sequence, after `<definedNames>`.
+    write_attr_element(&mut s, "calcPr", &workbook.settings.calc);
     s.push_str("</workbook>");
     s
 }

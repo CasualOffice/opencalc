@@ -1,7 +1,7 @@
 //! The workbook envelope and deterministic snapshot I/O.
 //! See `docs/22-NORMALIZED-SCHEMA.md`, `docs/25`-style snapshot discipline.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::Expr;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,53 @@ use crate::value::CellValue;
 /// The current workbook schema version. Snapshots record this so migrations can
 /// upgrade older ones deterministically.
 pub const SCHEMA_VERSION: u32 = 0;
+
+/// Workbook-level settings carried through verbatim.
+///
+/// Same reasoning as [`crate::SheetProtection`] and [`crate::PrintSetup`]: these
+/// elements hold roughly sixty attributes between them, most of which nothing in
+/// the editor reads. `workbookProtection` and `fileSharing` additionally carry
+/// password hashes and salts, where writing a regenerated value back locks the
+/// author out of their own workbook — a failure far worse than not supporting
+/// the feature.
+///
+/// `calcPr` is the one to watch: it is inert while the calc engine is held back,
+/// and becomes load-bearing the moment it lands, because a workbook that needs
+/// iterative calculation must not be recalculated without it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkbookSettings {
+    /// `<calcPr>` attributes as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calc: BTreeMap<String, String>,
+    /// `<fileVersion>` attributes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_version: BTreeMap<String, String>,
+    /// `<workbookPr>` attributes other than `date1904`, which is interpreted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workbook_pr: BTreeMap<String, String>,
+    /// `<workbookProtection>` attributes, hashes included.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub protection: BTreeMap<String, String>,
+    /// `<fileSharing>` attributes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_sharing: BTreeMap<String, String>,
+    /// Each `<workbookView>` inside `<bookViews>`, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<BTreeMap<String, String>>,
+}
+
+impl WorkbookSettings {
+    /// Whether nothing at all was carried.
+    pub fn is_empty(&self) -> bool {
+        self.calc.is_empty()
+            && self.file_version.is_empty()
+            && self.workbook_pr.is_empty()
+            && self.protection.is_empty()
+            && self.file_sharing.is_empty()
+            && self.views.is_empty()
+    }
+}
 
 /// The stock Office theme, in `theme="N"` slot order, used for a workbook that
 /// never came from a package or whose theme part was missing.
@@ -78,6 +125,9 @@ pub struct Workbook {
     /// snapshot byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub theme_colors: Vec<String>,
+    /// Workbook-level settings, carried through verbatim.
+    #[serde(default, skip_serializing_if = "WorkbookSettings::is_empty")]
+    pub settings: WorkbookSettings,
     /// Named cell styles (`Normal`, `Good`, `Heading 1`, …) in `cellStyleXfs`
     /// order, which is the order `Style::style_ref` indexes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +175,7 @@ impl Workbook {
             default_font_name: None,
             default_font_size_hp: None,
             theme_colors: Vec::new(),
+            settings: WorkbookSettings::default(),
             cell_styles: Vec::new(),
             date1904: false,
         }
