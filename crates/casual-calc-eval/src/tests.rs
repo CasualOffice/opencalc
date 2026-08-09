@@ -1200,3 +1200,106 @@ fn a_totals_row_formula_does_not_include_itself() {
     // included the totals row this would be self-referential.
     assert_eq!(value_at(&wb, 3, 1), CellValue::Number(300.0));
 }
+
+#[test]
+fn time_components_round_before_splitting() {
+    // 13:45:30 as a day fraction is not exactly representable, so truncating
+    // the raw product yields 29 seconds where the sheet plainly shows 30.
+    let serial = (13.0 * 3600.0 + 45.0 * 60.0 + 30.0) / 86_400.0;
+    let mut b = Builder::new();
+    b.number((0, 0), serial)
+        .formula((1, 0), "HOUR(A1)")
+        .formula((2, 0), "MINUTE(A1)")
+        .formula((3, 0), "SECOND(A1)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(13.0));
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(45.0));
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(30.0));
+}
+
+#[test]
+fn time_components_roll_over() {
+    // TIME(25,0,0) is 1:00, not an error — the rollover is what makes the
+    // function usable for arithmetic.
+    assert!((num("TIME(25,0,0)") - 1.0 / 24.0).abs() < 1e-12);
+    assert!((num("TIME(0,90,0)") - 1.5 / 24.0).abs() < 1e-12);
+}
+
+#[test]
+fn days360_follows_the_us_convention() {
+    // 2024-01-31 to 2024-03-31. Under the US convention the start's 31st
+    // becomes the 30th first, and only then does the end's 31st move — which
+    // is why the two clamps cannot be written symmetrically.
+    let start = num("DATE(2024,1,31)");
+    let end = num("DATE(2024,3,31)");
+    let mut b = Builder::new();
+    b.number((0, 0), start)
+        .number((1, 0), end)
+        .formula((2, 0), "DAYS360(A1,A2)")
+        .formula((3, 0), "DAYS360(A1,A2,TRUE())")
+        .formula((4, 0), "DAYS(A2,A1)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(60.0));
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(60.0));
+    // The real span, for contrast.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Number(60.0));
+}
+
+#[test]
+fn datedif_units_and_reversed_dates() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.formula((0, 0), "DATE(2020,3,15)")
+        .formula((1, 0), "DATE(2024,7,20)")
+        .formula((2, 0), "DATEDIF(A1,A2,\"Y\")")
+        .formula((3, 0), "DATEDIF(A1,A2,\"M\")")
+        .formula((4, 0), "DATEDIF(A1,A2,\"YM\")")
+        .formula((5, 0), "DATEDIF(A2,A1,\"D\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(4.0));
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(52.0));
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Number(4.0));
+    // Excel reports #NUM! rather than a negative span.
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Error(ErrorValue::Num));
+}
+
+#[test]
+fn iso_week_belongs_to_the_year_of_its_thursday() {
+    // 2021-01-01 is a Friday, so its ISO week is week 53 of 2020 — the case
+    // that separates ISOWEEKNUM from a naive day-count.
+    let mut b = Builder::new();
+    b.formula((0, 0), "DATE(2021,1,1)")
+        .formula((1, 0), "ISOWEEKNUM(A1)")
+        .formula((2, 0), "WEEKNUM(A1)")
+        .formula((3, 0), "DATE(2024,1,1)")
+        .formula((4, 0), "ISOWEEKNUM(A4)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(53.0));
+    // WEEKNUM counts from the week containing 1 January, so it says 1.
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(1.0));
+    // 2024-01-01 is a Monday: week 1 by both reckonings.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Number(1.0));
+}
+
+#[test]
+fn networkdays_and_workday_skip_weekends() {
+    let mut b = Builder::new();
+    // 2024-03-04 is a Monday; 2024-03-15 is the Friday of the next week.
+    b.formula((0, 0), "DATE(2024,3,4)")
+        .formula((1, 0), "DATE(2024,3,15)")
+        .formula((2, 0), "NETWORKDAYS(A1,A2)")
+        .formula((3, 0), "NETWORKDAYS(A2,A1)")
+        .formula((4, 0), "WORKDAY(A1,5)-A1");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    // Two full working weeks, counted inclusively at both ends.
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(10.0));
+    // Reversed, the same magnitude negated.
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(-10.0));
+    // Five working days from a Monday lands on the next Monday: 7 real days.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Number(7.0));
+}

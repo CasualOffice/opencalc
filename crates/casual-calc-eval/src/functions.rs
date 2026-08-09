@@ -50,7 +50,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
     ("DATE", "DATE(year, month, day)"),
+    ("DATEDIF", "DATEDIF(start, end, unit)"),
     ("DAY", "DAY(serial_number)"),
+    ("DAYS", "DAYS(end_date, start_date)"),
+    ("DAYS360", "DAYS360(start, end, [method])"),
     ("DEGREES", "DEGREES(angle)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
@@ -65,6 +68,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FLOOR", "FLOOR(number, significance)"),
     ("GCD", "GCD(number1, …)"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
+    ("HOUR", "HOUR(serial_number)"),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
@@ -81,6 +85,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISNONTEXT", "ISNONTEXT(value)"),
     ("ISNUMBER", "ISNUMBER(value)"),
     ("ISODD", "ISODD(number)"),
+    ("ISOWEEKNUM", "ISOWEEKNUM(date)"),
     ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
     ("LARGE", "LARGE(array, k)"),
@@ -96,12 +101,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MEDIAN", "MEDIAN(number1, …)"),
     ("MID", "MID(text, start_num, num_chars)"),
     ("MIN", "MIN(number1, …)"),
+    ("MINUTE", "MINUTE(serial_number)"),
     ("MOD", "MOD(number, divisor)"),
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
+    ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     ("NOT", "NOT(logical)"),
     ("ODD", "ODD(number)"),
     ("OR", "OR(logical1, …)"),
@@ -125,6 +132,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
     ("SEC", "SEC(number)"),
     ("SECH", "SECH(number)"),
+    ("SECOND", "SECOND(serial_number)"),
     ("SERIESSUM", "SERIESSUM(x, n, m, coefficients)"),
     ("SHEET", "SHEET([value])"),
     ("SHEETS", "SHEETS([reference])"),
@@ -146,6 +154,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TANH", "TANH(number)"),
     ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
+    ("TIME", "TIME(hour, minute, second)"),
     ("TRIM", "TRIM(text)"),
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
@@ -154,7 +163,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("VALUE", "VALUE(text)"),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
+    ("WEEKNUM", "WEEKNUM(serial, [type])"),
+    ("WORKDAY", "WORKDAY(start, days, [holidays])"),
     ("YEAR", "YEAR(serial_number)"),
+    ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
 ];
 
 /// Dispatch a function call by (upper-cased) name.
@@ -292,6 +304,21 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "PROPER" => text_op(ev, sheet, args, proper_case),
         "REPT" => eval_rept(ev, sheet, args),
         "EXACT" => eval_exact(ev, sheet, args),
+        "TIME" => eval_time(ev, sheet, args),
+        "HOUR" => eval_time_part(ev, sheet, args, 3600.0),
+        "MINUTE" => eval_time_part(ev, sheet, args, 60.0),
+        "SECOND" => eval_time_part(ev, sheet, args, 1.0),
+        "DAYS" => match pair_of_numbers(ev, sheet, args) {
+            Ok([end, start]) => Value::Number(end.trunc() - start.trunc()),
+            Err(e) => e,
+        },
+        "DAYS360" => eval_days360(ev, sheet, args),
+        "DATEDIF" => eval_datedif(ev, sheet, args),
+        "WEEKNUM" => eval_weeknum(ev, sheet, args),
+        "ISOWEEKNUM" => eval_isoweeknum(ev, sheet, args),
+        "YEARFRAC" => eval_yearfrac(ev, sheet, args),
+        "NETWORKDAYS" => eval_workdays(ev, sheet, args, false),
+        "WORKDAY" => eval_workdays(ev, sheet, args, true),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -2483,4 +2510,305 @@ fn eval_is_formula(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value
         .and_then(|s| s.cells.get(at))
         .is_some_and(|c| c.formula.is_some());
     Value::Bool(has)
+}
+
+// --- Date and time helpers -------------------------------------------------
+
+/// `TIME(h, m, s)` — a fraction of a day.
+///
+/// The components roll over rather than erroring: `TIME(25,0,0)` is 1:00, which
+/// is what makes the function usable for arithmetic.
+fn eval_time(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut parts = [0.0f64; 3];
+    for (i, slot) in parts.iter_mut().enumerate() {
+        match ev.eval_expr(sheet, &args[i]).as_number() {
+            Ok(v) => *slot = v.trunc(),
+            Err(e) => return Value::Error(e),
+        }
+    }
+    let seconds = parts[0] * 3600.0 + parts[1] * 60.0 + parts[2];
+    if seconds < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((seconds % 86_400.0) / 86_400.0)
+}
+
+/// `HOUR`/`MINUTE`/`SECOND` — the component of a serial's time-of-day.
+fn eval_time_part(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], unit: f64) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let serial = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    if serial < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Round to the nearest second before splitting: a time stored as a binary
+    // fraction is very often a hair under, so truncating raw gives 59 minutes
+    // where the sheet plainly shows 60.
+    let seconds = ((serial - serial.floor()) * 86_400.0).round() as i64;
+    // `seconds` is within one day, so the hour needs no wrap; minutes and
+    // seconds take the remainder within the next larger unit.
+    let value = match unit as i64 {
+        3600 => seconds / 3600,
+        60 => (seconds / 60) % 60,
+        _ => seconds % 60,
+    };
+    Value::Number(value as f64)
+}
+
+/// `DAYS360(start, end, [european])` — the 360-day year used in bond maths.
+fn eval_days360(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (start, end) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a, b),
+        Err(e) => return e,
+    };
+    let european = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_bool() {
+            Ok(b) => b,
+            Err(e) => return Value::Error(e),
+        },
+        None => false,
+    };
+    let (y1, m1, mut d1) = serial_to_ymd(start.trunc() as i64);
+    let (y2, m2, mut d2) = serial_to_ymd(end.trunc() as i64);
+    if european {
+        d1 = d1.min(30);
+        d2 = d2.min(30);
+    } else {
+        // The US convention: only after clamping the start does a 31st end date
+        // move, which is why these two cannot be written symmetrically.
+        if d1 == 31 {
+            d1 = 30;
+        }
+        if d2 == 31 && d1 == 30 {
+            d2 = 30;
+        }
+    }
+    Value::Number(((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) as f64)
+}
+
+/// `DATEDIF(start, end, unit)` — whole years, months or days between dates.
+fn eval_datedif(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (start, end) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a.trunc() as i64, b.trunc() as i64),
+        Err(e) => return e,
+    };
+    let unit = match ev.eval_expr(sheet, &args[2]) {
+        Value::Text(t) => t.to_ascii_uppercase(),
+        Value::Error(e) => return Value::Error(e),
+        _ => return Value::Error(ErrorValue::Value),
+    };
+    if end < start {
+        // Excel reports #NUM! rather than a negative span.
+        return Value::Error(ErrorValue::Num);
+    }
+    let (y1, m1, d1) = serial_to_ymd(start);
+    let (y2, m2, d2) = serial_to_ymd(end);
+    let mut months = (y2 - y1) * 12 + (m2 - m1);
+    if d2 < d1 {
+        months -= 1;
+    }
+    Value::Number(match unit.as_str() {
+        "D" => (end - start) as f64,
+        "M" => months as f64,
+        "Y" => (months / 12) as f64,
+        // Months ignoring years, days ignoring months, days ignoring years.
+        "YM" => (months % 12) as f64,
+        "MD" => {
+            let anchor = ymd_to_serial(y2, m2 - i64::from(d2 < d1), d1);
+            (end - anchor) as f64
+        }
+        "YD" => {
+            let anchor = ymd_to_serial(y2 - i64::from((m2, d2) < (m1, d1)), m1, d1);
+            (end - anchor) as f64
+        }
+        _ => return Value::Error(ErrorValue::Num),
+    })
+}
+
+/// The weekday of a serial, 0 = Sunday.
+fn weekday_of(serial: i64) -> i64 {
+    // Serial 1 is 1900-01-01, a Monday under Excel's calendar.
+    (serial + 6).rem_euclid(7)
+}
+
+/// `WEEKNUM(serial, [type])` — the week of the year, counting from the week
+/// containing 1 January.
+fn eval_weeknum(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let serial = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let start_day = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i64,
+            Err(e) => return Value::Error(e),
+        },
+        None => 1,
+    };
+    // Types 1 and 17 start on Sunday, 2 and 11 on Monday, 12..=17 on the day
+    // (type - 10). ISO week numbering is type 21 and is ISOWEEKNUM's job.
+    let first_weekday = match start_day {
+        1 | 17 => 0,
+        2 | 11 => 1,
+        12..=16 => (start_day - 10) % 7,
+        21 => return eval_isoweeknum(ev, sheet, &args[..1]),
+        _ => return Value::Error(ErrorValue::Num),
+    };
+    let (year, _, _) = serial_to_ymd(serial);
+    let jan1 = ymd_to_serial(year, 1, 1);
+    let offset = (weekday_of(jan1) - first_weekday).rem_euclid(7);
+    Value::Number(((serial - jan1 + offset) / 7 + 1) as f64)
+}
+
+/// `ISOWEEKNUM` — ISO 8601 weeks, which start on Monday and belong to the year
+/// containing their Thursday.
+fn eval_isoweeknum(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let serial = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    // Shift to the Thursday of this week; its year is the ISO week-year, which
+    // is what makes 1 January sometimes belong to week 52 of the year before.
+    let iso_weekday = (weekday_of(serial) + 6).rem_euclid(7); // 0 = Monday
+    let thursday = serial - iso_weekday + 3;
+    let (year, _, _) = serial_to_ymd(thursday);
+    let jan1 = ymd_to_serial(year, 1, 1);
+    Value::Number(((thursday - jan1) / 7 + 1) as f64)
+}
+
+/// `YEARFRAC(start, end, [basis])` — the fraction of a year between two dates.
+fn eval_yearfrac(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (start, end) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a.trunc() as i64, b.trunc() as i64),
+        Err(e) => return e,
+    };
+    let basis = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n as i64,
+            Err(e) => return Value::Error(e),
+        },
+        None => 0,
+    };
+    let (lo, hi) = (start.min(end), start.max(end));
+    let days = (hi - lo) as f64;
+    let frac = match basis {
+        // The day-count conventions. Getting one wrong gives an answer that is
+        // close enough to look right and wrong enough to matter in interest.
+        0 => {
+            let d = match eval_days360_serials(lo, hi, false) {
+                Some(d) => d,
+                None => return Value::Error(ErrorValue::Num),
+            };
+            d as f64 / 360.0
+        }
+        1 => days / average_year_length(lo, hi),
+        2 => days / 360.0,
+        3 => days / 365.0,
+        4 => {
+            let d = match eval_days360_serials(lo, hi, true) {
+                Some(d) => d,
+                None => return Value::Error(ErrorValue::Num),
+            };
+            d as f64 / 360.0
+        }
+        _ => return Value::Error(ErrorValue::Num),
+    };
+    Value::Number(frac)
+}
+
+/// The 360-day span between two serials, shared by DAYS360 and YEARFRAC.
+fn eval_days360_serials(start: i64, end: i64, european: bool) -> Option<i64> {
+    let (y1, m1, mut d1) = serial_to_ymd(start);
+    let (y2, m2, mut d2) = serial_to_ymd(end);
+    if european {
+        d1 = d1.min(30);
+        d2 = d2.min(30);
+    } else {
+        if d1 == 31 {
+            d1 = 30;
+        }
+        if d2 == 31 && d1 == 30 {
+            d2 = 30;
+        }
+    }
+    Some((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1))
+}
+
+/// The actual/actual basis divisor: the mean length of the years spanned.
+fn average_year_length(start: i64, end: i64) -> f64 {
+    let (y1, _, _) = serial_to_ymd(start);
+    let (y2, _, _) = serial_to_ymd(end);
+    let mut total = 0.0;
+    for year in y1..=y2 {
+        total += if is_leap(year) { 366.0 } else { 365.0 };
+    }
+    total / ((y2 - y1 + 1) as f64)
+}
+
+fn is_leap(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// `NETWORKDAYS` (count) and `WORKDAY` (advance), which share their weekend and
+/// holiday handling.
+fn eval_workdays(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], advance: bool) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (start, second) = match pair_of_numbers(ev, sheet, &args[..2]) {
+        Ok([a, b]) => (a.trunc() as i64, b.trunc()),
+        Err(e) => return e,
+    };
+    let holidays: Vec<i64> = match args.get(2) {
+        Some(_) => match flatten_numbers(ev, sheet, &args[2..]) {
+            Ok(ns) => ns.into_iter().map(|n| n.trunc() as i64).collect(),
+            Err(e) => return Value::Error(e),
+        },
+        None => Vec::new(),
+    };
+    let is_workday = |serial: i64| {
+        let day = weekday_of(serial);
+        day != 0 && day != 6 && !holidays.contains(&serial)
+    };
+
+    if advance {
+        let mut remaining = second as i64;
+        let step = if remaining >= 0 { 1 } else { -1 };
+        let mut at = start;
+        while remaining != 0 {
+            at += step;
+            if is_workday(at) {
+                remaining -= step;
+            }
+        }
+        return Value::Number(at as f64);
+    }
+    // NETWORKDAYS counts inclusively at both ends and is symmetric: a reversed
+    // pair returns the same magnitude, negated.
+    let end = second as i64;
+    let (lo, hi) = (start.min(end), start.max(end));
+    let count = (lo..=hi).filter(|d| is_workday(*d)).count() as f64;
+    Value::Number(if end < start { -count } else { count })
 }
