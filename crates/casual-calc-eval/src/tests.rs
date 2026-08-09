@@ -1379,3 +1379,92 @@ fn address_builds_reference_text_not_a_reference() {
     assert_eq!(text(1), "C2");
     assert_eq!(value_at(&wb, 2, 0), CellValue::Number(5.0));
 }
+
+#[test]
+fn char_and_code_differ_from_their_unicode_twins_by_range() {
+    use casual_calc_model::ErrorValue;
+    let text = |t: &str| -> String {
+        let mut b = Builder::new();
+        b.formula((0, 0), t);
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        match value_at(&wb, 0, 0) {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(id).unwrap().to_owned()
+            }
+            other => panic!("{t} gave {other:?}"),
+        }
+    };
+    assert_eq!(text("CHAR(65)"), "A");
+    assert_eq!(text("UNICHAR(955)"), "λ");
+    // CHAR stops at 255; accepting 955 and returning λ is what Excel refuses,
+    // and is the only thing separating the two functions.
+    assert_eq!(err("CHAR(955)"), ErrorValue::Value);
+    assert_eq!(num("CODE(\"A\")"), 65.0);
+    assert_eq!(num("UNICODE(\"λ\")"), 955.0);
+    assert_eq!(err("UNICODE(\"\")"), ErrorValue::Value);
+    // CODE is byte-oriented, so a character it cannot express is #VALUE!.
+    assert_eq!(err("CODE(\"λ\")"), ErrorValue::Value);
+}
+
+#[test]
+fn fixed_and_dollar_group_and_round() {
+    let text = |t: &str| -> String {
+        let mut b = Builder::new();
+        b.formula((0, 0), t);
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        match value_at(&wb, 0, 0) {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(id).unwrap().to_owned()
+            }
+            other => panic!("{t} gave {other:?}"),
+        }
+    };
+    assert_eq!(text("FIXED(1234.567)"), "1,234.57");
+    assert_eq!(text("FIXED(1234.567,1)"), "1,234.6");
+    assert_eq!(text("FIXED(1234.567,1,TRUE())"), "1234.6");
+    // A negative `decimals` rounds to the *left* of the point. Clamping it to
+    // zero instead would quietly give "1,235" for this.
+    assert_eq!(text("FIXED(1234.5,-2)"), "1,200");
+    assert_eq!(text("DOLLAR(1234.5)"), "$1,234.50");
+    // Negatives use parentheses, as the accounting format does.
+    assert_eq!(text("DOLLAR(-1234.5)"), "($1,234.50)");
+}
+
+#[test]
+fn numbervalue_takes_its_separators_rather_than_guessing() {
+    use casual_calc_model::ErrorValue;
+    // The point of the function: the caller states the separators instead of
+    // the engine inferring a locale, so the same text parses the same way
+    // everywhere.
+    assert_eq!(num("NUMBERVALUE(\"1.234,56\",\",\",\".\")"), 1234.56);
+    assert_eq!(num("NUMBERVALUE(\"1,234.56\")"), 1234.56);
+    assert_eq!(num("NUMBERVALUE(\"50%\")"), 0.5);
+    assert_eq!(err("NUMBERVALUE(\"abc\")"), ErrorValue::Value);
+}
+
+#[test]
+fn t_passes_text_through_and_does_not_convert() {
+    let mut b = Builder::new();
+    b.text((0, 0), "hello")
+        .number((1, 0), 42.0)
+        .formula((2, 0), "T(A1)")
+        .formula((3, 0), "T(A2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    match value_at(&wb, 2, 0) {
+        CellValue::SharedString(id) | CellValue::InlineString(id) => {
+            assert_eq!(wb.strings.get(id).unwrap(), "hello");
+        }
+        other => panic!("expected text, got {other:?}"),
+    }
+    // A number gives empty text, not "42" — T does not convert, which is the
+    // difference from TEXT.
+    match value_at(&wb, 3, 0) {
+        CellValue::SharedString(id) | CellValue::InlineString(id) => {
+            assert_eq!(wb.strings.get(id).unwrap(), "");
+        }
+        other => panic!("expected empty text, got {other:?}"),
+    }
+}

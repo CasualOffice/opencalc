@@ -7,7 +7,7 @@ use casual_calc_formula::Expr;
 use casual_calc_model::{CellRef, ErrorValue};
 
 use crate::eval::Evaluator;
-use crate::value::Value;
+use crate::value::{Value, number_to_text};
 
 /// Guard against pathological full-range aggregates (a dependency-graph with
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
@@ -34,7 +34,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
     ("CEILING", "CEILING(number, significance)"),
+    ("CHAR", "CHAR(number)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
+    ("CLEAN", "CLEAN(text)"),
+    ("CODE", "CODE(text)"),
     ("COLUMN", "COLUMN([reference])"),
     ("COLUMNS", "COLUMNS(array)"),
     ("COMBIN", "COMBIN(n, k)"),
@@ -57,6 +60,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DAYS", "DAYS(end_date, start_date)"),
     ("DAYS360", "DAYS360(start, end, [method])"),
     ("DEGREES", "DEGREES(angle)"),
+    ("DOLLAR", "DOLLAR(number, [decimals])"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
     ("ERROR.TYPE", "ERROR.TYPE(error)"),
@@ -67,6 +71,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FACTDOUBLE", "FACTDOUBLE(number)"),
     ("FALSE", "FALSE()"),
     ("FIND", "FIND(find_text, within_text, [start])"),
+    ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
     ("GCD", "GCD(number1, …)"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
@@ -115,6 +120,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("NA", "NA()"),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     ("NOT", "NOT(logical)"),
+    (
+        "NUMBERVALUE",
+        "NUMBERVALUE(text, [decimal_sep], [group_sep])",
+    ),
     ("ODD", "ODD(number)"),
     ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
@@ -156,6 +165,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SUMIFS", "SUMIFS(sum_range, range1, criteria1, …)"),
     ("SUMPRODUCT", "SUMPRODUCT(array1, …)"),
     ("SUMSQ", "SUMSQ(number1, …)"),
+    ("T", "T(value)"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
     ("TEXT", "TEXT(value, format_code)"),
@@ -165,6 +175,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
     ("TYPE", "TYPE(value)"),
+    ("UNICHAR", "UNICHAR(number)"),
+    ("UNICODE", "UNICODE(text)"),
     ("UPPER", "UPPER(text)"),
     ("VALUE", "VALUE(text)"),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
@@ -344,6 +356,24 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             }
             _ => Value::Error(ErrorValue::Value),
         },
+        "CHAR" => eval_char(ev, sheet, args, false),
+        "UNICHAR" => eval_char(ev, sheet, args, true),
+        "CODE" => eval_code(ev, sheet, args, false),
+        "UNICODE" => eval_code(ev, sheet, args, true),
+        "CLEAN" => eval_clean(ev, sheet, args),
+        // `T` passes text through and answers empty for everything else — it
+        // does *not* convert, which is the difference from TEXT.
+        "T" => match args {
+            [arg] => match ev.eval_expr(sheet, arg) {
+                Value::Text(t) => Value::Text(t),
+                Value::Error(e) => Value::Error(e),
+                _ => Value::Text(String::new()),
+            },
+            _ => Value::Error(ErrorValue::Value),
+        },
+        "FIXED" => eval_fixed(ev, sheet, args),
+        "DOLLAR" => eval_dollar(ev, sheet, args),
+        "NUMBERVALUE" => eval_numbervalue(ev, sheet, args),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -3082,4 +3112,215 @@ fn eval_offset(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     target.row = row as u32;
     target.col = col as u32;
     ev.eval_expr(sheet, &Expr::Reference(target))
+}
+
+// --- Text helpers ----------------------------------------------------------
+
+/// `CHAR` and `UNICHAR`.
+///
+/// They differ in range, not in kind: `CHAR` takes 1..=255 and `UNICHAR` any
+/// valid code point. Treating them as the same function would accept `CHAR(955)`
+/// and return λ, which Excel refuses.
+fn eval_char(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], unicode: bool) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let code = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => n.trunc(),
+        Err(e) => return Value::Error(e),
+    };
+    if code < 1.0 || (!unicode && code > 255.0) {
+        return Value::Error(ErrorValue::Value);
+    }
+    match u32::try_from(code as i64).ok().and_then(char::from_u32) {
+        Some(ch) => Value::Text(ch.to_string()),
+        None => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `CODE` and `UNICODE` — the code point of the first character.
+fn eval_code(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], unicode: bool) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, arg) {
+        Value::Text(t) => t,
+        Value::Error(e) => return Value::Error(e),
+        other => match other.as_number() {
+            Ok(n) => number_to_text(n),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    let Some(ch) = text.chars().next() else {
+        // Excel reports #VALUE! for empty text rather than 0.
+        return Value::Error(ErrorValue::Value);
+    };
+    let code = ch as u32;
+    if !unicode && code > 255 {
+        // CODE is byte-oriented; a character it cannot express is #VALUE!.
+        return Value::Error(ErrorValue::Value);
+    }
+    Value::Number(f64::from(code))
+}
+
+/// `CLEAN(text)` — drop the non-printable control characters.
+fn eval_clean(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match ev.eval_expr(sheet, arg) {
+        Value::Error(e) => Value::Error(e),
+        other => {
+            let text = match other {
+                Value::Text(t) => t,
+                Value::Empty => String::new(),
+                v => match v.as_number() {
+                    Ok(n) => number_to_text(n),
+                    Err(e) => return Value::Error(e),
+                },
+            };
+            Value::Text(text.chars().filter(|c| !c.is_control()).collect())
+        }
+    }
+}
+
+/// `FIXED(number, [decimals], [no_commas])` — fixed-point text.
+fn eval_fixed(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let value = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let decimals = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n.trunc() as i32,
+            Err(e) => return Value::Error(e),
+        },
+        None => 2,
+    };
+    let no_commas = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_bool() {
+            Ok(b) => b,
+            Err(e) => return Value::Error(e),
+        },
+        None => false,
+    };
+    // A negative `decimals` rounds to the left of the point: FIXED(1234.5,-2)
+    // is "1,200". Clamping it to zero instead would quietly change the answer.
+    let (rounded, places) = if decimals < 0 {
+        let factor = 10f64.powi(-decimals);
+        ((value / factor).round() * factor, 0usize)
+    } else {
+        (value, decimals as usize)
+    };
+    let mut text = format!("{rounded:.places$}");
+    if !no_commas {
+        text = group_thousands(&text);
+    }
+    Value::Text(text)
+}
+
+/// `DOLLAR(number, [decimals])` — like FIXED, always grouped, with a currency
+/// symbol and parentheses for negatives, as the accounting format uses.
+fn eval_dollar(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let value = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let decimals = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n.trunc() as i32,
+            Err(e) => return Value::Error(e),
+        },
+        None => 2,
+    };
+    let (rounded, places) = if decimals < 0 {
+        let factor = 10f64.powi(-decimals);
+        ((value / factor).round() * factor, 0usize)
+    } else {
+        (value, decimals as usize)
+    };
+    let body = group_thousands(&format!("{:.places$}", rounded.abs()));
+    Value::Text(if rounded < 0.0 {
+        format!("($={body})").replace("$=", "$")
+    } else {
+        format!("${body}")
+    })
+}
+
+/// Insert thousands separators into the integer part of a formatted number.
+fn group_thousands(text: &str) -> String {
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text),
+    };
+    let (int, frac) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    let mut grouped = String::new();
+    for (i, ch) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    match frac {
+        Some(f) => format!("{sign}{grouped}.{f}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+/// `NUMBERVALUE(text, [decimal], [group])` — parse a number written with
+/// explicit separators, rather than guessing at the locale.
+fn eval_numbervalue(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]) {
+        Value::Text(t) => t,
+        Value::Error(e) => return Value::Error(e),
+        other => match other.as_number() {
+            Ok(n) => return Value::Number(n),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    let mut separator = |i: usize, default: char| -> Result<char, Value> {
+        match args.get(i) {
+            Some(a) => match ev.eval_expr(sheet, a) {
+                Value::Text(t) => Ok(t.chars().next().unwrap_or(default)),
+                Value::Error(e) => Err(Value::Error(e)),
+                _ => Ok(default),
+            },
+            None => Ok(default),
+        }
+    };
+    let decimal = match separator(1, '.') {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let group = match separator(2, ',') {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let mut cleaned = String::new();
+    for ch in text.chars() {
+        if ch == group || ch.is_whitespace() {
+            continue;
+        }
+        cleaned.push(if ch == decimal { '.' } else { ch });
+    }
+    // A trailing percent scales the result, which is the one piece of
+    // interpretation the function does beyond separators.
+    let percents = cleaned.chars().rev().take_while(|c| *c == '%').count();
+    let body = cleaned.trim_end_matches('%');
+    match body.parse::<f64>() {
+        Ok(n) => Value::Number(n / 100f64.powi(percents as i32)),
+        Err(_) => Value::Error(ErrorValue::Value),
+    }
 }
