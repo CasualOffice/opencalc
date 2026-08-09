@@ -6,8 +6,21 @@ re-examined for actual completeness and standard behavior. Work items are
 completed **one at a time to full Excel/Sheets parity** (implement → verify
 in-browser → commit) before starting the next._
 
+**All 63 rows are ✅ as of 2026-08-09.** The backlog is kept rather than deleted:
+each row's note records what was actually wrong and why the fix took the shape
+it did, which is the part that does not survive in a diff.
+
 Status: 🔴 Todo · 🟡 Partial-in-progress · ✅ Done. Severity: **P0** broken /
 data-loss / wrong-target · **P1** expected-daily · **P2** polish.
+
+One pattern is worth carrying forward: a run of five consecutive **P2** rows
+turned out to be **silent data loss on save**, not the cosmetic gaps the rows
+described — diagonal borders, elapsed-time formats, sheet visibility, sheet and
+cell protection, and non-list data validations were each written correctly and
+imported as nothing. `date1904` was worse still: a Mac-epoch workbook displayed
+every date 1462 days out *and* saving corrupted it permanently. A row's severity
+was written from how it looks on screen; several of them were mis-rated because
+what a user sees says nothing about what reaches the file.
 
 Sources: audits of selection/navigation, editing/clipboard, formatting,
 structure/data, **formula-authoring**, and chrome/fidelity. Code citations are in
