@@ -2610,3 +2610,182 @@ fn intl_weekend_mask_is_monday_origin() {
         crate::functions::ymd_to_serial_for_test(2024, 5, 20)
     );
 }
+
+/// The `*B` functions count bytes under DBCS rules, where a full-width
+/// character is two. Aliasing them to their character twins — which is what
+/// they collapse to in a single-byte locale — would silently halve every count
+/// on exactly the data they exist for.
+#[test]
+fn byte_text_functions_count_double_width_characters_as_two() {
+    let mut b = Builder::new();
+    b.text((0, 0), "日本語abc"); // 3 wide + 3 narrow = 9 bytes, 6 characters
+    b.formula((0, 1), "LEN(A1)");
+    b.formula((1, 1), "LENB(A1)");
+    b.formula((2, 1), "LEFTB(A1,4)");
+    b.formula((3, 1), "RIGHTB(A1,3)");
+    b.formula((4, 1), "MIDB(A1,3,4)");
+    b.formula((5, 1), "FINDB(\"abc\",A1)");
+    b.formula((6, 1), "REPLACEB(A1,1,6,\"X\")");
+    // A cut landing inside a wide character yields a space for the half it
+    // cannot represent, so the width asked for is still the width returned.
+    b.formula((7, 1), "LEFTB(A1,3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let t = |r: u32| match value_at(&wb, r, 1) {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        CellValue::Number(n) => n.to_string(),
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert_eq!(t(0), "6", "LEN counts characters");
+    assert_eq!(t(1), "9", "LENB counts bytes");
+    assert_eq!(t(2), "日本", "two wide characters is four bytes");
+    assert_eq!(t(3), "abc");
+    assert_eq!(t(4), "本語", "from byte 3, four bytes");
+    assert_eq!(t(5), "7", "the ASCII run starts at byte 7");
+    assert_eq!(t(6), "Xabc", "six bytes replaced is three wide characters");
+    assert_eq!(t(7), "日 ", "the half character becomes a space");
+}
+
+/// On text with no double-byte characters the `*B` functions and their
+/// character twins must agree exactly — that is what makes them safe to use
+/// outside a DBCS locale.
+#[test]
+fn byte_and_character_text_functions_agree_on_ascii() {
+    let mut b = Builder::new();
+    b.text((0, 0), "Hello, world");
+    for (i, (a, bb)) in [
+        ("LEN(A1)", "LENB(A1)"),
+        ("LEFT(A1,5)", "LEFTB(A1,5)"),
+        ("RIGHT(A1,5)", "RIGHTB(A1,5)"),
+        ("MID(A1,4,3)", "MIDB(A1,4,3)"),
+        ("FIND(\"world\",A1)", "FINDB(\"world\",A1)"),
+        ("SEARCH(\"WORLD\",A1)", "SEARCHB(\"WORLD\",A1)"),
+        ("REPLACE(A1,1,5,\"Bye\")", "REPLACEB(A1,1,5,\"Bye\")"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        b.formula((i as u32, 1), a);
+        b.formula((i as u32, 2), bb);
+    }
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    for r in 0..7u32 {
+        assert_eq!(
+            value_at(&wb, r, 1),
+            value_at(&wb, r, 2),
+            "row {r}: the byte variant must match its character twin on ASCII"
+        );
+    }
+}
+
+/// `ASC` and `JIS` convert only the forms that have both widths; anything else
+/// passes through rather than being mangled.
+#[test]
+fn width_conversion_is_reversible_and_leaves_the_rest_alone() {
+    let mut b = Builder::new();
+    b.text((0, 0), "AB1");
+    b.text((1, 0), "ＡＢ１");
+    b.text((2, 0), "日本語");
+    b.formula((0, 1), "JIS(A1)");
+    b.formula((1, 1), "ASC(A2)");
+    b.formula((2, 1), "ASC(JIS(A1))");
+    b.formula((3, 1), "ASC(A3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let t = |r: u32| match value_at(&wb, r, 1) {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert_eq!(t(0), "ＡＢ１");
+    assert_eq!(t(1), "AB1");
+    assert_eq!(t(2), "AB1", "the pair round-trips");
+    assert_eq!(t(3), "日本語", "no half-width form, so untouched");
+}
+
+/// Bessel values checked against published tables and against a separately
+/// written implementation of the same series — not against this one's own
+/// output. A series that converges smoothly to the wrong number looks perfectly
+/// healthy from the inside.
+///
+/// Two of the constants here were wrong when first written: J₂(2.5) and
+/// K₁(1.5) were mistyped in the seventh and ninth decimal, and the failure was
+/// the *test*, not the code. Both now agree with the tables to seven places,
+/// which is as far as published values go.
+#[test]
+fn bessel_functions_match_reference_values() {
+    let mut b = Builder::new();
+    let cases = [
+        ("BESSELJ(1.5,0)", 0.511_827_671_735_918),
+        ("BESSELJ(1.5,1)", 0.557_936_507_910_100),
+        ("BESSELJ(2.5,2)", 0.446_059_058_437_444),
+        ("BESSELI(1.5,0)", 1.646_723_189_772_88),
+        ("BESSELI(1.5,1)", 0.981_666_428_925_837),
+        ("BESSELY(1.5,0)", 0.382_448_923_797_759),
+        ("BESSELY(1.5,1)", -0.412_308_626_973_911),
+        ("BESSELK(1.5,0)", 0.213_805_562_643_749),
+        ("BESSELK(1.5,1)", 0.277_387_800_456_844),
+    ];
+    for (i, (formula, _)) in cases.iter().enumerate() {
+        b.formula((i as u32, 0), formula);
+    }
+    // The domain edges: Y and K diverge at zero, and a negative argument is
+    // undefined — both #NUM! rather than an infinity, because a spreadsheet
+    // showing 1E+308 for an undefined value is worse than one that says so.
+    b.formula((20, 0), "BESSELY(0,0)");
+    b.formula((21, 0), "BESSELK(0,0)");
+    b.formula((22, 0), "BESSELJ(-1,0)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    for (i, (formula, want)) in cases.iter().enumerate() {
+        let got = match value_at(&wb, i as u32, 0) {
+            CellValue::Number(n) => n,
+            other => panic!("{formula}: {other:?}"),
+        };
+        assert!(
+            (got - want).abs() < 1e-9,
+            "{formula}: got {got}, want {want}"
+        );
+    }
+    for r in [20, 21, 22] {
+        assert_eq!(
+            value_at(&wb, r, 0),
+            CellValue::Error(casual_calc_model::ErrorValue::Num),
+            "row {r} is outside the domain"
+        );
+    }
+}
+
+/// Thai number words have two irregularities that a digit-by-digit rendering
+/// gets wrong: a tens digit of one is `สิบ`, and a units digit of one after any
+/// tens is `เอ็ด`.
+#[test]
+fn bahttext_handles_the_thai_irregular_forms() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "BAHTTEXT(1)");
+    b.formula((1, 0), "BAHTTEXT(10)");
+    b.formula((2, 0), "BAHTTEXT(11)");
+    b.formula((3, 0), "BAHTTEXT(21)");
+    b.formula((4, 0), "BAHTTEXT(0)");
+    b.formula((5, 0), "BAHTTEXT(1.25)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let t = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert_eq!(t(0), "หนึ่งบาทถ้วน");
+    assert_eq!(t(1), "สิบบาทถ้วน", "ten is สิบ, not หนึ่งสิบ");
+    assert_eq!(t(2), "สิบเอ็ดบาทถ้วน", "eleven ends in เอ็ด");
+    assert_eq!(t(3), "ยี่สิบเอ็ดบาทถ้วน", "twenty is ยี่สิบ");
+    assert_eq!(t(4), "ศูนย์บาทถ้วน");
+    assert_eq!(t(5), "หนึ่งบาทยี่สิบห้าสตางค์", "satang replace ถ้วน");
+}

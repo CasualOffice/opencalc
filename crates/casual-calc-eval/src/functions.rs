@@ -29,6 +29,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
     ("AND", "AND(logical1, …)"),
     ("AREAS", "AREAS(reference)"),
+    ("ASC", "ASC(text)"),
     ("ASIN", "ASIN(number)"),
     ("ASINH", "ASINH(number)"),
     ("ATAN", "ATAN(number)"),
@@ -39,6 +40,11 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEA", "AVERAGEA(value1, …)"),
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
+    ("BAHTTEXT", "BAHTTEXT(number)"),
+    ("BESSELI", "BESSELI(x, n)"),
+    ("BESSELJ", "BESSELJ(x, n)"),
+    ("BESSELK", "BESSELK(x, n)"),
+    ("BESSELY", "BESSELY(x, n)"),
     ("BETADIST", "BETADIST(x, alpha, beta, [A], [B])"),
     ("BETAINV", "BETAINV(probability, alpha, beta, [A], [B])"),
     ("BIN2DEC", "BIN2DEC(number)"),
@@ -158,6 +164,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FALSE", "FALSE()"),
     ("FDIST", "FDIST(x, degrees_freedom1, degrees_freedom2)"),
     ("FIND", "FIND(find_text, within_text, [start])"),
+    ("FINDB", "FINDB(find_text, within_text, [start_num])"),
     ("FISHER", "FISHER(x)"),
     ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
@@ -228,11 +235,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISPMT", "ISPMT(rate, per, nper, pv)"),
     ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
+    ("JIS", "JIS(text)"),
     ("KURT", "KURT(number1, …)"),
     ("LARGE", "LARGE(array, k)"),
     ("LCM", "LCM(number1, …)"),
     ("LEFT", "LEFT(text, [num_chars])"),
+    ("LEFTB", "LEFTB(text, [num_bytes])"),
     ("LEN", "LEN(text)"),
+    ("LENB", "LENB(text)"),
     ("LN", "LN(number)"),
     ("LOG", "LOG(number, [base])"),
     ("LOG10", "LOG10(number)"),
@@ -249,6 +259,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("MEDIAN", "MEDIAN(number1, …)"),
     ("MID", "MID(text, start_num, num_chars)"),
+    ("MIDB", "MIDB(text, start_num, num_bytes)"),
     ("MIN", "MIN(number1, …)"),
     ("MINA", "MINA(value1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
@@ -319,8 +330,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "RECEIVED(settlement, maturity, investment, discount, [basis])",
     ),
     ("REPLACE", "REPLACE(old, start, num_chars, new)"),
+    (
+        "REPLACEB",
+        "REPLACEB(old_text, start_num, num_bytes, new_text)",
+    ),
     ("REPT", "REPT(text, number_times)"),
     ("RIGHT", "RIGHT(text, [num_chars])"),
+    ("RIGHTB", "RIGHTB(text, [num_bytes])"),
     ("ROMAN", "ROMAN(number, [form])"),
     ("ROUND", "ROUND(number, num_digits)"),
     ("ROUNDDOWN", "ROUNDDOWN(number, num_digits)"),
@@ -330,6 +346,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("RRI", "RRI(nper, pv, fv)"),
     ("RSQ", "RSQ(known_y, known_x)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
+    ("SEARCHB", "SEARCHB(find_text, within_text, [start_num])"),
     ("SEC", "SEC(number)"),
     ("SECH", "SECH(number)"),
     ("SECOND", "SECOND(serial_number)"),
@@ -384,6 +401,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("UNICHAR", "UNICHAR(number)"),
     ("UNICODE", "UNICODE(text)"),
     ("UPPER", "UPPER(text)"),
+    ("USDOLLAR", "USDOLLAR(number, [decimals])"),
     ("VALUE", "VALUE(text)"),
     ("VAR", "VAR(number1, …)"),
     ("VARA", "VARA(value1, …)"),
@@ -527,6 +545,11 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CONCATENATE" | "CONCAT" => eval_concat(ev, sheet, args),
         "LEN" => eval_len(ev, sheet, args),
         "LEFT" => eval_left(ev, sheet, args),
+        "LENB" | "LEFTB" | "RIGHTB" | "MIDB" | "FINDB" | "SEARCHB" | "REPLACEB" => {
+            eval_text_bytes(ev, sheet, name, args)
+        }
+        "ASC" => eval_width_convert(ev, sheet, args, false),
+        "JIS" => eval_width_convert(ev, sheet, args, true),
         "RIGHT" => eval_right(ev, sheet, args),
         "MID" => eval_mid(ev, sheet, args),
         "UPPER" => text_op(ev, sheet, args, |s| s.to_uppercase()),
@@ -607,7 +630,11 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             _ => Value::Error(ErrorValue::Value),
         },
         "FIXED" => eval_fixed(ev, sheet, args),
-        "DOLLAR" => eval_dollar(ev, sheet, args),
+        // `USDOLLAR` is the legacy alias of `DOLLAR`, kept because old files
+        // still contain it.
+        "DOLLAR" | "USDOLLAR" => eval_dollar(ev, sheet, args),
+        "BAHTTEXT" => eval_bahttext(ev, sheet, args),
+        "BESSELI" | "BESSELJ" | "BESSELK" | "BESSELY" => eval_bessel(ev, sheet, name, args),
         "NUMBERVALUE" => eval_numbervalue(ev, sheet, args),
         // Descriptive statistics over the flattened numeric arguments.
         "AVEDEV" => stat_over(ev, sheet, args, |ns| {
@@ -7123,5 +7150,512 @@ fn eval_volatile(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]
             Value::Number((lo + (ev.next_random() * span).floor()).min(hi))
         }
         _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// Whether a character occupies two bytes in a double-byte character set.
+///
+/// The `*B` text functions count bytes, not characters, and in a DBCS locale a
+/// full-width character is two. Aliasing them to their character versions —
+/// which is what they collapse to in a single-byte locale — would silently
+/// halve every count on Japanese or Chinese text, which is precisely the data
+/// they exist for.
+///
+/// The ranges are the full-width and CJK blocks: CJK ideographs, kana, Hangul,
+/// and the full-width forms of the ASCII punctuation.
+fn is_double_byte(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F      // Hangul Jamo
+        | 0x2E80..=0x303E    // CJK radicals, kangxi, CJK symbols
+        | 0x3041..=0x33FF    // kana, Hangul compat, CJK compat
+        | 0x3400..=0x4DBF    // CJK extension A
+        | 0x4E00..=0x9FFF    // CJK unified ideographs
+        | 0xA000..=0xA4CF    // Yi
+        | 0xAC00..=0xD7A3    // Hangul syllables
+        | 0xF900..=0xFAFF    // CJK compatibility ideographs
+        | 0xFE30..=0xFE6F    // CJK compatibility forms
+        | 0xFF00..=0xFF60    // full-width forms
+        | 0xFFE0..=0xFFE6    // full-width signs
+        | 0x1F300..=0x1F64F  // emoji, which Excel also counts as wide
+        | 0x20000..=0x2FA1F  // CJK extensions B..F
+    )
+}
+
+/// The byte width of a string under DBCS rules.
+fn dbcs_len(text: &str) -> usize {
+    text.chars()
+        .map(|c| if is_double_byte(c) { 2 } else { 1 })
+        .sum()
+}
+
+/// Take characters until `bytes` byte-widths are used.
+///
+/// A cut that would land inside a double-byte character stops before it: Excel
+/// pads with a space in that case, and half of a character is not a character.
+fn dbcs_take(text: &str, bytes: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in text.chars() {
+        let w = if is_double_byte(c) { 2 } else { 1 };
+        if used + w > bytes {
+            // Landing mid-character: Excel emits a space for the half it can
+            // not represent, so the result still has the requested width.
+            if used < bytes {
+                out.push(' ');
+            }
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out
+}
+
+/// The character index at or after a byte offset, for the `*B` functions that
+/// take a start position.
+fn dbcs_char_index(text: &str, byte_pos: usize) -> usize {
+    let mut used = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        if used >= byte_pos {
+            return i;
+        }
+        used += if is_double_byte(c) { 2 } else { 1 };
+    }
+    text.chars().count()
+}
+
+/// The byte-oriented text functions.
+///
+/// Each is its character-counting twin measured in DBCS bytes. On text with no
+/// double-byte characters they agree exactly, which is what makes them safe to
+/// use in a single-byte locale — and why a test asserts both halves.
+fn eval_text_bytes(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    let text_arg = |ev: &mut Evaluator<'_>, i: usize| -> Result<String, ErrorValue> {
+        ev.eval_expr(sheet, &args[i]).as_text()
+    };
+    match name {
+        "LENB" => {
+            if args.len() != 1 {
+                return Value::Error(ErrorValue::Value);
+            }
+            match text_arg(ev, 0) {
+                Ok(t) => Value::Number(dbcs_len(&t) as f64),
+                Err(e) => Value::Error(e),
+            }
+        }
+        "LEFTB" | "RIGHTB" => match text_and_count(ev, sheet, args) {
+            Ok((text, count)) => {
+                let count = count as usize;
+                if name == "LEFTB" {
+                    Value::Text(dbcs_take(&text, count))
+                } else {
+                    // From the right: drop the leading bytes instead.
+                    let total = dbcs_len(&text);
+                    let skip = total.saturating_sub(count);
+                    let at = dbcs_char_index(&text, skip);
+                    Value::Text(text.chars().skip(at).collect())
+                }
+            }
+            Err(e) => Value::Error(e),
+        },
+        "MIDB" => {
+            if args.len() != 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let text = match text_arg(ev, 0) {
+                Ok(t) => t,
+                Err(e) => return Value::Error(e),
+            };
+            let [start, count] = match pair_of_numbers(ev, sheet, &args[1..3]) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            if start < 1.0 || count < 0.0 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let at = dbcs_char_index(&text, start as usize - 1);
+            let rest: String = text.chars().skip(at).collect();
+            Value::Text(dbcs_take(&rest, count as usize))
+        }
+        "FINDB" | "SEARCHB" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let needle = match text_arg(ev, 0) {
+                Ok(t) => t,
+                Err(e) => return Value::Error(e),
+            };
+            let hay = match text_arg(ev, 1) {
+                Ok(t) => t,
+                Err(e) => return Value::Error(e),
+            };
+            let start = match args.get(2) {
+                Some(a) => match ev.eval_expr(sheet, a).as_number() {
+                    Ok(n) => n as usize,
+                    Err(e) => return Value::Error(e),
+                },
+                None => 1,
+            };
+            if start < 1 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let from_char = dbcs_char_index(&hay, start - 1);
+            let rest: String = hay.chars().skip(from_char).collect();
+            // FINDB is case-sensitive; SEARCHB is not — the same split as
+            // between FIND and SEARCH.
+            let found = if name == "FINDB" {
+                rest.find(&needle)
+            } else {
+                rest.to_lowercase().find(&needle.to_lowercase())
+            };
+            match found {
+                Some(byte_off) => {
+                    // `find` gives a UTF-8 offset; convert through characters to
+                    // a DBCS byte position, which is a different measure again.
+                    let chars_before = rest[..byte_off].chars().count();
+                    let prefix: String = hay.chars().take(from_char + chars_before).collect();
+                    Value::Number(dbcs_len(&prefix) as f64 + 1.0)
+                }
+                None => Value::Error(ErrorValue::Value),
+            }
+        }
+        "REPLACEB" => {
+            if args.len() != 4 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let text = match text_arg(ev, 0) {
+                Ok(t) => t,
+                Err(e) => return Value::Error(e),
+            };
+            let [start, count] = match pair_of_numbers(ev, sheet, &args[1..3]) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let with = match text_arg(ev, 3) {
+                Ok(t) => t,
+                Err(e) => return Value::Error(e),
+            };
+            if start < 1.0 || count < 0.0 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let head_chars = dbcs_char_index(&text, start as usize - 1);
+            let head: String = text.chars().take(head_chars).collect();
+            let tail_at = dbcs_char_index(&text, start as usize - 1 + count as usize);
+            let tail: String = text.chars().skip(tail_at).collect();
+            Value::Text(format!("{head}{with}{tail}"))
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// `ASC` and `JIS` — full-width ↔ half-width conversion.
+///
+/// Only the ASCII range and the katakana that have both forms convert; anything
+/// else passes through, which is what Excel does and what stops the function
+/// mangling text that has no half-width equivalent.
+fn eval_width_convert(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], to_full: bool) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let text = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(t) => t,
+        Err(e) => return Value::Error(e),
+    };
+    let converted: String = text
+        .chars()
+        .map(|c| {
+            let code = c as u32;
+            if to_full {
+                match code {
+                    // ASCII printable → its full-width twin.
+                    0x21..=0x7E => char::from_u32(code + 0xFEE0).unwrap_or(c),
+                    0x20 => '\u{3000}', // the ideographic space
+                    _ => c,
+                }
+            } else {
+                match code {
+                    0xFF01..=0xFF5E => char::from_u32(code - 0xFEE0).unwrap_or(c),
+                    0x3000 => ' ',
+                    _ => c,
+                }
+            }
+        })
+        .collect();
+    Value::Text(converted)
+}
+
+/// `BAHTTEXT` — a number as Thai baht in words.
+///
+/// Thai number words are positional with two irregularities that make a naive
+/// digit-by-digit rendering wrong: a tens digit of 1 is `สิบ` rather than
+/// `หนึ่งสิบ`, and a units digit of 1 after any tens is `เอ็ด` rather than
+/// `หนึ่ง`. Both are the difference between correct Thai and something that
+/// reads as a foreigner's guess.
+fn thai_number(mut n: u64) -> String {
+    const DIGITS: [&str; 10] = [
+        "",
+        "หนึ่ง",
+        "สอง",
+        "สาม",
+        "สี่",
+        "ห้า",
+        "หก",
+        "เจ็ด",
+        "แปด",
+        "เก้า",
+    ];
+    const PLACES: [&str; 6] = ["", "สิบ", "ร้อย", "พัน", "หมื่น", "แสน"];
+    if n == 0 {
+        return "ศูนย์".to_owned();
+    }
+    let mut out = String::new();
+    // Above a million the whole millions part is spoken then suffixed, which
+    // recurses rather than needing place names beyond แสน.
+    if n >= 1_000_000 {
+        out.push_str(&thai_number(n / 1_000_000));
+        out.push_str("ล้าน");
+        n %= 1_000_000;
+        if n == 0 {
+            return out;
+        }
+    }
+    let digits: Vec<u32> = n
+        .to_string()
+        .chars()
+        .filter_map(|c| c.to_digit(10))
+        .collect();
+    let len = digits.len();
+    for (i, d) in digits.iter().enumerate() {
+        if *d == 0 {
+            continue;
+        }
+        let place = len - 1 - i;
+        if place == 1 && *d == 1 {
+            out.push_str(PLACES[1]); // สิบ, not หนึ่งสิบ
+        } else if place == 1 && *d == 2 {
+            out.push_str("ยี่");
+            out.push_str(PLACES[1]);
+        } else if place == 0 && *d == 1 && len > 1 {
+            out.push_str("เอ็ด"); // the special unit after any tens
+        } else {
+            out.push_str(DIGITS[*d as usize]);
+            out.push_str(PLACES[place]);
+        }
+    }
+    out
+}
+
+fn eval_bahttext(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let n = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let negative = n < 0.0;
+    let abs = n.abs();
+    let baht = abs.trunc() as u64;
+    // Satang are hundredths, rounded — a half-satang has nowhere to go.
+    let satang = ((abs - abs.trunc()) * 100.0).round() as u64;
+    let mut out = String::new();
+    if negative {
+        out.push_str("ลบ");
+    }
+    out.push_str(&thai_number(baht));
+    out.push_str("บาท");
+    if satang == 0 {
+        out.push_str("ถ้วน"); // "exactly", which Thai requires when there is no change
+    } else {
+        out.push_str(&thai_number(satang));
+        out.push_str("สตางค์");
+    }
+    Value::Text(out)
+}
+
+/// The Bessel functions of the first and second kind, and their modified forms.
+///
+/// Series expansions rather than a table: the series converge quickly for the
+/// arguments a spreadsheet sees, and a table would be an approximation with an
+/// arbitrary cut-off rather than one with a stated error.
+fn bessel_j(n: i32, x: f64) -> f64 {
+    // Ascending series: sum (-1)^k (x/2)^(2k+n) / (k! (k+n)!).
+    let mut term = (x / 2.0).powi(n) / factorial_f64(n as u32);
+    let mut sum = term;
+    let half_sq = (x / 2.0) * (x / 2.0);
+    for k in 1..200 {
+        term *= -half_sq / (k as f64 * (k + n) as f64);
+        sum += term;
+        if term.abs() < 1e-18 * sum.abs().max(1e-300) {
+            break;
+        }
+    }
+    sum
+}
+
+fn bessel_i(n: i32, x: f64) -> f64 {
+    // The modified form is the same series without the alternating sign.
+    let mut term = (x / 2.0).powi(n) / factorial_f64(n as u32);
+    let mut sum = term;
+    let half_sq = (x / 2.0) * (x / 2.0);
+    for k in 1..300 {
+        term *= half_sq / (k as f64 * (k + n) as f64);
+        sum += term;
+        if term.abs() < 1e-18 * sum.abs().max(1e-300) {
+            break;
+        }
+    }
+    sum
+}
+
+/// `n!` as a float, for the Bessel series. Named apart from the spreadsheet
+/// `FACT`, which returns a `Value` and validates its domain.
+fn factorial_f64(n: u32) -> f64 {
+    (1..=n).map(f64::from).product::<f64>().max(1.0)
+}
+
+/// `BESSELY` and `BESSELK` — the second-kind pair, built from the first.
+///
+/// Both diverge at zero and are undefined for negative arguments, which is a
+/// `#NUM!` rather than an infinity: a spreadsheet showing `1E+308` for an
+/// undefined value is worse than one that says so.
+fn bessel_y(n: i32, x: f64) -> f64 {
+    // Y_n via the limit form, using the recurrence from Y0 and Y1 computed by
+    // their standard series with the Euler–Mascheroni term.
+    const EULER: f64 = 0.577_215_664_901_532_9;
+    let y0 = {
+        let mut sum = 0.0;
+        let mut term = 1.0;
+        let half_sq = (x / 2.0) * (x / 2.0);
+        let mut harmonic = 0.0;
+        for k in 1..200 {
+            term *= -half_sq / (k as f64 * k as f64);
+            harmonic += 1.0 / k as f64;
+            sum += term * harmonic;
+            if term.abs() < 1e-18 {
+                break;
+            }
+        }
+        2.0 / std::f64::consts::PI * ((x / 2.0).ln() + EULER) * bessel_j(0, x)
+            - 2.0 / std::f64::consts::PI * sum
+    };
+    if n == 0 {
+        return y0;
+    }
+    let y1 = 2.0 / std::f64::consts::PI * (bessel_j(1, x) * ((x / 2.0).ln() + EULER) - 1.0 / x)
+        - bessel_series_y1_correction(x);
+    if n == 1 {
+        return y1;
+    }
+    // Upward recurrence, which is stable for Y.
+    let (mut prev, mut cur) = (y0, y1);
+    for k in 1..n {
+        let next = 2.0 * k as f64 / x * cur - prev;
+        prev = cur;
+        cur = next;
+    }
+    cur
+}
+
+/// The series part of `Y1` that is not expressible through `J1`.
+fn bessel_series_y1_correction(x: f64) -> f64 {
+    let half = x / 2.0;
+    let half_sq = half * half;
+    let mut term = half;
+    let mut sum = 0.0;
+    let mut h_k = 0.0;
+    let mut h_k1 = 1.0;
+    for k in 0..200 {
+        if k > 0 {
+            term *= -half_sq / (k as f64 * (k + 1) as f64);
+            h_k += 1.0 / k as f64;
+            h_k1 += 1.0 / (k + 1) as f64;
+        }
+        sum += term * (h_k + h_k1);
+        if term.abs() < 1e-18 {
+            break;
+        }
+    }
+    sum / std::f64::consts::PI
+}
+
+fn bessel_k(n: i32, x: f64) -> f64 {
+    // K via the integral-free relation to I, using the standard K0/K1 series
+    // and upward recurrence.
+    const EULER: f64 = 0.577_215_664_901_532_9;
+    let k0 = {
+        let mut sum = 0.0;
+        let mut term = 1.0;
+        let half_sq = (x / 2.0) * (x / 2.0);
+        let mut harmonic = 0.0;
+        for k in 1..300 {
+            term *= half_sq / (k as f64 * k as f64);
+            harmonic += 1.0 / k as f64;
+            sum += term * harmonic;
+            if term.abs() < 1e-18 {
+                break;
+            }
+        }
+        -((x / 2.0).ln() + EULER) * bessel_i(0, x) + sum
+    };
+    if n == 0 {
+        return k0;
+    }
+    let k1 = (1.0 / x) * (1.0 - x * k0 * 0.0) + {
+        // K1 = 1/x + ln(x/2)·I1 − series; assembled from the same pieces.
+        let half = x / 2.0;
+        let half_sq = half * half;
+        let mut term = half;
+        let mut sum = 0.0;
+        let mut h_k = 0.0;
+        let mut h_k1 = 1.0;
+        for k in 0..300 {
+            if k > 0 {
+                term *= half_sq / (k as f64 * (k + 1) as f64);
+                h_k += 1.0 / k as f64;
+                h_k1 += 1.0 / (k + 1) as f64;
+            }
+            sum += term * (h_k + h_k1);
+            if term.abs() < 1e-18 {
+                break;
+            }
+        }
+        ((x / 2.0).ln() + EULER) * bessel_i(1, x) - sum / 2.0
+    };
+    if n == 1 {
+        return k1;
+    }
+    let (mut prev, mut cur) = (k0, k1);
+    for k in 1..n {
+        let next = 2.0 * k as f64 / x * cur + prev;
+        prev = cur;
+        cur = next;
+    }
+    cur
+}
+
+fn eval_bessel(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    let [x, order] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n = order.trunc() as i32;
+    if n < 0 || x < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Y and K diverge at zero; J and I are defined there.
+    if x == 0.0 && matches!(name, "BESSELY" | "BESSELK") {
+        return Value::Error(ErrorValue::Num);
+    }
+    let v = match name {
+        "BESSELJ" => bessel_j(n, x),
+        "BESSELI" => bessel_i(n, x),
+        "BESSELY" => bessel_y(n, x),
+        _ => bessel_k(n, x),
+    };
+    if v.is_finite() {
+        Value::Number(v)
+    } else {
+        Value::Error(ErrorValue::Num)
     }
 }
