@@ -2515,6 +2515,42 @@ pub fn session_cells(
             if let Some(bd) = style.and_then(|s| s.border.as_ref()) {
                 extra.push_str(&format!(",\"bd\":{}", border_json(bd)));
             }
+            // Fill detail beyond a flat colour: a pattern's second colour and
+            // a gradient's stops. Sent only when present — nearly every filled
+            // cell is a plain solid.
+            if let Some(st) = style {
+                if let Some(bg2) = &st.fill_bg_color {
+                    extra.push_str(&format!(",\"bg2\":{}", json_string(bg2)));
+                }
+                if let Some(p) = &st.fill_pattern {
+                    extra.push_str(&format!(",\"pat\":{}", json_string(p)));
+                }
+                if let Some(g) = &st.fill_gradient {
+                    let stops: Vec<String> = g
+                        .stops
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "{{\"p\":{:.4},\"c\":{}}}",
+                                casual_calc_model::from_micro(s.position_micro),
+                                json_string(&s.color)
+                            )
+                        })
+                        .collect();
+                    extra.push_str(&format!(
+                        ",\"grad\":{{\"deg\":{:.2},\"stops\":[{}]}}",
+                        casual_calc_model::from_micro(g.degree_micro),
+                        stops.join(",")
+                    ));
+                }
+                if st.shrink_to_fit {
+                    extra.push_str(",\"shrink\":1");
+                }
+                if st.quote_prefix {
+                    extra.push_str(",\"qp\":1");
+                }
+            }
+
             // Rich text: the per-run formatting, so the canvas can draw a cell
             // whose parts differ. Emitted only when the string actually has
             // runs — the overwhelming majority do not, and a `runs` key on

@@ -1023,13 +1023,50 @@ function draw() {
     });
   }
   for (const it of items) {
-    if (!it.bg) continue;
+    if (!it.bg && !it.grad) continue;
     const x = colXAt(it.c);
     const y = rowYAt(it.r);
     if (x === undefined || y === undefined) continue;
+    const w = colWAt(it.c) - 1, h = rowHAt(it.r) - 1;
     withQuad(it.r, it.c, () => {
+      if (it.grad) {
+        // A gradient replaces the fill rather than joining it: `<fill>` holds
+        // a pattern or a gradient, never both. The angle is measured from the
+        // horizontal, as OOXML states it.
+        const rad = ((it.grad.deg || 0) * Math.PI) / 180;
+        const g = ctx.createLinearGradient(
+          x + 1, y + 1,
+          x + 1 + Math.cos(rad) * w, y + 1 + Math.sin(rad) * h,
+        );
+        for (const stop of it.grad.stops) {
+          g.addColorStop(Math.min(1, Math.max(0, stop.p)), "#" + stop.c);
+        }
+        ctx.fillStyle = g;
+        ctx.fillRect(x + 1, y + 1, w, h);
+        return;
+      }
+      if (it.pat) {
+        // A pattern's *background* fills the cell and its foreground draws the
+        // motif on top. Painting only the foreground — as a solid — is what
+        // made every patterned cell look like a flat block of the wrong
+        // colour. The motifs are approximated by density rather than matched
+        // hatch for hatch: the alternative is eighteen bitmaps for something
+        // almost no sheet uses, and a wrong-density hatch still reads as a
+        // hatch.
+        ctx.fillStyle = it.bg2 ? "#" + it.bg2 : colors.bg;
+        ctx.fillRect(x + 1, y + 1, w, h);
+        const density = { gray125: 0.125, gray0625: 0.0625, lightGray: 0.25,
+          mediumGray: 0.5, darkGray: 0.75, lightGrid: 0.25, lightTrellis: 0.3,
+          darkGrid: 0.6, darkTrellis: 0.65 }[it.pat] ?? 0.4;
+        ctx.save();
+        ctx.globalAlpha = density;
+        ctx.fillStyle = "#" + it.bg;
+        ctx.fillRect(x + 1, y + 1, w, h);
+        ctx.restore();
+        return;
+      }
       ctx.fillStyle = "#" + it.bg;
-      ctx.fillRect(x + 1, y + 1, colWAt(it.c) - 1, rowHAt(it.r) - 1);
+      ctx.fillRect(x + 1, y + 1, w, h);
     });
   }
   // The merges touching each drawn row. Built once per frame so the text pass
@@ -1234,7 +1271,10 @@ function draw() {
     // cell edge rather than borrowing empty neighbours. Excel has no such
     // setting — it always spills — so this skips the spill scan entirely and
     // leaves the span at the cell's own bounds.
-    } else if (!it.cl && tw > w - 8) {
+    // Shrink-to-fit joins `clip` in skipping the spill scan: both mean "stay
+    // inside this cell", so borrowing a neighbour first and then shrinking
+    // would leave the text scaled down *and* overhanging.
+    } else if (!it.cl && !it.shrink && tw > w - 8) {
       if (align !== "right") {
         let c = it.c;
         // Stop at a non-empty cell OR a column that isn't drawn (e.g. the gap
@@ -1259,6 +1299,18 @@ function draw() {
     ctx.beginPath();
     ctx.rect(clipL, yTop, clipR - clipL, h);
     ctx.clip();
+    // Shrink-to-fit: scale the font down until the text fits its own cell,
+    // rather than spilling or clipping. Applied after the spill scan so it
+    // overrides it — the whole point of the setting is that the text stays
+    // inside, so borrowing a neighbour first would defeat it.
+    if (it.shrink && tw > w - 8) {
+      const scale = Math.max(0.4, (w - 8) / tw);
+      const px = Math.max(5, cellPx(it) * scale);
+      const weight = it.b ? "600 " : "";
+      const slant = it.i ? "italic " : "";
+      ctx.font = `${slant}${weight}${px}px ${fontStack(it.fn)}`;
+      tw = ctx.measureText(text).width;
+    }
     ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
     let tx;
     const ind = (it.in || 0) * INDENT_PX;
