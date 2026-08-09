@@ -1948,3 +1948,57 @@ fn complex_identities_hold() {
     assert!((n(2) - 4.0).abs() < 1e-9, "sqrt(z)^2 imaginary part");
     assert!((n(3) - 3.0).abs() < 1e-9, "(z*w)/w = z");
 }
+
+#[test]
+fn distributions_and_their_inverses_round_trip() {
+    // Each pair is checked against the other rather than against recalled
+    // table values: a shared error in the underlying incomplete gamma or beta
+    // would cancel in a round trip, so these also assert one known point each.
+    let mut b = Builder::new();
+    b.formula((0, 0), "CHIINV(CHIDIST(3.5,4),4)")
+        .formula((1, 0), "TINV(TDIST(2.1,10,2),10)")
+        .formula((2, 0), "FINV(FDIST(2.5,3,8),3,8)")
+        .formula((3, 0), "GAMMAINV(GAMMADIST(4,2,3,TRUE()),2,3)")
+        .formula((4, 0), "BETAINV(BETADIST(0.3,2,5),2,5)")
+        // Known points: chi-square with 2 df is exponential, so the upper tail
+        // at x is exp(-x/2); the t distribution with huge df is normal.
+        .formula((5, 0), "CHIDIST(2,2)")
+        .formula((6, 0), "TDIST(1.96,100000,2)")
+        .formula((7, 0), "BETADIST(0.5,1,1)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 3.5).abs() < 1e-6, "CHIINV(CHIDIST(x)) = x");
+    assert!((n(1) - 2.1).abs() < 1e-6, "TINV(TDIST(x)) = x");
+    assert!((n(2) - 2.5).abs() < 1e-6, "FINV(FDIST(x)) = x");
+    assert!((n(3) - 4.0).abs() < 1e-6, "GAMMAINV(GAMMADIST(x)) = x");
+    assert!((n(4) - 0.3).abs() < 1e-6, "BETAINV(BETADIST(x)) = x");
+    // Chi-square with 2 degrees of freedom is the exponential: Q(x) = e^(-x/2).
+    assert!((n(5) - (-1.0f64).exp()).abs() < 1e-9);
+    // With enormous df the t distribution is the normal one, so the two-tailed
+    // probability at 1.96 is about 0.05.
+    assert!((n(6) - 0.05).abs() < 1e-3);
+    // Beta(1,1) is uniform.
+    assert!((n(7) - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn chidist_and_fdist_are_upper_tail() {
+    // Unlike almost every other *DIST, these report the upper tail. Returning
+    // the CDF instead gives 1 - the right answer, which is a plausible-looking
+    // probability and wrong every time.
+    let mut b = Builder::new();
+    b.formula((0, 0), "CHIDIST(0,4)")
+        .formula((1, 0), "FDIST(0,3,8)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("{other:?}"),
+    };
+    assert!((n(0) - 1.0).abs() < 1e-12, "the whole mass is above zero");
+    assert!((n(1) - 1.0).abs() < 1e-12);
+}
