@@ -66,6 +66,14 @@ pub enum Expr {
     Range(CellReference, CellReference),
     /// A defined name.
     Name(String),
+    /// An argument left out: `XLOOKUP(x, a, b, , -1)`.
+    ///
+    /// Excel allows any optional argument to be skipped this way, and files
+    /// written elsewhere rely on it. Modelled as an expression rather than by
+    /// shortening the argument list, because the *position* is what carries the
+    /// meaning — dropping the hole would shift every later argument one place
+    /// left and silently change which parameter they are.
+    Empty,
     /// Text this parser cannot read, kept exactly as written.
     ///
     /// Only reachable where dropping the expression would lose data that the

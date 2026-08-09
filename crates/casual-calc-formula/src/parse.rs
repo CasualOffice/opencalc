@@ -231,7 +231,14 @@ impl Parser {
             return Ok(args);
         }
         loop {
-            args.push(self.parse_expr(0)?);
+            // A hole between commas is an omitted argument, not a syntax
+            // error: `XLOOKUP(x, a, b, , -1)` skips `if_not_found`.
+            let omitted = matches!(self.peek(), Some(Token::Comma) | Some(Token::RParen));
+            args.push(if omitted {
+                Expr::Empty
+            } else {
+                self.parse_expr(0)?
+            });
             match self.peek() {
                 Some(Token::Comma) => {
                     self.advance();

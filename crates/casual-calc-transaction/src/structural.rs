@@ -465,7 +465,7 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
         Expr::StructuredRef { .. } => expr.clone(),
         // Unparsed text cannot be rewritten without understanding it, and
         // guessing at its references would corrupt what was preserved.
-        Expr::Raw(_) => expr.clone(),
+        Expr::Raw(_) | Expr::Empty => expr.clone(),
         Expr::Reference(reference) => rewrite_reference(reference, ctx),
         Expr::Range(a, b) => rewrite_range(a, b, ctx),
         Expr::Unary { op, operand } => Expr::Unary {

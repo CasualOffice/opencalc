@@ -263,3 +263,34 @@ The tests assert recovery rather than resemblance: points that lie exactly on
 `y = 3x + 2` must give back slope 3, intercept 2 and R² of 1, and the
 exponential pair must recover `y = 2·3^x`. A fit that is merely close would
 pass a looser test while being wrong.
+
+## Beyond the standard: the dynamic-array functions
+
+ECMA-376 predates them, so none of these moves the coverage number — but a
+spreadsheet without XLOOKUP and FILTER is not a current one, and they only
+became possible once results could spill.
+
+XLOOKUP, XMATCH, FILTER, UNIQUE, SORT, SORTBY, SEQUENCE, MAXIFS, MINIFS.
+
+Three things had to change in the *language*, not in the functions:
+
+- **An omitted argument is legal.** `XLOOKUP(x, a, b, , -1)` skips
+  `if_not_found`, and the parser rejected it outright. `Expr::Empty` holds the
+  position, because dropping the hole would shift every later argument one
+  place left and silently change which parameter it is.
+- **Operators broadcast.** `B1:B4>4` has to compare element by element — it is
+  how `FILTER(data, B1:B4>4)` is written — and collapsing to the corner tested
+  one cell and filtered on the answer. Two arrays must agree in shape; guessing
+  how to line up a 3×1 against a 1×4 produces a plausible answer to a question
+  nobody asked.
+- **A bare range is an array in array context.** On its own `=A1:B2` is
+  `#VALUE!`, because one cell has no single answer for it; inside `B1:B4>4` it
+  is four values. Excel draws the line in the same place, and until it was
+  drawn here `FILTER` silently returned nothing.
+
+`#CALC!` was added to the model for the empty-result case. `#VALUE!` would have
+been a plausible wrong answer, and Excel writes the real token.
+
+Spilling had to be added to the **incremental** recalculation as well as the
+full one. The incremental path is the one an edit takes, so a freshly typed
+`FILTER` showed a single value until it was.

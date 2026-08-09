@@ -43,6 +43,8 @@ impl fmt::Display for Expr {
             // Verbatim: the point of keeping it is that it goes back out
             // exactly as it came in.
             Expr::Raw(text) => write!(f, "{text}"),
+            // Prints as nothing, which is exactly how it was written.
+            Expr::Empty => Ok(()),
             Expr::Name(name) => f.write_str(name),
             Expr::StructuredRef { table, spec } => {
                 if let Some(table) = table {

@@ -944,6 +944,7 @@ fn parse_error(token: &str) -> Option<ErrorValue> {
         "#NULL!" => ErrorValue::Null,
         "#NUM!" => ErrorValue::Num,
         "#SPILL!" => ErrorValue::Spill,
+        "#CALC!" => ErrorValue::Calc,
         _ => return None,
     })
 }

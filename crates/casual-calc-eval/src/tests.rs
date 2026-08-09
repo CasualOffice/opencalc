@@ -3431,3 +3431,131 @@ fn linest_statistics_block_and_forced_intercept() {
     assert!(n(10, 4).abs() < 1e-12, "forced intercept {}", n(10, 4));
     assert!(n(10, 3) > 3.0, "and the slope absorbs it: {}", n(10, 3));
 }
+
+/// XLOOKUP replaces INDEX/MATCH, not just VLOOKUP: it can look left, and a
+/// wider return array gives back a whole row.
+#[test]
+fn xlookup_searches_both_directions_and_returns_rows() {
+    let mut b = Builder::new();
+    for (i, (name, qty, price)) in [("Ann", 3.0, 1.5), ("Bob", 5.0, 2.5), ("Cid", 7.0, 3.5)]
+        .iter()
+        .enumerate()
+    {
+        let r = i as u32;
+        b.text((r, 1), name)
+            .number((r, 2), *qty)
+            .number((r, 3), *price);
+    }
+    // Look up by name, return the qty — the column to the *left* of nothing,
+    // which VLOOKUP could not do without rearranging the data.
+    b.formula((0, 6), "XLOOKUP(\"Bob\",B1:B3,C1:C3)");
+    // A wider return array gives the whole row.
+    b.formula((2, 6), "XLOOKUP(\"Cid\",B1:B3,C1:D3)");
+    // Not found uses the fourth argument rather than #N/A.
+    b.formula((5, 6), "XLOOKUP(\"Zoe\",B1:B3,C1:C3,\"none\")");
+    b.formula((6, 6), "XLOOKUP(\"Zoe\",B1:B3,C1:C3)");
+    // XMATCH gives the position, one-based.
+    b.formula((7, 6), "XMATCH(\"Cid\",B1:B3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 6), CellValue::Number(5.0));
+    assert_eq!(value_at(&wb, 2, 6), CellValue::Number(7.0));
+    assert_eq!(
+        value_at(&wb, 2, 7),
+        CellValue::Number(3.5),
+        "spilled second column"
+    );
+    let (CellValue::InlineString(id) | CellValue::SharedString(id)) = value_at(&wb, 5, 6) else {
+        panic!("expected the if_not_found text");
+    };
+    assert_eq!(wb.strings.get(id).unwrap_or_default(), "none");
+    assert_eq!(
+        value_at(&wb, 6, 6),
+        CellValue::Error(casual_calc_model::ErrorValue::Na),
+        "no if_not_found means #N/A"
+    );
+    assert_eq!(value_at(&wb, 7, 6), CellValue::Number(3.0));
+}
+
+/// The ordered match modes need the *best* candidate, not the first acceptable
+/// one — taking the first returns whichever end the scan started from, which is
+/// a different answer to the same question.
+#[test]
+fn xlookup_approximate_modes_take_the_nearest() {
+    let mut b = Builder::new();
+    for (i, v) in [10.0, 20.0, 30.0, 40.0].iter().enumerate() {
+        b.number((i as u32, 0), *v);
+    }
+    b.formula((0, 2), "XLOOKUP(25,A1:A4,A1:A4,,-1)"); // next smaller → 20
+    b.formula((1, 2), "XLOOKUP(25,A1:A4,A1:A4,,1)"); // next larger → 30
+    b.formula((2, 2), "XLOOKUP(30,A1:A4,A1:A4,,-1)"); // exact wins
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 2), CellValue::Number(20.0));
+    assert_eq!(value_at(&wb, 1, 2), CellValue::Number(30.0));
+    assert_eq!(value_at(&wb, 2, 2), CellValue::Number(30.0));
+}
+
+/// FILTER, UNIQUE, SORT, SORTBY and SEQUENCE — the dynamic-array core, which
+/// only became possible once results could spill.
+#[test]
+fn the_dynamic_array_core_filters_sorts_and_generates() {
+    let mut b = Builder::new();
+    for (i, (name, qty)) in [("Ann", 3.0), ("Bob", 9.0), ("Cid", 5.0), ("Ann", 3.0)]
+        .iter()
+        .enumerate()
+    {
+        b.text((i as u32, 0), name).number((i as u32, 1), *qty);
+    }
+    b.formula((0, 3), "FILTER(A1:B4,B1:B4>4)"); // Bob and Cid
+    b.formula((0, 6), "UNIQUE(A1:A4)"); // Ann, Bob, Cid
+    b.formula((0, 8), "SORT(B1:B4,1,-1)"); // 9,5,3,3
+    b.formula((0, 10), "SEQUENCE(3,2,10,5)"); // 10,15 / 20,25 / 30,35
+    // Nothing matches: #CALC!, which is what Excel returns and is why the
+    // error had to exist.
+    b.formula((10, 3), "FILTER(A1:B4,B1:B4>100)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 4), CellValue::Number(9.0), "Bob's qty");
+    assert_eq!(value_at(&wb, 1, 4), CellValue::Number(5.0), "Cid's qty");
+    let text = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    assert_eq!(
+        (text(0, 6), text(1, 6), text(2, 6)),
+        ("Ann".into(), "Bob".into(), "Cid".into())
+    );
+    assert_eq!(value_at(&wb, 0, 8), CellValue::Number(9.0));
+    assert_eq!(value_at(&wb, 3, 8), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 0, 10), CellValue::Number(10.0));
+    assert_eq!(value_at(&wb, 0, 11), CellValue::Number(15.0));
+    assert_eq!(value_at(&wb, 2, 11), CellValue::Number(35.0));
+    assert_eq!(
+        value_at(&wb, 10, 3),
+        CellValue::Error(casual_calc_model::ErrorValue::Calc)
+    );
+}
+
+/// MAXIFS and MINIFS of nothing are 0, not an error — Excel's choice, and
+/// different from AVERAGEIFS because a maximum of no numbers has a defensible
+/// answer where a mean does not.
+#[test]
+fn maxifs_and_minifs_of_no_matches_are_zero() {
+    let mut b = Builder::new();
+    for (i, (region, v)) in [("W", 10.0), ("E", 20.0), ("W", 30.0)].iter().enumerate() {
+        b.text((i as u32, 0), region).number((i as u32, 1), *v);
+    }
+    b.formula((0, 3), "MAXIFS(B1:B3,A1:A3,\"W\")");
+    b.formula((1, 3), "MINIFS(B1:B3,A1:A3,\"W\")");
+    b.formula((2, 3), "MAXIFS(B1:B3,A1:A3,\"Z\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 3), CellValue::Number(30.0));
+    assert_eq!(value_at(&wb, 1, 3), CellValue::Number(10.0));
+    assert_eq!(value_at(&wb, 2, 3), CellValue::Number(0.0));
+}

@@ -376,6 +376,7 @@ const ERROR_HELP = {
   "#N/A": "A lookup found no match.",
   "#NULL!": "Two ranges that were intersected don't overlap.",
   "#SPILL!": "A result needs more room than is free.",
+  "#CALC!": "The calculation produced nothing — a filter that matched no rows, usually.",
 };
 let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging

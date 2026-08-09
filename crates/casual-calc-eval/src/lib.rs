@@ -202,21 +202,30 @@ pub fn recalculate_incremental(workbook: &mut Workbook, changed: &[(usize, CellR
                 .and_then(|s| s.cells.get(at))
                 .is_some_and(|c| c.formula.is_some());
             if is_formula {
-                let value = evaluator.eval_cell(sheet_index, at);
+                // The array form here too: an edit that creates a spilling
+                // formula has to spill, and the incremental path is the one an
+                // edit actually takes — spilling only on a full recalculation
+                // meant a freshly typed FILTER showed one value.
+                let value = evaluator.eval_cell_array(sheet_index, at);
                 updates.push((sheet_index, at, value));
             }
         }
         updates
     };
 
-    // Phase 2: write the new cached values back.
+    // Phase 2: write the new cached values back, spilling any arrays. Shares
+    // `write_result` with the full recalculation so the two cannot disagree
+    // about what a spill does.
+    let mut spilled = false;
     for (sheet_index, at, value) in updates {
-        let cell_value = value_to_cell(workbook, value);
-        if let Some(existing) = workbook.sheets[sheet_index].cells.get(at) {
-            let mut updated = existing.clone();
-            updated.value = cell_value;
-            workbook.sheets[sheet_index].cells.set(at, updated);
-        }
+        spilled |= write_result(workbook, sheet_index, at, value);
+    }
+    // A spill changes cells the dirty set never knew about, so anything reading
+    // into the new range needs another look. The full pass is the honest way to
+    // find them: the alternative is to guess which formulas point inside a
+    // range that did not exist when the graph was built.
+    if spilled {
+        recalculate(workbook);
     }
 }
 

@@ -26,6 +26,14 @@ pub enum ErrorValue {
     Num,
     /// `#SPILL!`
     Spill,
+    /// `#CALC!` — a calculation produced nothing to return, as when `FILTER`
+    /// matches no rows.
+    ///
+    /// Later than ECMA-376, like the functions that raise it. Excel writes the
+    /// token, so a file carrying one round-trips; a reader that predates it
+    /// shows the text, which is what it would do for any error it does not
+    /// know.
+    Calc,
 }
 
 impl fmt::Display for ErrorValue {
@@ -39,6 +47,7 @@ impl fmt::Display for ErrorValue {
             ErrorValue::Null => "#NULL!",
             ErrorValue::Num => "#NUM!",
             ErrorValue::Spill => "#SPILL!",
+            ErrorValue::Calc => "#CALC!",
         };
         f.write_str(token)
     }

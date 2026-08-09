@@ -181,6 +181,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FACTDOUBLE", "FACTDOUBLE(number)"),
     ("FALSE", "FALSE()"),
     ("FDIST", "FDIST(x, degrees_freedom1, degrees_freedom2)"),
+    ("FILTER", "FILTER(array, include, [if_empty])"),
     ("FIND", "FIND(find_text, within_text, [start])"),
     ("FINDB", "FINDB(find_text, within_text, [start_num])"),
     ("FINV", "FINV(probability, deg_freedom1, deg_freedom2)"),
@@ -281,6 +282,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
     ("MAXA", "MAXA(value1, …)"),
+    ("MAXIFS", "MAXIFS(max_range, range1, criteria1, …)"),
     ("MDETERM", "MDETERM(array)"),
     (
         "MDURATION",
@@ -291,6 +293,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MIDB", "MIDB(text, start_num, num_bytes)"),
     ("MIN", "MIN(number1, …)"),
     ("MINA", "MINA(value1, …)"),
+    ("MINIFS", "MINIFS(min_range, range1, criteria1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
     ("MINVERSE", "MINVERSE(array)"),
     ("MIRR", "MIRR(values, finance_rate, reinvest_rate)"),
@@ -405,6 +408,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SEC", "SEC(number)"),
     ("SECH", "SECH(number)"),
     ("SECOND", "SECOND(serial_number)"),
+    ("SEQUENCE", "SEQUENCE(rows, [columns], [start], [step])"),
     ("SERIESSUM", "SERIESSUM(x, n, m, coefficients)"),
     ("SHEET", "SHEET([value])"),
     ("SHEETS", "SHEETS([reference])"),
@@ -415,6 +419,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SLN", "SLN(cost, salvage, life)"),
     ("SLOPE", "SLOPE(known_y, known_x)"),
     ("SMALL", "SMALL(array, k)"),
+    ("SORT", "SORT(array, [sort_index], [sort_order], [by_col])"),
+    ("SORTBY", "SORTBY(array, by_array, [sort_order])"),
     ("SQRT", "SQRT(number)"),
     ("SQRTPI", "SQRTPI(number)"),
     ("STANDARDIZE", "STANDARDIZE(x, mean, standard_dev)"),
@@ -461,6 +467,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TYPE", "TYPE(value)"),
     ("UNICHAR", "UNICHAR(number)"),
     ("UNICODE", "UNICODE(text)"),
+    ("UNIQUE", "UNIQUE(array, [by_col], [exactly_once])"),
     ("UPPER", "UPPER(text)"),
     ("USDOLLAR", "USDOLLAR(number, [decimals])"),
     ("VALUE", "VALUE(text)"),
@@ -482,6 +489,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "WORKDAY.INTL(start, days, [weekend], [holidays])",
     ),
     ("XIRR", "XIRR(values, dates, [guess])"),
+    (
+        "XLOOKUP",
+        "XLOOKUP(lookup, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])",
+    ),
+    (
+        "XMATCH",
+        "XMATCH(lookup, lookup_array, [match_mode], [search_mode])",
+    ),
     ("XNPV", "XNPV(rate, values, dates)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
@@ -1046,6 +1061,11 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SUMPRODUCT" => eval_sumproduct(ev, sheet, args),
         // --- Multi-criteria aggregates (M6-2) ---
         "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
+        "MAXIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Max),
+        "MINIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Min),
+        "XLOOKUP" | "XMATCH" | "FILTER" | "UNIQUE" | "SORT" | "SORTBY" | "SEQUENCE" => {
+            eval_dynamic(ev, sheet, name, args)
+        }
         "DSUM" | "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DMAX" | "DMIN" | "DGET" | "DPRODUCT"
         | "DSTDEV" | "DSTDEVP" | "DVAR" | "DVARP" => eval_database(ev, sheet, name, args),
         "AVERAGEIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Average),
@@ -1788,11 +1808,18 @@ fn eval_range_2d(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -> Result<Gri
         }
         Ok(Grid { rows, cols, cells })
     } else {
-        Ok(Grid {
-            rows: 1,
-            cols: 1,
-            cells: vec![ev.eval_expr(sheet, arg)],
-        })
+        // Not a literal range — but it may still be a *shape*, now that
+        // functions return arrays and `B1:B4>4` evaluates to one. Without this
+        // a computed mask arrives as a single cell and matches nothing, which
+        // is how `FILTER(data, B1:B4>4)` came back empty.
+        match ev.eval_expr_array(sheet, arg) {
+            Value::Array { rows, cols, cells } => Ok(Grid { rows, cols, cells }),
+            other => Ok(Grid {
+                rows: 1,
+                cols: 1,
+                cells: vec![other],
+            }),
+        }
     }
 }
 
@@ -2641,6 +2668,8 @@ fn eval_textjoin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
 enum IfsKind {
     Sum,
     Average,
+    Max,
+    Min,
 }
 
 /// SUMIFS / AVERAGEIFS: an aggregate range followed by (range, criteria) pairs.
@@ -2669,6 +2698,13 @@ fn eval_ifs_aggregate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], kind:
         IfsKind::Sum => Value::Number(picked.iter().sum()),
         IfsKind::Average if picked.is_empty() => Value::Error(ErrorValue::Div0),
         IfsKind::Average => Value::Number(picked.iter().sum::<f64>() / picked.len() as f64),
+        // MAXIFS and MINIFS of nothing are **0**, not an error — Excel's
+        // choice, and different from AVERAGEIFS because a maximum of no
+        // numbers has a defensible answer where a mean does not.
+        IfsKind::Max if picked.is_empty() => Value::Number(0.0),
+        IfsKind::Min if picked.is_empty() => Value::Number(0.0),
+        IfsKind::Max => Value::Number(picked.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        IfsKind::Min => Value::Number(picked.iter().copied().fold(f64::INFINITY, f64::min)),
     }
 }
 
@@ -3128,6 +3164,8 @@ fn eval_error_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value
             // numbers it 9 (8 being #GETTING_DATA), so that is what a workbook
             // round-tripped through Excel expects to see.
             ErrorValue::Spill => 9.0,
+            // Excel numbers #CALC! 14, continuing past #SPILL!'s 9.
+            ErrorValue::Calc => 14.0,
         }),
         // Not an error: the answer is itself #N/A, not a number.
         _ => Value::Error(ErrorValue::Na),
@@ -9010,4 +9048,361 @@ fn eval_regression(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Exp
         cols: 1,
         cells,
     }
+}
+
+/// The modern dynamic-array functions: XLOOKUP, XMATCH, FILTER, UNIQUE, SORT,
+/// SORTBY and SEQUENCE.
+///
+/// None is in ECMA-376 — the standard predates them — but a spreadsheet
+/// without XLOOKUP and FILTER is not a current one, and they only became
+/// possible once results could spill.
+///
+/// How a value compares to a lookup key, for the ordered match modes.
+fn lookup_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => {
+            let (x, y) = (
+                a.as_text().unwrap_or_default().to_lowercase(),
+                b.as_text().unwrap_or_default().to_lowercase(),
+            );
+            x.cmp(&y)
+        }
+    }
+}
+
+/// Whether two values are equal for lookup purposes, with `match_mode = 2`
+/// meaning the needle may contain wildcards.
+fn lookup_equal(cell: &Value, needle: &Value, wildcard: bool) -> bool {
+    if wildcard {
+        let pattern = needle.as_text().unwrap_or_default();
+        if has_wildcard(&pattern) {
+            return match cell {
+                Value::Text(s) => wildcard_match(&pattern, s),
+                _ => false,
+            };
+        }
+    }
+    lookup_compare(cell, needle) == std::cmp::Ordering::Equal
+}
+
+/// The index `XLOOKUP` and `XMATCH` settle on, or `None`.
+///
+/// `match_mode` −1 and 1 mean "next smaller" and "next larger" and require the
+/// *best* candidate rather than the first acceptable one — taking the first
+/// would return whichever end of the data the scan started from, which is a
+/// different answer for the same question.
+fn lookup_index(
+    values: &[Value],
+    needle: &Value,
+    match_mode: i64,
+    search_mode: i64,
+) -> Option<usize> {
+    use std::cmp::Ordering;
+    let indices: Vec<usize> = if search_mode < 0 {
+        (0..values.len()).rev().collect()
+    } else {
+        (0..values.len()).collect()
+    };
+    match match_mode {
+        0 | 2 => indices
+            .into_iter()
+            .find(|&i| lookup_equal(&values[i], needle, match_mode == 2)),
+        -1 | 1 => {
+            let mut best: Option<(usize, &Value)> = None;
+            for i in indices {
+                let ord = lookup_compare(&values[i], needle);
+                if ord == Ordering::Equal {
+                    return Some(i); // exact always wins
+                }
+                let acceptable = if match_mode == -1 {
+                    ord == Ordering::Less
+                } else {
+                    ord == Ordering::Greater
+                };
+                if !acceptable {
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    Some((_, b)) => {
+                        let c = lookup_compare(&values[i], b);
+                        if match_mode == -1 {
+                            c == Ordering::Greater // the largest below
+                        } else {
+                            c == Ordering::Less // the smallest above
+                        }
+                    }
+                };
+                if better {
+                    best = Some((i, &values[i]));
+                }
+            }
+            best.map(|(i, _)| i)
+        }
+        _ => None,
+    }
+}
+
+/// A grid's values as a list of rows, each a list of values.
+fn grid_rows(g: &Grid) -> Vec<Vec<Value>> {
+    (0..g.rows)
+        .map(|r| (0..g.cols).map(|c| g.get(r, c).clone()).collect())
+        .collect()
+}
+
+/// Build an array value from rows, or a scalar when it is 1×1.
+fn rows_to_value(rows: Vec<Vec<Value>>) -> Value {
+    let height = rows.len();
+    let width = rows.first().map_or(0, Vec::len);
+    if height == 0 || width == 0 {
+        return Value::Error(ErrorValue::Value);
+    }
+    if height == 1 && width == 1 {
+        return rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .unwrap_or(Value::Empty);
+    }
+    Value::Array {
+        rows: height,
+        cols: width,
+        cells: rows.into_iter().flatten().collect(),
+    }
+}
+
+fn eval_dynamic(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    match name {
+        "SEQUENCE" => {
+            if args.is_empty() || args.len() > 4 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let v = match opt_numbers(ev, sheet, args, 1, [1.0, 1.0, 1.0, 1.0]) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let (rows, cols, start, step) = (v[0] as i64, v[1] as i64, v[2], v[3]);
+            if rows < 1 || cols < 1 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let cells = (0..rows * cols)
+                .map(|i| Value::Number(start + step * i as f64))
+                .collect();
+            Value::Array {
+                rows: rows as usize,
+                cols: cols as usize,
+                cells,
+            }
+        }
+        "XMATCH" | "XLOOKUP" => {
+            let min = if name == "XMATCH" { 2 } else { 3 };
+            if args.len() < min || args.len() > min + 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let needle = ev.eval_expr(sheet, &args[0]);
+            if let Value::Error(e) = needle {
+                return Value::Error(e);
+            }
+            let haystack = match eval_range_2d(ev, sheet, &args[1]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let flat: Vec<Value> = haystack.cells.clone();
+            let opt = |ev: &mut Evaluator<'_>, i: usize, dflt: f64| -> f64 {
+                args.get(i)
+                    .map(|a| ev_number_or(ev, sheet, a, dflt))
+                    .unwrap_or(dflt)
+            };
+            // Argument positions differ: XMATCH has no return array or
+            // not-found value, so its modes sit two places earlier.
+            let (mode_at, search_at) = if name == "XMATCH" { (2, 3) } else { (4, 5) };
+            let match_mode = opt(ev, mode_at, 0.0) as i64;
+            let search_mode = opt(ev, search_at, 1.0) as i64;
+            let found = lookup_index(&flat, &needle, match_mode, search_mode);
+
+            if name == "XMATCH" {
+                return match found {
+                    Some(i) => Value::Number(i as f64 + 1.0),
+                    None => Value::Error(ErrorValue::Na),
+                };
+            }
+            let Some(i) = found else {
+                // `if_not_found` is the fourth argument, and its whole purpose
+                // is to replace the #N/A — so it is only consulted here.
+                return match args.get(3) {
+                    Some(a) => ev.eval_expr(sheet, a),
+                    None => Value::Error(ErrorValue::Na),
+                };
+            };
+            let ret = match eval_range_2d(ev, sheet, &args[2]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            // The return array may be wider than the lookup column, in which
+            // case XLOOKUP answers with a whole row — that is what makes it a
+            // replacement for INDEX/MATCH rather than for VLOOKUP alone.
+            if ret.rows == flat.len() && ret.cols >= 1 {
+                let row: Vec<Value> = (0..ret.cols).map(|c| ret.get(i, c).clone()).collect();
+                return rows_to_value(vec![row]);
+            }
+            if ret.cols == flat.len() && ret.rows >= 1 {
+                let col: Vec<Vec<Value>> =
+                    (0..ret.rows).map(|r| vec![ret.get(r, i).clone()]).collect();
+                return rows_to_value(col);
+            }
+            Value::Error(ErrorValue::Value)
+        }
+        "FILTER" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let data = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let mask = match eval_range_2d(ev, sheet, &args[1]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let keep: Vec<bool> = mask
+                .cells
+                .iter()
+                .map(|v| v.as_bool().unwrap_or(false))
+                .collect();
+            // The mask runs along whichever axis it matches; a mask that
+            // matches neither is a mistake worth reporting.
+            let rows = grid_rows(&data);
+            let picked: Vec<Vec<Value>> = if keep.len() == data.rows {
+                rows.into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| keep[*i])
+                    .map(|(_, r)| r)
+                    .collect()
+            } else if keep.len() == data.cols {
+                rows.into_iter()
+                    .map(|r| {
+                        r.into_iter()
+                            .enumerate()
+                            .filter(|(i, _)| keep[*i])
+                            .map(|(_, v)| v)
+                            .collect()
+                    })
+                    .collect()
+            } else {
+                return Value::Error(ErrorValue::Value);
+            };
+            if picked.is_empty() || picked[0].is_empty() {
+                return match args.get(2) {
+                    Some(a) => ev.eval_expr(sheet, a),
+                    // Excel's own answer when nothing matches and no
+                    // replacement was given.
+                    None => Value::Error(ErrorValue::Calc),
+                };
+            }
+            rows_to_value(picked)
+        }
+        "UNIQUE" => {
+            if args.is_empty() || args.len() > 3 {
+                return Value::Error(ErrorValue::Value);
+            }
+            let data = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let exactly_once = args
+                .get(2)
+                .map(|a| ev.eval_expr(sheet, a).as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            let rows = grid_rows(&data);
+            let key = |r: &Vec<Value>| -> String {
+                r.iter()
+                    .map(|v| v.as_text().unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\u{1}")
+            };
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for r in &rows {
+                *counts.entry(key(r)).or_default() += 1;
+            }
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let picked: Vec<Vec<Value>> = rows
+                .into_iter()
+                .filter(|r| {
+                    let k = key(r);
+                    if exactly_once && counts.get(&k) != Some(&1) {
+                        return false;
+                    }
+                    seen.insert(k)
+                })
+                .collect();
+            if picked.is_empty() {
+                return Value::Error(ErrorValue::Calc);
+            }
+            rows_to_value(picked)
+        }
+        "SORT" | "SORTBY" => {
+            if args.is_empty() {
+                return Value::Error(ErrorValue::Value);
+            }
+            let data = match eval_range_2d(ev, sheet, &args[0]) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            let mut rows = grid_rows(&data);
+            // SORT keys on one of its own columns; SORTBY on a parallel array.
+            let (keys, descending) = if name == "SORT" {
+                let index = args
+                    .get(1)
+                    .map(|a| ev_number_or(ev, sheet, a, 1.0))
+                    .unwrap_or(1.0) as usize;
+                if index < 1 || index > data.cols {
+                    return Value::Error(ErrorValue::Value);
+                }
+                let order = args
+                    .get(2)
+                    .map(|a| ev_number_or(ev, sheet, a, 1.0))
+                    .unwrap_or(1.0);
+                (
+                    rows.iter()
+                        .map(|r| r[index - 1].clone())
+                        .collect::<Vec<_>>(),
+                    order < 0.0,
+                )
+            } else {
+                let by = match eval_range_2d(ev, sheet, &args[1]) {
+                    Ok(g) => g,
+                    Err(e) => return Value::Error(e),
+                };
+                if by.cells.len() != rows.len() {
+                    return Value::Error(ErrorValue::Value);
+                }
+                let order = args
+                    .get(2)
+                    .map(|a| ev_number_or(ev, sheet, a, 1.0))
+                    .unwrap_or(1.0);
+                (by.cells.clone(), order < 0.0)
+            };
+            // Sorted by index so the comparison can read the key list, and
+            // stably — equal keys keep their original order, which is what
+            // makes a second SORTBY pass meaningful.
+            let mut order: Vec<usize> = (0..rows.len()).collect();
+            order.sort_by(|a, b| {
+                let c = lookup_compare(&keys[*a], &keys[*b]);
+                if descending { c.reverse() } else { c }
+            });
+            let sorted: Vec<Vec<Value>> = order.into_iter().map(|i| rows[i].clone()).collect();
+            rows.clear();
+            rows_to_value(sorted)
+        }
+        _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// An argument as a number, falling back when it is absent or unreadable.
+fn ev_number_or(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr, dflt: f64) -> f64 {
+    ev.eval_expr(sheet, arg).as_number().unwrap_or(dflt)
 }

@@ -206,12 +206,49 @@ impl<'a> Evaluator<'a> {
     /// arrays from leaking into the hundred places that only ever wanted a
     /// number; only [`Self::eval_expr_array`] sees the whole block.
     pub fn eval_expr(&mut self, sheet_index: usize, expr: &Expr) -> Value {
-        self.eval_expr_array(sheet_index, expr).scalar()
+        self.eval_expr_inner(sheet_index, expr).scalar()
     }
 
-    /// Evaluate an expression, keeping an array result whole. Used by the
-    /// spilling pass and by the functions that consume a shape.
+    /// Evaluate an expression in an **array** context.
+    ///
+    /// A bare range is the difference between the two contexts: on its own it
+    /// is `#VALUE!`, because `=A1:B2` in one cell has no single answer — but
+    /// inside `B1:B4>4` it is the four values, and comparing it to a number
+    /// gives four answers. Excel draws the line in the same place.
     pub fn eval_expr_array(&mut self, sheet_index: usize, expr: &Expr) -> Value {
+        if let Expr::Range(a, b) = expr {
+            return self.range_as_array(sheet_index, a, b);
+        }
+        self.eval_expr_inner(sheet_index, expr)
+    }
+
+    /// The cells of a range as an array value.
+    fn range_as_array(
+        &mut self,
+        sheet_index: usize,
+        a: &CellReference,
+        b: &CellReference,
+    ) -> Value {
+        let Some(target) = self.resolve_sheet(&a.sheet, sheet_index) else {
+            return Value::Error(ErrorValue::Ref);
+        };
+        let (r0, c0, r1, c1) = self.range_bounds(target, a, b);
+        let (rows, cols) = ((r1 - r0 + 1) as usize, (c1 - c0 + 1) as usize);
+        // The same cap the aggregates use: a whole-column range in an array
+        // context would otherwise materialise a million values.
+        if rows.saturating_mul(cols) > 2_000_000 {
+            return Value::Error(ErrorValue::Num);
+        }
+        let mut cells = Vec::with_capacity(rows * cols);
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                cells.push(self.eval_cell(target, CellRef::new(r, c)));
+            }
+        }
+        Value::Array { rows, cols, cells }
+    }
+
+    fn eval_expr_inner(&mut self, sheet_index: usize, expr: &Expr) -> Value {
         match expr {
             Expr::Number(n) => Value::Number(*n),
             Expr::Bool(b) => Value::Bool(*b),
@@ -223,6 +260,9 @@ impl<'a> Evaluator<'a> {
             // answer: the reference exists in the file but means nothing here,
             // and inventing a value would be worse than saying so.
             Expr::Raw(_) => Value::Error(ErrorValue::Name),
+            // An omitted argument is blank, which is what a function that
+            // defaults it will read.
+            Expr::Empty => Value::Empty,
             Expr::Name(name) => self.eval_name(sheet_index, name),
             // A structured reference resolves to a range, so on its own it is
             // as much a #VALUE! as `A1:B2` is; it is the aggregate around it
@@ -274,6 +314,62 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Apply a binary operator element-wise across arrays.
+    ///
+    /// A scalar operand pairs with every element; two arrays pair positionally
+    /// and must agree in shape, because guessing how to line up a 3×1 against a
+    /// 1×4 produces a plausible answer to a question nobody asked.
+    fn broadcast_binary(&mut self, op: BinaryOp, lv: &Value, rv: &Value) -> Value {
+        let shape = |v: &Value| match v {
+            Value::Array { rows, cols, .. } => (*rows, *cols),
+            _ => (1, 1),
+        };
+        let (lr, lc) = shape(lv);
+        let (rr, rc) = shape(rv);
+        let (rows, cols) = (lr.max(rr), lc.max(rc));
+        let both_arrays = lr * lc > 1 && rr * rc > 1;
+        if both_arrays && (lr, lc) != (rr, rc) {
+            return Value::Error(ErrorValue::Value);
+        }
+        let pick = |v: &Value, r: usize, c: usize| -> Value {
+            match v {
+                Value::Array { rows, cols, cells } => cells
+                    .get((r % *rows) * *cols + (c % *cols))
+                    .cloned()
+                    .unwrap_or(Value::Empty),
+                other => other.clone(),
+            }
+        };
+        let mut cells = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let (a, b) = (pick(lv, r, c), pick(rv, r, c));
+                cells.push(self.apply_scalar_binary(op, &a, &b));
+            }
+        }
+        Value::Array { rows, cols, cells }
+    }
+
+    /// One operator on two scalars — the body of `eval_binary` once arrays are
+    /// out of the way, shared so the element-wise path cannot drift from it.
+    fn apply_scalar_binary(&mut self, op: BinaryOp, lv: &Value, rv: &Value) -> Value {
+        if let Some(e) = lv.as_error().or_else(|| rv.as_error()) {
+            return Value::Error(e);
+        }
+        match op {
+            BinaryOp::Add
+            | BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Power => arithmetic(op, lv, rv),
+            BinaryOp::Concat => match (lv.as_text(), rv.as_text()) {
+                (Ok(a), Ok(b)) => Value::Text(a + &b),
+                (Err(e), _) | (_, Err(e)) => Value::Error(e),
+            },
+            _ => comparison(op, lv, rv),
+        }
+    }
+
     fn eval_binary(
         &mut self,
         sheet_index: usize,
@@ -281,10 +377,16 @@ impl<'a> Evaluator<'a> {
         left: &Expr,
         right: &Expr,
     ) -> Value {
-        let lv = self.eval_expr(sheet_index, left);
-        let rv = self.eval_expr(sheet_index, right);
+        // Arrays stay whole here. `B1:B4>4` has to compare element by element
+        // — that is how `FILTER(data, B1:B4>4)` is written, and collapsing to
+        // the corner would silently test one cell and filter on the answer.
+        let lv = self.eval_expr_array(sheet_index, left);
+        let rv = self.eval_expr_array(sheet_index, right);
         if let Some(e) = lv.as_error().or_else(|| rv.as_error()) {
             return Value::Error(e);
+        }
+        if matches!(lv, Value::Array { .. }) || matches!(rv, Value::Array { .. }) {
+            return self.broadcast_binary(op, &lv, &rv);
         }
         match op {
             BinaryOp::Add
