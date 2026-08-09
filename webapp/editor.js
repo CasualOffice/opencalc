@@ -3113,6 +3113,16 @@ function buildColorMenu(menu, onPick, noneLabel) {
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+// The sheet's display switches, as the engine holds them.
+function viewOptions() {
+  try { return JSON.parse(wasm.session_view_options(state.sheet)); }
+  catch { return { formulas: false, zeros: true }; }
+}
+// Flip one of them. Undoable like any other sheet-level change.
+function setViewOption(which) {
+  const now = !!viewOptions()[which];
+  tryEdit(() => wasm.session_set_view_option(state.sheet, which, !now));
+}
 // Subscript / superscript. Pressing the one already applied turns it off.
 function setVertAlign(which) { formatSel((s) => wasm.session_toggle_vert_align(state.sheet, s.r0, s.c0, s.r1, s.c1, which)); }
 // One three-way choice: "overflow" (spill into empty neighbours), "wrap", or
@@ -7636,6 +7646,8 @@ function wireEvents() {
       const k = e.key.toLowerCase();
       // Ctrl+T creates a table over the selection, as in Excel.
       if (k === "t") { tableDialog(); e.preventDefault(); return; }
+      // Excel's Ctrl+` — show formulas instead of results.
+      if (k === "`") { setViewOption("formulas"); e.preventDefault(); return; }
       if (k === "home") { select(0, 0); e.preventDefault(); return; }
       if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
       // Ctrl+D / Ctrl+R: fill the selection down from its top row / right from
@@ -8278,6 +8290,7 @@ function wireEvents() {
       catch { return false; }
     };
     const gridOn = () => { try { return !wasm.session_gridlines_hidden(state.sheet); } catch { return true; } };
+    const viewOn = (k) => { try { return !!viewOptions()[k]; } catch { return false; } };
     // The active cell's number format and alignment, for the submenu ticks — a
     // menu that never shows what is already applied makes you guess.
     const curFmt = (key) => {
@@ -8373,6 +8386,10 @@ function wireEvents() {
         // "headers": that word belongs to the page header this menu bar can
         // collapse, and having both under one name is a coin-flip every time.
         ["Cell markings", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
+        // Both are per-sheet OOXML view flags that were being carried through
+        // every save without ever being shown.
+        ["Formulas instead of results", () => setViewOption("formulas"), "Ctrl+`", () => viewOn("formulas")],
+        ["Zero values", () => setViewOption("zeros"), null, () => viewOn("zeros")],
         { sub: "Zoom", items: [
           ["50%", () => setZoom(0.5), null, () => state.zoom === 0.5],
           ["75%", () => setZoom(0.75), null, () => state.zoom === 0.75],

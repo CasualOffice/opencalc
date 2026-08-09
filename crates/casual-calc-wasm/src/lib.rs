@@ -572,6 +572,50 @@ pub fn session_set_gridlines_hidden(sheet: usize, hidden: bool) -> Result<(), Js
     })
 }
 
+/// A sheet's display switches as JSON `{formulas, zeros}`.
+///
+/// Both were imported, exported and never shown: a file saved with "show
+/// formulas" on opened displaying results, and saved back claiming otherwise.
+///
+/// `rightToLeft` is deliberately not here. It is modelled and round-trips, but
+/// the canvas lays columns out left to right, so a switch for it would change
+/// the file and nothing on screen.
+#[wasm_bindgen]
+pub fn session_view_options(sheet: usize) -> String {
+    with_session(|s| {
+        let v = &s.workbook().sheets.get(sheet)?.view;
+        Some(format!(
+            "{{\"formulas\":{},\"zeros\":{}}}",
+            v.show_formulas, !v.hide_zeros
+        ))
+    })
+    .flatten()
+    .unwrap_or_else(|| "{\"formulas\":false,\"zeros\":true}".to_owned())
+}
+
+/// Set one of those switches (undoable). `which` is `formulas` or `zeros`; `on`
+/// is what the user asked for, so `zeros` means *show* zeros and is stored
+/// inverted, matching the OOXML attribute rather than the checkbox.
+#[wasm_bindgen]
+pub fn session_set_view_option(sheet: usize, which: &str, on: bool) -> Result<(), JsError> {
+    let which = which.to_owned();
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(mut op) = current_sheet_metadata(session, sheet) else {
+            return Ok(());
+        };
+        if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
+            match which.as_str() {
+                "formulas" => data.view.show_formulas = on,
+                "zeros" => data.view.hide_zeros = !on,
+                _ => return Ok(()),
+            }
+        }
+        session.edit(op).map_err(js)
+    })
+}
+
 /// Whether a sheet hides its row and column headers.
 #[wasm_bindgen]
 pub fn session_headers_hidden(sheet: usize) -> bool {
@@ -2901,7 +2945,26 @@ pub fn session_cells(
             if at.col < first_col || at.col > last_col {
                 continue;
             }
-            let text = display_text(wb, cell);
+            // Two sheet-view switches change what a cell reads as, so they are
+            // applied here rather than in `display_text`: they are properties
+            // of the view, not of the cell, and a copy or an export must still
+            // see the value.
+            let text = if sheet.view.show_formulas {
+                // `showFormulas` shows the formula in place of its result. A
+                // cell without one still shows its value, as in Excel.
+                cell_input_text(wb, cell)
+            } else {
+                display_text(wb, cell)
+            };
+            let text = if sheet.view.hide_zeros
+                && matches!(cell.value, CellValue::Number(n) if n == 0.0)
+            {
+                // `showZeros="0"` blanks a zero *result*, not the value: the
+                // cell still holds 0 and still totals as 0.
+                String::new()
+            } else {
+                text
+            };
             let style = cell.style.and_then(|id| wb.styles.get(id));
             // Conditional formatting overrides the cell's own fill when a rule
             // matches (first match wins). Numeric rules test the cell's number;
@@ -3002,7 +3065,10 @@ pub fn session_cells(
             // rule that a number too wide for its column renders as "#######"
             // rather than spilling or — worse — being clipped into a shorter
             // number that still reads as a plausible value.
-            if matches!(cell.value, CellValue::Number(_)) {
+            // Not under `showFormulas`: what is displayed there is the
+            // formula text, and a "#######" fill is the rule for a number too
+            // wide to be shown safely, not for text that can simply spill.
+            if matches!(cell.value, CellValue::Number(_)) && !sheet.view.show_formulas {
                 extra.push_str(",\"n\":1");
             }
             // Flagged rather than inferred from the text: a *text* cell may
