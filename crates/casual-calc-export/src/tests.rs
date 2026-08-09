@@ -1926,3 +1926,68 @@ fn carried_sheet_elements_keep_their_wrappers() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].carried, wb.sheets[0].carried);
 }
+
+#[test]
+fn alignment_view_and_format_attributes_round_trip() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/sharedStrings.xml", SHARED),
+        (
+            "xl/styles.xml",
+            br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+              <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+              <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+              <cellXfs count="2"><xf numFmtId="0"/>
+                <xf numFmtId="0" applyAlignment="1"><alignment shrinkToFit="1" readingOrder="2" justifyLastLine="1" relativeIndent="3"/></xf>
+              </cellXfs></styleSheet>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetViews><sheetView workbookViewId="0" rightToLeft="1" showFormulas="1" showZeros="0" tabSelected="1"/></sheetViews>
+              <sheetFormatPr defaultRowHeight="15" zeroHeight="1" thickTop="1" outlineLevelRow="2"/>
+              <sheetData><row r="1"><c r="A1" s="1"><v>1</v></c></row></sheetData>
+            </worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let view = &wb.sheets[0].view;
+    assert!(view.right_to_left, "an RTL sheet must not come back LTR");
+    assert!(view.show_formulas);
+    // showZeros defaults to true, so only an explicit "0" hides them.
+    assert!(view.hide_zeros);
+    assert!(view.tab_selected);
+    assert_eq!(
+        wb.sheets[0].format_pr.get("zeroHeight").map(String::as_str),
+        Some("1")
+    );
+    // The two interpreted defaults are removed from the carried map, or they
+    // would be written twice.
+    assert!(!wb.sheets[0].format_pr.contains_key("defaultRowHeight"));
+
+    let style = wb
+        .styles
+        .get(
+            wb.sheets[0]
+                .cells
+                .get(casual_calc_model::CellRef::new(0, 0))
+                .unwrap()
+                .style
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(style.shrink_to_fit);
+    assert!(style.justify_last_line);
+    assert_eq!(style.reading_order, Some(2));
+    assert_eq!(style.relative_indent, Some(3));
+
+    let back = import_package(write_workbook(&wb).unwrap())
+        .unwrap()
+        .workbook;
+    assert_eq!(back.sheets[0].view, wb.sheets[0].view);
+    assert_eq!(back.sheets[0].format_pr, wb.sheets[0].format_pr);
+}

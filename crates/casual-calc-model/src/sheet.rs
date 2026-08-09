@@ -62,6 +62,18 @@ pub struct SheetView {
     /// normal sheet.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hide_headers: bool,
+    /// Right-to-left sheet direction — column A on the right.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub right_to_left: bool,
+    /// Show formulas instead of their results.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_formulas: bool,
+    /// OOXML's `showZeros="0"`: render a zero as blank.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_zeros: bool,
+    /// Whether this sheet's tab is the selected one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tab_selected: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -79,7 +91,15 @@ fn is_zero_u16(value: &u16) -> bool {
 impl SheetView {
     /// Whether the view is at its default (nothing frozen, default zoom).
     pub fn is_default(&self) -> bool {
-        self.frozen_rows == 0 && self.frozen_cols == 0 && self.zoom == 0 && !self.hide_gridlines
+        self.frozen_rows == 0
+            && self.frozen_cols == 0
+            && self.zoom == 0
+            && !self.hide_gridlines
+            && !self.hide_headers
+            && !self.right_to_left
+            && !self.show_formulas
+            && !self.hide_zeros
+            && !self.tab_selected
     }
 }
 
@@ -184,6 +204,14 @@ pub struct Sheet {
     /// range was sorted, which Excel shows in its dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_state: Option<SortState>,
+    /// `<sheetFormatPr>` attributes other than the two defaults interpreted
+    /// into [`Sheet::columns`] and [`Sheet::rows`].
+    ///
+    /// `zeroHeight`, `thickTop`, `thickBottom`, `outlineLevelRow`,
+    /// `outlineLevelCol` and `customHeight` describe sheet-wide row behaviour
+    /// nothing here acts on, so they travel rather than being modelled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub format_pr: BTreeMap<String, String>,
     /// Sheet-level elements carried verbatim because nothing here acts on
     /// them: `<dimension>`, `<selection>`, `<ignoredErrors>`, `<protectedRanges>`
     /// and `<sheetCalcPr>`.
@@ -1118,6 +1146,7 @@ impl Sheet {
             tables: Vec::new(),
             sort_state: None,
             carried: Vec::new(),
+            format_pr: BTreeMap::new(),
             retained_refs: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,

@@ -871,7 +871,11 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
         || ids.valign.is_some()
         || ids.wrap
         || ids.indent != 0
-        || ids.rotation != 0;
+        || ids.rotation != 0
+        || ids.shrink_to_fit
+        || ids.justify_last_line
+        || ids.reading_order.is_some()
+        || ids.relative_indent.is_some();
     let xf_attr = xf_id
         .map(|id| format!(" xfId=\"{id}\""))
         .unwrap_or_default();
@@ -931,6 +935,18 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
     }
     if ids.rotation != 0 {
         s.push_str(&format!(" textRotation=\"{}\"", ids.rotation));
+    }
+    if ids.shrink_to_fit {
+        s.push_str(" shrinkToFit=\"1\"");
+    }
+    if ids.justify_last_line {
+        s.push_str(" justifyLastLine=\"1\"");
+    }
+    if let Some(order) = ids.reading_order {
+        s.push_str(&format!(" readingOrder=\"{order}\""));
+    }
+    if let Some(indent) = ids.relative_indent {
+        s.push_str(&format!(" relativeIndent=\"{indent}\""));
     }
     s.push_str("/></xf>");
 }
@@ -1020,6 +1036,10 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
             wrap: style.wrap,
             indent: style.indent,
             rotation: style.rotation,
+            shrink_to_fit: style.shrink_to_fit,
+            justify_last_line: style.justify_last_line,
+            reading_order: style.reading_order,
+            relative_indent: style.relative_indent,
             locked: style.locked,
             formula_hidden: style.formula_hidden,
             quote_prefix: style.quote_prefix,
@@ -1408,6 +1428,10 @@ struct StyleIds {
     wrap: bool,
     indent: u8,
     rotation: u16,
+    shrink_to_fit: bool,
+    justify_last_line: bool,
+    reading_order: Option<u8>,
+    relative_indent: Option<i16>,
     locked: Option<bool>,
     formula_hidden: Option<bool>,
     quote_prefix: bool,
@@ -1570,8 +1594,18 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         } else {
             ""
         };
+        let flags = [
+            (sheet.view.right_to_left, " rightToLeft=\"1\""),
+            (sheet.view.show_formulas, " showFormulas=\"1\""),
+            // showZeros defaults to true, so hiding them is written as "0".
+            (sheet.view.hide_zeros, " showZeros=\"0\""),
+            (sheet.view.tab_selected, " tabSelected=\"1\""),
+        ]
+        .into_iter()
+        .filter_map(|(on, attr)| on.then_some(attr))
+        .collect::<String>();
         s.push_str(&format!(
-            "<sheetViews><sheetView{grid_attr}{headers_attr}{zoom_attr} workbookViewId=\"0\">"
+            "<sheetViews><sheetView{grid_attr}{headers_attr}{flags}{zoom_attr} workbookViewId=\"0\">"
         ));
         if sheet.view.frozen_rows != 0 || sheet.view.frozen_cols != 0 {
             let top_left = cell_a1(sheet.view.frozen_rows, sheet.view.frozen_cols);
@@ -1590,7 +1624,10 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
     }
 
     // Axis defaults, then per-column overrides (schema order: before sheetData).
-    if sheet.columns.default.is_some() || sheet.rows.default.is_some() {
+    if sheet.columns.default.is_some()
+        || sheet.rows.default.is_some()
+        || !sheet.format_pr.is_empty()
+    {
         s.push_str("<sheetFormatPr");
         if let Some(w) = sheet.columns.default {
             s.push_str(&format!(
@@ -1603,6 +1640,11 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
                 " defaultRowHeight=\"{}\"",
                 fmt_f64(twips_to_row_points(h))
             ));
+        }
+        // The rest travel verbatim; the two defaults above were interpreted out
+        // of this map on import so they cannot be written twice.
+        for (k, v) in &sheet.format_pr {
+            s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
         }
         s.push_str("/>");
     }

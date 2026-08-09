@@ -483,6 +483,16 @@ pub struct Worksheet {
     pub sort_state: Option<SortState>,
     /// Sheet-level elements carried verbatim, in document order.
     pub carried: Vec<RetainedRef>,
+    /// `<sheetFormatPr>` attributes as read.
+    pub format_pr: BTreeMap<String, String>,
+    /// `<sheetView>` flags beyond grid lines and headers.
+    pub right_to_left: bool,
+    /// See [`Worksheet::right_to_left`].
+    pub show_formulas: bool,
+    /// See [`Worksheet::right_to_left`].
+    pub hide_zeros: bool,
+    /// See [`Worksheet::right_to_left`].
+    pub tab_selected: bool,
     /// Elements naming a retained part, in document order.
     pub retained_refs: Vec<RetainedRef>,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
@@ -767,6 +777,10 @@ fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
 
 /// Record `<sheetFormatPr>` axis defaults.
 fn read_sheet_format(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    // The two defaults below are interpreted; the rest travel verbatim.
+    result.format_pr = read_attrs(e)?;
+    result.format_pr.remove("defaultColWidth");
+    result.format_pr.remove("defaultRowHeight");
     if let Some(w) = read_f64_attr(e, b"defaultColWidth")? {
         result.col_default = Some(col_width_to_twips(w));
     }
@@ -1165,6 +1179,15 @@ fn read_pane(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErr
 /// Parse the `zoomScale` attribute of a `<sheetView>`. A zoom of 0 or 100 is the
 /// application default and is not retained, so no phantom `zoomScale` is written.
 fn read_sheet_view(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
+    let flag = |name: &[u8]| -> Result<bool, ImportError> {
+        Ok(read_attr(e, name)?.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+    };
+    result.right_to_left = flag(b"rightToLeft")?;
+    result.show_formulas = flag(b"showFormulas")?;
+    result.tab_selected = flag(b"tabSelected")?;
+    // `showZeros` defaults to true, so only an explicit "0" hides them.
+    result.hide_zeros =
+        read_attr(e, b"showZeros")?.is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"));
     if let Some(zoom) = read_attr(e, b"zoomScale")?.and_then(|s| s.parse::<u16>().ok())
         && zoom != 0
         && zoom != 100

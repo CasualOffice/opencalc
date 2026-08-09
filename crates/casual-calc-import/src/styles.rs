@@ -77,6 +77,10 @@ struct Xf {
     align: Option<HAlign>,
     valign: Option<VAlign>,
     wrap: bool,
+    shrink_to_fit: bool,
+    reading_order: Option<u8>,
+    justify_last_line: bool,
+    relative_indent: Option<i16>,
     rotation: u16,
     indent: u8,
     locked: Option<bool>,
@@ -443,6 +447,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             rotation: 0,
                             valign: None,
                             wrap: false,
+                            shrink_to_fit: false,
+                            reading_order: None,
+                            justify_last_line: false,
+                            relative_indent: None,
                             indent: 0,
                             locked: None,
                             formula_hidden: None,
@@ -492,6 +500,16 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             if let Some(vtoken) = attr(e, b"vertical")? {
                                 xf.valign = VAlign::from_ooxml(&vtoken);
                             }
+                            let flag = |name: &[u8]| -> Result<bool, ImportError> {
+                                Ok(attr(e, name)?
+                                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+                            };
+                            xf.shrink_to_fit = flag(b"shrinkToFit")?;
+                            xf.justify_last_line = flag(b"justifyLastLine")?;
+                            xf.reading_order =
+                                attr(e, b"readingOrder")?.and_then(|v| v.parse().ok());
+                            xf.relative_indent =
+                                attr(e, b"relativeIndent")?.and_then(|v| v.parse().ok());
                             // `xsd:boolean` — "true" is as valid as "1".
                             if attr(e, b"wrapText")?
                                 .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -576,6 +594,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             align: xf.align,
             valign: xf.valign,
             wrap: xf.wrap,
+            shrink_to_fit: xf.shrink_to_fit,
+            reading_order: xf.reading_order,
+            justify_last_line: xf.justify_last_line,
+            relative_indent: xf.relative_indent,
             indent: xf.indent,
             border: (!border.is_empty()).then_some(border),
             // `None` means the xf said nothing, which OOXML defines as locked.

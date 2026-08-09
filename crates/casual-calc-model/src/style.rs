@@ -328,6 +328,18 @@ pub struct Style {
     /// Vertical alignment (defaults to bottom when unset, per OOXML).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valign: Option<VAlign>,
+    /// Shrink the text to fit the cell rather than wrapping or clipping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shrink_to_fit: bool,
+    /// `readingOrder`: 0 context-dependent, 1 left-to-right, 2 right-to-left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_order: Option<u8>,
+    /// Stretch the last line of justified text too.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub justify_last_line: bool,
+    /// Indent relative to the inherited level, rather than absolutely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_indent: Option<i16>,
     /// Wrap text within the cell (instead of overflowing/clipping).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrap: bool,
@@ -439,6 +451,10 @@ impl Style {
             && self.align.is_none()
             && self.valign.is_none()
             && !self.wrap
+            && !self.shrink_to_fit
+            && self.reading_order.is_none()
+            && !self.justify_last_line
+            && self.relative_indent.is_none()
             && !self.clip
             && self.rotation == 0
             && self.indent == 0

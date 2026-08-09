@@ -347,6 +347,11 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         sheet.print = worksheet.print.clone();
         sheet.sort_state = worksheet.sort_state.clone();
         sheet.carried = worksheet.carried.clone();
+        sheet.format_pr = worksheet.format_pr.clone();
+        sheet.view.right_to_left = worksheet.right_to_left;
+        sheet.view.show_formulas = worksheet.show_formulas;
+        sheet.view.hide_zeros = worksheet.hide_zeros;
+        sheet.view.tab_selected = worksheet.tab_selected;
         sheet.retained_refs = worksheet.retained_refs.clone();
         sheet.protection = worksheet
             .protection
