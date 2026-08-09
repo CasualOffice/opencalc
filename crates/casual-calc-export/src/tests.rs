@@ -1688,3 +1688,72 @@ fn a_chart_survives_a_save_even_though_nothing_models_it() {
     assert_eq!(back.retained_parts.len(), wb.retained_parts.len());
     assert_eq!(back.sheets[0].retained_refs, wb.sheets[0].retained_refs);
 }
+
+#[test]
+fn tables_round_trip_with_their_columns_and_style() {
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+              <Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c></row></sheetData>
+              <tableParts count="1"><tablePart r:id="rId4"/></tableParts>
+            </worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/tables/table1.xml",
+            br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="A1:C4" totalsRowCount="1">
+              <autoFilter ref="A1:C3"/>
+              <tableColumns count="3">
+                <tableColumn id="1" name="Region" totalsRowLabel="Total"/>
+                <tableColumn id="2" name="Amount" totalsRowFunction="sum"/>
+                <tableColumn id="3" name="Margin"><calculatedColumnFormula>Sales[Amount]*0.1</calculatedColumnFormula></tableColumn>
+              </tableColumns>
+              <tableStyleInfo name="TableStyleMedium2" showRowStripes="1" showColumnStripes="0"/>
+            </table>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let table = &wb.sheets[0].tables[0];
+    assert_eq!(table.name, "Sales");
+    assert_eq!(table.totals_row_count, 1);
+    assert_eq!(table.columns.len(), 3);
+    assert_eq!(table.columns[1].totals_row_function.as_deref(), Some("sum"));
+    // A calculated column's formula is element text, not an attribute.
+    assert_eq!(
+        table.columns[2].calculated_column_formula.as_deref(),
+        Some("Sales[Amount]*0.1")
+    );
+    assert_eq!(
+        table.style.get("name").map(String::as_str),
+        Some("TableStyleMedium2")
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    // Without <tableParts> the part is in the package but attached to no sheet,
+    // so Excel shows a plain range.
+    assert!(xml_of(&written, "xl/worksheets/sheet1.xml").contains("<tableParts count=\"1\">"));
+    assert!(xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels").contains("tables/table1.xml"));
+    assert!(xml_of(&written, "[Content_Types].xml").contains("spreadsheetml.table+xml"));
+    let part = xml_of(&written, "xl/tables/table1.xml");
+    assert!(part.contains("name=\"Sales\""));
+    assert!(part.contains("<calculatedColumnFormula>"));
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].tables, wb.sheets[0].tables);
+}

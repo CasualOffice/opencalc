@@ -38,8 +38,8 @@ use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 use a1::{parse_a1, parse_range};
 use read::{
     RawCell, RawThreadedComment, parse_comments, parse_date1904, parse_defined_names,
-    parse_persons, parse_retained_refs, parse_shared_strings, parse_threaded_comments,
-    parse_workbook_settings, parse_worksheet,
+    parse_persons, parse_retained_refs, parse_shared_strings, parse_table, parse_table_parts,
+    parse_threaded_comments, parse_workbook_settings, parse_worksheet,
 };
 use styles::{StyleSheet, parse_styles};
 use theme::{ThemePalette, parse_theme};
@@ -148,6 +148,7 @@ const MODELLED_REL_SUFFIXES: &[&str] = &[
     "/calcChain",
     "/vmlDrawing",
     "/hyperlink",
+    "/table",
     COMMENTS_REL_SUFFIX,
     THREADED_COMMENTS_REL_SUFFIX,
     PERSONS_REL_SUFFIX,
@@ -691,6 +692,68 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                     location: raw.location.clone(),
                     tooltip: raw.tooltip.clone(),
                     display: raw.display.clone(),
+                });
+            }
+        }
+
+        // Tables (ListObjects). Each `<tablePart r:id>` in the worksheet names
+        // a part through the sheet's own relationships, the same indirection
+        // comments use — guessing `xl/tables/table{n}.xml` would bind sheet 2's
+        // table to sheet 1 in anyone else's package.
+        let table_ids = parse_table_parts(&xml)?;
+        if !table_ids.is_empty() {
+            let rels = package.relationships_of(&part, &OoxmlLimits::default())?;
+            for id in table_ids {
+                let Some(rel) = rels.iter().find(|r| r.id == id) else {
+                    continue;
+                };
+                let target = resolve_part(&part, &rel.target);
+                if !package.contains(&target) {
+                    continue;
+                }
+                let txml = package.read_part(&target)?;
+                let Some(raw) = parse_table(&txml)? else {
+                    continue;
+                };
+                let Some(range) = raw.attrs.get("ref").and_then(|r| parse_range(r)) else {
+                    continue;
+                };
+                let attr_u32 = |k: &str, default: u32| {
+                    raw.attrs
+                        .get(k)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(default)
+                };
+                let name = raw.attrs.get("name").cloned().unwrap_or_default();
+                let mut attrs = raw.attrs.clone();
+                // The interpreted attributes are removed from the verbatim map,
+                // or they would be written twice — once from the field and once
+                // from the map, with the stale copy winning on the next read.
+                for key in [
+                    "ref",
+                    "name",
+                    "displayName",
+                    "id",
+                    "headerRowCount",
+                    "totalsRowCount",
+                ] {
+                    attrs.remove(key);
+                }
+                sheet.tables.push(casual_calc_model::Table {
+                    id: attr_u32("id", 1),
+                    display_name: raw
+                        .attrs
+                        .get("displayName")
+                        .cloned()
+                        .unwrap_or_else(|| name.clone()),
+                    name,
+                    range,
+                    header_row_count: attr_u32("headerRowCount", 1),
+                    totals_row_count: attr_u32("totalsRowCount", 0),
+                    columns: raw.columns,
+                    auto_filter_ref: raw.auto_filter_ref,
+                    style: raw.style,
+                    attrs,
                 });
             }
         }

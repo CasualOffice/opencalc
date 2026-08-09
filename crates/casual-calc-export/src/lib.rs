@@ -21,7 +21,7 @@ use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
     ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId, Style,
-    ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
+    Table, ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -103,7 +103,11 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             .retained_rels
             .iter()
             .any(|r| r.source == sheet_part);
-        if sheet.comments.is_empty() && sheet.hyperlinks.is_empty() && !has_retained {
+        if sheet.comments.is_empty()
+            && sheet.hyperlinks.is_empty()
+            && sheet.tables.is_empty()
+            && !has_retained
+        {
             continue;
         }
         let n = i + 1;
@@ -122,8 +126,24 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         // a sheet with links and no notes still needs it.
         parts.push((
             format!("xl/worksheets/_rels/sheet{n}.xml.rels"),
-            sheet_rels(sheet, n, threaded, &workbook.retained_rels),
+            sheet_rels(
+                sheet,
+                n,
+                threaded,
+                &workbook.retained_rels,
+                &(0..sheet.tables.len())
+                    .map(|j| table_index(workbook, i, j))
+                    .collect::<Vec<_>>(),
+            ),
         ));
+    }
+    // Table parts are numbered across the whole workbook, not per sheet, which
+    // is how Excel numbers them and what `table_index` below reproduces.
+    for (i, sheet) in workbook.sheets.iter().enumerate() {
+        for (j, table) in sheet.tables.iter().enumerate() {
+            let n = table_index(workbook, i, j);
+            parts.push((format!("xl/tables/table{n}.xml"), table_xml(table)));
+        }
     }
     if any_threaded(workbook) {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
@@ -234,6 +254,14 @@ fn content_types(
     }
     // A retained part must be declared here or the package is invalid, and
     // Excel refuses to open it rather than ignoring the undeclared part.
+    for (i, sheet) in workbook.sheets.iter().enumerate() {
+        for j in 0..sheet.tables.len() {
+            s.push_str(&format!(
+                "<Override PartName=\"/xl/tables/table{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml\"/>",
+                table_index(workbook, i, j)
+            ));
+        }
+    }
     for retained in &workbook.retained_parts {
         if let Some(ct) = &retained.content_type {
             s.push_str(&format!(
@@ -413,7 +441,13 @@ fn vml_drawing(sheet: &Sheet) -> String {
 
 /// The `xl/worksheets/_rels/sheet{n}.xml.rels`: links the VML drawing and the
 /// comments part to the worksheet.
-fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool, retained: &[RetainedRel]) -> String {
+fn sheet_rels(
+    sheet: &Sheet,
+    n: usize,
+    threaded: bool,
+    retained: &[RetainedRel],
+    table_part_numbers: &[usize],
+) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     if !sheet.comments.is_empty() {
         s.push_str(&format!(
@@ -425,6 +459,13 @@ fn sheet_rels(sheet: &Sheet, n: usize, threaded: bool, retained: &[RetainedRel])
                 "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
             ));
         }
+    }
+    for (j, _) in sheet.tables.iter().enumerate() {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/table\" Target=\"../tables/table{}.xml\"/>",
+            table_rel_id(j),
+            table_part_numbers[j]
+        ));
     }
     // Relationships to retained parts (drawings, and through them charts and
     // images) keep their original ids, because the `<drawing r:id>` element
@@ -472,6 +513,93 @@ fn external_targets(sheet: &Sheet) -> Vec<String> {
 /// from the fixed rIds the comment parts use so the two cannot collide.
 fn hyperlink_rel_id(index: usize) -> String {
     format!("rIdHl{}", index + 1)
+}
+
+/// The workbook-wide 1-based number of a table part.
+fn table_index(workbook: &Workbook, sheet: usize, within: usize) -> usize {
+    workbook.sheets[..sheet]
+        .iter()
+        .map(|s| s.tables.len())
+        .sum::<usize>()
+        + within
+        + 1
+}
+
+/// The relationship id for a sheet's nth table. Numbered apart from the fixed
+/// ids the comment parts use so the two cannot collide.
+fn table_rel_id(within: usize) -> String {
+    format!("rIdTbl{}", within + 1)
+}
+
+/// One `xl/tables/table{n}.xml` part.
+fn table_xml(table: &Table) -> String {
+    let mut s = format!(
+        "{DECL}<table xmlns=\"{NS_MAIN}\" id=\"{}\" name=\"{}\" displayName=\"{}\" ref=\"{}\"",
+        table.id,
+        escape_attr(&table.name),
+        escape_attr(&table.display_name),
+        range_a1(&table.range)
+    );
+    if table.header_row_count != 1 {
+        s.push_str(&format!(" headerRowCount=\"{}\"", table.header_row_count));
+    }
+    if table.totals_row_count != 0 {
+        s.push_str(&format!(" totalsRowCount=\"{}\"", table.totals_row_count));
+    }
+    for (k, v) in &table.attrs {
+        s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
+    }
+    s.push('>');
+    if let Some(reference) = &table.auto_filter_ref {
+        s.push_str(&format!("<autoFilter ref=\"{}\"/>", escape_attr(reference)));
+    }
+    s.push_str(&format!("<tableColumns count=\"{}\">", table.columns.len()));
+    for column in &table.columns {
+        s.push_str(&format!(
+            "<tableColumn id=\"{}\" name=\"{}\"",
+            column.id,
+            escape_attr(&column.name)
+        ));
+        if let Some(f) = &column.totals_row_function {
+            s.push_str(&format!(" totalsRowFunction=\"{}\"", escape_attr(f)));
+        }
+        if let Some(l) = &column.totals_row_label {
+            s.push_str(&format!(" totalsRowLabel=\"{}\"", escape_attr(l)));
+        }
+        // Both formulas are element text, not attributes.
+        let body: Vec<String> = [
+            column.calculated_column_formula.as_ref().map(|f| {
+                format!(
+                    "<calculatedColumnFormula>{}</calculatedColumnFormula>",
+                    escape_text(f)
+                )
+            }),
+            column
+                .totals_row_formula
+                .as_ref()
+                .map(|f| format!("<totalsRowFormula>{}</totalsRowFormula>", escape_text(f))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if body.is_empty() {
+            s.push_str("/>");
+        } else {
+            s.push('>');
+            s.push_str(&body.concat());
+            s.push_str("</tableColumn>");
+        }
+    }
+    s.push_str("</tableColumns>");
+    if !table.style.is_empty() {
+        s.push_str("<tableStyleInfo");
+        for (k, v) in &table.style {
+            s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
+        }
+        s.push_str("/>");
+    }
+    s.push_str("</table>");
+    s
 }
 
 /// The `.rels` path for a part: `a/b/c.xml` becomes `a/b/_rels/c.xml.rels`.
@@ -1780,9 +1908,19 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         }
     }
 
-    // Legacy drawing ref (the VML holding note markers) — last in the sequence.
+    // Legacy drawing ref (the VML holding note markers).
     if !sheet.comments.is_empty() {
         s.push_str("<legacyDrawing r:id=\"rId1\"/>");
+    }
+
+    // `<tableParts>` closes CT_Worksheet. Without it the table parts are in the
+    // package but attached to no sheet, so Excel shows a plain range.
+    if !sheet.tables.is_empty() {
+        s.push_str(&format!("<tableParts count=\"{}\">", sheet.tables.len()));
+        for j in 0..sheet.tables.len() {
+            s.push_str(&format!("<tablePart r:id=\"{}\"/>", table_rel_id(j)));
+        }
+        s.push_str("</tableParts>");
     }
 
     s.push_str("</worksheet>");

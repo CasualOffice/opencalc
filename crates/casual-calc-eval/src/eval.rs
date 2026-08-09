@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use casual_calc_formula::{BinaryOp, CellReference, Expr, UnaryOp};
-use casual_calc_model::{CellRef, ErrorValue, Workbook};
+use casual_calc_model::{CellRange, CellRef, ErrorValue, Workbook};
 
 use crate::functions::call_function;
 use crate::value::{Value, value_from_cell};
@@ -113,6 +113,73 @@ impl<'a> Evaluator<'a> {
         self.current
     }
 
+    /// Resolve a structured reference to the range it names.
+    ///
+    /// Returns `None` when no table of that name exists or the specifier names
+    /// no column — the caller reports `#REF!`, which is what Excel shows for a
+    /// reference to a table that has been deleted.
+    pub fn resolve_structured(
+        &self,
+        sheet_index: usize,
+        table: Option<&str>,
+        spec: &str,
+    ) -> Option<(usize, CellRange)> {
+        // An unqualified `[Column]` means the table containing this formula.
+        let (si, found) = match table {
+            Some(name) => self.workbook.sheets.iter().enumerate().find_map(|(i, s)| {
+                s.tables
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(name))
+                    .map(|t| (i, t))
+            })?,
+            None => {
+                let (_, at) = self.current_cell()?;
+                let sheet = self.workbook.sheets.get(sheet_index)?;
+                let table = sheet.tables.iter().find(|t| {
+                    at.row >= t.range.start.row
+                        && at.row <= t.range.end.row
+                        && at.col >= t.range.start.col
+                        && at.col <= t.range.end.col
+                })?;
+                (sheet_index, table)
+            }
+        };
+
+        let spec = spec.trim();
+        // The data body: everything but the header and totals rows. That is
+        // what a bare `Table[Column]` means, and getting it wrong silently
+        // includes the header text or the totals row in every aggregate.
+        let first_data = found.range.start.row + found.header_row_count;
+        let last_data = found.range.end.row.saturating_sub(found.totals_row_count);
+
+        let (top, bottom) = match spec {
+            "#All" => (found.range.start.row, found.range.end.row),
+            "#Data" | "" => (first_data, last_data),
+            "#Headers" => (found.range.start.row, first_data.saturating_sub(1)),
+            "#Totals" => (last_data + 1, found.range.end.row),
+            _ => (first_data, last_data),
+        };
+
+        // A column name narrows the span; a `#` keyword covers every column.
+        let (left, right) = if spec.starts_with('#') || spec.is_empty() {
+            (found.range.start.col, found.range.end.col)
+        } else {
+            let index = found
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(spec))?;
+            let col = found.range.start.col + index as u32;
+            (col, col)
+        };
+        Some((
+            si,
+            CellRange {
+                start: CellRef::new(top, left),
+                end: CellRef::new(bottom, right),
+            },
+        ))
+    }
+
     /// Evaluate an expression in the context of `sheet_index`.
     pub fn eval_expr(&mut self, sheet_index: usize, expr: &Expr) -> Value {
         match expr {
@@ -123,6 +190,10 @@ impl<'a> Evaluator<'a> {
             Expr::Reference(reference) => self.eval_reference(sheet_index, reference),
             Expr::Range(..) => Value::Error(ErrorValue::Value),
             Expr::Name(name) => self.eval_name(sheet_index, name),
+            // A structured reference resolves to a range, so on its own it is
+            // as much a #VALUE! as `A1:B2` is; it is the aggregate around it
+            // that consumes the range.
+            Expr::StructuredRef { .. } => Value::Error(ErrorValue::Value),
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
             Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
             Expr::Function { name, args } => call_function(self, sheet_index, name, args),

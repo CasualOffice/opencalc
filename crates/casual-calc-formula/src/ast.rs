@@ -66,6 +66,21 @@ pub enum Expr {
     Range(CellReference, CellReference),
     /// A defined name.
     Name(String),
+    /// A structured (table) reference: `Sales[Amount]`, or `[Amount]` inside
+    /// the table itself.
+    ///
+    /// The specifier is kept as written rather than resolved to a range at
+    /// parse time, because resolving needs the table's geometry — which columns
+    /// exist, where the header and totals rows are — and the parser has no
+    /// access to the workbook. The evaluator resolves it; the printer renders
+    /// it back unchanged, so a formula survives a round trip even when no table
+    /// of that name is present.
+    StructuredRef {
+        /// The table name, absent for a reference from inside the table.
+        table: Option<String>,
+        /// The bracketed specifier, without the outer brackets.
+        spec: String,
+    },
     /// A unary operation.
     Unary {
         /// The operator.

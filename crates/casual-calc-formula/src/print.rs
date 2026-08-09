@@ -41,6 +41,12 @@ impl fmt::Display for Expr {
             Expr::Reference(r) => write!(f, "{r}"),
             Expr::Range(a, b) => write!(f, "{a}:{b}"),
             Expr::Name(name) => f.write_str(name),
+            Expr::StructuredRef { table, spec } => {
+                if let Some(table) = table {
+                    f.write_str(table)?;
+                }
+                write!(f, "[{spec}]")
+            }
             Expr::Unary { op, operand } => match op {
                 UnaryOp::Negate => write!(f, "(-{operand})"),
                 UnaryOp::Plus => write!(f, "(+{operand})"),

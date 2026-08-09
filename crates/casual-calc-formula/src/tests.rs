@@ -145,3 +145,26 @@ fn rejects_malformed() {
     assert!(parse("1 2").is_err());
     assert!(parse("\"unterminated").is_err());
 }
+
+#[test]
+fn structured_references_parse_and_print() {
+    // The specifier is kept as written: resolving it needs the table's
+    // geometry, which the parser cannot see. Round-tripping the text means a
+    // formula survives even when no table of that name is present.
+    for text in [
+        "SUM(Sales[Amount])",
+        "SUM(Sales[#All])",
+        "SUM([Amount])",
+        "SUM(Sales[[#Headers],[Amount]])",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip of {text}");
+    }
+}
+
+#[test]
+fn an_unterminated_structured_reference_is_an_error() {
+    // Not silently treated as a name: `Sales[Amount` would otherwise parse as
+    // the defined name `Sales` and quietly drop the column.
+    assert!(parse("SUM(Sales[Amount)").is_err());
+}

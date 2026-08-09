@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_model::{
-    OutlinePr, PrintSetup, RetainedRef, RunFont, TextRun, Underline, VertAlign, WorkbookSettings,
+    OutlinePr, PrintSetup, RetainedRef, RunFont, TableColumn, TextRun, Underline, VertAlign,
+    WorkbookSettings,
 };
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
@@ -1182,6 +1183,12 @@ fn read_attrs(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportErro
     let mut attrs = BTreeMap::new();
     for a in e.attributes() {
         let a = a.map_err(|err| xml_err(quick_xml::Error::from(err)))?;
+        // Namespace declarations are packaging, not data. Keeping them would
+        // also collapse `xmlns:r` to the local name `r`, colliding with a real
+        // attribute, and re-emit an `xmlns` the writer already declares.
+        if a.key.as_ref().starts_with(b"xmlns") {
+            continue;
+        }
         let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
         let value = a.unescape_value().map_err(xml_err)?.into_owned();
         attrs.insert(key, value);
@@ -1307,4 +1314,146 @@ pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, Strin
         buf.clear();
     }
     Ok(names)
+}
+
+/// Parse an `xl/tables/table{n}.xml` part.
+pub fn parse_table(xml: &[u8]) -> Result<Option<RawTable>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut table: Option<RawTable> = None;
+    let mut column: Option<TableColumn> = None;
+    let mut in_text: Option<&'static str> = None;
+    let mut text = String::new();
+
+    loop {
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                if matches!(event, Event::Start(_)) {
+                    bounds.open()?;
+                } else {
+                    bounds.count()?;
+                }
+                match e.local_name().as_ref() {
+                    b"table" => {
+                        table = Some(RawTable {
+                            attrs: read_attrs(e)?,
+                            ..Default::default()
+                        })
+                    }
+                    b"autoFilter" => {
+                        if let Some(t) = table.as_mut() {
+                            t.auto_filter_ref = read_attr(e, b"ref")?;
+                        }
+                    }
+                    b"tableStyleInfo" => {
+                        if let Some(t) = table.as_mut() {
+                            t.style = read_attrs(e)?;
+                        }
+                    }
+                    b"tableColumn" => {
+                        let attrs = read_attrs(e)?;
+                        column = Some(TableColumn {
+                            id: attrs.get("id").and_then(|v| v.parse().ok()).unwrap_or(0),
+                            name: attrs.get("name").cloned().unwrap_or_default(),
+                            totals_row_function: attrs.get("totalsRowFunction").cloned(),
+                            totals_row_label: attrs.get("totalsRowLabel").cloned(),
+                            calculated_column_formula: None,
+                            totals_row_formula: None,
+                        });
+                    }
+                    // Both are element *text*, not attributes: a calculated
+                    // column's formula is the body of the element.
+                    b"calculatedColumnFormula" => {
+                        in_text = Some("calc");
+                        text.clear();
+                    }
+                    b"totalsRowFormula" => {
+                        in_text = Some("totals");
+                        text.clear();
+                    }
+                    _ => {}
+                }
+                // A self-closed <tableColumn/> is complete right here.
+                if matches!(event, Event::Empty(_))
+                    && e.local_name().as_ref() == b"tableColumn"
+                    && let (Some(t), Some(c)) = (table.as_mut(), column.take())
+                {
+                    t.columns.push(c);
+                }
+            }
+            Event::Text(ref e) => {
+                if in_text.is_some() {
+                    text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(ref e) => {
+                bounds.close();
+                match e.local_name().as_ref() {
+                    b"calculatedColumnFormula" | b"totalsRowFormula" => {
+                        if let Some(c) = column.as_mut() {
+                            match in_text {
+                                Some("calc") => {
+                                    c.calculated_column_formula = Some(std::mem::take(&mut text))
+                                }
+                                Some("totals") => {
+                                    c.totals_row_formula = Some(std::mem::take(&mut text))
+                                }
+                                _ => {}
+                            }
+                        }
+                        in_text = None;
+                    }
+                    b"tableColumn" => {
+                        if let (Some(t), Some(c)) = (table.as_mut(), column.take()) {
+                            t.columns.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(table)
+}
+
+/// A `<table>` part before its `ref` is resolved to a range.
+#[derive(Debug, Default, Clone)]
+pub struct RawTable {
+    /// Every `<table>` attribute as read.
+    pub attrs: BTreeMap<String, String>,
+    /// The columns, left to right.
+    pub columns: Vec<TableColumn>,
+    /// `<autoFilter ref>`, if present.
+    pub auto_filter_ref: Option<String>,
+    /// `<tableStyleInfo>` attributes.
+    pub style: BTreeMap<String, String>,
+}
+
+/// The `r:id`s of a worksheet's `<tablePart>` children, in document order.
+pub fn parse_table_parts(xml: &[u8]) -> Result<Vec<String>, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut bounds = Bounds::new();
+    let mut out = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+            Event::Start(e) | Event::Empty(e) => {
+                bounds.count()?;
+                if e.local_name().as_ref() == b"tablePart"
+                    && let Some(id) = read_attr(&e, b"id")?
+                {
+                    out.push(id);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
 }

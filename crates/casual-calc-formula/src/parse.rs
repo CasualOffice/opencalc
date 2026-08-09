@@ -130,6 +130,9 @@ impl Parser {
                 let reference = reference_from(&word, Some(name))?;
                 self.maybe_range(reference)
             }
+            // A bare `[Amount]`, which is how a formula inside the table
+            // refers to its own columns.
+            Some(Token::Brackets(spec)) => Ok(Expr::StructuredRef { table: None, spec }),
             Some(Token::Word(word)) => self.parse_word(word),
             Some(other) => Err(FormulaError::UnexpectedToken(format!("{other:?}"))),
             None => Err(FormulaError::UnexpectedToken("end of input".to_owned())),
@@ -152,6 +155,16 @@ impl Parser {
                 let target = self.expect_word()?;
                 let reference = reference_from(&target, Some(word))?;
                 self.maybe_range(reference)
+            }
+            // `Sales[Amount]` — a name followed immediately by a specifier.
+            Some(Token::Brackets(_)) => {
+                let Some(Token::Brackets(spec)) = self.advance() else {
+                    unreachable!("peeked a Brackets token")
+                };
+                Ok(Expr::StructuredRef {
+                    table: Some(word),
+                    spec,
+                })
             }
             _ if word.eq_ignore_ascii_case("TRUE") => Ok(Expr::Bool(true)),
             _ if word.eq_ignore_ascii_case("FALSE") => Ok(Expr::Bool(false)),

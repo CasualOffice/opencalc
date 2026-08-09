@@ -27,6 +27,15 @@ pub enum Token {
     Caret,
     /// `&`
     Amp,
+    /// A structured reference's bracketed specifier, with the outer brackets
+    /// stripped: `Sales[Amount]` lexes as `Word("Sales")` then
+    /// `Brackets("Amount")`.
+    ///
+    /// Lexed as one token rather than as punctuation because the contents are
+    /// not an expression: they can hold spaces, `#` keywords and nested
+    /// brackets (`[[#Headers],[Amount]]`), and tokenizing them individually
+    /// would make the grammar ambiguous with array literals.
+    Brackets(String),
     /// `%`
     Percent,
     /// `=`
@@ -86,6 +95,34 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
             ':' => {
                 tokens.push(Token::Colon);
                 i += 1;
+            }
+            '[' => {
+                // Scan to the matching close, tracking depth so a nested
+                // specifier is captured whole.
+                let mut depth = 0usize;
+                let start = i + 1;
+                let mut end = None;
+                while i < chars.len() {
+                    match chars[i] {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let Some(end) = end else {
+                    return Err(FormulaError::UnexpectedToken(
+                        "unterminated structured reference".to_owned(),
+                    ));
+                };
+                tokens.push(Token::Brackets(chars[start..end].iter().collect()));
+                i = end + 1;
             }
             '!' => {
                 tokens.push(Token::Bang);

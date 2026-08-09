@@ -459,6 +459,10 @@ fn rewrite_all_formulas(
 /// Recursively rewrite references within an expression.
 fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
     match expr {
+        // A structured reference names columns, not addresses, so inserting or
+        // deleting rows leaves it alone — that insulation is the point of using
+        // one. Excel likewise never rewrites `Sales[Amount]`.
+        Expr::StructuredRef { .. } => expr.clone(),
         Expr::Reference(reference) => rewrite_reference(reference, ctx),
         Expr::Range(a, b) => rewrite_range(a, b, ctx),
         Expr::Unary { op, operand } => Expr::Unary {

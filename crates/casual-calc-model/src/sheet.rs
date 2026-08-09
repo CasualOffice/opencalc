@@ -177,6 +177,9 @@ pub struct Sheet {
     /// Print layout, carried through verbatim.
     #[serde(default, skip_serializing_if = "PrintSetup::is_empty")]
     pub print: PrintSetup,
+    /// Tables (ListObjects) defined on this sheet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<Table>,
     /// Worksheet elements that name a retained part — `<drawing r:id=…>`,
     /// `<oleObjects>`, `<controls>`, `<picture>`. Kept for the same reason the
     /// workbook keeps `<externalReference>`: the part alone is invisible unless
@@ -552,6 +555,76 @@ impl PrintSetup {
             && self.row_breaks.is_empty()
             && self.col_breaks.is_empty()
     }
+}
+
+/// One column of a [`Table`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableColumn {
+    /// The `id`, which `calculatedColumnFormula` and filters refer to.
+    pub id: u32,
+    /// The header text. This is also the name a structured reference uses, so
+    /// it must match the header cell — Excel keeps the two in step and a
+    /// mismatch breaks every `Table[Column]` pointing at it.
+    pub name: String,
+    /// A totals-row aggregate (`sum`, `average`, …), when the column has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals_row_function: Option<String>,
+    /// Literal text in the totals row, as the label column usually has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals_row_label: Option<String>,
+    /// The formula filling the whole column, if it is a calculated column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculated_column_formula: Option<String>,
+    /// The totals-row formula, when it is not one of the named aggregates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals_row_formula: Option<String>,
+}
+
+/// A table (OOXML calls it a ListObject; Excel's UI calls it a Table).
+///
+/// The thing Ctrl+T creates: a named range with a header row, banded styling,
+/// filter buttons, an optional totals row, and — the part that matters most —
+/// the target of structured references like `Sales[Amount]`.
+///
+/// Dropping one is not a formatting loss. Every formula written against it
+/// stops resolving, so the cells that referenced it become frozen constants,
+/// and nothing on screen says so.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Table {
+    /// The `id`, unique within the workbook.
+    pub id: u32,
+    /// The programmatic name, used by structured references.
+    pub name: String,
+    /// The display name. Excel keeps this equal to `name` in practice, but the
+    /// schema has both.
+    pub display_name: String,
+    /// The whole table including its header and totals rows.
+    pub range: CellRange,
+    /// Number of header rows: 1 normally, 0 for a headerless table.
+    #[serde(default, skip_serializing_if = "is_one")]
+    pub header_row_count: u32,
+    /// Number of totals rows: 0 or 1.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub totals_row_count: u32,
+    /// The columns, left to right.
+    pub columns: Vec<TableColumn>,
+    /// `<autoFilter ref>`, when the table's filter buttons are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter_ref: Option<String>,
+    /// `<tableStyleInfo>` attributes — the style name and the banding flags —
+    /// carried verbatim, since the renderer does not draw them yet and
+    /// interpreting them would be a chance to write one back wrong for nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub style: BTreeMap<String, String>,
+    /// Every other `<table>` attribute, so nothing is lost on the way out.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
 }
 
 /// A hyperlink over a cell or range.
@@ -996,6 +1069,7 @@ impl Sheet {
             comments: Vec::new(),
             hyperlinks: Vec::new(),
             print: PrintSetup::default(),
+            tables: Vec::new(),
             retained_refs: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,

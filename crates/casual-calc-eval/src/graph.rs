@@ -214,6 +214,12 @@ fn collect_precedents(
     uses_name: &mut bool,
 ) {
     match expr {
+        // A structured reference's dependencies cannot be resolved from the
+        // expression alone — it names a table, and the table's range decides
+        // the cells. Treated like a defined name: the formula recalculates on
+        // any change rather than tracking a narrower dependency, which is
+        // conservative and never stale.
+        Expr::StructuredRef { .. } => *uses_name = true,
         Expr::Reference(r) => {
             if let Some(si) = resolve_sheet(r, ctx_sheet, workbook) {
                 on_cell((si, r.row, r.col));

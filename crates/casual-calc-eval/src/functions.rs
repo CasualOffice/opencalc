@@ -919,6 +919,29 @@ fn flatten_numbers(
 ) -> Result<Vec<f64>, ErrorValue> {
     let mut out = Vec::new();
     for arg in args {
+        // A structured reference names a range, so every aggregate that accepts
+        // `A1:A9` must accept `Sales[Amount]` too — that is the whole point of
+        // writing one. It is expanded here rather than at parse time because
+        // only the evaluator can see the table's geometry.
+        if let Expr::StructuredRef { table, spec } = arg {
+            let Some((target, range)) = ev.resolve_structured(sheet, table.as_deref(), spec) else {
+                // The table or column is gone. #REF! is what Excel shows, and
+                // it is important that this is *not* silently empty: a SUM over
+                // a deleted table must not read as zero.
+                return Err(ErrorValue::Ref);
+            };
+            for row in range.start.row..=range.end.row {
+                for col in range.start.col..=range.end.col {
+                    match ev.eval_cell(target, CellRef::new(row, col)) {
+                        Value::Number(n) => out.push(n),
+                        Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
+                        Value::Error(e) => return Err(e),
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
         if let Expr::Range(a, b) = arg {
             let target = ev.resolve_sheet(&a.sheet, sheet).ok_or(ErrorValue::Ref)?;
             let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));

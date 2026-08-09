@@ -1117,3 +1117,86 @@ fn sheet_and_sheets_count_from_one() {
     assert_eq!(value_at(&wb, 0, 0), CellValue::Number(1.0));
     assert_eq!(value_at(&wb, 1, 0), CellValue::Number(1.0));
 }
+
+/// Build a sheet carrying a `Sales` table over A1:B4 with a totals row.
+fn table_workbook() -> Workbook {
+    use casual_calc_model::{CellRange, Table, TableColumn};
+    let mut b = Builder::new();
+    b.text((0, 0), "Region")
+        .text((0, 1), "Amount")
+        .text((1, 0), "North")
+        .number((1, 1), 100.0)
+        .text((2, 0), "South")
+        .number((2, 1), 200.0)
+        .text((3, 0), "Total")
+        .formula((3, 1), "SUM(Sales[Amount])")
+        .formula((5, 0), "SUM(Sales[Amount])")
+        .formula((6, 0), "SUM(Sales[#All])")
+        .formula((7, 0), "SUM(Missing[Amount])");
+    let mut wb = b.build();
+    wb.sheets[0].tables.push(Table {
+        id: 1,
+        name: "Sales".to_owned(),
+        display_name: "Sales".to_owned(),
+        range: CellRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(3, 1),
+        },
+        header_row_count: 1,
+        totals_row_count: 1,
+        columns: vec![
+            TableColumn {
+                id: 1,
+                name: "Region".to_owned(),
+                totals_row_function: None,
+                totals_row_label: None,
+                calculated_column_formula: None,
+                totals_row_formula: None,
+            },
+            TableColumn {
+                id: 2,
+                name: "Amount".to_owned(),
+                totals_row_function: Some("sum".to_owned()),
+                totals_row_label: None,
+                calculated_column_formula: None,
+                totals_row_formula: None,
+            },
+        ],
+        auto_filter_ref: None,
+        style: Default::default(),
+        attrs: Default::default(),
+    });
+    wb
+}
+
+#[test]
+fn structured_references_resolve_to_the_data_body() {
+    let mut wb = table_workbook();
+    recalculate(&mut wb);
+    // Sales[Amount] is the data rows only: 100 + 200. Including the header
+    // would add nothing numeric, but including the totals row would double the
+    // answer — and that mistake reads as plausible.
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Number(300.0));
+    // #All spans header and totals too; the header is text so it contributes
+    // nothing, but the totals cell (itself 300) does.
+    assert_eq!(value_at(&wb, 6, 0), CellValue::Number(600.0));
+}
+
+#[test]
+fn a_reference_to_a_missing_table_is_ref_not_zero() {
+    use casual_calc_model::ErrorValue;
+    let mut wb = table_workbook();
+    recalculate(&mut wb);
+    // Silently reading as an empty range would make a SUM over a deleted table
+    // report 0, which looks like a real answer.
+    assert_eq!(value_at(&wb, 7, 0), CellValue::Error(ErrorValue::Ref));
+}
+
+#[test]
+fn a_totals_row_formula_does_not_include_itself() {
+    let mut wb = table_workbook();
+    recalculate(&mut wb);
+    // B4 is the totals cell holding SUM(Sales[Amount]); if the data body
+    // included the totals row this would be self-referential.
+    assert_eq!(value_at(&wb, 3, 1), CellValue::Number(300.0));
+}
