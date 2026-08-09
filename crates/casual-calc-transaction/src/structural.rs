@@ -539,6 +539,17 @@ fn rewrite_range(a: &CellReference, b: &CellReference, ctx: &RewriteCtx) -> Expr
     if !targets(a, ctx) {
         return Expr::Range(a.clone(), b.clone());
     }
+    // A whole-column range already covers every row, so inserting or deleting
+    // rows cannot change it — and shifting its placeholder bound would turn
+    // `A:A` into a range that no longer starts at row 1. The same holds for a
+    // whole-row range against column edits.
+    let open_on_axis = match ctx.axis {
+        Axis::Row => a.row_implicit || b.row_implicit,
+        Axis::Col => a.col_implicit || b.col_implicit,
+    };
+    if open_on_axis {
+        return Expr::Range(a.clone(), b.clone());
+    }
     match ctx.kind {
         ShiftKind::Insert => {
             Expr::Range(shift_endpoint_insert(a, ctx), shift_endpoint_insert(b, ctx))

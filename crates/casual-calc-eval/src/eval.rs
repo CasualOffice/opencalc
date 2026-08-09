@@ -284,6 +284,26 @@ impl<'a> Evaluator<'a> {
             None => Some(default),
         }
     }
+
+    /// The bounds of a range on `target`, with any unnamed axis narrowed to the
+    /// data. Every site that walks a range goes through here — walking the
+    /// literal bounds of `A:A` is a million-row loop.
+    pub(crate) fn range_bounds(
+        &self,
+        target: usize,
+        a: &CellReference,
+        b: &CellReference,
+    ) -> (u32, u32, u32, u32) {
+        match self.workbook.sheets.get(target) {
+            Some(sheet) => crate::ranges::range_bounds(sheet, a, b),
+            None => (
+                a.row.min(b.row),
+                a.col.min(b.col),
+                a.row.max(b.row),
+                a.col.max(b.col),
+            ),
+        }
+    }
 }
 
 fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {

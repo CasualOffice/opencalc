@@ -26,6 +26,7 @@
 mod eval;
 mod functions;
 mod graph;
+mod ranges;
 
 pub use graph::{dependents_of, precedents_of};
 mod value;

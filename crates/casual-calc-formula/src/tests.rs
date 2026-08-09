@@ -168,3 +168,52 @@ fn an_unterminated_structured_reference_is_an_error() {
     // the defined name `Sales` and quietly drop the column.
     assert!(parse("SUM(Sales[Amount)").is_err());
 }
+
+/// A whole-column or whole-row reference must survive a round trip through the
+/// AST unchanged. Excel writes `Print_Titles` as `Sheet1!$1:$2`, and a reader
+/// that reformats it as `A1:XFD2` has written a different thing.
+#[test]
+fn axis_references_parse_and_print_back_verbatim() {
+    for text in [
+        "A:A",
+        "$A:$C",
+        "Sheet1!$1:$2",
+        "SUM(A:A)",
+        "SUM(Sheet1!$1:$1)",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+}
+
+/// Only a following colon makes an axis token a reference. Without this, every
+/// one-letter defined name would become a column reference.
+#[test]
+fn a_bare_column_letter_is_still_a_name() {
+    assert!(matches!(parse("A").unwrap(), Expr::Name(n) if n == "A"));
+    assert!(matches!(parse("A + 1").unwrap(), Expr::Binary { .. }));
+    // ...and the range form does resolve to a reference.
+    assert!(matches!(parse("A:A").unwrap(), Expr::Range(..)));
+}
+
+/// The unnamed side carries the sheet's limit so ordinary consumers see a valid
+/// span, and the flag is what tells the printer not to show it.
+#[test]
+fn an_unnamed_axis_spans_the_sheet_but_is_marked() {
+    let Expr::Range(a, b) = parse("A:A").unwrap() else {
+        panic!("expected a range");
+    };
+    assert!(a.row_implicit && b.row_implicit);
+    assert_eq!((a.row, b.row), (0, crate::MAX_ROW));
+    assert_eq!((a.col, b.col), (0, 0));
+}
+
+/// Copying `A:A` down must not turn it into `A2:A1048576`.
+#[test]
+fn shifting_leaves_an_unnamed_axis_alone() {
+    let shifted = crate::shift_references(&parse("SUM(A:A)").unwrap(), 5, 0);
+    assert_eq!(shifted.to_string(), "SUM(A:A)");
+    // A named axis still shifts, so the guard is not simply disabling the shift.
+    let normal = crate::shift_references(&parse("SUM(A1:A3)").unwrap(), 5, 0);
+    assert_eq!(normal.to_string(), "SUM(A6:A8)");
+}

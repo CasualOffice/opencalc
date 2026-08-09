@@ -3,7 +3,7 @@
 use crate::ast::{BinaryOp, Expr, UnaryOp};
 use crate::error::FormulaError;
 use crate::lex::{Token, tokenize};
-use crate::reference::{CellReference, parse_a1};
+use crate::reference::{CellReference, parse_a1, parse_a1_axis};
 
 /// Parse a formula body (the text after a leading `=`) into an [`Expr`].
 pub fn parse(input: &str) -> Result<Expr, FormulaError> {
@@ -127,7 +127,7 @@ impl Parser {
             Some(Token::QuotedSheet(name)) => {
                 self.expect(&Token::Bang)?;
                 let word = self.expect_word()?;
-                let reference = reference_from(&word, Some(name))?;
+                let reference = self.reference_or_axis(&word, Some(name))?;
                 self.maybe_range(reference)
             }
             // A bare `[Amount]`, which is how a formula inside the table
@@ -153,7 +153,7 @@ impl Parser {
             Some(Token::Bang) => {
                 self.advance();
                 let target = self.expect_word()?;
-                let reference = reference_from(&target, Some(word))?;
+                let reference = self.reference_or_axis(&target, Some(word))?;
                 self.maybe_range(reference)
             }
             // `Sales[Amount]` — a name followed immediately by a specifier.
@@ -170,6 +170,13 @@ impl Parser {
             _ if word.eq_ignore_ascii_case("FALSE") => Ok(Expr::Bool(false)),
             _ => match parse_a1(&word) {
                 Some(reference) => self.maybe_range(reference),
+                // `A:A` is a whole-column reference, but a bare `A` is a
+                // defined name. Only a following colon tells them apart, so the
+                // axis form is tried nowhere else.
+                None if self.peek() == Some(&Token::Colon) => match parse_a1_axis(&word, false) {
+                    Some(reference) => self.maybe_range(reference),
+                    None => Ok(Expr::Name(word)),
+                },
                 None => Ok(Expr::Name(word)),
             },
         }
@@ -185,13 +192,33 @@ impl Parser {
         }
     }
 
+    /// A reference that may name only one axis, when a colon follows it.
+    ///
+    /// The colon is the whole test: without it `A` is a name and `$1` is not a
+    /// reference at all.
+    fn reference_or_axis(
+        &mut self,
+        word: &str,
+        sheet: Option<String>,
+    ) -> Result<CellReference, FormulaError> {
+        if self.peek() == Some(&Token::Colon)
+            && let Some(mut reference) = parse_a1_axis(word, false)
+        {
+            reference.sheet = sheet;
+            return Ok(reference);
+        }
+        reference_from(word, sheet)
+    }
+
     fn parse_ref_operand(&mut self) -> Result<CellReference, FormulaError> {
         match self.advance() {
-            Some(Token::Word(word)) => reference_from(&word, None),
+            // The closing side of a range: an axis token here takes the *last*
+            // row or column, so `A:A` spans the column rather than one cell.
+            Some(Token::Word(word)) => end_reference_from(&word, None),
             Some(Token::QuotedSheet(name)) => {
                 self.expect(&Token::Bang)?;
                 let word = self.expect_word()?;
-                reference_from(&word, Some(name))
+                end_reference_from(&word, Some(name))
             }
             Some(other) => Err(FormulaError::UnexpectedToken(format!("{other:?}"))),
             None => Err(FormulaError::UnexpectedToken("end of input".to_owned())),
@@ -227,6 +254,15 @@ impl Parser {
 fn reference_from(word: &str, sheet: Option<String>) -> Result<CellReference, FormulaError> {
     let mut reference =
         parse_a1(word).ok_or_else(|| FormulaError::InvalidReference(word.to_owned()))?;
+    reference.sheet = sheet;
+    Ok(reference)
+}
+
+/// The closing side of a range, where an unnamed axis takes its last index.
+fn end_reference_from(word: &str, sheet: Option<String>) -> Result<CellReference, FormulaError> {
+    let mut reference = parse_a1(word)
+        .or_else(|| parse_a1_axis(word, true))
+        .ok_or_else(|| FormulaError::InvalidReference(word.to_owned()))?;
     reference.sheet = sheet;
     Ok(reference)
 }

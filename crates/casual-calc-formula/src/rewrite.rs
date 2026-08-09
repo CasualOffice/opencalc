@@ -31,10 +31,13 @@ pub fn shift_references(expr: &Expr, dr: i64, dc: i64) -> Expr {
 
 fn shift_ref(r: &CellReference, dr: i64, dc: i64) -> CellReference {
     let mut out = r.clone();
-    if !out.row_absolute {
+    // An axis the reference never named has no coordinate to move: `A:A` copied
+    // one row down is still `A:A`. Shifting the placeholder bound would turn it
+    // into `A2:A1048576`, which is a different — and wrong — range.
+    if !out.row_absolute && !out.row_implicit {
         out.row = (out.row as i64 + dr).max(0) as u32;
     }
-    if !out.col_absolute {
+    if !out.col_absolute && !out.col_implicit {
         out.col = (out.col as i64 + dc).max(0) as u32;
     }
     out

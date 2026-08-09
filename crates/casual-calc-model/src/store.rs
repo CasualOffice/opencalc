@@ -108,6 +108,28 @@ impl CellStore {
         self.cells.iter().map(|(r, c)| (*r, c))
     }
 
+    /// The highest populated row, or `None` when the sheet is empty.
+    ///
+    /// O(log n): the map is keyed row-major, so the last key is the last row.
+    /// A whole-column reference like `A:A` needs exactly this — it is what
+    /// stops the range from spanning all 1,048,576 rows.
+    #[must_use]
+    pub fn last_row(&self) -> Option<u32> {
+        self.cells.keys().next_back().map(|at| at.row)
+    }
+
+    /// The highest populated column within `[first_row, last_row]`.
+    ///
+    /// Scoped to the band rather than the sheet because the map is not ordered
+    /// by column: answering for the whole sheet would mean a full scan, and a
+    /// whole-row reference like `$1:$2` only ever needs its own rows.
+    #[must_use]
+    pub fn last_col_in_rows(&self, first_row: u32, last_row: u32) -> Option<u32> {
+        self.row_band(first_row, last_row)
+            .map(|(at, _)| at.col)
+            .max()
+    }
+
     /// Iterate populated cells whose row is in `[first_row, last_row]`, in
     /// row-major order. Cost is proportional to the cells in that band, not to
     /// the whole sheet — the basis for O(visible) viewport layout.

@@ -230,7 +230,13 @@ fn collect_precedents(
             }
         }
         Expr::Range(a, b) => {
-            if let Some(si) = resolve_sheet(a, ctx_sheet, workbook) {
+            // An open range (`A:A`) covers whatever the sheet grows into, so a
+            // dependency span computed from today's extent goes stale the
+            // moment a cell appears below it. Treated like a defined name
+            // instead: recalculate on any change. Conservative, never wrong.
+            if crate::ranges::is_open(a, b) {
+                *uses_name = true;
+            } else if let Some(si) = resolve_sheet(a, ctx_sheet, workbook) {
                 on_range(
                     si,
                     a.row.min(b.row),

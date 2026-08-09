@@ -1374,8 +1374,7 @@ fn flatten_values(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -> Vec<Value
         let Some(target) = ev.resolve_sheet(&a.sheet, sheet) else {
             return vec![Value::Error(ErrorValue::Ref)];
         };
-        let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
-        let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+        let (r0, c0, r1, c1) = ev.range_bounds(target, a, b);
         let area = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
         if area > MAX_RANGE_CELLS {
             return vec![Value::Error(ErrorValue::Num)];
@@ -1424,8 +1423,7 @@ fn flatten_numbers(
         }
         if let Expr::Range(a, b) = arg {
             let target = ev.resolve_sheet(&a.sheet, sheet).ok_or(ErrorValue::Ref)?;
-            let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
-            let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+            let (r0, c0, r1, c1) = ev.range_bounds(target, a, b);
             let area = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
             if area > MAX_RANGE_CELLS {
                 return Err(ErrorValue::Num);
@@ -1567,8 +1565,7 @@ impl Grid {
 fn eval_range_2d(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -> Result<Grid, ErrorValue> {
     if let Expr::Range(a, b) = arg {
         let target = ev.resolve_sheet(&a.sheet, sheet).ok_or(ErrorValue::Ref)?;
-        let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
-        let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+        let (r0, c0, r1, c1) = ev.range_bounds(target, a, b);
         let area = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
         if area > MAX_RANGE_CELLS {
             return Err(ErrorValue::Num);
@@ -3384,15 +3381,7 @@ fn range_cells(ev: &mut Evaluator<'_>, sheet: usize, expr: &Expr) -> Option<(usi
     let (target, range) = match expr {
         Expr::Range(a, b) => {
             let target = ev.resolve_sheet(&a.sheet, sheet)?;
-            (
-                target,
-                (
-                    a.row.min(b.row),
-                    a.col.min(b.col),
-                    a.row.max(b.row),
-                    a.col.max(b.col),
-                ),
-            )
+            (target, ev.range_bounds(target, a, b))
         }
         Expr::StructuredRef { table, spec } => {
             let (target, range) = ev.resolve_structured(sheet, table.as_deref(), spec)?;

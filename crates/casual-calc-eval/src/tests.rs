@@ -2134,3 +2134,73 @@ fn treasury_bill_functions_invert() {
     // which is the relationship between the two quoting conventions.
     assert!(n(3) > 0.05 && n(3) < 0.06);
 }
+
+/// `=SUM(A:A)` is one of the commonest formulas there is, and it used to be
+/// `#NAME?` — the parser could not read a whole-column reference at all.
+#[test]
+fn whole_column_and_whole_row_references_evaluate() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0) // A1
+        .number((1, 0), 2.0) // A2
+        .number((2, 0), 3.0) // A3
+        .number((0, 1), 10.0) // B1
+        .formula((0, 3), "SUM(A:A)") // D1
+        .formula((1, 3), "COUNT(A:A)") // D2
+        .formula((2, 3), "SUM($1:$1)"); // D3 — row 1 across
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 3), CellValue::Number(6.0));
+    assert_eq!(value_at(&wb, 1, 3), CellValue::Number(3.0));
+    // Row 1 holds A1 (1) and B1 (10). D1 is a formula on the same row, so its
+    // own value is excluded only by the self-reference guard, not by us — the
+    // assertion is on the data cells.
+    assert!(
+        matches!(value_at(&wb, 2, 3), CellValue::Number(n) if n >= 11.0),
+        "row range saw A1 and B1: {:?}",
+        value_at(&wb, 2, 3)
+    );
+}
+
+/// The bounds an open range walks come from the data, not from the sheet's
+/// limits. Without the clamp this test would iterate 1,048,576 rows per
+/// formula and take minutes rather than milliseconds.
+#[test]
+fn an_open_range_costs_the_data_not_the_sheet() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0);
+    for i in 0..200u32 {
+        b.formula((i, 4), "SUM(A:A)");
+    }
+    let mut wb = b.build();
+    let start = std::time::Instant::now();
+    recalculate(&mut wb);
+    let elapsed = start.elapsed();
+    assert_eq!(value_at(&wb, 0, 4), CellValue::Number(1.0));
+    // Generous by three orders of magnitude against the unclamped cost; this is
+    // a cliff detector, not a benchmark.
+    assert!(
+        elapsed.as_secs() < 5,
+        "200 open-range formulas took {elapsed:?} — the clamp is not being applied"
+    );
+}
+
+/// A whole-column range grows with the sheet, so a dependency span frozen at
+/// today's extent would go stale the moment a cell appears below it.
+#[test]
+fn an_open_range_recalculates_when_the_column_grows() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0).formula((0, 3), "SUM(A:A)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 3), CellValue::Number(1.0));
+
+    wb.sheets[0]
+        .cells
+        .set(CellRef::new(50, 0), Cell::value(CellValue::Number(41.0)));
+    recalculate(&mut wb);
+    assert_eq!(
+        value_at(&wb, 0, 3),
+        CellValue::Number(42.0),
+        "a cell added below the old extent must still be counted"
+    );
+}
