@@ -26,7 +26,7 @@ the other way around. This index is the map.
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **45–49, 54, 55** — product surface: editor parity, UX map, design system,
+  - **45–49, 54–56** — product surface: editor parity, UX map, design system,
     per-construct design notes (added as phases open).
   - **50–53** — measured gap trackers, generated from or audited against the
     code rather than hand-maintained.
@@ -77,7 +77,7 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
-### Product, UX & the SDK (45–49, 54, 55)
+### Product, UX & the SDK (45–49, 54–56)
 
 | # | Title | Purpose |
 | --- | --- | --- |
@@ -88,6 +88,7 @@ the other way around. This index is the map.
 | 49 | [Design System](49-DESIGN-SYSTEM.md) | The editor's visual language — tokens, spacing, chrome |
 | 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
 | 55 | [SDK Embedding & Integration](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) | The embeddable element: isolation, theming, commands, events, access, i18n |
+| 56 | [Collaboration Concurrency](56-COLLABORATION-CONCURRENCY-DESIGN.md) | OT vs CRDT for Phase 5, and why the per-cell byte ceiling decides it (ADR-011) |
 
 ### Measured gap trackers (50–53)
 
@@ -104,8 +105,10 @@ cannot quietly disagree with what shipped.
 ## Status
 
 **Alpha — engine, editor and embeddable SDK are live.** Phases 0–1E done,
-Phase 2 (calc) substantially done, Phase 3 shipped; the SDK is built but not
-published to npm, and the Phase 5 concurrency model is still undecided.
+Phase 2 (calc) substantially done, Phase 3 shipped, and the browser SDK
+published to npm as `@opencalc/sheet`. The Phase 5 concurrency model is
+**proposed but not accepted** (ADR-011, [56](56-COLLABORATION-CONCURRENCY-DESIGN.md));
+no collaboration code exists.
 
 `docs/` remains the source of truth for *design*: a substantial design is
 settled here before it is implemented. It is no longer the source of truth for

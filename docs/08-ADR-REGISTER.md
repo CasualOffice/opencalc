@@ -24,6 +24,7 @@ decision is marked `Superseded by ADR-NNN`, not edited away.
 | ADR-008 | Backend-neutral display list + CPU raster backend | Accepted | Layout emits a serializable display list; `casual-calc-render` executes it on `tiny-skia` with `skrifa` glyph outlines. The grid paints cell tiles as display-list items. See [42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md). |
 | ADR-009 | Viewport virtualization is a model/layout concern, not a UI hack | Accepted | Layout and paint operate on the visible window only; the model supports O(visible) queries over a 1M-cell sheet. See [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md), [42](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md). |
 | ADR-010 | Deterministic, byte-stable snapshots | Accepted | The normalized model serializes to deterministic JSON with `deny_unknown_fields` + `skip_serializing_if`, so additive schema changes keep old golden snapshots byte-identical. |
+| ADR-011 | Server-mediated operational transform, not a CRDT | **Proposed** | Concurrent editing reconciles by OT over the existing closed op set, with a server imposing the total order. Decided by the per-cell byte ceiling (ADR-004) — which CRDT metadata would consume in every single-user session — and by documents originating as `.xlsx` snapshots with no causal history to merge. Costs bounded-offline and a required server, both stated. See [56](56-COLLABORATION-CONCURRENCY-DESIGN.md). |
 
 ## Pending / to be written
 

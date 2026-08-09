@@ -115,10 +115,14 @@ What is still open, and therefore where the work is:
 
 - **Phase 2 tail** — the persistent incremental dependency graph and the <50 ms
   worst-case recalc budget.
-- **Phase 4** — the SDK is built and documented but not published to npm.
-- **Phase 5** — the concurrency model for shared editing is undecided; it needs
-  an ADR before any code (see [24](docs/24-TRANSACTION-AND-EDIT-SEMANTICS.md)
-  §Open decisions).
+- **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
+  by an `sdk-v*` tag); what remains is a *stable* API, since `0.0.x` is a
+  preview.
+- **Phase 5** — the concurrency model is **proposed, not accepted**:
+  server-mediated operational transform, not a CRDT (ADR-011,
+  [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)). It carries five open
+  questions and no code should be written against it until they are answered
+  and the ADR is Accepted.
 
 The design-first rule has not relaxed now that code exists: a substantial
 design is discussed and written down before it is implemented, not alongside.

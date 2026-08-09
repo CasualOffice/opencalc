@@ -140,7 +140,11 @@ Each op returns, alongside its inverse, a **`DirtySet`** of changed addresses
 
 ## Open decisions (to ADR before Phase 1A editing lands)
 
-- Exact operational-transform / CRDT choice for Phase 5 (does not change the op
-  set, only how concurrent ops are reconciled).
+- ~~Exact operational-transform / CRDT choice for Phase 5~~ — **decided**:
+  server-mediated operational transform over this op set, not a CRDT
+  (ADR-011, [56](56-COLLABORATION-CONCURRENCY-DESIGN.md)). The op set is
+  unchanged, as anticipated here; if reconciliation ever needs an operation the
+  single-user editor does not have, that is evidence against the decision
+  rather than licence to widen the set.
 - Whether `SetRangeValues` carries a dense or sparse payload for very large fills.
 - Coalescing policy for rapid same-cell edits into one undo step.
