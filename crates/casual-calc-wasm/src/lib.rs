@@ -1336,6 +1336,68 @@ pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Resul
     })
 }
 
+/// Grow the table that a newly-typed cell sits directly below or beside.
+///
+/// Typing in the row under a table extends it, which is the behaviour that
+/// makes a table worth having: the range, the banding and every structured
+/// reference follow the data instead of needing to be re-pointed by hand.
+///
+/// A no-op unless the cell is exactly one row below, or one column right of,
+/// a table — growing on anything further away would swallow unrelated data.
+#[wasm_bindgen]
+pub fn session_table_autoexpand(sheet: usize, row: u32, col: u32) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        for table in data.tables.iter_mut() {
+            let bottom = table.range.end.row;
+            let within_cols = col >= table.range.start.col && col <= table.range.end.col;
+            let within_rows = row >= table.range.start.row && row <= table.range.end.row;
+            // A totals row sits at the bottom, so a new data row goes *above*
+            // it — growing past it would leave the totals stranded mid-table.
+            if within_cols && table.totals_row_count == 0 && row == bottom + 1 {
+                table.range.end.row = row;
+                table.auto_filter_ref = Some(range_a1_string(
+                    table.range.start.row,
+                    table.range.start.col,
+                    table.range.end.row,
+                    table.range.end.col,
+                ));
+                return;
+            }
+            if within_rows && col == table.range.end.col + 1 {
+                table.range.end.col = col;
+                // A new column needs a name, or a structured reference to it
+                // has nothing to resolve against.
+                let next = table.columns.len() + 1;
+                let mut name = format!("Column{next}");
+                let mut k = next;
+                while table
+                    .columns
+                    .iter()
+                    .any(|c| c.name.eq_ignore_ascii_case(&name))
+                {
+                    k += 1;
+                    name = format!("Column{k}");
+                }
+                table.columns.push(casual_calc_model::TableColumn {
+                    id: table.columns.len() as u32 + 1,
+                    name,
+                    totals_row_function: None,
+                    totals_row_label: None,
+                    calculated_column_formula: None,
+                    totals_row_formula: None,
+                });
+                table.auto_filter_ref = Some(range_a1_string(
+                    table.range.start.row,
+                    table.range.start.col,
+                    table.range.end.row,
+                    table.range.end.col,
+                ));
+                return;
+            }
+        }
+    })
+}
+
 /// The table covering a cell as JSON, or `null` — drives the UI's state.
 #[wasm_bindgen]
 pub fn session_table_at(sheet: usize, row: u32, col: u32) -> String {
@@ -2463,8 +2525,18 @@ pub fn session_cells(
             if style.is_some_and(|s| s.italic) {
                 extra.push_str(",\"i\":1");
             }
-            if style.is_some_and(|s| s.underline.is_some()) {
+            if let Some(u) = style.and_then(|s| s.underline) {
                 extra.push_str(",\"u\":1");
+                // The kind travels beside the flag rather than replacing it, so
+                // every existing reader of `u` keeps working while a renderer
+                // that cares can draw a double or accounting rule.
+                extra.push_str(&format!(",\"uk\":{}", json_string(u.ooxml())));
+            }
+            // Superscript / subscript on the *cell* font. `va` is already taken
+            // by vertical alignment, which is a different property with a
+            // confusingly similar name in the format.
+            if let Some(v) = style.and_then(|s| s.vert_align) {
+                extra.push_str(&format!(",\"sup\":{}", json_string(v.ooxml())));
             }
             if style.is_some_and(|s| s.wrap) {
                 extra.push_str(",\"w\":1");

@@ -2139,6 +2139,9 @@ function commit(value, advance) {
         wasm.session_toggle_wrap(state.sheet, state.sel.row, state.sel.col, state.sel.row, state.sel.col);
       }
     }
+    // A table grows to take in a value typed just below or beside it. Done
+    // after the value lands so the engine sees the cell it is growing for.
+    try { wasm.session_table_autoexpand(state.sheet, state.sel.row, state.sel.col); } catch {}
     status.textContent = "ok";
   } catch (e) {
     status.textContent = `error: ${e}`;
@@ -3389,7 +3392,25 @@ function toggleFilter() {
 // pane must be clipped to its own pane, not painted over the frozen one.
 function drawFilterButtons(withQuad) {
   filterButtons = [];
-  if (!filterInfo) return;
+  // Every header that carries filter buttons: the sheet's own autofilter, plus
+  // each table's. A table brings its own — Excel turns them on with the table,
+  // and without them a table header reads as an ordinary shaded row.
+  const regions = [];
+  if (filterInfo) {
+    regions.push({ r0: filterInfo.r0, c0: filterInfo.c0, c1: filterInfo.c1, cols: filterInfo.cols });
+  }
+  for (const t of tablesInView) {
+    if (t.headers > 0) {
+      // A table's own filter state is not tracked separately yet, so no column
+      // reads as active. Showing the button unfilled is honest — it says the
+      // control exists — where hiding it would say the table has no filter.
+      regions.push({ r0: t.r0, c0: t.c0, c1: t.c1, cols: new Set() });
+    }
+  }
+  for (const region of regions) drawFilterRegion(withQuad, region);
+}
+
+function drawFilterRegion(withQuad, filterInfo) {
   const row = filterInfo.r0;
   const y = rowYAt(row);
   if (y === undefined) return;
@@ -6526,6 +6547,18 @@ function cellMenu(x, y) {
     false,
     () => tableDialog(),
   );
+  (() => {
+    let t = null;
+    try { t = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
+    if (!t) return;
+    item(t.totals > 0 ? "Hide totals row" : "Show totals row", false, () => {
+      try {
+        wasm.session_table_totals(state.sheet, state.sel.row, state.sel.col, t.totals === 0);
+        status.textContent = t.totals > 0 ? "totals row hidden" : "totals row shown";
+      } catch (e) { status.textContent = `error: ${e}`; }
+      draw();
+    });
+  })();
   item("Define name…", false, () => {
     const r = canvas.getBoundingClientRect();
     openNameManager(r.left + 120, r.top + 90);
