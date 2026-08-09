@@ -2949,3 +2949,155 @@ fn french_depreciation_prorates_the_first_period() {
         n(0)
     );
 }
+
+/// `CELL` reports on the *reference*, not on the value at it — which is why
+/// the argument has to stay an expression. Evaluating it first would leave a
+/// number and lose the address entirely.
+#[test]
+fn cell_reports_on_the_reference_not_the_value() {
+    let mut b = Builder::new();
+    b.number((4, 2), 42.0); // C5
+    b.text((5, 2), "hello"); // C6
+    b.formula((0, 0), "CELL(\"address\",C5)");
+    b.formula((1, 0), "CELL(\"row\",C5)");
+    b.formula((2, 0), "CELL(\"col\",C5)");
+    b.formula((3, 0), "CELL(\"type\",C5)");
+    b.formula((4, 0), "CELL(\"type\",C6)");
+    b.formula((5, 0), "CELL(\"type\",C9)");
+    b.formula((6, 0), "CELL(\"contents\",C5)");
+    // Locked is OOXML's default for a cell that says nothing — the same
+    // default the protection guard relies on.
+    b.formula((7, 0), "CELL(\"protect\",C5)");
+    // No path exists here, and "" would read as an unsaved workbook.
+    b.formula((8, 0), "CELL(\"filename\",C5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let t = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::InlineString(id) | CellValue::SharedString(id) => {
+            wb.strings.get(id).unwrap_or_default().to_owned()
+        }
+        CellValue::Number(n) => n.to_string(),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(t(0), "$C$5");
+    assert_eq!(t(1), "5");
+    assert_eq!(t(2), "3");
+    assert_eq!(t(3), "v", "a number is a value");
+    assert_eq!(t(4), "l", "text is a label");
+    assert_eq!(t(5), "b", "an empty cell is blank");
+    assert_eq!(t(6), "42");
+    assert_eq!(t(7), "1");
+    assert_eq!(
+        value_at(&wb, 8, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Na)
+    );
+}
+
+/// `INFO` answers only what it can answer truthfully. There is no working
+/// directory in a browser, and inventing one would fail somewhere far away
+/// from the formula that asked.
+#[test]
+fn info_declines_what_it_cannot_know() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "INFO(\"recalc\")");
+    b.formula((1, 0), "INFO(\"directory\")");
+    b.formula((2, 0), "INFO(\"numfile\")");
+    b.formula((3, 0), "INFO(\"nonsense\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let (CellValue::InlineString(id) | CellValue::SharedString(id)) = value_at(&wb, 0, 0) else {
+        panic!("expected text");
+    };
+    assert_eq!(wb.strings.get(id).unwrap_or_default(), "Automatic");
+    for r in [1, 2] {
+        assert_eq!(
+            value_at(&wb, r, 0),
+            CellValue::Error(casual_calc_model::ErrorValue::Na),
+            "row {r} is unknowable here, not guessable"
+        );
+    }
+    assert_eq!(
+        value_at(&wb, 3, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Value),
+        "an unrecognised type is a mistake, not an unknown"
+    );
+}
+
+/// `CONVERT` goes through one base unit per category, so a conversion is a
+/// division rather than a lookup of every pair — a pairwise table of eighty
+/// units is six thousand entries and every one a chance to be wrong.
+#[test]
+fn convert_crosses_units_within_a_category_only() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "CONVERT(1,\"lbm\",\"kg\")");
+    b.formula((1, 0), "CONVERT(1,\"mi\",\"m\")");
+    b.formula((2, 0), "CONVERT(1,\"day\",\"hr\")");
+    b.formula((3, 0), "CONVERT(1,\"gal\",\"l\")");
+    b.formula((4, 0), "CONVERT(1024,\"byte\",\"bit\")");
+    // Metric prefixes apply, but an exact unit name wins over a prefixed
+    // reading: `m` is metres, not milli-anything.
+    b.formula((5, 0), "CONVERT(1,\"km\",\"m\")");
+    b.formula((6, 0), "CONVERT(1,\"m\",\"cm\")");
+    // Different categories have no answer at all — kilograms into metres is
+    // not a small error, it is a question with none.
+    b.formula((7, 0), "CONVERT(1,\"kg\",\"m\")");
+    b.formula((8, 0), "CONVERT(1,\"kg\",\"nonsense\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 0.45359237).abs() < 1e-12);
+    assert!((n(1) - 1609.344).abs() < 1e-9);
+    assert!((n(2) - 24.0).abs() < 1e-12);
+    assert!((n(3) - 3.785411784).abs() < 1e-12);
+    assert!((n(4) - 8192.0).abs() < 1e-9);
+    assert!((n(5) - 1000.0).abs() < 1e-9, "kilo prefix: {}", n(5));
+    assert!(
+        (n(6) - 100.0).abs() < 1e-9,
+        "m is metres, not milli: {}",
+        n(6)
+    );
+    for r in [7, 8] {
+        assert_eq!(
+            value_at(&wb, r, 0),
+            CellValue::Error(casual_calc_model::ErrorValue::Na),
+            "row {r}"
+        );
+    }
+}
+
+/// Temperature is the one family a factor cannot express, because the scales
+/// have different zeros: a factor alone turns 0 °C into 0 °F.
+#[test]
+fn convert_handles_temperature_offsets() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "CONVERT(0,\"C\",\"F\")");
+    b.formula((1, 0), "CONVERT(100,\"C\",\"F\")");
+    b.formula((2, 0), "CONVERT(-40,\"C\",\"F\")");
+    b.formula((3, 0), "CONVERT(0,\"C\",\"K\")");
+    b.formula((4, 0), "CONVERT(212,\"F\",\"C\")");
+    // A temperature into a length has no answer.
+    b.formula((5, 0), "CONVERT(0,\"C\",\"m\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!((n(0) - 32.0).abs() < 1e-9, "freezing: {}", n(0));
+    assert!((n(1) - 212.0).abs() < 1e-9, "boiling: {}", n(1));
+    assert!(
+        (n(2) + 40.0).abs() < 1e-9,
+        "the scales cross at -40: {}",
+        n(2)
+    );
+    assert!((n(3) - 273.15).abs() < 1e-9);
+    assert!((n(4) - 100.0).abs() < 1e-9);
+    assert_eq!(
+        value_at(&wb, 5, 0),
+        CellValue::Error(casual_calc_model::ErrorValue::Na)
+    );
+}

@@ -235,7 +235,11 @@ pub fn display_text(workbook: &Workbook, cell: &Cell) -> String {
     }
 }
 
-fn cell_number_format<'a>(workbook: &'a Workbook, cell: &Cell) -> Option<&'a str> {
+/// The number-format code in force on a cell, or `None` for General.
+///
+/// Public because `CELL("format")` has to report the same code the renderer
+/// draws with; resolving it twice is how the two come to disagree.
+pub fn cell_number_format<'a>(workbook: &'a Workbook, cell: &Cell) -> Option<&'a str> {
     let style = workbook.styles.get(cell.style?)?;
     style.number_format.as_deref()
 }

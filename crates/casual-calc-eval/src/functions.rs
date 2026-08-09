@@ -72,6 +72,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BITRSHIFT", "BITRSHIFT(number, shift)"),
     ("BITXOR", "BITXOR(number1, number2)"),
     ("CEILING", "CEILING(number, significance)"),
+    ("CELL", "CELL(info_type, [reference])"),
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
     ("CHIINV", "CHIINV(probability, degrees_freedom)"),
@@ -87,6 +88,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
     ("CONFIDENCE", "CONFIDENCE(alpha, standard_dev, size)"),
+    ("CONVERT", "CONVERT(number, from_unit, to_unit)"),
     ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
     ("COSH", "COSH(number)"),
@@ -233,6 +235,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IMTAN", "IMTAN(inumber)"),
     ("INDEX", "INDEX(array, row_num, [col_num])"),
     ("INDIRECT", "INDIRECT(ref_text, [a1])"),
+    ("INFO", "INFO(type_text)"),
     ("INT", "INT(number)"),
     ("INTERCEPT", "INTERCEPT(known_y, known_x)"),
     (
@@ -964,6 +967,9 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         // to its contents before a function sees it — so ISREF answers by
         // inspecting the *expression*, not the value it produced.
         "ISREF" => eval_is_ref(args),
+        "CELL" => eval_cell_info(ev, sheet, args),
+        "CONVERT" => eval_convert(ev, sheet, args),
+        "INFO" => eval_info(ev, sheet, args),
         "ISFORMULA" => eval_is_formula(ev, sheet, args),
         // Both are 1-based over the workbook's sheet order.
         "SHEET" => match args {
@@ -7855,4 +7861,416 @@ fn eval_amor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], degressive: bo
         book -= amount;
     }
     Value::Number(0.0)
+}
+
+/// `CELL(info_type, [reference])` — properties of a cell rather than its value.
+///
+/// Most of the types describe the *reference*, not the value at it, which is
+/// why the argument has to stay an expression: evaluating it first would leave
+/// only a number and lose the address entirely.
+///
+/// The types this cannot answer honestly return `#N/A` rather than a plausible
+/// value. `"filename"` in particular: there is no path here, and returning an
+/// empty string would read as "an unsaved workbook", which is a different
+/// claim.
+fn eval_cell_info(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let kind = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(t) => t.trim().to_ascii_lowercase(),
+        Err(e) => return Value::Error(e),
+    };
+    // With no reference, Excel reports on the cell holding the formula.
+    let target = match args.get(1) {
+        Some(Expr::Reference(r)) => (r.sheet.clone(), r.row, r.col),
+        Some(Expr::Range(a, _)) => (a.sheet.clone(), a.row, a.col),
+        Some(_) => return Value::Error(ErrorValue::Value),
+        None => match ev.current_cell() {
+            Some((_, at)) => (None, at.row, at.col),
+            None => return Value::Error(ErrorValue::Value),
+        },
+    };
+    let (sheet_name, row, col) = target;
+    let index = match ev.resolve_sheet(&sheet_name, sheet) {
+        Some(i) => i,
+        None => return Value::Error(ErrorValue::Ref),
+    };
+    let at = CellRef::new(row, col);
+    let wb = ev.workbook();
+    let cell = wb.sheets.get(index).and_then(|s| s.cells.get(at));
+
+    match kind.as_str() {
+        "address" => Value::Text(format!(
+            "${}${}",
+            casual_calc_formula::column_to_letters(col),
+            row + 1
+        )),
+        "col" => Value::Number(col as f64 + 1.0),
+        "row" => Value::Number(row as f64 + 1.0),
+        "contents" => match cell {
+            Some(c) => crate::value::value_from_cell(&c.value, &wb.strings),
+            None => Value::Number(0.0),
+        },
+        // `"type"` is about the *kind* of content: b(lank), l(abel), v(alue).
+        "type" => Value::Text(
+            match cell.map(|c| &c.value) {
+                None | Some(casual_calc_model::CellValue::Empty) => "b",
+                Some(casual_calc_model::CellValue::SharedString(_))
+                | Some(casual_calc_model::CellValue::InlineString(_)) => "l",
+                _ => "v",
+            }
+            .to_owned(),
+        ),
+        "prefix" => {
+            // The alignment prefix character: ' left, " right, ^ centre, empty
+            // for anything else. Reported from the alignment, which is where a
+            // reader of the file would find it.
+            let style = cell.and_then(|c| c.style).and_then(|id| wb.styles.get(id));
+            Value::Text(
+                match style.and_then(|s| s.align) {
+                    Some(casual_calc_model::HAlign::Left) => "'",
+                    Some(casual_calc_model::HAlign::Right) => "\"",
+                    Some(casual_calc_model::HAlign::Center) => "^",
+                    Some(casual_calc_model::HAlign::Fill) => "\\",
+                    _ => "",
+                }
+                .to_owned(),
+            )
+        }
+        "protect" => {
+            // 1 when locked, which is OOXML's default for a cell that says
+            // nothing — the same default the protection guard relies on.
+            let locked = cell
+                .and_then(|c| c.style)
+                .and_then(|id| wb.styles.get(id))
+                .and_then(|s| s.locked)
+                .unwrap_or(true);
+            Value::Number(if locked { 1.0 } else { 0.0 })
+        }
+        "width" => {
+            // Excel reports the width in characters of the default font;
+            // the model stores it in the same unit scaled by 256, as OOXML
+            // does, so it is divided back rather than reported raw.
+            const DEFAULT_COL: i64 = 8 * 256;
+            let width = wb
+                .sheets
+                .get(index)
+                .map(|s| s.columns.size(col, DEFAULT_COL))
+                .unwrap_or(DEFAULT_COL);
+            Value::Number((width as f64 / 256.0).round())
+        }
+        "format" => {
+            // Excel's format codes are a small closed vocabulary, not the
+            // number-format string. Only the ones that map unambiguously are
+            // reported; anything else is "G", which is what Excel gives for a
+            // format it has no letter for.
+            let code = cell
+                .and_then(|c| casual_calc_layout::cell_number_format(wb, c).map(str::to_owned))
+                .unwrap_or_default();
+            Value::Text(
+                if code.is_empty() || code == "General" {
+                    "G"
+                } else if code.contains('%') {
+                    "P0"
+                } else if code.contains('$') {
+                    "C0"
+                } else if code.contains('y') || code.contains('d') {
+                    "D1"
+                } else if code.contains('h') || code.contains('s') {
+                    "D9"
+                } else if code.contains("0.00") {
+                    "F2"
+                } else {
+                    "G"
+                }
+                .to_owned(),
+            )
+        }
+        "color" | "parentheses" => {
+            // Both report whether the *negative* section of the format does
+            // something special, which needs the section split.
+            let code = cell
+                .and_then(|c| casual_calc_layout::cell_number_format(wb, c).map(str::to_owned))
+                .unwrap_or_default();
+            let negative = code.split(';').nth(1).unwrap_or_default();
+            let flag = if kind == "color" {
+                negative.contains('[')
+            } else {
+                negative.contains('(')
+            };
+            Value::Number(if flag { 1.0 } else { 0.0 })
+        }
+        // No path, no window, nothing to report — and an empty string would
+        // read as "an unsaved workbook", which is a different claim.
+        "filename" => Value::Error(ErrorValue::Na),
+        _ => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `INFO(type)` — properties of the environment.
+///
+/// Only what can be answered truthfully is answered. There is no working
+/// directory and no open-file count in a browser, and inventing them would be
+/// worse than `#N/A`: a formula built on a fabricated path fails somewhere far
+/// from here.
+fn eval_info(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let kind = match ev.eval_expr(sheet, &args[0]).as_text() {
+        Ok(t) => t.trim().to_ascii_lowercase(),
+        Err(e) => return Value::Error(e),
+    };
+    match kind.as_str() {
+        // A1 versus R1C1; this engine speaks A1 and the origin is the
+        // top-left of the sheet.
+        "origin" => Value::Text("$A:$A$1".to_owned()),
+        "recalc" => Value::Text("Automatic".to_owned()),
+        "release" => Value::Text(env!("CARGO_PKG_VERSION").to_owned()),
+        "system" => Value::Text("pcdos".to_owned()),
+        "numfile" | "directory" | "osversion" | "memavail" | "memused" | "totmem" => {
+            Value::Error(ErrorValue::Na)
+        }
+        _ => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `CONVERT(number, from, to)` — unit conversion.
+///
+/// Every unit is expressed as a factor to one SI base per *category*, so a
+/// conversion is a division rather than a lookup of every pair — a pairwise
+/// table of eighty units is six thousand entries and every one a chance to be
+/// wrong. Units from different categories are `#N/A`, which is Excel's answer
+/// and the honest one: kilograms into metres is not a small error, it is a
+/// question with no answer.
+///
+/// Temperature is the exception and has to be, because its scales have
+/// different zeros: a factor alone turns 0 °C into 0 °F.
+fn convert_factor(unit: &str) -> Option<(&'static str, f64)> {
+    // (category, factor to the category's base unit)
+    const UNITS: &[(&str, &str, f64)] = &[
+        // Mass — base gram.
+        ("g", "mass", 1.0),
+        ("sg", "mass", 14593.9029372064),
+        ("lbm", "mass", 453.59237),
+        ("u", "mass", 1.66053886e-24),
+        ("ozm", "mass", 28.349523125),
+        ("grain", "mass", 0.06479891),
+        ("cwt", "mass", 45359.237),
+        ("shweight", "mass", 45359.237),
+        ("uk_cwt", "mass", 50802.34544),
+        ("lcwt", "mass", 50802.34544),
+        ("hweight", "mass", 50802.34544),
+        ("stone", "mass", 6350.29318),
+        ("ton", "mass", 907184.74),
+        ("uk_ton", "mass", 1016046.9088),
+        ("LTON", "mass", 1016046.9088),
+        ("brton", "mass", 1016046.9088),
+        // Distance — base metre.
+        ("m", "distance", 1.0),
+        ("mi", "distance", 1609.344),
+        ("Nmi", "distance", 1852.0),
+        ("in", "distance", 0.0254),
+        ("ft", "distance", 0.3048),
+        ("yd", "distance", 0.9144),
+        ("ang", "distance", 1e-10),
+        ("ell", "distance", 1.143),
+        ("ly", "distance", 9.46073047258080e15),
+        ("parsec", "distance", 3.08567758128155e16),
+        ("pc", "distance", 3.08567758128155e16),
+        ("Picapt", "distance", 0.0254 / 72.0),
+        ("Pica", "distance", 0.0254 / 6.0),
+        ("survey_mi", "distance", 1609.347218694437),
+        // Time — base second.
+        ("yr", "time", 31557600.0),
+        ("day", "time", 86400.0),
+        ("d", "time", 86400.0),
+        ("hr", "time", 3600.0),
+        ("mn", "time", 60.0),
+        ("min", "time", 60.0),
+        ("sec", "time", 1.0),
+        ("s", "time", 1.0),
+        // Pressure — base pascal.
+        ("Pa", "pressure", 1.0),
+        ("p", "pressure", 1.0),
+        ("atm", "pressure", 101325.0),
+        ("at", "pressure", 101325.0),
+        ("mmHg", "pressure", 133.322),
+        ("psi", "pressure", 6894.75729316836),
+        ("Torr", "pressure", 101325.0 / 760.0),
+        // Force — base newton.
+        ("N", "force", 1.0),
+        ("dyn", "force", 1e-5),
+        ("dy", "force", 1e-5),
+        ("lbf", "force", 4.4482216152605),
+        ("pond", "force", 9.80665e-3),
+        // Energy — base joule.
+        ("J", "energy", 1.0),
+        ("e", "energy", 1e-7),
+        ("c", "energy", 4.184),
+        ("cal", "energy", 4.1868),
+        ("eV", "energy", 1.60217653e-19),
+        ("ev", "energy", 1.60217653e-19),
+        ("HPh", "energy", 2684519.53769617),
+        ("hh", "energy", 2684519.53769617),
+        ("Wh", "energy", 3600.0),
+        ("wh", "energy", 3600.0),
+        ("flb", "energy", 1.3558179483314),
+        ("BTU", "energy", 1055.05585262),
+        ("btu", "energy", 1055.05585262),
+        // Power — base watt.
+        ("HP", "power", 745.69987158227),
+        ("h", "power", 745.69987158227),
+        ("W", "power", 1.0),
+        ("w", "power", 1.0),
+        ("PS", "power", 735.49875),
+        // Magnetism — base tesla.
+        ("T", "magnetism", 1.0),
+        ("ga", "magnetism", 1e-4),
+        // Volume — base litre.
+        ("l", "volume", 1.0),
+        ("L", "volume", 1.0),
+        ("lt", "volume", 1.0),
+        ("tsp", "volume", 0.00492892159375),
+        ("tbs", "volume", 0.01478676478125),
+        ("oz", "volume", 0.0295735295625),
+        ("cup", "volume", 0.2365882365),
+        ("pt", "volume", 0.473176473),
+        ("us_pt", "volume", 0.473176473),
+        ("uk_pt", "volume", 0.5682612544),
+        ("qt", "volume", 0.946352946),
+        ("uk_qt", "volume", 1.1365225088),
+        ("gal", "volume", 3.785411784),
+        ("uk_gal", "volume", 4.54609),
+        ("ang3", "volume", 1e-27),
+        ("barrel", "volume", 158.987294928),
+        ("bushel", "volume", 35.23907016688),
+        ("ft3", "volume", 28.316846592),
+        ("in3", "volume", 0.016387064),
+        ("m3", "volume", 1000.0),
+        ("mi3", "volume", 4168181825440.58),
+        ("yd3", "volume", 764.554857984),
+        // Area — base square metre.
+        ("m2", "area", 1.0),
+        ("uk_acre", "area", 4046.8564224),
+        ("us_acre", "area", 4046.87261),
+        ("ang2", "area", 1e-20),
+        ("ar", "area", 100.0),
+        ("ft2", "area", 0.09290304),
+        ("ha", "area", 10000.0),
+        ("in2", "area", 0.00064516),
+        ("mi2", "area", 2589988.110336),
+        ("Nmi2", "area", 3429904.0),
+        ("yd2", "area", 0.83612736),
+        // Information — base bit.
+        ("bit", "information", 1.0),
+        ("byte", "information", 8.0),
+        // Speed — base metres per second.
+        ("m/s", "speed", 1.0),
+        ("m/sec", "speed", 1.0),
+        ("m/h", "speed", 1.0 / 3600.0),
+        ("mph", "speed", 0.44704),
+        ("kn", "speed", 1852.0 / 3600.0),
+        ("admkn", "speed", 1853.184 / 3600.0),
+    ];
+    // Metric prefixes, which apply to the SI units only. Excel accepts them on
+    // anything, so this does too rather than maintaining a second table of
+    // which unit is metric.
+    const PREFIXES: &[(&str, f64)] = &[
+        ("Y", 1e24),
+        ("Z", 1e21),
+        ("E", 1e18),
+        ("P", 1e15),
+        ("T", 1e12),
+        ("G", 1e9),
+        ("M", 1e6),
+        ("k", 1e3),
+        ("h", 1e2),
+        ("e", 1e1),
+        ("d", 1e-1),
+        ("c", 1e-2),
+        ("m", 1e-3),
+        ("u", 1e-6),
+        ("n", 1e-9),
+        ("p", 1e-12),
+        ("f", 1e-15),
+        ("a", 1e-18),
+        ("z", 1e-21),
+        ("y", 1e-24),
+    ];
+    // Exact match first: `m` is metres, not milli-anything, and `T` is tesla
+    // rather than tera. Trying prefixes first would silently reinterpret the
+    // commonest units in the table.
+    if let Some((_, cat, f)) = UNITS.iter().find(|(u, _, _)| *u == unit) {
+        return Some((cat, *f));
+    }
+    for (p, scale) in PREFIXES {
+        if let Some(rest) = unit.strip_prefix(p)
+            && !rest.is_empty()
+            && let Some((_, cat, f)) = UNITS.iter().find(|(u, _, _)| u == &rest)
+        {
+            return Some((cat, f * scale));
+        }
+    }
+    None
+}
+
+/// Temperature in kelvin, and back — the one family a factor cannot express,
+/// because the scales do not share a zero.
+fn temperature_to_kelvin(unit: &str, v: f64) -> Option<f64> {
+    Some(match unit {
+        "C" | "cel" => v + 273.15,
+        "F" | "fah" => (v - 32.0) * 5.0 / 9.0 + 273.15,
+        "K" | "kel" => v,
+        "Rank" => v * 5.0 / 9.0,
+        "Reau" => v * 1.25 + 273.15,
+        _ => return None,
+    })
+}
+
+fn temperature_from_kelvin(unit: &str, k: f64) -> Option<f64> {
+    Some(match unit {
+        "C" | "cel" => k - 273.15,
+        "F" | "fah" => (k - 273.15) * 9.0 / 5.0 + 32.0,
+        "K" | "kel" => k,
+        "Rank" => k * 9.0 / 5.0,
+        "Reau" => (k - 273.15) * 0.8,
+        _ => return None,
+    })
+}
+
+fn eval_convert(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let number = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let from = match ev.eval_expr(sheet, &args[1]).as_text() {
+        Ok(t) => t,
+        Err(e) => return Value::Error(e),
+    };
+    let to = match ev.eval_expr(sheet, &args[2]).as_text() {
+        Ok(t) => t,
+        Err(e) => return Value::Error(e),
+    };
+
+    if let Some(k) = temperature_to_kelvin(&from, number) {
+        return match temperature_from_kelvin(&to, k) {
+            Some(v) => Value::Number(v),
+            // A temperature into anything else has no answer.
+            None => Value::Error(ErrorValue::Na),
+        };
+    }
+    let (Some((cat_from, f_from)), Some((cat_to, f_to))) =
+        (convert_factor(&from), convert_factor(&to))
+    else {
+        return Value::Error(ErrorValue::Na);
+    };
+    if cat_from != cat_to {
+        return Value::Error(ErrorValue::Na);
+    }
+    Value::Number(number * f_from / f_to)
 }
