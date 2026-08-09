@@ -32,7 +32,8 @@ pub use ids::{
 pub use sheet::{
     AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat, CustomFilter,
     DataValidation, DvKind, DvOperator, FilterOp, FilterRule, Hyperlink, OutlinePr, PrintSetup,
-    Sheet, SheetProtection, SheetView, SheetVisibility, Table, TableColumn, wildcard_match,
+    Sheet, SheetProtection, SheetView, SheetVisibility, SortState, Table, TableColumn,
+    wildcard_match,
 };
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;

@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_model::{
-    OutlinePr, PrintSetup, RetainedRef, RunFont, TableColumn, TextRun, Underline, VertAlign,
-    WorkbookSettings,
+    OutlinePr, PrintSetup, RetainedRef, RunFont, SortState, TableColumn, TextRun, Underline,
+    VertAlign, WorkbookSettings,
 };
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
@@ -479,6 +479,8 @@ pub struct Worksheet {
     pub protection: Option<BTreeMap<String, String>>,
     /// Print layout, carried through verbatim.
     pub print: PrintSetup,
+    /// `<sortState>` with its conditions, carried verbatim.
+    pub sort_state: Option<SortState>,
     /// Elements naming a retained part, in document order.
     pub retained_refs: Vec<RetainedRef>,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
@@ -503,6 +505,8 @@ pub struct RawFilterColumn {
     pub custom: Vec<(String, String)>,
     /// `<customFilters and="1">`.
     pub custom_and: bool,
+    /// A refinement we carry but do not evaluate, as `(element, attributes)`.
+    pub unevaluated: Option<(String, BTreeMap<String, String>)>,
 }
 
 /// A raw `<dataValidation>`, before mapping to the model.
@@ -635,6 +639,18 @@ fn read_filter_element(
                 && let Some(fc) = cur_fc.as_mut()
             {
                 fc.values.push(val);
+            }
+        }
+        // Refinements we keep but never apply. Carried so the filter survives
+        // the save; the rows they would hide stay visible, which is visibly
+        // incomplete rather than silently wrong.
+        b"top10" | b"dynamicFilter" | b"colorFilter" | b"iconFilter" | b"dateGroupItem"
+            if cur_fc.is_some() =>
+        {
+            let element = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+            let attrs = read_attrs(e)?;
+            if let Some(fc) = cur_fc.as_mut() {
+                fc.unevaluated = Some((element, attrs));
             }
         }
         b"customFilters" if cur_fc.is_some() => {
@@ -834,6 +850,17 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             read_attrs(&e)?,
                         ));
                     }
+                    b"sortState" => {
+                        result.sort_state = Some(SortState {
+                            attrs: read_attrs(&e)?,
+                            conditions: Vec::new(),
+                        });
+                    }
+                    b"sortCondition" => {
+                        if let Some(state) = result.sort_state.as_mut() {
+                            state.conditions.push(read_attrs(&e)?);
+                        }
+                    }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
@@ -972,6 +999,17 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
                             read_attrs(&e)?,
                         ));
+                    }
+                    b"sortState" => {
+                        result.sort_state = Some(SortState {
+                            attrs: read_attrs(&e)?,
+                            conditions: Vec::new(),
+                        });
+                    }
+                    b"sortCondition" => {
+                        if let Some(state) = result.sort_state.as_mut() {
+                            state.conditions.push(read_attrs(&e)?);
+                        }
                     }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {

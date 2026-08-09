@@ -345,6 +345,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // away on purpose, so the state travels with the sheet.
         sheet.visibility = SheetVisibility::from_ooxml(&state);
         sheet.print = worksheet.print.clone();
+        sheet.sort_state = worksheet.sort_state.clone();
         sheet.retained_refs = worksheet.retained_refs.clone();
         sheet.protection = worksheet
             .protection
@@ -480,7 +481,11 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         {
             let mut filter = AutoFilter::new(range);
             for fc in worksheet.filter_columns {
-                let rule = if fc.saw_filters {
+                // A refinement takes precedence: a filterColumn holding one has
+                // no <filters> or <customFilters> to read instead.
+                let rule = if let Some((element, attrs)) = fc.unevaluated.clone() {
+                    FilterRule::Unevaluated { element, attrs }
+                } else if fc.saw_filters {
                     let mut values = fc.values;
                     if fc.blank {
                         // `blank="1"` is the checklist's "(Blanks)" entry, which

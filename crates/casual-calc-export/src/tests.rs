@@ -1826,3 +1826,52 @@ fn two_fonts_differing_only_in_a_legacy_effect_stay_distinct() {
     let styles = xml_of(&written, "xl/styles.xml");
     assert_eq!(styles.matches("<shadow/>").count(), 1);
 }
+
+#[test]
+fn unevaluated_filters_and_sort_state_survive_without_hiding_rows() {
+    use casual_calc_model::FilterRule;
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c></row>
+                <row r="2"><c r="A2"><v>5</v></c></row>
+                <row r="3"><c r="A3"><v>9</v></c></row>
+              </sheetData>
+              <autoFilter ref="A1:A3"><filterColumn colId="0"><top10 val="1" percent="0" top="1"/></filterColumn></autoFilter>
+              <sortState ref="A2:A3"><sortCondition ref="A2:A3" descending="1"/></sortState>
+            </worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let sheet = &wb.sheets[0];
+    let rule = sheet.auto_filter.as_ref().unwrap().rules.get(&0).unwrap();
+    assert!(matches!(rule, FilterRule::Unevaluated { element, .. } if element == "top10"));
+    // Not evaluated, so every row passes. Hiding rows on a rule we do not
+    // understand would be a guess; showing them all is visibly incomplete,
+    // which is the failure worth having.
+    assert!(rule.matches("5", Some(5.0)));
+    assert!(rule.matches("9", Some(9.0)));
+
+    let sort = sheet.sort_state.as_ref().unwrap();
+    assert_eq!(sort.conditions.len(), 1);
+    assert_eq!(
+        sort.conditions[0].get("descending").map(String::as_str),
+        Some("1")
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    // Re-emitted exactly, so Excel applies the filter it wrote even though we
+    // never evaluated it.
+    assert!(xml.contains("<top10"));
+    assert!(xml.contains("<sortCondition"));
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].sort_state, wb.sheets[0].sort_state);
+    assert_eq!(back.sheets[0].auto_filter, wb.sheets[0].auto_filter);
+}

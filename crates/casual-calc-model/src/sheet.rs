@@ -177,6 +177,13 @@ pub struct Sheet {
     /// Print layout, carried through verbatim.
     #[serde(default, skip_serializing_if = "PrintSetup::is_empty")]
     pub print: PrintSetup,
+    /// `<sortState>` and its `<sortCondition>` children, carried verbatim.
+    ///
+    /// A saved sort describes an order already applied to the cells, so nothing
+    /// needs re-sorting on load; losing it only loses the record of how the
+    /// range was sorted, which Excel shows in its dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_state: Option<SortState>,
     /// Tables (ListObjects) defined on this sheet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
@@ -320,6 +327,21 @@ pub enum FilterRule {
         /// Join the two with AND rather than OR. OOXML `customFilters/@and`.
         #[serde(default)]
         and: bool,
+    },
+    /// A refinement we carry but do not evaluate: `<top10>`, `<dynamicFilter>`,
+    /// `<colorFilter>`, `<iconFilter>` or `<dateGroupItem>`.
+    ///
+    /// Held verbatim as the element name plus its attributes. The rows it would
+    /// hide are left visible, which is the honest failure: showing every row is
+    /// obviously incomplete, whereas dropping the rule would make the sheet look
+    /// deliberately unfiltered and hide that anything was lost. The filter still
+    /// survives the save, so Excel applies it again on reopen.
+    Unevaluated {
+        /// The element name, e.g. `top10`.
+        element: String,
+        /// Its attributes exactly as read.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        attrs: BTreeMap<String, String>,
     },
 }
 
@@ -475,6 +497,10 @@ impl FilterRule {
                     None => a,
                 }
             }
+            // Not evaluated, so every row passes. Hiding rows on a rule we do
+            // not understand would be a guess; showing them all is visibly
+            // incomplete, which is the failure worth having.
+            FilterRule::Unevaluated { .. } => true,
         }
     }
 }
@@ -625,6 +651,18 @@ pub struct Table {
 
 fn is_one(value: &u32) -> bool {
     *value == 1
+}
+
+/// A saved sort, carried verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SortState {
+    /// `<sortState>` attributes as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
+    /// Each `<sortCondition>`'s attributes, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<BTreeMap<String, String>>,
 }
 
 /// A hyperlink over a cell or range.
@@ -1070,6 +1108,7 @@ impl Sheet {
             hyperlinks: Vec::new(),
             print: PrintSetup::default(),
             tables: Vec::new(),
+            sort_state: None,
             retained_refs: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,

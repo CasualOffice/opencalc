@@ -1713,6 +1713,11 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         for (&col_id, rule) in &filter.rules {
             s.push_str(&format!("<filterColumn colId=\"{col_id}\">"));
             match rule {
+                // Re-emitted exactly as read, so Excel applies the filter it
+                // wrote even though we never evaluated it.
+                FilterRule::Unevaluated { element, attrs } => {
+                    write_attr_element(&mut s, element, attrs);
+                }
                 FilterRule::Values(vals) => {
                     // A blank is not a <filter val="">; OOXML carries it as an
                     // attribute on the container.
@@ -1834,6 +1839,25 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
             s.push_str("</dataValidation>");
         }
         s.push_str("</dataValidations>");
+    }
+
+    if let Some(sort) = &sheet.sort_state {
+        // Follows `<autoFilter>` in CT_Worksheet's sequence. A saved sort
+        // records an order already applied to the cells, so nothing is
+        // re-sorted on load; only the record would be lost.
+        s.push_str("<sortState");
+        for (k, v) in &sort.attrs {
+            s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
+        }
+        if sort.conditions.is_empty() {
+            s.push_str("/>");
+        } else {
+            s.push('>');
+            for condition in &sort.conditions {
+                write_attr_element(&mut s, "sortCondition", condition);
+            }
+            s.push_str("</sortState>");
+        }
     }
 
     // `<hyperlinks>` sits after `dataValidations` and before `printOptions` in
