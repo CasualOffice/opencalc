@@ -127,11 +127,7 @@
             <div class="row" id="calc"></div>
             <p class="note" id="calc-note"></p>
             <div class="row" id="access" style="margin-top:11px"></div>
-            <p class="note">
-              Read-only is refused <b>in the engine</b>, not by hiding buttons —
-              selecting, scrolling and copying still work. <b>Preview</b> is the
-              same thing with every chrome region off.
-            </p>
+            <p class="note" id="access-note"></p>
           </div>
 
           <div class="card">
@@ -268,18 +264,25 @@
       }
 
       const access = document.getElementById("access");
-      for (const [mode, label] of [["edit", "Editable"], ["readOnly", "Read-only"], ["preview", "Preview"]]) {
+      const ACCESS = [
+        ["edit", "Edit"],
+        ["view", "View only"],
+        ["preview", "Preview"],
+      ];
+      const ACCESS_NOTE = {
+        edit: "The editor.",
+        view: "An access level: the whole application minus the commands that write. Scroll, select, zoom, copy, find, export, recalculate — all still there.",
+        preview: "A presentation, not a workspace: no chrome at all. A thumbnail someone can still select and copy from, that does not pretend to be an editor they have been locked out of.",
+      };
+      for (const [mode, label] of ACCESS) {
         const b = el("button", "chip", label);
         b.addEventListener("click", async () => {
           state.access = mode;
-          if (mode === "preview") {
-            await sheet.configure({ preview: true });
-            for (const r of CHROME) state.chrome[r] = false;
-          } else {
-            await sheet.configure({ readOnly: mode === "readOnly" });
-          }
+          // The panel keeps showing the host's *preference*; preview overrides
+          // it without erasing it, exactly as the element does.
+          await sheet.configure({ access: mode });
           for (const cb of chrome.querySelectorAll("input")) {
-            cb.checked = state.chrome[cb.nextSibling.textContent] ?? true;
+            cb.disabled = mode === "preview";
           }
           sync();
         });
@@ -311,9 +314,10 @@
           b.setAttribute("aria-pressed", String(mode === state.calculation));
         }
         for (const b of access.children) {
-          const mode = { Editable: "edit", "Read-only": "readOnly", Preview: "preview" }[b.textContent];
+          const mode = ACCESS.find(([, label]) => label === b.textContent)[0];
           b.setAttribute("aria-pressed", String(mode === state.access));
         }
+        document.getElementById("access-note").textContent = ACCESS_NOTE[state.access];
         document.getElementById("calc-note").textContent =
           state.calculation === "manual"
             ? "Edits apply; formulas wait. The status bar reads Calculate until F9."
@@ -346,8 +350,9 @@
         if (state.calculation !== "auto") {
           lines.push("", `await sheet.configure({ calculation: "${state.calculation}" });`);
         }
-        if (state.access === "readOnly") lines.push("", "await sheet.configure({ readOnly: true });");
-        if (state.access === "preview") lines.push("", "await sheet.configure({ preview: true });");
+        if (state.access !== "edit") {
+          lines.push("", `await sheet.configure({ access: "${state.access}" });`);
+        }
         document.getElementById("code").innerHTML = hl(lines.join("\n"));
       }
 

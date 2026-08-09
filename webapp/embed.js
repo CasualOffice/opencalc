@@ -104,6 +104,7 @@ function bodyOf(html) {
 class OpenCalcSheet extends HTMLElement {
   #shell = null;
   #ready = null;
+  #access = "edit";
   /// Host-supplied tokens, kept per scheme — see `theme()`.
   #tokens = { light: {}, dark: {} };
   #watchScheme = null;
@@ -188,10 +189,36 @@ class OpenCalcSheet extends HTMLElement {
   #applyChrome() {
     if (!this.#shell) return;
     for (const name of CHROME) {
-      // Absent means shown, except where CHROME_DEFAULT says otherwise.
-      const shown = this.#chrome[name] ?? true;
+      // Preview *overrides* the host's preference rather than replacing it.
+      // Overwriting `#chrome` meant leaving preview restored "whatever the host
+      // asked for" — which by then was preview's own all-off, so the chrome
+      // never came back.
+      const shown = this.#access === "preview" ? false : this.#chrome[name] ?? true;
       this.#shell.classList.toggle(`oc-hide-${name}`, !shown);
     }
+  }
+
+  /// Hide or disable individual commands by id.
+  ///
+  ///   sheet.commands({ hidden: ["file.open"], disabled: ["insert.chart"] });
+  ///
+  /// Hidden and disabled differ on purpose. A capability the host has not
+  /// implemented yet should be *disabled* — a user who cannot see a thing
+  /// assumes it does not exist and stops looking. One that makes no sense in
+  /// the host's product should be *hidden*.
+  ///
+  /// `listCommands()` returns every id this build has, so the list can be
+  /// discovered rather than read from documentation that may have moved on.
+  async commands(rules) {
+    const editor = await this.ready;
+    editor.setCommandRules(rules);
+    return this;
+  }
+
+  /// Every command id in this build.
+  async listCommands() {
+    const editor = await this.ready;
+    return editor.listCommands();
   }
 
   /// Set theme tokens.
@@ -288,24 +315,65 @@ class OpenCalcSheet extends HTMLElement {
   ///
   ///   {
   ///     calculation: "auto" | "manual",
-  ///     readOnly: boolean,          // refused in the engine, not by hiding chrome
+  ///     access: "edit" | "view" | "preview",
   ///   }
   ///
-  /// `preview: true` is shorthand for a read-only sheet with no chrome at all —
-  /// a thumbnail someone can still scroll and copy out of. One concept rather
-  /// than two, so the two cannot disagree.
+  /// **`edit`** — the editor.
+  ///
+  /// **`view`** is an *access level*: this person is working in the sheet and
+  /// may not change it. They get the whole application minus the editing —
+  /// scroll, select, navigate sheets, zoom, copy, find, follow links, expand
+  /// outlines, read comments, export, print, recalculate. The chrome stays;
+  /// only the commands that would write are taken off it. It is what a
+  /// permission system means by read-only.
+  ///
+  /// **`preview`** is a *presentation*: a thumbnail, a row in a file list, an
+  /// attachment rendered inline. Not a workspace. No chrome at all, and no
+  /// affordances suggesting there is anything to do here — someone may still
+  /// select a range and copy it, because that costs nothing and refusing it
+  /// only annoys. The point is that it reads as a picture of a document rather
+  /// than an application someone has been locked out of.
+  ///
+  /// Conflating them produces the two worst outcomes in this area: a viewer
+  /// that looks like a broken editor because it is full of greyed-out menus,
+  /// and a thumbnail that invites clicking on things it will then refuse.
+  ///
+  /// Both refuse writes **in the engine**, not by hiding chrome — the UI is
+  /// how it is communicated, not how it is enforced.
   async configure(options = {}) {
     const editor = await this.ready;
     if (options.calculation) {
       editor.wasmApi().session_set_calculation_mode(options.calculation);
     }
-    if (options.preview) {
-      editor.setReadOnly(true);
-      this.chrome(Object.fromEntries(CHROME.map((r) => [r, false])));
-    } else if (options.readOnly !== undefined) {
-      editor.setReadOnly(options.readOnly);
+    // `readOnly` / `preview` booleans remain as sugar over the same axis, so
+    // there is one source of truth and they cannot disagree.
+    let access = options.access;
+    if (access === undefined && options.preview !== undefined) {
+      access = options.preview ? "preview" : "edit";
     }
+    if (access === undefined && options.readOnly !== undefined) {
+      access = options.readOnly ? "view" : "edit";
+    }
+    if (access !== undefined) this.#setAccess(access, editor);
     return this;
+  }
+
+  #setAccess(access, editor) {
+    if (!["edit", "view", "preview"].includes(access)) {
+      throw new Error(`unknown OpenCalc access "${access}" — one of: edit, view, preview`);
+    }
+    this.#access = access;
+    editor.setReadOnly(access !== "edit");
+    // `#applyChrome` reads `#access`, so preview hides everything and leaving
+    // it restores exactly what the host had chosen — not everything, and not
+    // preview's own emptiness.
+    this.#applyChrome();
+    editor.relayout?.();
+  }
+
+  /// The access level in force.
+  get access() {
+    return this.#access;
   }
 
   /// Open an `.xlsx` (or CSV/TSV/PSV) from bytes.

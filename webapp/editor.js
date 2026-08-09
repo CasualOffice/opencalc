@@ -5394,6 +5394,102 @@ async function pivotDialog() {
   status.textContent = "drag a field into Values to see the report";
 }
 
+// --- Commands ---------------------------------------------------------------
+//
+// Every menu item and toolbar button carries a stable id, so a host can hide or
+// disable *individual* controls rather than whole regions — and so read-only
+// can take editing off the menus rather than only refusing the keystroke.
+//
+// Ids are derived from the English label path (`Format ▸ Alignment ▸ Left` →
+// `format.alignment.left`) rather than hand-assigned. That keeps them
+// predictable and impossible to forget on a new item; the cost is that
+// renaming a label renames its id, which the docs state plainly and which we
+// treat as a breaking change like any other API rename.
+
+function commandId(path, label) {
+  const slug = String(label)
+    .replace(/[…\u2026]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return path ? `${path}.${slug}` : slug;
+}
+
+/// Commands a viewer may still run.
+///
+/// A **whitelist**, deliberately. With a blacklist, an editing command added
+/// later and not added to the list leaks into read-only mode; with a whitelist
+/// the worst case is that something harmless is hidden until someone notices.
+/// Getting that backwards is the difference between a cosmetic bug and a
+/// workbook a viewer could change.
+const READ_ONLY_SAFE = [
+  // Reading the sheet, in every sense.
+  /^edit\.copy$/, /^edit\.select-all$/,
+  // No toolbar entry: every control on it applies formatting, the format
+  // painter included — it reads a style from one cell and *writes* it to
+  // another, which a first pass wrongly let through.
+  // Zoom is the editor's own state, not the workbook's — a viewer must be able
+  // to zoom.
+  /^view\.zoom/,
+  // Recalculating is not an edit: it produces the values the formulas already
+  // imply, and a viewer that cannot compute is showing stale numbers.
+  /^tools\.calculation/,
+  // Getting a copy out, and putting it on paper.
+  /^file\.download/, /^file\.print$/,
+  /^help\./,
+];
+
+// Everything else in `view.` is deliberately absent. Freezing panes, hiding
+// gridlines, showing formulas and showing zeros all live in the *workbook* —
+// they travel in the file and go through `SetSheetMetadata`, which a read-only
+// session refuses. Offering them would be offering something that then fails.
+
+const isReadOnlySafe = (id) => READ_ONLY_SAFE.some((re) => re.test(id));
+
+/// Host-supplied `{ hidden: [], disabled: [] }`.
+let commandRules = { hidden: [], disabled: [] };
+
+/// Every command id present in this mount, for a host that wants to discover
+/// them rather than read a list in the docs that can go stale.
+export function listCommands() {
+  return [...qsa("[data-oc-command]")].map((n) => n.dataset.ocCommand).filter((v, i, a) => a.indexOf(v) === i).sort();
+}
+
+/// Hide or disable commands by id.
+export function setCommandRules(rules) {
+  commandRules = {
+    hidden: rules?.hidden ?? [],
+    disabled: rules?.disabled ?? [],
+  };
+  applyCommandRules();
+}
+
+/// Apply the host's rules *and* read-only, which hides every editing command.
+///
+/// Hidden rather than disabled for read-only: a viewer is not a broken editor,
+/// and a menu of greyed-out things a user can never enable is worse than a
+/// short menu. A host that would rather grey them can say so per command.
+export function applyCommandRules() {
+  const viewer = readOnly();
+  for (const node of qsa("[data-oc-command]")) {
+    const id = node.dataset.ocCommand;
+    const hide = commandRules.hidden.includes(id) || (viewer && !isReadOnlySafe(id));
+    node.hidden = hide;
+    node.classList.toggle("oc-cmd-hidden", hide);
+    const off = !hide && commandRules.disabled.includes(id);
+    node.disabled = off;
+    node.classList.toggle("oc-cmd-disabled", off);
+  }
+  // A menu whose every item is hidden should not open an empty box, and a
+  // separator with nothing on one side is a stray line.
+  for (const menu of qsa(".menu-drop, .menu-sub")) {
+    const live = [...menu.querySelectorAll("button")].some((b) => !b.hidden);
+    const top = qs(`.menubar [data-oc-command="${menu.dataset.ocFor ?? ""}"]`);
+    if (top) top.hidden = !live;
+  }
+}
+
 // --- Calculation mode ------------------------------------------------------
 //
 // Excel's Formulas ▸ Calculation Options. A workbook saved with calculation
@@ -5429,6 +5525,10 @@ function readOnly() {
 /// Open the workbook for reading only, or release it.
 export function setReadOnly(on) {
   try { wasm.session_set_read_only(!!on); } catch (e) { statusError(errText(e)); return; }
+  // Editing commands come off the menus and the toolbar, not just the
+  // keystroke path: a viewer offered Insert ▸ Chart and told "no" after
+  // clicking has been misled, twice.
+  applyCommandRules();
   // Editing chrome is pointless in a viewer, but hiding it is the *host's*
   // call — the engine's refusal is what makes the mode real, so here we only
   // repaint and let the mode word say so.
@@ -10341,7 +10441,7 @@ function wireEvents() {
       try { action && action(); } catch (err) { statusError(errText(err)); }
       closeMenus();
     };
-    const renderItems = (container, items, isTop) => {
+    const renderItems = (container, items, isTop, path = "") => {
       for (const it of items) {
         if (it === "sep") {
           const s = document.createElement("div"); s.className = "menu-sep"; container.appendChild(s); continue;
@@ -10352,7 +10452,8 @@ function wireEvents() {
           b.querySelector(".mi-label").textContent = it.sub;
           const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
           ocOverlayHost.appendChild(sub); subs.push(sub);
-          renderItems(sub, it.items, false);
+          b.dataset.ocCommand = commandId(path, it.sub);
+          renderItems(sub, it.items, false, commandId(path, it.sub));
           const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); sub.hidden = false; };
           b.addEventListener("mouseenter", openSub);
           b.addEventListener("click", (e) => { e.stopPropagation(); openSub(); });
@@ -10362,6 +10463,7 @@ function wireEvents() {
         const b = document.createElement("button");
         b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span>${key ? `<span class="mi-key">${key}</span>` : ""}`;
         b.querySelector(".mi-label").textContent = label;
+        b.dataset.ocCommand = commandId(path, label);
         if (check) b._check = check;
         if (isTop) b.addEventListener("mouseenter", closeSubs);
         b.addEventListener("click", (e) => { e.stopPropagation(); runItem(action); });
@@ -10409,7 +10511,10 @@ function wireEvents() {
       btn.setAttribute("aria-haspopup", "true"); btn.setAttribute("aria-expanded", "false");
       const drop = document.createElement("div"); drop.className = "menu-drop popmenu"; drop.hidden = true;
       drop.setAttribute("role", "menu");
-      ocOverlayHost.appendChild(drop); renderItems(drop, items, true);
+      ocOverlayHost.appendChild(drop);
+      btn.dataset.ocCommand = commandId("", name);
+      drop.dataset.ocFor = commandId("", name);
+      renderItems(drop, items, true, commandId("", name));
       btn.addEventListener("click", (e) => { e.stopPropagation(); openIdx === i ? closeMenus() : openMenu(i); });
       btn.addEventListener("mouseenter", () => { if (openIdx >= 0 && openIdx !== i) openMenu(i); });
       bar.appendChild(btn); topBtns.push(btn); drops.push(drop);
@@ -10700,6 +10805,12 @@ async function main() {
   // handed the engine a clock.
   syncClock(true);
   wireEvents();
+  // Toolbar controls get command ids from their element ids (`tb-bold` →
+  // `toolbar.bold`), so a host hides a button by name rather than by reaching
+  // into the shadow root with a selector that will move.
+  for (const node of qsa("[id^='tb-']")) {
+    if (!node.dataset.ocCommand) node.dataset.ocCommand = `toolbar.${node.id.slice(3)}`;
+  }
   seed();
   renderTabs();
   resize();

@@ -183,6 +183,11 @@ body {
 /* The tabs live inside the bottom bar, so hiding them alone keeps the bar. */
 .oc-hide-tabs .sheet-tabs { display: none; }
 
+/* A command the host hid, or read-only removed. `hidden` alone loses to the
+   `display:flex` these controls carry. */
+[data-oc-command].oc-cmd-hidden { display: none !important; }
+[data-oc-command].oc-cmd-disabled { opacity: .45; pointer-events: none; }
+
 .app-header {
   display: flex;
   align-items: center;

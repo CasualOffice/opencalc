@@ -389,11 +389,31 @@ shape depends on a config flag is a trap.
 Two distinct products, and conflating them is how read-only modes end up
 leaky:
 
-| Mode | Grid | Chrome | Engine | For |
-| --- | --- | --- | --- | --- |
-| `readOnly: false` | editable | all | writable | the editor |
-| `readOnly: true` | selectable, scrollable, copyable — **not** editable | editing commands hidden or disabled | writes refused | a viewer someone can still read numbers out of |
-| `preview: true` | selectable and scrollable only | none | writes refused | a thumbnail or an inline preview in a list |
+One axis, `access`, rather than two booleans that can disagree:
+
+| `access` | What it is | Chrome | For |
+| --- | --- | --- | --- |
+| `edit` | the editor | all | the editor |
+| `view` | an **access level** — this person is working in the sheet and may not change it | all of it, minus every command that writes | a permission system's read-only |
+| `preview` | a **presentation** — not a workspace | none | a thumbnail, a row in a file list, an attachment rendered inline |
+
+The distinction is not cosmetic and conflating them produces both of the bad
+outcomes in this area: a viewer that reads as a *broken editor* because it is
+full of greyed-out menus, and a thumbnail that invites clicking things it will
+then refuse.
+
+`view` keeps the application: scroll, select, navigate sheets, zoom, copy, find,
+follow links, expand outlines, read comments, export, print, recalculate. Only
+the writing commands come off the menus.
+
+`preview` keeps almost nothing. Selection and copy still work, because they cost
+nothing and refusing them only annoys — but there is no chrome and nothing that
+suggests there is anything to do here.
+
+Preview **overrides** the host's chrome preferences rather than replacing them,
+so leaving preview restores what the host had chosen. Replacing them meant
+leaving preview restored "whatever the host asked for", which by then was
+preview's own emptiness — the chrome never came back.
 
 Read-only is **not** "hide the toolbar". Every one of these has to be true or
 it is a suggestion rather than a mode:
@@ -418,10 +438,15 @@ Sheet protection already models something adjacent — `SheetProtection`, per-ce
 session-wide version and should reuse that refusal path rather than inventing a
 parallel one, so there is one place where "this edit is not allowed" is decided.
 
-**Open question (7):** does `preview` need to be its own mode, or is it
-`readOnly: true` plus `chrome: { …all false }`? I lean to the latter — one
-fewer concept — with `preview` as a documented preset that expands to exactly
-that.
+Which commands a viewer keeps is a **whitelist**, deliberately. With a
+blacklist, an editing command added later and not added to the list leaks into
+read-only mode; with a whitelist the worst case is that something harmless is
+hidden until someone notices. The first pass got two entries wrong in exactly
+the way that argues for it: `view.*` looked safe but freezing panes, hiding
+gridlines and showing formulas all live in the *workbook* and go through
+`SetSheetMetadata`, which a read-only session refuses — so offering them would
+offer something that then fails; and the format painter looked like a viewer
+tool but reads a style from one cell and *writes* it to another.
 
 ### 5g. Localization
 
