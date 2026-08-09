@@ -25,7 +25,25 @@
 // engine already answers; it adds no state of its own, because a second copy
 // of the workbook is a second thing to keep in step.
 
+/// Where the package's own files sit, used when the host says nothing.
 const HERE = new URL(".", import.meta.url);
+
+/// Resolve the asset base for one element.
+///
+/// `assets-url` exists because `import.meta.url` resolution does not work
+/// everywhere: Turbopack does not treat `.wasm` as an emitted asset, so a
+/// Next.js host copies the files into `public/` and points at them. It is also
+/// the only mode where the host controls cache headers on a multi-megabyte
+/// binary.
+///
+/// Resolved against the *document*, not this module, because a host writes the
+/// path they serve from (`/opencalc/`) and not one relative to wherever their
+/// bundler happened to put our JavaScript.
+function assetBase(el) {
+  const given = el.getAttribute("assets-url") ?? el.assetsUrl;
+  if (!given) return HERE;
+  return new URL(given.endsWith("/") ? given : `${given}/`, document.baseURI);
+}
 /// The cache-buster the dev server stamps on this module, reused for the
 /// editor's own assets so an embedded editor is never a build behind the page.
 const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
@@ -65,26 +83,34 @@ const TOKENS = [
 /// `accentColor` -> `--oc-accent-color`.
 const cssVar = (name) => "--oc-" + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
 
+/// How many elements have mounted, so each gets a distinct module instance.
+let instances = 0;
+
 /// The one stylesheet object every mount adopts. Null where constructable
 /// stylesheets are unavailable, in which case each root gets its own `<style>`.
 let sharedSheet = null;
 
-/// Fetch the editor's markup and stylesheet once, however many elements mount.
-let assets = null;
-function loadAssets() {
-  if (!assets) {
-    assets = Promise.all([
-      fetch(new URL(`editor.html?v=${BUILD}`, HERE)).then((r) => r.text()),
-      fetch(new URL(`editor.css?v=${BUILD}`, HERE)).then((r) => r.text()),
+/// Fetch the editor's markup and stylesheet once per asset base.
+///
+/// Keyed by base rather than global: two elements pointed at different builds
+/// is unusual but not incoherent, and a single cache would serve one of them
+/// the other's markup.
+const assets = new Map();
+function loadAssets(base) {
+  const key = String(base);
+  if (!assets.has(key)) {
+    assets.set(key, Promise.all([
+      fetch(new URL(`editor.html?v=${BUILD}`, base)).then((r) => r.text()),
+      fetch(new URL(`editor.css?v=${BUILD}`, base)).then((r) => r.text()),
     ]).then(([html, css]) => {
       if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
         sharedSheet = new CSSStyleSheet();
         sharedSheet.replaceSync(css);
       }
       return { markup: bodyOf(html), css };
-    });
+    }));
   }
-  return assets;
+  return assets.get(key);
 }
 
 /// The editor page's body, minus its scripts.
@@ -125,14 +151,15 @@ class OpenCalcSheet extends HTMLElement {
 
   async #mount() {
     const root = this.attachShadow({ mode: "open" });
-    const { markup, css } = await loadAssets();
+    const base = assetBase(this);
+    const { markup, css } = await loadAssets(base);
 
     // `@font-face` inside a shadow root is ignored by the CSS engine — font
     // faces resolve against the document, not the tree. The rules are hoisted
     // once into the page so the bundled metric-compatible faces (Carlito for
     // Calibri, and the rest) are available to the canvas, which is what makes a
     // cell's font render the same on a machine that has none of them.
-    hoistFontFaces(css);
+    hoistFontFaces(css, base);
 
     // One `CSSStyleSheet` shared by every mount rather than a `<style>` each.
     // This is the duplication AG Grid warns about in shadow DOM: four editors on
@@ -153,9 +180,18 @@ class OpenCalcSheet extends HTMLElement {
     this.#shell = shell;
     this.#applyChrome();
 
-    const editor = await import(new URL(`editor.js?v=${BUILD}`, HERE));
+    // A *fresh* module per element, not the shared one. `editor.js` keeps its
+    // state at module scope — one engine binding, one selection, one geometry
+    // cache — so two elements importing the same instance share and race all of
+    // it: mounting three left all three stuck at "loading engine…". Varying the
+    // URL is what gives each its own module scope, and `start(key)` does the
+    // same for the wasm glue underneath so each element gets its own workbook.
+    const key = String(++instances);
+    const editor = await import(
+      /* @vite-ignore */ new URL(`editor.js?v=${BUILD}&i=${key}`, base).href
+    );
     editor.setMountRoot(root);
-    await editor.start();
+    await editor.start(key);
     this.#editor = editor;
     this.dispatchEvent(new CustomEvent("ready"));
     return editor;
@@ -393,6 +429,10 @@ class OpenCalcSheet extends HTMLElement {
     // preview's own emptiness.
     this.#applyChrome();
     editor.relayout?.();
+    // A preview shows the top-left of the sheet. Removing the chrome changes
+    // how much grid there is, and whatever was scrolled into view for an
+    // editor is not what a thumbnail should show.
+    if (access === "preview") editor.resetToOrigin?.();
   }
 
   /// The access level in force.
@@ -418,10 +458,10 @@ class OpenCalcSheet extends HTMLElement {
 /// They are the one kind of rule a shadow root cannot host: font faces are
 /// resolved per document, so a face declared only inside the shadow tree is
 /// never registered and every bundled family silently falls back.
-let fontsHoisted = false;
-function hoistFontFaces(css) {
-  if (fontsHoisted) return;
-  fontsHoisted = true;
+const fontsHoisted = new Set();
+function hoistFontFaces(css, base) {
+  if (fontsHoisted.has(String(base))) return;
+  fontsHoisted.add(String(base));
   const faces = css.match(/@font-face\s*\{[^}]*\}/g);
   if (!faces) return;
   const style = document.createElement("style");
@@ -430,7 +470,7 @@ function hoistFontFaces(css) {
   // element lives — so they are resolved against it explicitly.
   style.textContent = faces
     .join("\n")
-    .replace(/url\("\.\/([^"]+)"\)/g, (_, path) => `url("${new URL(path, HERE)}")`);
+    .replace(/url\("\.\/([^"]+)"\)/g, (_, path) => `url("${new URL(path, base)}")`);
   document.head.append(style);
 }
 

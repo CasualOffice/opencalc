@@ -228,6 +228,29 @@ viewport and a stacking context with a page we do not control**, and every
 floating layer has to be right in that shared space forever. An iframe has its
 own viewport and the question never arises.
 
+### 4b. One module instance per element
+
+The editor keeps its state at **module scope** — one engine binding, one
+selection, one geometry cache. Mounting the same module into two shadow roots
+therefore shares and races all of it: three elements on one page left all three
+stuck at "loading engine…", because each `start()` re-entered the same
+initialisation.
+
+Each element imports its own copy of `editor.js` (a distinct URL is what makes
+the module instance distinct) and passes a key down so the wasm glue is
+instantiated separately too. That is what makes a page of preview thumbnails
+possible at all.
+
+It is not free: each instance is its own JS module and its own wasm linear
+memory. The compiled wasm *code* is shared by the browser, so the marginal cost
+is the heap, which for a thumbnail-sized workbook is small — but a page with
+fifty previews should be paging them in and out rather than mounting fifty
+engines, and the docs should say so.
+
+The alternative — refactoring every module-scope binding into per-instance
+state — is the better end state and a large change. This is the honest version
+of "later".
+
 ### 4a. Sharing the stylesheet
 
 The prototype injects a `<style>` into every shadow root, which is exactly the

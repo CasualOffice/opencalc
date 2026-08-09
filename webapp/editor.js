@@ -5579,22 +5579,56 @@ export function setCommandRules(rules) {
 /// short menu. A host that would rather grey them can say so per command.
 export function applyCommandRules() {
   const viewer = readOnly();
+  const hide = (node, on) => {
+    node.hidden = on;
+    node.classList.toggle("oc-cmd-hidden", on);
+  };
+
   for (const node of qsa("[data-oc-command]")) {
+    // A top-level menu button is not a command in its own right — `file` is a
+    // heading, not something anyone can run. Deciding it by the whitelist hid
+    // every menu in read-only and left an empty bar. It is decided below, by
+    // whether anything inside it survived.
+    if (node.classList.contains("menu-top")) continue;
     const id = node.dataset.ocCommand;
-    const hide = commandRules.hidden.includes(id) || (viewer && !isReadOnlySafe(id));
-    node.hidden = hide;
-    node.classList.toggle("oc-cmd-hidden", hide);
-    const off = !hide && commandRules.disabled.includes(id);
-    node.disabled = off;
-    node.classList.toggle("oc-cmd-disabled", off);
+    const off = commandRules.hidden.includes(id) || (viewer && !isReadOnlySafe(id));
+    hide(node, off);
+    const dim = !off && commandRules.disabled.includes(id);
+    node.disabled = dim;
+    node.classList.toggle("oc-cmd-disabled", dim);
   }
-  // A menu whose every item is hidden should not open an empty box, and a
-  // separator with nothing on one side is a stray line.
-  for (const menu of qsa(".menu-drop, .menu-sub")) {
-    const live = [...menu.querySelectorAll("button")].some((b) => !b.hidden);
-    const top = qs(`.menubar [data-oc-command="${menu.dataset.ocFor ?? ""}"]`);
-    if (top) top.hidden = !live;
+
+  // A submenu whose every item went, and then the menu that opens it: an empty
+  // popup is worse than an absent one.
+  for (const sub of qsa(".menu-sub")) {
+    const live = [...sub.querySelectorAll("button")].some((b) => !b.hidden);
+    const opener = qs(`[data-oc-command="${sub.dataset.ocFor ?? "\u0000"}"]`);
+    if (opener) hide(opener, !live);
   }
+  for (const drop of qsa(".menu-drop")) {
+    const live = [...drop.querySelectorAll("button")].some((b) => !b.hidden);
+    const top = qs(`.menubar [data-oc-command="${drop.dataset.ocFor ?? "\u0000"}"]`);
+    if (top) hide(top, !live);
+  }
+  // ...and a toolbar group with nothing left in it, which would otherwise be a
+  // run of blank space where the controls used to be.
+  //
+  // Liveness is measured on **commands**, not on every button: when the toolbar
+  // is narrow it collapses each group behind a trigger button, and that trigger
+  // is not a command. Counting it kept every group "live" and left a row of
+  // dropdowns that open onto nothing.
+  let anyGroup = false;
+  for (const group of qsa(".tb-group")) {
+    const live = [...group.querySelectorAll("[data-oc-command]")].some((n) => !n.hidden);
+    anyGroup ||= live;
+    group.hidden = !live;
+    group.classList.toggle("oc-cmd-hidden", !live);
+  }
+  // Every control on the toolbar formats something, so in a viewer the whole
+  // strip is empty. Removing it is not a policy choice the host should have to
+  // make — it is the honest consequence of there being nothing in it.
+  const toolbar = qs(".toolbar");
+  if (toolbar) toolbar.classList.toggle("oc-cmd-hidden", !anyGroup);
 }
 
 // --- Calculation mode ------------------------------------------------------
@@ -10560,6 +10594,7 @@ function wireEvents() {
           const sub = document.createElement("div"); sub.className = "menu-sub popmenu"; sub.hidden = true;
           ocOverlayHost.appendChild(sub); subs.push(sub);
           b.dataset.ocCommand = commandId(path, it.sub);
+          sub.dataset.ocFor = commandId(path, it.sub);
           renderItems(sub, it.items, false, commandId(path, it.sub));
           const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); sub.hidden = false; };
           b.addEventListener("mouseenter", openSub);
@@ -10880,6 +10915,14 @@ export function refreshTheme() {
   draw();
 }
 
+/// Scroll to the top-left and select A1.
+///
+/// What a thumbnail means: a preview scrolled to row 14 of someone else's
+/// workbook is not a preview of it.
+export function resetToOrigin() {
+  resetView();
+}
+
 /// Re-measure and repaint after the element's box changed.
 ///
 /// Hiding a chrome region gives the grid more room, and the canvas is sized in
@@ -10897,12 +10940,27 @@ export function wasmApi() {
   return wasm;
 }
 
+/// Distinguishes this module instance's engine from any other on the page.
+///
+/// The editor is a module with module-scope state — one `wasm` binding, one
+/// `state`, one geometry cache — so a second element mounting the *same* module
+/// would share and race all of it. Each element therefore imports its own copy
+/// of this module and its own copy of the wasm glue, which is what this key
+/// varies. See `docs/55` §4b for what that costs.
+let instanceKey = "";
+
 async function main() {
   bindElements();
-  const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}`);
+  const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}${instanceKey}`);
   init = mod.default;
   wasm = mod;
-  await init(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`);
+  // Resolved against **this module**, not the page. A bare relative string is
+  // resolved against the document, so the binary was fetched from wherever the
+  // host's HTML happened to live — which worked only while the page sat beside
+  // the engine, and 404'd the moment an example in another directory embedded
+  // it. `import.meta.url` is the whole reason a bundler can emit this as an
+  // asset and still have it found.
+  await init(new URL(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`, import.meta.url));
 
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();
@@ -10928,7 +10986,8 @@ async function main() {
 ///
 /// Exported so an embed wrapper can point the editor at a shadow root first;
 /// the page host below starts it immediately, as it always did.
-export async function start() {
+export async function start(key = "") {
+  instanceKey = key ? `&i=${encodeURIComponent(key)}` : "";
   return main();
 }
 

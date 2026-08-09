@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenCalc — vanilla</title>
+    <style>
+      body { margin: 0; font: 15px/1.5 system-ui, sans-serif; }
+      header { padding: 12px 16px; border-bottom: 1px solid #e4e7ec; display: flex; gap: 10px; align-items: center; }
+      opencalc-sheet { display: block; height: calc(100vh - 58px); }
+      button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+      #status { margin-left: auto; color: #667; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>OpenCalc</strong>
+      <button id="open">Open…</button>
+      <button id="save">Download .xlsx</button>
+      <span id="status">loading…</span>
+    </header>
+
+    <!-- The whole integration. Everything below is the host's own UI. -->
+    <opencalc-sheet id="sheet"></opencalc-sheet>
+    <input id="file" type="file" accept=".xlsx,.csv,.tsv,.psv" hidden />
+
+    <script type="module">
+      // In an application this is `import "@opencalc/sheet"`. Here it is a
+      // relative path because the example lives inside the repo that builds it.
+      import "../../../webapp/embed.js";
+
+      const sheet = document.getElementById("sheet");
+      const status = document.getElementById("status");
+
+      // `ready` resolves once the engine is up and the grid is on screen.
+      sheet.ready.then(() => { status.textContent = "ready"; });
+
+      // Events carry a `source`: without checking it, a host that saves on
+      // change and writes back on load echoes its own writes forever.
+      sheet.on("cellsChanged", (e) => {
+        if (e.source === "api") return;
+        status.textContent = `changed ${e.range.r0 + 1}:${e.range.c0 + 1}`;
+      });
+
+      document.getElementById("open").onclick = () => document.getElementById("file").click();
+      document.getElementById("file").onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        await sheet.open(await file.arrayBuffer(), file.name);
+        status.textContent = `opened ${file.name}`;
+      };
+
+      document.getElementById("save").onclick = async () => {
+        const bytes = await sheet.save();
+        const url = URL.createObjectURL(new Blob([bytes], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "workbook.xlsx";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+    </script>
+  </body>
+</html>
