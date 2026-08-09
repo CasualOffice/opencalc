@@ -117,6 +117,37 @@ Its own case: `calcPr` (`iterate`, `iterateCount`, `iterateDelta`,
 back, and a correctness problem the moment it lands — a workbook that requires
 iterative calculation would be recalculated without it.
 
+## The other axis: formula functions
+
+The schema types `<f>` as a plain string (`ST_Formula` restricts `ST_Xstring`),
+so function coverage cannot be measured from the XSD at all. The function
+library is specified in prose instead — Part 1 **§18.17.7**, one numbered
+section per function — and that is where the inventory in
+[`tools/fidelity-audit/data/spec-functions.txt`](../tools/fidelity-audit/data/spec-functions.txt)
+comes from. Score it with `tools/fidelity-audit/functions.py`.
+
+| | |
+| --- | --- |
+| Functions defined by the standard | 356 sections (349 parsed cleanly) |
+| Implemented in `casual-calc-eval` | 86 |
+| **Covered** | **77 — 22.6%** |
+
+`CONCAT`, `IFS`, `SWITCH`, `TEXTJOIN` and `IFNA` are post-2016 Excel additions
+absent from the 5th edition, so they count as extra rather than missing.
+
+This is a **separate axis from the structural score** and is not counted in it.
+The calc engine is deliberately held back ([40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)),
+so low coverage here is a planned position rather than a defect. It is recorded
+because "fidelity" with no number against it is how the last set of gaps went
+unnoticed.
+
+Two structural things do belong to the calc phase and are missing today:
+`<f>` carries twelve attributes, and the ones covering **array formulas**
+(`t="array"` with `ref`) and **data tables** (`t="dataTable"`, `dt2D`, `dtr`,
+`r1`, `r2`, `del1`, `del2`) are unhandled, as are `ca`/`aca` (the volatile-cell
+markers). Whole-column references (`A:A`) and structured references still do not
+parse.
+
 ## Known limitations of this audit
 
 - The vendored schema is **Strict**, not Transitional. Real files are almost
