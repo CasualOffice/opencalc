@@ -22,7 +22,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ABS", "ABS(number)"),
     ("ACOS", "ACOS(number)"),
     ("ACOSH", "ACOSH(number)"),
+    ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
     ("AND", "AND(logical1, …)"),
+    ("AREAS", "AREAS(reference)"),
     ("ASIN", "ASIN(number)"),
     ("ASINH", "ASINH(number)"),
     ("ATAN", "ATAN(number)"),
@@ -69,11 +71,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("GCD", "GCD(number1, …)"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
+    ("HYPERLINK", "HYPERLINK(link, [friendly])"),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
     ("IFS", "IFS(test1, value1, …)"),
     ("INDEX", "INDEX(array, row_num, [col_num])"),
+    ("INDIRECT", "INDIRECT(ref_text, [a1])"),
     ("INT", "INT(number)"),
     ("ISBLANK", "ISBLANK(value)"),
     ("ISERR", "ISERR(value)"),
@@ -95,6 +99,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("LN", "LN(number)"),
     ("LOG", "LOG(number, [base])"),
     ("LOG10", "LOG10(number)"),
+    ("LOOKUP", "LOOKUP(value, vector, [result])"),
     ("LOWER", "LOWER(text)"),
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
@@ -111,6 +116,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     ("NOT", "NOT(logical)"),
     ("ODD", "ODD(number)"),
+    ("OFFSET", "OFFSET(reference, rows, cols, [height], [width])"),
     ("OR", "OR(logical1, …)"),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
@@ -319,6 +325,25 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "YEARFRAC" => eval_yearfrac(ev, sheet, args),
         "NETWORKDAYS" => eval_workdays(ev, sheet, args, false),
         "WORKDAY" => eval_workdays(ev, sheet, args, true),
+        "ADDRESS" => eval_address(ev, sheet, args),
+        "INDIRECT" => eval_indirect(ev, sheet, args),
+        "OFFSET" => eval_offset(ev, sheet, args),
+        "AREAS" => eval_areas(args),
+        "LOOKUP" => eval_lookup(ev, sheet, args),
+        // HYPERLINK displays its friendly name and otherwise evaluates to the
+        // link text; the navigation is the host's job, not the engine's.
+        "HYPERLINK" => match args {
+            [link] => ev.eval_expr(sheet, link),
+            [link, friendly] => {
+                let value = ev.eval_expr(sheet, friendly);
+                if matches!(value, Value::Empty) {
+                    ev.eval_expr(sheet, link)
+                } else {
+                    value
+                }
+            }
+            _ => Value::Error(ErrorValue::Value),
+        },
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -2811,4 +2836,250 @@ fn eval_workdays(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], advance: b
     let (lo, hi) = (start.min(end), start.max(end));
     let count = (lo..=hi).filter(|d| is_workday(*d)).count() as f64;
     Value::Number(if end < start { -count } else { count })
+}
+
+// --- Lookup and reference helpers ------------------------------------------
+
+/// `ADDRESS(row, col, [abs], [a1], [sheet])` — build a reference *as text*.
+///
+/// It returns a string, not a reference: `ADDRESS(1,1)` is `"$A$1"`, and it is
+/// `INDIRECT` that turns such a string back into something to read.
+fn eval_address(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 5 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut number = |i: usize, default: f64| -> Result<f64, Value> {
+        match args.get(i) {
+            Some(a) => ev.eval_expr(sheet, a).as_number().map_err(Value::Error),
+            None => Ok(default),
+        }
+    };
+    let row = match number(0, 1.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    let col = match number(1, 1.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    let abs = match number(2, 1.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    if row < 1 || col < 1 || !(1..=4).contains(&abs) {
+        return Value::Error(ErrorValue::Value);
+    }
+    // 1 both absolute, 2 row absolute, 3 column absolute, 4 neither.
+    let (row_abs, col_abs) = match abs {
+        1 => (true, true),
+        2 => (true, false),
+        3 => (false, true),
+        _ => (false, false),
+    };
+    let letters = casual_calc_formula::column_to_letters((col - 1) as u32);
+    let mut out = format!(
+        "{}{letters}{}{row}",
+        if col_abs { "$" } else { "" },
+        if row_abs { "$" } else { "" }
+    );
+    if let Some(arg) = args.get(4) {
+        match ev.eval_expr(sheet, arg) {
+            Value::Text(name) if !name.is_empty() => out = format!("{name}!{out}"),
+            Value::Error(e) => return Value::Error(e),
+            _ => {}
+        }
+    }
+    Value::Text(out)
+}
+
+/// `AREAS(reference)` — how many areas a reference names.
+///
+/// Answered from the expression, since the evaluator resolves a reference to
+/// its contents before a function sees it. Without union syntax in the parser
+/// every reference is a single area.
+fn eval_areas(args: &[Expr]) -> Value {
+    match args {
+        [Expr::Reference(_) | Expr::Range(..) | Expr::StructuredRef { .. }] => Value::Number(1.0),
+        [_] => Value::Error(ErrorValue::Value),
+        _ => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `LOOKUP(value, vector, [result])` — the vector form.
+///
+/// Always approximate: it assumes the lookup vector is sorted ascending and
+/// returns the last entry not greater than the target. There is no exact-match
+/// mode, which is exactly why MATCH/VLOOKUP exist.
+fn eval_lookup(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let target = ev.eval_expr(sheet, &args[0]);
+    if let Value::Error(e) = target {
+        return Value::Error(e);
+    }
+    let Some(lookup) = range_cells(ev, sheet, &args[1]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let result = match args.get(2) {
+        Some(a) => match range_cells(ev, sheet, a) {
+            Some(cells) => Some(cells),
+            None => return Value::Error(ErrorValue::Value),
+        },
+        None => None,
+    };
+
+    let mut best: Option<usize> = None;
+    for (i, at) in lookup.1.iter().enumerate() {
+        let value = ev.eval_cell(lookup.0, *at);
+        if matches!(loose_cmp(&value, &target), Some(Ordering::Greater)) {
+            break;
+        }
+        if loose_cmp(&value, &target).is_some() {
+            best = Some(i);
+        }
+    }
+    let Some(index) = best else {
+        return Value::Error(ErrorValue::Na);
+    };
+    match result {
+        Some((rs, cells)) => match cells.get(index) {
+            Some(at) => ev.eval_cell(rs, *at),
+            None => Value::Error(ErrorValue::Na),
+        },
+        None => ev.eval_cell(lookup.0, lookup.1[index]),
+    }
+}
+
+/// The cells a range expression covers, in row-major order.
+fn range_cells(ev: &mut Evaluator<'_>, sheet: usize, expr: &Expr) -> Option<(usize, Vec<CellRef>)> {
+    let (target, range) = match expr {
+        Expr::Range(a, b) => {
+            let target = ev.resolve_sheet(&a.sheet, sheet)?;
+            (
+                target,
+                (
+                    a.row.min(b.row),
+                    a.col.min(b.col),
+                    a.row.max(b.row),
+                    a.col.max(b.col),
+                ),
+            )
+        }
+        Expr::StructuredRef { table, spec } => {
+            let (target, range) = ev.resolve_structured(sheet, table.as_deref(), spec)?;
+            (
+                target,
+                (
+                    range.start.row,
+                    range.start.col,
+                    range.end.row,
+                    range.end.col,
+                ),
+            )
+        }
+        _ => return None,
+    };
+    let (r0, c0, r1, c1) = range;
+    if (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64 > MAX_RANGE_CELLS {
+        return None;
+    }
+    let mut out = Vec::new();
+    for row in r0..=r1 {
+        for col in c0..=c1 {
+            out.push(CellRef::new(row, col));
+        }
+    }
+    Some((target, out))
+}
+
+/// `INDIRECT(text)` — read the cell a *string* names.
+///
+/// The reason it is special: the dependency graph cannot see through it, since
+/// the target is only known once the string is evaluated. `graph.rs` therefore
+/// treats a formula containing INDIRECT as depending on everything, the same
+/// treatment a defined name gets — conservative, and never stale.
+fn eval_indirect(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    // The A1/R1C1 flag: only A1 is supported, and FALSE asks for R1C1, so it
+    // is refused rather than silently answered in the wrong notation.
+    if let Some(arg) = args.get(1) {
+        match ev.eval_expr(sheet, arg).as_bool() {
+            Ok(true) => {}
+            Ok(false) => return Value::Error(ErrorValue::Value),
+            Err(e) => return Value::Error(e),
+        }
+    }
+    let text = match ev.eval_expr(sheet, &args[0]) {
+        Value::Text(t) => t,
+        Value::Error(e) => return Value::Error(e),
+        other => match other.as_number() {
+            Ok(n) => n.to_string(),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    // A sheet-qualified target resolves through the same path a written
+    // reference does, so `INDIRECT("Sheet2!A1")` behaves like `Sheet2!A1`.
+    let (sheet_name, cell) = match text.rsplit_once('!') {
+        Some((name, cell)) => (Some(name.trim_matches('\'').to_owned()), cell),
+        None => (None, text.as_str()),
+    };
+    let Some(mut reference) = casual_calc_formula::parse_a1(cell) else {
+        // A string that is not a reference is #REF!, which is what Excel shows
+        // and is distinguishable from the cell simply being empty.
+        return Value::Error(ErrorValue::Ref);
+    };
+    reference.sheet = sheet_name;
+    ev.eval_expr(sheet, &Expr::Reference(reference))
+}
+
+/// `OFFSET(reference, rows, cols, [height], [width])`.
+///
+/// Returns the single cell when the result is 1×1. A larger result is a range,
+/// and a range on its own is `#VALUE!` here exactly as `A1:B2` is — it is the
+/// aggregate around it that consumes one.
+fn eval_offset(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 || args.len() > 5 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let Expr::Reference(base) = &args[0] else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let number = |ev: &mut Evaluator<'_>, i: usize, default: f64| -> Result<f64, Value> {
+        match args.get(i) {
+            Some(a) => ev.eval_expr(sheet, a).as_number().map_err(Value::Error),
+            None => Ok(default),
+        }
+    };
+    let rows = match number(ev, 1, 0.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    let cols = match number(ev, 2, 0.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    let height = match number(ev, 3, 1.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    let width = match number(ev, 4, 1.0) {
+        Ok(v) => v as i64,
+        Err(e) => return e,
+    };
+    if height != 1 || width != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let row = base.row as i64 + rows;
+    let col = base.col as i64 + cols;
+    if row < 0 || col < 0 {
+        // Off the top or left edge of the grid.
+        return Value::Error(ErrorValue::Ref);
+    }
+    let mut target = base.clone();
+    target.row = row as u32;
+    target.col = col as u32;
+    ev.eval_expr(sheet, &Expr::Reference(target))
 }

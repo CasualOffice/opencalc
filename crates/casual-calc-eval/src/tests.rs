@@ -1303,3 +1303,79 @@ fn networkdays_and_workday_skip_weekends() {
     // Five working days from a Monday lands on the next Monday: 7 real days.
     assert_eq!(value_at(&wb, 4, 0), CellValue::Number(7.0));
 }
+
+#[test]
+fn indirect_reads_the_cell_a_string_names() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.number((0, 0), 42.0)
+        .text((1, 0), "A1")
+        .formula((2, 0), "INDIRECT(\"A1\")")
+        .formula((3, 0), "INDIRECT(A2)")
+        .formula((4, 0), "INDIRECT(\"not a ref\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(42.0));
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Number(42.0));
+    // A string that is not a reference is #REF!, distinguishable from the cell
+    // simply being empty.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Error(ErrorValue::Ref));
+}
+
+#[test]
+fn indirect_does_not_go_stale_when_its_target_changes() {
+    // The dependency graph cannot see through INDIRECT: walking the arguments
+    // finds the string, never the cell it names. Without treating it like a
+    // defined name the formula would keep its first answer forever.
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0).formula((1, 0), "INDIRECT(\"A1\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(1.0));
+
+    wb.sheets[0]
+        .cells
+        .set(CellRef::new(0, 0), Cell::value(CellValue::Number(99.0)));
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(99.0));
+}
+
+#[test]
+fn offset_shifts_and_reports_ref_off_grid() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0)
+        .number((2, 1), 7.0)
+        .formula((5, 0), "OFFSET(A1,2,1)")
+        .formula((6, 0), "OFFSET(A1,-1,0)")
+        // A result larger than one cell is a range, and a range alone is
+        // #VALUE! here exactly as A1:B2 is.
+        .formula((7, 0), "OFFSET(A1,0,0,2,2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Number(7.0));
+    assert_eq!(value_at(&wb, 6, 0), CellValue::Error(ErrorValue::Ref));
+    assert_eq!(value_at(&wb, 7, 0), CellValue::Error(ErrorValue::Value));
+}
+
+#[test]
+fn address_builds_reference_text_not_a_reference() {
+    // ADDRESS returns a *string*: it is INDIRECT that turns one back into
+    // something to read, which is why the two are so often paired.
+    let mut b = Builder::new();
+    b.formula((0, 0), "ADDRESS(2,3)")
+        .formula((1, 0), "ADDRESS(2,3,4)")
+        .number((1, 2), 5.0)
+        .formula((2, 0), "INDIRECT(ADDRESS(2,3))");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let text = |row: u32| match value_at(&wb, row, 0) {
+        CellValue::SharedString(id) | CellValue::InlineString(id) => {
+            wb.strings.get(id).unwrap().to_owned()
+        }
+        other => panic!("expected text, got {other:?}"),
+    };
+    assert_eq!(text(0), "$C$2");
+    assert_eq!(text(1), "C2");
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Number(5.0));
+}

@@ -244,7 +244,17 @@ fn collect_precedents(
             collect_precedents(left, ctx_sheet, workbook, on_cell, on_range, uses_name);
             collect_precedents(right, ctx_sheet, workbook, on_cell, on_range, uses_name);
         }
-        Expr::Function { args, .. } => {
+        Expr::Function { name, args } => {
+            // A function whose target is computed from a string cannot have its
+            // precedents read off the expression: `INDIRECT("A"&B1)` depends on
+            // whatever that string names, which is only known once it is
+            // evaluated. Walking the arguments finds B1 but not the cell the
+            // formula actually reads, so the result would go stale when that
+            // cell changed. Flagged like a defined name instead — recalculate
+            // on any change, which is conservative and never wrong.
+            if matches!(name.as_str(), "INDIRECT" | "OFFSET") {
+                *uses_name = true;
+            }
             for a in args {
                 collect_precedents(a, ctx_sheet, workbook, on_cell, on_range, uses_name);
             }
