@@ -2204,3 +2204,97 @@ fn an_open_range_recalculates_when_the_column_grows() {
         "a cell added below the old extent must still be counted"
     );
 }
+
+/// The `D` functions, and the criteria rules that make them what they are:
+/// conditions across a row are AND, rows are OR, and an empty criteria cell is
+/// not a condition at all.
+#[test]
+fn database_functions_aggregate_matching_rows() {
+    let mut b = Builder::new();
+    // A1:C5 — the table.
+    b.text((0, 0), "Region")
+        .text((0, 1), "Rep")
+        .text((0, 2), "Sales");
+    b.text((1, 0), "West")
+        .text((1, 1), "Ann")
+        .number((1, 2), 100.0);
+    b.text((2, 0), "East")
+        .text((2, 1), "Bob")
+        .number((2, 2), 200.0);
+    b.text((3, 0), "West")
+        .text((3, 1), "Cid")
+        .number((3, 2), 300.0);
+    b.text((4, 0), "North")
+        .text((4, 1), "Ann")
+        .number((4, 2), 50.0);
+    // E1:F3 — criteria: Region=West AND Sales>150, OR Rep=Ann.
+    b.text((0, 4), "Region").text((0, 5), "Sales");
+    b.text((1, 4), "West").text((1, 5), ">150");
+    b.text((2, 4), "North").text((2, 5), "");
+
+    b.formula((0, 7), "DSUM(A1:C5,\"Sales\",E1:F3)"); // 300 + 50
+    b.formula((1, 7), "DCOUNT(A1:C5,\"Sales\",E1:F3)");
+    b.formula((2, 7), "DMAX(A1:C5,3,E1:F3)"); // field by 1-based index
+    b.formula((3, 7), "DMIN(A1:C5,\"Sales\",E1:F3)");
+    b.formula((4, 7), "DAVERAGE(A1:C5,\"Sales\",E1:F3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 7), CellValue::Number(350.0));
+    assert_eq!(value_at(&wb, 1, 7), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 2, 7), CellValue::Number(300.0));
+    assert_eq!(value_at(&wb, 3, 7), CellValue::Number(50.0));
+    assert_eq!(value_at(&wb, 4, 7), CellValue::Number(175.0));
+}
+
+/// `DGET` answers with the row it found — and refuses to guess when there is
+/// not exactly one. Returning the first of several would be a plausible wrong
+/// answer, which is the worst kind.
+#[test]
+fn dget_refuses_to_guess() {
+    let mut b = Builder::new();
+    b.text((0, 0), "Rep").text((0, 1), "Sales");
+    b.text((1, 0), "Ann").number((1, 1), 100.0);
+    b.text((2, 0), "Bob").number((2, 1), 200.0);
+    b.text((3, 0), "Ann").number((3, 1), 300.0);
+    b.text((0, 3), "Rep");
+    b.text((1, 3), "Bob");
+    b.text((0, 5), "Rep");
+    b.text((1, 5), "Ann");
+    b.text((0, 7), "Rep");
+    b.text((1, 7), "Zoe");
+
+    b.formula((0, 9), "DGET(A1:B4,\"Sales\",D1:D2)"); // exactly one
+    b.formula((1, 9), "DGET(A1:B4,\"Sales\",F1:F2)"); // two → #NUM!
+    b.formula((2, 9), "DGET(A1:B4,\"Sales\",H1:H2)"); // none → #VALUE!
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(value_at(&wb, 0, 9), CellValue::Number(200.0));
+    assert_eq!(
+        value_at(&wb, 1, 9),
+        CellValue::Error(casual_calc_model::ErrorValue::Num)
+    );
+    assert_eq!(
+        value_at(&wb, 2, 9),
+        CellValue::Error(casual_calc_model::ErrorValue::Value)
+    );
+}
+
+/// `DCOUNT` counts numbers and `DCOUNTA` counts anything present — the same
+/// distinction as COUNT and COUNTA. Swapping them silently changes a total.
+#[test]
+fn dcount_and_dcounta_differ_on_text() {
+    let mut b = Builder::new();
+    b.text((0, 0), "Rep").text((0, 1), "Sales");
+    b.text((1, 0), "Ann").number((1, 1), 100.0);
+    b.text((2, 0), "Ann").text((2, 1), "pending");
+    b.text((0, 3), "Rep");
+    b.text((1, 3), "Ann");
+    b.formula((0, 5), "DCOUNT(A1:B3,\"Sales\",D1:D2)");
+    b.formula((1, 5), "DCOUNTA(A1:B3,\"Sales\",D1:D2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(1.0));
+    assert_eq!(value_at(&wb, 1, 5), CellValue::Number(2.0));
+}

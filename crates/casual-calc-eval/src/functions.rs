@@ -79,10 +79,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CUMPRINC", "CUMPRINC(rate, nper, pv, start, end, type)"),
     ("DATE", "DATE(year, month, day)"),
     ("DATEDIF", "DATEDIF(start, end, unit)"),
+    ("DAVERAGE", "DAVERAGE(database, field, criteria)"),
     ("DAY", "DAY(serial_number)"),
     ("DAYS", "DAYS(end_date, start_date)"),
     ("DAYS360", "DAYS360(start, end, [method])"),
     ("DB", "DB(cost, salvage, life, period, [month])"),
+    ("DCOUNT", "DCOUNT(database, field, criteria)"),
+    ("DCOUNTA", "DCOUNTA(database, field, criteria)"),
     ("DDB", "DDB(cost, salvage, life, period, [factor])"),
     ("DEC2BIN", "DEC2BIN(number, [places])"),
     ("DEC2HEX", "DEC2HEX(number, [places])"),
@@ -90,13 +93,22 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DEGREES", "DEGREES(angle)"),
     ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
+    ("DGET", "DGET(database, field, criteria)"),
     (
         "DISC",
         "DISC(settlement, maturity, pr, redemption, [basis])",
     ),
+    ("DMAX", "DMAX(database, field, criteria)"),
+    ("DMIN", "DMIN(database, field, criteria)"),
     ("DOLLAR", "DOLLAR(number, [decimals])"),
     ("DOLLARDE", "DOLLARDE(fractional_dollar, fraction)"),
     ("DOLLARFR", "DOLLARFR(decimal_dollar, fraction)"),
+    ("DPRODUCT", "DPRODUCT(database, field, criteria)"),
+    ("DSTDEV", "DSTDEV(database, field, criteria)"),
+    ("DSTDEVP", "DSTDEVP(database, field, criteria)"),
+    ("DSUM", "DSUM(database, field, criteria)"),
+    ("DVAR", "DVAR(database, field, criteria)"),
+    ("DVARP", "DVARP(database, field, criteria)"),
     ("ECMA.CEILING", "ECMA.CEILING(number, significance)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EFFECT", "EFFECT(nominal_rate, npery)"),
@@ -843,6 +855,8 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SUMPRODUCT" => eval_sumproduct(ev, sheet, args),
         // --- Multi-criteria aggregates (M6-2) ---
         "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
+        "DSUM" | "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DMAX" | "DMIN" | "DGET" | "DPRODUCT"
+        | "DSTDEV" | "DSTDEVP" | "DVAR" | "DVARP" => eval_database(ev, sheet, name, args),
         "AVERAGEIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Average),
         "COUNTIFS" => eval_countifs(ev, sheet, args),
         // --- Shape / text (M6-2) ---
@@ -6296,5 +6310,160 @@ fn year_fraction(start: f64, end: f64, basis: i64) -> f64 {
         3 => (b - a) as f64 / 365.0,
         4 => eval_days360_serials(a, b, true).unwrap_or(0) as f64 / 360.0,
         _ => 0.0,
+    }
+}
+
+/// The `D` functions: an aggregate over the rows of a table that satisfy a
+/// criteria block.
+///
+/// All twelve are one shape — `Dxxx(database, field, criteria)` — differing
+/// only in what they do with the picked column, so they share everything up to
+/// that point. Writing them separately is how twelve copies of the criteria
+/// rules drift apart.
+///
+/// The criteria block is the part worth stating: its first row names fields,
+/// each following row is a set of conditions, conditions **across a row are
+/// AND** and **rows are OR**. An empty criteria cell is not a condition at all
+/// — reading it as "equals blank" would exclude every row.
+fn eval_database(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let db = match eval_range_2d(ev, sheet, &args[0]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let crit = match eval_range_2d(ev, sheet, &args[2]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    // A table with only a header row has no rows to aggregate, and a criteria
+    // block with only a header row selects everything.
+    if db.rows < 1 || db.cols == 0 || crit.rows < 1 || crit.cols == 0 {
+        return Value::Error(ErrorValue::Value);
+    }
+
+    let header = |g: &Grid, c: usize| g.get(0, c).as_text().unwrap_or_default().trim().to_owned();
+    let db_headers: Vec<String> = (0..db.cols).map(|c| header(&db, c)).collect();
+
+    // `field` is a column name, a 1-based index, or a reference to a header
+    // cell — Excel accepts all three, and a file written by someone else will
+    // use whichever they preferred.
+    let field_value = ev.eval_expr(sheet, &args[1]);
+    let field_col: Option<usize> = match &field_value {
+        Value::Number(n) => {
+            let i = *n as i64;
+            if i >= 1 && (i as usize) <= db.cols {
+                Some(i as usize - 1)
+            } else {
+                None
+            }
+        }
+        other => {
+            let want = other.as_text().unwrap_or_default();
+            let want = want.trim();
+            db_headers.iter().position(|h| h.eq_ignore_ascii_case(want))
+        }
+    };
+    // DCOUNTA is the one that allows an absent field: it then counts rows.
+    let counting_rows = field_col.is_none() && name == "DCOUNTA";
+    if field_col.is_none() && !counting_rows {
+        return Value::Error(ErrorValue::Value);
+    }
+
+    let mut picked: Vec<Value> = Vec::new();
+    for r in 1..db.rows {
+        let mut any_row_matched = false;
+        for cr in 1..crit.rows {
+            let mut all = true;
+            let mut had_condition = false;
+            for cc in 0..crit.cols {
+                let cell = crit.get(cr, cc);
+                let text = cell.as_text().unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue; // not a condition
+                }
+                had_condition = true;
+                let Some(col) = db_headers
+                    .iter()
+                    .position(|h| h.eq_ignore_ascii_case(header(&crit, cc).trim()))
+                else {
+                    // A criteria column naming no field cannot be satisfied.
+                    all = false;
+                    break;
+                };
+                let (op, operand) = parse_criteria(cell);
+                if !criterion_matches(db.get(r, col), op, &operand) {
+                    all = false;
+                    break;
+                }
+            }
+            // A criteria row with no conditions at all matches everything,
+            // which is what an empty row under the headers means.
+            if all && (had_condition || crit.cols > 0) {
+                any_row_matched = true;
+                break;
+            }
+        }
+        if any_row_matched {
+            picked.push(if counting_rows {
+                Value::Number(1.0)
+            } else {
+                db.get(r, field_col.expect("checked")).clone()
+            });
+        }
+    }
+
+    let numbers: Vec<f64> = picked
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => None,
+        })
+        .collect();
+
+    match name {
+        // DCOUNT counts numbers; DCOUNTA counts anything that is not blank.
+        // The pair is the same distinction as COUNT and COUNTA, and swapping
+        // them silently changes what a report totals.
+        "DCOUNT" => Value::Number(numbers.len() as f64),
+        "DCOUNTA" => {
+            Value::Number(picked.iter().filter(|v| !matches!(v, Value::Empty)).count() as f64)
+        }
+        "DGET" => match picked.len() {
+            // Excel's own answers: nothing matched is #VALUE!, more than one
+            // match is #NUM!. Returning the first would be a plausible wrong
+            // answer, which is the worst kind.
+            0 => Value::Error(ErrorValue::Value),
+            1 => picked.into_iter().next().expect("one"),
+            _ => Value::Error(ErrorValue::Num),
+        },
+        _ if numbers.is_empty() => match name {
+            "DSUM" | "DPRODUCT" => Value::Number(0.0),
+            _ => Value::Error(ErrorValue::Div0),
+        },
+        "DSUM" => Value::Number(numbers.iter().sum()),
+        "DPRODUCT" => Value::Number(numbers.iter().product()),
+        "DAVERAGE" => Value::Number(numbers.iter().sum::<f64>() / numbers.len() as f64),
+        "DMAX" => Value::Number(numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        "DMIN" => Value::Number(numbers.iter().copied().fold(f64::INFINITY, f64::min)),
+        "DVAR" | "DSTDEV" => {
+            // Sample statistics need two points; one has no spread to measure.
+            if numbers.len() < 2 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+            let var = numbers.iter().map(|n| (n - mean).powi(2)).sum::<f64>()
+                / (numbers.len() - 1) as f64;
+            Value::Number(if name == "DVAR" { var } else { var.sqrt() })
+        }
+        "DVARP" | "DSTDEVP" => {
+            let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+            let var =
+                numbers.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+            Value::Number(if name == "DVARP" { var } else { var.sqrt() })
+        }
+        _ => Value::Error(ErrorValue::Name),
     }
 }
