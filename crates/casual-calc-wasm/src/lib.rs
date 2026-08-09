@@ -665,30 +665,25 @@ pub fn session_set_list_validation(
     c1: u32,
     values: Vec<String>,
 ) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
-            sh.validations.retain(|v| {
-                !(v.range.start.row <= rr1
-                    && v.range.end.row >= rr0
-                    && v.range.start.col <= cc1
-                    && v.range.end.col >= cc0)
-            });
-            let clean: Vec<String> = values
-                .into_iter()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !clean.is_empty() {
-                sh.validations.push(DataValidation::list(
-                    CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
-                    clean,
-                ));
-            }
+    edit_sheet_metadata(sheet, move |_, data| {
+        let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+        data.validations.retain(|v| {
+            !(v.range.start.row <= rr1
+                && v.range.end.row >= rr0
+                && v.range.start.col <= cc1
+                && v.range.end.col >= cc0)
+        });
+        let clean: Vec<String> = values
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !clean.is_empty() {
+            data.validations.push(DataValidation::list(
+                CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+                clean,
+            ));
         }
-        Ok(())
     })
 }
 
@@ -818,21 +813,16 @@ pub fn session_set_validation(
     error_text: &str,
 ) -> Result<(), JsError> {
     let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) else {
-            return Ok(());
-        };
+    edit_sheet_metadata(sheet, move |_, data| {
         // Replace whatever covered this block, as the list setter does.
-        sh.validations.retain(|v| {
+        data.validations.retain(|v| {
             !(v.range.start.row <= rr1
                 && v.range.end.row >= rr0
                 && v.range.start.col <= cc1
                 && v.range.end.col >= cc0)
         });
         let range = CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1));
-        sh.validations.push(casual_calc_model::DataValidation {
+        data.validations.push(casual_calc_model::DataValidation {
             kind: casual_calc_model::DvKind::from_ooxml(kind),
             operator: casual_calc_model::DvOperator::from_ooxml(op),
             formula1: f1.trim().to_owned(),
@@ -841,7 +831,6 @@ pub fn session_set_validation(
             error_text: error_text.trim().to_owned(),
             ..casual_calc_model::DataValidation::none(range)
         });
-        Ok(())
     })
 }
 
@@ -854,18 +843,13 @@ pub fn session_clear_validation(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.validations.retain(|v| {
-                !(v.range.start.row <= r1
-                    && v.range.end.row >= r0
-                    && v.range.start.col <= c1
-                    && v.range.end.col >= c0)
-            });
-        }
-        Ok(())
+    edit_sheet_metadata(sheet, move |_, data| {
+        data.validations.retain(|v| {
+            !(v.range.start.row <= r1
+                && v.range.end.row >= r0
+                && v.range.start.col <= c1
+                && v.range.end.col >= c0)
+        });
     })
 }
 
@@ -923,47 +907,37 @@ pub fn session_add_cf(
         _ => return Err(JsError::new("unknown conditional-format rule")),
     };
     let fill = fill.trim().trim_start_matches('#').to_ascii_uppercase();
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
-            // New rules go last in priority, so they do not silently
-            // outrank the ones already there.
-            let next = sh
-                .conditional_formats
-                .iter()
-                .map(|c| c.priority)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let mut cf = ConditionalFormat::new(
-                CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
-                rule,
-                fill,
-            );
-            cf.priority = next;
-            sh.conditional_formats.push(cf);
-        }
-        Ok(())
+    edit_sheet_metadata(sheet, move |_, data| {
+        let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+        // New rules go last in priority, so they do not silently outrank the
+        // ones already there.
+        let next = data
+            .conditional_formats
+            .iter()
+            .map(|c| c.priority)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut cf = ConditionalFormat::new(
+            CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+            rule,
+            fill,
+        );
+        cf.priority = next;
+        data.conditional_formats.push(cf);
     })
 }
 
 /// Remove every conditional-format rule intersecting a range.
 #[wasm_bindgen]
 pub fn session_clear_cf(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            sh.conditional_formats.retain(|cf| {
-                !(cf.range.start.row <= r1
-                    && cf.range.end.row >= r0
-                    && cf.range.start.col <= c1
-                    && cf.range.end.col >= c0)
-            });
-        }
-        Ok(())
+    edit_sheet_metadata(sheet, move |_, data| {
+        data.conditional_formats.retain(|cf| {
+            !(cf.range.start.row <= r1
+                && cf.range.end.row >= r0
+                && cf.range.start.col <= c1
+                && cf.range.end.col >= c0)
+        });
     })
 }
 
@@ -982,37 +956,32 @@ pub fn session_set_comment(
     author: &str,
     created: &str,
 ) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) {
-            // Editing keeps the replies that were already on the thread; only
-            // an empty text (a delete) drops them.
-            let existing = sh
-                .comments
-                .iter()
-                .position(|c| c.at.row == row && c.at.col == col);
-            let text = text.trim();
-            if text.is_empty() {
-                if let Some(i) = existing {
-                    sh.comments.remove(i);
-                }
-                return Ok(());
+    edit_sheet_metadata(sheet, move |_, data| {
+        // Editing keeps the replies that were already on the thread; only
+        // an empty text (a delete) drops them.
+        let existing = data
+            .comments
+            .iter()
+            .position(|c| c.at.row == row && c.at.col == col);
+        let text = text.trim();
+        if text.is_empty() {
+            if let Some(i) = existing {
+                data.comments.remove(i);
             }
-            let mut thread = match existing {
-                Some(i) => sh.comments.remove(i),
-                None => CellComment::note(CellRef::new(row, col), "", None),
-            };
-            thread.text = text.to_owned();
-            if !author.is_empty() {
-                thread.author = Some(author.to_owned());
-            }
-            if !created.is_empty() {
-                thread.created = Some(created.to_owned());
-            }
-            sh.comments.push(thread);
+            return;
         }
-        Ok(())
+        let mut thread = match existing {
+            Some(i) => data.comments.remove(i),
+            None => CellComment::note(CellRef::new(row, col), "", None),
+        };
+        thread.text = text.to_owned();
+        if !author.is_empty() {
+            thread.author = Some(author.to_owned());
+        }
+        if !created.is_empty() {
+            thread.created = Some(created.to_owned());
+        }
+        data.comments.push(thread);
     })
 }
 
@@ -1027,25 +996,22 @@ pub fn session_reply_comment(
     author: &str,
     created: &str,
 ) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+    edit_sheet_metadata(sheet, move |_, data| {
         let text = text.trim();
         if text.is_empty() {
-            return Ok(());
+            return;
         }
-        if let Some(thread) = session.workbook_mut().sheets.get_mut(sheet).and_then(|sh| {
-            sh.comments
-                .iter_mut()
-                .find(|c| c.at.row == row && c.at.col == col)
-        }) {
+        if let Some(thread) = data
+            .comments
+            .iter_mut()
+            .find(|c| c.at.row == row && c.at.col == col)
+        {
             thread.replies.push(CommentReply {
                 text: text.to_owned(),
                 author: (!author.is_empty()).then(|| author.to_owned()),
                 created: (!created.is_empty()).then(|| created.to_owned()),
             });
         }
-        Ok(())
     })
 }
 
@@ -1057,17 +1023,14 @@ pub fn session_resolve_comment(
     col: u32,
     resolved: bool,
 ) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(thread) = session.workbook_mut().sheets.get_mut(sheet).and_then(|sh| {
-            sh.comments
-                .iter_mut()
-                .find(|c| c.at.row == row && c.at.col == col)
-        }) {
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(thread) = data
+            .comments
+            .iter_mut()
+            .find(|c| c.at.row == row && c.at.col == col)
+        {
             thread.resolved = resolved;
         }
-        Ok(())
     })
 }
 
@@ -1571,13 +1534,8 @@ pub fn session_sheet_protected() -> String {
 /// the file, which is the honest reading of "unprotect".
 #[wasm_bindgen]
 pub fn session_set_sheet_protected(index: usize, on: bool) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(index) {
-            sh.protection = on.then(casual_calc_model::SheetProtection::enabled);
-        }
-        Ok(())
+    edit_sheet_metadata(index, move |_, data| {
+        data.protection = on.then(casual_calc_model::SheetProtection::enabled);
     })
 }
 
@@ -1602,27 +1560,29 @@ pub fn session_sheet_visibility() -> String {
 /// workbook with nothing on screen has no way back.
 #[wasm_bindgen]
 pub fn session_set_sheet_visibility(index: usize, state: &str) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let wb = session.workbook_mut();
+    {
         let next = SheetVisibility::from_ooxml(state);
+        // The "at least one visible sheet" check reads the whole workbook and
+        // can refuse, so it runs *before* the edit rather than inside it: an
+        // operation closure has nowhere to report an error to.
         if !next.is_visible() {
-            let visible = wb
-                .sheets
-                .iter()
-                .enumerate()
-                .filter(|(i, sh)| *i != index && sh.visibility.is_visible())
-                .count();
+            let visible = with_session(|s| {
+                s.workbook()
+                    .sheets
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, sh)| *i != index && sh.visibility.is_visible())
+                    .count()
+            })
+            .unwrap_or(0);
             if visible == 0 {
                 return Err(JsError::new("a workbook needs at least one visible sheet"));
             }
         }
-        if let Some(sh) = wb.sheets.get_mut(index) {
-            sh.visibility = next;
-        }
-        Ok(())
-    })
+        edit_sheet_metadata(index, move |_, data| {
+            data.visibility = next;
+        })
+    }
 }
 
 /// The sheet names as a JSON array of strings.
@@ -2385,15 +2345,10 @@ fn describe_cf_rule(rule: &CfRule) -> String {
 /// Delete the rule at document index `index`.
 #[wasm_bindgen]
 pub fn session_delete_cf_rule(sheet: usize, index: usize) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet)
-            && index < sh.conditional_formats.len()
-        {
-            sh.conditional_formats.remove(index);
+    edit_sheet_metadata(sheet, move |_, data| {
+        if index < data.conditional_formats.len() {
+            data.conditional_formats.remove(index);
         }
-        Ok(())
     })
 }
 
@@ -2403,55 +2358,44 @@ pub fn session_delete_cf_rule(sheet: usize, index: usize) -> Result<(), JsError>
 /// unambiguous rather than depending on ties broken by document position.
 #[wasm_bindgen]
 pub fn session_reorder_cf_rule(sheet: usize, index: usize, up: bool) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let Some(sh) = session.workbook_mut().sheets.get_mut(sheet) else {
-            return Ok(());
-        };
-        let n = sh.conditional_formats.len();
+    edit_sheet_metadata(sheet, move |_, data| {
+        let n = data.conditional_formats.len();
         if index >= n {
-            return Ok(());
+            return;
         }
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&i| {
-            let p = sh.conditional_formats[i].priority;
+            let p = data.conditional_formats[i].priority;
             (if p == 0 { u32::MAX } else { p }, i)
         });
         let Some(pos) = order.iter().position(|&i| i == index) else {
-            return Ok(());
+            return;
         };
         let swap_with = if up {
             if pos == 0 {
-                return Ok(());
+                return;
             }
             pos - 1
         } else {
             if pos + 1 >= n {
-                return Ok(());
+                return;
             }
             pos + 1
         };
         order.swap(pos, swap_with);
         for (rank, &i) in order.iter().enumerate() {
-            sh.conditional_formats[i].priority = rank as u32 + 1;
+            data.conditional_formats[i].priority = rank as u32 + 1;
         }
-        Ok(())
     })
 }
 
 /// Turn `stopIfTrue` on or off for the rule at `index`.
 #[wasm_bindgen]
 pub fn session_set_cf_stop(sheet: usize, index: usize, stop: bool) -> Result<(), JsError> {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(sheet)
-            && let Some(cf) = sh.conditional_formats.get_mut(index)
-        {
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(cf) = data.conditional_formats.get_mut(index) {
             cf.stop_if_true = stop;
         }
-        Ok(())
     })
 }
 
@@ -3934,9 +3878,17 @@ fn hidden_edit(sheet: usize, a: u32, b: u32, columns: bool, hide: bool) -> Resul
 /// OOXML caps outline nesting at seven levels.
 const MAX_OUTLINE_LEVEL: u8 = 7;
 
-/// Apply `edit` to the sheet's positional-metadata bundle and commit it as one
-/// undo step. The closure also gets the sheet itself, for the reads (outline
-/// bands, cell text) that decide what the edit should be.
+/// Apply `edit` to the sheet's metadata bundle and commit it as one undo step.
+/// The closure also gets the sheet itself, for the reads (outline bands, cell
+/// text) that decide what the edit should be.
+///
+/// The bundle covers validations, conditional formats, comments, visibility and
+/// protection as well as the positional state. Those five used to be mutated
+/// straight through `workbook_mut()`, which is worse than having no undo: the
+/// button stays enabled and the history keeps filling, so Ctrl+Z after editing a
+/// comment reversed the preceding *cell* edit instead — destroying work the user
+/// never touched, somewhere they were not looking. Everything that changes sheet
+/// state goes through here.
 fn edit_sheet_metadata(
     sheet: usize,
     edit: impl FnOnce(&Sheet, &mut SheetMetadata),
@@ -5796,6 +5748,64 @@ mod tests {
         assert_eq!((clip[1].sr, clip[1].dr), (2, 1));
         assert_eq!((clip[2].sr, clip[2].dr), (3, 2));
         assert_eq!(clip[1].cell.value, CellValue::Number(3.0));
+    }
+
+    /// Undo must reverse the sheet-metadata edit itself, not whatever preceded
+    /// it.
+    ///
+    /// These six areas used to write straight to `workbook_mut()`. That is
+    /// worse than having no undo: the button stays enabled and the history
+    /// keeps filling, so Ctrl+Z after adding a comment silently reversed the
+    /// *previous cell edit* — destroying work the user never touched, in a
+    /// place they were not looking. This asserts the cell survives and the
+    /// metadata change is the thing that goes.
+    #[test]
+    fn undo_reverses_metadata_edits_not_the_edit_before_them() {
+        use super::{
+            session_add_cf, session_cell_input, session_comment_at, session_new, session_set_cell,
+            session_set_comment, session_set_sheet_protected, session_set_sheet_visibility,
+            session_undo,
+        };
+        for (label, apply) in [
+            (
+                "comment",
+                (&|| {
+                    session_set_comment(0, 5, 5, "note", "", "").unwrap();
+                }) as &dyn Fn(),
+            ),
+            ("conditional format", &|| {
+                session_add_cf(0, 0, 0, 3, 3, "gt", 5.0, 0.0, "", "FF0000").unwrap();
+            }),
+            ("sheet protection", &|| {
+                session_set_sheet_protected(0, true).unwrap();
+            }),
+        ] {
+            session_new();
+            session_set_cell(0, 0, 0, "keep me").unwrap();
+            apply();
+            session_undo().unwrap();
+            assert_eq!(
+                session_cell_input(0, 0, 0),
+                "keep me",
+                "undo after a {label} edit destroyed the preceding cell edit"
+            );
+        }
+
+        // And the metadata change itself is what undo removes.
+        session_new();
+        session_set_comment(0, 1, 1, "hello", "", "").unwrap();
+        assert_eq!(session_comment_at(0, 1, 1), "hello");
+        session_undo().unwrap();
+        assert_eq!(session_comment_at(0, 1, 1), "");
+
+        // Hiding a sheet is reversible too; it used to be permanent.
+        session_new();
+        super::session_add_sheet().unwrap();
+        session_set_sheet_visibility(1, "hidden").unwrap();
+        // The reader returns a JSON array of every sheet's state.
+        assert!(super::session_sheet_visibility().contains("hidden"));
+        session_undo().unwrap();
+        assert!(!super::session_sheet_visibility().contains("hidden"));
     }
 
     /// Typing a date must produce a date, and a date cell must edit as one —

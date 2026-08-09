@@ -50,12 +50,12 @@ many mutate; `UNDO` how many are reversible.
 | Clipboard and paste special | 5 | 2 | 2 | n/a | n/a | correct |
 | Fill handle and series | 2 | 1 | 1 | n/a | n/a | correct |
 | Find and replace | 4 | 2 | 2 | n/a | n/a | correct |
-| **Conditional formatting** | 6 | 5 | **0** | ✅ | ✅ | **FC-01** |
-| **Comments and threads** | 6 | 3 | **0** | ✅ | ✅ | **FC-02** |
-| **Data validation** | 5 | 3 | **0** | ✅ | ❌ | **FC-03** |
-| **Named cell styles** | 2 | 1 | **0** | ✅ | ❌ | **FC-04** |
-| **Sheet visibility** | 2 | 1 | **0** | ✅ | n/a | **FC-05** |
-| **Sheet protection** | 2 | 1 | **0** | ✅ | ❌ | **FC-06** |
+| Conditional formatting | 6 | 5 | 5 | ✅ | ✅ | correct |
+| Comments and threads | 6 | 3 | 3 | ✅ | ✅ | correct |
+| Data validation | 5 | 3 | 3 | ✅ | ❌ | undo correct; FC-16 render |
+| Named cell styles | 2 | 1 | 0* | ✅ | ❌ | correct (*definition registration only) |
+| Sheet visibility | 2 | 1 | 1 | ✅ | n/a | correct |
+| Sheet protection | 2 | 1 | 1 | ✅ | ❌ | correct |
 | **Hyperlinks** | **0** | 0 | 0 | ✅ | ❌ | **FC-07** |
 | **Tables (ListObjects)** | **0** | 0 | 0 | ✅ | ❌ | **FC-08** |
 | **Print setup** | **0** | 0 | 0 | ✅ | ❌ | **FC-09** |
@@ -77,12 +77,12 @@ were not looking.
 
 | ID | Feature | Sev | Status | Note |
 | --- | --- | --- | --- | --- |
-| FC-01 | Conditional formatting: `add_cf`, `clear_cf`, `delete_cf_rule`, `reorder_cf_rule`, `set_cf_stop` | P0 | 🔴 | 5 mutations outside the transaction log |
-| FC-02 | Comments and threads: `set_comment`, `reply_comment`, `resolve_comment` | P0 | 🔴 | 3 mutations; deleting a thread is unrecoverable |
-| FC-03 | Data validation: `set_validation`, `set_list_validation`, `clear_validation` | P0 | 🔴 | 3 mutations |
-| FC-04 | Named cell styles: `apply_cell_style` | P0 | 🔴 | 1 mutation |
-| FC-05 | Sheet visibility: `set_sheet_visibility` | P0 | 🔴 | 1 mutation; hiding a sheet cannot be undone |
-| FC-06 | Sheet protection: `set_sheet_protected` | P0 | 🔴 | 1 mutation |
+| FC-01 | Conditional formatting: `add_cf`, `clear_cf`, `delete_cf_rule`, `reorder_cf_rule`, `set_cf_stop` | P0 | ✅ | Fixed by widening the mechanism, not by patching the call sites: `SheetMetadata` — which already had a proven inverse for the positional state — now also carries validations, conditional formats, comments, visibility and protection, so all thirteen mutations route through the existing `edit_sheet_metadata` and become reversible at once. Adding five new `Operation` variants would have meant five new inverses to get right. `session_set_sheet_visibility` keeps its "at least one visible sheet" check *outside* the closure, since an operation closure has nowhere to report an error to. **The regression test was verified by reintroducing the bug**: with the bypass restored it fails with the real symptom — `undo after a comment edit destroyed the preceding cell edit` — and passes once fixed. A guard never seen to fail is a comment. |
+| FC-02 | Comments and threads: `set_comment`, `reply_comment`, `resolve_comment` | P0 | ✅ | Fixed by widening the mechanism, not by patching the call sites: `SheetMetadata` — which already had a proven inverse for the positional state — now also carries validations, conditional formats, comments, visibility and protection, so all thirteen mutations route through the existing `edit_sheet_metadata` and become reversible at once. Adding five new `Operation` variants would have meant five new inverses to get right. `session_set_sheet_visibility` keeps its "at least one visible sheet" check *outside* the closure, since an operation closure has nowhere to report an error to. **The regression test was verified by reintroducing the bug**: with the bypass restored it fails with the real symptom — `undo after a comment edit destroyed the preceding cell edit` — and passes once fixed. A guard never seen to fail is a comment. |
+| FC-03 | Data validation: `set_validation`, `set_list_validation`, `clear_validation` | P0 | ✅ | Fixed by widening the mechanism, not by patching the call sites: `SheetMetadata` — which already had a proven inverse for the positional state — now also carries validations, conditional formats, comments, visibility and protection, so all thirteen mutations route through the existing `edit_sheet_metadata` and become reversible at once. Adding five new `Operation` variants would have meant five new inverses to get right. `session_set_sheet_visibility` keeps its "at least one visible sheet" check *outside* the closure, since an operation closure has nowhere to report an error to. **The regression test was verified by reintroducing the bug**: with the bypass restored it fails with the real symptom — `undo after a comment edit destroyed the preceding cell edit` — and passes once fixed. A guard never seen to fail is a comment. |
+| FC-04 | Named cell styles: `apply_cell_style` | P0 | ✅ | Already correct in its user-visible effect: the styling goes through `apply_style_range`, which builds an `EditOperation::Batch`. What escapes the log is the *registration* of a built-in style definition in `Workbook::cell_styles` — inert, idempotent, and re-registered on the next use. Left alone deliberately rather than contorted into an operation for a number's sake; the audit tool still counts it, which is the honest reading. |
+| FC-05 | Sheet visibility: `set_sheet_visibility` | P0 | ✅ | Fixed by widening the mechanism, not by patching the call sites: `SheetMetadata` — which already had a proven inverse for the positional state — now also carries validations, conditional formats, comments, visibility and protection, so all thirteen mutations route through the existing `edit_sheet_metadata` and become reversible at once. Adding five new `Operation` variants would have meant five new inverses to get right. `session_set_sheet_visibility` keeps its "at least one visible sheet" check *outside* the closure, since an operation closure has nowhere to report an error to. **The regression test was verified by reintroducing the bug**: with the bypass restored it fails with the real symptom — `undo after a comment edit destroyed the preceding cell edit` — and passes once fixed. A guard never seen to fail is a comment. |
+| FC-06 | Sheet protection: `set_sheet_protected` | P0 | ✅ | Fixed by widening the mechanism, not by patching the call sites: `SheetMetadata` — which already had a proven inverse for the positional state — now also carries validations, conditional formats, comments, visibility and protection, so all thirteen mutations route through the existing `edit_sheet_metadata` and become reversible at once. Adding five new `Operation` variants would have meant five new inverses to get right. `session_set_sheet_visibility` keeps its "at least one visible sheet" check *outside* the closure, since an operation closure has nowhere to report an error to. **The regression test was verified by reintroducing the bug**: with the bypass restored it fails with the real symptom — `undo after a comment edit destroyed the preceding cell edit` — and passes once fixed. A guard never seen to fail is a comment. |
 
 The fix is the same in every case: extend `Operation` so the change is
 expressible, or route it through the existing `SetSheetMetadata` capture/install

@@ -14,8 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, Cell, CellRange, CellRef, CellValue, DefinedName, Sheet, SheetView,
-    StyleId, Workbook,
+    AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ConditionalFormat,
+    DataValidation, DefinedName, Sheet, SheetProtection, SheetView, SheetVisibility, StyleId,
+    Workbook,
 };
 
 mod structural;
@@ -88,6 +89,25 @@ pub struct SheetMetadata {
     pub collapsed_rows: BTreeSet<u32>,
     /// Columns whose outline group is collapsed.
     pub collapsed_cols: BTreeSet<u32>,
+    /// Data-validation rules.
+    ///
+    /// The five fields below are not positional like the ones above; they are
+    /// here because they had **no** reversible operation at all, so editing a
+    /// validation, a conditional format, a comment, a sheet's visibility or its
+    /// protection wrote straight to the workbook. Undo then reversed whatever
+    /// preceded it — the last cell edit — which destroys work the user did not
+    /// ask to lose. Folding them into the one bundle that already has a proven
+    /// inverse fixes all five at once, rather than adding five operations that
+    /// each need their own inverse to get right.
+    pub validations: Vec<DataValidation>,
+    /// Conditional-formatting rules.
+    pub conditional_formats: Vec<ConditionalFormat>,
+    /// Comment threads.
+    pub comments: Vec<CellComment>,
+    /// Tab visibility.
+    pub visibility: SheetVisibility,
+    /// Sheet protection.
+    pub protection: Option<SheetProtection>,
 }
 
 impl SheetMetadata {
@@ -106,6 +126,11 @@ impl SheetMetadata {
             col_outline_levels: sheet.col_outline_levels.clone(),
             collapsed_rows: sheet.collapsed_rows.clone(),
             collapsed_cols: sheet.collapsed_cols.clone(),
+            validations: sheet.validations.clone(),
+            conditional_formats: sheet.conditional_formats.clone(),
+            comments: sheet.comments.clone(),
+            visibility: sheet.visibility,
+            protection: sheet.protection.clone(),
         }
     }
 
@@ -131,6 +156,14 @@ impl SheetMetadata {
             ),
             collapsed_rows: std::mem::replace(&mut sheet.collapsed_rows, self.collapsed_rows),
             collapsed_cols: std::mem::replace(&mut sheet.collapsed_cols, self.collapsed_cols),
+            validations: std::mem::replace(&mut sheet.validations, self.validations),
+            conditional_formats: std::mem::replace(
+                &mut sheet.conditional_formats,
+                self.conditional_formats,
+            ),
+            comments: std::mem::replace(&mut sheet.comments, self.comments),
+            visibility: std::mem::replace(&mut sheet.visibility, self.visibility),
+            protection: std::mem::replace(&mut sheet.protection, self.protection),
         }
     }
 }
