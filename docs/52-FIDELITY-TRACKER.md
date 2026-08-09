@@ -50,7 +50,7 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 | Signal | Baseline | Current |
 | --- | --- | --- |
 | Structural coverage | 54.8% | 74.7% |
-| Function coverage | 22.8% | 32.3% |
+| Function coverage | 22.8% | 34.0% |
 | **P0 destructive remaining** | 8 | 1 |
 | P1 visible-loss remaining | 13 | 10 |
 | P2 compatibility remaining | 4 | 4 |
@@ -114,7 +114,7 @@ is how a plausible wrong answer ships.
 | ID | Cluster | Count | Status | Note |
 | --- | --- | --- | --- | --- |
 | FN-01 | Math and trigonometry | 41 | ✅ | Trig with its reciprocals and hyperbolics, inverse/log family, EVEN/ODD/MROUND/QUOTIENT, combinatorics, GCD/LCM, SUMSQ, SERIESSUM, PI. Three real traps: **ATAN2 takes x then y**, the reverse of every maths library, so forwarding in order mirrors every angle about the diagonal while still looking plausible; domain failures are **#NUM!, not NaN** (`ASIN(2)`, `LN(-1)`) and zero denominators are #DIV/0!, since a NaN in a cell compares and formats as nonsense; and **COMBIN accumulates term by term**, because `n!/(k!(n-k)!)` overflows f64 long before the answer does and returns #NUM! for COMBIN(100,2)=4950. Also EVEN(0)=0 and ODD(0)=1 against the general round-away rule, and FACT(171) is #NUM! not infinity. 9 tests. 22.8% → 32.3% |
-| FN-04 | Logical and information | 8 | 🔴 | TRUE, FALSE, N, TYPE, ISREF, ERROR.TYPE, CELL, INFO |
+| FN-04 | Logical and information | 8 | ✅ | TRUE, FALSE, N, TYPE, ERROR.TYPE, ISREF, ISFORMULA, SHEET, SHEETS. Three that are not what they look like: **`N` reads text as 0 rather than erroring**, which is the entire reason the function exists, so routing it through the ordinary numeric coercion would defeat it. **`ISREF` has to inspect the expression, not the value** — by the time a function receives an argument the evaluator has already resolved a reference to its contents, so asking the value answers FALSE for every reference. And **`ISFORMULA` of a non-reference is `#VALUE!`, not FALSE**, since FALSE would read as "that cell has no formula", a different claim. `ERROR.TYPE` numbers `#SPILL!` 9, which post-dates the 5th edition (that stops at 7) but is what a workbook round-tripped through Excel expects. The catalog/dispatch sync test caught SHEET and SHEETS listed with no implementation. 4 tests. 32.3% → 34.0% |
 | FN-03 | Date and time | 16 | 🔴 | NOW, TODAY, TIME, TIMEVALUE, DATEVALUE, HOUR, MINUTE, SECOND, DATEDIF, DAYS360, WEEKNUM, ISOWEEKNUM, NETWORKDAYS(.INTL), WORKDAY(.INTL). Needs a clock seam so tests stay deterministic |
 | FN-05 | Lookup and reference | 9 | 🔴 | ADDRESS, AREAS, INDIRECT, OFFSET, LOOKUP, TRANSPOSE, HYPERLINK, GETPIVOTDATA, RTD |
 | FN-02 | Text | 17 | 🔴 | CHAR, CODE, CLEAN, DOLLAR, FIXED, NUMBERVALUE, UNICHAR, UNICODE, T, plus the byte-oriented `*B` variants and the East Asian ASC/JIS/DBCS/PHONETIC/BAHTTEXT |

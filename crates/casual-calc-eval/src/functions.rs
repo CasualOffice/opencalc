@@ -54,11 +54,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DEGREES", "DEGREES(angle)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
+    ("ERROR.TYPE", "ERROR.TYPE(error)"),
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
     ("EXP", "EXP(number)"),
     ("FACT", "FACT(number)"),
     ("FACTDOUBLE", "FACTDOUBLE(number)"),
+    ("FALSE", "FALSE()"),
     ("FIND", "FIND(find_text, within_text, [start])"),
     ("FLOOR", "FLOOR(number, significance)"),
     ("GCD", "GCD(number1, …)"),
@@ -73,11 +75,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISERR", "ISERR(value)"),
     ("ISERROR", "ISERROR(value)"),
     ("ISEVEN", "ISEVEN(number)"),
+    ("ISFORMULA", "ISFORMULA(reference)"),
     ("ISLOGICAL", "ISLOGICAL(value)"),
     ("ISNA", "ISNA(value)"),
     ("ISNONTEXT", "ISNONTEXT(value)"),
     ("ISNUMBER", "ISNUMBER(value)"),
     ("ISODD", "ISODD(number)"),
+    ("ISREF", "ISREF(value)"),
     ("ISTEXT", "ISTEXT(value)"),
     ("LARGE", "LARGE(array, k)"),
     ("LCM", "LCM(number1, …)"),
@@ -96,6 +100,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
+    ("N", "N(value)"),
     ("NA", "NA()"),
     ("NOT", "NOT(logical)"),
     ("ODD", "ODD(number)"),
@@ -121,6 +126,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SEC", "SEC(number)"),
     ("SECH", "SECH(number)"),
     ("SERIESSUM", "SERIESSUM(x, n, m, coefficients)"),
+    ("SHEET", "SHEET([value])"),
+    ("SHEETS", "SHEETS([reference])"),
     ("SIGN", "SIGN(number)"),
     ("SIN", "SIN(number)"),
     ("SINH", "SINH(number)"),
@@ -140,7 +147,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
     ("TRIM", "TRIM(text)"),
+    ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
+    ("TYPE", "TYPE(value)"),
     ("UPPER", "UPPER(text)"),
     ("VALUE", "VALUE(text)"),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
@@ -295,6 +304,38 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SWITCH" => eval_switch(ev, sheet, args),
         "IFNA" => eval_ifna(ev, sheet, args),
         "NA" => Value::Error(ErrorValue::Na),
+        // The literal-valued logicals. Both take no arguments; `TRUE(1)` is an
+        // error rather than being tolerated, because a stray argument almost
+        // always means the author meant something else.
+        "TRUE" => nullary(args, Value::Bool(true)),
+        "FALSE" => nullary(args, Value::Bool(false)),
+        // `N` coerces to a number the way a spreadsheet does: text becomes 0
+        // rather than an error, which is the whole reason the function exists.
+        "N" => eval_n(ev, sheet, args),
+        "TYPE" => eval_type(ev, sheet, args),
+        "ERROR.TYPE" => eval_error_type(ev, sheet, args),
+        // A reference is not a distinct value here — the evaluator resolves one
+        // to its contents before a function sees it — so ISREF answers by
+        // inspecting the *expression*, not the value it produced.
+        "ISREF" => eval_is_ref(args),
+        "ISFORMULA" => eval_is_formula(ev, sheet, args),
+        // Both are 1-based over the workbook's sheet order.
+        "SHEET" => match args {
+            // Without an argument, the sheet the formula is on.
+            [] => Value::Number(sheet as f64 + 1.0),
+            [Expr::Reference(r)] => match r.sheet.as_deref() {
+                Some(name) => match sheet_index_by_name(ev, name) {
+                    Some(i) => Value::Number(i as f64 + 1.0),
+                    None => Value::Error(ErrorValue::Na),
+                },
+                None => Value::Number(sheet as f64 + 1.0),
+            },
+            _ => Value::Error(ErrorValue::Value),
+        },
+        "SHEETS" => match args {
+            [] => Value::Number(ev.workbook().sheets.len() as f64),
+            _ => Value::Error(ErrorValue::Value),
+        },
         "ISBLANK" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Empty)),
         "ISNUMBER" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Number(_))),
         "ISTEXT" => is_predicate(ev, sheet, args, |v| matches!(v, Value::Text(_))),
@@ -2308,4 +2349,115 @@ fn pair_of_numbers(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Resul
         .as_number()
         .map_err(Value::Error)?;
     Ok([a, b])
+}
+
+// --- Logical and information helpers ---------------------------------------
+
+/// A function taking no arguments at all.
+fn nullary(args: &[Expr], value: Value) -> Value {
+    if args.is_empty() {
+        value
+    } else {
+        Value::Error(ErrorValue::Value)
+    }
+}
+
+/// `N(value)` — the numeric reading of a value.
+///
+/// Not the same as a coercion: text is `0` rather than an error, `TRUE` is 1,
+/// and an error propagates. That asymmetry is the function's entire purpose, so
+/// routing it through the ordinary `as_number` would defeat it.
+fn eval_n(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    match ev.eval_expr(sheet, arg) {
+        Value::Number(n) => Value::Number(n),
+        Value::Bool(b) => Value::Number(if b { 1.0 } else { 0.0 }),
+        Value::Error(e) => Value::Error(e),
+        Value::Text(_) | Value::Empty => Value::Number(0.0),
+    }
+}
+
+/// `TYPE(value)` — 1 number, 2 text, 4 logical, 16 error, 64 array.
+fn eval_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let code = match ev.eval_expr(sheet, arg) {
+        // An empty cell reads as a number here, matching Excel: TYPE of a blank
+        // is 1, not a distinct "empty" code.
+        Value::Number(_) | Value::Empty => 1.0,
+        Value::Text(_) => 2.0,
+        Value::Bool(_) => 4.0,
+        Value::Error(_) => 16.0,
+    };
+    Value::Number(code)
+}
+
+/// `ERROR.TYPE(error)` — the ordinal of an error value, or `#N/A` when the
+/// argument is not an error at all.
+fn eval_error_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    match ev.eval_expr(sheet, arg) {
+        Value::Error(e) => Value::Number(match e {
+            ErrorValue::Null => 1.0,
+            ErrorValue::Div0 => 2.0,
+            ErrorValue::Value => 3.0,
+            ErrorValue::Ref => 4.0,
+            ErrorValue::Name => 5.0,
+            ErrorValue::Num => 6.0,
+            ErrorValue::Na => 7.0,
+            // #SPILL! post-dates the 5th edition, which stops at 7. Excel
+            // numbers it 9 (8 being #GETTING_DATA), so that is what a workbook
+            // round-tripped through Excel expects to see.
+            ErrorValue::Spill => 9.0,
+        }),
+        // Not an error: the answer is itself #N/A, not a number.
+        _ => Value::Error(ErrorValue::Na),
+    }
+}
+
+/// The zero-based index of a sheet by name, case-insensitively as Excel
+/// compares sheet names.
+fn sheet_index_by_name(ev: &Evaluator<'_>, name: &str) -> Option<usize> {
+    ev.workbook()
+        .sheets
+        .iter()
+        .position(|s| s.name.eq_ignore_ascii_case(name))
+}
+
+/// `ISREF(value)` — whether the argument *is* a reference.
+///
+/// Decided from the expression rather than its value, because by the time a
+/// function receives an argument the evaluator has already resolved a reference
+/// to its contents; asking the value would answer "no" for every reference.
+fn eval_is_ref(args: &[Expr]) -> Value {
+    match args {
+        [expr] => Value::Bool(matches!(expr, Expr::Reference(_) | Expr::Range(_, _))),
+        _ => Value::Error(ErrorValue::Value),
+    }
+}
+
+/// `ISFORMULA(reference)` — whether the referenced cell holds a formula.
+fn eval_is_formula(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [Expr::Reference(reference)] = args else {
+        // Anything that is not a plain reference cannot hold a formula, and
+        // Excel answers #VALUE! rather than FALSE — the difference matters,
+        // since FALSE would read as "that cell has no formula".
+        return Value::Error(ErrorValue::Value);
+    };
+    let at = CellRef::new(reference.row, reference.col);
+    let has = ev
+        .workbook()
+        .sheets
+        .get(sheet)
+        .and_then(|s| s.cells.get(at))
+        .is_some_and(|c| c.formula.is_some());
+    Value::Bool(has)
 }

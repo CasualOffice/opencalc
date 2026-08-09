@@ -1046,3 +1046,74 @@ fn gcd_lcm_multinomial_and_series() {
     assert_eq!(num("LOG(100)"), 2.0);
     assert_eq!(num("SQRTPI(4)"), (4.0 * std::f64::consts::PI).sqrt());
 }
+
+#[test]
+fn logical_and_information_functions() {
+    use casual_calc_model::ErrorValue;
+    assert_eq!(eval1("TRUE()"), CellValue::Bool(true));
+    assert_eq!(eval1("FALSE()"), CellValue::Bool(false));
+    // A stray argument is an error, not tolerated: it nearly always means the
+    // author meant something else.
+    assert_eq!(err("TRUE(1)"), ErrorValue::Value);
+    assert_eq!(err("NA()"), ErrorValue::Na);
+
+    // N reads text as 0 rather than erroring — that asymmetry is the whole
+    // reason the function exists, so it must not route through as_number.
+    assert_eq!(num("N(7)"), 7.0);
+    assert_eq!(num("N(TRUE())"), 1.0);
+    assert_eq!(num("N(\"abc\")"), 0.0);
+    assert_eq!(err("N(NA())"), ErrorValue::Na);
+
+    assert_eq!(num("TYPE(1)"), 1.0);
+    assert_eq!(num("TYPE(\"x\")"), 2.0);
+    assert_eq!(num("TYPE(TRUE())"), 4.0);
+    assert_eq!(num("TYPE(NA())"), 16.0);
+
+    assert_eq!(num("ERROR.TYPE(NA())"), 7.0);
+    assert_eq!(num("ERROR.TYPE(1/0)"), 2.0);
+    // Not an error: the answer is itself #N/A, not a number.
+    assert_eq!(err("ERROR.TYPE(5)"), ErrorValue::Na);
+}
+
+#[test]
+fn isref_reads_the_expression_not_the_value() {
+    // By the time a function receives an argument the evaluator has resolved a
+    // reference to its contents, so asking the value would answer FALSE for
+    // every reference. ISREF has to inspect the expression instead.
+    let mut b = Builder::new();
+    b.number((0, 0), 5.0)
+        .formula((1, 0), "ISREF(A1)")
+        .formula((2, 0), "ISREF(5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Bool(true));
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Bool(false));
+}
+
+#[test]
+fn isformula_distinguishes_a_formula_from_a_value() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    b.number((0, 0), 5.0)
+        .formula((1, 0), "A1*2")
+        .formula((2, 0), "ISFORMULA(A2)")
+        .formula((3, 0), "ISFORMULA(A1)")
+        .formula((4, 0), "ISFORMULA(5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 2, 0), CellValue::Bool(true));
+    assert_eq!(value_at(&wb, 3, 0), CellValue::Bool(false));
+    // A non-reference is #VALUE!, not FALSE — FALSE would read as "that cell
+    // has no formula", which is a different claim.
+    assert_eq!(value_at(&wb, 4, 0), CellValue::Error(ErrorValue::Value));
+}
+
+#[test]
+fn sheet_and_sheets_count_from_one() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "SHEET()").formula((1, 0), "SHEETS()");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 0), CellValue::Number(1.0));
+    assert_eq!(value_at(&wb, 1, 0), CellValue::Number(1.0));
+}
