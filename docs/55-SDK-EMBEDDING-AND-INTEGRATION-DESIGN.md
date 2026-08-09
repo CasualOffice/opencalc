@@ -650,6 +650,18 @@ fixed-position overlays, and `100vh` measuring the window inside a shadow root.
 - **Luckysheet: not researched, and does not need to be.** It became Univer,
   which is in §1.
 - **Assets are same-origin.** §3, and the reason is the worker in §3d.
+- **Keeping an integration current is the integrator's job**, not ours. No
+  auto-update, no compatibility shims for old versions, no phoning home to
+  check. We publish versions and a changelog; they choose when to take one.
+
+  One narrow exception, and it is a footgun the copy-to-public strategy in §3b
+  creates rather than a maintenance service: `npm update` bumps the JS but
+  leaves whatever was copied into `public/` alone, so a host can end up running
+  a new shim against last release's wasm. The engine's version is checked
+  against the shim's at load and a mismatch is a loud error naming the fix
+  (`npx opencalc-assets`), because the alternative is a bug report about a
+  function that "stopped working". That is the whole of what the §9 handshake's
+  version field is for — not skew management, just catching a stale copy.
 
 ---
 
