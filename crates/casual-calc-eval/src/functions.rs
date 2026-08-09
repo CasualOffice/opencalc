@@ -20,7 +20,14 @@ const MAX_RANGE_CELLS: u64 = 2_000_000;
 /// `call_function` so the two never drift. Add a function in both places.
 pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ABS", "ABS(number)"),
+    ("ACOS", "ACOS(number)"),
+    ("ACOSH", "ACOSH(number)"),
     ("AND", "AND(logical1, …)"),
+    ("ASIN", "ASIN(number)"),
+    ("ASINH", "ASINH(number)"),
+    ("ATAN", "ATAN(number)"),
+    ("ATAN2", "ATAN2(x, y)"),
+    ("ATANH", "ATANH(number)"),
     ("AVERAGE", "AVERAGE(number1, …)"),
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
@@ -28,19 +35,33 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CHOOSE", "CHOOSE(index, value1, …)"),
     ("COLUMN", "COLUMN([reference])"),
     ("COLUMNS", "COLUMNS(array)"),
+    ("COMBIN", "COMBIN(n, k)"),
+    ("COMBINA", "COMBINA(n, k)"),
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
+    ("COS", "COS(number)"),
+    ("COSH", "COSH(number)"),
+    ("COT", "COT(number)"),
+    ("COTH", "COTH(number)"),
     ("COUNT", "COUNT(value1, …)"),
     ("COUNTA", "COUNTA(value1, …)"),
     ("COUNTIF", "COUNTIF(range, criteria)"),
     ("COUNTIFS", "COUNTIFS(range1, criteria1, …)"),
+    ("CSC", "CSC(number)"),
+    ("CSCH", "CSCH(number)"),
     ("DATE", "DATE(year, month, day)"),
     ("DAY", "DAY(serial_number)"),
+    ("DEGREES", "DEGREES(angle)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
+    ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
+    ("EXP", "EXP(number)"),
+    ("FACT", "FACT(number)"),
+    ("FACTDOUBLE", "FACTDOUBLE(number)"),
     ("FIND", "FIND(find_text, within_text, [start])"),
     ("FLOOR", "FLOOR(number, significance)"),
+    ("GCD", "GCD(number1, …)"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
@@ -59,8 +80,12 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISODD", "ISODD(number)"),
     ("ISTEXT", "ISTEXT(value)"),
     ("LARGE", "LARGE(array, k)"),
+    ("LCM", "LCM(number1, …)"),
     ("LEFT", "LEFT(text, [num_chars])"),
     ("LEN", "LEN(text)"),
+    ("LN", "LN(number)"),
+    ("LOG", "LOG(number, [base])"),
+    ("LOG10", "LOG10(number)"),
     ("LOWER", "LOWER(text)"),
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
@@ -69,12 +94,20 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MIN", "MIN(number1, …)"),
     ("MOD", "MOD(number, divisor)"),
     ("MONTH", "MONTH(serial_number)"),
+    ("MROUND", "MROUND(number, multiple)"),
+    ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("NA", "NA()"),
     ("NOT", "NOT(logical)"),
+    ("ODD", "ODD(number)"),
     ("OR", "OR(logical1, …)"),
+    ("PERMUT", "PERMUT(n, k)"),
+    ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
+    ("PI", "PI()"),
     ("POWER", "POWER(number, power)"),
     ("PRODUCT", "PRODUCT(number1, …)"),
     ("PROPER", "PROPER(text)"),
+    ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
+    ("RADIANS", "RADIANS(angle)"),
     ("RANK", "RANK(number, ref, [order])"),
     ("REPLACE", "REPLACE(old, start, num_chars, new)"),
     ("REPT", "REPT(text, number_times)"),
@@ -85,9 +118,15 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ROW", "ROW([reference])"),
     ("ROWS", "ROWS(array)"),
     ("SEARCH", "SEARCH(find_text, within_text, [start])"),
+    ("SEC", "SEC(number)"),
+    ("SECH", "SECH(number)"),
+    ("SERIESSUM", "SERIESSUM(x, n, m, coefficients)"),
     ("SIGN", "SIGN(number)"),
+    ("SIN", "SIN(number)"),
+    ("SINH", "SINH(number)"),
     ("SMALL", "SMALL(array, k)"),
     ("SQRT", "SQRT(number)"),
+    ("SQRTPI", "SQRTPI(number)"),
     ("STDEV", "STDEV(number1, …)"),
     ("STDEVP", "STDEVP(number1, …)"),
     ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
@@ -95,10 +134,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SUMIF", "SUMIF(range, criteria, [sum_range])"),
     ("SUMIFS", "SUMIFS(sum_range, range1, criteria1, …)"),
     ("SUMPRODUCT", "SUMPRODUCT(array1, …)"),
-    (
-        "SWITCH",
-        "SWITCH(expression, value1, result1, …, [default])",
-    ),
+    ("SUMSQ", "SUMSQ(number1, …)"),
+    ("TAN", "TAN(number)"),
+    ("TANH", "TANH(number)"),
     ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
     ("TRIM", "TRIM(text)"),
@@ -138,6 +176,80 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SUMIF" => eval_sumif(ev, sheet, args),
         "AVERAGEIF" => eval_averageif(ev, sheet, args),
         "ABS" => scalar(ev, sheet, args, f64::abs),
+        // Trigonometry and friends. The spec defines these as the ordinary
+        // mathematical functions, so they delegate to the standard library;
+        // what needs care is the domain errors below, where Excel answers
+        // #NUM! rather than the IEEE NaN Rust would hand back.
+        "SIN" => scalar(ev, sheet, args, f64::sin),
+        "COS" => scalar(ev, sheet, args, f64::cos),
+        "TAN" => scalar(ev, sheet, args, f64::tan),
+        "SINH" => scalar(ev, sheet, args, f64::sinh),
+        "COSH" => scalar(ev, sheet, args, f64::cosh),
+        "TANH" => scalar(ev, sheet, args, f64::tanh),
+        "ATAN" => scalar(ev, sheet, args, f64::atan),
+        "DEGREES" => scalar(ev, sheet, args, f64::to_degrees),
+        "RADIANS" => scalar(ev, sheet, args, f64::to_radians),
+        "EXP" => scalar(ev, sheet, args, f64::exp),
+        // Reciprocal trig: a zero denominator is #DIV/0!, not infinity.
+        "COT" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.tan(), ErrorValue::Div0)
+        }),
+        "COTH" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.tanh(), ErrorValue::Div0)
+        }),
+        "CSC" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.sin(), ErrorValue::Div0)
+        }),
+        "CSCH" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.sinh(), ErrorValue::Div0)
+        }),
+        "SEC" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.cos(), ErrorValue::Div0)
+        }),
+        "SECH" => checked(ev, sheet, args, |n| {
+            finite_or(1.0 / n.cosh(), ErrorValue::Div0)
+        }),
+        // Domain-restricted: outside the domain the answer is #NUM!.
+        "ASIN" => checked(ev, sheet, args, |n| domain(n.asin())),
+        "ACOS" => checked(ev, sheet, args, |n| domain(n.acos())),
+        "ACOSH" => checked(ev, sheet, args, |n| domain(n.acosh())),
+        "ASINH" => scalar(ev, sheet, args, f64::asinh),
+        "ATANH" => checked(ev, sheet, args, |n| domain(n.atanh())),
+        "LN" => checked(ev, sheet, args, |n| domain(n.ln())),
+        "LOG10" => checked(ev, sheet, args, |n| domain(n.log10())),
+        "SQRTPI" => checked(ev, sheet, args, |n| {
+            domain((n * std::f64::consts::PI).sqrt())
+        }),
+        "PI" => {
+            if args.is_empty() {
+                Value::Number(std::f64::consts::PI)
+            } else {
+                Value::Error(ErrorValue::Value)
+            }
+        }
+        // ATAN2's arguments are (x, y) in OOXML — the reverse of the atan2(y, x)
+        // convention every maths library uses. Passing them straight through
+        // would silently reflect every angle about the diagonal.
+        "ATAN2" => eval_atan2(ev, sheet, args),
+        "LOG" => eval_log(ev, sheet, args),
+        "EVEN" => scalar(ev, sheet, args, |n| round_away_to(n, 2.0)),
+        "ODD" => scalar(ev, sheet, args, eval_odd),
+        "QUOTIENT" => eval_quotient(ev, sheet, args),
+        "MROUND" => eval_mround(ev, sheet, args),
+        "FACT" => checked(ev, sheet, args, |n| factorial(n.trunc())),
+        "FACTDOUBLE" => checked(ev, sheet, args, factorial_double),
+        "COMBIN" => eval_combin(ev, sheet, args, false),
+        "COMBINA" => eval_combin(ev, sheet, args, true),
+        "PERMUT" => eval_permut(ev, sheet, args, false),
+        "PERMUTATIONA" => eval_permut(ev, sheet, args, true),
+        "GCD" => eval_gcd_lcm(ev, sheet, args, true),
+        "LCM" => eval_gcd_lcm(ev, sheet, args, false),
+        "MULTINOMIAL" => eval_multinomial(ev, sheet, args),
+        "SUMSQ" => match flatten_numbers(ev, sheet, args) {
+            Ok(ns) => Value::Number(ns.iter().map(|n| n * n).sum()),
+            Err(e) => Value::Error(e),
+        },
+        "SERIESSUM" => eval_seriessum(ev, sheet, args),
         "INT" => scalar(ev, sheet, args, f64::floor),
         "SQRT" => eval_sqrt(ev, sheet, args),
         "MOD" => eval_mod(ev, sheet, args),
@@ -1880,4 +1992,320 @@ fn eval_row_col(ev: &mut Evaluator<'_>, args: &[Expr], row: bool) -> Value {
         Some(_) => return Value::Error(ErrorValue::Value),
     };
     Value::Number((index + 1) as f64)
+}
+
+// --- Maths helpers ---------------------------------------------------------
+
+/// A unary function that can fail. Excel answers with an error value where IEEE
+/// arithmetic would produce NaN or an infinity, so the closure returns a
+/// [`Value`] rather than an `f64`.
+fn checked(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], f: fn(f64) -> Value) -> Value {
+    let Some(arg) = args.first() else {
+        return Value::Error(ErrorValue::Value);
+    };
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => f(n),
+        Err(e) => Value::Error(e),
+    }
+}
+
+/// A result outside the function's domain is `#NUM!`, which is what Excel
+/// reports for `ASIN(2)` or `LN(-1)` where the maths yields NaN.
+fn domain(v: f64) -> Value {
+    if v.is_finite() {
+        Value::Number(v)
+    } else {
+        Value::Error(ErrorValue::Num)
+    }
+}
+
+/// A non-finite result becomes `err`; used where a zero denominator means the
+/// answer is a division error rather than an infinity.
+fn finite_or(v: f64, err: ErrorValue) -> Value {
+    if v.is_finite() {
+        Value::Number(v)
+    } else {
+        Value::Error(err)
+    }
+}
+
+/// Round away from zero to the next multiple of `step`, preserving sign. Zero
+/// stays zero: `EVEN(0)` is 0, not 2.
+fn round_away_to(n: f64, step: f64) -> f64 {
+    if n == 0.0 {
+        return 0.0;
+    }
+    let scaled = (n.abs() / step).ceil() * step;
+    if n < 0.0 { -scaled } else { scaled }
+}
+
+/// `ODD` rounds away from zero to the next odd integer; `ODD(0)` is 1.
+fn eval_odd(n: f64) -> f64 {
+    if n == 0.0 {
+        return 1.0;
+    }
+    let up = ((n.abs() + 1.0) / 2.0).ceil() * 2.0 - 1.0;
+    if n < 0.0 { -up } else { up }
+}
+
+/// `n!` for a non-negative integer. Negative input is `#NUM!`; anything past
+/// 170 overflows an `f64`, which Excel also reports as `#NUM!` rather than
+/// returning an infinity.
+fn factorial(n: f64) -> Value {
+    if !(0.0..=170.0).contains(&n) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let mut acc = 1.0f64;
+    for i in 2..=(n as u64) {
+        acc *= i as f64;
+    }
+    Value::Number(acc)
+}
+
+/// The double factorial `n!!` — every other term down to 1 or 2.
+fn factorial_double(n: f64) -> Value {
+    let n = n.trunc();
+    if n < -1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let mut acc = 1.0f64;
+    let mut i = n;
+    while i > 1.0 {
+        acc *= i;
+        i -= 2.0;
+        if !acc.is_finite() {
+            return Value::Error(ErrorValue::Num);
+        }
+    }
+    Value::Number(acc)
+}
+
+/// `ATAN2(x, y)`. OOXML orders the arguments x-then-y, the reverse of the
+/// `atan2(y, x)` every maths library uses; swapping them here is the whole
+/// point of the function existing separately.
+fn eval_atan2(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [x, y] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if x == 0.0 && y == 0.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    Value::Number(y.atan2(x))
+}
+
+/// `LOG(number, [base])`, base 10 when omitted.
+fn eval_log(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let n = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let base = if args.len() == 2 {
+        match ev.eval_expr(sheet, &args[1]).as_number() {
+            Ok(b) => b,
+            Err(e) => return Value::Error(e),
+        }
+    } else {
+        10.0
+    };
+    if n <= 0.0 || base <= 0.0 || base == 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    domain(n.log(base))
+}
+
+/// `QUOTIENT` — the integer part of a division, discarding the remainder.
+fn eval_quotient(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    match pair_of_numbers(ev, sheet, args) {
+        Ok([_, 0.0]) => Value::Error(ErrorValue::Div0),
+        Ok([a, b]) => Value::Number((a / b).trunc()),
+        Err(e) => e,
+    }
+}
+
+/// `MROUND` — round to the nearest multiple. Excel requires the number and the
+/// multiple to share a sign, and reports `#NUM!` when they do not.
+fn eval_mround(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    match pair_of_numbers(ev, sheet, args) {
+        Ok([n, m]) => {
+            if m == 0.0 {
+                return Value::Number(0.0);
+            }
+            if n.signum() != m.signum() && n != 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number((n / m).round() * m)
+        }
+        Err(e) => e,
+    }
+}
+
+/// `COMBIN(n, k)`, or `COMBINA` for combinations with repetition.
+fn eval_combin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], repeat: bool) -> Value {
+    match pair_of_numbers(ev, sheet, args) {
+        Ok([n, k]) => {
+            let (n, k) = (n.trunc(), k.trunc());
+            if n < 0.0 || k < 0.0 || (!repeat && k > n) {
+                return Value::Error(ErrorValue::Num);
+            }
+            // COMBINA(n, k) = COMBIN(n + k - 1, k).
+            let (n, k) = if repeat { (n + k - 1.0, k) } else { (n, k) };
+            binomial(n, k)
+        }
+        Err(e) => e,
+    }
+}
+
+/// `n choose k`, accumulated term by term so the intermediate products stay
+/// representable — computing `n!/(k!(n-k)!)` directly overflows well before the
+/// result does.
+fn binomial(n: f64, k: f64) -> Value {
+    if k > n {
+        return Value::Number(0.0);
+    }
+    let k = k.min(n - k);
+    let mut acc = 1.0f64;
+    let mut i = 0.0;
+    while i < k {
+        acc = acc * (n - i) / (i + 1.0);
+        i += 1.0;
+    }
+    if acc.is_finite() {
+        Value::Number(acc.round())
+    } else {
+        Value::Error(ErrorValue::Num)
+    }
+}
+
+/// `PERMUT(n, k)`, or `PERMUTATIONA` for permutations with repetition.
+fn eval_permut(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], repeat: bool) -> Value {
+    match pair_of_numbers(ev, sheet, args) {
+        Ok([n, k]) => {
+            let (n, k) = (n.trunc(), k.trunc());
+            if n < 0.0 || k < 0.0 || (!repeat && k > n) {
+                return Value::Error(ErrorValue::Num);
+            }
+            if repeat {
+                return finite_or(n.powf(k), ErrorValue::Num);
+            }
+            let mut acc = 1.0f64;
+            let mut i = 0.0;
+            while i < k {
+                acc *= n - i;
+                i += 1.0;
+            }
+            finite_or(acc, ErrorValue::Num)
+        }
+        Err(e) => e,
+    }
+}
+
+/// `GCD` / `LCM` over every number in the arguments. Both are defined on
+/// non-negative integers, and the fractional part is truncated as Excel does.
+fn eval_gcd_lcm(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], gcd_mode: bool) -> Value {
+    let numbers = match flatten_numbers(ev, sheet, args) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    if numbers.is_empty() {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut acc: u64 = if gcd_mode { 0 } else { 1 };
+    for n in numbers {
+        if n < 0.0 {
+            return Value::Error(ErrorValue::Num);
+        }
+        let v = n.trunc() as u64;
+        acc = if gcd_mode {
+            gcd(acc, v)
+        } else if v == 0 {
+            return Value::Number(0.0);
+        } else {
+            match (acc / gcd(acc, v)).checked_mul(v) {
+                Some(l) => l,
+                None => return Value::Error(ErrorValue::Num),
+            }
+        };
+    }
+    Value::Number(acc as f64)
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// `MULTINOMIAL` — `(Σx)! / Πx!`, built up term by term to avoid overflowing on
+/// the factorials when the result itself is small.
+fn eval_multinomial(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let numbers = match flatten_numbers(ev, sheet, args) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let mut acc = 1.0f64;
+    let mut running = 0.0f64;
+    for n in numbers {
+        if n < 0.0 {
+            return Value::Error(ErrorValue::Num);
+        }
+        let n = n.trunc();
+        running += n;
+        match binomial(running, n) {
+            Value::Number(c) => acc *= c,
+            other => return other,
+        }
+    }
+    finite_or(acc, ErrorValue::Num)
+}
+
+/// `SERIESSUM(x, n, m, coefficients)` — the power series
+/// `Σ coefficient_i · x^(n + i·m)`.
+fn eval_seriessum(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut scalars = [0.0f64; 3];
+    for (i, slot) in scalars.iter_mut().enumerate() {
+        match ev.eval_expr(sheet, &args[i]).as_number() {
+            Ok(v) => *slot = v,
+            Err(e) => return Value::Error(e),
+        }
+    }
+    let [x, n, m] = scalars;
+    let coefficients = match flatten_numbers(ev, sheet, &args[3..]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let mut total = 0.0f64;
+    for (i, c) in coefficients.iter().enumerate() {
+        total += c * x.powf(n + (i as f64) * m);
+    }
+    finite_or(total, ErrorValue::Num)
+}
+
+/// Evaluate exactly two arguments as numbers, or the error to report instead.
+fn pair_of_numbers(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Result<[f64; 2], Value> {
+    if args.len() != 2 {
+        return Err(Value::Error(ErrorValue::Value));
+    }
+    let a = ev
+        .eval_expr(sheet, &args[0])
+        .as_number()
+        .map_err(Value::Error)?;
+    let b = ev
+        .eval_expr(sheet, &args[1])
+        .as_number()
+        .map_err(Value::Error)?;
+    Ok([a, b])
 }

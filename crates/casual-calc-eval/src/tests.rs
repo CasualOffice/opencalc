@@ -907,3 +907,142 @@ fn text_function_formats_via_the_display_engine() {
     assert_eq!(text_at(&wb, 2, 1), "($42.00)");
     assert_eq!(text_at(&wb, 3, 1), "5.000");
 }
+
+/// Evaluate a single formula and return its value.
+fn eval1(text: &str) -> CellValue {
+    let mut b = Builder::new();
+    b.formula((0, 0), text);
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    value_at(&wb, 0, 0)
+}
+
+fn num(text: &str) -> f64 {
+    match eval1(text) {
+        CellValue::Number(n) => n,
+        other => panic!("{text} gave {other:?}, expected a number"),
+    }
+}
+
+fn err(text: &str) -> casual_calc_model::ErrorValue {
+    match eval1(text) {
+        CellValue::Error(e) => e,
+        other => panic!("{text} gave {other:?}, expected an error"),
+    }
+}
+
+#[test]
+fn trigonometry_matches_the_spec() {
+    use std::f64::consts::PI;
+    assert!((num("SIN(PI()/2)") - 1.0).abs() < 1e-12);
+    assert!((num("COS(0)") - 1.0).abs() < 1e-12);
+    assert!((num("DEGREES(PI())") - 180.0).abs() < 1e-12);
+    assert!((num("RADIANS(180)") - PI).abs() < 1e-12);
+    assert!((num("ACOS(1)")).abs() < 1e-12);
+    assert!((num("SINH(0)")).abs() < 1e-12);
+    assert!((num("SEC(0)") - 1.0).abs() < 1e-12);
+    assert!((num("CSC(PI()/2)") - 1.0).abs() < 1e-12);
+    assert!((num("COT(PI()/4)") - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn atan2_takes_x_before_y() {
+    use casual_calc_model::ErrorValue;
+    use std::f64::consts::PI;
+    // OOXML orders the arguments x-then-y, the reverse of the atan2(y, x) that
+    // every maths library uses. ATAN2(1, 0) is therefore 0 and ATAN2(0, 1) is
+    // a quarter turn — passing them straight through would swap the two and
+    // silently mirror every angle about the diagonal.
+    assert!((num("ATAN2(1,0)")).abs() < 1e-12);
+    assert!((num("ATAN2(0,1)") - PI / 2.0).abs() < 1e-12);
+    assert!((num("ATAN2(1,1)") - PI / 4.0).abs() < 1e-12);
+    assert_eq!(err("ATAN2(0,0)"), ErrorValue::Div0);
+}
+
+#[test]
+fn domain_errors_are_num_not_nan() {
+    use casual_calc_model::ErrorValue;
+    // IEEE arithmetic yields NaN here; a spreadsheet must answer #NUM!, and a
+    // NaN leaking into a cell would compare and format as nonsense.
+    for f in [
+        "ASIN(2)",
+        "ACOS(-2)",
+        "LN(-1)",
+        "LOG10(0)",
+        "ACOSH(0.5)",
+        "ATANH(1)",
+    ] {
+        assert_eq!(err(f), ErrorValue::Num, "{f}");
+    }
+    // A zero denominator is a division error, not an infinity.
+    assert_eq!(err("CSC(0)"), ErrorValue::Div0);
+    assert_eq!(err("COT(0)"), ErrorValue::Div0);
+}
+
+#[test]
+fn rounding_helpers_round_away_from_zero() {
+    assert_eq!(num("EVEN(1.5)"), 2.0);
+    assert_eq!(num("EVEN(3)"), 4.0);
+    assert_eq!(num("EVEN(-1.5)"), -2.0);
+    assert_eq!(num("EVEN(0)"), 0.0, "EVEN(0) is 0, not 2");
+    assert_eq!(num("ODD(1.5)"), 3.0);
+    assert_eq!(num("ODD(2)"), 3.0);
+    assert_eq!(num("ODD(-2)"), -3.0);
+    assert_eq!(num("ODD(0)"), 1.0, "ODD(0) is 1, not -1 or 0");
+    assert_eq!(num("MROUND(10,3)"), 9.0);
+    assert_eq!(num("MROUND(-10,-3)"), -9.0);
+    assert_eq!(num("QUOTIENT(9,2)"), 4.0);
+    assert_eq!(
+        num("QUOTIENT(-9,2)"),
+        -4.0,
+        "QUOTIENT truncates toward zero"
+    );
+}
+
+#[test]
+fn mround_rejects_mismatched_signs() {
+    use casual_calc_model::ErrorValue;
+    // Excel refuses to round a positive number to a negative multiple.
+    assert_eq!(err("MROUND(10,-3)"), ErrorValue::Num);
+}
+
+#[test]
+fn combinatorics() {
+    use casual_calc_model::ErrorValue;
+    assert_eq!(num("FACT(5)"), 120.0);
+    assert_eq!(num("FACT(0)"), 1.0);
+    assert_eq!(err("FACT(-1)"), ErrorValue::Num);
+    assert_eq!(num("FACTDOUBLE(7)"), 105.0); // 7·5·3·1
+    assert_eq!(num("FACTDOUBLE(8)"), 384.0); // 8·6·4·2
+    assert_eq!(num("COMBIN(8,2)"), 28.0);
+    assert_eq!(num("COMBINA(4,3)"), 20.0);
+    assert_eq!(num("PERMUT(4,2)"), 12.0);
+    assert_eq!(num("PERMUTATIONA(4,2)"), 16.0);
+    assert_eq!(err("COMBIN(2,8)"), ErrorValue::Num);
+    // Large binomials must not overflow on the way to a small answer: 100!
+    // exceeds f64 range but C(100,2) is 4950.
+    assert_eq!(num("COMBIN(100,2)"), 4950.0);
+}
+
+#[test]
+fn factorial_overflow_is_num() {
+    use casual_calc_model::ErrorValue;
+    // 170! is the largest representable; 171! is #NUM!, not an infinity.
+    assert!(num("FACT(170)").is_finite());
+    assert_eq!(err("FACT(171)"), ErrorValue::Num);
+}
+
+#[test]
+fn gcd_lcm_multinomial_and_series() {
+    assert_eq!(num("GCD(24,36)"), 12.0);
+    assert_eq!(num("GCD(5,0)"), 5.0);
+    assert_eq!(num("LCM(4,6)"), 12.0);
+    assert_eq!(num("LCM(4,0)"), 0.0);
+    assert_eq!(num("MULTINOMIAL(2,3,4)"), 1260.0);
+    assert_eq!(num("SUMSQ(3,4)"), 25.0);
+    // SERIESSUM(x=2, n=1, m=1, {1,1,1}) = 2 + 4 + 8.
+    assert_eq!(num("SERIESSUM(2,1,1,1)"), 2.0);
+    assert_eq!(num("LOG(8,2)"), 3.0);
+    assert_eq!(num("LOG(100)"), 2.0);
+    assert_eq!(num("SQRTPI(4)"), (4.0 * std::f64::consts::PI).sqrt());
+}
