@@ -20,6 +20,7 @@ mod display;
 pub mod font_substitution;
 mod geometry;
 mod numfmt;
+pub mod table_style;
 
 pub use axis::Axis;
 pub use display::{Align, BorderLine, DisplayList, PaintItem, Rect};

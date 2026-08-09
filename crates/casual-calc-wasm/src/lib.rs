@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use casual_calc_eval::recalculate;
 use casual_calc_formula::{CellReference, Expr, parse, shift_references};
 use casual_calc_import::import_package;
+use casual_calc_layout::table_style::table_style_colors;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_color, display_text,
     layout_viewport,
@@ -1354,6 +1355,139 @@ pub fn session_remove_table(sheet: usize, row: u32, col: u32) -> Result<(), JsEr
     })
 }
 
+/// Rename the table under a cell.
+///
+/// A structured reference resolves by name alone, so the new name has to be
+/// unique across the workbook or `Sales[Amount]` starts pointing at whichever
+/// table the resolver reaches first. A clash is rejected rather than silently
+/// suffixed: the user typed a specific name and deserves to be told.
+#[wasm_bindgen]
+pub fn session_rename_table(sheet: usize, row: u32, col: u32, name: &str) -> Result<(), JsError> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(JsError::new("a table needs a name"));
+    }
+    // Excel's rule: a name is an identifier, not a label — no spaces, and it
+    // cannot look like a cell reference.
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit())
+        || name
+            .chars()
+            .any(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+    {
+        return Err(JsError::new(
+            "a table name must start with a letter and hold only letters, digits, _ or .",
+        ));
+    }
+    let clash = with_session(|s| {
+        s.workbook().sheets.iter().enumerate().any(|(i, sh)| {
+            sh.tables.iter().any(|t| {
+                t.name.eq_ignore_ascii_case(&name)
+                    && !(i == sheet
+                        && row >= t.range.start.row
+                        && row <= t.range.end.row
+                        && col >= t.range.start.col
+                        && col <= t.range.end.col)
+            })
+        })
+    })
+    .unwrap_or(false);
+    if clash {
+        return Err(JsError::new("another table already has that name"));
+    }
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(t) = table_at_mut(&mut data.tables, row, col) {
+            t.name = name.clone();
+            t.display_name = name.clone();
+        }
+    })
+}
+
+/// Set the style name and banding flags on the table under a cell.
+///
+/// The name is what every colour is derived from — Excel stores no fills for a
+/// table, only this name — so changing it is what restyles the table.
+///
+/// `flags` is a bitmask: 1 banded rows, 2 banded columns, 4 emphasise the first
+/// column, 8 emphasise the last. One argument rather than four booleans so the
+/// whole change stays a single undo step.
+#[wasm_bindgen]
+pub fn session_set_table_style(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    style: &str,
+    flags: u32,
+) -> Result<(), JsError> {
+    let style = style.to_owned();
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(t) = table_at_mut(&mut data.tables, row, col) {
+            for (bit, key) in [
+                (1, "showRowStripes"),
+                (2, "showColumnStripes"),
+                (4, "showFirstColumn"),
+                (8, "showLastColumn"),
+            ] {
+                t.style
+                    .insert(key.to_owned(), u8::from(flags & bit != 0).to_string());
+            }
+            if style.is_empty() {
+                t.style.remove("name");
+            } else {
+                t.style.insert("name".to_owned(), style.clone());
+            }
+        }
+    })
+}
+
+/// Turn a table's header row on or off.
+///
+/// The range does not move: Excel's "Header Row" checkbox decides whether the
+/// table's first row is read as headers, not where the table sits. Shifting the
+/// range here would either swallow a row of data or leave one stranded outside
+/// the table.
+#[wasm_bindgen]
+pub fn session_set_table_headers(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    on: bool,
+) -> Result<(), JsError> {
+    edit_sheet_metadata(sheet, move |_, data| {
+        if let Some(t) = table_at_mut(&mut data.tables, row, col) {
+            t.header_row_count = u32::from(on);
+        }
+    })
+}
+
+/// The colours a style name resolves to, as JSON — what the style picker
+/// paints its swatches with, so the preview and the grid cannot disagree.
+#[wasm_bindgen]
+pub fn session_table_style_preview(style: &str) -> String {
+    with_session(|s| {
+        let c = table_style_colors(s.workbook(), style);
+        format!(
+            "{{\"headerFill\":{},\"headerText\":{},\"bodyFill\":{},\"bandFill\":{},\"border\":{}}}",
+            json_string(&c.header_fill),
+            json_string(&c.header_text),
+            json_string(&c.body_fill),
+            json_string(&c.band_fill),
+            json_string(&c.border),
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// The table covering a cell, mutably. Every table command needs this same
+/// lookup, and writing it out each time is how two of them drifted apart.
+fn table_at_mut(tables: &mut [Table], row: u32, col: u32) -> Option<&mut Table> {
+    tables.iter_mut().find(|t| {
+        row >= t.range.start.row
+            && row <= t.range.end.row
+            && col >= t.range.start.col
+            && col <= t.range.end.col
+    })
+}
+
 /// Turn a table's totals row on or off, growing or shrinking its range.
 #[wasm_bindgen]
 pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Result<(), JsError> {
@@ -1438,6 +1572,48 @@ pub fn session_table_autoexpand(sheet: usize, row: u32, col: u32) -> Result<(), 
     })
 }
 
+/// One table as JSON, with its style resolved to concrete colours.
+///
+/// Shared by `session_table_at` and `session_tables`: the two used to format
+/// this separately, which is how `showRowStripes` went out as a bare `1` from
+/// one of them while the host compared it to the string `"1"` — banding never
+/// painted on any table, and nothing pointed at why.
+fn table_json(workbook: &Workbook, t: &Table) -> String {
+    let flag = |key: &str| {
+        matches!(
+            t.style.get(key).map(String::as_str),
+            Some("1") | Some("true")
+        )
+    };
+    let style = t.style.get("name").map(String::as_str).unwrap_or_default();
+    let c = table_style_colors(workbook, style);
+    format!(
+        "{{\"name\":{},\"style\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\
+         \"headers\":{},\"totals\":{},\"stripes\":{},\"colStripes\":{},\
+         \"firstCol\":{},\"lastCol\":{},\
+         \"headerFill\":{},\"headerText\":{},\"bodyFill\":{},\"bodyText\":{},\
+         \"bandFill\":{},\"border\":{}}}",
+        json_string(&t.name),
+        json_string(style),
+        t.range.start.row,
+        t.range.start.col,
+        t.range.end.row,
+        t.range.end.col,
+        t.header_row_count,
+        t.totals_row_count,
+        flag("showRowStripes"),
+        flag("showColumnStripes"),
+        flag("showFirstColumn"),
+        flag("showLastColumn"),
+        json_string(&c.header_fill),
+        json_string(&c.header_text),
+        json_string(&c.body_fill),
+        json_string(&c.body_text),
+        json_string(&c.band_fill),
+        json_string(&c.border),
+    )
+}
+
 /// The table covering a cell as JSON, or `null` — drives the UI's state.
 #[wasm_bindgen]
 pub fn session_table_at(sheet: usize, row: u32, col: u32) -> String {
@@ -1452,17 +1628,7 @@ pub fn session_table_at(sheet: usize, row: u32, col: u32) -> String {
         }) else {
             return "null".to_owned();
         };
-        format!(
-            "{{\"name\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"headers\":{},\"totals\":{},\"stripes\":{}}}",
-            json_string(&t.name),
-            t.range.start.row,
-            t.range.start.col,
-            t.range.end.row,
-            t.range.end.col,
-            t.header_row_count,
-            t.totals_row_count,
-            t.style.get("showRowStripes").map(String::as_str).unwrap_or("0"),
-        )
+        table_json(s.workbook(), t)
     })
     .unwrap_or_else(|| "null".to_owned())
 }
@@ -1477,19 +1643,7 @@ pub fn session_tables(sheet: usize) -> String {
         let items: Vec<String> = sh
             .tables
             .iter()
-            .map(|t| {
-                format!(
-                    "{{\"name\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"headers\":{},\"totals\":{},\"stripes\":{}}}",
-                    json_string(&t.name),
-                    t.range.start.row,
-                    t.range.start.col,
-                    t.range.end.row,
-                    t.range.end.col,
-                    t.header_row_count,
-                    t.totals_row_count,
-                    t.style.get("showRowStripes").map(String::as_str).unwrap_or("0"),
-                )
-            })
+            .map(|t| table_json(s.workbook(), t))
             .collect();
         format!("[{}]", items.join(","))
     })

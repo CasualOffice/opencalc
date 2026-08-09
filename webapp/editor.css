@@ -957,3 +957,18 @@ button.fx:hover { color: var(--fg); background: var(--card); }
   --table-header: rgba(96, 145, 255, 0.20);
   --table-band: rgba(148, 163, 184, 0.10);
 }
+
+/* The table panel: name, banding checkboxes and the style swatches. */
+.oc-table-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-bottom: 12px; }
+.oc-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg); }
+.oc-table-styles { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+/* Each swatch is a four-row miniature of the table it would produce: header,
+   plain row, banded row, plain row. */
+.oc-style-swatch {
+  display: grid; grid-template-rows: repeat(4, 6px);
+  width: 46px; padding: 2px; gap: 0;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); cursor: pointer;
+}
+.oc-style-swatch span { display: block; }
+.oc-style-swatch.sel { outline: 2px solid var(--accent); outline-offset: 1px; }

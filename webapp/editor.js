@@ -85,6 +85,26 @@ let linkCells = new Set();
 // Tables on the current sheet, refreshed each draw. Held so the header
 // filter-button hit test does not have to ask the engine on every mousedown.
 let tablesInView = [];
+// A cell's text colour. The cell's own wins; a table supplies one where the
+// cell has none, because a table style's colours are part of the style, not of
+// the cells — and because the block a table paints is light whatever the
+// application theme is, so the grid's own text colour would vanish on it.
+function cellFg(it) {
+  if (it.fc) return "#" + it.fc;
+  return tableTextAt(it.r, it.c) || colors.fg;
+}
+// The table text colour at a cell, or null where the cell's own style wins.
+function tableTextAt(r, c) {
+  for (const t of tablesInView) {
+    if (r < t.r0 || r > t.r1 || c < t.c0 || c > t.c1) continue;
+    const isHeader = t.headers > 0 && r === t.r0;
+    const isTotals = t.totals > 0 && r === t.r1;
+    // The header's colour is part of the style — white on a Medium accent —
+    // and the body's is whatever reads against the light block a table is.
+    return isHeader || isTotals ? "#" + t.headerText : "#" + t.bodyText;
+  }
+  return null;
+}
 let errorCells = new Set();   // "r,c" of cells holding an error value, likewise
 
 // What each spreadsheet error actually means, in the terms that caused it.
@@ -454,7 +474,7 @@ function drawRuns(it, x, y) {
   let cursor = x;
   for (const run of it.runs) {
     ctx.font = runFont(it, run);
-    ctx.fillStyle = run.fc ? "#" + run.fc : (it.fc ? "#" + it.fc : colors.fg);
+    ctx.fillStyle = run.fc ? "#" + run.fc : (cellFg(it));
     // Superscript rides above the baseline, subscript below it. The offsets
     // are fractions of the cell's size so they track a resized font.
     const shift = run.va === "superscript" ? -cellPx(it) * 0.32
@@ -1007,6 +1027,65 @@ function draw() {
     ctx.restore();
   };
 
+  // Tables: header shading and banded rows.
+  //
+  // This has to run before the cell pass, not after it: the fills are opaque,
+  // and painting them later covers the text. The block used to sit near the end
+  // of draw() with a comment claiming otherwise — it got away with it only
+  // because the two colours it used were 16%-alpha washes.
+  tablesInView = [];
+  if (wasm) {
+    try { tablesInView = JSON.parse(wasm.session_tables(state.sheet)); } catch {}
+    for (const t of tablesInView) {
+      // Colours come from the table's own style name resolved against the
+      // workbook theme, not from constants here: a file whose author chose a
+      // green style has to open green.
+      //
+      // The body is filled too, not just the bands. A table is a light block in
+      // Excel whatever the application theme is, and painting only the bands
+      // left light stripes across a dark grid with unreadable text on them.
+      for (let r = t.r0; r <= t.r1; r++) {
+        const ry = rowYAt(r);
+        if (ry === undefined) continue;
+        const rh = rowHAt(r);
+        const isHeader = t.headers > 0 && r === t.r0;
+        const isTotals = t.totals > 0 && r === t.r1;
+        // Bands count from the first *data* row, so a header does not shift
+        // the stripe pattern by one and make the first data row look banded
+        // when it should not be.
+        const dataIndex = r - t.r0 - (t.headers > 0 ? 1 : 0);
+        const banded = t.stripes && !isHeader && !isTotals && dataIndex % 2 === 1;
+        for (let c = t.c0; c <= t.c1; c++) {
+          const cx = colXAt(c);
+          if (cx === undefined) continue;
+          const cw = colWAt(c);
+          // A column stripe alternates on top of the row banding, and an
+          // emphasised first/last column reads as banded too.
+          const colBanded = t.colStripes && (c - t.c0) % 2 === 1;
+          const emphasised = (t.firstCol && c === t.c0) || (t.lastCol && c === t.c1);
+          const fill = (isHeader || isTotals)
+            ? "#" + t.headerFill
+            : (banded || colBanded || emphasised) ? "#" + t.bandFill : "#" + t.bodyFill;
+          withQuad(r, c, () => { ctx.fillStyle = fill; ctx.fillRect(cx, ry, cw, rh); });
+        }
+        // The rule under the header is what a Light style has instead of a
+        // fill, so it is drawn for every family rather than only where the
+        // header is coloured.
+        if (isHeader || isTotals) {
+          const y = isHeader ? ry + rh - 1 : ry;
+          for (let c = t.c0; c <= t.c1; c++) {
+            const cx = colXAt(c);
+            if (cx === undefined) continue;
+            withQuad(r, c, () => {
+              ctx.fillStyle = "#" + t.border;
+              ctx.fillRect(cx, y, colWAt(c), 1);
+            });
+          }
+        }
+      }
+    }
+  }
+
   // Data bars sit behind the value: drawn after the cell fills so they read as
   // part of the cell, before the text so they never obscure it.
   ctx.textBaseline = "middle";
@@ -1129,7 +1208,7 @@ function draw() {
       ctx.rect(x, yTop, w, h);
       ctx.clip();
       ctx.font = cellFont(it);
-      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.fillStyle = cellFg(it);
       // Indent shifts the text off its leading edge (Excel: ~3 space-widths
       // per level), so an indented label lines up under its parent.
       const ind = (it.in || 0) * INDENT_PX;
@@ -1176,7 +1255,7 @@ function draw() {
       ctx.beginPath();
       ctx.rect(x, yTop, w, h);
       ctx.clip();
-      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.fillStyle = cellFg(it);
       ctx.textAlign = "center";
       if (it.rot === 255) {
         // Stacked: one glyph per line, upright.
@@ -1206,7 +1285,7 @@ function draw() {
       ctx.beginPath();
       ctx.rect(x, yTop, w, h);
       ctx.clip();
-      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.fillStyle = cellFg(it);
       ctx.textAlign = "left";
       if (unit > 0.5) {
         // Guarded on a real width: a zero-width string would loop forever.
@@ -1233,7 +1312,7 @@ function draw() {
       ctx.beginPath();
       ctx.rect(x, yTop, spanR - x, h);
       ctx.clip();
-      ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+      ctx.fillStyle = cellFg(it);
       ctx.textAlign = "center";
       ctx.fillText(String(it.t), (x + spanR) / 2, y);
       ctx.restore();
@@ -1322,7 +1401,7 @@ function draw() {
       ctx.font = `${slant}${weight}${px}px ${fontStack(it.fn)}`;
       tw = ctx.measureText(text).width;
     }
-    ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+    ctx.fillStyle = cellFg(it);
     let tx;
     const ind = (it.in || 0) * INDENT_PX;
     if (align === "right") { ctx.textAlign = "right"; tx = x + w - 5 - ind; }
@@ -1412,7 +1491,7 @@ function draw() {
           ctx.rect(mx, my, mw, mh);
           ctx.clip();
           ctx.font = cellFont(it);
-          ctx.fillStyle = it.fc ? "#" + it.fc : colors.fg;
+          ctx.fillStyle = cellFg(it);
           const al = it.a === "r" ? "right" : it.a === "c" ? "center" : "left";
           ctx.textAlign = al;
           const tx = al === "right" ? mx + mw - 5 : al === "center" ? mx + mw / 2 : mx + 5;
@@ -1573,39 +1652,6 @@ function draw() {
       ctx.closePath();
       ctx.fill();
     });
-  }
-
-  // Tables: header shading and banded rows. Painted before the cell content so
-  // the text sits on top, and before the hyperlink underlines so a linked cell
-  // inside a table still shows its rule.
-  tablesInView = [];
-  if (wasm) {
-    try { tablesInView = JSON.parse(wasm.session_tables(state.sheet)); } catch {}
-    for (const t of tablesInView) {
-      for (let r = t.r0; r <= t.r1; r++) {
-        const ry = rowYAt(r);
-        if (ry === undefined) continue;
-        const rh = rowHAt(r);
-        const isHeader = t.headers > 0 && r === t.r0;
-        const isTotals = t.totals > 0 && r === t.r1;
-        // Bands count from the first *data* row, so a header does not shift
-        // the stripe pattern by one and make the first data row look banded
-        // when it should not be.
-        const dataIndex = r - t.r0 - (t.headers > 0 ? 1 : 0);
-        const banded = t.stripes === "1" && !isHeader && !isTotals && dataIndex % 2 === 1;
-        if (!isHeader && !isTotals && !banded) continue;
-        for (let c = t.c0; c <= t.c1; c++) {
-          const cx = colXAt(c);
-          if (cx === undefined) continue;
-          withQuad(r, c, () => {
-            ctx.fillStyle = isHeader || isTotals
-              ? colors.tableHeader
-              : colors.tableBand;
-            ctx.fillRect(cx, ry, colWAt(c), rh);
-          });
-        }
-      }
-    }
   }
 
   // Hyperlinks: underline them and tint them, which is the only cue that a
@@ -3806,7 +3852,7 @@ function openValidationMenu() {
 // One right-docked panel, tool-switched. It stays open while you keep selecting
 // cells; the "Apply to range" readout tracks the live selection, and Apply acts
 // on whatever is selected at click time.
-let activePanel = null;        // 'dv' | 'cf' | 'note' | null
+let activePanel = null;        // 'dv' | 'cf' | 'note' | 'table' | null
 let panelRangeEls = [];        // range readouts to keep in sync on selection change
 let panelNote = null;          // { ta, addrEl, cell } while the note panel is open
 
@@ -3838,17 +3884,159 @@ function panelActions(body, primaryText, onPrimary, ghostText, onGhost) {
   return primary;
 }
 
+// The table panel: name, style and the six banding switches, all applied the
+// moment you change them.
+//
+// Every control here is one `session_*` call and therefore one undo step — the
+// panel holds no state of its own, so it cannot disagree with the workbook.
+function buildTablePanel(body) {
+  const t = currentTable();
+  if (!t) {
+    body.appendChild(el("div", "panel-note", "Select a cell inside a table."));
+    return;
+  }
+  const at = () => ({ r: t.r0, c: t.c0 });
+
+  panelLabel(body, "Name");
+  const name = el("input", "panel-field");
+  name.type = "text";
+  name.value = t.name;
+  // On commit rather than per keystroke: a half-typed name is usually invalid,
+  // and rejecting it mid-word would fight the person typing.
+  const rename = () => {
+    const want = name.value.trim();
+    if (!want || want === t.name) { name.value = t.name; return; }
+    try {
+      wasm.session_rename_table(state.sheet, at().r, at().c, want);
+      status.textContent = `renamed to ${want}`;
+    } catch (e) {
+      status.textContent = `error: ${e}`;
+      name.value = t.name;
+    }
+    draw();
+    refreshTablePanel();
+  };
+  name.addEventListener("change", rename);
+  name.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.stopPropagation(); name.blur(); }
+    else if (e.key === "Escape") { e.stopPropagation(); name.value = t.name; name.blur(); }
+  });
+  body.appendChild(name);
+
+  panelLabel(body, "Range");
+  body.appendChild(el("div", "panel-range", `${A1(t.r0, t.c0)}:${A1(t.r1, t.c1)}`));
+
+  panelLabel(body, "Style");
+  const styles = el("div", "oc-table-styles");
+  for (const [label, id] of TABLE_STYLES) {
+    const b = el("button", "oc-style-swatch" + (id === t.style ? " sel" : ""));
+    b.type = "button";
+    b.title = label;
+    // Swatches are painted from the engine's own resolution, so the preview
+    // and the grid cannot disagree about what a style looks like.
+    let c = { headerFill: "FFFFFF", bandFill: "F2F2F2", border: "BFBFBF" };
+    try { c = JSON.parse(wasm.session_table_style_preview(id)) || c; } catch {}
+    const head = el("span");
+    head.style.background = "#" + c.headerFill;
+    head.style.borderBottom = "2px solid #" + c.border;
+    const band = el("span");
+    band.style.background = "#" + c.bandFill;
+    b.append(head, el("span"), band, el("span"));
+    b.addEventListener("click", () => applyTableStyle({ style: id }));
+    styles.appendChild(b);
+  }
+  body.appendChild(styles);
+
+  panelLabel(body, "Show");
+  const checks = el("div", "oc-table-checks");
+  const check = (label, on, onChange) => {
+    const l = el("label", "oc-check");
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.checked = on;
+    i.addEventListener("change", () => onChange(i.checked));
+    l.append(i, document.createTextNode(" " + label));
+    checks.appendChild(l);
+  };
+  check("Header row", t.headers > 0, (on) => {
+    tryEdit(() => wasm.session_set_table_headers(state.sheet, at().r, at().c, on));
+    refreshTablePanel();
+  });
+  check("Totals row", t.totals > 0, (on) => {
+    tryEdit(() => wasm.session_table_totals(state.sheet, at().r, at().c, on));
+    refreshTablePanel();
+  });
+  check("Banded rows", !!t.stripes, (on) => applyTableStyle({ stripes: on }));
+  check("Banded columns", !!t.colStripes, (on) => applyTableStyle({ colStripes: on }));
+  check("First column", !!t.firstCol, (on) => applyTableStyle({ firstCol: on }));
+  check("Last column", !!t.lastCol, (on) => applyTableStyle({ lastCol: on }));
+  body.appendChild(checks);
+
+  const row = el("div", "panel-actions");
+  const rm = el("button", "panel-btn-ghost", "Convert to range");
+  rm.addEventListener("click", async () => {
+    const cur = currentTable();
+    if (!cur) return;
+    const ok = await confirmModal(
+      `Convert "${cur.name}" to a range`,
+      "The values and formatting stay. The table's name goes, so any formula "
+        + "written as " + cur.name + "[Column] will stop resolving.",
+      "Convert to range",
+    );
+    if (!ok) return;
+    tryEdit(() => wasm.session_remove_table(state.sheet, cur.r0, cur.c0));
+    status.textContent = "converted to a range";
+    closePanel();
+  });
+  row.appendChild(rm);
+  body.appendChild(row);
+}
+
+// The table under the cursor, as the engine reports it, or null.
+function currentTable() {
+  try {
+    return JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col));
+  } catch { return null; }
+}
+
+// Write the style name and banding flags. Anything not named keeps its current
+// value, so a single checkbox does not silently reset the other five.
+function applyTableStyle(change) {
+  const t = currentTable();
+  if (!t) return;
+  const v = (key) => (change[key] !== undefined ? change[key] : t[key]);
+  // Bitmask: 1 banded rows, 2 banded columns, 4 first column, 8 last.
+  const flags = (v("stripes") ? 1 : 0) | (v("colStripes") ? 2 : 0)
+    | (v("firstCol") ? 4 : 0) | (v("lastCol") ? 8 : 0);
+  tryEdit(() => wasm.session_set_table_style(
+    state.sheet, t.r0, t.c0, v("style"), flags));
+  refreshTablePanel();
+}
+
+// Rebuild the panel from the workbook after any change, so what it shows is
+// what the model holds rather than what the last click intended.
+function refreshTablePanel() {
+  if (activePanel !== "table") return;
+  const body = document.getElementById("side-panel-body");
+  body.textContent = "";
+  buildTablePanel(body);
+}
+
 function openPanel(tool) {
   const panel = document.getElementById("side-panel");
   activePanel = tool;
   panelRangeEls = [];
   panelNote = null;
   document.getElementById("side-panel-title").textContent =
-    tool === "dv" ? "Data validation" : tool === "cf" ? "Conditional formatting" : "Comments";
+    tool === "dv" ? "Data validation"
+      : tool === "cf" ? "Conditional formatting"
+      : tool === "table" ? "Table"
+      : "Comments";
   const body = document.getElementById("side-panel-body");
   body.textContent = "";
   if (tool === "dv") buildDvPanel(body);
   else if (tool === "cf") buildCfPanel(body);
+  else if (tool === "table") buildTablePanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
   resize(); // the grid narrows — refit the canvas to its new width
@@ -3876,6 +4064,16 @@ function refreshPanel() {
   if (activePanel === "dv" || activePanel === "cf") {
     const t = A1range(effectiveRange());
     for (const r of panelRangeEls) r.textContent = t;
+  } else if (activePanel === "table") {
+    // Moving into a different table has to re-target the panel, or renaming
+    // would rename whichever table it was opened on.
+    const t = currentTable();
+    const shown = document.getElementById("side-panel-body").dataset.table;
+    const key = t ? `${t.name}@${t.r0},${t.c0}` : "";
+    if (key !== shown) {
+      document.getElementById("side-panel-body").dataset.table = key;
+      refreshTablePanel();
+    }
   } else if (activePanel === "note" && panelNote) {
     const addr = A1(state.sel.row, state.sel.col);
     if (addr !== panelNote.cell) {
@@ -4309,26 +4507,33 @@ function followHyperlink(row, col) {
 // header decides the column names, and a wrong guess leaves every structured
 // reference pointing at the wrong column — silently, since the formulas still
 // resolve.
+// The style names offered in the picker. A small, representative set rather
+// than all sixty Excel ships: every family, and the six accents inside the
+// family people actually use.
+const TABLE_STYLES = [
+  ["None", ""],
+  ["Light blue", "TableStyleLight2"],
+  ["Light green", "TableStyleLight7"],
+  ["Blue", "TableStyleMedium2"],
+  ["Orange", "TableStyleMedium3"],
+  ["Grey", "TableStyleMedium4"],
+  ["Gold", "TableStyleMedium5"],
+  ["Steel", "TableStyleMedium6"],
+  ["Green", "TableStyleMedium7"],
+  ["Dark blue", "TableStyleDark2"],
+];
+
+// Create a table under the cursor, or open the panel on the one already there.
+//
+// Creation asks nothing: everything it could ask — name, style, banding,
+// headers — is in the panel, live, and creating is one undo step. A modal that
+// asked four questions before showing you anything was both slower and blind.
 async function tableDialog() {
   let existing = null;
   try {
     existing = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col));
   } catch {}
-  if (existing) {
-    const ok = await confirmModal(
-      `Convert "${existing.name}" to a range`,
-      "The values and formatting stay. The table's name goes, so any formula "
-        + "written as " + existing.name + "[Column] will stop resolving.",
-      "Convert to range",
-    );
-    if (!ok) return;
-    try {
-      wasm.session_remove_table(state.sheet, state.sel.row, state.sel.col);
-      status.textContent = "converted to a range";
-    } catch (e) { status.textContent = `error: ${e}`; }
-    draw();
-    return;
-  }
+  if (existing) { openPanel("table"); return; }
 
   const r = effectiveRange();
   // A single cell means "the block around it", as Ctrl+T does — asking someone
@@ -4340,20 +4545,15 @@ async function tableDialog() {
       if (blk) bounds = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
     } catch {}
   }
-  const ok = await confirmModal(
-    `Create a table from ${A1(bounds.r0, bounds.c0)}:${A1(bounds.r1, bounds.c1)}`,
-    "The first row becomes the column headers, which is what a structured "
-      + "reference like Table1[Amount] resolves against.",
-    "My table has headers",
-  );
-  if (!ok) return;
   try {
     const name = wasm.session_create_table(
-      state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, "Table", true);
+      state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, "", true);
     select(bounds.r0, bounds.c0);
-    status.textContent = `created ${name}`;
-  } catch (e) { status.textContent = `error: ${e}`; }
+    status.textContent = `created ${name} — Esc closes the panel`;
+  } catch (e) { status.textContent = `error: ${e}`; return; }
+  invalidateGrowth();
   draw();
+  openPanel("table");
 }
 
 // A yes/no question in the shared modal. Resolves true only on the confirm
