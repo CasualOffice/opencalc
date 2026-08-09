@@ -102,6 +102,10 @@ enum Edge {
     Right,
     Top,
     Bottom,
+    /// The inside rules of a border applied across a range.
+    InsideHorizontal,
+    /// See [`Edge::InsideHorizontal`].
+    InsideVertical,
 }
 
 fn edge_field(borders: &mut Borders, edge: Edge) -> &mut Option<BorderEdge> {
@@ -111,6 +115,8 @@ fn edge_field(borders: &mut Borders, edge: Edge) -> &mut Option<BorderEdge> {
         Edge::Top => &mut borders.top,
         Edge::Bottom => &mut borders.bottom,
         Edge::Diagonal => &mut borders.diagonal,
+        Edge::InsideHorizontal => &mut borders.inside_horizontal,
+        Edge::InsideVertical => &mut borders.inside_vertical,
     }
 }
 
@@ -262,12 +268,20 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             ..Borders::default()
                         });
                     }
-                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_borders => {
+                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" | b"horizontal"
+                    | b"vertical"
+                        if in_borders =>
+                    {
+                        // `horizontal` and `vertical` inside `<border>` are the
+                        // *inside* rules, not alignment — the format reuses two
+                        // names that mean something else on `<alignment>`.
                         let edge = match e.local_name().as_ref() {
                             b"left" => Edge::Left,
                             b"right" => Edge::Right,
                             b"top" => Edge::Top,
                             b"diagonal" => Edge::Diagonal,
+                            b"horizontal" => Edge::InsideHorizontal,
+                            b"vertical" => Edge::InsideVertical,
                             _ => Edge::Bottom,
                         };
                         cur_edge = Some(edge);

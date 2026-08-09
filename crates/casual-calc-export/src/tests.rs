@@ -1991,3 +1991,120 @@ fn alignment_view_and_format_attributes_round_trip() {
     assert_eq!(back.sheets[0].view, wb.sheets[0].view);
     assert_eq!(back.sheets[0].format_pr, wb.sheets[0].format_pr);
 }
+
+#[test]
+fn inside_borders_round_trip() {
+    use casual_calc_model::{BorderEdge, Borders, CellRef, Style};
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let edge = |style: &str| {
+        Some(BorderEdge {
+            style: style.to_owned(),
+            color: None,
+        })
+    };
+    let id = wb.intern_style(Style {
+        border: Some(Borders {
+            left: edge("thin"),
+            // `horizontal` and `vertical` inside <border> are the *inside*
+            // rules of a range border, not alignment — the format reuses two
+            // names that mean something else on <alignment>.
+            inside_horizontal: edge("hair"),
+            inside_vertical: edge("dotted"),
+            ..Borders::default()
+        }),
+        ..Style::default()
+    });
+    let at = CellRef::new(0, 0);
+    let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+    cell.style = Some(id);
+    wb.sheets[0].cells.set(at, cell);
+
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert!(styles.contains("<horizontal style=\"hair\">"), "{styles}");
+    assert!(styles.contains("<vertical style=\"dotted\">"));
+
+    let back = import_package(written).unwrap().workbook;
+    let b = back
+        .styles
+        .get(back.sheets[0].cells.get(at).unwrap().style.unwrap())
+        .unwrap()
+        .border
+        .clone()
+        .unwrap();
+    assert_eq!(b.inside_horizontal.unwrap().style, "hair");
+    assert_eq!(b.inside_vertical.unwrap().style, "dotted");
+}
+
+/// A table filters independently of the sheet it sits on, so its rules have to
+/// live on the table. Storing only the `ref` string left a table's header
+/// buttons with nowhere to keep a rule: clicking one found no filter and
+/// offered no values.
+#[test]
+fn a_table_carries_its_own_filter_rules() {
+    use casual_calc_model::FilterRule;
+
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+              <Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c></row></sheetData>
+              <tableParts count="1"><tablePart r:id="rId4"/></tableParts>
+            </worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/tables/table1.xml",
+            br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="A1:B4">
+              <autoFilter ref="A1:B4">
+                <filterColumn colId="0"><filters><filter val="West"/><filter val="East"/></filters></filterColumn>
+                <filterColumn colId="1"><customFilters><customFilter operator="greaterThan" val="100"/></customFilters></filterColumn>
+              </autoFilter>
+              <tableColumns count="2">
+                <tableColumn id="1" name="Region"/>
+                <tableColumn id="2" name="Amount"/>
+              </tableColumns>
+            </table>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let filter = wb.sheets[0].tables[0]
+        .auto_filter
+        .as_ref()
+        .expect("the table's <autoFilter> is its own, not the sheet's");
+    // The sheet itself has no filter — reading only `sheet.auto_filter` here is
+    // exactly what made the table's buttons inert.
+    assert!(wb.sheets[0].auto_filter.is_none());
+    assert_eq!(filter.range.end.col, 1);
+    assert!(matches!(filter.rules.get(&0), Some(FilterRule::Values(v)) if v.len() == 2));
+    assert!(matches!(
+        filter.rules.get(&1),
+        Some(FilterRule::Custom { .. })
+    ));
+
+    let written = write_workbook(&wb).unwrap();
+    let part = xml_of(&written, "xl/tables/table1.xml");
+    assert!(part.contains("<filterColumn colId=\"0\">"), "{part}");
+    assert!(
+        part.contains("<customFilter operator=\"greaterThan\""),
+        "{part}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].tables, wb.sheets[0].tables);
+}

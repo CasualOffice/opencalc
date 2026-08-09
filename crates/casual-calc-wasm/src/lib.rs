@@ -25,7 +25,7 @@ use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
     FilterRule, HAlign, Hyperlink, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, Table,
-    ThemeTint, Underline, VAlign, Workbook,
+    ThemeTint, Underline, VAlign, VertAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -1279,7 +1279,10 @@ pub fn session_create_table(
             // Excel turns the filter buttons on with the table; without them
             // the header row looks like an ordinary row that happens to be
             // shaded.
-            auto_filter_ref: Some(range_a1_string(rr0, cc0, rr1, cc1)),
+            auto_filter: Some(AutoFilter::new(CellRange::new(
+                CellRef::new(rr0, cc0),
+                CellRef::new(rr1, cc1),
+            ))),
             style: [
                 ("name".to_owned(), "TableStyleMedium2".to_owned()),
                 ("showRowStripes".to_owned(), "1".to_owned()),
@@ -1290,12 +1293,6 @@ pub fn session_create_table(
         });
     })?;
     Ok(created)
-}
-
-/// `A1:B2` for a range, for the places OOXML wants a `ref` string.
-fn range_a1_string(r0: u32, c0: u32, r1: u32, c1: u32) -> String {
-    let cell = |r: u32, c: u32| format!("{}{}", casual_calc_formula::column_to_letters(c), r + 1);
-    format!("{}:{}", cell(r0, c0), cell(r1, c1))
 }
 
 /// Remove the table covering a cell, leaving its values in place — Excel's
@@ -1355,12 +1352,11 @@ pub fn session_table_autoexpand(sheet: usize, row: u32, col: u32) -> Result<(), 
             // it — growing past it would leave the totals stranded mid-table.
             if within_cols && table.totals_row_count == 0 && row == bottom + 1 {
                 table.range.end.row = row;
-                table.auto_filter_ref = Some(range_a1_string(
-                    table.range.start.row,
-                    table.range.start.col,
-                    table.range.end.row,
-                    table.range.end.col,
-                ));
+                // Widen the filter with the table, keeping any rules on it —
+                // rebuilding it from the range would silently clear them.
+                if let Some(filter) = table.auto_filter.as_mut() {
+                    filter.range = table.range;
+                }
                 return;
             }
             if within_rows && col == table.range.end.col + 1 {
@@ -1386,12 +1382,11 @@ pub fn session_table_autoexpand(sheet: usize, row: u32, col: u32) -> Result<(), 
                     calculated_column_formula: None,
                     totals_row_formula: None,
                 });
-                table.auto_filter_ref = Some(range_a1_string(
-                    table.range.start.row,
-                    table.range.start.col,
-                    table.range.end.row,
-                    table.range.end.col,
-                ));
+                // Widen the filter with the table, keeping any rules on it —
+                // rebuilding it from the range would silently clear them.
+                if let Some(filter) = table.auto_filter.as_mut() {
+                    filter.range = table.range;
+                }
                 return;
             }
         }
@@ -4308,6 +4303,28 @@ pub fn session_toggle_strike(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.strike = target)
 }
 
+/// Toggle subscript or superscript across a range (one undo step).
+///
+/// `which` is `"superscript"` or `"subscript"`; anything else clears it. The
+/// two are mutually exclusive in OOXML — one `vertAlign` per font — so setting
+/// one replaces the other rather than stacking.
+#[wasm_bindgen]
+pub fn session_toggle_vert_align(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    which: &str,
+) -> Result<(), JsError> {
+    let want = VertAlign::from_ooxml(which);
+    // Pressing the button on a range already carrying it turns it off, which is
+    // what every other character toggle here does.
+    let already = want.is_some() && range_all(sheet, r0, c0, r1, c1, |st| st.vert_align == want);
+    let target = if already { None } else { want };
+    apply_style_range(sheet, r0, c0, r1, c1, move |st| st.vert_align = target)
+}
+
 /// Hide rows `r0..=r1` on a sheet.
 #[wasm_bindgen]
 pub fn session_hide_rows(sheet: usize, r0: u32, r1: u32) -> Result<(), JsError> {
@@ -4629,18 +4646,54 @@ fn row_passes(
     })
 }
 
-/// The rows a sheet's autofilter hides, recomputed from its rules.
+/// Every filter on a sheet: its own, then each table's, in table order.
+///
+/// A table filters independently of the sheet it sits on, so anything that
+/// asks "what is filtered here" has to look at both — reading only
+/// `sheet.auto_filter` is what left a table's header buttons inert.
+fn sheet_filters(sheet: &Sheet) -> impl Iterator<Item = (FilterSite, &AutoFilter)> {
+    sheet
+        .auto_filter
+        .iter()
+        .map(|f| (FilterSite::Sheet, f))
+        .chain(
+            sheet
+                .tables
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| t.auto_filter.as_ref().map(|f| (FilterSite::Table(i), f))),
+        )
+}
+
+/// Where a filter lives. The host knows the button it drew, not which structure
+/// owns it, so every operation resolves the site from a column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FilterSite {
+    /// The worksheet's own `<autoFilter>`.
+    Sheet,
+    /// The table at this index in `sheet.tables`.
+    Table(usize),
+}
+
+/// The filter whose range covers `col`, and where it lives.
+///
+/// The sheet's own filter wins when both cover the column: it is the one the
+/// toolbar button turned on, so it is the one the user just interacted with.
+fn filter_at_col(sheet: &Sheet, col: u32) -> Option<(FilterSite, &AutoFilter)> {
+    sheet_filters(sheet).find(|(_, f)| col >= f.range.start.col && col <= f.range.end.col)
+}
+
+/// The rows every filter on the sheet hides, recomputed from their rules.
 fn recompute_filter_hidden(wb: &Workbook, sheet: &Sheet) -> BTreeSet<u32> {
     let mut hidden = BTreeSet::new();
-    let Some(filter) = &sheet.auto_filter else {
-        return hidden;
-    };
-    if !filter.is_active() {
-        return hidden;
-    }
-    for row in filter.body_start()..=filter.range.end.row {
-        if !row_passes(wb, sheet, filter, row, None) {
-            hidden.insert(row);
+    for (_, filter) in sheet_filters(sheet) {
+        if !filter.is_active() {
+            continue;
+        }
+        for row in filter.body_start()..=filter.range.end.row {
+            if !row_passes(wb, sheet, filter, row, None) {
+                hidden.insert(row);
+            }
         }
     }
     hidden
@@ -4648,40 +4701,61 @@ fn recompute_filter_hidden(wb: &Workbook, sheet: &Sheet) -> BTreeSet<u32> {
 
 /// Install `filter` on a sheet and hide the rows it excludes, as one undoable
 /// edit. Passing `None` turns the filter off and releases every row it hid.
-fn commit_filter(sheet: usize, filter: Option<AutoFilter>) -> Result<(), JsError> {
+fn commit_filter(
+    sheet: usize,
+    site: FilterSite,
+    filter: Option<AutoFilter>,
+) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let Some(mut op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
-        let hidden = match &filter {
-            Some(f) => {
-                let wb = session.workbook();
-                let Some(sh) = wb.sheets.get(sheet) else {
-                    return Ok(());
-                };
-                // Evaluate against a sheet carrying the *new* rules, not the
-                // ones currently installed.
-                let mut probe = sh.clone();
-                probe.auto_filter = Some(f.clone());
-                recompute_filter_hidden(wb, &probe)
-            }
-            None => BTreeSet::new(),
+        let wb = session.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return Ok(());
         };
+        // Evaluate against a sheet carrying the *new* rules, not the ones
+        // currently installed. Every other filter on the sheet still applies,
+        // so the probe keeps them — clearing one table's filter must not
+        // release rows another filter hides.
+        let mut probe = sh.clone();
+        match site {
+            FilterSite::Sheet => probe.auto_filter = filter.clone(),
+            FilterSite::Table(i) => match probe.tables.get_mut(i) {
+                Some(t) => t.auto_filter = filter.clone(),
+                None => return Ok(()),
+            },
+        }
+        let hidden = recompute_filter_hidden(wb, &probe);
         if let EditOperation::SetSheetMetadata { data, .. } = &mut op {
-            let auto_filter = &mut data.auto_filter;
-            let filter_hidden = &mut data.filter_hidden;
-            *auto_filter = filter;
-            *filter_hidden = hidden;
+            match site {
+                FilterSite::Sheet => data.auto_filter = filter,
+                FilterSite::Table(i) => {
+                    if let Some(t) = data.tables.get_mut(i) {
+                        t.auto_filter = filter;
+                    }
+                }
+            }
+            data.filter_hidden = hidden;
         }
         session.edit(op).map_err(js)
     })
 }
 
-/// Read a sheet's autofilter, or `None` if it has none.
+/// Read a sheet's own autofilter, or `None` if it has none.
 fn sheet_filter(sheet: usize) -> Option<AutoFilter> {
     with_session(|s| s.workbook().sheets.get(sheet)?.auto_filter.clone()).flatten()
+}
+
+/// Read the filter covering `col` — the sheet's or a table's — with its site.
+fn filter_for_col(sheet: usize, col: u32) -> Option<(FilterSite, AutoFilter)> {
+    with_session(|s| {
+        let sh = s.workbook().sheets.get(sheet)?;
+        filter_at_col(sh, col).map(|(site, f)| (site, f.clone()))
+    })
+    .flatten()
 }
 
 /// The sheet's autofilter as JSON `{r0,c0,r1,c1,cols:[…]}` — the header range
@@ -4715,6 +4789,51 @@ pub fn session_filter_info(sheet: usize) -> String {
     .unwrap_or_else(|| "null".to_owned())
 }
 
+/// Every filter region on the sheet, as JSON
+/// `{hidden, regions:[{r0,c0,c1,cols:[absCol,…]}, …]}` — the sheet's own filter
+/// first, then each table's.
+///
+/// `hidden` is how many rows the sheet's filters hide between them. It belongs
+/// here rather than on `session_filter_info`, which reports nothing at all when
+/// the sheet has no filter of its own: a table's filter would then be reported
+/// as hiding nothing, and the status line said "filter cleared" on the edit
+/// that had just hidden two rows.
+///
+/// The host draws a button on every header cell in each region and a "filtered"
+/// variant on the columns listed. It needs all of them together: a table's
+/// buttons are indistinguishable from the sheet's on screen, and drawing a
+/// table's from table geometry alone left them unable to say which of its
+/// columns carried a rule.
+#[wasm_bindgen]
+pub fn session_filter_regions(sheet: usize) -> String {
+    with_session(|s| {
+        let sh = s.workbook().sheets.get(sheet)?;
+        let regions: Vec<String> = sheet_filters(sh)
+            .map(|(_, f)| {
+                let cols: Vec<String> = f
+                    .rules
+                    .keys()
+                    .map(|off| (f.range.start.col.saturating_add(*off)).to_string())
+                    .collect();
+                format!(
+                    "{{\"r0\":{},\"c0\":{},\"c1\":{},\"cols\":[{}]}}",
+                    f.range.start.row,
+                    f.range.start.col,
+                    f.range.end.col,
+                    cols.join(",")
+                )
+            })
+            .collect();
+        Some(format!(
+            "{{\"hidden\":{},\"regions\":[{}]}}",
+            sh.filter_hidden.len(),
+            regions.join(",")
+        ))
+    })
+    .flatten()
+    .unwrap_or_else(|| "{\"hidden\":0,\"regions\":[]}".to_owned())
+}
+
 /// Turn an autofilter on over `r0..=r1 × c0..=c1`, treating the first row as
 /// the header. Replaces any existing filter, dropping its rules.
 #[wasm_bindgen]
@@ -4729,13 +4848,13 @@ pub fn session_set_filter_range(
         CellRef::new(r0.min(r1), c0.min(c1)),
         CellRef::new(r1.max(r0), c1.max(c0)),
     );
-    commit_filter(sheet, Some(AutoFilter::new(range)))
+    commit_filter(sheet, FilterSite::Sheet, Some(AutoFilter::new(range)))
 }
 
 /// Turn the autofilter off, releasing every row it hid.
 #[wasm_bindgen]
 pub fn session_clear_filter(sheet: usize) -> Result<(), JsError> {
-    commit_filter(sheet, None)
+    commit_filter(sheet, FilterSite::Sheet, None)
 }
 
 /// Drop every column rule but keep the filter (and its buttons) in place.
@@ -4745,7 +4864,7 @@ pub fn session_clear_filter_rules(sheet: usize) -> Result<(), JsError> {
         return Ok(());
     };
     f.rules.clear();
-    commit_filter(sheet, Some(f))
+    commit_filter(sheet, FilterSite::Sheet, Some(f))
 }
 
 /// The distinct values to offer in column `col`'s checklist, as JSON
@@ -4762,10 +4881,7 @@ pub fn session_filter_values(sheet: usize, col: u32) -> String {
     let out = with_session(|s| {
         let wb = s.workbook();
         let sh = wb.sheets.get(sheet)?;
-        let filter = sh.auto_filter.as_ref()?;
-        if col < filter.range.start.col || col > filter.range.end.col {
-            return None;
-        }
+        let (_, filter) = filter_at_col(sh, col)?;
         let off = col - filter.range.start.col;
         let checked: Option<&Vec<String>> = match filter.rules.get(&off) {
             Some(FilterRule::Values(v)) => Some(v),
@@ -4815,19 +4931,16 @@ pub fn session_set_filter_values(
     col: u32,
     values: Vec<String>,
 ) -> Result<(), JsError> {
-    let Some(mut f) = sheet_filter(sheet) else {
+    let Some((site, mut f)) = filter_for_col(sheet, col) else {
         return Ok(());
     };
-    if col < f.range.start.col || col > f.range.end.col {
-        return Ok(());
-    }
     let off = col - f.range.start.col;
     if values.is_empty() {
         f.rules.remove(&off);
     } else {
         f.rules.insert(off, FilterRule::Values(values));
     }
-    commit_filter(sheet, Some(f))
+    commit_filter(sheet, site, Some(f))
 }
 
 /// Set column `col` to a condition: `op`/`val` and an optional second
@@ -4847,12 +4960,9 @@ pub fn session_set_filter_custom(
     val2: &str,
     and: bool,
 ) -> Result<(), JsError> {
-    let Some(mut f) = sheet_filter(sheet) else {
+    let Some((site, mut f)) = filter_for_col(sheet, col) else {
         return Ok(());
     };
-    if col < f.range.start.col || col > f.range.end.col {
-        return Ok(());
-    }
     let off = col - f.range.start.col;
     if op.is_empty() {
         f.rules.remove(&off);
@@ -4872,7 +4982,7 @@ pub fn session_set_filter_custom(
             },
         );
     }
-    commit_filter(sheet, Some(f))
+    commit_filter(sheet, site, Some(f))
 }
 
 /// Re-evaluate every sheet's autofilter against the current data.
@@ -5034,6 +5144,9 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             }
             if st.strike {
                 parts.push("\"st\":1".to_owned());
+            }
+            if let Some(v) = st.vert_align {
+                parts.push(format!("\"vt\":{}", json_string(v.ooxml())));
             }
             if st.wrap {
                 parts.push("\"w\":1".to_owned());

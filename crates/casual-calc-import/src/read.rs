@@ -502,7 +502,7 @@ pub struct Worksheet {
 }
 
 /// A raw `<filterColumn>`, before mapping to the model.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RawFilterColumn {
     /// The `colId` attribute — an offset from the filter range's first column.
     pub col_id: u32,
@@ -526,6 +526,12 @@ pub struct RawFilterColumn {
 pub struct RawDv {
     /// The `sqref` attribute — a space-separated list of areas.
     pub sqref: String,
+    /// `errorStyle`, `showDropDown` and `imeMode`, carried through.
+    pub error_style: Option<String>,
+    /// See [`RawDv::error_style`].
+    pub hide_dropdown: bool,
+    /// See [`RawDv::error_style`].
+    pub ime_mode: Option<String>,
     /// The `type` attribute; absent means `none`.
     pub kind: String,
     /// The `operator` attribute; absent means `between`.
@@ -627,12 +633,12 @@ fn read_cf_rule(e: &BytesStart<'_>, sqref: &str) -> Result<RawCf, ImportError> {
 fn read_filter_element(
     e: &BytesStart<'_>,
     name: &[u8],
-    result: &mut Worksheet,
+    auto_filter_ref: &mut Option<String>,
     cur_fc: &mut Option<RawFilterColumn>,
 ) -> Result<bool, ImportError> {
     match name {
         b"autoFilter" => {
-            result.auto_filter = read_attr(e, b"ref")?;
+            *auto_filter_ref = read_attr(e, b"ref")?;
         }
         b"filterColumn" => {
             *cur_fc = Some(RawFilterColumn {
@@ -930,6 +936,10 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                         // how a file's number and date rules used to disappear.
                         dv = Some(RawDv {
                             sqref: read_attr(&e, b"sqref")?.unwrap_or_default(),
+                            error_style: read_attr(&e, b"errorStyle")?,
+                            hide_dropdown: read_attr(&e, b"showDropDown")?
+                                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+                            ime_mode: read_attr(&e, b"imeMode")?,
                             kind: read_attr(&e, b"type")?.unwrap_or_default(),
                             operator: read_attr(&e, b"operator")?.unwrap_or_default(),
                             allow_blank: read_bool_attr(&e, b"allowBlank")?.unwrap_or(false),
@@ -945,7 +955,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"conditionalFormatting" => {
                         cf_sqref = read_attr(&e, b"sqref")?.unwrap_or_default();
                     }
-                    n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
+                    n if read_filter_element(&e, n, &mut result.auto_filter, &mut cur_fc)? => {}
                     b"cfRule" => {
                         cur_cf = Some(read_cf_rule(&e, &cf_sqref)?);
                     }
@@ -1073,7 +1083,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             .conditional_formats
                             .push(read_cf_rule(&e, &cf_sqref)?);
                     }
-                    n if read_filter_element(&e, n, &mut result, &mut cur_fc)? => {}
+                    n if read_filter_element(&e, n, &mut result.auto_filter, &mut cur_fc)? => {}
                     _ => {}
                 }
             }
@@ -1410,6 +1420,7 @@ pub fn parse_table(xml: &[u8]) -> Result<Option<RawTable>, ImportError> {
     let mut bounds = Bounds::new();
     let mut table: Option<RawTable> = None;
     let mut column: Option<TableColumn> = None;
+    let mut cur_fc: Option<RawFilterColumn> = None;
     let mut in_text: Option<&'static str> = None;
     let mut text = String::new();
 
@@ -1429,11 +1440,13 @@ pub fn parse_table(xml: &[u8]) -> Result<Option<RawTable>, ImportError> {
                             ..Default::default()
                         })
                     }
-                    b"autoFilter" => {
-                        if let Some(t) = table.as_mut() {
-                            t.auto_filter_ref = read_attr(e, b"ref")?;
-                        }
-                    }
+                    n if table.is_some()
+                        && read_filter_element(
+                            e,
+                            n,
+                            &mut table.as_mut().expect("checked").auto_filter_ref,
+                            &mut cur_fc,
+                        )? => {}
                     b"tableStyleInfo" => {
                         if let Some(t) = table.as_mut() {
                             t.style = read_attrs(e)?;
@@ -1478,6 +1491,11 @@ pub fn parse_table(xml: &[u8]) -> Result<Option<RawTable>, ImportError> {
             Event::End(ref e) => {
                 bounds.close();
                 match e.local_name().as_ref() {
+                    b"filterColumn" => {
+                        if let (Some(t), Some(fc)) = (table.as_mut(), cur_fc.take()) {
+                            t.filter_columns.push(fc);
+                        }
+                    }
                     b"calculatedColumnFormula" | b"totalsRowFormula" => {
                         if let Some(c) = column.as_mut() {
                             match in_text {
@@ -1517,6 +1535,8 @@ pub struct RawTable {
     pub columns: Vec<TableColumn>,
     /// `<autoFilter ref>`, if present.
     pub auto_filter_ref: Option<String>,
+    /// Per-column filter rules inside that `<autoFilter>`.
+    pub filter_columns: Vec<RawFilterColumn>,
     /// `<tableStyleInfo>` attributes.
     pub style: BTreeMap<String, String>,
 }

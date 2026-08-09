@@ -482,46 +482,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // OOXML has no separate marker — so they land in `hidden_rows` here and
         // the session re-derives `filter_hidden` from the rules once formatting
         // is available (display text is what a checklist matches on).
-        if let Some(reference) = worksheet.auto_filter.as_deref()
-            && let Some(range) = a1::parse_range(reference)
-        {
-            let mut filter = AutoFilter::new(range);
-            for fc in worksheet.filter_columns {
-                // A refinement takes precedence: a filterColumn holding one has
-                // no <filters> or <customFilters> to read instead.
-                let rule = if let Some((element, attrs)) = fc.unevaluated.clone() {
-                    FilterRule::Unevaluated { element, attrs }
-                } else if fc.saw_filters {
-                    let mut values = fc.values;
-                    if fc.blank {
-                        // `blank="1"` is the checklist's "(Blanks)" entry, which
-                        // the model carries as the empty string.
-                        values.push(String::new());
-                    }
-                    // An empty checklist would select nothing at all; Excel does
-                    // not write one, and honouring it would blank the sheet.
-                    if values.is_empty() {
-                        continue;
-                    }
-                    FilterRule::Values(values)
-                } else {
-                    let mut ops = fc.custom.into_iter().map(|(op, value)| CustomFilter {
-                        op: FilterOp::from_ooxml(&op),
-                        value,
-                    });
-                    let Some(first) = ops.next() else {
-                        continue; // a filterColumn with neither kind of child
-                    };
-                    FilterRule::Custom {
-                        first,
-                        second: ops.next(),
-                        and: fc.custom_and,
-                    }
-                };
-                filter.rules.insert(fc.col_id, rule);
-            }
-            sheet.auto_filter = Some(filter);
-        }
+        sheet.auto_filter = worksheet
+            .auto_filter
+            .as_deref()
+            .and_then(|r| build_auto_filter(r, worksheet.filter_columns));
 
         // Data validations, every kind. Only a `list` rule's inline quoted CSV is
         // expanded into values; the other kinds keep their operands as the raw
@@ -564,6 +528,9 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                         formula1: raw.formula1.clone(),
                         formula2: raw.formula2.clone(),
                         allow_blank: raw.allow_blank,
+                        error_style: raw.error_style.clone(),
+                        hide_dropdown: raw.hide_dropdown,
+                        ime_mode: raw.ime_mode.clone(),
                         error_title: raw.error_title.clone(),
                         error_text: raw.error_text.clone(),
                         prompt_title: raw.prompt_title.clone(),
@@ -762,7 +729,10 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
                     header_row_count: attr_u32("headerRowCount", 1),
                     totals_row_count: attr_u32("totalsRowCount", 0),
                     columns: raw.columns,
-                    auto_filter_ref: raw.auto_filter_ref,
+                    auto_filter: raw
+                        .auto_filter_ref
+                        .as_deref()
+                        .and_then(|r| build_auto_filter(r, raw.filter_columns)),
                     style: raw.style,
                     attrs,
                 });
@@ -895,3 +865,48 @@ fn parse_error(token: &str) -> Option<ErrorValue> {
 
 #[cfg(test)]
 mod tests;
+
+/// Build an [`AutoFilter`] from a raw `ref` string and its `<filterColumn>`s.
+///
+/// Shared by the worksheet and the table: a table carries its own filter, with
+/// the same element and the same rules, and building it in two places invited
+/// the two to drift.
+fn build_auto_filter(reference: &str, columns: Vec<read::RawFilterColumn>) -> Option<AutoFilter> {
+    let range = a1::parse_range(reference)?;
+    let mut filter = AutoFilter::new(range);
+    for fc in columns {
+        // A refinement takes precedence: a filterColumn holding one has
+        // no <filters> or <customFilters> to read instead.
+        let rule = if let Some((element, attrs)) = fc.unevaluated.clone() {
+            FilterRule::Unevaluated { element, attrs }
+        } else if fc.saw_filters {
+            let mut values = fc.values;
+            if fc.blank {
+                // `blank="1"` is the checklist's "(Blanks)" entry, which
+                // the model carries as the empty string.
+                values.push(String::new());
+            }
+            // An empty checklist would select nothing at all; Excel does
+            // not write one, and honouring it would blank the sheet.
+            if values.is_empty() {
+                continue;
+            }
+            FilterRule::Values(values)
+        } else {
+            let mut ops = fc.custom.into_iter().map(|(op, value)| CustomFilter {
+                op: FilterOp::from_ooxml(&op),
+                value,
+            });
+            let Some(first) = ops.next() else {
+                continue; // a filterColumn with neither kind of child
+            };
+            FilterRule::Custom {
+                first,
+                second: ops.next(),
+                and: fc.custom_and,
+            }
+        };
+        filter.rules.insert(fc.col_id, rule);
+    }
+    Some(filter)
+}

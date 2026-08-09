@@ -55,6 +55,13 @@ pub struct Borders {
     /// Draw the diagonal from top-left to bottom-right.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub diagonal_down: bool,
+    /// The inside-horizontal rule, used when a border is applied across a
+    /// range: OOXML carries it on `<border>` as `<horizontal>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside_horizontal: Option<BorderEdge>,
+    /// The inside-vertical rule. See [`Borders::inside_horizontal`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside_vertical: Option<BorderEdge>,
 }
 
 impl Borders {
@@ -67,6 +74,8 @@ impl Borders {
             // A diagonal alone is still a border; without this a cell whose only
             // border is a diagonal would be treated as unbordered and dropped.
             && self.diagonal.is_none()
+            && self.inside_horizontal.is_none()
+            && self.inside_vertical.is_none()
     }
 }
 

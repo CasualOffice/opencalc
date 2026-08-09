@@ -672,9 +672,14 @@ pub struct Table {
     pub totals_row_count: u32,
     /// The columns, left to right.
     pub columns: Vec<TableColumn>,
-    /// `<autoFilter ref>`, when the table's filter buttons are on.
+    /// The table's own autofilter, when its filter buttons are on.
+    ///
+    /// A real [`AutoFilter`] rather than just the `ref` string, because a table
+    /// filters independently of the sheet's own: storing only the range left the
+    /// header buttons with nowhere to keep their rules, so clicking one found no
+    /// filter and offered no values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_filter_ref: Option<String>,
+    pub auto_filter: Option<AutoFilter>,
     /// `<tableStyleInfo>` attributes — the style name and the banding flags —
     /// carried verbatim, since the renderer does not draw them yet and
     /// interpreting them would be a chance to write one back wrong for nothing.
@@ -910,6 +915,20 @@ pub struct DataValidation {
     /// attribute means false and must come back that way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_blank: bool,
+    /// `errorStyle`: `stop` (the default), `warning` or `information`.
+    ///
+    /// Not cosmetic: only `stop` actually refuses the entry. Dropping it turns
+    /// an advisory warning into a hard block, or the reverse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_style: Option<String>,
+    /// `showDropDown`, which — confusingly — *hides* the in-cell dropdown when
+    /// set, exactly as the schema defines it. Named for what it does here so
+    /// the inversion cannot be read the wrong way at a call site.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_dropdown: bool,
+    /// `imeMode`, an East Asian input-method hint, carried verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ime_mode: Option<String>,
     /// Title and body of the message shown when the rule is broken. Author-set
     /// wording beats anything generated here, so it is preserved.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1044,6 +1063,9 @@ impl DataValidation {
             formula1: String::new(),
             formula2: String::new(),
             allow_blank: true,
+            error_style: None,
+            hide_dropdown: false,
+            ime_mode: None,
             error_title: String::new(),
             error_text: String::new(),
             prompt_title: String::new(),

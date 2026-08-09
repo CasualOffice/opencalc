@@ -19,9 +19,9 @@ use std::io::{Cursor, Write};
 
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId, Style,
-    Table, ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
+    AutoFilter, BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind,
+    DvOperator, ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId,
+    Style, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -550,8 +550,8 @@ fn table_xml(table: &Table) -> String {
         s.push_str(&format!(" {k}=\"{}\"", escape_attr(v)));
     }
     s.push('>');
-    if let Some(reference) = &table.auto_filter_ref {
-        s.push_str(&format!("<autoFilter ref=\"{}\"/>", escape_attr(reference)));
+    if let Some(filter) = &table.auto_filter {
+        write_auto_filter(&mut s, filter);
     }
     s.push_str(&format!("<tableColumns count=\"{}\">", table.columns.len()));
     for column in &table.columns {
@@ -1463,6 +1463,9 @@ fn write_border(s: &mut String, border: &Borders) {
     write_border_edge(s, "top", &border.top);
     write_border_edge(s, "bottom", &border.bottom);
     write_border_edge(s, "diagonal", &border.diagonal);
+    // CT_Border's sequence puts the inside rules after the diagonal.
+    write_border_edge(s, "vertical", &border.inside_vertical);
+    write_border_edge(s, "horizontal", &border.inside_horizontal);
     s.push_str("</border>");
 }
 
@@ -1782,47 +1785,7 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
 
     // <autoFilter> precedes <mergeCells> in the CT_Worksheet sequence.
     if let Some(filter) = &sheet.auto_filter {
-        s.push_str(&format!("<autoFilter ref=\"{}\">", range_a1(&filter.range)));
-        for (&col_id, rule) in &filter.rules {
-            s.push_str(&format!("<filterColumn colId=\"{col_id}\">"));
-            match rule {
-                // Re-emitted exactly as read, so Excel applies the filter it
-                // wrote even though we never evaluated it.
-                FilterRule::Unevaluated { element, attrs } => {
-                    write_attr_element(&mut s, element, attrs);
-                }
-                FilterRule::Values(vals) => {
-                    // A blank is not a <filter val="">; OOXML carries it as an
-                    // attribute on the container.
-                    let blank = vals.iter().any(|v| v.is_empty());
-                    s.push_str(if blank {
-                        "<filters blank=\"1\">"
-                    } else {
-                        "<filters>"
-                    });
-                    for v in vals.iter().filter(|v| !v.is_empty()) {
-                        s.push_str(&format!("<filter val=\"{}\"/>", escape_attr(v)));
-                    }
-                    s.push_str("</filters>");
-                }
-                FilterRule::Custom { first, second, and } => {
-                    s.push_str(&format!(
-                        "<customFilters{}>",
-                        if *and { " and=\"1\"" } else { "" }
-                    ));
-                    for f in std::iter::once(first).chain(second.as_ref()) {
-                        s.push_str(&format!(
-                            "<customFilter operator=\"{}\" val=\"{}\"/>",
-                            f.op.as_ooxml(),
-                            escape_attr(&f.value)
-                        ));
-                    }
-                    s.push_str("</customFilters>");
-                }
-            }
-            s.push_str("</filterColumn>");
-        }
-        s.push_str("</autoFilter>");
+        write_auto_filter(&mut s, filter);
     }
 
     if !sheet.merges.is_empty() {
@@ -1884,6 +1847,15 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
                 if !v.prompt_text.is_empty() {
                     s.push_str(&format!(" prompt=\"{}\"", escape_attr(&v.prompt_text)));
                 }
+            }
+            if let Some(style) = &v.error_style {
+                s.push_str(&format!(" errorStyle=\"{}\"", escape_attr(style)));
+            }
+            if v.hide_dropdown {
+                s.push_str(" showDropDown=\"1\"");
+            }
+            if let Some(ime) = &v.ime_mode {
+                s.push_str(&format!(" imeMode=\"{}\"", escape_attr(ime)));
             }
             s.push_str(" showErrorMessage=\"1\"");
             if !v.error_title.is_empty() {
@@ -2206,3 +2178,51 @@ fn sheet_index(workbook: &Workbook, id: SheetId) -> Option<usize> {
 
 #[cfg(test)]
 mod tests;
+
+/// Write an `<autoFilter>` element with its per-column rules.
+///
+/// Shared by the worksheet and table writers: a table filters independently of
+/// the sheet it sits on, and the element is identical in both places.
+fn write_auto_filter(s: &mut String, filter: &AutoFilter) {
+    s.push_str(&format!("<autoFilter ref=\"{}\">", range_a1(&filter.range)));
+    for (&col_id, rule) in &filter.rules {
+        s.push_str(&format!("<filterColumn colId=\"{col_id}\">"));
+        match rule {
+            // Re-emitted exactly as read, so Excel applies the filter it
+            // wrote even though we never evaluated it.
+            FilterRule::Unevaluated { element, attrs } => {
+                write_attr_element(s, element, attrs);
+            }
+            FilterRule::Values(vals) => {
+                // A blank is not a <filter val="">; OOXML carries it as an
+                // attribute on the container.
+                let blank = vals.iter().any(|v| v.is_empty());
+                s.push_str(if blank {
+                    "<filters blank=\"1\">"
+                } else {
+                    "<filters>"
+                });
+                for v in vals.iter().filter(|v| !v.is_empty()) {
+                    s.push_str(&format!("<filter val=\"{}\"/>", escape_attr(v)));
+                }
+                s.push_str("</filters>");
+            }
+            FilterRule::Custom { first, second, and } => {
+                s.push_str(&format!(
+                    "<customFilters{}>",
+                    if *and { " and=\"1\"" } else { "" }
+                ));
+                for f in std::iter::once(first).chain(second.as_ref()) {
+                    s.push_str(&format!(
+                        "<customFilter operator=\"{}\" val=\"{}\"/>",
+                        f.op.as_ooxml(),
+                        escape_attr(&f.value)
+                    ));
+                }
+                s.push_str("</customFilters>");
+            }
+        }
+        s.push_str("</filterColumn>");
+    }
+    s.push_str("</autoFilter>");
+}

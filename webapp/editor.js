@@ -2434,20 +2434,50 @@ function selectAll() {
   endInline();
   draw();
 }
-// Progressive Ctrl+A (Excel): first press selects the used data region, a
-// second press (already covering it) selects the whole sheet.
+// Progressive Ctrl+A (Excel): the first press selects the contiguous block of
+// data around the cursor — the table you are standing in — the second widens to
+// the whole used region, and the third to the entire sheet.
+//
+// It used to jump straight to the used region from A1, which on a loaded sheet
+// reads as "select everything" and loses the one selection you actually wanted:
+// this block. A blank cursor cell has no block, so it starts at the used region.
 function ctrlA() {
-  const b = usedBounds();
   const r = selRect();
-  const coversData = state.selKind === "cells" &&
-    r.r0 === 0 && r.c0 === 0 && r.r1 === b.rows - 1 && r.c1 === b.cols - 1;
-  if (coversData) { selectAll(); return; }
-  state.selKind = "cells";
-  state.ranges = [];
-  state.anchor = { row: 0, col: 0 };
-  state.sel = { row: b.rows - 1, col: b.cols - 1 };
-  endInline();
-  draw();
+  const covers = (r0, c0, r1, c1) =>
+    state.selKind === "cells" && r.r0 === r0 && r.c0 === c0 && r.r1 === r1 && r.c1 === c1;
+
+  const select = (r0, c0, r1, c1) => {
+    state.selKind = "cells";
+    state.ranges = [];
+    state.anchor = { row: r0, col: c0 };
+    state.sel = { row: r1, col: c1 };
+    endInline();
+    draw();
+  };
+
+  let block = null;
+  if (wasm) {
+    try {
+      const j = wasm.session_block_bounds(state.sheet, state.sel.row, state.sel.col);
+      if (j && j !== "null") block = JSON.parse(j);
+    } catch {}
+  }
+  const b = usedBounds();
+  const usedIsBlock =
+    block && block.r0 === 0 && block.c0 === 0 &&
+    block.r1 === b.rows - 1 && block.c1 === b.cols - 1;
+
+  if (block && !covers(block.r0, block.c0, block.r1, block.c1)) {
+    select(block.r0, block.c0, block.r1, block.c1);
+    return;
+  }
+  // A block that already *is* the used region has no wider step to take, so it
+  // goes straight to the sheet rather than re-selecting itself.
+  if (!usedIsBlock && !covers(0, 0, b.rows - 1, b.cols - 1)) {
+    select(0, 0, b.rows - 1, b.cols - 1);
+    return;
+  }
+  selectAll();
 }
 // Whole-row selection; the focus stays at column 0 so the view doesn't jump.
 function selectRow(r, exp) {
@@ -3013,6 +3043,8 @@ function buildColorMenu(menu, onPick, noneLabel) {
 function setAlign(al) { formatSel((s) => wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, al)); }
 function setValign(va) { formatSel((s) => wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, va)); }
 function toggleWrap() { formatSel((s) => wasm.session_toggle_wrap(state.sheet, s.r0, s.c0, s.r1, s.c1)); }
+// Subscript / superscript. Pressing the one already applied turns it off.
+function setVertAlign(which) { formatSel((s) => wasm.session_toggle_vert_align(state.sheet, s.r0, s.c0, s.r1, s.c1, which)); }
 // One three-way choice: "overflow" (spill into empty neighbours), "wrap", or
 // "clip" (stop at the cell edge). Wrap and clip are mutually exclusive, so the
 // engine sets them together rather than exposing two toggles that can disagree.
@@ -3374,11 +3406,15 @@ function sortDialog() {
 // the sheet (so they save to .xlsx and undo as one step) and the rows they hide
 // are a set of their own, separate from rows hidden by hand. Clearing a filter
 // therefore releases exactly the rows it hid.
-let filterInfo = null;    // {r0,c0,r1,c1,cols:Set<absCol>,hidden} or null
+let filterInfo = null;    // the *sheet's* own filter: {r0,c0,r1,c1,cols:Set<absCol>,hidden} or null
+let filterRegions = [];   // every filter on the sheet, tables included
+let filterHidden = 0;     // rows hidden by all of them together
 let filterButtons = [];   // hit targets rebuilt each frame by drawFilterButtons()
 
 function refreshFilterInfo() {
   filterInfo = null;
+  filterRegions = [];
+  filterHidden = 0;
   if (!wasm) return;
   try {
     const j = wasm.session_filter_info(state.sheet);
@@ -3386,6 +3422,13 @@ function refreshFilterInfo() {
       filterInfo = JSON.parse(j);
       filterInfo.cols = new Set(filterInfo.cols);
     }
+  } catch {}
+  try {
+    // Regions come from the model rather than from table geometry, so a table
+    // column carrying a rule draws as filtered like any other.
+    const payload = JSON.parse(wasm.session_filter_regions(state.sheet));
+    filterHidden = payload.hidden || 0;
+    filterRegions = payload.regions.map((r) => ({ ...r, cols: new Set(r.cols) }));
   } catch {}
 }
 
@@ -3396,13 +3439,27 @@ function toggleFilter() {
     tryEdit(() => wasm.session_clear_filter(state.sheet));
     status.textContent = "filter removed";
   } else {
-    // An explicit multi-cell selection wins; otherwise take the used region,
-    // which is what a user pressing the button on a single cell means.
+    // An explicit multi-cell selection wins; otherwise the contiguous block
+    // around the cursor — the table you are standing in — exactly as Excel
+    // does. Taking the used region instead put a filter button on every column
+    // between A and the last used one, blank ones included, because the used
+    // region is a bounding box over the whole sheet rather than one table.
     const r = effectiveRange();
     const multi = r.r1 > r.r0 || r.c1 > r.c0;
-    const b = usedBounds();
-    if (!multi && (b.rows < 2 || b.cols < 1)) { status.textContent = "nothing to filter"; return; }
-    const box = multi ? r : { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+    let box = multi ? r : null;
+    if (!box) {
+      try {
+        const j = wasm.session_block_bounds(state.sheet, state.sel.row, state.sel.col);
+        if (j && j !== "null") box = JSON.parse(j);
+      } catch {}
+    }
+    // A cursor on a blank cell has no block; the used region is the only honest
+    // guess left.
+    if (!box) {
+      const b = usedBounds();
+      if (b.rows < 2 || b.cols < 1) { status.textContent = "nothing to filter"; return; }
+      box = { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+    }
     tryEdit(() => wasm.session_set_filter_range(state.sheet, box.r0, box.c0, box.r1, box.c1));
     status.textContent = "filter on — click a header button to filter a column";
   }
@@ -3420,19 +3477,7 @@ function drawFilterButtons(withQuad) {
   // Every header that carries filter buttons: the sheet's own autofilter, plus
   // each table's. A table brings its own — Excel turns them on with the table,
   // and without them a table header reads as an ordinary shaded row.
-  const regions = [];
-  if (filterInfo) {
-    regions.push({ r0: filterInfo.r0, c0: filterInfo.c0, c1: filterInfo.c1, cols: filterInfo.cols });
-  }
-  for (const t of tablesInView) {
-    if (t.headers > 0) {
-      // A table's own filter state is not tracked separately yet, so no column
-      // reads as active. Showing the button unfilled is honest — it says the
-      // control exists — where hiding it would say the table has no filter.
-      regions.push({ r0: t.r0, c0: t.c0, c1: t.c1, cols: new Set() });
-    }
-  }
-  for (const region of regions) drawFilterRegion(withQuad, region);
+  for (const region of filterRegions) drawFilterRegion(withQuad, region);
 }
 
 function drawFilterRegion(withQuad, filterInfo) {
@@ -3648,7 +3693,10 @@ function openColumnFilter(col, x, y) {
 // Report what the filter now hides. The repaint already happened inside
 // tryEdit, and draw() refreshes `filterInfo`, so this only reads the result.
 function afterFilterChange() {
-  const n = filterInfo ? filterInfo.hidden : 0;
+  // Counted across every filter, not just the sheet's own: a table carries its
+  // own, and reading `filterInfo` alone reported "filter cleared" on the edit
+  // that had just hidden rows.
+  const n = filterHidden;
   status.textContent = n ? `filtered — ${n} row${n === 1 ? "" : "s"} hidden` : "filter cleared";
 }
 
@@ -7894,6 +7942,7 @@ function wireEvents() {
     const nfIs = (code) => () => curFmt("nf") === code;
     const alIs = (token) => () => curFmt("al") === token;
     const vaIs = (token) => () => curFmt("va") === token;
+    const vtIs = (token) => () => curFmt("vt") === token;
     const headersOn = () => { try { return !wasm.session_headers_hidden(state.sheet); } catch { return true; } };
     const clearContents = () => {
       try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
@@ -7999,12 +8048,21 @@ function wireEvents() {
         ["Delete columns", () => tryEdit(() => { const r = rng(); wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1); })],
         "sep",
         ["Note", clickEl("#tb-note")],
+        "sep",
+        // The context menu and Ctrl+T both reach this, but neither is somewhere
+        // you look for a feature you have not met yet.
+        ["Table…", () => tableDialog(), "Ctrl+T"],
+        ["Hyperlink…", () => hyperlinkDialog(), "Ctrl+K"],
       ]],
       ["Format", [
         ["Bold", clickEl("#tb-bold"), "Ctrl+B", () => fmtHas("b")],
         ["Italic", clickEl("#tb-italic"), "Ctrl+I", () => fmtHas("i")],
         ["Underline", clickEl("#tb-underline"), "Ctrl+U", () => fmtHas("u")],
         ["Strikethrough", clickEl("#tb-strike"), null, () => fmtHas("st")],
+        // Both are one `vertAlign` on the font, so they are mutually exclusive:
+        // choosing one replaces the other rather than stacking.
+        ["Superscript", () => setVertAlign("superscript"), null, vtIs("superscript")],
+        ["Subscript", () => setVertAlign("subscript"), null, vtIs("subscript")],
         "sep",
         ["Cell styles…", () => cellStyleGallery()],
         ["Conditional formatting rules…", () => manageCfRules()],

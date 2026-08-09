@@ -1162,7 +1162,7 @@ fn table_workbook() -> Workbook {
                 totals_row_formula: None,
             },
         ],
-        auto_filter_ref: None,
+        auto_filter: None,
         style: Default::default(),
         attrs: Default::default(),
     });
