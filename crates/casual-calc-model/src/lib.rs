@@ -25,7 +25,7 @@ mod value;
 mod workbook;
 
 pub use cell::{Cell, CellFlags};
-pub use chart::{ChartKind, ChartSeries, ChartView};
+pub use chart::{ChartKind, ChartSeries, ChartView, ImageView};
 pub use defined_name::DefinedName;
 pub use error::ModelError;
 pub use ids::{

@@ -85,6 +85,56 @@ let linkCells = new Set();
 // Tables on the current sheet, refreshed each draw. Held so the header
 // filter-button hit test does not have to ask the engine on every mousedown.
 let tablesInView = [];
+// Decoded pictures, keyed by package part.
+//
+// An <img> decodes asynchronously, so the first frame after a load has nothing
+// to draw and a redraw has to be asked for once it does — otherwise the picture
+// only appears the next time something else happens to repaint.
+const imageCache = new Map();
+function imageFor(part) {
+  const hit = imageCache.get(part);
+  if (hit !== undefined) return hit;
+  imageCache.set(part, null); // in flight; do not request it again every frame
+  let url = "";
+  try { url = wasm.session_image_data(part); } catch {}
+  if (!url) return null;
+  const img = new Image();
+  img.onload = () => { imageCache.set(part, img); draw(); };
+  // A part this browser cannot decode stays a blank frame rather than
+  // retrying forever.
+  img.onerror = () => imageCache.set(part, false);
+  img.src = url;
+  return null;
+}
+
+// Pictures anchored on the sheet, drawn under the charts and over the cells.
+function drawImages() {
+  if (!wasm) return;
+  let images = [];
+  try { images = JSON.parse(wasm.session_images(state.sheet)); } catch { return; }
+  for (const im of images) {
+    const x0 = colXAt(im.c0), y0 = rowYAt(im.r0);
+    if (x0 === undefined || y0 === undefined) continue;
+    let x1 = colXAt(im.c1), y1 = rowYAt(im.r1);
+    if (x1 === undefined) x1 = canvas.clientWidth;
+    if (y1 === undefined) y1 = canvas.clientHeight;
+    const w = Math.max(8, x1 - x0), h = Math.max(8, y1 - y0);
+    const img = imageFor(im.part);
+    if (!img) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, w, h);
+    ctx.clip();
+    // Fitted inside the anchor and centred, keeping the aspect ratio: an
+    // anchor is a frame, and stretching a photograph to fill it is a visible
+    // lie about the file.
+    const scale = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+    const dw = img.naturalWidth * scale, dh = img.naturalHeight * scale;
+    ctx.drawImage(img, x0 + (w - dw) / 2, y0 + (h - dh) / 2, dw, dh);
+    ctx.restore();
+  }
+}
+
 // Every chart on the sheet, at its anchored cells.
 //
 // A chart is anchored in *cells*, which is why it moves with the rows under it
@@ -1237,6 +1287,7 @@ function draw() {
   // Charts, drawn over the grid at their anchors. Read-only: the engine parses
   // the chart part for display and still writes it back from its own bytes, so
   // nothing here can change the file.
+  drawImages();
   drawCharts(withQuad);
 
   // Manual page breaks, as the dashed rules Excel draws. A break that is only
@@ -8574,6 +8625,10 @@ function wireEvents() {
     } catch (err) { status.textContent = friendlyOpenError(err, file.name, delim !== null); }
     e.target.value = ""; // allow re-opening the same file
     invalidateGrowth();
+    // Part paths repeat across workbooks — every file has an
+    // `xl/media/image1.png` — so a cache kept across a load shows the previous
+    // file's pictures.
+    imageCache.clear();
     // Open on the sheet the file was left on, not always the first: a workbook
     // records which tab its author was looking at, and a summary sheet at the
     // end is put there deliberately.
@@ -8785,7 +8840,7 @@ function wireEvents() {
 
     const MENUS = [
       ["File", [
-        ["New", () => { stopMarch(); wasm.session_new(); state.sheet = 0; seed(); renderTabs(); }],
+        ["New", () => { stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs(); }],
         ["Open…", clickEl("#tb-open")],
         { sub: "Download", items: [
           ["Excel (.xlsx)", () => saveAs("xlsx")],

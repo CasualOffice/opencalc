@@ -2249,3 +2249,68 @@ fn a_chart_is_read_for_display_and_still_round_trips_verbatim() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.sheets[0].charts, wb.sheets[0].charts);
 }
+
+/// A picture is located for the renderer while its bytes stay in the retained
+/// media part — stored once, and written back as they arrived.
+#[test]
+fn an_image_is_located_without_copying_its_bytes() {
+    let drawing = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <xdr:twoCellAnchor>
+        <xdr:from><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:from>
+        <xdr:to><xdr:col>5</xdr:col><xdr:row>10</xdr:row></xdr:to>
+        <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
+        <xdr:clientData/>
+      </xdr:twoCellAnchor>
+    </xdr:wsDr>"#;
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="png" ContentType="image/png"/>
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rId9"/></worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+            </Relationships>"#,
+        ),
+        ("xl/drawings/drawing1.xml", drawing),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+            </Relationships>"#,
+        ),
+        ("xl/media/image1.png", b"\x89PNG\r\n\x1a\nnot-a-real-png"),
+    ]);
+
+    let wb = import_package(source).unwrap().workbook;
+    let images = &wb.sheets[0].images;
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].part, "xl/media/image1.png");
+    assert_eq!(
+        (images[0].anchor.start.row, images[0].anchor.start.col),
+        (2, 1)
+    );
+    // The bytes are not on the sheet — they belong to the retained part, so a
+    // picture is stored once however many places point at it.
+    let part = wb
+        .retained_parts
+        .iter()
+        .find(|p| p.path == "xl/media/image1.png")
+        .expect("the media part is retained");
+    assert!(part.bytes.starts_with(b"\x89PNG"));
+
+    let written = write_workbook(&wb).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].images, wb.sheets[0].images);
+}

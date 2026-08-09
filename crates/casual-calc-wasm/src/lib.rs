@@ -2784,6 +2784,100 @@ pub fn session_toggle_page_break(sheet: usize, row: u32, col: u32) -> Result<(),
     })
 }
 
+/// The pictures on a sheet as JSON `[{r0,c0,r1,c1,part}]`.
+///
+/// The bytes are fetched separately by `session_image_data`, because a sheet
+/// with a dozen photographs would otherwise send megabytes of base64 on every
+/// frame the host asks where things are.
+#[wasm_bindgen]
+pub fn session_images(sheet: usize) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = sh
+            .images
+            .iter()
+            .map(|im| {
+                format!(
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"part\":{}}}",
+                    im.anchor.start.row,
+                    im.anchor.start.col,
+                    im.anchor.end.row,
+                    im.anchor.end.col,
+                    json_string(&im.part)
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// One picture as a `data:` URL, or `""` when the part is missing.
+///
+/// The media bytes live in the retained parts — the same bytes that get written
+/// back — so a picture is never stored twice and what is drawn is always what
+/// the file holds.
+#[wasm_bindgen]
+pub fn session_image_data(part: &str) -> String {
+    with_session(|s| {
+        let found = s
+            .workbook()
+            .retained_parts
+            .iter()
+            .find(|p| p.path == part)?;
+        // The declared content type where the package gave one; otherwise the
+        // extension. Guessing wrong makes the browser refuse to decode it.
+        let mime = found.content_type.clone().unwrap_or_else(|| {
+            match part.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()) {
+                Some(e) if e == "png" => "image/png",
+                Some(e) if e == "jpg" || e == "jpeg" => "image/jpeg",
+                Some(e) if e == "gif" => "image/gif",
+                Some(e) if e == "bmp" => "image/bmp",
+                Some(e) if e == "svg" => "image/svg+xml",
+                Some(e) if e == "webp" => "image/webp",
+                _ => "application/octet-stream",
+            }
+            .to_owned()
+        });
+        Some(format!(
+            "data:{mime};base64,{}",
+            base64_encode(&found.bytes)
+        ))
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// Standard base64, no line breaks — what a `data:` URL wants.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        // Padding stands in for the bytes that were not there.
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// The charts on a sheet, with their data already resolved, as JSON.
 ///
 /// `[{r0,c0,r1,c1,kind,title,cats:[…],series:[{name,values:[…]}]}]`. The host
@@ -8256,5 +8350,26 @@ mod page_break_tests {
         // ...and it is on the row the break sits before, not the one after.
         let at = html.find("break-before:page").expect("a break");
         assert!(html[at..].contains("r2"), "{html}");
+    }
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::base64_encode;
+
+    /// The padding cases are where a hand-written encoder goes wrong, and a
+    /// wrong `data:` URL is a picture the browser silently refuses to decode.
+    #[test]
+    fn base64_pads_every_remainder() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // High bytes must not be sign-extended or mangled.
+        assert_eq!(base64_encode(&[0xff, 0xfe, 0xfd]), "//79");
+        assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
     }
 }

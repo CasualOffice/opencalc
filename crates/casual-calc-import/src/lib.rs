@@ -61,6 +61,8 @@ const THREADED_COMMENTS_REL_SUFFIX: &str = "/threadedComment";
 const DRAWING_REL_SUFFIX: &str = "/drawing";
 /// A drawing's chart, one hop further out.
 const CHART_REL_SUFFIX: &str = "/chart";
+/// A drawing's picture.
+const IMAGE_REL_SUFFIX: &str = "/image";
 /// Relationship type suffix binding the workbook to its persons part.
 const PERSONS_REL_SUFFIX: &str = "/person";
 /// Most areas honoured from one `sqref`. Each area materializes its own model
@@ -160,31 +162,39 @@ const MODELLED_REL_SUFFIXES: &[&str] = &[
 ];
 
 /// Resolve a relationship target against the part that declared it.
-/// The charts anchored on a sheet, resolved through its drawing.
+/// The charts and pictures anchored on a sheet, resolved through its drawing.
 ///
 /// A sheet points at one drawing; the drawing's anchors point at charts through
 /// its *own* relationships, so two hops are needed. Anything that fails to
 /// resolve is skipped rather than reported: the part is still retained and
 /// still written back, so the only cost is a chart that does not appear.
-fn read_sheet_charts(
+#[allow(clippy::type_complexity)]
+fn read_sheet_drawings(
     package: &mut SpreadsheetPackage,
     sheet_part: &str,
-) -> Result<Vec<casual_calc_model::ChartView>, ImportError> {
+) -> Result<
+    (
+        Vec<casual_calc_model::ChartView>,
+        Vec<casual_calc_model::ImageView>,
+    ),
+    ImportError,
+> {
     let limits = OoxmlLimits::default();
     let Some(drawing_part) = package
         .related_part(sheet_part, DRAWING_REL_SUFFIX, &limits)?
         .filter(|p| package.contains(p))
     else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let drawing_xml = package.read_part(&drawing_part)?;
     let anchors = chart::parse_drawing(&drawing_xml)?;
     if anchors.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let rels = package.relationships_of(&drawing_part, &limits)?;
 
-    let mut out = Vec::new();
+    let mut charts = Vec::new();
+    let mut images = Vec::new();
     for anchor in anchors {
         let Some(rel_id) = anchor.rel_id else {
             continue;
@@ -192,24 +202,33 @@ fn read_sheet_charts(
         let Some(rel) = rels.iter().find(|r| r.id == rel_id) else {
             continue;
         };
-        if rel.external || !rel.rel_type.ends_with(CHART_REL_SUFFIX) {
-            continue; // a picture or anything else framed by the same drawing
+        if rel.external {
+            continue;
         }
         let target = resolve_part(&drawing_part, &rel.target);
         if !package.contains(&target) {
             continue;
         }
-        let spec = chart::parse_chart(&package.read_part(&target)?)?;
-        out.push(casual_calc_model::ChartView {
-            anchor: anchor.range,
-            kind: spec
-                .kind
-                .unwrap_or(casual_calc_model::ChartKind::Unsupported),
-            title: spec.title,
-            series: spec.series,
-        });
+        if rel.rel_type.ends_with(CHART_REL_SUFFIX) {
+            let spec = chart::parse_chart(&package.read_part(&target)?)?;
+            charts.push(casual_calc_model::ChartView {
+                anchor: anchor.range,
+                kind: spec
+                    .kind
+                    .unwrap_or(casual_calc_model::ChartKind::Unsupported),
+                title: spec.title,
+                series: spec.series,
+            });
+        } else if rel.rel_type.ends_with(IMAGE_REL_SUFFIX) {
+            // Only the path: the bytes are already retained under it, and
+            // copying them here would store every picture twice.
+            images.push(casual_calc_model::ImageView {
+                anchor: anchor.range,
+                part: target,
+            });
+        }
     }
-    Ok(out)
+    Ok((charts, images))
 }
 
 fn resolve_part(source: &str, target: &str) -> String {
@@ -813,7 +832,9 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         // Charts, read for display only. The parts stay retained and are
         // written back from their own bytes; this is the projection a renderer
         // needs, so a chart it cannot decode simply does not draw.
-        sheet.charts = read_sheet_charts(&mut package, &part)?;
+        let drawn = read_sheet_drawings(&mut package, &part)?;
+        sheet.charts = drawn.0;
+        sheet.images = drawn.1;
 
         workbook.sheets.push(sheet);
     }

@@ -101,3 +101,19 @@ impl ChartKind {
         }
     }
 }
+
+/// A picture anchored on a sheet.
+///
+/// The bytes are **not** here: they stay in [`crate::Workbook::retained_parts`]
+/// under `part`, so an image is stored once and written back from the same
+/// bytes it arrived in. Copying a multi-megabyte PNG into the sheet would
+/// double a workbook's memory to gain nothing — the renderer needs to know
+/// *which* part to draw, not to own it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageView {
+    /// The cells the picture's frame covers.
+    pub anchor: CellRange,
+    /// The package path of its media part, e.g. `xl/media/image1.png`.
+    pub part: String,
+}
