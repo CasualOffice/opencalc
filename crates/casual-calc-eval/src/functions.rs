@@ -199,6 +199,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
     ("GESTEP", "GESTEP(number, [step])"),
+    ("GROWTH", "GROWTH(known_y, [known_x], [new_x], [const])"),
     ("HARMEAN", "HARMEAN(number1, …)"),
     ("HEX2BIN", "HEX2BIN(number, [places])"),
     ("HEX2DEC", "HEX2DEC(number)"),
@@ -268,9 +269,11 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("LEFTB", "LEFTB(text, [num_bytes])"),
     ("LEN", "LEN(text)"),
     ("LENB", "LENB(text)"),
+    ("LINEST", "LINEST(known_y, [known_x], [const], [stats])"),
     ("LN", "LN(number)"),
     ("LOG", "LOG(number, [base])"),
     ("LOG10", "LOG10(number)"),
+    ("LOGEST", "LOGEST(known_y, [known_x], [const], [stats])"),
     ("LOGINV", "LOGINV(probability, mean, standard_dev)"),
     ("LOGNORMDIST", "LOGNORMDIST(x, mean, standard_dev)"),
     ("LOOKUP", "LOOKUP(value, vector, [result])"),
@@ -449,6 +452,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TINV", "TINV(probability, degrees_freedom)"),
     ("TODAY", "TODAY()"),
     ("TRANSPOSE", "TRANSPOSE(array)"),
+    ("TREND", "TREND(known_y, [known_x], [new_x], [const])"),
     ("TRIM", "TRIM(text)"),
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
     ("TRUE", "TRUE()"),
@@ -955,6 +959,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             eval_odd_bond(ev, sheet, name, args)
         }
         "MDETERM" => eval_mdeterm(ev, sheet, args),
+        "LINEST" | "LOGEST" | "TREND" | "GROWTH" => eval_regression(ev, sheet, name, args),
         "TRANSPOSE" | "MMULT" | "MINVERSE" | "FREQUENCY" => eval_matrix(ev, sheet, name, args),
         "ACCRINTM" | "PRICEDISC" | "YIELDDISC" | "PRICEMAT" | "YIELDMAT" => {
             eval_bond_simple(ev, sheet, name, args)
@@ -8679,5 +8684,330 @@ fn eval_matrix(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) 
             }
         }
         _ => Value::Error(ErrorValue::Name),
+    }
+}
+
+/// A fitted least-squares model, and the statistics `LINEST` reports about it.
+struct Regression {
+    /// `[intercept, m1, m2, …]`. Excel reports the slopes in *reverse* order
+    /// with the intercept last, which is a presentation choice rather than a
+    /// mathematical one, so the reversal happens where the array is built.
+    coeffs: Vec<f64>,
+    /// Standard error of each coefficient, in the same order.
+    se: Vec<f64>,
+    r2: f64,
+    se_y: f64,
+    f: f64,
+    df: f64,
+    ss_reg: f64,
+    ss_resid: f64,
+}
+
+/// Ordinary least squares of `y` on the predictor columns in `x`.
+///
+/// Solved through the normal equations with Gaussian elimination. That is less
+/// numerically careful than a QR decomposition, and adequate here: a
+/// spreadsheet regression is a handful of predictors over a few hundred rows,
+/// where the conditioning that would justify QR does not arise.
+///
+/// `intercept = false` forces the line through the origin, which changes the
+/// degrees of freedom as well as the fit — a detail that silently corrupts R²
+/// if it is missed.
+fn least_squares(y: &[f64], x: &[Vec<f64>], intercept: bool) -> Option<Regression> {
+    let n = y.len();
+    let k = x.len();
+    if n == 0 || x.iter().any(|col| col.len() != n) {
+        return None;
+    }
+    let terms = k + usize::from(intercept);
+    if terms == 0 || n < terms {
+        return None;
+    }
+
+    // The design matrix, constant column first when there is an intercept.
+    let design = |row: usize, col: usize| -> f64 {
+        if intercept {
+            if col == 0 { 1.0 } else { x[col - 1][row] }
+        } else {
+            x[col][row]
+        }
+    };
+
+    // Normal equations: (XᵀX) b = Xᵀy.
+    let mut a = vec![0.0; terms * terms];
+    let mut rhs = vec![0.0; terms];
+    for i in 0..terms {
+        for j in 0..terms {
+            a[i * terms + j] = (0..n).map(|r| design(r, i) * design(r, j)).sum();
+        }
+        rhs[i] = (0..n).map(|r| design(r, i) * y[r]).sum();
+    }
+
+    // Gauss–Jordan on [A | I | rhs], keeping the inverse because the standard
+    // errors need its diagonal.
+    let mut inv = vec![0.0; terms * terms];
+    for i in 0..terms {
+        inv[i * terms + i] = 1.0;
+    }
+    for col in 0..terms {
+        let mut pivot = col;
+        for r in (col + 1)..terms {
+            if a[r * terms + col].abs() > a[pivot * terms + col].abs() {
+                pivot = r;
+            }
+        }
+        if a[pivot * terms + col].abs() < 1e-300 {
+            return None; // collinear predictors: no unique fit
+        }
+        if pivot != col {
+            for c in 0..terms {
+                a.swap(col * terms + c, pivot * terms + c);
+                inv.swap(col * terms + c, pivot * terms + c);
+            }
+            rhs.swap(col, pivot);
+        }
+        let d = a[col * terms + col];
+        for c in 0..terms {
+            a[col * terms + c] /= d;
+            inv[col * terms + c] /= d;
+        }
+        rhs[col] /= d;
+        for r in 0..terms {
+            if r == col {
+                continue;
+            }
+            let factor = a[r * terms + col];
+            if factor == 0.0 {
+                continue;
+            }
+            for c in 0..terms {
+                a[r * terms + c] -= factor * a[col * terms + c];
+                inv[r * terms + c] -= factor * inv[col * terms + c];
+            }
+            rhs[r] -= factor * rhs[col];
+        }
+    }
+    let beta = rhs;
+
+    let predict = |row: usize| -> f64 { (0..terms).map(|c| beta[c] * design(row, c)).sum() };
+    let ss_resid: f64 = (0..n).map(|r| (y[r] - predict(r)).powi(2)).sum();
+    // Without an intercept the total sum of squares is measured about zero,
+    // not about the mean — using the mean there reports an R² that can be
+    // negative or above one.
+    let mean = y.iter().sum::<f64>() / n as f64;
+    let ss_total: f64 = if intercept {
+        y.iter().map(|v| (v - mean).powi(2)).sum()
+    } else {
+        y.iter().map(|v| v * v).sum()
+    };
+    let ss_reg = (ss_total - ss_resid).max(0.0);
+    let df = (n - terms) as f64;
+    let se_y = if df > 0.0 {
+        (ss_resid / df).sqrt()
+    } else {
+        0.0
+    };
+    let r2 = if ss_total > 0.0 {
+        ss_reg / ss_total
+    } else {
+        1.0
+    };
+    let predictors = (terms - usize::from(intercept)).max(1) as f64;
+    let f = if df > 0.0 && ss_resid > 0.0 {
+        (ss_reg / predictors) / (ss_resid / df)
+    } else {
+        f64::INFINITY
+    };
+    let se: Vec<f64> = (0..terms)
+        .map(|i| (inv[i * terms + i].max(0.0) * se_y * se_y).sqrt())
+        .collect();
+
+    // Internally `[intercept, slopes…]` when there is one; callers that want
+    // Excel's order reverse at the boundary.
+    let coeffs = if intercept {
+        beta
+    } else {
+        std::iter::once(0.0).chain(beta).collect()
+    };
+    let se = if intercept {
+        se
+    } else {
+        std::iter::once(0.0).chain(se).collect()
+    };
+    Some(Regression {
+        coeffs,
+        se,
+        r2,
+        se_y,
+        f,
+        df,
+        ss_reg,
+        ss_resid,
+    })
+}
+
+/// Gather `known_y` and `known_x` as columns.
+///
+/// A missing `known_x` is `{1, 2, 3, …}`, which is what makes `TREND(y)` mean
+/// "fit against position". Multiple predictors come from a range whose *other*
+/// axis is the shorter one — Excel decides orientation by shape, and so does
+/// this, because a file written elsewhere relies on it.
+fn regression_inputs(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    y_arg: &Expr,
+    x_arg: Option<&Expr>,
+) -> Result<(Vec<f64>, Vec<Vec<f64>>), ErrorValue> {
+    let ys = flatten_numbers(ev, sheet, std::slice::from_ref(y_arg))?;
+    if ys.is_empty() {
+        return Err(ErrorValue::Value);
+    }
+    let Some(x_arg) = x_arg else {
+        return Ok((ys.clone(), vec![(1..=ys.len()).map(|i| i as f64).collect()]));
+    };
+    let grid = eval_range_2d(ev, sheet, x_arg)?;
+    let values: Vec<f64> = grid
+        .cells
+        .iter()
+        .map(Value::as_number)
+        .collect::<Result<_, _>>()?;
+    if values.len() == ys.len() {
+        return Ok((ys, vec![values]));
+    }
+    // More x values than y: several predictors, laid out along whichever axis
+    // matches the y count.
+    if grid.rows == ys.len() && grid.cols > 0 {
+        let cols = (0..grid.cols)
+            .map(|c| (0..grid.rows).map(|r| values[r * grid.cols + c]).collect())
+            .collect();
+        return Ok((ys, cols));
+    }
+    if grid.cols == ys.len() && grid.rows > 0 {
+        let cols = (0..grid.rows)
+            .map(|r| (0..grid.cols).map(|c| values[r * grid.cols + c]).collect())
+            .collect();
+        return Ok((ys, cols));
+    }
+    Err(ErrorValue::Ref)
+}
+
+/// `LINEST`, `LOGEST`, `TREND` and `GROWTH`.
+///
+/// The exponential pair are the linear pair fitted to `ln(y)`: `y = b·m^x`
+/// becomes `ln y = ln b + x·ln m`. That is why a non-positive `y` is `#NUM!`
+/// rather than being skipped — its logarithm does not exist, and dropping the
+/// point would fit a different dataset than the one given.
+fn eval_regression(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let logarithmic = matches!(name, "LOGEST" | "GROWTH");
+    let estimating = matches!(name, "LINEST" | "LOGEST");
+
+    let x_arg = args.get(1);
+    let (mut ys, xs) = match regression_inputs(ev, sheet, &args[0], x_arg) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if logarithmic {
+        if ys.iter().any(|v| *v <= 0.0) {
+            return Value::Error(ErrorValue::Num);
+        }
+        ys = ys.into_iter().map(f64::ln).collect();
+    }
+
+    // Third argument: LINEST/LOGEST take `const`, TREND/GROWTH take `new_x`.
+    let const_arg = if estimating { args.get(2) } else { args.get(3) };
+    let intercept = match const_arg {
+        Some(a) => match ev.eval_expr(sheet, a).as_bool() {
+            Ok(v) => v,
+            Err(e) => return Value::Error(e),
+        },
+        None => true,
+    };
+
+    let Some(fit) = least_squares(&ys, &xs, intercept) else {
+        return Value::Error(ErrorValue::Num);
+    };
+
+    if estimating {
+        let stats = match args.get(3) {
+            Some(a) => ev.eval_expr(sheet, a).as_bool().unwrap_or(false),
+            None => false,
+        };
+        // Excel's order: slopes reversed, intercept last.
+        let mut row: Vec<f64> = fit.coeffs[1..].iter().rev().copied().collect();
+        row.push(fit.coeffs[0]);
+        if logarithmic {
+            // The fit is on ln(y), so the coefficients come back through exp.
+            row = row.into_iter().map(f64::exp).collect();
+        }
+        let width = row.len();
+        if !stats {
+            return Value::Array {
+                rows: 1,
+                cols: width,
+                cells: row.into_iter().map(Value::Number).collect(),
+            };
+        }
+        let mut se: Vec<f64> = fit.se[1..].iter().rev().copied().collect();
+        se.push(fit.se[0]);
+        // The 5×n block. Cells with no meaning in a given column are #N/A,
+        // which is what Excel puts there — a zero would read as a measurement.
+        let mut cells: Vec<Value> = Vec::with_capacity(5 * width);
+        cells.extend(row.iter().map(|v| Value::Number(*v)));
+        cells.extend(se.iter().map(|v| Value::Number(*v)));
+        let mut push_pair = |a: f64, b: f64| {
+            cells.push(Value::Number(a));
+            cells.push(Value::Number(b));
+            for _ in 2..width {
+                cells.push(Value::Error(ErrorValue::Na));
+            }
+        };
+        push_pair(fit.r2, fit.se_y);
+        push_pair(fit.f, fit.df);
+        push_pair(fit.ss_reg, fit.ss_resid);
+        // A single-column fit has no room for the second statistic of each
+        // pair, so the block is trimmed to what fits.
+        cells.truncate(5 * width);
+        return Value::Array {
+            rows: 5,
+            cols: width,
+            cells,
+        };
+    }
+
+    // TREND / GROWTH: predict at `new_x`, defaulting to the fitted points.
+    let new_x: Vec<Vec<f64>> = match args.get(2) {
+        Some(a) => match regression_inputs(ev, sheet, &args[0], Some(a)) {
+            Ok((_, cols)) => cols,
+            Err(_) => {
+                // A new_x of a different length than known_y is normal — it is
+                // the whole point of predicting — so gather it on its own.
+                match flatten_numbers(ev, sheet, std::slice::from_ref(a)) {
+                    Ok(v) => vec![v],
+                    Err(e) => return Value::Error(e),
+                }
+            }
+        },
+        None => xs.clone(),
+    };
+    let points = new_x.first().map_or(0, Vec::len);
+    if points == 0 || new_x.len() != xs.len() {
+        return Value::Error(ErrorValue::Ref);
+    }
+    let cells: Vec<Value> = (0..points)
+        .map(|i| {
+            let mut v = fit.coeffs[0];
+            for (j, col) in new_x.iter().enumerate() {
+                v += fit.coeffs[j + 1] * col[i];
+            }
+            Value::Number(if logarithmic { v.exp() } else { v })
+        })
+        .collect();
+    Value::Array {
+        rows: points,
+        cols: 1,
+        cells,
     }
 }

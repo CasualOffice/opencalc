@@ -3323,3 +3323,111 @@ fn matrix_functions_satisfy_their_identities() {
     // Three bins-worth of buckets for two bins: 1 | 5 | 9.
     assert_eq!((n(0, 10), n(1, 10), n(2, 10)), (1.0, 1.0, 1.0));
 }
+
+/// A regression on points that lie exactly on a line must recover that line —
+/// slope, intercept and an R² of one. Anything less means the fit is wrong in a
+/// way no amount of plausible-looking output would reveal.
+#[test]
+fn linest_recovers_an_exact_line() {
+    let mut b = Builder::new();
+    // y = 3x + 2 at x = 1..5.
+    for i in 0..5u32 {
+        b.number((i, 0), (i + 1) as f64);
+        b.number((i, 1), 3.0 * (i + 1) as f64 + 2.0);
+    }
+    b.formula((0, 3), "LINEST(B1:B5,A1:A5)");
+    // TREND must agree with the line it fitted.
+    b.formula((0, 6), "TREND(B1:B5,A1:A5,A1:A5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let n = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::Number(v) => v,
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    // Excel's order: slope first, intercept second.
+    assert!((n(0, 3) - 3.0).abs() < 1e-9, "slope {}", n(0, 3));
+    assert!((n(0, 4) - 2.0).abs() < 1e-9, "intercept {}", n(0, 4));
+    for i in 0..5u32 {
+        let want = 3.0 * (i + 1) as f64 + 2.0;
+        assert!(
+            (n(i, 6) - want).abs() < 1e-9,
+            "TREND at {i}: {} want {want}",
+            n(i, 6)
+        );
+    }
+}
+
+/// `LOGEST` and `GROWTH` fit `y = b·m^x`, which is the linear fit on `ln(y)`.
+/// A non-positive y has no logarithm, and skipping it would fit a different
+/// dataset than the one given — so it is `#NUM!`.
+#[test]
+fn logest_recovers_an_exact_exponential() {
+    let mut b = Builder::new();
+    // y = 2 · 3^x at x = 1..4.
+    for i in 0..4u32 {
+        let x = (i + 1) as f64;
+        b.number((i, 0), x);
+        b.number((i, 1), 2.0 * 3.0f64.powf(x));
+    }
+    b.formula((0, 3), "LOGEST(B1:B4,A1:A4)");
+    b.formula((0, 6), "GROWTH(B1:B4,A1:A4,A1:A4)");
+    // A zero in the data has no logarithm.
+    b.number((0, 9), 1.0).number((1, 9), 0.0);
+    b.number((0, 10), 1.0).number((1, 10), 2.0);
+    b.formula((5, 3), "LOGEST(J1:J2,K1:K2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let n = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::Number(v) => v,
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    assert!((n(0, 3) - 3.0).abs() < 1e-9, "base {}", n(0, 3));
+    assert!((n(0, 4) - 2.0).abs() < 1e-9, "coefficient {}", n(0, 4));
+    for i in 0..4u32 {
+        let want = 2.0 * 3.0f64.powf((i + 1) as f64);
+        assert!((n(i, 6) - want).abs() < 1e-6, "GROWTH at {i}: {}", n(i, 6));
+    }
+    assert_eq!(
+        value_at(&wb, 5, 3),
+        CellValue::Error(casual_calc_model::ErrorValue::Num),
+        "a non-positive y has no logarithm"
+    );
+}
+
+/// `LINEST` with statistics returns a 5-row block. Forcing the intercept to
+/// zero changes the degrees of freedom as well as the fit, which silently
+/// corrupts R² if it is missed.
+#[test]
+fn linest_statistics_block_and_forced_intercept() {
+    let mut b = Builder::new();
+    for i in 0..5u32 {
+        let x = (i + 1) as f64;
+        b.number((i, 0), x);
+        b.number((i, 1), 3.0 * x + 2.0);
+    }
+    b.formula((0, 3), "LINEST(B1:B5,A1:A5,TRUE,TRUE)");
+    // Through the origin: the best fit is no longer y = 3x + 2.
+    b.formula((10, 3), "LINEST(B1:B5,A1:A5,FALSE)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let n = |r: u32, c: u32| match value_at(&wb, r, c) {
+        CellValue::Number(v) => v,
+        other => panic!("({r},{c}): {other:?}"),
+    };
+    // Row 0 coefficients, row 2 holds R² and the standard error of y.
+    assert!((n(0, 3) - 3.0).abs() < 1e-9);
+    assert!(
+        (n(2, 3) - 1.0).abs() < 1e-9,
+        "R² of an exact fit: {}",
+        n(2, 3)
+    );
+    assert!(n(2, 4).abs() < 1e-9, "no residual error: {}", n(2, 4));
+    // Degrees of freedom: five points, two coefficients.
+    assert!((n(3, 4) - 3.0).abs() < 1e-9, "df {}", n(3, 4));
+    // Forced through the origin the intercept is reported as zero.
+    assert!(n(10, 4).abs() < 1e-12, "forced intercept {}", n(10, 4));
+    assert!(n(10, 3) > 3.0, "and the slope absorbs it: {}", n(10, 3));
+}

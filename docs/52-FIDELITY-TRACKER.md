@@ -203,10 +203,10 @@ Named rather than left in a "missing" count, because the difference between
 | `GETPIVOTDATA` | Reads a pivot table's cache. Pivot tables are retained verbatim and not modelled, so there is nothing to read. Implementable once they are. |
 | `PHONETIC` | Returns the furigana stored in a cell's `<rPh>` runs. Those runs are retained in the file but not parsed, so the only available answer is the base text — which is what Excel returns when there is *no* furigana, and therefore a plausible wrong answer for a cell that has some. |
 
-That leaves the reachable ceiling at **347 of 356**. The remaining eight —
-FREQUENCY, GROWTH, LINEST, LOGEST, MINVERSE, MMULT, TRANSPOSE, TREND — all
-return arrays, and the engine has no result spilling. That is a design step,
-not a function.
+That leaves the reachable ceiling at **346 of 356 (97.2%)**, and it has been
+reached: every function outside that table is implemented. (An earlier note in
+this file put the ceiling at 347 — that was an arithmetic slip, counting
+PHONETIC as reachable while also listing it as not.)
 
 ## Array results and spilling
 
@@ -240,3 +240,26 @@ Three rules the pass has to get right:
 `MDETERM`, `TRANSPOSE`, `MMULT`, `MINVERSE` and `FREQUENCY` are built on it. The
 matrix tests assert the identities that define them — `A × A⁻¹ = I` — rather
 than quoting numbers, which also exercises reading across a spill boundary.
+
+## The least-squares family
+
+`LINEST`, `LOGEST`, `TREND` and `GROWTH`, which close the function work.
+
+One shared `least_squares` over the normal equations, keeping the inverse
+because the standard errors need its diagonal. Normal equations rather than a
+QR decomposition: a spreadsheet regression is a few predictors over a few
+hundred rows, where the conditioning that would justify QR does not arise —
+stated because it is a deliberate trade rather than an oversight.
+
+The exponential pair are the linear pair fitted to `ln(y)`. A non-positive `y`
+is `#NUM!` rather than being skipped: its logarithm does not exist, and dropping
+the point would fit a different dataset than the one given.
+
+`const = FALSE` changes the degrees of freedom as well as the fit, and the total
+sum of squares is then measured about zero rather than about the mean — using
+the mean there reports an R² that can be negative or above one.
+
+The tests assert recovery rather than resemblance: points that lie exactly on
+`y = 3x + 2` must give back slope 3, intercept 2 and R² of 1, and the
+exponential pair must recover `y = 2·3^x`. A fit that is merely close would
+pass a looser test while being wrong.
