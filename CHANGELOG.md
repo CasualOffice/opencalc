@@ -11,6 +11,96 @@ the design doc or ADR that motivated it.
 
 ## Unreleased
 
+### 2026-08-10 — Pivot tables, charts, and the embeddable SDK
+
+**Added**
+
+- **`LET` and `LAMBDA`**, with first-class function values — so
+  `LAMBDA(x,LAMBDA(y,x+y))(3)(4)` is 7 — plus `MAP` / `REDUCE` / `SCAN` /
+  `BYROW` / `BYCOL` / `MAKEARRAY`.
+- **Pivot tables** end to end (PIV-01, PIV-03, PIV-04): model, engine, import,
+  an undoable host surface, a drag-to-arrange fields panel, eleven aggregates,
+  page filters, subtotals, grand totals, and `GETPIVOTDATA`. Every record is
+  accumulated into every (row-prefix, column-prefix) pair in **one pass**, so a
+  subtotal cannot disagree with the rows above it. Refresh **refuses rather than
+  overwrites** when the report would land on something you typed.
+- **Chart authoring** (CHT-01, CHT-02): column, bar, line, area, pie, doughnut
+  and scatter, inserted from a range, retitled, moved and resized on the grid,
+  and written as **real chart parts** rather than pictures.
+- **The embeddable SDK** — `<opencalc-sheet>`, a custom element with a shadow
+  root: 27 typed theme tokens (`Color` / `Shadow` / `FontFamily` suffixes), a
+  per-scheme `theme({light, dark})`, seven controllable chrome regions,
+  hide/disable by command id, cancellable `before*` events carrying a `source`,
+  `edit` / `view` / `preview` access levels **enforced in the engine**, and
+  host-supplied translation catalogues with an optional footer picker. Design in
+  [docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md); runnable vanilla,
+  React, Next.js and viewer examples in [`sdk/`](sdk/).
+- A `SessionConfig` on the Rust side: admission limits, calculation mode, a
+  supplied `Environment` (clock and seed, never sampled), undo depth, read-only.
+- An SDK integration guide on the marketing site, and an embed demo page.
+
+**Fixed**
+
+- `<pivotCaches>` was dropped on import, leaving cache parts that nothing
+  declared — Excel offered to repair the file. Latent since pivot parts were
+  first retained.
+- `<xdr:to>` was read as **inclusive**; it is exclusive. Anchored frames drew a
+  row and a column too large, and would have grown on every save once the
+  writer emitted anchors. The renderer had a compensating near-edge bug that
+  hid it — both fixed (CHT-03).
+- Charts and overflowing text vanished when the owning cell scrolled out of
+  view: both drew from the top-left cell's screen position, which is undefined
+  once it is off-screen (CHT-03, UX-B02).
+- Resizing a chart snapped to gridlines — EMU offsets are now carried through
+  the model, import, export and the drag handler.
+- Deleting or editing an imported chart left a dangling drawing anchor (CHT-04),
+  and dropping a chart part matched relationships by filename **suffix**, so
+  `mychart1.xml` matched `chart1.xml`.
+- Several SDK isolation bugs the examples exposed and the demo page could not:
+  a module-scope singleton meant a second element on a page never finished
+  loading; `contain: layout paint` made the host a containing block for
+  `position: fixed`, so every dropdown opened level with the element rather than
+  its trigger; `100vh` inside a shadow root measured the window.
+
+### 2026-08-09 — Fidelity, feature correctness, and the function library
+
+A sustained parity pass driven by three generated trackers — the measured
+SpreadsheetML fidelity register ([docs/51](docs/51-FIDELITY-GAP-AUDIT.md)),
+the fidelity execution tracker ([docs/52](docs/52-FIDELITY-TRACKER.md)) and the
+feature-correctness tracker ([docs/53](docs/53-FEATURE-CORRECTNESS-TRACKER.md)) —
+plus the UX completeness tracker ([docs/50](docs/50-UX-COMPLETENESS-TRACKER.md)),
+which closed at all 63 rows.
+
+**Added**
+
+- **The function library, to 347 of the 356 functions in §18.17.7** (FN-02
+  through FN-08): text, date/time, logical and information, lookup, the
+  statistical set including distributions and regression, financial including
+  the bond and depreciation families, engineering including complex numbers,
+  base conversion and Bessel, and the database family. The nine that are absent
+  each need something an offline engine cannot have — a live OLAP cube, a COM
+  server — and are **named rather than counted**.
+- **Dynamic arrays that spill** — `FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`,
+  `XLOOKUP`, `XMATCH` — refusing rather than overwriting when something is in
+  the way (`#SPILL!`).
+- **Round-trip fidelity** for hyperlinks, rich-text runs, gradient and pattern
+  fills, print setup, workbook settings, tables and structured references,
+  legacy font effects, filter and sort state, view flags and sheet format
+  attributes (FID-01 … FID-25). Unmodelled parts — drawings, charts, images —
+  now survive a save through the retention path rather than being dropped.
+- **Feature correctness** (FC-01 … FC-34): sheet-metadata edits made undoable,
+  hyperlinks given a UI, rich text and gradients rendered on the canvas, tables
+  with `Ctrl+T`/banding/totals/auto-expand, per-column autofilter, sheet
+  protection enforced, page setup and manual page breaks, defined names for
+  print area and titles, whole-row and whole-column references.
+- **Editor depth**: a Format Cells dialog, named cell styles, conditional
+  formatting with ranked rules and Manage Rules, every OOXML data-validation
+  kind, threaded comments, outline grouping, paste special with arithmetic,
+  text to columns, fill series, precedent/dependent tracing, Alt mnemonics,
+  wildcard find, and an accessibility tree mirroring the visible grid (UX-A03).
+- **Number-format correctness**: elapsed time, month and day names in the
+  format's own language, the 1904 epoch, and Excel's 1900 leap-year bug.
+
 ### 2026-08-05 — Editor product pass: full formatting, alignment, sheet management
 
 A depth pass to bring the editor toward real-spreadsheet parity (not MVP stubs).

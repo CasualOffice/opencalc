@@ -2,19 +2,23 @@
 
 This matrix separates **target** (what OpenCalc is designed to support) from
 **implemented** (what actually passes its gates). A target is **not supported**
-until its CI/oracle gate is green. Today, everything is a target — no code exists.
+until its CI/oracle gate is green.
 
 Legend: ○ target · ◑ in progress · ● implemented & gated.
+
+Statuses here are claims about **gates**, not about effort. If a row says ● and
+you cannot point at the test that would fail when it regresses, the row is
+wrong — fix the row or add the gate.
 
 ## Platforms
 
 | Platform | Rust triple | Tier | Status |
 | --- | --- | --- | --- |
-| macOS arm64 | `aarch64-apple-darwin` | 1 | ○ |
-| Linux x64 | `x86_64-unknown-linux-gnu` | 1 | ○ |
-| Windows x64 | `x86_64-pc-windows-msvc` | 1 | ○ |
-| WebAssembly | `wasm32-unknown-unknown` | 1 | ○ |
-| Linux arm64 | `aarch64-unknown-linux-gnu` | 2 | ○ |
+| macOS arm64 | `aarch64-apple-darwin` | 1 | ● `platform` matrix job |
+| Linux x64 | `x86_64-unknown-linux-gnu` | 1 | ● full job set + MSRV |
+| Windows x64 | `x86_64-pc-windows-msvc` | 1 | ● `platform` matrix job |
+| WebAssembly | `wasm32-unknown-unknown` | 1 | ● `wasm` job (`cargo check --target wasm32-unknown-unknown`) |
+| Linux arm64 | `aarch64-unknown-linux-gnu` | 2 | ○ not in CI |
 
 Tier 1 = full test matrix in CI. Tier 2 = build + smoke.
 
@@ -22,11 +26,12 @@ Tier 1 = full test matrix in CI. Tier 2 = build + smoke.
 
 | Mode | Description | Status |
 | --- | --- | --- |
-| **Tauri desktop app** | Native Rust engine via `casual-calc-sdk` from Tauri commands; calc runs native | ○ |
-| **Web app (WASM)** | Browser demo via `casual-calc-wasm`; calc + import + render run in WASM | ◑ (W-001: formula eval + open-xlsx render; interactive editor pending) |
-| Headless native | Read/model/calc/write, no rendering surface | ○ |
-| Headless render | + display list → PNG via CPU raster | ◑ (P1D-001: grid raster; glyphs pending) |
-| Embedded SDK | `casual-calc-sdk` in any Rust host app | ◑ (SDK-001: WorkbookSession open/edit/recalc/render/save) |
+| **Web app (WASM)** | Browser editor via `casual-calc-wasm`; calc + import + render run in WASM | ● the editor in `webapp/` is the reference host |
+| **Embeddable browser SDK** | `<opencalc-sheet>` custom element wrapping that editor for third-party pages | ◑ built and documented ([55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md)); **not published to npm** |
+| Embedded SDK (Rust) | `casual-calc-sdk` in any Rust host app | ● `WorkbookSession` open / edit / recalc / render / save, with `SessionConfig` |
+| Headless native | Read/model/calc/write, no rendering surface | ● the same session with no render call |
+| Headless render | + display list → PNG via CPU raster | ◑ frozen panes are not split in the PNG backend (the editor canvas does split them) |
+| **Tauri desktop app** | Native Rust engine via `casual-calc-sdk` from Tauri commands; calc runs native | ○ `casual-calc-tauri` not written (TAURI-001) |
 
 Both the Tauri and web hosts compose the same host-agnostic core; the calc engine
 runs **native** on desktop and **WASM** in the browser, producing identical
@@ -36,48 +41,70 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
-| `.xlsx` (SpreadsheetML) | ○ | ○ | Primary path; byte-identical + semantic writers |
-| `.ods` (OpenDocument) | ○ | ○ | Secondary open-format path (`casual-calc-ods`); shares the OPC substrate |
-| CSV / TSV / PSV | ○ | ○ | Delimited text (comma/tab/pipe); lossy tabular interchange; not packages |
-| Normalized JSON | ○ | ○ | The engine's own snapshot format |
+| `.xlsx` (SpreadsheetML) | ● | ● | Primary path; byte-identical + semantic writers; round-trip is a gated semantic fixed point |
+| CSV / TSV / PSV | ● | ● | Delimited text with typed fields, RFC 4180 quoting and encoding detection (`casual-calc-io`) |
+| Normalized JSON | ● | ● | The engine's own deterministic snapshot format |
+| `.ods` (OpenDocument) | ○ | ○ | `casual-calc-ods` is a **skeleton with no logic yet**; the crate boundary is reserved, nothing behind it |
 
-## SpreadsheetML feature capability (target)
+## SpreadsheetML feature capability
 
 | Feature | Model | Render | Calc | Status |
 | --- | --- | --- | --- | --- |
-| Cells: number / string / bool / error | ○ | ○ | n/a | Phase 1A/1C |
-| Shared strings | ○ | ○ | n/a | Phase 1A |
-| Inline strings | ○ | ○ | n/a | Phase 1A |
-| Number formats (built-in + custom) | ◑ | ○ | n/a | Phase 1A (P1A-003, model); render 1C |
-| Styles: fonts, fills, borders, alignment | ○ | ○ | n/a | Phase 1A (P1A-003b) / 1C |
-| Merged ranges | ◑ | ○ | n/a | Phase 1A (P1A-004, model); render 1C |
-| Frozen panes / defined names | ◑ | ○ | n/a | Phase 1A (P1A-004, model) |
-| Column/row sizing, hidden, outline | ○ | ○ | n/a | Phase 1A/1C |
-| Frozen panes / splits | ○ | ○ | n/a | Phase 1A/1C |
-| Defined names | ○ | n/a | ○ | Phase 1A / used in Phase 2 |
-| Formulas: parse & preserve (AST) | ● | n/a | n/a | **Phase 1A** (P1A-002; A1 subset) |
-| Formulas: evaluate | n/a | n/a | ◑ | **Phase 2** (P2-001; full recalc, subset) |
-| Dependency graph + incremental recalc | n/a | n/a | ○ | Phase 2 (P2-002) |
-| Function library (math/text/lookup/…) | n/a | n/a | ◑ | Phase 2 (SUM/AVG/MIN/MAX/COUNT/IF/ABS/ROUND) |
-| Spill / dynamic arrays | ○ | ○ | ○ | Phase 2 |
-| Tables & structured references | ○ | ○ | ○ | Phase 3 |
-| Conditional formatting | ○ | ○ | ○ | Phase 3 |
-| Data validation | ○ | ○ | ○ | Phase 3 |
-| Autofilter & sort | ○ | ○ | n/a | Phase 3 |
-| Charts | preserve → ○ | ○ | n/a | Preserved 1A; rendered Phase 3 |
-| Pivot tables/caches | preserve → ○ | ○ | ○ | Preserved 1A; Phase 3 |
+| Cells: number / string / bool / error | ● | ● | n/a | — |
+| Shared strings, inline strings | ● | ● | n/a | — |
+| Number formats (built-in + custom) | ● | ● | n/a | Sections, colours, literal runs, elapsed time, locale-specific month/day names |
+| Styles: fonts, fills, borders, alignment | ● | ● | n/a | Incl. gradients, patterns, diagonals, double lines, super/subscript |
+| Rich text runs | ● | ● | n/a | FID-02, FC-11 |
+| Merged ranges, frozen panes, splits | ● | ● | n/a | Frozen panes split in the canvas, **not** in the PNG backend |
+| Column/row sizing, hidden, outline | ● | ● | n/a | — |
+| Defined names | ● | n/a | ● | Incl. print area and titles; unparseable ones are retained |
+| Formulas: parse & preserve (AST) | ● | n/a | n/a | — |
+| Formulas: evaluate | n/a | n/a | ● | Full recalculation |
+| Function library | n/a | n/a | ● | **347 of the 356** in §18.17.7; the nine absent are named in [52](52-FIDELITY-TRACKER.md), not counted |
+| `LET` / `LAMBDA` + helpers | n/a | n/a | ● | First-class function values; `MAP`/`REDUCE`/`SCAN`/`BYROW`/`BYCOL`/`MAKEARRAY` |
+| Spill / dynamic arrays | ● | ● | ● | `#SPILL!` refuses rather than overwrites |
+| Dependency graph + incremental recalc | n/a | n/a | ◑ | Recalculation is correct; the **persistent incremental graph** and the <50 ms budget are the open Phase 2 work |
+| Tables & structured references | ● | ● | ● | Banding, totals row, auto-expand, per-table filter |
+| Conditional formatting | ● | ● | ● | Ranked rules, priority, colour scales, data bars, font effects |
+| Data validation | ● | ● | ● | Every OOXML kind, modelled and enforced |
+| Autofilter & sort | ● | ● | n/a | Per-column filter, multi-key sort, recorded sort state |
+| Sheet & workbook protection | ● | ● | n/a | Enforced, not merely preserved |
+| Print setup & page breaks | ● | ● | n/a | Page setup, print area/titles, manual breaks |
+| Comments / threaded comments | ● | ● | n/a | Replies, authors, timestamps |
+| Charts | ● | ● | n/a | Read, drawn, and **authored** as real chart parts (7 types) |
+| Pivot tables/caches | ● | ● | ● | Built, filtered, refreshed, `GETPIVOTDATA`. One gap: a pivot *created here* exports as its cells, not as a live Excel pivot ([PIV-02](54-PIVOT-TABLES.md)) |
+| Images / drawings | ● | ● | n/a | Anchored with EMU offsets; survive a save |
 | VBA / macros | preserve only | n/a | **never** | Opaque; never executed |
 | Digital signatures, customXml | preserve only | n/a | n/a | Opaque side table |
+
+Anything not listed is covered by the retention path — unmodelled parts survive
+a save byte for byte rather than being dropped ([34](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md)).
+The measured per-construct register is [51](51-FIDELITY-GAP-AUDIT.md).
+
+## Editor & SDK capability
+
+| Feature | Status |
+| --- | --- |
+| Canvas grid: selection, editing, formatting, structural ops, undo/redo | ● [45](45-EDITOR-PARITY-TRACKER.md), [50](50-UX-COMPLETENESS-TRACKER.md) (closed at 63 rows) |
+| Accessibility tree mirroring the visible grid | ● UX-A03 |
+| Shadow-DOM isolation, typed theme tokens, chrome & command control | ● [55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) |
+| `edit` / `view` / `preview` access, enforced in the engine | ● |
+| Cancellable `before*` events carrying a `source` | ● |
+| Localization | ◑ menus, submenus and toolbar tooltips only; panels, dialogs and status messages are still English |
+| npm packaging (`@opencalc/sheet`, `/react`, `/engine`) | ○ integrators vendor from `webapp/` |
+| Collaborative editing | ○ Phase 5, blocked on an ADR ([24](24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions). Explicitly **not** in the embeddable SDK |
 
 ## Capacity & performance targets
 
 | Target | Value | Gate | Status |
 | --- | --- | --- | --- |
-| Populated cells | 1,000,000+ | memory-ceiling benchmark | ○ (Phase 1D) |
-| Grid scroll | 60 fps visible-window repaint | scroll benchmark | ○ (Phase 1D) |
-| Worst-case incremental recalc | < 50 ms | recalc-latency benchmark | ○ (Phase 2) |
+| Populated cells | 1,000,000+ | memory-ceiling benchmark | ◑ benchmark-smoke runs; the ceiling is not yet asserted |
+| Grid scroll | 60 fps visible-window repaint | scroll benchmark | ◑ same |
+| Worst-case incremental recalc | < 50 ms | recalc-latency benchmark | ○ waits on the persistent incremental graph |
 
-See [30-PERFORMANCE-AND-CAPACITY-TARGETS](30-PERFORMANCE-AND-CAPACITY-TARGETS.md).
+These three are the reason the architecture looks the way it does, and they are
+the least gated things in this document. See
+[30-PERFORMANCE-AND-CAPACITY-TARGETS](30-PERFORMANCE-AND-CAPACITY-TARGETS.md).
 
 ## Required release evidence
 

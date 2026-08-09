@@ -14,5 +14,7 @@ full contract. This file only restates the essentials.
   (1M cells / 60 fps / <50 ms recalc), not an afterthought.
 - **No silent data loss**; the calc engine is held back but fully designed.
 
-Current state: **documentation phase, no code yet.** See AGENTS.md §"Current
-state".
+Current state: **alpha — engine, editor and embeddable SDK are live.** Phases
+0–1E done, Phase 2 (calc) substantially done, Phase 3 shipped; the SDK is built
+but unpublished, and the collaboration concurrency model is still undecided.
+See AGENTS.md §"Current state".

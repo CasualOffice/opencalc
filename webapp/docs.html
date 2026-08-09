@@ -6,7 +6,7 @@
     <title>OpenCalc SDK — integration guide</title>
     <meta name="description" content="Embed a real spreadsheet in your React, Vue or plain-HTML application. Installation, configuration, theming, events and the read-only modes." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./style.css?v=6" />
     <style>
       .doc { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 48px; align-items: start; padding: 40px 0 80px; }
       @media (max-width: 940px) { .doc { grid-template-columns: 1fr; gap: 20px; } .toc { position: static !important; } }
@@ -26,11 +26,22 @@
       .body td { border-bottom: 1px solid var(--line); padding: 10px 10px 10px 0; color: var(--muted); vertical-align: top; }
       .body td code, .body p code, .body li code { font-size: 13px; background: #f2f4f7; border-radius: 5px; padding: 1px 5px; color: #0b0d12; }
       pre { background: #0f1216; color: #d7dee9; border-radius: 12px; padding: 16px 18px; overflow: auto; font: 400 13px/1.65 ui-monospace, Menlo, Consolas, monospace; margin: 14px 0; }
-      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; }
+      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; } pre .n { color: #f78c6c; }
       .callout { border-left: 3px solid var(--accent, #2f6df6); background: #f6f9ff; border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 18px 0; }
       .callout.warn { border-left-color: #d97706; background: #fffaf0; }
       .callout p { color: #444c59; }
       .lede { font-size: 18px; line-height: 1.6; color: var(--muted); }
+      .numlist { list-style: none; counter-reset: n; padding: 0; margin: 22px 0 0; }
+      .numlist > li { position: relative; counter-increment: n; padding: 0 0 22px 44px; margin: 0; border-left: 1px solid var(--border); }
+      .numlist > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+      .numlist > li::before {
+        content: counter(n); position: absolute; left: -13px; top: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: #fff;
+        font-family: var(--mono); font-size: 13px; font-weight: 600;
+      }
+      .numlist h3 { margin: 1px 0 6px; font-size: 16.5px; color: var(--fg); }
+      .numlist pre { margin: 10px 0 0; }
     </style>
   </head>
   <body>
@@ -43,8 +54,9 @@
         <nav class="nav-links">
           <a href="./index.html#product">Product</a>
           <a href="./index.html#today">What works</a>
-          <a href="./docs.html">SDK</a>
-          <a href="./embed.html">Embed demo</a>
+          <a href="./index.html#embed">Embed</a>
+          <a href="./docs.html">SDK docs</a>
+          <a href="./embed.html">Live demo</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
           <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
@@ -55,7 +67,8 @@
       <aside class="toc">
         <h4>Start</h4>
         <a href="#install">Installation</a>
-        <a href="#quick">Quick start</a>
+        <a href="#steps">Integrate in five steps</a>
+        <a href="#quick">A complete page</a>
         <a href="#assets">Serving the engine</a>
         <h4>Configure</h4>
         <a href="#config">Options</a>
@@ -70,6 +83,10 @@
         <a href="#react">React</a>
         <a href="#next">Next.js</a>
         <a href="#vue">Vue and Svelte</a>
+        <h4>Operate</h4>
+        <a href="#csp">CSP and headers</a>
+        <a href="#versioning">Versions and upgrades</a>
+        <a href="#troubleshoot">Troubleshooting</a>
         <h4>Notes</h4>
         <a href="#limits">Limits and caveats</a>
       </aside>
@@ -84,6 +101,21 @@
           runs entirely in your user's browser.
         </p>
 
+        <div class="callout warn">
+          <p>
+            <b>Alpha: the packages below are not on npm yet.</b> The element,
+            the engine and every API on this page are built and working — what
+            is not done is the publish. Until it is, take the
+            <a href="https://github.com/CasualOffice/opencalc/tree/main/webapp">four files</a>
+            (<code>embed.js</code>, <code>editor.js</code>,
+            <code>editor.css</code>, <code>editor.html</code>) plus
+            <code>pkg/</code> and <code>fonts/</code>, serve them from your
+            origin, and <code>import "./embed.js"</code>. That is exactly what
+            <code>@opencalc/sheet</code> will contain; everything else on this
+            page is unchanged by the packaging.
+          </p>
+        </div>
+
         <h3>Installation</h3>
 <pre><span class="c"># the editor as a custom element</span>
 npm install @opencalc/sheet
@@ -93,21 +125,124 @@ npm install @opencalc/react
 
 <span class="c"># the engine alone, no DOM and no CSS, for headless work</span>
 npm install @opencalc/engine</pre>
+        <table>
+          <tr><th>Package</th><th>Take it when</th><th>Ships</th></tr>
+          <tr><td><code>@opencalc/sheet</code></td><td>you want the editor on a page — this is the one almost everybody needs</td><td>the custom element, its stylesheet, the wasm binary and fonts, the <code>opencalc-assets</code> CLI</td></tr>
+          <tr><td><code>@opencalc/react</code></td><td>you are on React and want props and <code>onEvent</code> handlers instead of imperative calls</td><td>a ~70-line wrapper; depends on <code>@opencalc/sheet</code></td></tr>
+          <tr><td><code>@opencalc/engine</code></td><td>you need to read, recalculate or write a workbook with no UI — a server route, a worker, a test</td><td>the wasm engine and its JS bindings; no DOM, no CSS</td></tr>
+        </table>
 
-        <h2 id="quick">Quick start</h2>
+        <h2 id="steps">Integrate in five steps</h2>
+        <p>
+          End to end, from an empty project to a sheet your users can edit and
+          you can persist. Every step below is exercised by the
+          <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">runnable examples</a>.
+        </p>
+        <ol class="numlist">
+          <li>
+            <h3>Install the package</h3>
+            <p>No peer dependency on a UI framework, and no build-time plugin to register.</p>
+<pre>npm install @opencalc/sheet</pre>
+          </li>
+          <li>
+            <h3>Put the engine on your own origin</h3>
+            <p>
+              With Vite, webpack, Rollup or Parcel there is nothing to do —
+              skip to step 3. With <b>Next.js</b>, or any host serving static
+              files it did not bundle, copy the assets and tell the element
+              where they landed.
+            </p>
+<pre><span class="c">// package.json</span>
+<span class="s">"scripts"</span>: { <span class="s">"postinstall"</span>: <span class="s">"opencalc-assets ./public/opencalc"</span> }</pre>
+          </li>
+          <li>
+            <h3>Import once, then use the tag anywhere</h3>
+            <p>
+              The import registers <code>&lt;opencalc-sheet&gt;</code> as a
+              custom element. Do it once, at your app entry point — a second
+              import is a no-op, not a second registration.
+            </p>
 <pre><span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
 
-<span class="c">// Anywhere in your markup.</span>
-<span class="c">// &lt;opencalc-sheet id="sheet" style="height: 600px"&gt;&lt;/opencalc-sheet&gt;</span>
+&lt;opencalc-sheet id=<span class="s">"sheet"</span> style=<span class="s">"height: 600px"</span>&gt;&lt;/opencalc-sheet&gt;</pre>
+            <p>
+              <b>It has no intrinsic height.</b> Give it one — a pixel height, a
+              flex child that stretches, or <code>height: 100%</code> inside a
+              sized parent. Left alone it collapses to zero and looks like a
+              failed load.
+            </p>
+          </li>
+          <li>
+            <h3>Wait for it, then configure and load</h3>
+            <p>
+              Booting the engine is asynchronous. <code>ready</code> resolves
+              once the grid is live; calls made before it are queued rather than
+              lost, but reading state back needs it.
+            </p>
+<pre><span class="k">const</span> sheet = document.<span class="f">getElementById</span>(<span class="s">"sheet"</span>);
+<span class="k">await</span> sheet.ready;
 
-<span class="k">const</span> sheet = document.<span class="f">getElementById</span>(<span class="s">"sheet"</span>);
+<span class="k">await</span> sheet.<span class="f">configure</span>({ access: <span class="s">"edit"</span>, calculation: <span class="s">"auto"</span> });
+sheet.<span class="f">theme</span>({ light: { accentColor: <span class="s">"#7c3aed"</span> } });
+sheet.<span class="f">chrome</span>({ statusbar: <span class="k">false</span> });
 
-<span class="k">await</span> sheet.<span class="f">open</span>(bytes, <span class="s">"budget.xlsx"</span>);   <span class="c">// an ArrayBuffer or Uint8Array</span>
-<span class="k">const</span> saved = <span class="k">await</span> sheet.<span class="f">save</span>();          <span class="c">// .xlsx bytes back out</span></pre>
+<span class="k">const</span> bytes = <span class="k">await</span> (<span class="k">await</span> <span class="f">fetch</span>(<span class="s">"/api/files/42.xlsx"</span>)).<span class="f">arrayBuffer</span>();
+<span class="k">await</span> sheet.<span class="f">open</span>(bytes, <span class="s">"budget.xlsx"</span>);</pre>
+          </li>
+          <li>
+            <h3>Persist what changes</h3>
+            <p>
+              Listen, debounce, save. The <code>source</code> check is not
+              optional — without it a host that saves on change and loads on
+              mount echoes its own writes back to itself forever.
+            </p>
+<pre><span class="k">let</span> timer;
+sheet.<span class="f">on</span>(<span class="s">"cellsChanged"</span>, (e) =&gt; {
+  <span class="k">if</span> (e.source === <span class="s">"api"</span>) <span class="k">return</span>;
+  <span class="f">clearTimeout</span>(timer);
+  timer = <span class="f">setTimeout</span>(<span class="k">async</span> () =&gt; {
+    <span class="k">await</span> <span class="f">fetch</span>(<span class="s">"/api/files/42.xlsx"</span>, { method: <span class="s">"PUT"</span>, body: <span class="k">await</span> sheet.<span class="f">save</span>() });
+  }, <span class="n">1500</span>);
+});</pre>
+          </li>
+        </ol>
+        <div class="callout">
+          <p>
+            That is the whole integration. Everything below is refinement —
+            which controls to show, what it looks like, what happens when the
+            user may not write.
+          </p>
+        </div>
+
+        <h2 id="quick">A complete page</h2>
+        <p>
+          Copy this into a file, serve it, and you have a working spreadsheet
+          with a file picker and a download button. Nothing else required.
+        </p>
+<pre><span class="k">&lt;!doctype html&gt;</span>
+&lt;input type=<span class="s">"file"</span> id=<span class="s">"pick"</span> accept=<span class="s">".xlsx,.csv"</span>&gt;
+&lt;button id=<span class="s">"dl"</span>&gt;Download&lt;/button&gt;
+&lt;opencalc-sheet id=<span class="s">"sheet"</span> style=<span class="s">"display:block;height:70vh"</span>&gt;&lt;/opencalc-sheet&gt;
+
+&lt;script type=<span class="s">"module"</span>&gt;
+  <span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
+  <span class="k">const</span> sheet = document.<span class="f">getElementById</span>(<span class="s">"sheet"</span>);
+  <span class="k">await</span> sheet.ready;
+
+  pick.<span class="f">onchange</span> = <span class="k">async</span> (e) =&gt; {
+    <span class="k">const</span> file = e.target.files[<span class="n">0</span>];
+    <span class="k">await</span> sheet.<span class="f">open</span>(<span class="k">await</span> file.<span class="f">arrayBuffer</span>(), file.name);
+  };
+
+  dl.<span class="f">onclick</span> = <span class="k">async</span> () =&gt; {
+    <span class="k">const</span> url = URL.<span class="f">createObjectURL</span>(<span class="k">new</span> <span class="f">Blob</span>([<span class="k">await</span> sheet.<span class="f">save</span>()]));
+    Object.<span class="f">assign</span>(document.<span class="f">createElement</span>(<span class="s">"a"</span>), { href: url, download: <span class="s">"out.xlsx"</span> }).<span class="f">click</span>();
+    URL.<span class="f">revokeObjectURL</span>(url);
+  };
+&lt;/script&gt;</pre>
         <p>
           The element gives itself a shadow root, so your stylesheet cannot
-          reach into it and its stylesheet cannot reach out onto your page. It
-          has no intrinsic height — give it one.
+          reach into it and its stylesheet cannot reach out onto your page.
         </p>
 
         <h2 id="assets">Serving the engine</h2>
@@ -144,9 +279,8 @@ npm install @opencalc/engine</pre>
         <p>
           Re-run it after upgrading: <code>npm update</code> bumps the
           JavaScript and leaves <code>public/</code> alone, so the two can
-          drift. The SDK compares their versions at load and fails loudly naming
-          this command, rather than letting you debug a function that "stopped
-          working".
+          drift. Keeping the copy in <code>postinstall</code> is what stops
+          that; see <a href="#versioning">Versions and upgrades</a>.
         </p>
 
         <h2 id="config">Options</h2>
@@ -373,6 +507,85 @@ sheet.<span class="f">on</span>(<span class="s">"beforeCellsChanged"</span>, (e)
         </p>
 <pre><span class="c">&lt;!-- Vue --&gt;</span>
 &lt;opencalc-sheet ref=<span class="s">"sheet"</span> @cellsChanged=<span class="s">"onChange"</span> /&gt;</pre>
+
+        <h2 id="csp">CSP and headers</h2>
+        <p>A policy that lets the engine start, with everything on your origin:</p>
+<pre>Content-Security-Policy:
+  script-src  <span class="s">'self' 'wasm-unsafe-eval'</span>;
+  style-src   <span class="s">'self' 'unsafe-inline'</span>;
+  font-src    <span class="s">'self'</span>;
+  connect-src <span class="s">'self'</span>;</pre>
+        <table>
+          <tr><th>Directive</th><th>Why</th></tr>
+          <tr><td><code>'wasm-unsafe-eval'</code></td><td>Compiling a WebAssembly module counts as evaluation. This is the narrow keyword that permits wasm and nothing else — it does <b>not</b> re-enable <code>eval()</code>. Do not reach for <code>'unsafe-eval'</code>.</td></tr>
+          <tr><td><code>style-src 'unsafe-inline'</code></td><td>Two uses, and you can narrow both. See below.</td></tr>
+          <tr><td><code>font-src</code></td><td>The bundled metric-compatible faces — Carlito for Calibri, Caladea for Cambria — are what make a cell render the same on a machine that has neither.</td></tr>
+          <tr><td><code>connect-src</code></td><td>The element fetches its own markup, stylesheet and wasm binary from the assets base. If that base is a different origin, name it here.</td></tr>
+        </table>
+        <h3>Narrowing <code>style-src</code></h3>
+        <p>
+          The SDK injects exactly one <code>&lt;style&gt;</code> element: the
+          bundled <code>@font-face</code> rules, hoisted into the document
+          because a font face declared inside a shadow root is never registered.
+          Give the element your nonce and that one is covered:
+        </p>
+<pre>&lt;opencalc-sheet nonce=<span class="s">"{{cspNonce}}"</span>&gt;&lt;/opencalc-sheet&gt;</pre>
+        <p>
+          What a nonce cannot cover is the <i>style attribute</i>: theme tokens
+          are written as inline custom properties, and CSP nonces do not apply
+          to attributes. Under a policy without <code>'unsafe-inline'</code> the
+          grid renders correctly in its default palette and only your
+          <code>theme()</code> overrides are dropped. If that trade is the wrong
+          way round for you, set the tokens from your own stylesheet instead —
+          custom properties inherit through a shadow boundary, which is the
+          whole reason they are the theming API:
+        </p>
+<pre>opencalc-sheet { --oc-accent-color: <span class="s">#7c3aed</span>; }</pre>
+        <p>
+          Nothing needs <code>frame-src</code>, <code>img-src blob:</code> or
+          <code>worker-src</code> today — the grid is a canvas, not an iframe,
+          and the engine runs on the main thread. <code>worker-src 'self'</code>
+          is worth allowing now if your policy is hard to change later.
+        </p>
+
+        <h2 id="versioning">Versions and upgrades</h2>
+        <p>
+          Two artefacts have to agree: the JavaScript from
+          <code>node_modules</code>, and the wasm binary wherever you copied it.
+          On the bundler path they move together. On the
+          <code>public/</code> path they can drift, because
+          <code>npm update</code> touches one and not the other.
+        </p>
+        <div class="callout warn">
+          <p>
+            <b>There is no version check between them yet.</b> A skew today
+            surfaces as a function that quietly returns the wrong answer, which
+            is the expensive kind of failure — so the copy belongs in
+            <code>postinstall</code>, not in a runbook. Failing loudly at load
+            on a mismatch ships with the npm packaging.
+          </p>
+        </div>
+        <ul>
+          <li><b>Re-run the asset copy after every upgrade.</b> Keeping it in <code>postinstall</code> means you cannot forget.</li>
+          <li><b>Pin during alpha.</b> The element name, the token names and the command ids are the API surface, and while we are pre-1.0 a rename is a minor version, not a major one.</li>
+          <li><b>Command ids follow English labels.</b> Renaming a menu label renames its id; we treat that as breaking and put it in the changelog.</li>
+          <li><b>Nothing phones home.</b> No auto-update, no version check against a server, no telemetry. Upgrading is entirely your call and entirely your responsibility.</li>
+        </ul>
+
+        <h2 id="troubleshoot">Troubleshooting</h2>
+        <table>
+          <tr><th>What you see</th><th>What it is</th></tr>
+          <tr><td>The element renders nothing, no errors</td><td>No height. It has no intrinsic size — <code>style="height:600px"</code>, or a sized flex/grid parent.</td></tr>
+          <tr><td><code>404</code> on <code>casual_calc_wasm_bg.wasm</code></td><td>The assets are not where the element is looking. On Next.js run <code>opencalc-assets ./public/opencalc</code> and set <code>assets-url="/opencalc/"</code>; elsewhere check that your bundler emitted the package's assets.</td></tr>
+          <tr><td><code>window is not defined</code> during build</td><td>Server rendering. <code>"use client"</code> is not enough — a client component still renders on the server for the initial HTML. Use <code>dynamic(..., { ssr: false })</code>.</td></tr>
+          <tr><td>Console: refused to compile WebAssembly</td><td><code>script-src</code> is missing <code>'wasm-unsafe-eval'</code>. See <a href="#csp">CSP</a>.</td></tr>
+          <tr><td>Every cell renders in a fallback font</td><td>The <code>@font-face</code> hoist was blocked by <code>style-src</code>. Pass the <code>nonce</code> attribute.</td></tr>
+          <tr><td>Dark mode ignores your palette</td><td><code>theme({ backgroundColor })</code> sets it for <i>both</i> schemes, and an inline property beats the stylesheet's dark block. Use the <code>{ light, dark }</code> form.</td></tr>
+          <tr><td>Your save handler runs forever in a loop</td><td>Missing the <code>source</code> check in <code>cellsChanged</code>. Your own writes come back as <code>source: "api"</code>.</td></tr>
+          <tr><td>Config props remount the element every render</td><td>A new object literal each render, passed to the raw element. The React wrapper diffs by value for exactly this reason.</td></tr>
+          <tr><td>Menus open in the wrong place</td><td>An ancestor with <code>contain: layout</code>, <code>transform</code>, <code>filter</code> or <code>perspective</code> becomes the containing block for fixed positioning, and dropdowns anchor to it. This is a CSS fact about your page, not about the element.</td></tr>
+          <tr><td>A second element on the page never finishes loading</td><td>Fixed in current versions — each mount gets its own engine instance. If you are pinned to an early alpha, upgrade.</td></tr>
+        </table>
 
         <h2 id="limits">Limits and caveats</h2>
         <ul>

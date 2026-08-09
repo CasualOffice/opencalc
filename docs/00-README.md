@@ -26,7 +26,10 @@ the other way around. This index is the map.
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **50+** — per-construct design notes (added as phases open).
+  - **45–49, 54, 55** — product surface: editor parity, UX map, design system,
+    per-construct design notes (added as phases open).
+  - **50–53** — measured gap trackers, generated from or audited against the
+    code rather than hand-maintained.
 
 ## Index
 
@@ -74,8 +77,39 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
+### Product, UX & the SDK (45–49, 54, 55)
+
+| # | Title | Purpose |
+| --- | --- | --- |
+| 45 | [Editor Parity Tracker](45-EDITOR-PARITY-TRACKER.md) | The browser editor measured against Excel and Sheets |
+| 46 | [Competitive Parity Analysis](46-COMPETITIVE-PARITY-ANALYSIS.md) | Where we stand feature-for-feature, and what that costs |
+| 47 | [UX & Feature Map](47-UX-AND-FEATURE-MAP.md) | Every surface the editor exposes, and where it lives |
+| 48 | [Feature Pipeline](48-FEATURE-PIPELINE.md) | What is queued, in what order, and why |
+| 49 | [Design System](49-DESIGN-SYSTEM.md) | The editor's visual language — tokens, spacing, chrome |
+| 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
+| 55 | [SDK Embedding & Integration](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) | The embeddable element: isolation, theming, commands, events, access, i18n |
+
+### Measured gap trackers (50–53)
+
+Generated or audited against the code rather than written by hand, so a row
+cannot quietly disagree with what shipped.
+
+| # | Title | Purpose |
+| --- | --- | --- |
+| 50 | [UX Completeness Tracker](50-UX-COMPLETENESS-TRACKER.md) | Editor gaps with severity — closed at all 63 rows |
+| 51 | [Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md) | The measured SpreadsheetML construct register |
+| 52 | [Fidelity Tracker](52-FIDELITY-TRACKER.md) | FID-### / FN-### execution against that register |
+| 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach |
+
 ## Status
 
-Documentation phase. No code yet. See
-[14-EXECUTION-TRACKER](14-EXECUTION-TRACKER.md) for what is designed, being
-designed, and pending.
+**Alpha — engine, editor and embeddable SDK are live.** Phases 0–1E done,
+Phase 2 (calc) substantially done, Phase 3 shipped; the SDK is built but not
+published to npm, and the Phase 5 concurrency model is still undecided.
+
+`docs/` remains the source of truth for *design*: a substantial design is
+settled here before it is implemented. It is no longer the source of truth for
+*state* — for that see [14-EXECUTION-TRACKER](14-EXECUTION-TRACKER.md) and the
+measured trackers above, and keep this section agreeing with
+[AGENTS.md](../AGENTS.md) §Current state and the phase table in
+[README.md](../README.md).

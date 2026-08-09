@@ -21,9 +21,16 @@ before coordinated disclosure.
 
 ## Supported Versions
 
-OpenCalc has no stable release yet — it is in the documentation phase with no
-engine code. Security fixes will target `main`. Supported release lines and
+OpenCalc has no stable release yet — it is **alpha**, and nothing is published
+to crates.io or npm. Security fixes target `main`. Supported release lines and
 end-of-support dates will be listed here before the first public preview.
+
+Two things are worth stating plainly while that is true. The engine already
+admits untrusted workbooks under the bounds below, and those bounds are gated
+and fuzzed — a parser bug is in scope for this policy today. But an integrator
+running an alpha vendored from `webapp/` has no upgrade channel from us: there
+is no auto-update and nothing phones home, so acting on an advisory is
+manual until the packages are published.
 
 ## Security Boundaries
 

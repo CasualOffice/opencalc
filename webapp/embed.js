@@ -164,7 +164,7 @@ class OpenCalcSheet extends HTMLElement {
     // once into the page so the bundled metric-compatible faces (Carlito for
     // Calibri, and the rest) are available to the canvas, which is what makes a
     // cell's font render the same on a machine that has none of them.
-    hoistFontFaces(css, base);
+    hoistFontFaces(css, base, this.getAttribute("nonce") || this.nonce || "");
 
     // One `CSSStyleSheet` shared by every mount rather than a `<style>` each.
     // This is the duplication AG Grid warns about in shadow DOM: four editors on
@@ -478,13 +478,20 @@ class OpenCalcSheet extends HTMLElement {
 /// resolved per document, so a face declared only inside the shadow tree is
 /// never registered and every bundled family silently falls back.
 const fontsHoisted = new Set();
-function hoistFontFaces(css, base) {
+function hoistFontFaces(css, base, nonce) {
   if (fontsHoisted.has(String(base))) return;
   fontsHoisted.add(String(base));
   const faces = css.match(/@font-face\s*\{[^}]*\}/g);
   if (!faces) return;
   const style = document.createElement("style");
   style.dataset.opencalcFonts = "";
+  // This is the SDK's only injected `<style>`, so it is the only thing a
+  // `style-src` nonce has to cover. Set as a property as well as an attribute:
+  // some browsers hide the attribute from script once CSP is active.
+  if (nonce) {
+    style.setAttribute("nonce", nonce);
+    style.nonce = nonce;
+  }
   // The URLs are relative to the stylesheet, which is not where this style
   // element lives — so they are resolved against it explicitly.
   style.textContent = faces

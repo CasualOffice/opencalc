@@ -106,7 +106,22 @@ When two goals conflict, the earlier one wins:
 
 ## Current state
 
-**Documentation phase — no engine code exists yet.** Today the only valid work
-is authoring and refining the design record in `docs/` and the root governance
-files. The first code milestone is Phase 0 (workspace + CI + fixtures + bounded
-XLSX reader), and it does not begin until its design docs are finalized.
+**Alpha — the engine, the editor and the embeddable SDK are live.** Phases 0
+through 1E are done, Phase 2 (calc) is substantially done, and Phase 3
+(spreadsheet features) has shipped. The workspace is fifteen crates; the browser
+editor runs the same core through WebAssembly.
+
+What is still open, and therefore where the work is:
+
+- **Phase 2 tail** — the persistent incremental dependency graph and the <50 ms
+  worst-case recalc budget.
+- **Phase 4** — the SDK is built and documented but not published to npm.
+- **Phase 5** — the concurrency model for shared editing is undecided; it needs
+  an ADR before any code (see [24](docs/24-TRANSACTION-AND-EDIT-SEMANTICS.md)
+  §Open decisions).
+
+The design-first rule has not relaxed now that code exists: a substantial
+design is discussed and written down before it is implemented, not alongside.
+Do not update this section from a commit message — update it when a phase
+actually changes state, and keep it agreeing with the phase table in
+[README.md](README.md) and [06](docs/06-ROADMAP-AND-DELIVERY.md).

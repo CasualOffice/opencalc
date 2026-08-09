@@ -6,7 +6,7 @@
     <title>OpenCalc — a spreadsheet engine you can put anywhere</title>
     <meta name="description" content="OpenCalc reads and writes real .xlsx, keeps the workbook in a normalized editable model, recalculates it, and renders a virtualized grid — the same Rust core on the desktop, in the browser via WebAssembly, and headless on a server." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css?v=5" />
+    <link rel="stylesheet" href="./style.css?v=6" />
   </head>
   <body>
     <!-- Nav -->
@@ -20,9 +20,9 @@
           <a href="#product">Product</a>
           <a href="#today">What works</a>
           <a href="#engine">Engine</a>
-          <a href="#compare">Compare</a>
+          <a href="#embed">Embed</a>
           <a href="#roadmap">Roadmap</a>
-          <a href="./docs.html">SDK</a>
+          <a href="./docs.html">SDK docs</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
           <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
@@ -63,7 +63,7 @@
 
         <!-- Stat strip -->
         <div class="stats">
-          <div class="stat"><b>56</b><span>worksheet functions</span></div>
+          <div class="stat"><b>347</b><span>worksheet functions</span></div>
           <div class="stat"><b>.xlsx</b><span>semantic round-trip, gated</span></div>
           <div class="stat"><b>1M+</b><span>cell capacity target</span></div>
           <div class="stat"><b>60 fps</b><span>virtualized scrolling</span></div>
@@ -180,7 +180,7 @@
         <h2>One pipeline. Three hosts.</h2>
         <p class="section-lede">Parsing sits below evaluation, so import and editing use the formula AST without pulling in the calc engine at all.</p>
         <div class="pipeline">
-          <span class="stage">.xlsx · ods · csv</span><span class="arrow">→</span>
+          <span class="stage">.xlsx · csv · tsv</span><span class="arrow">→</span>
           <span class="stage">bounded admission</span><span class="arrow">→</span>
           <span class="stage">import</span><span class="arrow">→</span>
           <span class="stage accent">workbook model</span><span class="arrow">→</span>
@@ -204,8 +204,76 @@ session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span 
       </div>
     </section>
 
+    <!-- Embed / SDK -->
+    <section id="embed" class="section alt">
+      <div class="wrap">
+        <p class="eyebrow">Embed it</p>
+        <h2>Ship a spreadsheet inside your product.</h2>
+        <p class="section-lede">
+          One custom element, one line of markup, and your users get the editor
+          above — <code>.xlsx</code> in and out, 347 functions, pivot tables and
+          charts, all client-side. It works in React, Next.js, Vue, Svelte or
+          plain HTML.
+        </p>
+
+        <div class="steps">
+          <article class="step">
+            <h4>Install</h4>
+            <p>The element and, if you use React, its wrapper. No peer dependency on a UI framework.</p>
+<pre><span class="c"># the editor as a custom element</span>
+npm install @opencalc/sheet</pre>
+          </article>
+          <article class="step">
+            <h4>Serve the engine yourself</h4>
+            <p>The WebAssembly binary is copied into your build and served from your origin — never from a CDN we run.</p>
+<pre><span class="c"># package.json → postinstall</span>
+opencalc-assets ./public/opencalc</pre>
+          </article>
+          <article class="step">
+            <h4>Mount it</h4>
+            <p>Give it a height and it boots. Open a workbook, get bytes back, listen for changes.</p>
+<pre><span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
+
+&lt;opencalc-sheet style=<span class="s">"height:600px"</span>&gt;</pre>
+          </article>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>Load a file, react to edits, save it back</span><span class="code-crate">@opencalc/sheet</span></div>
+<pre><code><span class="k">const</span> sheet = document.querySelector(<span class="s">"opencalc-sheet"</span>);
+
+sheet.theme({ light: { accentColor: <span class="s">"#7c3aed"</span> } });  <span class="c">// CSS tokens, scoped by a shadow root</span>
+sheet.chrome({ statusbar: <span class="n">false</span> });                  <span class="c">// hide whole regions…</span>
+sheet.commands({ hidden: [<span class="s">"file.open"</span>] });          <span class="c">// …or single controls, by id</span>
+
+<span class="k">await</span> sheet.configure({ access: <span class="s">"view"</span> });          <span class="c">// "edit" | "view" | "preview"</span>
+<span class="k">await</span> sheet.open(bytes, <span class="s">"budget.xlsx"</span>);
+
+sheet.on(<span class="s">"cellsChanged"</span>, (e) =&gt; {
+  <span class="k">if</span> (e.source !== <span class="s">"api"</span>) persist(<span class="k">await</span> sheet.save());  <span class="c">// deterministic .xlsx</span>
+});</code></pre>
+        </div>
+
+        <p class="embed-note">
+          Your CSS cannot reach in and its CSS cannot reach out — the element
+          isolates itself in a shadow root, and theming happens through typed
+          custom properties rather than by overriding our selectors. Read-only
+          and preview refuse writes <b>in the engine</b>, not by hiding buttons.
+          <b>Alpha:</b> the element and every API here work today — the npm
+          publish is the part that is still pending, so for now you vendor the
+          files from the repo. The guide shows both.
+        </p>
+
+        <div class="embed-more">
+          <a class="btn btn-ink btn-lg" href="./docs.html">Read the integration guide</a>
+          <a class="btn btn-outline btn-lg" href="./embed.html">Try the live embed demo</a>
+          <a class="btn btn-outline btn-lg" href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">Runnable examples</a>
+        </div>
+      </div>
+    </section>
+
     <!-- Compare -->
-    <section id="compare" class="section alt">
+    <section id="compare" class="section">
       <div class="wrap">
         <p class="eyebrow">The trade-off everyone else makes</p>
         <h2>Fidelity, or embeddability. Pick both.</h2>
@@ -237,7 +305,7 @@ session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span 
     </section>
 
     <!-- Roadmap -->
-    <section id="roadmap" class="section">
+    <section id="roadmap" class="section alt">
       <div class="wrap">
         <p class="eyebrow">Honest status</p>
         <h2>Where it is, and what's next.</h2>
@@ -282,9 +350,10 @@ session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span 
       <div class="wrap cta-grid">
         <div>
           <h2>Open the editor and start typing.</h2>
-          <p>No sign-up, no upload, no build step. Bring an <code>.xlsx</code> and watch it round-trip.</p>
+          <p>No sign-up, no upload, no build step. Bring an <code>.xlsx</code> and watch it round-trip — then put the same thing in your own product.</p>
           <div class="cta">
             <a class="btn btn-light btn-lg" href="./editor.html">Open the editor</a>
+            <a class="btn btn-ondark btn-lg" href="./docs.html">Integration guide</a>
             <a class="btn btn-ondark btn-lg" href="https://github.com/CasualOffice/opencalc">Star on GitHub</a>
           </div>
         </div>
@@ -302,6 +371,13 @@ session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span 
         <div>
           <span class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>OpenCalc</span>
           <p class="foot-tag">The spreadsheet engine behind Casual Sheets, and an SDK others can embed.</p>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">SDK</span>
+          <a href="./docs.html">Integration guide</a>
+          <a href="./docs.html#quick">Quick start</a>
+          <a href="./embed.html">Live embed demo</a>
+          <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">Framework examples</a>
         </div>
         <div class="foot-col">
           <span class="foot-h">Docs</span>

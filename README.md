@@ -92,6 +92,11 @@ engine for Casual Sheets and an SDK others can embed.
   themes, and undo/redo.
 - **Render** — deterministic PNG raster of a viewport (tiny-skia) with glyphs from
   bundled metric-compatible faces, and a live in-browser canvas renderer.
+- **Embeddable SDK** — the editor as an isolated custom element: typed theme
+  tokens, region and per-command visibility, cancellable `before*` events
+  carrying a `source`, `edit`/`view`/`preview` access enforced in the engine,
+  and host-supplied translation catalogues. See
+  [Embedding it](#embedding-it--in-a-browser-application) and [`sdk/`](sdk/).
 
 ## Why OpenCalc
 
@@ -118,7 +123,45 @@ server. OpenCalc is built the other way around:
   **sub-50 ms worst-case incremental recalculation**. See
   [docs/30-PERFORMANCE-AND-CAPACITY-TARGETS.md](docs/30-PERFORMANCE-AND-CAPACITY-TARGETS.md).
 
-### Embedding it
+### Embedding it — in a browser application
+
+The editor ships as a custom element with a shadow root, so a host page's CSS
+cannot reach into it and its CSS cannot reach out. Theming is typed CSS custom
+properties, chrome and individual commands are host-controlled, and the
+WebAssembly binary is served **from the integrator's own origin** — not from a
+CDN we run, because a Web Worker cannot be constructed from a cross-origin URL
+and that would foreclose ever moving the engine off the main thread.
+
+```js
+import "@opencalc/sheet";                       // <opencalc-sheet style="height:600px">
+
+const sheet = document.querySelector("opencalc-sheet");
+await sheet.ready;
+
+sheet.theme({ light: { accentColor: "#7c3aed" } });   // per scheme: an inline
+sheet.chrome({ statusbar: false });                   // token beats the dark block
+sheet.commands({ hidden: ["file.open"] });            // ids from the English label path
+
+await sheet.configure({ access: "view" });      // "edit" | "view" | "preview" — the
+await sheet.open(bytes, "budget.xlsx");         // last two are refused in the engine,
+                                                // not by hiding buttons
+sheet.on("cellsChanged", async (e) => {
+  if (e.source !== "api") persist(await sheet.save());   // check `source` or you loop
+});
+```
+
+`view` and `preview` are deliberately different things: the first is an access
+level that keeps the chrome minus everything that writes, the second is a
+presentation with no chrome at all. Conflating them gives you a viewer that
+reads as a broken editor *and* a thumbnail that invites clicks it will refuse.
+
+Design and rationale: [docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md).
+Runnable examples for vanilla JS, React, Next.js and a read-only viewer:
+[`sdk/`](sdk/). **The npm packages are not published yet** — until they are,
+vendor `embed.js`, `editor.js`, `editor.css`, `editor.html`, `pkg/` and
+`fonts/` from [`webapp/`](webapp/) and serve them yourself.
+
+### Embedding it — in a Rust host
 
 `casual-calc-sdk` is the one crate a host depends on, and a session takes a
 configuration rather than baking in constants that suit one kind of host:
@@ -147,11 +190,11 @@ what a host shows as *Calculate*.
 ## Scope, in a planned order
 
 OpenCalc is ambitious in full but delivered in capability-gated phases. The
-formula/calculation engine — the single largest and riskiest surface — is
-deliberately **held back to a later phase**: the workbook must be read, modeled,
-preserved, written back byte-faithfully, laid out, and rendered *before* any cell
-is evaluated. Formulas are imported and preserved from Phase 1A, but they are not
-*calculated* until the dedicated calc-engine phase.
+formula/calculation engine — the single largest and riskiest surface — was
+deliberately **held back**: the workbook had to be read, modeled, preserved,
+written back byte-faithfully, laid out, and rendered *before* any cell was
+evaluated. That ordering held, and calculation landed in Phase 2 on a model
+that was already a round-trip fixed point.
 
 | Phase | Delivers | Status |
 | --- | --- | --- |
@@ -163,8 +206,8 @@ is evaluated. Formulas are imported and preserved from Phase 1A, but they are no
 | 1E — Browser grid editor (WASM) | cell edit, selection, formatting, structural ops, undo/redo | ✅ done (see the parity + UX trackers) |
 | **2 — Formula & calc engine** | tokenizer/parser, recalc, function library; dependency graph, incremental recalc, spill/array | 🟡 347/356 functions, spilling arrays, `LET`/`LAMBDA` live; persistent incremental graph pending |
 | 3 — Spreadsheet features | conditional formatting, data validation, tables/structured refs, autofilter, sort, charts, pivots | ✅ all live — conditional formatting (colour scales, data bars), data validation, sheet protection, tables with structured references, multi-key sort, per-column autofilter, print setup, **charts** and **pivot tables**. One named gap: a pivot *created here* exports as its cells rather than as a live Excel pivot ([PIV-02](docs/54-PIVOT-TABLES.md)) |
-| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | ⬜ |
-| 5 — Collaboration / web | operation model for shared editing | ⬜ |
+| 4 — SDK beta / embedding | stable host surfaces, native + WASM packaging | 🟡 `SessionConfig` on the Rust side; an embeddable `<opencalc-sheet>` element with theming, chrome/command control, events, access levels and localization ([docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md), [`sdk/`](sdk/)). **Not published to npm yet** — integrators vendor from `webapp/` |
+| 5 — Collaboration / web | operation model for shared editing | ⬜ blocked on an ADR: operational transform vs CRDT ([docs/24](docs/24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions). Explicitly **not** part of the embeddable SDK, which is single-user |
 | 6 — 1.0 | stable SDK, support guarantees | ⬜ |
 
 Full detail: [docs/06-ROADMAP-AND-DELIVERY.md](docs/06-ROADMAP-AND-DELIVERY.md).
@@ -180,19 +223,25 @@ those below it (layer division in
 | `casual-calc-sdk` | Host-facing engine and workbook-session facade, and the `SessionConfig` a host embeds it with |
 | `casual-calc-model` | Normalized workbook: sheets, sparse cell grid, shared strings, styles, number formats, defined names, invariants, snapshot I/O |
 | `casual-calc-formula` | Formula tokenizer, parser, AST, A1/R1C1 reference algebra, pretty-printer |
-| `casual-calc-eval` | Dependency graph, incremental recalculation, cycle detection, and the built-in function library *(Phase 2)* |
+| `casual-calc-eval` | Dependency graph, recalculation, cycle detection, the built-in function library, array spilling, and pivot-table computation |
 | `casual-calc-transaction` | Atomic operations, inverses, and reference/position mapping (insert/delete rows & columns, edit cells) |
 | `casual-calc-selection` | Active-cell and range selection validation and mapping |
 | `casual-calc-package` | Format-neutral, security-bounded ZIP/OPC admission and part reads |
 | `casual-calc-ooxml` | Security-bounded SpreadsheetML (OPC) package inspection |
-| `casual-calc-ods` | Security-bounded OpenDocument Spreadsheet admission and semantic import |
+| `casual-calc-ods` | *(skeleton, no logic yet)* Security-bounded OpenDocument Spreadsheet admission and semantic import |
 | `casual-calc-import` | SpreadsheetML semantic import into the normalized model + preservation ledger |
 | `casual-calc-export` | XLSX writers: byte-identical reconstruction and the semantic model → SpreadsheetML writer |
-| `casual-calc-io` | Format-neutral identities, detection/dispatch, and built-in adapters (XLSX, ODS, CSV/TSV/PSV, normalized JSON) |
+| `casual-calc-io` | Delimited text (CSV/TSV/PSV): extension→delimiter dispatch, RFC 4180 read/write, field typing and encoding detection. *Designed to grow into the format-neutral adapter layer (XLSX, ODS, normalized JSON); today those callers use their own crates directly* |
 | `casual-calc-layout` | Grid geometry, column/row sizing, frozen panes, merged cells, number-format display text (incl. section colours and the text section), the metric-compatible font-substitution table, viewport virtualization, and the backend-neutral display list |
 | `casual-calc-render` | CPU render backend: executes the display list on a `tiny-skia` pixmap, rasterizing glyphs from `skrifa` outlines |
 | `casual-calc-wasm` | `wasm-bindgen` bridge that drives the browser grid editor |
-| `casual-calc-tauri` | *(optional glue)* Tauri command wrappers for the desktop app; the desktop host otherwise consumes `casual-calc-sdk` directly with the calc engine running **native** |
+| `casual-calc-tauri` | *(planned, not yet written)* Tauri command wrappers for the desktop app; the desktop host otherwise consumes `casual-calc-sdk` directly with the calc engine running **native** |
+
+Two workspace members under `tools/` are build-time only, not part of the
+engine: `casual-calc-benchmark` (deterministic benchmark harness, smoke-gated in
+CI) and `casual-calc-fidelity` (scans the code to generate the measured fidelity
+and function-coverage trackers, so a tracker row cannot quietly disagree with
+what shipped).
 
 ## Prior art we study
 
@@ -222,12 +271,21 @@ A live demo is also deployed to GitHub Pages from [`webapp/`](webapp/).
 
 ## Status
 
-**Alpha.** The engine and editor are functional and improving; the API is not yet
-stable. Remaining before beta: the incremental dependency graph (<50 ms recalc), a
-frozen panes in the **PNG** backend, a persistent incremental dependency graph,
-writing a created pivot as a live Excel pivot rather than as its cells, and the
-concurrency model for shared editing. Known editor gaps are itemised — with
-severity — in
+**Alpha.** The engine, the editor and the embeddable SDK are functional and
+improving; the API is not yet stable. Remaining before beta:
+
+- a **persistent incremental dependency graph**, and with it the <50 ms
+  worst-case recalc budget;
+- **frozen panes in the PNG backend** (the editor canvas already splits them);
+- writing a **pivot created here as a live Excel pivot** rather than as its
+  cells ([PIV-02](docs/54-PIVOT-TABLES.md));
+- **publishing the SDK to npm** — the element and its whole API work today, but
+  integrators currently vendor the files from `webapp/`;
+- **localization beyond the chrome** — menus, submenus and toolbar tooltips are
+  translatable; panels, dialogs and status messages are still English;
+- the **concurrency model for shared editing**, which needs an ADR before code.
+
+Known editor gaps are itemised — with severity — in
 [docs/50-UX-COMPLETENESS-TRACKER.md](docs/50-UX-COMPLETENESS-TRACKER.md).
 
 Details: [architecture](docs/02-ARCHITECTURE.md) ·
@@ -239,4 +297,4 @@ Details: [architecture](docs/02-ARCHITECTURE.md) ·
 
 ## License
 
-Apache-2.0 (planned) — see `LICENSE` once added.
+Apache-2.0 — see [LICENSE](LICENSE).
