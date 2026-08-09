@@ -3439,27 +3439,19 @@ function toggleFilter() {
     tryEdit(() => wasm.session_clear_filter(state.sheet));
     status.textContent = "filter removed";
   } else {
-    // An explicit multi-cell selection wins; otherwise the contiguous block
-    // around the cursor — the table you are standing in — exactly as Excel
-    // does. Taking the used region instead put a filter button on every column
-    // between A and the last used one, blank ones included, because the used
-    // region is a bounding box over the whole sheet rather than one table.
+    // The engine decides what the selection means: a genuinely two-dimensional
+    // one is taken as given, anything thinner grows to the block around it.
+    // Selecting the row 1 header and pressing Filter is the ordinary way to
+    // reach this, and taken literally it asks for one row across all 16384
+    // columns — no rows beneath the header, so every checklist was empty, and a
+    // button on every column of the sheet.
     const r = effectiveRange();
-    const multi = r.r1 > r.r0 || r.c1 > r.c0;
-    let box = multi ? r : null;
-    if (!box) {
-      try {
-        const j = wasm.session_block_bounds(state.sheet, state.sel.row, state.sel.col);
-        if (j && j !== "null") box = JSON.parse(j);
-      } catch {}
-    }
-    // A cursor on a blank cell has no block; the used region is the only honest
-    // guess left.
-    if (!box) {
-      const b = usedBounds();
-      if (b.rows < 2 || b.cols < 1) { status.textContent = "nothing to filter"; return; }
-      box = { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
-    }
+    let box = null;
+    try {
+      const j = wasm.session_filter_range_for(state.sheet, r.r0, r.c0, r.r1, r.c1);
+      if (j && j !== "null") box = JSON.parse(j);
+    } catch {}
+    if (!box) { status.textContent = "nothing to filter"; return; }
     tryEdit(() => wasm.session_set_filter_range(state.sheet, box.r0, box.c0, box.r1, box.c1));
     status.textContent = "filter on — click a header button to filter a column";
   }

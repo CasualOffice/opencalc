@@ -1163,6 +1163,51 @@ pub fn session_block_bounds(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_else(|| "null".to_owned())
 }
 
+/// The range a filter should actually cover for a selection, as JSON
+/// `{r0,c0,r1,c1}`, or `null` when there is nothing to filter.
+///
+/// A selection that is genuinely two-dimensional is taken as given. Anything
+/// thinner — one cell, one row, one column, the whole sheet — is grown to the
+/// contiguous block around the first populated cell inside it, which is what
+/// Excel does and what the user means.
+///
+/// Without this, the ordinary way to reach the feature broke it: clicking the
+/// row 1 header and pressing Filter asks, literally, for one row spanning all
+/// 16384 columns. That is a filter with no rows beneath its header — every
+/// checklist empty — and a button on every column of the sheet, blank ones
+/// included.
+#[wasm_bindgen]
+pub fn session_filter_range_for(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    let (r0, c0, r1, c1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "null".to_owned();
+        };
+        let filled = |r: u32, c: u32| {
+            sh.cells
+                .get(CellRef::new(r, c))
+                .is_some_and(|cell| !cell.value.is_empty() || cell.formula.is_some())
+        };
+        if r1 > r0 && c1 > c0 {
+            return format!("{{\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}");
+        }
+        // Scanning the populated cells rather than the box: a whole-row
+        // selection is 16384 columns wide and all but a handful are empty.
+        let seed = sh
+            .cells
+            .iter()
+            .map(|(at, _)| at)
+            .filter(|at| at.row >= r0 && at.row <= r1 && at.col >= c0 && at.col <= c1)
+            .filter(|at| filled(at.row, at.col))
+            .min_by_key(|at| (at.row, at.col));
+        match seed {
+            Some(at) => session_block_bounds(sheet, at.row, at.col),
+            None => "null".to_owned(),
+        }
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
 /// Create a table over a range — Excel's Ctrl+T.
 ///
 /// The header row's cells become the column names, because a structured
