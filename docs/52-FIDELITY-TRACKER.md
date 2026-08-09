@@ -50,7 +50,7 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 | Signal | Baseline | Current |
 | --- | --- | --- |
 | Structural coverage | 54.8% | 77.9% |
-| Function coverage | 22.8% | 49.4% |
+| Function coverage | 22.8% | 53.4% |
 | **P0 destructive remaining** | 8 | 0 |
 | P1 visible-loss remaining | 13 | 10 |
 | P2 compatibility remaining | 4 | 4 |
@@ -59,7 +59,7 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 
 | Milestone | Structural | P0 | P1 | Functions | Also |
 | --- | --- | --- | --- | --- | --- |
-| **Alpha fidelity** | 75%+ | 0 | — | 50%+ | |
+| **Alpha fidelity** ✅ | 75%+ | 0 | — | 50%+ | met 2026-08-09 at 77.9% / P0 0 / 53.4% |
 | **Beta / daily use** | 90%+ | 0 | ~0 | 75%+ | |
 | **Excel alternative** | 98–100% | 0 | 0 | 100% | charts preserve + render · pivots preserve then model · drawings preserve + edit · formula correctness validated against a spec corpus |
 

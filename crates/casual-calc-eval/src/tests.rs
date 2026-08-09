@@ -1648,3 +1648,56 @@ fn discrete_distributions_sum_in_log_space() {
     assert!((n(3) - 0.5).abs() < 0.02, "large binomial stays finite");
     assert!((n(4) - (1.0 - (-1.0f64).exp())).abs() < 1e-12);
 }
+
+#[test]
+fn the_a_variants_count_text_as_zero() {
+    let mut b = Builder::new();
+    b.number((0, 0), 10.0)
+        .text((1, 0), "n/a")
+        .number((2, 0), 20.0)
+        .formula((0, 2), "AVERAGE(A1:A3)")
+        .formula((1, 2), "AVERAGEA(A1:A3)")
+        .formula((2, 2), "MAXA(A1:A3)")
+        .formula((3, 2), "MINA(A1:A3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 2) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // AVERAGE skips the text entirely; AVERAGEA counts it as zero and so
+    // reports a different, smaller number. That difference is the only reason
+    // both functions exist.
+    assert_eq!(n(0), 15.0);
+    assert!((n(1) - 10.0).abs() < 1e-12);
+    assert_eq!(n(2), 20.0);
+    assert_eq!(n(3), 0.0, "MINA sees the text as zero");
+}
+
+#[test]
+fn remaining_distributions() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "WEIBULL(2,1,1,TRUE())")
+        .formula((1, 0), "LOGNORMDIST(1,0,1)")
+        .formula((2, 0), "LOGINV(0.5,0,1)")
+        .formula((3, 0), "HYPGEOMDIST(1,4,8,20)")
+        .formula((4, 0), "NEGBINOMDIST(10,5,0.25)")
+        .formula((5, 0), "CRITBINOM(6,0.5,0.75)")
+        .formula((6, 0), "CONFIDENCE(0.05,2.5,50)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    // Weibull with alpha = beta = 1 is the exponential.
+    assert!((n(0) - (1.0 - (-2.0f64).exp())).abs() < 1e-12);
+    // LOGNORMDIST(1, 0, 1) is the normal CDF at ln(1) = 0.
+    assert!((n(1) - 0.5).abs() < 1e-12);
+    // ...and its inverse at p = 0.5 is exp(0) = 1.
+    assert!((n(2) - 1.0).abs() < 1e-9);
+    assert!(n(3) > 0.0 && n(3) < 1.0);
+    assert!(n(4) > 0.0 && n(4) < 1.0);
+    assert!(n(5) >= 0.0 && n(5) <= 6.0);
+    assert!((n(6) - 1.959_963_984_540_054 * 2.5 / 50.0f64.sqrt()).abs() < 1e-6);
+}

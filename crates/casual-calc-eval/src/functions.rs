@@ -32,12 +32,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ATANH", "ATANH(number)"),
     ("AVEDEV", "AVEDEV(number1, …)"),
     ("AVERAGE", "AVERAGE(number1, …)"),
+    ("AVERAGEA", "AVERAGEA(value1, …)"),
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
-    (
-        "BINOMDIST",
-        "BINOMDIST(number_s, trials, probability_s, cumulative)",
-    ),
     ("CEILING", "CEILING(number, significance)"),
     ("CHAR", "CHAR(number)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
@@ -49,6 +46,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("COMBINA", "COMBINA(n, k)"),
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
+    ("CONFIDENCE", "CONFIDENCE(alpha, standard_dev, size)"),
     ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
     ("COSH", "COSH(number)"),
@@ -60,6 +58,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("COUNTIF", "COUNTIF(range, criteria)"),
     ("COUNTIFS", "COUNTIFS(range1, criteria1, …)"),
     ("COVAR", "COVAR(array1, array2)"),
+    ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
     ("DATE", "DATE(year, month, day)"),
@@ -93,6 +92,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
+    (
+        "HYPGEOMDIST",
+        "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)",
+    ),
     ("IF", "IF(logical_test, value_if_true, value_if_false)"),
     ("IFERROR", "IFERROR(value, value_if_error)"),
     ("IFNA", "IFNA(value, value_if_na)"),
@@ -122,13 +125,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("LN", "LN(number)"),
     ("LOG", "LOG(number, [base])"),
     ("LOG10", "LOG10(number)"),
+    ("LOGINV", "LOGINV(probability, mean, standard_dev)"),
+    ("LOGNORMDIST", "LOGNORMDIST(x, mean, standard_dev)"),
     ("LOOKUP", "LOOKUP(value, vector, [result])"),
     ("LOWER", "LOWER(text)"),
     ("MATCH", "MATCH(lookup, array, [match_type])"),
     ("MAX", "MAX(number1, …)"),
+    ("MAXA", "MAXA(value1, …)"),
     ("MEDIAN", "MEDIAN(number1, …)"),
     ("MID", "MID(text, start_num, num_chars)"),
     ("MIN", "MIN(number1, …)"),
+    ("MINA", "MINA(value1, …)"),
     ("MINUTE", "MINUTE(serial_number)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
@@ -137,6 +144,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
+    (
+        "NEGBINOMDIST",
+        "NEGBINOMDIST(number_f, number_s, probability_s)",
+    ),
     ("NETWORKDAYS", "NETWORKDAYS(start, end, [holidays])"),
     ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
     ("NORMINV", "NORMINV(probability, mean, sd)"),
@@ -186,7 +197,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SQRTPI", "SQRTPI(number)"),
     ("STANDARDIZE", "STANDARDIZE(x, mean, standard_dev)"),
     ("STDEV", "STDEV(number1, …)"),
+    ("STDEVA", "STDEVA(value1, …)"),
     ("STDEVP", "STDEVP(number1, …)"),
+    ("STDEVPA", "STDEVPA(value1, …)"),
     ("STEYX", "STEYX(known_y, known_x)"),
     ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
     ("SUM", "SUM(number1, …)"),
@@ -210,10 +223,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("UPPER", "UPPER(text)"),
     ("VALUE", "VALUE(text)"),
     ("VAR", "VAR(number1, …)"),
+    ("VARA", "VARA(value1, …)"),
     ("VARP", "VARP(number1, …)"),
+    ("VARPA", "VARPA(value1, …)"),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
+    ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
     ("WORKDAY", "WORKDAY(start, days, [holidays])"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
@@ -493,6 +509,23 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "EXPONDIST" => eval_expondist(ev, sheet, args),
         "POISSON" => eval_poisson(ev, sheet, args),
         "BINOMDIST" => eval_binomdist(ev, sheet, args),
+        // The `A` variants count text as 0 and logicals as 0/1, where the plain
+        // forms skip non-numbers entirely. That difference is the only reason
+        // both exist, so they share nothing but the reduction.
+        "AVERAGEA" => stat_over_a(ev, sheet, args, |ns| Some(mean(ns))),
+        "MAXA" => stat_over_a(ev, sheet, args, |ns| ns.iter().copied().reduce(f64::max)),
+        "MINA" => stat_over_a(ev, sheet, args, |ns| ns.iter().copied().reduce(f64::min)),
+        "VARA" => stat_over_a(ev, sheet, args, |ns| variance(ns, true)),
+        "VARPA" => stat_over_a(ev, sheet, args, |ns| variance(ns, false)),
+        "STDEVA" => stat_over_a(ev, sheet, args, |ns| variance(ns, true).map(f64::sqrt)),
+        "STDEVPA" => stat_over_a(ev, sheet, args, |ns| variance(ns, false).map(f64::sqrt)),
+        "LOGNORMDIST" => eval_lognormdist(ev, sheet, args),
+        "LOGINV" => eval_loginv(ev, sheet, args),
+        "WEIBULL" => eval_weibull(ev, sheet, args),
+        "NEGBINOMDIST" => eval_negbinomdist(ev, sheet, args),
+        "HYPGEOMDIST" => eval_hypgeomdist(ev, sheet, args),
+        "CRITBINOM" => eval_critbinom(ev, sheet, args),
+        "CONFIDENCE" => eval_confidence(ev, sheet, args),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -4017,4 +4050,182 @@ fn eval_binomdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value 
     } else {
         term(s)
     })
+}
+
+/// As [`stat_over`], but over the `A` family's coercion: text counts as 0 and
+/// logicals as 0 or 1, rather than being skipped.
+fn stat_over_a(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    f: fn(&[f64]) -> Option<f64>,
+) -> Value {
+    let mut values = Vec::new();
+    for arg in args {
+        match range_cells(ev, sheet, arg) {
+            Some((target, cells)) => {
+                for at in cells {
+                    match ev.eval_cell(target, at) {
+                        Value::Number(n) => values.push(n),
+                        Value::Bool(b) => values.push(if b { 1.0 } else { 0.0 }),
+                        // Text is zero, not skipped: that is the whole point of
+                        // the A variants, and it drags an average down.
+                        Value::Text(_) => values.push(0.0),
+                        Value::Error(e) => return Value::Error(e),
+                        Value::Empty => {}
+                    }
+                }
+            }
+            None => match ev.eval_expr(sheet, arg) {
+                Value::Number(n) => values.push(n),
+                Value::Bool(b) => values.push(if b { 1.0 } else { 0.0 }),
+                Value::Text(_) => values.push(0.0),
+                Value::Error(e) => return Value::Error(e),
+                Value::Empty => {}
+            },
+        }
+    }
+    if values.is_empty() {
+        return Value::Error(ErrorValue::Div0);
+    }
+    match f(&values) {
+        Some(v) if v.is_finite() => Value::Number(v),
+        _ => Value::Error(ErrorValue::Num),
+    }
+}
+
+fn eval_lognormdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [x, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if x <= 0.0 || sd <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number(standard_normal_cdf((x.ln() - m) / sd))
+}
+
+fn eval_loginv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [p, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if sd <= 0.0 || p <= 0.0 || p >= 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((m + sd * normal_quantile(p)).exp())
+}
+
+fn eval_weibull(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let Some(v) = three_numbers(ev, sheet, &args[..3]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [x, alpha, beta] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[3]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    if x < 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let scaled = (x / beta).powf(alpha);
+    Value::Number(if cumulative {
+        1.0 - (-scaled).exp()
+    } else {
+        alpha / beta.powf(alpha) * x.powf(alpha - 1.0) * (-scaled).exp()
+    })
+}
+
+fn eval_negbinomdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [f, s, p] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (f, s) = (f.trunc(), s.trunc());
+    if f < 0.0 || s < 1.0 || !(0.0..=1.0).contains(&p) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let log = ln_gamma(f + s) - ln_gamma(f + 1.0) - ln_gamma(s) + s * p.ln() + f * (1.0 - p).ln();
+    Value::Number(log.exp())
+}
+
+fn eval_hypgeomdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut v = [0.0f64; 4];
+    for (i, slot) in v.iter_mut().enumerate() {
+        match ev.eval_expr(sheet, &args[i]).as_number() {
+            Ok(n) => *slot = n.trunc(),
+            Err(e) => return Value::Error(e),
+        }
+    }
+    let [k, n, successes, population] = v;
+    if k < 0.0 || k > n || k > successes || n > population || successes > population {
+        return Value::Error(ErrorValue::Num);
+    }
+    let log_choose = |a: f64, b: f64| ln_gamma(a + 1.0) - ln_gamma(b + 1.0) - ln_gamma(a - b + 1.0);
+    Value::Number(
+        (log_choose(successes, k) + log_choose(population - successes, n - k)
+            - log_choose(population, n))
+        .exp(),
+    )
+}
+
+/// `CRITBINOM(trials, p, alpha)` — the smallest k whose cumulative binomial
+/// probability reaches `alpha`.
+fn eval_critbinom(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [trials, p, alpha] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let trials = trials.trunc();
+    if trials < 0.0 || !(0.0..=1.0).contains(&p) || !(0.0..=1.0).contains(&alpha) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let mut cumulative = 0.0;
+    for k in 0..=(trials as u64) {
+        let k = k as f64;
+        cumulative += (ln_gamma(trials + 1.0) - ln_gamma(k + 1.0) - ln_gamma(trials - k + 1.0)
+            + k * p.ln()
+            + (trials - k) * (1.0 - p).ln())
+        .exp();
+        if cumulative >= alpha {
+            return Value::Number(k);
+        }
+    }
+    Value::Number(trials)
+}
+
+fn eval_confidence(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [alpha, sd, size] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if alpha <= 0.0 || alpha >= 1.0 || sd <= 0.0 || size < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Two-tailed, so the quantile is at 1 - alpha/2.
+    Value::Number(normal_quantile(1.0 - alpha / 2.0) * sd / size.trunc().sqrt())
 }
