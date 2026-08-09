@@ -85,6 +85,213 @@ let linkCells = new Set();
 // Tables on the current sheet, refreshed each draw. Held so the header
 // filter-button hit test does not have to ask the engine on every mousedown.
 let tablesInView = [];
+// Every chart on the sheet, at its anchored cells.
+//
+// A chart is anchored in *cells*, which is why it moves with the rows under it
+// and why this has to be recomputed each frame rather than positioned once.
+function drawCharts(withQuad) {
+  if (!wasm) return;
+  let charts = [];
+  try { charts = JSON.parse(wasm.session_charts(state.sheet)); } catch { return; }
+  for (const ch of charts) {
+    const x0 = colXAt(ch.c0), y0 = rowYAt(ch.r0);
+    if (x0 === undefined || y0 === undefined) continue;
+    let x1 = colXAt(ch.c1), y1 = rowYAt(ch.r1);
+    // An edge scrolled out of view still has to bound the frame, or a chart
+    // half off-screen collapses to nothing.
+    if (x1 === undefined) x1 = canvas.clientWidth;
+    if (y1 === undefined) y1 = canvas.clientHeight;
+    const w = Math.max(60, x1 - x0), h = Math.max(40, y1 - y0);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, w, h);
+    ctx.clip();
+    drawChartFrame(ch, x0, y0, w, h);
+    ctx.restore();
+  }
+}
+
+// One chart: frame, title, then whichever picture its kind calls for.
+function drawChartFrame(ch, x, y, w, h) {
+  ctx.fillStyle = colors.bg;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = colors.border || "#888";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  let top = y + 6;
+  if (ch.title) {
+    ctx.fillStyle = colors.fg;
+    ctx.font = "600 12px " + (colors.uiFont || "system-ui, sans-serif");
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(ch.title, x + w / 2, top);
+    top += 18;
+  }
+  ctx.textAlign = "left";
+
+  const series = (ch.series || []).filter((s) => (s.values || []).some((v) => v !== null));
+  if (!series.length) {
+    // Honest rather than blank: the chart exists, its data did not resolve.
+    ctx.fillStyle = colors.muted || "#888";
+    ctx.font = "11px " + (colors.uiFont || "system-ui, sans-serif");
+    ctx.fillText("no data", x + 8, top);
+    return;
+  }
+  const plot = { x: x + 34, y: top, w: w - 44, h: y + h - top - 18 };
+  if (plot.w < 20 || plot.h < 20) return;
+
+  if (ch.kind === "pie" || ch.kind === "doughnut") drawPie(ch, series, plot);
+  else if (ch.kind === "line" || ch.kind === "area" || ch.kind === "scatter") {
+    drawLineChart(ch, series, plot, ch.kind);
+  } else if (ch.kind === "bar" || ch.kind === "column") drawBarChart(ch, series, plot, ch.kind);
+  else {
+    ctx.fillStyle = colors.muted || "#888";
+    ctx.font = "11px " + (colors.uiFont || "system-ui, sans-serif");
+    ctx.fillText(`${ch.kind} chart not drawn`, plot.x, plot.y);
+  }
+}
+
+// Series colours, taken from the workbook's theme accents so a chart matches
+// the file it came from rather than a palette invented here.
+function seriesColors(n) {
+  let theme = [];
+  try { theme = JSON.parse(wasm.theme_colors()); } catch {}
+  const accents = theme.slice(4, 10).filter(Boolean);
+  const base = accents.length ? accents : ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
+  return Array.from({ length: n }, (_, i) => "#" + base[i % base.length]);
+}
+
+// The value range a chart's axis has to cover, always including zero so a bar's
+// length is proportional to its value.
+function valueExtent(series) {
+  let lo = 0, hi = 0;
+  for (const s of series) {
+    for (const v of s.values) {
+      if (v === null) continue;
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+  }
+  if (lo === hi) hi = lo + 1;
+  return { lo, hi };
+}
+
+function drawAxes(plot, lo, hi) {
+  const zeroY = plot.y + plot.h * (hi / (hi - lo));
+  ctx.strokeStyle = colors.gridline || "#666";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(plot.x, plot.y);
+  ctx.lineTo(plot.x, plot.y + plot.h);
+  ctx.moveTo(plot.x, zeroY + 0.5);
+  ctx.lineTo(plot.x + plot.w, zeroY + 0.5);
+  ctx.stroke();
+  ctx.fillStyle = colors.muted || "#888";
+  ctx.font = "9px " + (colors.uiFont || "system-ui, sans-serif");
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(Math.round(hi * 100) / 100), plot.x - 3, plot.y + 4);
+  ctx.fillText(String(Math.round(lo * 100) / 100), plot.x - 3, plot.y + plot.h - 4);
+  ctx.textAlign = "left";
+  return zeroY;
+}
+
+function drawBarChart(ch, series, plot, kind) {
+  const { lo, hi } = valueExtent(series);
+  const zeroY = drawAxes(plot, lo, hi);
+  const cols = seriesColors(series.length);
+  const points = Math.max(...series.map((s) => s.values.length));
+  if (!points) return;
+  const groupW = plot.w / points;
+  const barW = Math.max(1, (groupW * 0.7) / series.length);
+  for (let i = 0; i < points; i++) {
+    for (let si = 0; si < series.length; si++) {
+      const v = series[si].values[i];
+      if (v === null || v === undefined) continue;
+      const bx = plot.x + i * groupW + groupW * 0.15 + si * barW;
+      const top = plot.y + plot.h * ((hi - v) / (hi - lo));
+      ctx.fillStyle = cols[si];
+      // A negative value draws downward from the zero line, which is why the
+      // rectangle is measured from it rather than from the axis.
+      ctx.fillRect(bx, Math.min(top, zeroY), barW - 1, Math.abs(zeroY - top) || 1);
+    }
+  }
+  drawCategoryLabels(ch, plot, points, kind);
+}
+
+function drawLineChart(ch, series, plot, kind) {
+  const { lo, hi } = valueExtent(series);
+  drawAxes(plot, lo, hi);
+  const cols = seriesColors(series.length);
+  const points = Math.max(...series.map((s) => s.values.length));
+  const step = points > 1 ? plot.w / (points - 1) : 0;
+  for (let si = 0; si < series.length; si++) {
+    ctx.strokeStyle = cols[si];
+    ctx.fillStyle = cols[si];
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < series[si].values.length; i++) {
+      const v = series[si].values[i];
+      if (v === null || v === undefined) { started = false; continue; }
+      const px = plot.x + i * step;
+      const py = plot.y + plot.h * ((hi - v) / (hi - lo));
+      if (kind === "scatter") { ctx.fillRect(px - 2, py - 2, 4, 4); continue; }
+      if (started) ctx.lineTo(px, py); else { ctx.moveTo(px, py); started = true; }
+    }
+    if (kind !== "scatter") ctx.stroke();
+  }
+  drawCategoryLabels(ch, plot, points, kind);
+}
+
+function drawPie(ch, series, plot) {
+  const values = series[0].values.filter((v) => v !== null && v > 0);
+  const total = values.reduce((a, b) => a + b, 0);
+  if (!total) return;
+  const cols = seriesColors(values.length);
+  const cx = plot.x + plot.w / 2, cy = plot.y + plot.h / 2;
+  const r = Math.max(6, Math.min(plot.w, plot.h) / 2 - 4);
+  let angle = -Math.PI / 2; // twelve o'clock, as Excel starts
+  values.forEach((v, i) => {
+    const sweep = (v / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, angle, angle + sweep);
+    ctx.closePath();
+    ctx.fillStyle = cols[i];
+    ctx.fill();
+    angle += sweep;
+  });
+  if (ch.kind === "doughnut") {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = colors.bg;
+    ctx.fill();
+  }
+}
+
+// Category labels under the plot, thinned to whatever fits: overlapping labels
+// are less readable than fewer of them.
+function drawCategoryLabels(ch, plot, points, kind) {
+  const cats = ch.cats || [];
+  if (!cats.length || kind === "scatter") return;
+  ctx.fillStyle = colors.muted || "#888";
+  ctx.font = "9px " + (colors.uiFont || "system-ui, sans-serif");
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const every = Math.max(1, Math.ceil((points * 34) / plot.w));
+  for (let i = 0; i < points; i += every) {
+    const label = cats[i];
+    if (!label) continue;
+    const px = points > 1 && kind !== "column" && kind !== "bar"
+      ? plot.x + (i * plot.w) / (points - 1)
+      : plot.x + (i + 0.5) * (plot.w / points);
+    ctx.fillText(label.length > 10 ? label.slice(0, 9) + "…" : label, px, plot.y + plot.h + 3);
+  }
+  ctx.textAlign = "left";
+}
+
 // A cell's text colour. The cell's own wins; a table supplies one where the
 // cell has none, because a table style's colours are part of the style, not of
 // the cells — and because the block a table paints is light whatever the
@@ -1026,6 +1233,11 @@ function draw() {
     fn();
     ctx.restore();
   };
+
+  // Charts, drawn over the grid at their anchors. Read-only: the engine parses
+  // the chart part for display and still writes it back from its own bytes, so
+  // nothing here can change the file.
+  drawCharts(withQuad);
 
   // Manual page breaks, as the dashed rules Excel draws. A break that is only
   // visible once you print is a break you set by accident and never find.

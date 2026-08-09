@@ -16,7 +16,7 @@ use crate::theme::{ThemePalette, indexed_color};
 const MAX_XML_ELEMENTS: usize = 50_000_000;
 const MAX_XML_DEPTH: usize = 256;
 
-fn xml_err(err: quick_xml::Error) -> ImportError {
+pub(crate) fn xml_err(err: quick_xml::Error) -> ImportError {
     ImportError::Ooxml(OoxmlError::MalformedXml(err.to_string()))
 }
 
@@ -41,7 +41,7 @@ pub struct RawCell {
     pub shared_index: Option<u32>,
 }
 
-fn read_attr(
+pub(crate) fn read_attr(
     e: &quick_xml::events::BytesStart<'_>,
     local: &[u8],
 ) -> Result<Option<String>, ImportError> {

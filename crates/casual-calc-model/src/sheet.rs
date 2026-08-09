@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::chart::ChartView;
 use crate::ids::SheetId;
 use crate::store::{CellRange, CellRef, CellStore};
 
@@ -197,6 +198,13 @@ pub struct Sheet {
     /// Print layout, carried through verbatim.
     #[serde(default, skip_serializing_if = "PrintSetup::is_empty")]
     pub print: PrintSetup,
+    /// Charts anchored on this sheet, parsed for display only.
+    ///
+    /// The chart parts are retained byte for byte and written back from those
+    /// bytes; see [`crate::ChartView`]. Nothing here reaches the writer, so an
+    /// incomplete entry costs a picture, never a file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<ChartView>,
     /// `<sortState>` and its `<sortCondition>` children, carried verbatim.
     ///
     /// A saved sort describes an order already applied to the cells, so nothing
@@ -1166,6 +1174,7 @@ impl Sheet {
             hyperlinks: Vec::new(),
             print: PrintSetup::default(),
             tables: Vec::new(),
+            charts: Vec::new(),
             sort_state: None,
             carried: Vec::new(),
             format_pr: BTreeMap::new(),

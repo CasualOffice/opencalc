@@ -2784,6 +2784,166 @@ pub fn session_toggle_page_break(sheet: usize, row: u32, col: u32) -> Result<(),
     })
 }
 
+/// The charts on a sheet, with their data already resolved, as JSON.
+///
+/// `[{r0,c0,r1,c1,kind,title,cats:[…],series:[{name,values:[…]}]}]`. The host
+/// draws pictures; resolving `Sheet1!$B$2:$B$4` into numbers is the engine's
+/// job, and doing it here means the canvas never parses a formula.
+///
+/// A series whose reference does not resolve is dropped rather than drawn as
+/// zeroes — a chart of flat zeroes looks like data, which is worse than a
+/// chart with one series missing.
+#[wasm_bindgen]
+pub fn session_charts(sheet: usize) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let items: Vec<String> = sh
+            .charts
+            .iter()
+            .map(|ch| {
+                let cats = ch
+                    .series
+                    .first()
+                    .and_then(|s| s.categories.as_deref())
+                    .map(|r| ref_text(wb, sheet, r))
+                    .unwrap_or_default();
+                let series: Vec<String> = ch
+                    .series
+                    .iter()
+                    .map(|se| {
+                        let values = ref_numbers(wb, sheet, &se.values);
+                        format!(
+                            "{{\"name\":{},\"values\":[{}]}}",
+                            json_string(&se.name),
+                            values
+                                .iter()
+                                .map(|v| match v {
+                                    Some(n) => format_json_number(*n),
+                                    None => "null".to_owned(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"kind\":{},\
+                     \"title\":{},\"cats\":[{}],\"series\":[{}]}}",
+                    ch.anchor.start.row,
+                    ch.anchor.start.col,
+                    ch.anchor.end.row,
+                    ch.anchor.end.col,
+                    json_string(chart_kind_name(ch.kind)),
+                    json_string(&ch.title),
+                    cats.iter()
+                        .map(|t| json_string(t))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    series.join(",")
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// The lowercase name the host switches on.
+fn chart_kind_name(kind: casual_calc_model::ChartKind) -> &'static str {
+    use casual_calc_model::ChartKind as K;
+    match kind {
+        K::Bar => "bar",
+        K::Column => "column",
+        K::Line => "line",
+        K::Area => "area",
+        K::Pie => "pie",
+        K::Doughnut => "doughnut",
+        K::Scatter => "scatter",
+        K::Unsupported => "unsupported",
+    }
+}
+
+/// Resolve a chart's `Sheet1!$A$2:$A$9` to the cells it names, in order.
+fn ref_cells(wb: &Workbook, default_sheet: usize, reference: &str) -> Vec<(usize, CellRef)> {
+    let Ok(expr) = parse(reference.trim().trim_start_matches('=')) else {
+        return Vec::new();
+    };
+    let (a, b) = match &expr {
+        Expr::Range(a, b) => (a.clone(), b.clone()),
+        Expr::Reference(r) => (r.clone(), r.clone()),
+        _ => return Vec::new(),
+    };
+    let target = match &a.sheet {
+        Some(name) => match wb
+            .sheets
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(name))
+        {
+            Some(i) => i,
+            None => return Vec::new(),
+        },
+        None => default_sheet,
+    };
+    let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
+    let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+    // A chart series is a strip, and its points are in reading order along it.
+    let mut out = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            out.push((target, CellRef::new(r, c)));
+        }
+    }
+    out
+}
+
+/// A reference's cells as display text — chart category labels.
+fn ref_text(wb: &Workbook, default_sheet: usize, reference: &str) -> Vec<String> {
+    ref_cells(wb, default_sheet, reference)
+        .into_iter()
+        .map(|(si, at)| {
+            wb.sheets
+                .get(si)
+                .and_then(|sh| sh.cells.get(at))
+                .map(|cell| casual_calc_layout::display_text(wb, cell))
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// A reference's cells as numbers; a non-numeric cell is a gap, not a zero.
+fn ref_numbers(wb: &Workbook, default_sheet: usize, reference: &str) -> Vec<Option<f64>> {
+    ref_cells(wb, default_sheet, reference)
+        .into_iter()
+        .map(
+            |(si, at)| match wb.sheets.get(si).and_then(|sh| sh.cells.get(at)) {
+                Some(cell) => match cell.value {
+                    CellValue::Number(n) => Some(n),
+                    CellValue::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+                    _ => None,
+                },
+                None => None,
+            },
+        )
+        .collect()
+}
+
+/// A finite number as JSON, or `null`. `NaN` and infinities are not JSON, and
+/// emitting them bare produces a payload the host cannot parse at all.
+fn format_json_number(n: f64) -> String {
+    if n.is_finite() {
+        let mut s = n.to_string();
+        if s.ends_with(".0") {
+            s.truncate(s.len() - 2);
+        }
+        s
+    } else {
+        "null".to_owned()
+    }
+}
+
 /// A printable HTML document for a sheet, honouring its page setup.
 ///
 /// A page-setup panel that only edits the file is half a feature: the settings

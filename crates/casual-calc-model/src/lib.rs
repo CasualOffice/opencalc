@@ -13,6 +13,7 @@
 //! See `docs/22-NORMALIZED-SCHEMA.md` and `docs/23-CELL-STORE-REPRESENTATION.md`.
 
 mod cell;
+mod chart;
 mod defined_name;
 mod error;
 mod ids;
@@ -24,6 +25,7 @@ mod value;
 mod workbook;
 
 pub use cell::{Cell, CellFlags};
+pub use chart::{ChartKind, ChartSeries, ChartView};
 pub use defined_name::DefinedName;
 pub use error::ModelError;
 pub use ids::{

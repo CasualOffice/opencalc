@@ -1,0 +1,257 @@
+//! Reading charts far enough to draw them.
+//!
+//! Two parts are involved and neither is optional. `xl/drawings/drawingN.xml`
+//! says *where* a chart sits — as cell coordinates, which is why a chart moves
+//! with the rows under it — and names the chart part through a relationship.
+//! `xl/charts/chartN.xml` says what it plots.
+//!
+//! Everything here feeds [`casual_calc_model::ChartView`], which is a display
+//! projection: the parts themselves are retained byte for byte and written back
+//! from those bytes. A field this parser misses costs a picture, not a file.
+
+use casual_calc_model::{CellRange, CellRef, ChartKind, ChartSeries};
+use quick_xml::Reader;
+use quick_xml::events::Event;
+
+use crate::error::ImportError;
+use crate::read::{read_attr, xml_err};
+
+/// A `<xdr:*Anchor>`: the cells it covers and the relationship id of whatever
+/// it frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawingAnchor {
+    /// The cells the frame spans.
+    pub range: CellRange,
+    /// `r:id` of the referenced part, when the anchor frames one.
+    pub rel_id: Option<String>,
+}
+
+/// Parse a drawing part's anchors.
+///
+/// `oneCellAnchor` and `absoluteAnchor` carry an extent in EMUs rather than a
+/// second cell. Rather than convert EMUs to a column count — which needs every
+/// column's width and still only guesses — they get a nominal span; a chart
+/// drawn a column or two out is far better than one not drawn at all, and the
+/// file is unaffected either way.
+pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
+    /// Columns and rows a one-cell or absolute anchor is assumed to cover.
+    const NOMINAL_COLS: u32 = 8;
+    const NOMINAL_ROWS: u32 = 15;
+
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<DrawingAnchor> = Vec::new();
+
+    // Which corner is being read, and the numbers collected so far. `<xdr:col>`
+    // and `<xdr:row>` are element *text*, and both corners use the same element
+    // names — so which corner is open has to be tracked.
+    let mut corner: Option<bool> = None; // Some(true) = <from>, Some(false) = <to>
+    let mut field: Option<bool> = None; // Some(true) = col, Some(false) = row
+    let mut text = String::new();
+    let (mut fc, mut fr, mut tc, mut tr) = (0u32, 0u32, 0u32, 0u32);
+    let mut have_to = false;
+    let mut rel_id: Option<String> = None;
+    let mut open = false;
+
+    loop {
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => match e.local_name().as_ref() {
+                b"twoCellAnchor" | b"oneCellAnchor" | b"absoluteAnchor" => {
+                    open = true;
+                    have_to = false;
+                    rel_id = None;
+                    (fc, fr, tc, tr) = (0, 0, 0, 0);
+                }
+                b"from" => corner = Some(true),
+                b"to" => {
+                    corner = Some(false);
+                    have_to = true;
+                }
+                b"col" => {
+                    field = Some(true);
+                    text.clear();
+                }
+                b"row" => {
+                    field = Some(false);
+                    text.clear();
+                }
+                // `<c:chart r:id>` inside `<a:graphicData>`, and the same
+                // attribute on a picture's `<a:blip r:embed>`.
+                b"chart" | b"blip" => {
+                    if let Some(id) = read_attr(e, b"id")?.or(read_attr(e, b"embed")?) {
+                        rel_id = Some(id);
+                    }
+                }
+                _ => {}
+            },
+            Event::Text(ref e) => {
+                if field.is_some() {
+                    text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(ref e) => match e.local_name().as_ref() {
+                b"col" | b"row" => {
+                    let value: u32 = text.trim().parse().unwrap_or(0);
+                    match (corner, field) {
+                        (Some(true), Some(true)) => fc = value,
+                        (Some(true), Some(false)) => fr = value,
+                        (Some(false), Some(true)) => tc = value,
+                        (Some(false), Some(false)) => tr = value,
+                        _ => {}
+                    }
+                    field = None;
+                }
+                b"from" | b"to" => corner = None,
+                b"twoCellAnchor" | b"oneCellAnchor" | b"absoluteAnchor" if open => {
+                    let (end_c, end_r) = if have_to {
+                        (tc, tr)
+                    } else {
+                        (fc + NOMINAL_COLS, fr + NOMINAL_ROWS)
+                    };
+                    out.push(DrawingAnchor {
+                        range: CellRange::new(
+                            CellRef::new(fr, fc),
+                            CellRef::new(end_r.max(fr), end_c.max(fc)),
+                        ),
+                        rel_id: rel_id.take(),
+                    });
+                    open = false;
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
+}
+
+/// What a chart part plots.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChartSpec {
+    /// The chart kind, or `Unsupported`.
+    pub kind: Option<ChartKind>,
+    /// The title text, empty when absent.
+    pub title: String,
+    /// Series in plot order.
+    pub series: Vec<ChartSeries>,
+}
+
+/// Parse a chart part.
+///
+/// The shape that matters: `<c:plotArea>` holds one or more chart-group
+/// elements (`<c:barChart>`, `<c:lineChart>`, …), each holding `<c:ser>`, each
+/// holding `<c:tx>` (name), `<c:cat>` (categories) and `<c:val>` (values).
+/// References live in a `<c:f>` element inside those.
+pub fn parse_chart(xml: &[u8]) -> Result<ChartSpec, ImportError> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buf = Vec::new();
+    let mut spec = ChartSpec::default();
+
+    let mut bar_dir: Option<String> = None;
+    let mut group: Option<String> = None;
+    let mut series: Option<ChartSeries> = None;
+    // Which of a series' three reference slots is open.
+    let mut slot: Option<&'static str> = None;
+    let mut in_formula = false;
+    let mut in_title = false;
+    let mut text = String::new();
+    // A title's text is `<a:t>` inside `<c:title>`; `<a:t>` also appears in
+    // every other bit of rich text in the part, so the enclosing title has to
+    // be tracked or the first axis label becomes the chart's name.
+    let mut title_text = String::new();
+    // `<c:tx><c:v>` is a literal series name; `<c:tx><c:strRef><c:f>` is a
+    // reference to one. The literal is preferred where both appear, because it
+    // is what Excel displays without resolving anything.
+    let mut in_value = false;
+
+    loop {
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"barDir" => bar_dir = read_attr(e, b"val")?,
+                    b"title" => in_title = true,
+                    b"ser" => series = Some(ChartSeries::default()),
+                    b"tx" => slot = Some("tx"),
+                    b"cat" | b"xVal" => slot = Some("cat"),
+                    b"val" | b"yVal" => slot = Some("val"),
+                    b"f" => {
+                        in_formula = true;
+                        text.clear();
+                    }
+                    b"v" if slot == Some("tx") => {
+                        in_value = true;
+                        text.clear();
+                    }
+                    b"t" if in_title => {
+                        in_formula = false;
+                        text.clear();
+                        in_value = true;
+                    }
+                    other => {
+                        let n = String::from_utf8_lossy(other).into_owned();
+                        if n.ends_with("Chart") {
+                            // The first group decides the kind. A combination
+                            // chart has several; drawing the first is wrong in
+                            // a way that is visible, which beats drawing
+                            // nothing at all.
+                            group.get_or_insert(n);
+                        }
+                    }
+                }
+            }
+            Event::Text(ref e) => {
+                if in_formula || in_value {
+                    text.push_str(&e.unescape().map_err(xml_err)?);
+                }
+            }
+            Event::End(ref e) => match e.local_name().as_ref() {
+                b"f" => {
+                    in_formula = false;
+                    if let Some(s) = series.as_mut() {
+                        match slot {
+                            Some("tx") if s.name.is_empty() => s.name = text.clone(),
+                            Some("cat") => s.categories = Some(text.clone()),
+                            Some("val") => s.values = text.clone(),
+                            _ => {}
+                        }
+                    }
+                }
+                b"v" => {
+                    if in_value
+                        && slot == Some("tx")
+                        && let Some(s) = series.as_mut()
+                    {
+                        s.name = text.clone();
+                    }
+                    in_value = false;
+                }
+                b"t" if in_title => {
+                    if title_text.is_empty() {
+                        title_text = text.clone();
+                    }
+                    in_value = false;
+                }
+                b"title" => in_title = false,
+                b"tx" | b"cat" | b"val" | b"xVal" | b"yVal" => slot = None,
+                b"ser" => {
+                    if let Some(s) = series.take() {
+                        spec.series.push(s);
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    spec.title = title_text;
+    spec.kind = group.map(|g| ChartKind::from_element(&g, bar_dir.as_deref()));
+    Ok(spec)
+}
