@@ -9,7 +9,7 @@ If you want a spreadsheet your users can *see*, you want
 [`@opencalc/sheet`](https://www.npmjs.com/package/@opencalc/sheet) instead;
 this is the layer underneath it.
 
-- 📖 **[Documentation](https://casualoffice.github.io/opencalc/)**
+- 📖 **[Documentation](https://calc.casualoffice.org/)**
 - 🏗 **[Architecture](https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md)**
 - 🦀 **[Source](https://github.com/CasualOffice/opencalc)** — Rust, Apache-2.0
 

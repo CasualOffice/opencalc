@@ -229,8 +229,8 @@ jobs:
 
           ### Links
 
-          - [Integration guide](https://casualoffice.github.io/opencalc/docs.html) — installation, theming, chrome and commands, read-only, events, CSP, troubleshooting
-          - [Live demo](https://casualoffice.github.io/opencalc/embed.html)
+          - [Integration guide](https://calc.casualoffice.org/docs.html) — installation, theming, chrome and commands, read-only, events, CSP, troubleshooting
+          - [Live demo](https://calc.casualoffice.org/embed.html)
           - [Runnable examples](https://github.com/CasualOffice/opencalc/tree/main/sdk/examples) — vanilla, React, Next.js, read-only viewer
           - [Design rationale](https://github.com/CasualOffice/opencalc/blob/main/docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md)
           - [Changelog](https://github.com/CasualOffice/opencalc/blob/main/CHANGELOG.md)

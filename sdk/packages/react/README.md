@@ -5,8 +5,8 @@ an embeddable spreadsheet that reads and writes real `.xlsx`, evaluates 347
 worksheet functions, and builds pivot tables and charts entirely in the
 browser.
 
-- 📖 **[Integration guide](https://casualoffice.github.io/opencalc/docs.html)**
-- 🧪 **[Live demo](https://casualoffice.github.io/opencalc/embed.html)**
+- 📖 **[Integration guide](https://calc.casualoffice.org/docs.html)**
+- 🧪 **[Live demo](https://calc.casualoffice.org/embed.html)**
 - 💾 **[Runnable React example](https://github.com/CasualOffice/opencalc/tree/main/sdk/examples/react)**
 - 🦀 **[Source](https://github.com/CasualOffice/opencalc)** — Apache-2.0
 

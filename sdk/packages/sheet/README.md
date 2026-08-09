@@ -9,8 +9,8 @@ The engine is [OpenCalc](https://github.com/CasualOffice/opencalc): a
 deterministic spreadsheet engine written in Rust and compiled to WebAssembly.
 This package is the browser SDK for it.
 
-- 📖 **[Integration guide](https://casualoffice.github.io/opencalc/docs.html)** — the full reference
-- 🧪 **[Live demo](https://casualoffice.github.io/opencalc/embed.html)** — theming, chrome and access levels, changed live
+- 📖 **[Integration guide](https://calc.casualoffice.org/docs.html)** — the full reference
+- 🧪 **[Live demo](https://calc.casualoffice.org/embed.html)** — theming, chrome and access levels, changed live
 - 💾 **[Runnable examples](https://github.com/CasualOffice/opencalc/tree/main/sdk/examples)** — vanilla, React, Next.js, read-only viewer
 - 🦀 **[Source](https://github.com/CasualOffice/opencalc)** — Apache-2.0
 

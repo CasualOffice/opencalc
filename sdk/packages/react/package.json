@@ -16,7 +16,7 @@
     "webassembly",
     "opencalc"
   ],
-  "homepage": "https://casualoffice.github.io/opencalc/docs.html#react",
+  "homepage": "https://calc.casualoffice.org/docs.html#react",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CasualOffice/opencalc.git",

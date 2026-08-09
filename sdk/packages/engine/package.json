@@ -18,7 +18,7 @@
     "ooxml",
     "opencalc"
   ],
-  "homepage": "https://casualoffice.github.io/opencalc/",
+  "homepage": "https://calc.casualoffice.org/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CasualOffice/opencalc.git",

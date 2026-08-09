@@ -20,7 +20,7 @@
     "csv",
     "ooxml"
   ],
-  "homepage": "https://casualoffice.github.io/opencalc/docs.html",
+  "homepage": "https://calc.casualoffice.org/docs.html",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CasualOffice/opencalc.git",
