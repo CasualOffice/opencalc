@@ -1032,9 +1032,36 @@ function measure() {
   // and grow rows that contain wrapped text / tall fonts (auto row height).
   const lastRowIdx = geo.rowIdx[geo.rowIdx.length - 1] ?? fsr;
   const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
+  const firstRowIdx = fr > 0 ? 0 : fsr;
+  const firstColIdx = fc > 0 ? 0 : fsc;
   geoItems = JSON.parse(
-    wasm.session_cells(state.sheet, fr > 0 ? 0 : fsr, fc > 0 ? 0 : fsc, lastRowIdx, lastColIdx),
+    wasm.session_cells(state.sheet, firstRowIdx, firstColIdx, lastRowIdx, lastColIdx),
   );
+  // Text spills across empty neighbours, so a label whose own cell is outside
+  // the window can still be showing inside it — and only the *nearest*
+  // populated cell on each side can, since anything beyond is blocked by it.
+  // Without these a long label vanished the instant its own column scrolled
+  // off, taking the visible half of the text with it. Excel keeps drawing it.
+  //
+  // Two calls at most, whatever the row count: everything between the furthest
+  // owner and the window is empty by definition, so one window per side picks
+  // up exactly the owners.
+  try {
+    const span = JSON.parse(
+      wasm.session_spill_owners(state.sheet, firstRowIdx, lastRowIdx, firstColIdx, lastColIdx),
+    );
+    const gather = (a, b) => {
+      for (const it of JSON.parse(
+        wasm.session_cells(state.sheet, firstRowIdx, a, lastRowIdx, b),
+      )) {
+        // Only text can spill: a number too wide for its cell becomes `#`
+        // inside it, and a wrapped or clipped cell stays put by definition.
+        if (it.t && !it.n && !it.w && !it.cl && !it.shrink) geoItems.push(it);
+      }
+    };
+    if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1);
+    if (span.right !== null) gather(lastColIdx + 1, span.right);
+  } catch { /* nothing outside the window is the common case */ }
   // Rows the workbook sized itself are pinned: auto-height must not override an
   // imported height (nor one the user dragged), exactly as Excel stops
   // auto-fitting a row once its height is set. Without this every styled row of
@@ -1657,10 +1684,15 @@ function draw() {
     // *anchor cell* instead, leaving a fragment outside the block that the
     // merge pass never covers — a ghost of the label beside it.
     if (drawnMergeAt(it.r, it.c)) continue;
-    const x = colXAt(it.c);
+    // The row must be in the window, but the *column* need not: a spill owner
+    // fetched from outside it is here precisely so its text can reach in, and
+    // `colXAt` has no answer for a column that was never drawn.
     const yTop = rowYAt(it.r);
-    if (x === undefined || yTop === undefined) continue;
-    const w = colWAt(it.c);
+    if (yTop === undefined) continue;
+    const drawnHere = geo.colOf.has(it.c);
+    if (!drawnHere && (it.w || it.cl || it.shrink)) continue; // cannot spill
+    const x = drawnHere ? colXAt(it.c) : fscreenX(it.c);
+    const w = drawnHere ? colWAt(it.c) : fscreenXEnd(it.c) - x;
     const h = rowHAt(it.r);
     const y = textY(it, yTop, h, cellLineH(it));
     ctx.font = cellFont(it);
@@ -1843,16 +1875,24 @@ function draw() {
         // Stop at a non-empty cell OR a column that isn't drawn (e.g. the gap
         // between a frozen band and the scrolling body) — colXAt is undefined
         // there and would make the clip NaN.
-        while (clipR - x < tw + 8 && c + 1 < spillHi && geo.colOf.has(c + 1) && !occupied.has(it.r + "," + (c + 1))) {
+        // The scan may cross columns that are not drawn: a label whose own
+        // cell is left of the window spills *into* it, and stopping at the
+        // first undrawn column would stop at the very first step. `fscreen*`
+        // has a position for any column, drawn or not. The pane bounds still
+        // apply, so a frozen cell cannot borrow the body's columns.
+        while (clipR - x < tw + 8 && c + 1 < spillHi && !occupied.has(it.r + "," + (c + 1))) {
           c += 1;
-          clipR = colXAt(c) + colWAt(c);
+          clipR = fscreenXEnd(c);
         }
       }
       if (align !== "left") {
         let c = it.c;
-        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && geo.colOf.has(c - 1) && !occupied.has(it.r + "," + (c - 1))) {
+        // Same reasoning as the rightward scan: a right-aligned label whose
+        // cell is off the *right* edge spills back into the window, and the
+        // columns it crosses on the way are not drawn either.
+        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && !occupied.has(it.r + "," + (c - 1))) {
           c -= 1;
-          clipL = colXAt(c);
+          clipL = fscreenX(c);
         }
       }
     }

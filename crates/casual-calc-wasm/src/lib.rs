@@ -4651,6 +4651,49 @@ pub fn session_col_offset_px(sheet: usize, col: u32) -> i32 {
     with_session(|s| geometry_of(s, sheet).columns.offset(col) as i32 * 96 / 1440).unwrap_or(0)
 }
 
+/// The column span just outside a horizontal window that can still show text
+/// inside it, as `{"left":c|null,"right":c|null}`.
+///
+/// Long text spills across **empty** neighbours, so at most one cell per row
+/// on each side can be showing text inside the window: the nearest populated
+/// one. Everything between that cell and the window is empty by definition, so
+/// one extra `session_cells` call per side fetches exactly the owners and
+/// nothing else — which is why this returns a span rather than a list of
+/// addresses, and why the cost does not grow with the number of visible rows.
+///
+/// The host draws only the cells it asks for, and it asks for the visible
+/// window — so a label in column B spilling across C..N vanished the moment B
+/// scrolled off the left, taking the visible half of the text with it. Excel
+/// keeps drawing it.
+///
+/// Both sides, because a right-aligned cell spills *leftwards*: a label off the
+/// right edge reaches back into the window.
+#[wasm_bindgen]
+pub fn session_spill_owners(sheet: usize, r0: u32, r1: u32, c0: u32, c1: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "{\"left\":null,\"right\":null}".to_owned();
+        };
+        // Scanning the populated cells rather than the columns: a window that
+        // starts at column 5000 would otherwise walk 5000 empty addresses per
+        // row, on every frame.
+        let (mut left, mut right): (Option<u32>, Option<u32>) = (None, None);
+        for (at, cell) in sh.cells.row_band(r0, r1) {
+            if cell.value.is_empty() && cell.formula.is_none() {
+                continue;
+            }
+            if at.col < c0 {
+                left = Some(left.map_or(at.col, |c: u32| c.min(at.col)));
+            } else if at.col > c1 {
+                right = Some(right.map_or(at.col, |c: u32| c.max(at.col)));
+            }
+        }
+        let fmt = |v: Option<u32>| v.map_or("null".to_owned(), |c| c.to_string());
+        format!("{{\"left\":{},\"right\":{}}}", fmt(left), fmt(right))
+    })
+    .unwrap_or_else(|| "{\"left\":null,\"right\":null}".to_owned())
+}
+
 /// Absolute pixel offset (96 dpi) of a row's top edge from row 0.
 #[wasm_bindgen]
 pub fn session_row_offset_px(sheet: usize, row: u32) -> i32 {
