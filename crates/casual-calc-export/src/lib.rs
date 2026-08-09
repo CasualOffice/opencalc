@@ -1501,6 +1501,24 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
     // order is `tabColor`, `outlinePr`, then `pageSetUpPr`. Excel stores the tab color as 8-hex
     // ARGB; the model keeps `RRGGBB`, so we prepend an opaque `FF` alpha on the
     // way out. `<outlinePr>` is emitted only for non-default summary positions.
+    // Some of these are children of a wrapper element that carries nothing
+    // itself; writing the child without it is invalid, so the wrapper is
+    // synthesized here rather than carried.
+    let carried = |s: &mut String, name: &str, wrapper: Option<&str>| {
+        let items: Vec<_> = sheet.carried.iter().filter(|(n, _)| n == name).collect();
+        if items.is_empty() {
+            return;
+        }
+        if let Some(wrapper) = wrapper {
+            s.push_str(&format!("<{wrapper}>"));
+        }
+        for (element, attrs) in items {
+            write_attr_element(s, element, attrs);
+        }
+        if let Some(wrapper) = wrapper {
+            s.push_str(&format!("</{wrapper}>"));
+        }
+    };
     let has_outline_pr = !sheet.outline.is_default();
     let has_setup_pr = !sheet.print.setup_pr.is_empty();
     if sheet.tab_color.is_some() || has_outline_pr || has_setup_pr {
@@ -1525,9 +1543,16 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         s.push_str("</sheetPr>");
     }
 
-    // `<sheetView>` carries the zoom scale (an attribute) and the frozen `<pane>`
-    // (a child); either alone is enough to emit the element.
-    if !sheet.view.is_default() {
+    // CT_Worksheet's sequence is sheetPr, dimension, sheetViews, … — dimension
+    // precedes the views rather than sitting just before sheetData.
+    carried(&mut s, "dimension", None);
+
+    // `<sheetView>` carries the zoom scale (an attribute), the frozen `<pane>`
+    // and the carried `<selection>`; any one alone is enough to emit it. A
+    // default view with only a selection still needs the element, or the
+    // selection has nowhere to go and is silently dropped.
+    let has_selection = sheet.carried.iter().any(|(n, _)| n == "selection");
+    if !sheet.view.is_default() || has_selection {
         let zoom_attr = if sheet.view.zoom != 0 {
             format!(" zoomScale=\"{}\"", sheet.view.zoom)
         } else {
@@ -1554,6 +1579,12 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
                 "<pane xSplit=\"{}\" ySplit=\"{}\" topLeftCell=\"{}\" state=\"frozen\" activePane=\"bottomRight\"/>",
                 sheet.view.frozen_cols, sheet.view.frozen_rows, top_left
             ));
+        }
+        // `<selection>` follows `<pane>` inside `<sheetView>`; it records the
+        // cursor position, which is worth keeping so reopening a file lands
+        // where the author left it.
+        for (element, attrs) in sheet.carried.iter().filter(|(n, _)| n == "selection") {
+            write_attr_element(&mut s, element, attrs);
         }
         s.push_str("</sheetView></sheetViews>");
     }
@@ -1841,6 +1872,8 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         s.push_str("</dataValidations>");
     }
 
+    carried(&mut s, "protectedRange", Some("protectedRanges"));
+    carried(&mut s, "sheetCalcPr", None);
     if let Some(sort) = &sheet.sort_state {
         // Follows `<autoFilter>` in CT_Worksheet's sequence. A saved sort
         // records an order already applied to the cells, so nothing is
@@ -1953,6 +1986,7 @@ fn worksheet_xml(workbook: &Workbook, sheet_index: usize, dxfs: &[String]) -> St
         s.push_str("<legacyDrawing r:id=\"rId1\"/>");
     }
 
+    carried(&mut s, "ignoredError", Some("ignoredErrors"));
     // `<tableParts>` closes CT_Worksheet. Without it the table parts are in the
     // package but attached to no sheet, so Excel shows a plain range.
     if !sheet.tables.is_empty() {

@@ -481,6 +481,8 @@ pub struct Worksheet {
     pub print: PrintSetup,
     /// `<sortState>` with its conditions, carried verbatim.
     pub sort_state: Option<SortState>,
+    /// Sheet-level elements carried verbatim, in document order.
+    pub carried: Vec<RetainedRef>,
     /// Elements naming a retained part, in document order.
     pub retained_refs: Vec<RetainedRef>,
     /// The `<autoFilter ref>` range, if the sheet has an autofilter.
@@ -861,6 +863,16 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                             state.conditions.push(read_attrs(&e)?);
                         }
                     }
+                    // Nothing here acts on these, so they travel verbatim.
+                    // `<protectedRange>` holds password hashes; regenerating one
+                    // would lock the author out of their own range.
+                    b"dimension" | b"selection" | b"sheetCalcPr" | b"ignoredError"
+                    | b"protectedRange" => {
+                        result.carried.push((
+                            String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
+                            read_attrs(&e)?,
+                        ));
+                    }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {
                             result.merges.push(reference);
@@ -1010,6 +1022,16 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                         if let Some(state) = result.sort_state.as_mut() {
                             state.conditions.push(read_attrs(&e)?);
                         }
+                    }
+                    // Nothing here acts on these, so they travel verbatim.
+                    // `<protectedRange>` holds password hashes; regenerating one
+                    // would lock the author out of their own range.
+                    b"dimension" | b"selection" | b"sheetCalcPr" | b"ignoredError"
+                    | b"protectedRange" => {
+                        result.carried.push((
+                            String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
+                            read_attrs(&e)?,
+                        ));
                     }
                     b"mergeCell" => {
                         if let Some(reference) = read_attr(&e, b"ref")? {

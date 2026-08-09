@@ -1875,3 +1875,54 @@ fn unevaluated_filters_and_sort_state_survive_without_hiding_rows() {
     assert_eq!(back.sheets[0].sort_state, wb.sheets[0].sort_state);
     assert_eq!(back.sheets[0].auto_filter, wb.sheets[0].auto_filter);
 }
+
+#[test]
+fn carried_sheet_elements_keep_their_wrappers() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <dimension ref="A1:C9"/>
+              <sheetViews><sheetView workbookViewId="0"><selection activeCell="B2" sqref="B2"/></sheetView></sheetViews>
+              <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+              <protectedRanges><protectedRange sqref="A1:B2" name="R1" algorithmName="SHA-512" hashValue="abc" saltValue="s" spinCount="100000"/></protectedRanges>
+              <ignoredErrors><ignoredError sqref="A1" numberStoredAsText="1"/></ignoredErrors>
+            </worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let names: Vec<&str> = wb.sheets[0]
+        .carried
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    for expected in ["dimension", "selection", "protectedRange", "ignoredError"] {
+        assert!(
+            names.contains(&expected),
+            "{expected} missing from {names:?}"
+        );
+    }
+
+    let written = write_workbook(&wb).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    // The wrappers carry nothing themselves, so they are synthesized — writing
+    // the child alone is invalid and Excel refuses the package.
+    assert!(xml.contains("<protectedRanges><protectedRange"));
+    assert!(xml.contains("<ignoredErrors><ignoredError"));
+    // selection belongs inside sheetView, not beside it.
+    assert!(xml.contains("<selection"));
+    assert!(
+        xml.find("<selection").unwrap() < xml.find("</sheetView>").unwrap(),
+        "selection must sit inside sheetView"
+    );
+    // A protected range holds a password hash; regenerating one would lock the
+    // author out of their own range.
+    assert!(xml.contains("hashValue=\"abc\""));
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].carried, wb.sheets[0].carried);
+}

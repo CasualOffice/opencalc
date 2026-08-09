@@ -49,11 +49,11 @@ destructive-loss counts sit beside it and are what actually gate a milestone.
 
 | Signal | Baseline | Current |
 | --- | --- | --- |
-| Structural coverage | 54.8% | 91.7% |
+| Structural coverage | 54.8% | 95.9% |
 | Function coverage | 22.8% | 53.4% |
 | **P0 destructive remaining** | 8 | 0 |
 | P1 visible-loss remaining | 13 | 10 |
-| P2 compatibility remaining | 4 | 3 |
+| P2 compatibility remaining | 4 | 2 |
 
 ## Milestones
 
@@ -96,7 +96,7 @@ invisible until someone reopens the file.
 | FID-22 | Filter refinements: `top10`, `dynamicFilter`, `colorFilter`, `iconFilter`, `dateGroupItem`, `sortState`, `sortCondition` | P2 | ✅ | `top10`, `dynamicFilter`, `colorFilter`, `iconFilter` and `dateGroupItem` are carried verbatim as a `FilterRule::Unevaluated`, and `sortState`/`sortCondition` as a verbatim `SortState`. **The design decision is what the unevaluated rules do to the view**: every row passes. Hiding rows on a rule we do not understand would be a guess, and a wrong guess looks exactly like a correct filter; showing them all is visibly incomplete, which is the failure worth having. The rule still survives the save, so Excel applies it again on reopen — the sheet is under-filtered here, never in the file. A saved sort describes an order already applied to the cells, so nothing is re-sorted on load; only the record would have been lost. They appear in both `worksheet` and `table`, so one change closed fourteen slots. 1 test. Structural 85.3% → 91.7% |
 | FID-23 | Conditional formatting: `cfvo`, `iconSet`, `colorScale` | P2 | 🔴 | rule types beyond the ones modelled |
 | FID-24 | `tableStyles`, `tableStyle`, `tableStyleElement` in `styleSheet` | P2 | 🔴 | custom table styles; pairs with FID-03 |
-| FID-25 | Remaining P2: `dimension`, `selection`, `ignoredError(s)`, `protectedRange(s)`, `col/@bestFit`, `col/@phonetic`, `row/@spans`, `row/@thickTop`/`thickBot`, `definedName/@hidden`, `xf/@pivotButton`, `border/@outline` | P2 | 🔴 | cheap carry-through, good score-per-effort |
+| FID-25 | Remaining P2: `dimension`, `selection`, `ignoredError(s)`, `protectedRange(s)`, `col/@bestFit`, `col/@phonetic`, `row/@spans`, `row/@thickTop`/`thickBot`, `definedName/@hidden`, `xf/@pivotButton`, `border/@outline` | P2 | ✅ | `dimension`, `selection`, `ignoredError(s)`, `protectedRange(s)` and `sheetCalcPr` carried verbatim. `<protectedRange>` holds password hashes, so it travels byte for byte for the same reason `SheetProtection` does — regenerating one locks the author out of their own range. **Two placement bugs the test caught, both invisible in review**: `<ignoredError>` and `<protectedRange>` each need a wrapper element that carries nothing itself, and writing the child alone is invalid — Excel refuses the package rather than ignoring it, so the wrappers are synthesized. And `<dimension>` must precede `<sheetViews>` in CT_Worksheet's sequence; writing it just before `<sheetData>` put it after the views. `<selection>` lives *inside* `<sheetView>`, which meant emitting that element even for an otherwise-default view, or a file whose only view state was a cursor position lost it. 1 test. Structural 91.7% → 95.9% |
 
 ## Function library
 

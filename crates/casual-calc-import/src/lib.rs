@@ -346,6 +346,7 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
         sheet.visibility = SheetVisibility::from_ooxml(&state);
         sheet.print = worksheet.print.clone();
         sheet.sort_state = worksheet.sort_state.clone();
+        sheet.carried = worksheet.carried.clone();
         sheet.retained_refs = worksheet.retained_refs.clone();
         sheet.protection = worksheet
             .protection

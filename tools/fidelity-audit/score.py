@@ -51,9 +51,13 @@ def main():
 
     S = Schema()
     root = pathlib.Path(__file__).resolve().parents[2]
+    # Both crates: `<sheet>` and `<sheets>` are parsed in casual-calc-ooxml's
+    # package discovery, not in the importer, and scanning only the importer
+    # scored them as unhandled when they are the first thing read.
     imp = set()
-    for p in (root / "crates/casual-calc-import/src").glob("*.rs"):
-        imp |= set(re.findall(r'b"([\w:.-]+)"', p.read_text()))
+    for crate in ("casual-calc-import", "casual-calc-ooxml"):
+        for p in (root / f"crates/{crate}/src").glob("*.rs"):
+            imp |= set(re.findall(r'b"([\w:.-]+)"', p.read_text()))
 
     def kids(name):
         t = S.elem_type.get(name)

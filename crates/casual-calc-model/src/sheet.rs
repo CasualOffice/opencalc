@@ -184,6 +184,14 @@ pub struct Sheet {
     /// range was sorted, which Excel shows in its dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_state: Option<SortState>,
+    /// Sheet-level elements carried verbatim because nothing here acts on
+    /// them: `<dimension>`, `<selection>`, `<ignoredErrors>`, `<protectedRanges>`
+    /// and `<sheetCalcPr>`.
+    ///
+    /// `<protectedRanges>` in particular holds password hashes, so it travels
+    /// byte for byte on the same reasoning as [`SheetProtection`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<(String, BTreeMap<String, String>)>,
     /// Tables (ListObjects) defined on this sheet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
@@ -1109,6 +1117,7 @@ impl Sheet {
             print: PrintSetup::default(),
             tables: Vec::new(),
             sort_state: None,
+            carried: Vec::new(),
             retained_refs: Vec::new(),
             protection: None,
             visibility: SheetVisibility::Visible,
