@@ -2002,3 +2002,135 @@ fn chidist_and_fdist_are_upper_tail() {
     assert!((n(0) - 1.0).abs() < 1e-12, "the whole mass is above zero");
     assert!((n(1) - 1.0).abs() < 1e-12);
 }
+
+#[test]
+fn subtotal_100_series_skips_hidden_rows() {
+    // The whole point of SUBTOTAL: a filtered list must not report a total that
+    // includes what is hidden. 9 counts everything, 109 counts what is visible.
+    let mut b = Builder::new();
+    for (i, v) in [10.0, 20.0, 30.0, 40.0].iter().enumerate() {
+        b.number((i as u32, 0), *v);
+    }
+    b.formula((5, 0), "SUBTOTAL(9,A1:A4)")
+        .formula((6, 0), "SUBTOTAL(109,A1:A4)")
+        .formula((7, 0), "SUBTOTAL(1,A1:A4)")
+        .formula((8, 0), "SUBTOTAL(4,A1:A4)");
+    let mut wb = b.build();
+    wb.sheets[0].hidden_rows.insert(1); // hide the 20
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert_eq!(n(5), 100.0, "9 includes hidden rows");
+    assert_eq!(n(6), 80.0, "109 excludes them");
+    assert_eq!(n(7), 25.0, "average over all four");
+    assert_eq!(n(8), 40.0, "max");
+}
+
+#[test]
+fn statistical_tests() {
+    let mut b = Builder::new();
+    for (i, v) in [3.0, 4.0, 5.0, 6.0, 7.0].iter().enumerate() {
+        b.number((i as u32, 0), *v);
+    }
+    // Deliberately not a constant offset from column A: a paired t-test on
+    // differences that never vary has zero variance and is genuinely
+    // undefined, so uniform data would test the #DIV/0! path rather than the
+    // statistic.
+    for (i, v) in [5.0, 7.0, 6.0, 9.0, 8.0].iter().enumerate() {
+        b.number((i as u32, 1), *v);
+    }
+    b.formula((0, 3), "TTEST(A1:A5,B1:B5,2,2)")
+        .formula((1, 3), "TTEST(A1:A5,B1:B5,2,1)")
+        .formula((2, 3), "FTEST(A1:A5,B1:B5)")
+        .formula((3, 3), "ZTEST(A1:A5,5)")
+        .formula((4, 3), "CHITEST(A1:A5,B1:B5)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 3) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    for r in 0..5 {
+        assert!((0.0..=1.0).contains(&n(r)), "row {r} is a probability");
+    }
+    // Both samples have the same spread here, so the F ratio is 1 and its
+    // two-tailed probability is 1.
+    assert!((n(2) - 1.0).abs() < 1e-9);
+    // The sample mean is exactly the tested value, so ZTEST is one half.
+    assert!((n(3) - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn roman_and_ceiling_variants() {
+    use casual_calc_model::ErrorValue;
+    let text = |t: &str| -> String {
+        let mut b = Builder::new();
+        b.formula((0, 0), t);
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        match value_at(&wb, 0, 0) {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(id).unwrap().to_owned()
+            }
+            other => panic!("{t} gave {other:?}"),
+        }
+    };
+    assert_eq!(text("ROMAN(1994)"), "MCMXCIV");
+    assert_eq!(text("ROMAN(4)"), "IV");
+    assert_eq!(text("ROMAN(3999)"), "MMMCMXCIX");
+    assert_eq!(err("ROMAN(4000)"), ErrorValue::Value);
+    // The concise forms are not modelled, so a non-zero form is refused rather
+    // than silently answered in the classic one.
+    assert_eq!(err("ROMAN(1994,1)"), ErrorValue::Value);
+    // The two ceilings agree on positives and differ on negatives: ISO rounds
+    // toward positive infinity, ECMA away from zero.
+    assert_eq!(num("ISO.CEILING(4.2,1)"), 5.0);
+    assert_eq!(num("ECMA.CEILING(4.2,1)"), 5.0);
+    assert_eq!(num("ISO.CEILING(-4.2,1)"), -4.0);
+    assert_eq!(num("ECMA.CEILING(-4.2,1)"), -5.0);
+}
+
+#[test]
+fn cumulative_payments_sum_to_the_loan() {
+    // CUMIPMT and CUMPRINC over the whole term must account for every payment:
+    // the principal repaid is the loan, and the two together are the payments.
+    let mut b = Builder::new();
+    b.formula((0, 0), "CUMPRINC(0.05,10,10000,1,10,0)")
+        .formula((1, 0), "CUMIPMT(0.05,10,10000,1,10,0)")
+        .formula((2, 0), "PMT(0.05,10,10000)*10");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!(
+        (n(0) + 10_000.0).abs() < 1e-6,
+        "principal repaid is the loan"
+    );
+    assert!(
+        (n(0) + n(1) - n(2)).abs() < 1e-6,
+        "principal + interest = payments"
+    );
+}
+
+#[test]
+fn treasury_bill_functions_invert() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "DATE(2024,1,1)")
+        .formula((1, 0), "DATE(2024,7,1)")
+        .formula((2, 0), "TBILLPRICE(A1,A2,0.05)")
+        .formula((3, 0), "TBILLYIELD(A1,A2,A3)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let n = |r: u32| match value_at(&wb, r, 0) {
+        CellValue::Number(v) => v,
+        other => panic!("row {r}: {other:?}"),
+    };
+    assert!(n(2) > 90.0 && n(2) < 100.0, "a bill trades below par");
+    // The yield implied by that price is close to, and above, the discount —
+    // which is the relationship between the two quoting conventions.
+    assert!(n(3) > 0.05 && n(3) < 0.06);
+}

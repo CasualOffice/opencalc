@@ -49,6 +49,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
     ("CHIINV", "CHIINV(probability, degrees_freedom)"),
+    ("CHITEST", "CHITEST(actual, expected)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
     ("CLEAN", "CLEAN(text)"),
     ("CODE", "CODE(text)"),
@@ -74,6 +75,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
+    ("CUMIPMT", "CUMIPMT(rate, nper, pv, start, end, type)"),
+    ("CUMPRINC", "CUMPRINC(rate, nper, pv, start, end, type)"),
     ("DATE", "DATE(year, month, day)"),
     ("DATEDIF", "DATEDIF(start, end, unit)"),
     ("DAY", "DAY(serial_number)"),
@@ -87,9 +90,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DEGREES", "DEGREES(angle)"),
     ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
+    (
+        "DISC",
+        "DISC(settlement, maturity, pr, redemption, [basis])",
+    ),
     ("DOLLAR", "DOLLAR(number, [decimals])"),
     ("DOLLARDE", "DOLLARDE(fractional_dollar, fraction)"),
     ("DOLLARFR", "DOLLARFR(decimal_dollar, fraction)"),
+    ("ECMA.CEILING", "ECMA.CEILING(number, significance)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EFFECT", "EFFECT(nominal_rate, npery)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
@@ -105,15 +113,12 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FALSE", "FALSE()"),
     ("FDIST", "FDIST(x, degrees_freedom1, degrees_freedom2)"),
     ("FIND", "FIND(find_text, within_text, [start])"),
-    (
-        "FINV",
-        "FINV(probability, degrees_freedom1, degrees_freedom2)",
-    ),
     ("FISHER", "FISHER(x)"),
     ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
     ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
     ("GAMMADIST", "GAMMADIST(x, alpha, beta, cumulative)"),
@@ -157,6 +162,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("INDIRECT", "INDIRECT(ref_text, [a1])"),
     ("INT", "INT(number)"),
     ("INTERCEPT", "INTERCEPT(known_y, known_x)"),
+    (
+        "INTRATE",
+        "INTRATE(settlement, maturity, investment, redemption, [basis])",
+    ),
     ("IPMT", "IPMT(rate, per, nper, pv, [fv], [type])"),
     ("IRR", "IRR(values, [guess])"),
     ("ISBLANK", "ISBLANK(value)"),
@@ -168,6 +177,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ISNA", "ISNA(value)"),
     ("ISNONTEXT", "ISNONTEXT(value)"),
     ("ISNUMBER", "ISNUMBER(value)"),
+    ("ISO.CEILING", "ISO.CEILING(number, [significance])"),
     ("ISODD", "ISODD(number)"),
     ("ISOWEEKNUM", "ISOWEEKNUM(date)"),
     ("ISPMT", "ISPMT(rate, per, nper, pv)"),
@@ -227,6 +237,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("POISSON", "POISSON(x, mean, cumulative)"),
     ("POWER", "POWER(number, power)"),
     ("PPMT", "PPMT(rate, per, nper, pv, [fv], [type])"),
+    ("PROB", "PROB(x_range, prob_range, lower, [upper])"),
     ("PRODUCT", "PRODUCT(number1, …)"),
     ("PROPER", "PROPER(text)"),
     ("PV", "PV(rate, nper, pmt, [fv], [type])"),
@@ -235,9 +246,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("RADIANS", "RADIANS(angle)"),
     ("RANK", "RANK(number, ref, [order])"),
     ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
+    (
+        "RECEIVED",
+        "RECEIVED(settlement, maturity, investment, discount, [basis])",
+    ),
     ("REPLACE", "REPLACE(old, start, num_chars, new)"),
     ("REPT", "REPT(text, number_times)"),
     ("RIGHT", "RIGHT(text, [num_chars])"),
+    ("ROMAN", "ROMAN(number, [form])"),
     ("ROUND", "ROUND(number, num_digits)"),
     ("ROUNDDOWN", "ROUNDDOWN(number, num_digits)"),
     ("ROUNDUP", "ROUNDUP(number, num_digits)"),
@@ -268,15 +284,22 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("STDEVPA", "STDEVPA(value1, …)"),
     ("STEYX", "STEYX(known_y, known_x)"),
     ("SUBSTITUTE", "SUBSTITUTE(text, old, new, [instance])"),
+    ("SUBTOTAL", "SUBTOTAL(function_num, ref1, …)"),
     ("SUM", "SUM(number1, …)"),
     ("SUMIF", "SUMIF(range, criteria, [sum_range])"),
     ("SUMIFS", "SUMIFS(sum_range, range1, criteria1, …)"),
     ("SUMPRODUCT", "SUMPRODUCT(array1, …)"),
     ("SUMSQ", "SUMSQ(number1, …)"),
+    ("SUMX2MY2", "SUMX2MY2(array_x, array_y)"),
+    ("SUMX2PY2", "SUMX2PY2(array_x, array_y)"),
+    ("SUMXMY2", "SUMXMY2(array_x, array_y)"),
     ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
+    ("TBILLEQ", "TBILLEQ(settlement, maturity, discount)"),
+    ("TBILLPRICE", "TBILLPRICE(settlement, maturity, discount)"),
+    ("TBILLYIELD", "TBILLYIELD(settlement, maturity, pr)"),
     ("TDIST", "TDIST(x, degrees_freedom, tails)"),
     ("TEXT", "TEXT(value, format_code)"),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
@@ -286,6 +309,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
+    ("TTEST", "TTEST(array1, array2, tails, type)"),
     ("TYPE", "TYPE(value)"),
     ("UNICHAR", "UNICHAR(number)"),
     ("UNICODE", "UNICODE(text)"),
@@ -304,6 +328,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("XNPV", "XNPV(rate, values, dates)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
+    ("ZTEST", "ZTEST(array, x, [sigma])"),
 ];
 
 /// Dispatch a function call by (upper-cased) name.
@@ -719,6 +744,34 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "GAMMAINV" => eval_gammainv(ev, sheet, args),
         "BETADIST" => eval_betadist(ev, sheet, args),
         "BETAINV" => eval_betainv(ev, sheet, args),
+        "ZTEST" => eval_ztest(ev, sheet, args),
+        "TTEST" => eval_ttest(ev, sheet, args),
+        "FTEST" => eval_ftest(ev, sheet, args),
+        "CHITEST" => eval_chitest(ev, sheet, args),
+        "PROB" => eval_prob(ev, sheet, args),
+        "SUBTOTAL" => eval_subtotal(ev, sheet, args),
+        "SUMX2MY2" => paired(ev, sheet, args, |xs, ys| {
+            Some(xs.iter().zip(ys).map(|(x, y)| x * x - y * y).sum())
+        }),
+        "SUMX2PY2" => paired(ev, sheet, args, |xs, ys| {
+            Some(xs.iter().zip(ys).map(|(x, y)| x * x + y * y).sum())
+        }),
+        "SUMXMY2" => paired(ev, sheet, args, |xs, ys| {
+            Some(xs.iter().zip(ys).map(|(x, y)| (x - y).powi(2)).sum())
+        }),
+        "ROMAN" => eval_roman(ev, sheet, args),
+        // Both round away from zero to a multiple, differing only in how they
+        // treat a negative number — which is the whole reason two names exist.
+        "ISO.CEILING" => eval_ceiling_variant(ev, sheet, args, true),
+        "ECMA.CEILING" => eval_ceiling_variant(ev, sheet, args, false),
+        "CUMIPMT" => eval_cumulative(ev, sheet, args, true),
+        "CUMPRINC" => eval_cumulative(ev, sheet, args, false),
+        "DISC" => eval_disc(ev, sheet, args),
+        "INTRATE" => eval_intrate(ev, sheet, args, false),
+        "RECEIVED" => eval_intrate(ev, sheet, args, true),
+        "TBILLPRICE" => eval_tbill(ev, sheet, args, 0),
+        "TBILLYIELD" => eval_tbill(ev, sheet, args, 1),
+        "TBILLEQ" => eval_tbill(ev, sheet, args, 2),
         "DATE" => eval_date(ev, sheet, args),
         "YEAR" => eval_date_part(ev, sheet, args, DatePart::Year),
         "MONTH" => eval_date_part(ev, sheet, args, DatePart::Month),
@@ -5769,4 +5822,490 @@ fn eval_betainv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         }
     }
     Value::Number(lo + (hi - lo) * (a + b) / 2.0)
+}
+
+// --- Statistical tests -----------------------------------------------------
+
+fn eval_ztest(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let sample = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let x = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    if sample.is_empty() {
+        return Value::Error(ErrorValue::Num);
+    }
+    // Without a stated sigma the sample's own standard deviation stands in,
+    // which is what makes ZTEST usable on a sample rather than a population.
+    let sigma = match args.get(2) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n,
+            Err(e) => return Value::Error(e),
+        },
+        None => match variance(&sample, true) {
+            Some(v) => v.sqrt(),
+            None => return Value::Error(ErrorValue::Div0),
+        },
+    };
+    if sigma <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let z = (mean(&sample) - x) / (sigma / (sample.len() as f64).sqrt());
+    // One-tailed, upper: ZTEST reports the probability of a value this high.
+    Value::Number(1.0 - standard_normal_cdf(z))
+}
+
+fn eval_ttest(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let xs = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let ys = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (tails, kind) = match pair_of_numbers(ev, sheet, &args[2..4]) {
+        Ok([a, b]) => (a, b),
+        Err(e) => return e,
+    };
+    if !(tails == 1.0 || tails == 2.0) || !(1.0..=3.0).contains(&kind) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (t, df) = match kind as i32 {
+        // Paired: the test is on the differences, so the samples must line up.
+        1 => {
+            if xs.len() != ys.len() || xs.len() < 2 {
+                return Value::Error(ErrorValue::Na);
+            }
+            let diffs: Vec<f64> = xs.iter().zip(&ys).map(|(x, y)| x - y).collect();
+            let sd = match variance(&diffs, true) {
+                Some(v) => v.sqrt(),
+                None => return Value::Error(ErrorValue::Div0),
+            };
+            if sd == 0.0 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let n = diffs.len() as f64;
+            (mean(&diffs) / (sd / n.sqrt()), n - 1.0)
+        }
+        // Equal variance: pooled.
+        2 => {
+            let (n1, n2) = (xs.len() as f64, ys.len() as f64);
+            if n1 < 2.0 || n2 < 2.0 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let (v1, v2) = (variance(&xs, true).unwrap(), variance(&ys, true).unwrap());
+            let pooled = ((n1 - 1.0) * v1 + (n2 - 1.0) * v2) / (n1 + n2 - 2.0);
+            let se = (pooled * (1.0 / n1 + 1.0 / n2)).sqrt();
+            if se == 0.0 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            ((mean(&xs) - mean(&ys)) / se, n1 + n2 - 2.0)
+        }
+        // Unequal variance: Welch, whose degrees of freedom are not an integer.
+        _ => {
+            let (n1, n2) = (xs.len() as f64, ys.len() as f64);
+            if n1 < 2.0 || n2 < 2.0 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let (v1, v2) = (variance(&xs, true).unwrap(), variance(&ys, true).unwrap());
+            let se2 = v1 / n1 + v2 / n2;
+            if se2 == 0.0 {
+                return Value::Error(ErrorValue::Div0);
+            }
+            let df = se2 * se2 / ((v1 / n1).powi(2) / (n1 - 1.0) + (v2 / n2).powi(2) / (n2 - 1.0));
+            ((mean(&xs) - mean(&ys)) / se2.sqrt(), df)
+        }
+    };
+    Value::Number((1.0 - t_cdf(t.abs(), df)) * tails)
+}
+
+fn eval_ftest(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let xs = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let ys = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (Some(v1), Some(v2)) = (variance(&xs, true), variance(&ys, true)) else {
+        return Value::Error(ErrorValue::Div0);
+    };
+    if v1 == 0.0 || v2 == 0.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    // The larger variance goes on top so the ratio is ≥ 1 and the tail is the
+    // upper one; the other order gives the complement.
+    let (hi, lo, dfh, dfl) = if v1 > v2 {
+        (v1, v2, xs.len() as f64 - 1.0, ys.len() as f64 - 1.0)
+    } else {
+        (v2, v1, ys.len() as f64 - 1.0, xs.len() as f64 - 1.0)
+    };
+    Value::Number(2.0 * (1.0 - f_cdf(hi / lo, dfh, dfl)))
+}
+
+fn eval_chitest(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let actual = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let expected = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if actual.len() != expected.len() || actual.is_empty() {
+        return Value::Error(ErrorValue::Na);
+    }
+    let mut chi = 0.0;
+    for (a, e) in actual.iter().zip(&expected) {
+        if *e == 0.0 {
+            return Value::Error(ErrorValue::Div0);
+        }
+        chi += (a - e).powi(2) / e;
+    }
+    let df = (actual.len() - 1) as f64;
+    Value::Number(1.0 - gamma_p(df / 2.0, chi / 2.0))
+}
+
+fn eval_prob(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let xs = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let ps = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    if xs.len() != ps.len() || xs.is_empty() {
+        return Value::Error(ErrorValue::Na);
+    }
+    // The probabilities must be a distribution; Excel refuses otherwise rather
+    // than normalizing, since a list that does not sum to 1 is a data error.
+    let total: f64 = ps.iter().sum();
+    if (total - 1.0).abs() > 1e-9 || ps.iter().any(|p| *p <= 0.0 || *p > 1.0) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let lower = match ev.eval_expr(sheet, &args[2]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let upper = match args.get(3) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n,
+            Err(e) => return Value::Error(e),
+        },
+        None => lower,
+    };
+    let (lo, hi) = (lower.min(upper), lower.max(upper));
+    Value::Number(
+        xs.iter()
+            .zip(&ps)
+            .filter(|(x, _)| **x >= lo && **x <= hi)
+            .map(|(_, p)| p)
+            .sum(),
+    )
+}
+
+/// `SUBTOTAL(fn, ranges…)` — the aggregate a table's totals row uses.
+///
+/// Codes 1..11 include manually hidden rows; 101..111 exclude them. The
+/// distinction is the whole point of the function: a filtered list must not
+/// report a total that includes what is hidden.
+fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let code = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n.trunc() as i32,
+        Err(e) => return Value::Error(e),
+    };
+    let ignore_hidden = code > 100;
+    let op = if ignore_hidden { code - 100 } else { code };
+    if !(1..=11).contains(&op) {
+        return Value::Error(ErrorValue::Value);
+    }
+    // Gather the values, skipping hidden rows for the 100-series.
+    let mut values = Vec::new();
+    for arg in &args[1..] {
+        match range_cells(ev, sheet, arg) {
+            Some((target, cells)) => {
+                for at in cells {
+                    if ignore_hidden {
+                        let hidden = ev
+                            .workbook()
+                            .sheets
+                            .get(target)
+                            .is_some_and(|sh| sh.is_row_hidden(at.row));
+                        if hidden {
+                            continue;
+                        }
+                    }
+                    match ev.eval_cell(target, at) {
+                        Value::Number(n) => values.push(n),
+                        Value::Error(e) => return Value::Error(e),
+                        _ => {}
+                    }
+                }
+            }
+            None => match ev.eval_expr(sheet, arg) {
+                Value::Number(n) => values.push(n),
+                Value::Error(e) => return Value::Error(e),
+                _ => {}
+            },
+        }
+    }
+    if values.is_empty() && op != 2 && op != 3 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    Value::Number(match op {
+        1 => mean(&values),
+        2 | 3 => values.len() as f64,
+        4 => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        5 => values.iter().copied().fold(f64::INFINITY, f64::min),
+        6 => values.iter().product(),
+        7 => match variance(&values, true) {
+            Some(v) => v.sqrt(),
+            None => return Value::Error(ErrorValue::Div0),
+        },
+        8 => match variance(&values, false) {
+            Some(v) => v.sqrt(),
+            None => return Value::Error(ErrorValue::Div0),
+        },
+        9 => values.iter().sum(),
+        10 => match variance(&values, true) {
+            Some(v) => v,
+            None => return Value::Error(ErrorValue::Div0),
+        },
+        _ => match variance(&values, false) {
+            Some(v) => v,
+            None => return Value::Error(ErrorValue::Div0),
+        },
+    })
+}
+
+/// `ROMAN(number, [form])` — classic form only; the four "concise" forms
+/// differ in how they abbreviate and are not modelled, so a non-zero form is
+/// refused rather than silently answered in the classic one.
+fn eval_roman(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let n = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(v) => v.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    if let Some(a) = args.get(1) {
+        match ev.eval_expr(sheet, a).as_number() {
+            Ok(f) if f != 0.0 => return Value::Error(ErrorValue::Value),
+            Ok(_) => {}
+            Err(e) => return Value::Error(e),
+        }
+    }
+    if !(0..=3999).contains(&n) {
+        return Value::Error(ErrorValue::Value);
+    }
+    const TABLE: [(i64, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut left = n;
+    let mut out = String::new();
+    for (value, glyph) in TABLE {
+        while left >= value {
+            out.push_str(glyph);
+            left -= value;
+        }
+    }
+    Value::Text(out)
+}
+
+/// `ISO.CEILING` and `ECMA.CEILING`. They agree on positives and differ on
+/// negatives: ISO rounds toward positive infinity, ECMA away from zero.
+fn eval_ceiling_variant(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], iso: bool) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let n = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let step = match args.get(1) {
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(v) => v,
+            Err(e) => return Value::Error(e),
+        },
+        None => 1.0,
+    };
+    if step == 0.0 {
+        return Value::Number(0.0);
+    }
+    let step = step.abs();
+    Value::Number(if iso || n >= 0.0 {
+        (n / step).ceil() * step
+    } else {
+        -((-n / step).ceil() * step)
+    })
+}
+
+/// `CUMIPMT` / `CUMPRINC` — the interest or principal paid across a span of
+/// periods, summed from the per-period figures so the two always agree with
+/// PMT rather than being derived independently.
+fn eval_cumulative(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], interest: bool) -> Value {
+    if args.len() != 6 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut v = [0.0f64; 6];
+    for (i, slot) in v.iter_mut().enumerate() {
+        match ev.eval_expr(sheet, &args[i]).as_number() {
+            Ok(n) => *slot = n,
+            Err(e) => return Value::Error(e),
+        }
+    }
+    let [rate, nper, pv, start, end, kind] = v;
+    if rate <= 0.0 || nper <= 0.0 || pv <= 0.0 || start < 1.0 || end < start || end > nper {
+        return Value::Error(ErrorValue::Num);
+    }
+    let Some(payment) = eval_pmt_values(rate, nper, pv, 0.0, kind) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    let mut total = 0.0;
+    for per in (start as u64)..=(end as u64) {
+        let per = per as f64;
+        let (growth, factor) = annuity_factor(rate, per - 1.0);
+        let balance = pv * growth + payment * due_factor(rate, kind) * factor;
+        let mut part = -balance * rate;
+        if kind != 0.0 {
+            part = if per == 1.0 { 0.0 } else { part / (1.0 + rate) };
+        }
+        total += if interest { part } else { payment - part };
+    }
+    Value::Number(total)
+}
+
+/// `DISC` — the discount rate implied by a price.
+fn eval_disc(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 4 || args.len() > 5 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let [settle, mature, price, redemption, basis] =
+        match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    if price <= 0.0 || redemption <= 0.0 || mature <= settle {
+        return Value::Error(ErrorValue::Num);
+    }
+    let frac = year_fraction(settle, mature, basis as i64);
+    if frac <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    Value::Number((redemption - price) / redemption / frac)
+}
+
+/// `INTRATE` and `RECEIVED`, which invert each other.
+fn eval_intrate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], received: bool) -> Value {
+    if args.len() < 4 || args.len() > 5 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let [settle, mature, investment, other, basis] =
+        match opt_numbers(ev, sheet, args, 4, [0.0, 0.0, 0.0, 0.0, 0.0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    if investment <= 0.0 || mature <= settle {
+        return Value::Error(ErrorValue::Num);
+    }
+    let frac = year_fraction(settle, mature, basis as i64);
+    if frac <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    if received {
+        let denominator = 1.0 - other * frac;
+        if denominator == 0.0 {
+            return Value::Error(ErrorValue::Num);
+        }
+        return Value::Number(investment / denominator);
+    }
+    Value::Number((other - investment) / investment / frac)
+}
+
+/// The three Treasury-bill functions, which all use the 360-day actual basis
+/// the bill market quotes on.
+fn eval_tbill(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], which: u8) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [settle, mature, third] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let days = mature.trunc() - settle.trunc();
+    // A bill runs at most a year; beyond that the quoting convention does not
+    // apply and Excel refuses rather than extrapolating.
+    if days <= 0.0 || days > 366.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    match which {
+        0 => {
+            if third <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number(100.0 * (1.0 - third * days / 360.0))
+        }
+        1 => {
+            if third <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number((100.0 - third) / third * (360.0 / days))
+        }
+        _ => {
+            if third <= 0.0 {
+                return Value::Error(ErrorValue::Num);
+            }
+            Value::Number(365.0 * third / (360.0 - third * days))
+        }
+    }
+}
+
+/// The year fraction between two serials on an OOXML day-count basis.
+fn year_fraction(start: f64, end: f64, basis: i64) -> f64 {
+    let (a, b) = (start.trunc() as i64, end.trunc() as i64);
+    match basis {
+        0 => eval_days360_serials(a, b, false).unwrap_or(0) as f64 / 360.0,
+        1 => (b - a) as f64 / average_year_length(a, b),
+        2 => (b - a) as f64 / 360.0,
+        3 => (b - a) as f64 / 365.0,
+        4 => eval_days360_serials(a, b, true).unwrap_or(0) as f64 / 360.0,
+        _ => 0.0,
+    }
 }
