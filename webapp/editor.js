@@ -78,6 +78,10 @@ const state = {
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
 let validationChevron = null; // {x,y,w,h,values} of the active cell's list-dropdown button
 let commentCells = new Set(); // "r,c" of cells with a note in view (for hover tooltip)
+// "r,c" of linked cells in view. Kept as a set rather than asked per cell so a
+// screenful of links costs one call, and so the click handler can tell in O(1)
+// whether a click is on a link before doing anything slower.
+let linkCells = new Set();
 let errorCells = new Set();   // "r,c" of cells holding an error value, likewise
 
 // What each spreadsheet error actually means, in the terms that caused it.
@@ -1408,6 +1412,36 @@ function draw() {
       ctx.closePath();
       ctx.fill();
     });
+  }
+
+  // Hyperlinks: underline them and tint them, which is the only cue that a
+  // cell is clickable. Drawn before the comment markers so a cell with both
+  // still shows its note triangle on top.
+  linkCells = new Set();
+  if (wasm) {
+    const lr0 = geo.rowIdx[0] ?? state.firstRow, lc0 = geo.colIdx[0] ?? state.firstCol;
+    const lr1 = geo.rowIdx[geo.rowIdx.length - 1] ?? lr0;
+    const lc1 = geo.colIdx[geo.colIdx.length - 1] ?? lc0;
+    let links = [];
+    try { links = JSON.parse(wasm.session_hyperlink_cells(state.sheet, lr0, lc0, lr1, lc1)); } catch {}
+    for (const lk of links) {
+      linkCells.add(lk.r + "," + lk.c);
+      const lx = colXAt(lk.c), ly = rowYAt(lk.r);
+      if (lx === undefined || ly === undefined) continue;
+      const lw = colWAt(lk.c), lh = rowHAt(lk.r);
+      withQuad(lk.r, lk.c, () => {
+        ctx.strokeStyle = getComputedStyle(document.documentElement)
+          .getPropertyValue("--accent").trim() || "#3b82f6";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        // Sit the rule on the text baseline rather than the cell floor, or it
+        // reads as a bottom border instead of an underline.
+        const baseline = ly + lh - Math.max(4, Math.round(lh * 0.22));
+        ctx.moveTo(lx + 3, baseline + 0.5);
+        ctx.lineTo(lx + lw - 3, baseline + 0.5);
+        ctx.stroke();
+      });
+    }
   }
 
   // Comment indicators — a small red triangle in each commented cell's corner.
@@ -3918,6 +3952,102 @@ function buildNotePanel(body) {
   setTimeout(() => ta.focus(), 0);
 }
 
+// Insert or edit the hyperlink on the active cell.
+//
+// Two destinations rather than one: an external address, and a location inside
+// this workbook. The schema treats them as independent — a link can carry both,
+// meaning "open that document at this anchor" — so the dialog does too instead
+// of making the user pick a mode.
+function hyperlinkDialog() {
+  const { row, col } = state.sel;
+  let existing = null;
+  try { existing = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
+  const modal = document.getElementById("oc-modal");
+  const body = document.getElementById("oc-modal-body");
+  document.getElementById("oc-modal-title").textContent =
+    existing ? `Edit link on ${A1(row, col)}` : `Insert link on ${A1(row, col)}`;
+  body.textContent = "";
+
+  const field = (label, value, placeholder) => {
+    body.appendChild(el("div", "panel-label", label));
+    const input = el("input", "panel-field");
+    input.type = "text";
+    input.value = value || "";
+    input.placeholder = placeholder;
+    body.appendChild(input);
+    return input;
+  };
+  const target = field("Web address", existing && existing.target, "https://example.com");
+  const location = field("Place in this workbook", existing && existing.location, "Sheet2!A1");
+  const display = field("Text to display", existing && existing.display, "leave empty to keep the cell's own text");
+  const tooltip = field("Tooltip", existing && existing.tooltip, "shown on hover");
+
+  const row2 = el("div", "oc-confirm-actions");
+  const commit = (clear) => {
+    try {
+      wasm.session_set_hyperlink(
+        state.sheet, row, col,
+        clear ? "" : target.value,
+        clear ? "" : location.value,
+        clear ? "" : tooltip.value,
+        clear ? "" : display.value,
+      );
+      status.textContent = clear ? "link removed" : "link set";
+    } catch (e) { status.textContent = `error: ${e}`; }
+    modal.hidden = true;
+    draw();
+  };
+  if (existing) {
+    const remove = el("button", "danger", "Remove link");
+    remove.addEventListener("click", () => commit(true));
+    row2.appendChild(remove);
+  }
+  const cancel = el("button", null, "Cancel");
+  cancel.addEventListener("click", () => { modal.hidden = true; });
+  const ok = el("button", "primary", existing ? "Update" : "Insert");
+  ok.addEventListener("click", () => commit(false));
+  row2.appendChild(cancel);
+  row2.appendChild(ok);
+  body.appendChild(row2);
+  modal.hidden = false;
+  setTimeout(() => target.focus(), 0);
+}
+
+// Open a link. An external target goes to the browser; an internal one is a
+// navigation within the workbook, which is why they are not the same code path.
+function followHyperlink(row, col) {
+  let link = null;
+  try { link = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
+  if (!link) return false;
+  if (link.location) {
+    const [sheetName, cellRef] = link.location.includes("!")
+      ? link.location.split("!")
+      : [null, link.location];
+    if (sheetName) {
+      let names = [];
+      try { names = JSON.parse(wasm.session_sheet_names()); } catch {}
+      const i = names.findIndex((n) => n.toLowerCase() === sheetName.replace(/^'|'$/g, "").toLowerCase());
+      if (i >= 0 && i !== state.sheet) switchSheet(i);
+    }
+    // `parseNameRange` is what the name box already uses, so a link's anchor
+    // accepts exactly the references a user can type there.
+    const at = parseNameRange(cellRef);
+    if (at) {
+      select(at.r0, at.c0);
+      ensureVisible(at.r0, at.c0);
+      draw();
+    }
+    return true;
+  }
+  if (link.target) {
+    // `noopener` matters: without it the opened page can reach back through
+    // `window.opener` and navigate this one.
+    window.open(link.target, "_blank", "noopener,noreferrer");
+    return true;
+  }
+  return false;
+}
+
 // A yes/no question in the shared modal. Resolves true only on the confirm
 // button; Escape, the ✕ and the backdrop all mean "no", because this is only
 // used to guard destructive steps.
@@ -6156,6 +6286,15 @@ function cellMenu(x, y) {
     false,
     () => { if (activePanel !== "note") togglePanel("note"); else panelNote?.refresh(); },
   );
+  item(
+    (() => {
+      let has = null;
+      try { has = JSON.parse(wasm.session_hyperlink_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
+      return has ? "Edit link…" : "Insert link…";
+    })(),
+    false,
+    () => hyperlinkDialog(),
+  );
   item("Define name…", false, () => {
     const r = canvas.getBoundingClientRect();
     openNameManager(r.left + 120, r.top + 90);
@@ -6350,6 +6489,26 @@ function wireEvents() {
     // While editing a formula at a reference position, clicking a cell inserts
     // its reference instead of moving the selection. preventDefault keeps the
     // inline input focused (no blur/commit); a drag turns it into a range.
+    // A plain click on a linked cell follows it, as Excel does. Guarded three
+    // ways so it cannot hijack ordinary work: not while picking a formula
+    // reference, not with a modifier held (Ctrl-click is how you select a
+    // linked cell without leaving), and not on a second click of a cell that is
+    // already selected — that is someone starting a drag or a rename, not
+    // asking to navigate.
+    if (!refAcceptable() && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.button === 0) {
+      const hit = cellAt(px, py);
+      if (
+        hit
+        && linkCells.has(hit.row + "," + hit.col)
+        && !(hit.row === state.sel.row && hit.col === state.sel.col)
+      ) {
+        e.preventDefault();
+        select(hit.row, hit.col);
+        followHyperlink(hit.row, hit.col);
+        draw();
+        return;
+      }
+    }
     if (refAcceptable()) {
       const hit = cellAt(px, py);
       if (hit) {
@@ -6538,6 +6697,18 @@ function wireEvents() {
       commentTip.style.left = (px + 14) + "px";
       commentTip.style.top = (py + 8) + "px";
       commentTip.hidden = false;
+    } else if (hit && linkCells.has(hit.row + "," + hit.col)) {
+      let link = null;
+      try { link = JSON.parse(wasm.session_hyperlink_at(state.sheet, hit.row, hit.col)); } catch {}
+      const dest = link && (link.tooltip || link.target || link.location);
+      if (dest) {
+        commentTip.textContent = dest;
+        commentTip.style.whiteSpace = "";
+        commentTip.style.left = (px + 14) + "px";
+        commentTip.style.top = (py + 8) + "px";
+        commentTip.hidden = false;
+        canvas.style.cursor = "pointer";
+      } else commentTip.hidden = true;
     } else if (hit && commentCells.has(hit.row + "," + hit.col)) {
       // The hover shows the whole thread, not just the opening remark: a reply
       // is usually the part that answers the question the cell raises, and

@@ -24,8 +24,8 @@ use casual_calc_layout::{
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
     CommentReply, ConditionalFormat, CustomFilter, DataValidation, DefinedName, FilterOp,
-    FilterRule, HAlign, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint, Underline,
-    VAlign, Workbook,
+    FilterRule, HAlign, Hyperlink, Id, Sheet, SheetId, SheetVisibility, Style, StyleId, ThemeTint,
+    Underline, VAlign, Workbook,
 };
 use casual_calc_render::render_png;
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
@@ -1032,6 +1032,92 @@ pub fn session_resolve_comment(
             thread.resolved = resolved;
         }
     })
+}
+
+/// Set (or, with an empty target and location, remove) the hyperlink on a cell.
+///
+/// `target` is an external URI and `location` an anchor inside this workbook;
+/// either may be empty, and a link with both means "open that document at this
+/// anchor". Goes through the metadata log, so it is undoable like any edit.
+#[wasm_bindgen]
+pub fn session_set_hyperlink(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    target: &str,
+    location: &str,
+    tooltip: &str,
+    display: &str,
+) -> Result<(), JsError> {
+    let target = target.trim().to_owned();
+    let location = location.trim().to_owned();
+    let tooltip = tooltip.trim().to_owned();
+    let display = display.trim().to_owned();
+    edit_sheet_metadata(sheet, move |_, data| {
+        data.hyperlinks
+            .retain(|h| !(h.range.start.row == row && h.range.start.col == col));
+        // Neither destination means "remove": a link with nowhere to go would
+        // render as a live link that does nothing.
+        if target.is_empty() && location.is_empty() {
+            return;
+        }
+        data.hyperlinks.push(Hyperlink {
+            range: CellRange::new(CellRef::new(row, col), CellRef::new(row, col)),
+            target: (!target.is_empty()).then_some(target),
+            location: (!location.is_empty()).then_some(location),
+            tooltip: (!tooltip.is_empty()).then_some(tooltip),
+            display: (!display.is_empty()).then_some(display),
+        });
+    })
+}
+
+/// The hyperlink covering a cell as JSON, or `null`.
+#[wasm_bindgen]
+pub fn session_hyperlink_at(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let Some(link) = s.workbook().sheets.get(sheet).and_then(|sh| {
+            sh.hyperlinks.iter().find(|h| {
+                row >= h.range.start.row
+                    && row <= h.range.end.row
+                    && col >= h.range.start.col
+                    && col <= h.range.end.col
+            })
+        }) else {
+            return "null".to_owned();
+        };
+        let field = |v: &Option<String>| v.as_deref().map_or("null".to_owned(), json_string);
+        format!(
+            "{{\"target\":{},\"location\":{},\"tooltip\":{},\"display\":{}}}",
+            field(&link.target),
+            field(&link.location),
+            field(&link.tooltip),
+            field(&link.display),
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// The linked cells within a range as JSON `[{r,c}, …]`, so the grid can
+/// underline them without asking cell by cell.
+#[wasm_bindgen]
+pub fn session_hyperlink_cells(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    with_session(|s| {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let mut items = Vec::new();
+        for link in &sh.hyperlinks {
+            for r in link.range.start.row..=link.range.end.row {
+                for c in link.range.start.col..=link.range.end.col {
+                    if r >= r0 && r <= r1 && c >= c0 && c <= c1 {
+                        items.push(format!("{{\"r\":{r},\"c\":{c}}}"));
+                    }
+                }
+            }
+        }
+        format!("[{}]", items.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
 }
 
 /// A cell's comment text, or `""` if it has none.

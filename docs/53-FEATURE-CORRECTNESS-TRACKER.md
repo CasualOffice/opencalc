@@ -56,7 +56,7 @@ many mutate; `UNDO` how many are reversible.
 | Named cell styles | 2 | 1 | 0* | ✅ | ❌ | correct (*definition registration only) |
 | Sheet visibility | 2 | 1 | 1 | ✅ | n/a | correct |
 | Sheet protection | 2 | 1 | 1 | ✅ | ❌ | correct |
-| **Hyperlinks** | **0** | 0 | 0 | ✅ | ❌ | **FC-07** |
+| Hyperlinks | 3 | 1 | 1 | ✅ | ✅ | correct |
 | **Tables (ListObjects)** | **0** | 0 | 0 | ✅ | ❌ | **FC-08** |
 | **Print setup** | **0** | 0 | 0 | ✅ | ❌ | **FC-09** |
 | **Charts, drawings, images** | **0** | 0 | 0 | ✅ | ❌ | **FC-10** |
@@ -95,7 +95,7 @@ Opening a workbook preserves them; the user cannot make one.
 
 | ID | Feature | Sev | Status | Note |
 | --- | --- | --- | --- | --- |
-| FC-07 | Hyperlinks: insert, edit, follow, remove | P1 | 🔴 | model + round-trip done; zero UI, zero rendering |
+| FC-07 | Hyperlinks: insert, edit, follow, remove | P1 | ✅ | Insert/edit dialog, underline + accent cue on the grid, hover tooltip, click to follow, and remove — all through `SheetMetadata`, so the whole thing is undoable. **The dialog offers both destinations rather than a mode switch**, because the schema treats `r:id` and `location` as independent and a link may carry both ("open that document at this anchor"); making the user pick one would model the feature more narrowly than the format does. Following is guarded three ways so it cannot hijack ordinary work: not while picking a formula reference, not with a modifier held (Ctrl-click selects a linked cell without leaving), and not on a cell that is already selected — that is a drag or a rename starting, not a request to navigate. External targets open with `noopener`, or the opened page can reach back through `window.opener` and navigate this one. Internal anchors resolve through `parseNameRange`, the same parser the name box uses, so a link accepts exactly the references a user can type. Verified in-browser end to end including undo removing the link and redo restoring it. |
 | FC-08 | Tables: Ctrl+T, banded rows, header filter buttons, totals row | P1 | 🔴 | model + structured references done; zero UI |
 | FC-09 | Print setup: margins, orientation, headers/footers, breaks | P2 | 🔴 | carried verbatim; a UI means modelling it properly first |
 | FC-10 | Charts, drawings, images | P2 | 🔴 | retained byte for byte; not drawn, not editable |

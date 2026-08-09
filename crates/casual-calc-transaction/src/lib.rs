@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ConditionalFormat,
-    DataValidation, DefinedName, Sheet, SheetProtection, SheetView, SheetVisibility, StyleId,
-    Workbook,
+    DataValidation, DefinedName, Hyperlink, Sheet, SheetProtection, SheetView, SheetVisibility,
+    StyleId, Workbook,
 };
 
 mod structural;
@@ -108,6 +108,8 @@ pub struct SheetMetadata {
     pub visibility: SheetVisibility,
     /// Sheet protection.
     pub protection: Option<SheetProtection>,
+    /// Hyperlinks.
+    pub hyperlinks: Vec<Hyperlink>,
 }
 
 impl SheetMetadata {
@@ -131,6 +133,7 @@ impl SheetMetadata {
             comments: sheet.comments.clone(),
             visibility: sheet.visibility,
             protection: sheet.protection.clone(),
+            hyperlinks: sheet.hyperlinks.clone(),
         }
     }
 
@@ -164,6 +167,7 @@ impl SheetMetadata {
             comments: std::mem::replace(&mut sheet.comments, self.comments),
             visibility: std::mem::replace(&mut sheet.visibility, self.visibility),
             protection: std::mem::replace(&mut sheet.protection, self.protection),
+            hyperlinks: std::mem::replace(&mut sheet.hyperlinks, self.hyperlinks),
         }
     }
 }
