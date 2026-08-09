@@ -287,6 +287,23 @@ pub struct Style {
     /// The theme slot this fill colour came from, if it came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_theme: Option<ThemeTint>,
+    /// The `patternType` when the fill is patterned rather than solid.
+    ///
+    /// `fill_color` is the pattern's foreground in that case. A pattern with
+    /// only its foreground kept loses half its definition, which is why
+    /// [`Style::fill_bg_color`] exists beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_pattern: Option<String>,
+    /// A pattern fill's background colour (`bgColor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_bg_color: Option<String>,
+    /// The theme slot the background colour came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_bg_theme: Option<ThemeTint>,
+    /// A gradient fill, which is an alternative to a pattern rather than an
+    /// addition to it — a cell has one or the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_gradient: Option<GradientFill>,
     /// Horizontal alignment (defaults per value type when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<HAlign>,
@@ -393,6 +410,10 @@ impl Style {
             && self.font_theme.is_none()
             && self.fill_color.is_none()
             && self.fill_theme.is_none()
+            && self.fill_pattern.is_none()
+            && self.fill_bg_color.is_none()
+            && self.fill_bg_theme.is_none()
+            && self.fill_gradient.is_none()
             && self.align.is_none()
             && self.valign.is_none()
             && !self.wrap
@@ -623,4 +644,65 @@ pub struct TextRun {
     /// Its formatting; absent when the run simply inherits the cell's font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font: Option<RunFont>,
+}
+
+/// One stop in a gradient fill.
+///
+/// `position` and the gradient's geometry are `xsd:double` in the schema but are
+/// stored as integer millionths here, because [`Style`] is `Hash + Eq` for
+/// deduplication and a float is neither. A millionth of a fraction is far finer
+/// than any renderer resolves, and a value written at that precision re-reads to
+/// the same integer, so the round trip still settles.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GradientStop {
+    /// Position along the gradient, in millionths (`0` to `1_000_000`).
+    pub position_micro: i32,
+    /// The stop colour as `RRGGBB`.
+    pub color: String,
+    /// The theme slot the colour came from, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_theme: Option<ThemeTint>,
+}
+
+/// A gradient fill — OOXML's `<gradientFill>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GradientFill {
+    /// `linear` (the default) or `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Angle of a linear gradient, in millionths of a degree.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub degree_micro: i32,
+    /// Path-gradient inset from each edge, in millionths.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub left_micro: i32,
+    /// See [`GradientFill::left_micro`].
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub right_micro: i32,
+    /// See [`GradientFill::left_micro`].
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub top_micro: i32,
+    /// See [`GradientFill::left_micro`].
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub bottom_micro: i32,
+    /// The stops, in document order.
+    pub stops: Vec<GradientStop>,
+}
+
+/// A fraction or angle as its integer millionths, for the `Hash + Eq` types.
+pub fn to_micro(value: f64) -> i32 {
+    if value.is_finite() {
+        (value * 1_000_000.0)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+    } else {
+        0
+    }
+}
+
+/// The inverse of [`to_micro`].
+pub fn from_micro(micro: i32) -> f64 {
+    f64::from(micro) / 1_000_000.0
 }

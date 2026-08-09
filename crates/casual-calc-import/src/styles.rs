@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use casual_calc_model::{
-    BorderEdge, Borders, HAlign, NamedCellStyle, Style, ThemeTint, Underline, VAlign, VertAlign,
+    BorderEdge, Borders, GradientFill, GradientStop, HAlign, NamedCellStyle, Style, ThemeTint,
+    Underline, VAlign, VertAlign, to_micro,
 };
 use casual_calc_ooxml::OoxmlError;
 use quick_xml::Reader;
@@ -53,9 +54,14 @@ struct Font {
 #[derive(Debug, Default, Clone)]
 struct FillInfo {
     solid: bool,
+    /// The raw `patternType`, kept so a non-solid pattern survives.
+    pattern: Option<String>,
     color: Option<String>,
     /// The theme slot `color` was resolved from, when it was a theme reference.
     color_theme: Option<ThemeTint>,
+    bg_color: Option<String>,
+    bg_theme: Option<ThemeTint>,
+    gradient: Option<GradientFill>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -124,6 +130,14 @@ fn attr_u32(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<u32>, ImportError
 /// property back on.
 fn toggle_on(e: &BytesStart<'_>) -> Result<bool, ImportError> {
     Ok(attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+}
+
+/// An `xsd:double` attribute as integer millionths, `0` when absent.
+fn micro_attr(e: &BytesStart<'_>, name: &[u8]) -> Result<i32, ImportError> {
+    Ok(attr(e, name)?
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(to_micro)
+        .unwrap_or(0))
 }
 
 /// Resolve an OOXML color element to `RRGGBB`, whichever of the three forms it
@@ -337,7 +351,54 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                     b"fill" if in_fills => fills.push(FillInfo::default()),
                     b"patternFill" if in_fills => {
                         if let Some(fill) = fills.last_mut() {
-                            fill.solid = attr(e, b"patternType")?.as_deref() == Some("solid");
+                            let pattern = attr(e, b"patternType")?;
+                            fill.solid = pattern.as_deref() == Some("solid");
+                            // `none` is the absence of a fill, not a pattern to
+                            // carry; keeping it would make every unfilled cell
+                            // carry a style.
+                            fill.pattern = pattern.filter(|p| p != "none" && p != "solid");
+                        }
+                    }
+                    b"gradientFill" if in_fills => {
+                        if let Some(fill) = fills.last_mut() {
+                            fill.gradient = Some(GradientFill {
+                                kind: attr(e, b"type")?,
+                                degree_micro: micro_attr(e, b"degree")?,
+                                left_micro: micro_attr(e, b"left")?,
+                                right_micro: micro_attr(e, b"right")?,
+                                top_micro: micro_attr(e, b"top")?,
+                                bottom_micro: micro_attr(e, b"bottom")?,
+                                stops: Vec::new(),
+                            });
+                        }
+                    }
+                    b"stop" if in_fills => {
+                        if let Some(gradient) = fills.last_mut().and_then(|f| f.gradient.as_mut()) {
+                            gradient.stops.push(GradientStop {
+                                position_micro: micro_attr(e, b"position")?,
+                                color: String::new(),
+                                color_theme: None,
+                            });
+                        }
+                    }
+                    b"bgColor" if in_fills => {
+                        if let (Some(fill), Some((c, slot))) =
+                            (fills.last_mut(), color_ref(e, theme)?)
+                        {
+                            fill.bg_color = Some(c);
+                            fill.bg_theme = slot;
+                        }
+                    }
+                    // Inside a `<stop>` the `<color>` belongs to the stop, not
+                    // to the font that `b"color"` otherwise handles.
+                    b"color" if in_fills => {
+                        if let (Some(gradient), Some((c, slot))) = (
+                            fills.last_mut().and_then(|f| f.gradient.as_mut()),
+                            color_ref(e, theme)?,
+                        ) && let Some(stop) = gradient.stops.last_mut()
+                        {
+                            stop.color = c;
+                            stop.color_theme = slot;
                         }
                     }
                     b"fgColor" if in_fills => {
@@ -468,8 +529,22 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
             font_size_hp: font.size_hp,
             font_color: font.color,
             font_theme: font.color_theme,
-            fill_color: if fill.solid { fill.color.clone() } else { None },
-            fill_theme: if fill.solid { fill.color_theme } else { None },
+            // A pattern's foreground is still its colour, so a non-solid
+            // pattern keeps `fill_color`; only an empty fill has none.
+            fill_color: if fill.solid || fill.pattern.is_some() {
+                fill.color.clone()
+            } else {
+                None
+            },
+            fill_theme: if fill.solid || fill.pattern.is_some() {
+                fill.color_theme
+            } else {
+                None
+            },
+            fill_pattern: fill.pattern.clone(),
+            fill_bg_color: fill.bg_color.clone(),
+            fill_bg_theme: fill.bg_theme,
+            fill_gradient: fill.gradient.clone(),
             align: xf.align,
             valign: xf.valign,
             wrap: xf.wrap,

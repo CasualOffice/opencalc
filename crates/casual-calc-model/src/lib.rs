@@ -37,8 +37,8 @@ pub use sheet::{
 pub use store::{CellRange, CellRef, CellStore};
 pub use strings::StringTable;
 pub use style::{
-    BorderEdge, Borders, HAlign, RunFont, Style, StyleTable, TextRun, ThemeTint, Underline, VAlign,
-    VertAlign,
+    BorderEdge, Borders, GradientFill, GradientStop, HAlign, RunFont, Style, StyleTable, TextRun,
+    ThemeTint, Underline, VAlign, VertAlign, from_micro, to_micro,
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{NamedCellStyle, SCHEMA_VERSION, STOCK_THEME_SLOTS, Workbook};

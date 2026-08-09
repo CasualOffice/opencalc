@@ -20,8 +20,8 @@ use std::io::{Cursor, Write};
 use casual_calc_formula::column_to_letters;
 use casual_calc_model::{
     BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind, DvOperator,
-    ErrorValue, FilterRule, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint, Underline, VAlign,
-    VertAlign, Workbook,
+    ErrorValue, FilterRule, GradientFill, HAlign, RunFont, Sheet, SheetId, Style, ThemeTint,
+    Underline, VAlign, VertAlign, Workbook, from_micro,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -706,15 +706,21 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
                 fonts.push(font_key.clone());
                 fonts.len() - 1
             });
-        let fill_id = match &style.fill_color {
-            Some(color) => {
-                let key: FillKey = (color.clone(), style.fill_theme);
-                2 + fills.iter().position(|f| *f == key).unwrap_or_else(|| {
-                    fills.push(key.clone());
-                    fills.len() - 1
-                })
-            }
-            None => 0,
+        let fill_id = if style.fill_color.is_some() || style.fill_gradient.is_some() {
+            let key: FillKey = (
+                style.fill_color.clone(),
+                style.fill_theme,
+                style.fill_pattern.clone(),
+                style.fill_bg_color.clone(),
+                style.fill_bg_theme,
+                style.fill_gradient.clone(),
+            );
+            2 + fills.iter().position(|f| *f == key).unwrap_or_else(|| {
+                fills.push(key.clone());
+                fills.len() - 1
+            })
+        } else {
+            0
         };
         let num_fmt_id = match &style.number_format {
             Some(code) => {
@@ -849,11 +855,27 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     s.push_str(&format!("<fills count=\"{}\">", fills.len() + 2));
     s.push_str("<fill><patternFill patternType=\"none\"/></fill>");
     s.push_str("<fill><patternFill patternType=\"gray125\"/></fill>");
-    for (color, theme) in &fills {
-        s.push_str(&format!(
-            "<fill><patternFill patternType=\"solid\">{}</patternFill></fill>",
-            color_element("fgColor", color, theme.as_ref())
-        ));
+    for (color, theme, pattern, bg, bg_theme, gradient) in &fills {
+        s.push_str("<fill>");
+        match gradient {
+            // A gradient replaces the pattern rather than joining it: `<fill>`
+            // holds one or the other, never both.
+            Some(g) => s.push_str(&gradient_fill_xml(g)),
+            None => {
+                s.push_str(&format!(
+                    "<patternFill patternType=\"{}\">",
+                    escape_attr(pattern.as_deref().unwrap_or("solid"))
+                ));
+                if let Some(color) = color {
+                    s.push_str(&color_element("fgColor", color, theme.as_ref()));
+                }
+                if let Some(bg) = bg {
+                    s.push_str(&color_element("bgColor", bg, bg_theme.as_ref()));
+                }
+                s.push_str("</patternFill>");
+            }
+        }
+        s.push_str("</fill>");
     }
     s.push_str("</fills>");
 
@@ -943,8 +965,20 @@ type FontKey = (
     Option<u32>,
 );
 
-/// A solid fill: its resolved colour and the theme slot it came from.
-type FillKey = (String, Option<ThemeTint>);
+/// Everything that distinguishes one `<fill>` from another.
+///
+/// The pattern, the background colour and the gradient are all part of the key:
+/// two cells whose foregrounds match but whose patterns differ are different
+/// fills, and keying on the foreground alone would give the second one the
+/// first one's pattern.
+type FillKey = (
+    Option<String>,
+    Option<ThemeTint>,
+    Option<String>,
+    Option<String>,
+    Option<ThemeTint>,
+    Option<GradientFill>,
+);
 
 /// Write a colour element, as a theme reference when the colour is linked to
 /// one and as a literal `rgb` otherwise. Writing `rgb` for a theme colour is
@@ -1022,6 +1056,47 @@ fn any_theme_link(workbook: &Workbook) -> bool {
         .styles
         .iter()
         .any(|s| s.font_theme.is_some() || s.fill_theme.is_some())
+}
+
+/// One `<gradientFill>` with its stops.
+fn gradient_fill_xml(g: &GradientFill) -> String {
+    let mut s = String::from("<gradientFill");
+    if let Some(kind) = &g.kind {
+        s.push_str(&format!(" type=\"{}\"", escape_attr(kind)));
+    }
+    for (name, micro) in [
+        ("degree", g.degree_micro),
+        ("left", g.left_micro),
+        ("right", g.right_micro),
+        ("top", g.top_micro),
+        ("bottom", g.bottom_micro),
+    ] {
+        if micro != 0 {
+            s.push_str(&format!(" {name}=\"{}\"", fmt_micro(micro)));
+        }
+    }
+    s.push('>');
+    for stop in &g.stops {
+        s.push_str(&format!(
+            "<stop position=\"{}\">{}</stop>",
+            fmt_micro(stop.position_micro),
+            color_element("color", &stop.color, stop.color_theme.as_ref())
+        ));
+    }
+    s.push_str("</gradientFill>");
+    s
+}
+
+/// Integer millionths back to the plain decimal OOXML writes.
+fn fmt_micro(micro: i32) -> String {
+    let mut s = format!("{:.6}", from_micro(micro));
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
 }
 
 /// A tint as OOXML writes it: plain decimal, no exponent, no trailing zeros.

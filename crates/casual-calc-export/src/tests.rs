@@ -1373,3 +1373,77 @@ fn u_with_no_val_is_single_and_val_none_is_not_underlined() {
     assert_eq!(Underline::from_ooxml("single"), Some(Underline::Single));
     assert_eq!(Underline::from_ooxml("none"), None);
 }
+
+#[test]
+fn gradient_and_pattern_fills_round_trip() {
+    use casual_calc_model::{CellRef, GradientFill, GradientStop, Style, to_micro};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    let gradient = wb.intern_style(Style {
+        fill_gradient: Some(GradientFill {
+            kind: None,
+            degree_micro: to_micro(90.0),
+            stops: vec![
+                GradientStop {
+                    position_micro: 0,
+                    color: "FF0000".to_owned(),
+                    color_theme: None,
+                },
+                GradientStop {
+                    position_micro: to_micro(1.0),
+                    color: "0000FF".to_owned(),
+                    color_theme: None,
+                },
+            ],
+            ..GradientFill::default()
+        }),
+        ..Style::default()
+    });
+    let patterned = wb.intern_style(Style {
+        fill_color: Some("112233".to_owned()),
+        fill_pattern: Some("lightGrid".to_owned()),
+        fill_bg_color: Some("FFEECC".to_owned()),
+        ..Style::default()
+    });
+    // Same foreground as the pattern above but solid: these must not collapse
+    // into one fill.
+    let solid = wb.intern_style(Style {
+        fill_color: Some("112233".to_owned()),
+        ..Style::default()
+    });
+    assert_ne!(patterned, solid);
+
+    for (row, id) in [(0, gradient), (1, patterned), (2, solid)] {
+        let at = CellRef::new(row, 0);
+        let mut cell = wb.sheets[0].cells.get(at).cloned().unwrap();
+        cell.style = Some(id);
+        wb.sheets[0].cells.set(at, cell);
+    }
+
+    let written = write_workbook(&wb).unwrap();
+    let styles = xml_of(&written, "xl/styles.xml");
+    assert!(styles.contains("<gradientFill degree=\"90\">"), "{styles}");
+    assert!(styles.contains("patternType=\"lightGrid\""));
+    assert!(styles.contains("bgColor"));
+
+    let back = import_package(written).unwrap().workbook;
+    let style_of = |row: u32| {
+        let id = back.sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .unwrap()
+            .style;
+        back.styles.get(id.unwrap()).unwrap().clone()
+    };
+    let g = style_of(0)
+        .fill_gradient
+        .expect("the gradient must survive");
+    assert_eq!(g.degree_micro, to_micro(90.0));
+    assert_eq!(g.stops.len(), 2);
+    assert_eq!(g.stops[1].color, "0000FF");
+    assert_eq!(style_of(1).fill_pattern.as_deref(), Some("lightGrid"));
+    assert_eq!(style_of(1).fill_bg_color.as_deref(), Some("FFEECC"));
+    // The solid one keeps its colour and gains no pattern.
+    assert_eq!(style_of(2).fill_color.as_deref(), Some("112233"));
+    assert_eq!(style_of(2).fill_pattern, None);
+}
