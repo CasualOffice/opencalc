@@ -221,17 +221,27 @@ fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
 fn axis_metadata_mut(
     sheet: &mut Sheet,
     axis: Axis,
-) -> (&mut AxisSizing, &mut BTreeSet<u32>, &mut u32) {
+) -> (
+    &mut AxisSizing,
+    &mut BTreeSet<u32>,
+    &mut u32,
+    &mut BTreeMap<u32, u8>,
+    &mut BTreeSet<u32>,
+) {
     match axis {
         Axis::Row => (
             &mut sheet.rows,
             &mut sheet.hidden_rows,
             &mut sheet.view.frozen_rows,
+            &mut sheet.row_outline_levels,
+            &mut sheet.collapsed_rows,
         ),
         Axis::Col => (
             &mut sheet.columns,
             &mut sheet.hidden_cols,
             &mut sheet.view.frozen_cols,
+            &mut sheet.col_outline_levels,
+            &mut sheet.collapsed_cols,
         ),
     }
 }
@@ -267,13 +277,16 @@ fn shift_metadata_insert(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
             Some(if k >= at { k.saturating_add(count) } else { k })
         });
     }
-    let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
-    reindex_map(&mut sizing.sizes, |k| {
-        Some(if k >= at { k.saturating_add(count) } else { k })
-    });
-    reindex_set(hidden, |k| {
-        Some(if k >= at { k.saturating_add(count) } else { k })
-    });
+    let (sizing, hidden, frozen, outline, collapsed) = axis_metadata_mut(sheet, axis);
+    let shift = |k: u32| Some(if k >= at { k.saturating_add(count) } else { k });
+    reindex_map(&mut sizing.sizes, shift);
+    reindex_set(hidden, shift);
+    // The outline is position-indexed like everything else here, and was being
+    // left behind: insert three rows above a group and its levels and collapse
+    // flags stayed on the rows the group used to occupy, so the group silently
+    // detached from its own rows.
+    reindex_map(outline, shift);
+    reindex_set(collapsed, shift);
     // Inserting inside (or above) the frozen band extends it; inserting exactly
     // at the boundary (`at == *frozen`) or below leaves the freeze alone.
     if at < *frozen {
@@ -317,9 +330,12 @@ fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
             map_index_delete(k, at, end, count)
         });
     }
-    let (sizing, hidden, frozen) = axis_metadata_mut(sheet, axis);
-    reindex_map(&mut sizing.sizes, |k| map_index_delete(k, at, end, count));
-    reindex_set(hidden, |k| map_index_delete(k, at, end, count));
+    let (sizing, hidden, frozen, outline, collapsed) = axis_metadata_mut(sheet, axis);
+    let shift = |k: u32| map_index_delete(k, at, end, count);
+    reindex_map(&mut sizing.sizes, shift);
+    reindex_set(hidden, shift);
+    reindex_map(outline, shift);
+    reindex_set(collapsed, shift);
     // Only the pinned lines that actually fell in the band reduce the freeze.
     if at < *frozen {
         let removed = end.min(*frozen).saturating_sub(at);
@@ -342,7 +358,7 @@ fn map_index_delete(index: u32, at: u32, end: u32, count: u32) -> Option<u32> {
 /// Rebuild a sizing/height map under an index remapping, dropping keys the
 /// remapper returns `None` for. Values ride along with their (possibly moved)
 /// key; a collision keeps the last-written value in ascending key order.
-fn reindex_map(map: &mut BTreeMap<u32, i64>, remap: impl Fn(u32) -> Option<u32>) {
+fn reindex_map<V>(map: &mut BTreeMap<u32, V>, remap: impl Fn(u32) -> Option<u32>) {
     let taken = std::mem::take(map);
     for (key, value) in taken {
         if let Some(new_key) = remap(key) {

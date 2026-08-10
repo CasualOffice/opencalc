@@ -1566,3 +1566,62 @@ fn a_batch_reports_the_union_of_its_metadata_fields() {
         crate::SheetFields::VIEW.union(crate::SheetFields::COLUMNS)
     );
 }
+#[test]
+fn a_structural_insert_carries_the_outline_with_it() {
+    // The outline is position-indexed like the sizing and the hidden sets, and
+    // was the one thing the shift did not touch: inserting above a group left
+    // its levels and collapse flags on the rows the group used to occupy, so
+    // the group silently detached from its own rows.
+    let mut wb = workbook();
+    wb.sheets[0].row_outline_levels.insert(5, 2);
+    wb.sheets[0].collapsed_rows.insert(5);
+
+    let inverse = apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(wb.sheets[0].row_outline_levels.get(&8), Some(&2));
+    assert!(wb.sheets[0].collapsed_rows.contains(&8));
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[0].row_outline_levels.get(&5), Some(&2));
+    assert!(wb.sheets[0].collapsed_rows.contains(&5));
+}
+
+#[test]
+fn a_structural_delete_drops_the_outline_it_removes_and_moves_the_rest() {
+    let mut wb = workbook();
+    wb.sheets[0].row_outline_levels.insert(2, 1);
+    wb.sheets[0].row_outline_levels.insert(7, 3);
+    wb.sheets[0].collapsed_cols.insert(4);
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 1,
+            count: 3,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !wb.sheets[0].row_outline_levels.contains_key(&2),
+        "the level inside the deleted band goes with it"
+    );
+    assert_eq!(
+        wb.sheets[0].row_outline_levels.get(&4),
+        Some(&3),
+        "the one below moves up by the band width"
+    );
+    assert!(
+        wb.sheets[0].collapsed_cols.contains(&4),
+        "a row delete leaves the column outline alone"
+    );
+}
