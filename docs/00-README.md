@@ -26,7 +26,7 @@ the other way around. This index is the map.
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **45–49, 54–56** — product surface: editor parity, UX map, design system,
+  - **45–49, 54–57** — product surface: editor parity, UX map, design system,
     per-construct design notes (added as phases open).
   - **50–53** — measured gap trackers, generated from or audited against the
     code rather than hand-maintained.
@@ -77,7 +77,7 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
-### Product, UX & the SDK (45–49, 54–56)
+### Product, UX & the SDK (45–49, 54–57)
 
 | # | Title | Purpose |
 | --- | --- | --- |
@@ -89,6 +89,7 @@ the other way around. This index is the map.
 | 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
 | 55 | [SDK Embedding & Integration](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) | The embeddable element: isolation, theming, commands, events, access, i18n |
 | 56 | [Collaboration Concurrency](56-COLLABORATION-CONCURRENCY-DESIGN.md) | OT vs CRDT for Phase 5, and why the per-cell byte ceiling decides it (ADR-011) |
+| 57 | [Collaboration Server Boundary](57-COLLABORATION-SERVER-BOUNDARY.md) | What the server owns and must not own; webhook callbacks, not a file store (ADR-012) |
 
 ### Measured gap trackers (50–53)
 
