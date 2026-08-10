@@ -172,6 +172,50 @@ not the target.
 The important consequence: **the snapshot cadence is a latency knob, not just a
 storage one.** Too sparse and every cold start replays a long tail.
 
+## Where recalculation runs
+
+**Rule: recalculation runs wherever the authoritative model is.** It is not a
+separate deployment decision, and there is no mode where a host holds a model
+it cannot evaluate.
+
+| Situation | Model lives | Recalculates |
+| --- | --- | --- |
+| One editor, no server | the browser | **the browser**, in WebAssembly — the client is the authority |
+| A co-editing session | the server orders, every participant holds a copy | **both**, and they agree |
+| Desktop | the local process | **native Rust**, at full speed — no WebAssembly, no web app ([44](44-TAURI-DESKTOP-SHELL-DESIGN.md)) |
+
+The middle row is the interesting one, and it is only tenable because
+calculation is deterministic. Given the same model, the same engine version and
+the same environment, every host computes the same values. So the server does
+not recalculate *in order to tell clients the answers* — it recalculates
+because it must write snapshots, serve headless export, and answer a client
+that has no engine. Clients recalculate because they have to paint.
+
+Two consequences follow, and they are the reason this is worth writing down
+rather than leaving as an implementation detail.
+
+**The wire carries ops, not values.** Every participant applies the same
+ordered ops to the same base snapshot and arrives at the same cells, so
+shipping computed values would be redundant bytes and a second source of truth
+to disagree with. It also means the collaboration protocol is the op set and
+nothing more — the same thing the single-user editor already speaks.
+
+**The environment becomes server-issued and stamped per revision.** This is the
+one thing that can break the guarantee above. `TODAY()`, `NOW()`, `RAND()` and
+`RANDBETWEEN()` read `volatile_now` and `volatile_seed`, which the host supplies
+and the engine never samples from a clock — a property the engine already has
+([`Environment`](../crates/casual-calc-sdk), and gated by test). In a session
+those values stop being the client's to choose: **the server stamps each
+revision with the environment used to evaluate it**, so two clients recomputing
+revision *N* get identical volatiles, and a new revision re-evaluates them as
+Excel does.
+
+The honest edge: a client evaluating its own not-yet-acknowledged ops has no
+stamp yet and uses a provisional one, so a volatile cell can show a value that
+changes when the revision lands. That is confined to volatiles, it is transient,
+and the alternative — round-tripping to the server before showing the user
+anything — is worse.
+
 ## What is hybridised, and what is not
 
 Mixing reconciliation strategies is fine **partitioned by data domain** and
@@ -266,6 +310,7 @@ These follow from the decision and are what the implementation is held to.
 | Peer-to-peer co-editing? | **No.** See *What would supersede this*. |
 | Serverless? | **Both senses.** No server at one editor; serverless *compute* for sessions. |
 | Presence through transform? | **No** — separate ephemeral channel. |
+| Where does recalculation run? | **Wherever the authoritative model is** — browser when there is no server, both ends in a session, native on the desktop. Determinism is what makes that a free choice; the price is a server-issued, revision-stamped environment. |
 
 ## Open — scoping, not direction
 
@@ -274,16 +319,12 @@ None of these block the decision; they are settled while building.
 1. **Is presence in the first cut, or after?** It does not go through
    transform, but it is most of what makes collaboration *feel* present, so
    shipping without it reads as broken rather than minimal.
-2. **Where does recalculation run?** Determinism makes server, client, or both
-   equally correct, so this is cost and latency, not correctness. Worth
-   deciding early because it drives whether the server holds a live engine or
-   only a model.
-3. **Snapshot cadence and retention window.** The numbers behind "bounded"
+2. **Snapshot cadence and retention window.** The numbers behind "bounded"
    and behind cold-start latency.
-4. **What happens to the retained-bytes side table under concurrent edit?** Two
+3. **What happens to the retained-bytes side table under concurrent edit?** Two
    clients editing a sheet whose drawing part is preserved verbatim must not
    both rewrite it. Likely answer — retention is server-owned and never
    transformed — but it needs stating, because getting it wrong produces
    exactly the "file needs repair" outcome the fidelity work exists to prevent.
-5. **Do comments join the presence row or the document row?** Append-mostly and
+4. **Do comments join the presence row or the document row?** Append-mostly and
    structurally inert, so either defensible.
