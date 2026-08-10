@@ -20,6 +20,9 @@ use casual_calc_model::{
 };
 
 mod structural;
+pub mod transform;
+#[cfg(test)]
+mod transform_tests;
 
 use structural::Axis;
 
