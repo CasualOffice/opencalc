@@ -19,6 +19,9 @@ use casual_calc_model::{
     SheetProtection, SheetView, SheetVisibility, SortState, StyleId, Table, Workbook,
 };
 
+pub mod session;
+#[cfg(test)]
+mod session_tests;
 mod structural;
 pub mod transform;
 #[cfg(test)]

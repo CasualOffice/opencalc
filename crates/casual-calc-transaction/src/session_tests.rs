@@ -1,0 +1,470 @@
+//! The protocol end to end: several clients, a server, no network.
+//!
+//! Convergence is asserted over *interleavings*, not over single exchanges.
+//! Pairwise TP1 says two operations commute correctly; it says nothing about a
+//! client that edits three times while two acknowledgements and someone else's
+//! insert are in flight. That is where protocols actually break, and it costs
+//! nothing to run here because none of this touches a socket.
+
+use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+use crate::{
+    Operation,
+    session::{ClientSession, ServerSession, Submission},
+};
+
+fn seed() -> Workbook {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    for row in 0..8u32 {
+        for col in 0..3u32 {
+            sheet.cells.set(
+                CellRef::new(row, col),
+                Cell::value(CellValue::Number(f64::from(row * 10 + col))),
+            );
+        }
+    }
+    workbook.sheets.push(sheet);
+    workbook
+}
+
+fn observe(workbook: &Workbook) -> String {
+    let sheet = &workbook.sheets[0];
+    let mut cells: Vec<String> = sheet
+        .cells
+        .iter()
+        .map(|(at, cell)| format!("{}:{}={:?}", at.row, at.col, cell.value))
+        .collect();
+    cells.sort();
+    format!("{} cols{:?}", cells.join(","), sheet.columns.sizes)
+}
+
+fn write(row: u32, col: u32, n: f64) -> Operation {
+    Operation::SetCell {
+        sheet: 0,
+        at: CellRef::new(row, col),
+        cell: Some(Cell::value(CellValue::Number(n))),
+    }
+}
+
+/// One client and its own copy of the document.
+struct Peer {
+    session: ClientSession,
+    workbook: Workbook,
+}
+
+impl Peer {
+    fn new(base: &Workbook) -> Self {
+        Self {
+            session: ClientSession::new(0),
+            workbook: base.clone(),
+        }
+    }
+}
+
+/// A server, its document, and the clients attached to it.
+struct World {
+    server: ServerSession,
+    workbook: Workbook,
+    peers: Vec<Peer>,
+    /// Chunks sent but not yet delivered to the server, oldest first — the
+    /// network, modelled as a queue we can reorder deliberately.
+    inflight: Vec<(usize, Submission)>,
+}
+
+impl World {
+    fn new(peers: usize) -> Self {
+        let workbook = seed();
+        Self {
+            server: ServerSession::new(),
+            peers: (0..peers).map(|_| Peer::new(&workbook)).collect(),
+            workbook,
+            inflight: Vec::new(),
+        }
+    }
+
+    fn edit(&mut self, peer: usize, op: Operation) {
+        let peer = &mut self.peers[peer];
+        peer.session
+            .edit(&mut peer.workbook, op)
+            .expect("local edit");
+    }
+
+    /// Send whatever `peer` has pending, if it is allowed to.
+    fn send(&mut self, peer: usize) {
+        if let Some(submission) = self.peers[peer].session.flush() {
+            self.inflight.push((peer, submission));
+        }
+    }
+
+    /// Deliver the `nth` queued chunk to the server and broadcast the result.
+    fn deliver(&mut self, nth: usize) {
+        if self.inflight.is_empty() {
+            return;
+        }
+        let (from, submission) = self.inflight.remove(nth % self.inflight.len());
+        let committed = self
+            .server
+            .commit(&mut self.workbook, &submission)
+            .expect("server commits");
+        let revision = self.server.revision();
+
+        for (index, peer) in self.peers.iter_mut().enumerate() {
+            if index == from {
+                peer.session.acknowledge(revision);
+            } else {
+                for op in &committed {
+                    peer.session
+                        .receive(&mut peer.workbook, op, revision)
+                        .expect("remote applies");
+                }
+            }
+        }
+    }
+
+    /// Drain everything until nothing is outstanding anywhere.
+    fn settle(&mut self) {
+        for _ in 0..64 {
+            for peer in 0..self.peers.len() {
+                self.send(peer);
+            }
+            if self.inflight.is_empty() {
+                break;
+            }
+            self.deliver(0);
+        }
+        assert!(self.inflight.is_empty(), "the network never drained");
+        assert!(
+            self.peers.iter().all(|p| !p.session.has_unacknowledged()),
+            "a client still holds unacknowledged work"
+        );
+    }
+
+    fn assert_converged(&self, label: &str) {
+        let authoritative = observe(&self.workbook);
+        for (index, peer) in self.peers.iter().enumerate() {
+            assert_eq!(
+                observe(&peer.workbook),
+                authoritative,
+                "{label}: client {index} diverged from the server"
+            );
+        }
+    }
+}
+
+#[test]
+fn two_clients_editing_different_cells_converge() {
+    let mut world = World::new(2);
+    world.edit(0, write(0, 0, 100.0));
+    world.edit(1, write(5, 2, 200.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("disjoint edits");
+}
+
+#[test]
+fn two_clients_editing_the_same_cell_converge_on_one_of_them() {
+    let mut world = World::new(2);
+    world.edit(0, write(1, 1, 111.0));
+    world.edit(1, write(1, 1, 222.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("same cell");
+
+    // Whoever the server ordered last is what everyone sees — but everyone
+    // sees the *same* one, which is the property that matters.
+    let value = observe(&world.workbook);
+    assert!(
+        value.contains("1:1=Number(222.0)") || value.contains("1:1=Number(111.0)"),
+        "one of the two writes survived intact: {value}"
+    );
+}
+
+#[test]
+fn an_edit_below_a_concurrent_insert_lands_on_the_right_row() {
+    let mut world = World::new(2);
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 2,
+        },
+    );
+    world.edit(1, write(4, 0, 999.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("insert vs edit");
+
+    // Row 4 was pushed to row 6, and the edit has to have followed it.
+    assert!(
+        observe(&world.workbook).contains("6:0=Number(999.0)"),
+        "the edit followed its row: {}",
+        observe(&world.workbook)
+    );
+}
+
+#[test]
+fn a_client_keeps_editing_while_its_chunk_is_in_flight() {
+    // The case the one-chunk-at-a-time rule exists for: edits made *after*
+    // sending are rebased onto whatever the server accepted meanwhile.
+    let mut world = World::new(2);
+    world.edit(0, write(0, 0, 1.0));
+    world.send(0); // in flight, unacknowledged
+
+    world.edit(0, write(0, 1, 2.0)); // still pending behind it
+    world.edit(0, write(0, 2, 3.0));
+    assert!(
+        world.peers[0].session.flush().is_none(),
+        "nothing more is sent until the first chunk is acknowledged"
+    );
+
+    world.edit(
+        1,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.send(1);
+
+    world.settle();
+    world.assert_converged("pipelined edits");
+}
+
+#[test]
+fn convergence_survives_every_delivery_order() {
+    // The interleaving matters, so try them all rather than the one that
+    // happened to be written first. Each run edits identically and differs
+    // only in the order the server sees the chunks.
+    let mut results = Vec::new();
+    for order in 0..6usize {
+        let mut world = World::new(3);
+        world.edit(0, write(2, 0, 10.0));
+        world.edit(
+            1,
+            Operation::DeleteRows {
+                sheet: 0,
+                at: 1,
+                count: 2,
+            },
+        );
+        world.edit(2, write(6, 1, 30.0));
+        world.edit(
+            2,
+            Operation::SetColumnWidth {
+                sheet: 0,
+                col: 1,
+                width: Some(150),
+            },
+        );
+        for peer in 0..3 {
+            world.send(peer);
+        }
+        // A different rotation of the queue each time.
+        world.deliver(order % 3);
+        world.deliver(order / 3);
+        world.settle();
+        world.assert_converged(&format!("order {order}"));
+        results.push(observe(&world.workbook));
+    }
+
+    // Different orders may legitimately produce different documents — that is
+    // what "the server decides" means. What must never happen is a *client*
+    // disagreeing with its server, which `assert_converged` checked for each.
+    assert_eq!(results.len(), 6);
+}
+
+#[test]
+fn an_edit_to_a_deleted_row_becomes_nothing_rather_than_landing_elsewhere() {
+    let mut world = World::new(2);
+    world.edit(
+        0,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 3,
+            count: 2,
+        },
+    );
+    world.edit(1, write(4, 0, 555.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("edit into a deleted band");
+
+    assert!(
+        !observe(&world.workbook).contains("Number(555.0)"),
+        "the row it was written to is gone, so the edit is gone: {}",
+        observe(&world.workbook)
+    );
+}
+
+#[test]
+fn a_client_too_far_behind_is_told_rather_than_dropped() {
+    // The bounded-offline edge. Its work is refused with the range it needed,
+    // not silently discarded, so the host can say what happened.
+    let mut world = World::new(2);
+    world.edit(0, write(0, 0, 1.0));
+    world.send(0);
+    world.deliver(0);
+    world.edit(0, write(0, 1, 2.0));
+    world.send(0);
+    world.deliver(0);
+
+    world.server.compact_to(world.server.revision());
+
+    let stale = Submission {
+        base: 0,
+        ops: vec![write(7, 2, 42.0)],
+    };
+    let error = world
+        .server
+        .commit(&mut world.workbook, &stale)
+        .expect_err("a base older than the retained history is refused");
+    assert!(matches!(
+        error,
+        crate::session::SessionError::UnknownRevision { claimed: 0, .. }
+    ));
+}
+
+#[test]
+fn a_refused_chunk_leaves_the_document_untouched() {
+    let mut world = World::new(1);
+    let before = observe(&world.workbook);
+    let stale = Submission {
+        base: 99,
+        ops: vec![write(0, 0, 1.0)],
+    };
+    assert!(world.server.commit(&mut world.workbook, &stale).is_err());
+    assert_eq!(observe(&world.workbook), before, "nothing was half-applied");
+    assert_eq!(world.server.revision(), 0);
+}
+
+#[test]
+fn pending_edits_are_rebased_before_they_are_ever_sent() {
+    // The client's own buffer has to move when a remote arrives, and this is
+    // the arrangement that proves it. If the client flushes *before* the remote
+    // lands, its chunk carries a stale base and the server rebases it on the
+    // client's behalf — masking a client that never rebases its own buffer at
+    // all. Here the remote lands first, so the chunk goes out based on the
+    // post-remote revision and the server has nothing to correct with: the
+    // buffer must already be right.
+    let mut world = World::new(2);
+    world.edit(0, write(5, 0, 777.0)); // pending, deliberately not sent
+
+    world.edit(
+        1,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    );
+    world.send(1);
+    world.deliver(0);
+    assert_eq!(
+        world.peers[0].session.revision(),
+        world.server.revision(),
+        "the client has caught up before it sends"
+    );
+
+    world.send(0);
+    world.settle();
+    world.assert_converged("pending rebased before sending");
+    assert!(
+        observe(&world.workbook).contains("8:0=Number(777.0)"),
+        "row 5 became row 8: {}",
+        observe(&world.workbook)
+    );
+}
+
+#[test]
+fn a_multi_operation_chunk_is_threaded_through_the_history() {
+    // Within one chunk, the second operation was written against the state the
+    // first produced. Rebasing both onto the same unchanged history lands the
+    // second one a whole operation out of place — the same threading bug as in
+    // `Batch`, one layer up, and it only shows when the chunk has more than one
+    // positional operation *and* there is concurrent history to rebase onto.
+    let mut world = World::new(2);
+
+    world.edit(
+        1,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.send(1);
+
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    );
+    world.edit(0, write(4, 0, 4242.0)); // addresses a row the insert above created
+    world.send(0);
+
+    world.settle();
+    world.assert_converged("multi-op chunk against concurrent history");
+    assert!(
+        observe(&world.workbook).contains("4:1=Number(4242.0)"),
+        "the write kept its row and followed the inserted column: {}",
+        observe(&world.workbook)
+    );
+}
+
+#[test]
+fn concurrent_history_advances_past_each_operation_in_a_chunk() {
+    // The other half of the threading, and the half that hides. Rebasing a
+    // chunk's second operation onto the history as it was — rather than as it
+    // is after the chunk's *first* operation — is only visible when the history
+    // operation itself moves, which needs both on the same axis and the second
+    // operation landing in the span the first one opened.
+    //
+    // Here: the remote inserts one row at 1. This client inserts three at 0 and
+    // writes into row 2 — its own new row. Rebasing that write against the
+    // remote's *original* position at 1 would push it to row 3, into a row it
+    // never meant to touch. Against the remote's position after the three-row
+    // insert, at 4, it correctly stays put.
+    let mut world = World::new(2);
+
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    );
+    world.edit(0, write(2, 0, 1234.0));
+    world.send(0);
+
+    world.edit(
+        1,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    );
+    world.send(1);
+
+    world.deliver(1); // the remote is ordered first
+    world.deliver(0); // then the chunk, rebased onto it
+    world.settle();
+
+    world.assert_converged("history threaded through a chunk");
+    assert!(
+        observe(&world.workbook).contains("2:0=Number(1234.0)"),
+        "the write stayed in the row this client opened: {}",
+        observe(&world.workbook)
+    );
+}
