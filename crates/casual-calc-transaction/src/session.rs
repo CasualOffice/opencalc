@@ -36,6 +36,7 @@ use casual_calc_model::{ModelError, Workbook};
 use crate::{
     Operation, TxnError, apply,
     transform::{Side, TransformError, is_noop, transform},
+    wire::WireOperation,
 };
 
 /// Why a session could not accept something.
@@ -142,8 +143,13 @@ pub struct Submission {
     pub seq: u64,
     /// The revision the operations were written against.
     pub base: u64,
-    /// The operations, in the order the client made them.
-    pub ops: Vec<Operation>,
+    /// The operations, in the order the client made them, **each packaged with
+    /// what its handles mean**.
+    ///
+    /// Not bare [`Operation`]s: a cell refers to its formula and style by an
+    /// index into the sending workbook's own tables, which names something
+    /// different — or nothing — anywhere else. See [`WireOperation`].
+    pub ops: Vec<WireOperation>,
 }
 
 /// What committing a chunk did.
@@ -153,8 +159,9 @@ pub enum Commit {
     /// onto whatever had been committed since the client's base — which is
     /// what every other participant is told about.
     Applied {
-        /// The rebased operations, in order.
-        ops: Vec<Operation>,
+        /// The rebased operations, in order, packaged for the wire so every
+        /// other participant can localise them into its own tables.
+        ops: Vec<WireOperation>,
         /// The revision the document reached.
         revision: u64,
     },
@@ -248,19 +255,14 @@ impl ClientSession {
     /// Returns `None` when there is nothing to send or a chunk is already in
     /// flight — the one-at-a-time rule, which is what keeps a single server
     /// order sufficient.
-    pub fn flush(&mut self) -> Option<Submission> {
+    pub fn flush(&mut self, workbook: &Workbook) -> Option<Submission> {
         if !self.sent.is_empty() || self.pending.is_empty() {
             return None;
         }
         self.sent = core::mem::take(&mut self.pending);
         self.chunks += 1;
         self.sent_seq = self.chunks;
-        Some(Submission {
-            client: self.client,
-            seq: self.sent_seq,
-            base: self.revision,
-            ops: self.sent.clone(),
-        })
+        self.package(workbook)
     }
 
     /// The chunk in flight, to send again.
@@ -270,7 +272,16 @@ impl ClientSession {
     /// is what lets the server recognise it rather than apply it twice. The
     /// base moves with the client, because remote operations that arrived
     /// meanwhile have already rebased the chunk.
-    pub fn resend(&self) -> Option<Submission> {
+    pub fn resend(&self, workbook: &Workbook) -> Option<Submission> {
+        self.package(workbook)
+    }
+
+    /// The chunk in flight, packaged against `workbook`.
+    ///
+    /// The workbook is required because an operation's handles mean nothing
+    /// apart from the tables they index, and this is the last point at which
+    /// those are to hand.
+    fn package(&self, workbook: &Workbook) -> Option<Submission> {
         if self.sent.is_empty() {
             return None;
         }
@@ -278,7 +289,12 @@ impl ClientSession {
             client: self.client,
             seq: self.sent_seq,
             base: self.revision,
-            ops: self.sent.clone(),
+            ops: self
+                .sent
+                .iter()
+                .cloned()
+                .map(|op| WireOperation::of(op, workbook))
+                .collect(),
         })
     }
 
@@ -297,10 +313,12 @@ impl ClientSession {
     pub fn receive(
         &mut self,
         workbook: &mut Workbook,
-        incoming: &Operation,
+        incoming: &WireOperation,
         revision: u64,
     ) -> Result<(), SessionError> {
-        let mut arriving = incoming.clone();
+        // Localised first, into this workbook's own tables, before it is
+        // compared with anything local.
+        let mut arriving = incoming.clone().localise(workbook);
 
         // Fold through everything outstanding, oldest first, rebasing both
         // sides as we go. Both halves are needed: the arrival has to be
@@ -440,7 +458,17 @@ impl ServerSession {
         let mut rebased = Vec::with_capacity(submission.ops.len());
         let mut history: Vec<Operation> = self.log[skip.min(self.log.len())..].to_vec();
 
-        for op in &submission.ops {
+        // Localise before transforming: the transform compares positions and
+        // fields, and an operation still carrying the sender's handles would
+        // transform correctly and then write a cell nothing here can resolve.
+        let incoming: Vec<Operation> = submission
+            .ops
+            .iter()
+            .cloned()
+            .map(|wire| wire.localise(workbook))
+            .collect();
+
+        for op in &incoming {
             let mut current = op.clone();
             for committed in &mut history {
                 let next = transform(&current, committed, Side::Later)?;
@@ -468,8 +496,12 @@ impl ServerSession {
         }
         self.accepted
             .insert(submission.client, (submission.seq, self.revision));
+        let packaged = rebased
+            .into_iter()
+            .map(|op| WireOperation::of(op, workbook))
+            .collect();
         Ok(Commit::Applied {
-            ops: rebased,
+            ops: packaged,
             revision: self.revision,
         })
     }

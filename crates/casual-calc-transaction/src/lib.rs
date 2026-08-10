@@ -26,6 +26,7 @@ mod structural;
 pub mod transform;
 #[cfg(test)]
 mod transform_tests;
+pub mod wire;
 
 use structural::Axis;
 

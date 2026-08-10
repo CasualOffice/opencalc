@@ -11,6 +11,7 @@ use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use crate::{
     Operation,
     session::{ClientId, ClientSession, Commit, ServerSession, Submission},
+    wire::WireOperation,
 };
 
 fn seed() -> Workbook {
@@ -94,7 +95,8 @@ impl World {
 
     /// Send whatever `peer` has pending, if it is allowed to.
     fn send(&mut self, peer: usize) {
-        if let Some(submission) = self.peers[peer].session.flush() {
+        let book = self.peers[peer].workbook.clone();
+        if let Some(submission) = self.peers[peer].session.flush(&book) {
             self.inflight.push((peer, submission));
         }
     }
@@ -223,7 +225,10 @@ fn a_client_keeps_editing_while_its_chunk_is_in_flight() {
     world.edit(0, write(0, 1, 2.0)); // still pending behind it
     world.edit(0, write(0, 2, 3.0));
     assert!(
-        world.peers[0].session.flush().is_none(),
+        world.peers[0]
+            .session
+            .flush(&world.workbook.clone())
+            .is_none(),
         "nothing more is sent until the first chunk is acknowledged"
     );
 
@@ -326,7 +331,10 @@ fn a_client_too_far_behind_is_told_rather_than_dropped() {
         client: ClientId(9),
         seq: 1,
         base: 0,
-        ops: vec![write(7, 2, 42.0)],
+        ops: vec![WireOperation::of(
+            write(7, 2, 42.0),
+            &Workbook::new(Id::from_parts(1, 1)),
+        )],
     };
     let error = world
         .server
@@ -346,7 +354,10 @@ fn a_refused_chunk_leaves_the_document_untouched() {
         client: ClientId(9),
         seq: 1,
         base: 99,
-        ops: vec![write(0, 0, 1.0)],
+        ops: vec![WireOperation::of(
+            write(0, 0, 1.0),
+            &Workbook::new(Id::from_parts(1, 1)),
+        )],
     };
     assert!(world.server.commit(&mut world.workbook, &stale).is_err());
     assert_eq!(observe(&world.workbook), before, "nothing was half-applied");
@@ -619,7 +630,10 @@ fn a_client_past_the_retained_window_is_refused_with_the_range_it_needed() {
         client: ClientId(9),
         seq: 1,
         base: 1,
-        ops: vec![write(0, 2, 7.0)],
+        ops: vec![WireOperation::of(
+            write(0, 2, 7.0),
+            &Workbook::new(Id::from_parts(1, 1)),
+        )],
     };
     match world.server.commit(&mut world.workbook, &stale) {
         Err(crate::session::SessionError::UnknownRevision {
@@ -661,7 +675,10 @@ fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
         client: ClientId(9),
         seq: 1,
         base: server.revision(),
-        ops: vec![write(7, 0, 99.0)],
+        ops: vec![WireOperation::of(
+            write(7, 0, 99.0),
+            &Workbook::new(Id::from_parts(1, 1)),
+        )],
     };
     server
         .commit(&mut revived, &submission)
@@ -679,7 +696,10 @@ fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
 fn a_resent_chunk_is_committed_once() {
     let mut world = World::new(1);
     world.edit(0, write(3, 0, 42.0));
-    let submission = world.peers[0].session.flush().expect("a chunk to send");
+    let submission = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .expect("a chunk to send");
 
     let first = world
         .server
@@ -715,7 +735,10 @@ fn a_resent_structural_op_does_not_insert_twice() {
             count: 1,
         },
     );
-    let submission = world.peers[0].session.flush().unwrap();
+    let submission = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
 
     world
         .server
@@ -738,7 +761,10 @@ fn a_resent_structural_op_does_not_insert_twice() {
 fn resend_reuses_the_sequence_but_follows_the_clients_revision() {
     let mut world = World::new(2);
     world.edit(0, write(0, 0, 1.0));
-    let sent = world.peers[0].session.flush().unwrap();
+    let sent = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
 
     // A remote lands while the chunk is in flight, so the client rebases it.
     world.edit(
@@ -752,7 +778,11 @@ fn resend_reuses_the_sequence_but_follows_the_clients_revision() {
     world.send(1);
     world.deliver(0);
 
-    let again = world.peers[0].session.resend().expect("still outstanding");
+    let book = world.peers[0].workbook.clone();
+    let again = world.peers[0]
+        .session
+        .resend(&book)
+        .expect("still outstanding");
     assert_eq!(again.seq, sent.seq, "the same chunk, so the same sequence");
     assert_eq!(again.client, sent.client);
     assert!(
@@ -767,8 +797,14 @@ fn two_clients_sequences_do_not_collide() {
     let mut world = World::new(2);
     world.edit(0, write(0, 0, 1.0));
     world.edit(1, write(5, 0, 2.0));
-    let a = world.peers[0].session.flush().unwrap();
-    let b = world.peers[1].session.flush().unwrap();
+    let a = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
+    let b = world.peers[1]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
     assert_eq!(a.seq, b.seq, "both are each client's first chunk");
     assert_ne!(a.client, b.client);
 
@@ -793,7 +829,10 @@ fn a_successor_leader_without_the_record_would_double_apply() {
             count: 1,
         },
     );
-    let submission = world.peers[0].session.flush().unwrap();
+    let submission = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
     world
         .server
         .commit(&mut world.workbook, &submission)
@@ -819,7 +858,10 @@ fn a_resend_is_recognised_even_after_its_base_was_compacted_away() {
     // duplicate check runs before the base is validated.
     let mut world = World::new(1);
     world.edit(0, write(1, 0, 7.0));
-    let submission = world.peers[0].session.flush().unwrap();
+    let submission = world.peers[0]
+        .session
+        .flush(&world.workbook.clone())
+        .unwrap();
     let Commit::Applied { revision, .. } = world
         .server
         .commit(&mut world.workbook, &submission)
@@ -839,7 +881,7 @@ fn a_resend_is_recognised_even_after_its_base_was_compacted_away() {
                     client: ClientId(2),
                     seq: u64::from(row),
                     base: world.server.revision(),
-                    ops: vec![op],
+                    ops: vec![WireOperation::of(op, &world.workbook)],
                 },
             )
             .unwrap();
@@ -854,4 +896,94 @@ fn a_resend_is_recognised_even_after_its_base_was_compacted_away() {
         Commit::Duplicate { revision },
         "recognised rather than refused for a base that is long gone"
     );
+}
+
+#[test]
+fn a_formula_typed_by_one_client_arrives_intact_at_another() {
+    // COL-12 end to end. Each replica has its own formula arena, and the
+    // sender's is deliberately further along than the receiver's, so a bare
+    // handle would name the wrong entry rather than merely a missing one.
+    let mut world = World::new(2);
+    world.peers[0]
+        .workbook
+        .store_formula(casual_calc_formula::parse("111").unwrap());
+    world.peers[0]
+        .workbook
+        .store_formula(casual_calc_formula::parse("222").unwrap());
+
+    let handle = world.peers[0]
+        .workbook
+        .store_formula(casual_calc_formula::parse("6*7").unwrap());
+    let mut cell = Cell::value(CellValue::Number(42.0));
+    cell.formula = Some(handle);
+    world.edit(
+        0,
+        Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(3, 1),
+            cell: Some(cell),
+        },
+    );
+
+    world.settle();
+    world.assert_converged("a formula crossing replicas");
+
+    for (index, peer) in world.peers.iter().enumerate() {
+        let landed = peer.workbook.sheets[0]
+            .cells
+            .get(CellRef::new(3, 1))
+            .and_then(|c| c.formula)
+            .and_then(|h| peer.workbook.formula(h))
+            .cloned();
+        assert_eq!(
+            landed,
+            Some(casual_calc_formula::parse("6*7").unwrap()),
+            "client {index} has the expression, whatever index it took locally"
+        );
+    }
+
+    let on_server = world.workbook.sheets[0]
+        .cells
+        .get(CellRef::new(3, 1))
+        .and_then(|c| c.formula)
+        .and_then(|h| world.workbook.formula(h))
+        .cloned();
+    assert_eq!(on_server, Some(casual_calc_formula::parse("6*7").unwrap()));
+}
+
+#[test]
+fn a_style_applied_by_one_client_arrives_at_another() {
+    let mut world = World::new(2);
+    // The receiver's style table is not the sender's, so the id cannot travel.
+    world.peers[1]
+        .workbook
+        .intern_style(casual_calc_model::Style {
+            italic: true,
+            ..Default::default()
+        });
+    let bold = casual_calc_model::Style {
+        bold: true,
+        ..Default::default()
+    };
+    let id = world.peers[0].workbook.intern_style(bold.clone());
+
+    world.edit(
+        0,
+        Operation::SetStyle {
+            sheet: 0,
+            at: CellRef::new(2, 2),
+            style: Some(id),
+        },
+    );
+    world.settle();
+
+    for (index, peer) in world.peers.iter().enumerate() {
+        let landed = peer.workbook.sheets[0]
+            .cells
+            .get(CellRef::new(2, 2))
+            .and_then(|c| c.style)
+            .and_then(|s| peer.workbook.styles.get(s))
+            .cloned();
+        assert_eq!(landed, Some(bold.clone()), "client {index} sees it bold");
+    }
 }

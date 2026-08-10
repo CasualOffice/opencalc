@@ -260,6 +260,7 @@ mod tests {
     use casual_calc_transaction::{
         Operation,
         session::{ClientId, Commit, SnapshotPolicy},
+        wire::WireOperation,
     };
 
     use super::*;
@@ -291,15 +292,20 @@ mod tests {
     }
 
     fn chunk(seq: u64, base: u64, row: u32, value: f64) -> Submission {
+        // A plain value carries no handles, so any workbook will package it.
+        let scratch = casual_calc_model::Workbook::new(casual_calc_model::Id::from_parts(9, 9));
         Submission {
             client: ClientId(1),
             seq,
             base,
-            ops: vec![Operation::SetCell {
-                sheet: 0,
-                at: CellRef::new(row, 0),
-                cell: Some(Cell::value(CellValue::Number(value))),
-            }],
+            ops: vec![WireOperation::of(
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(row, 0),
+                    cell: Some(Cell::value(CellValue::Number(value))),
+                },
+                &scratch,
+            )],
         }
     }
 
@@ -414,48 +420,36 @@ mod tests {
         assert_eq!(session.revision(), revision);
     }
 
-    /// A formula handle is an index into the *sending* workbook's arena, so an
-    /// operation carrying one does not mean the same thing on another replica.
+    /// A handle that never went through the wire form still means nothing here.
     ///
-    /// Demonstrated rather than asserted, because this is a gap in the wire
-    /// format that ADR-011 assumed away when it called the op set ready to
-    /// transmit. Tracked as COL-12.
+    /// COL-12 is fixed by packaging operations with what their handles refer
+    /// to; this pins what happens when something skips that, because the
+    /// failure is silent — the chunk commits, and the writer then drops the
+    /// whole cell rather than only its formula.
     #[test]
-    fn a_formula_handle_from_another_replica_does_not_travel() {
-        // A client interns a formula in *its* workbook and gets handle 0.
+    fn an_unpackaged_handle_is_detectable_before_it_is_committed() {
         let mut client = casual_calc_import::import_package(document())
             .unwrap()
             .workbook;
         let handle = client.store_formula(casual_calc_formula::parse("1+2").unwrap());
         let mut cell = Cell::value(CellValue::Number(3.0));
         cell.formula = Some(handle);
+        let op = Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(30, 0),
+            cell: Some(cell),
+        };
 
-        // The server's arena does not have it.
-        let mut session = open();
-        session
-            .commit(
-                &Submission {
-                    client: ClientId(1),
-                    seq: 1,
-                    base: 0,
-                    ops: vec![Operation::SetCell {
-                        sheet: 0,
-                        at: CellRef::new(30, 0),
-                        cell: Some(cell),
-                    }],
-                },
-                100,
-            )
-            .unwrap();
-
-        let bytes = session.assemble().unwrap();
-        let back = casual_calc_import::import_package(bytes).unwrap().workbook;
+        let session = open();
         assert!(
-            back.sheets[0].cells.get(CellRef::new(30, 0)).is_none(),
-            "the cell vanished from the written file: its handle indexed the \
-             sender's formula arena, which does not exist here, and the writer \
-             dropped the whole cell rather than part of it. An operation has to \
-             carry the expression itself (COL-12)"
+            casual_calc_transaction::wire::carries_handles(&op),
+            "it refers to a formula, so it must be packaged before it is sent"
+        );
+        assert_eq!(
+            casual_calc_transaction::wire::dangling_handle(&op, &session.workbook),
+            Some(handle),
+            "and against this workbook the handle resolves to nothing, which is \
+             what a server checks rather than committing and losing the cell"
         );
     }
 
@@ -467,9 +461,10 @@ mod tests {
         // literals, which need no recalculation at all, and consequently
         // passed with the recalculation removed entirely.
         let mut session = open();
-        let handle = session
-            .workbook
-            .store_formula(casual_calc_formula::parse("2*21").unwrap());
+        let mut scratch = casual_calc_import::import_package(document())
+            .unwrap()
+            .workbook;
+        let handle = scratch.store_formula(casual_calc_formula::parse("2*21").unwrap());
         let mut formula_cell = Cell::value(CellValue::Number(0.0));
         formula_cell.formula = Some(handle);
 
@@ -479,11 +474,14 @@ mod tests {
                     client: ClientId(1),
                     seq: 1,
                     base: 0,
-                    ops: vec![Operation::SetCell {
-                        sheet: 0,
-                        at: CellRef::new(25, 0),
-                        cell: Some(formula_cell),
-                    }],
+                    ops: vec![WireOperation::of(
+                        Operation::SetCell {
+                            sheet: 0,
+                            at: CellRef::new(25, 0),
+                            cell: Some(formula_cell),
+                        },
+                        &scratch,
+                    )],
                 },
                 100,
             )
