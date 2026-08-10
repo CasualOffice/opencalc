@@ -133,7 +133,7 @@ fn formula_cells_are_parsed_to_ast_with_cached_value() {
     // Formula parsed into the arena and referenced by the cell.
     let handle = cell.formula.expect("cell has a formula handle");
     let expr = wb.formula(handle).expect("handle resolves in the arena");
-    assert_eq!(expr.to_string(), "(A1*2)");
+    assert_eq!(expr.to_string(), "A1*2");
 
     // Reported as mapped.
     let formula_entry = import
@@ -384,9 +384,9 @@ fn shared_formula_followers_are_expanded_from_their_master() {
     };
     // The master is unchanged; each follower is shifted by its row delta, and
     // the `$`-anchored parts stay put ($D$1 entirely, $A2's column only).
-    assert_eq!(formula_at(0), "((A1*$D$1)+$A2)");
-    assert_eq!(formula_at(1), "((A2*$D$1)+$A3)");
-    assert_eq!(formula_at(2), "((A3*$D$1)+$A4)");
+    assert_eq!(formula_at(0), "A1*$D$1+$A2");
+    assert_eq!(formula_at(1), "A2*$D$1+$A3");
+    assert_eq!(formula_at(2), "A3*$D$1+$A4");
 }
 
 #[test]

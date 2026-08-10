@@ -30,3 +30,9 @@ crates/*/pkg/
 /dist-tarballs/
 node_modules/
 .claude/
+
+# browser-smoke run output. `package-lock.json` IS committed, so CI installs
+# the same Playwright the gate was written against.
+/tests/browser/test-results/
+/tests/browser/playwright-report/
+/tests/browser/blob-report/

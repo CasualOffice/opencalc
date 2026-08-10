@@ -97,10 +97,12 @@ fn written_package_reopens_and_preserves_data() {
     assert_eq!(sheet.view.frozen_rows, 1);
     assert_eq!(wb.defined_names.len(), 1);
 
-    // The formula survived as an AST.
+    // The formula survived as an AST — and comes back written the way it was
+    // written, not re-bracketed, since this is the text the file carries and
+    // the text another spreadsheet will show.
     let a3 = sheet.cells.get(CellRef::new(2, 0)).unwrap();
     let expr = wb.formula(a3.formula.unwrap()).unwrap();
-    assert_eq!(expr.to_string(), "(A1*2)");
+    assert_eq!(expr.to_string(), "A1*2");
 
     // The number-format style survived.
     let b3 = sheet.cells.get(CellRef::new(2, 1)).unwrap();

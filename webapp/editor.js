@@ -2463,8 +2463,7 @@ function refreshFormulaBar() {
     let what = "";
     try { what = enabled ? wasm[label]() : ""; } catch {}
     const text = what ? `${verb} ${what} (${key})` : `${verb} (${key})`;
-    btn.title = text;
-    btn.setAttribute("aria-label", text);
+    setTip(btn, text);
   }
   // Reflect formatting from the selection's top-left (the representative/active
   // cell). For a range/row/column selection state.sel is the *moving end*, which
@@ -6869,6 +6868,20 @@ function initTooltips() {
   });
   document.addEventListener("mousedown", hideTip);
 }
+// Set a control's tooltip after boot, through whichever surface it is using.
+//
+// `tipify` moves `title` onto `data-tip` and *deletes the attribute*, so code
+// that later assigns `node.title` does two wrong things at once: the custom
+// tooltip goes on showing the text it captured at boot, and the native bubble
+// — the thing tipify exists to suppress — reappears underneath it. Undo and
+// Redo are the only tooltips in the editor that change after boot, so they were
+// the only ones that could show this, and they did: both stayed "Undo (Ctrl+Z)"
+// for the life of the page instead of naming the edit they would reverse.
+function setTip(node, text) {
+  if (node.dataset.tip !== undefined) node.dataset.tip = text;
+  else node.title = text;
+  node.setAttribute("aria-label", text);
+}
 // Move an element's `title` to `data-tip` (+ aria-label), suppressing the native tip.
 function tipify(node) {
   const t = node.getAttribute("title");
@@ -10975,6 +10988,11 @@ function seed() {
   for (let c = 0; c < 4; c++) wasm.session_set_style(0, 0, c, true, headerFill);
   wasm.session_set_style(0, 4, 3, true, "");
   wasm.session_set_style(0, 4, 0, true, "");
+  // The seeded sheet is the document, not something the user did to it.
+  // Without this, holding Ctrl+Z takes the demo apart cell by cell and leaves
+  // an empty grid — and Undo starts out enabled on a document nobody has
+  // touched, which is its own small lie.
+  wasm.session_clear_history();
   select(0, 0);
 }
 

@@ -1,0 +1,13 @@
+{
+  "name": "opencalc-browser-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The browser-smoke gate: Playwright against the real editor and a real wasm build.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.48.2"
+  }
+}

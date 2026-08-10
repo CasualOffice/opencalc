@@ -126,6 +126,25 @@ fn roundtrips_through_pretty_printer() {
         "IF(A1>=0,\"pos\",\"neg\")",
         "A1&\"x\"",
         "MyName+1",
+        // The associativity traps, which a fully-bracketed printer could not
+        // get wrong and a minimal one can.
+        "2^3^2",
+        "(2^3)^2",
+        "1-2-3",
+        "1-(2-3)",
+        "8/4/2",
+        "8/(4/2)",
+        "-2^2",
+        "-(2^2)",
+        "1+-2",
+        "-A1%",
+        "(-A1)%",
+        "(1+2)%",
+        "1<2=TRUE",
+        "\"a\"&\"b\"&\"c\"",
+        "1+2&\"x\"",
+        "(1+2)*(3-4)",
+        "SUM(A1:A3)/COUNT(A1:A3)",
     ] {
         let first = parse(input).unwrap_or_else(|e| panic!("parse {input:?}: {e}"));
         let printed = first.to_string();
@@ -216,4 +235,74 @@ fn shifting_leaves_an_unnamed_axis_alone() {
     // A named axis still shifts, so the guard is not simply disabling the shift.
     let normal = crate::shift_references(&parse("SUM(A1:A3)").unwrap(), 5, 0);
     assert_eq!(normal.to_string(), "SUM(A6:A8)");
+}
+
+/// A formula typed the way a person writes one comes back as they wrote it.
+///
+/// Stronger than the AST round-trip above, and only true since the printer
+/// stopped bracketing every operator: `parse` then `print` is the identity on
+/// text that is already minimally bracketed. This is the property a user
+/// actually experiences, because the formula bar shows the *printed* tree —
+/// there is no record of the original text to fall back on — so anything this
+/// test allows to drift is a formula the editor rewrites under them, and
+/// anything it saves is what Excel will show when the file is opened there.
+#[test]
+fn prints_what_was_typed() {
+    for input in [
+        // Precedence that needs no help.
+        "1+2*3",
+        "2*3+1",
+        "1+2*3-4/5",
+        "A1*B1+C1",
+        "-A1+B1",
+        "A1&B1&C1",
+        "A1<B1",
+        "SUM(A1:A9)/COUNT(A1:A9)",
+        "IF(A1>0,B1*2,C1/2)",
+        // Brackets the reader genuinely needs, which must survive.
+        "(1+2)*3",
+        "8/(4/2)",
+        "1-(2-3)",
+        "(2^3)^2",
+        "-(2^2)",
+        "(A1+B1)/(C1-D1)",
+        "(1+2)%",
+        // Right-associative `^` needs none.
+        "2^3^2",
+        // Nothing to bracket at all.
+        "42",
+        "A1",
+        "$B$7",
+        "Sheet2!C3",
+        "SUM(A1:B2,3)",
+        "10%",
+        "TRUE",
+    ] {
+        let printed = parse(input)
+            .unwrap_or_else(|e| panic!("parse {input:?}: {e}"))
+            .to_string();
+        assert_eq!(
+            printed, input,
+            "the editor would show {printed:?} for a cell typed as {input:?}"
+        );
+    }
+}
+
+/// Brackets that were never needed are dropped, which is the change itself.
+///
+/// Pinned as its own behaviour rather than left implied: printing is not
+/// verbatim — it is the tree — so redundant brackets do not survive, and that
+/// is correct. Only the ones the grammar requires come back.
+#[test]
+fn redundant_brackets_are_not_preserved() {
+    for (typed, shown) in [
+        ("(1+2*3)", "1+2*3"),
+        ("1+(2*3)", "1+2*3"),
+        ("((A1))", "A1"),
+        ("(SUM(A1:A3))", "SUM(A1:A3)"),
+        ("2^(3^2)", "2^3^2"),
+        ("(1-2)-3", "1-2-3"),
+    ] {
+        assert_eq!(parse(typed).unwrap().to_string(), shown);
+    }
 }

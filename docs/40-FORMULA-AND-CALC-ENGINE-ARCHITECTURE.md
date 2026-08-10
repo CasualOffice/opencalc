@@ -44,7 +44,7 @@ Consequences the design accounts for from the start:
 ## `casual-calc-formula` — the language
 
 > **Status: implemented (Phase 1A, P1A-002).** Tokenizer + precedence-climbing
-> parser + serializable `Expr` AST + canonical pretty-printer. Subset: literals,
+> parser + serializable `Expr` AST + **minimally-bracketed** printer. Subset: literals,
 > A1 references with `$` anchors and sheet qualification (`Sheet2!A1`,
 > `'My Sheet'!B2`), cell ranges, defined names, function calls, unary `+`/`-`/`%`,
 > and binary arithmetic/comparison/concat with correct precedence and
@@ -59,7 +59,11 @@ Consequences the design accounts for from the start:
   intersection space, union `,`), function calls, references, and names.
 - Produces a **stable AST**. Parsing is error-tolerant enough to preserve a
   malformed formula's text for write-back rather than losing it.
-- Round-trips: `parse → pretty-print → parse` is a fixed point (a Phase 1A gate).
+- Round-trips: `parse → print → parse` is a fixed point (a Phase 1A gate), and
+  `parse → print` is the identity on text that is already minimally bracketed
+  (FID-05). The second matters because a cell stores the *tree*, not the text
+  that was typed: the formula bar shows what the printer emits, and so does the
+  saved file, so a printer that adds brackets rewrites the user's formula.
 
 ### References & the AST
 

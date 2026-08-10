@@ -46,6 +46,40 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-11 — The editor gets a gate, and the gate finds four bugs
+
+**Added**
+
+- **`browser-smoke`** (CI-002), the last job in
+  [docs/15](docs/15-CI-AND-RELEASE-GATES.md)'s contract table that did not
+  exist, and the only one that runs the editor as a person does: Playwright
+  against `webapp/editor.html` on an engine the job builds itself. It asserts
+  through real user surfaces — the name box, the formula bar, the accessibility
+  mirror — so there is no test-only hook to keep in step.
+- **`WorkbookSession::clear_history`** (and `session_clear_history` in WASM),
+  for a host to say "this is where the document starts" after populating a
+  fresh session.
+
+**Fixed** — all four found by `browser-smoke` on its first run, all four
+shipped, none of them visible to any of the 600-odd Rust tests:
+
+- **Undo was one press behind, for every edit** (UX-B04). The editor submits a
+  sheet-metadata bundle after every cell commit; with no table near the cell it
+  differs in nothing, and `History::apply` recorded it anyway — so the first
+  Ctrl+Z popped a phantom and the second did the work. An operation that
+  provably changes nothing is now applied and forgotten. It also no longer
+  clears the redo stack, which it had been discarding for no reason.
+- **Ctrl+Z walked out of the document it opened** (UX-B05). Undo was enabled on
+  a freshly opened document and would take the seeded sheet apart cell by cell.
+- **The undo tooltip never said what it would undo** (UX-B06). The engine's
+  label was written to `title`, which the tooltip layer had already moved to
+  `data-tip` and deleted — so the label went nowhere and the native browser
+  bubble came back.
+- **A typed formula came back rewritten** (FID-05). `=1+2*3` returned as
+  `=(1+(2*3))`, in the formula bar and in the saved `.xlsx`. A cell stores the
+  parsed tree, not the typed text, so the printer is the formula; it now emits
+  the brackets the grammar needs and no others.
+
 ### 2026-08-11 — Frozen panes render headlessly
 
 **Fixed**

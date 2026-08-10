@@ -590,6 +590,30 @@ impl Operation {
     }
 }
 
+/// Whether an operation **provably** changes nothing, so the undo stack should
+/// not carry it.
+///
+/// Conservative on purpose: it answers "can this be shown to be a no-op without
+/// consulting the workbook", and `false` for anything else. Setting a cell to
+/// the value it already holds is also a no-op, and this does not say so —
+/// proving it needs the state the op was written against, which is gone by the
+/// time the inverse comes back. Reporting only what is certain keeps a real
+/// edit from being silently dropped, which is the far worse failure of the two.
+///
+/// [`SheetFields`] is what makes the sheet-metadata case provable at all: an
+/// inverse comes back from [`apply`] narrowed to the fields that actually
+/// differed, so an empty mask *is* the proof.
+fn changes_nothing(op: &Operation) -> bool {
+    match op {
+        Operation::SetSheetMetadata { changed, .. } => *changed == SheetFields::NONE,
+        // Vacuously for an empty batch, and by induction otherwise: a batch is
+        // exactly its members, so one whose every member does nothing does
+        // nothing.
+        Operation::Batch(ops) => ops.iter().all(changes_nothing),
+        _ => false,
+    }
+}
+
 /// A short, human name for an operation, for undo/redo labels.
 ///
 /// Deliberately coarse: a label's job is to say which action is about to be
@@ -901,8 +925,24 @@ impl History {
     }
 
     /// Apply `op`, recording its inverse for undo and clearing the redo stack.
+    ///
+    /// An operation that **changed nothing** is applied and then forgotten: no
+    /// undo entry, and the redo stack survives. This is the same rule a refused
+    /// edit follows in [`WorkbookSession::edit`](../casual_calc_sdk/struct.WorkbookSession.html#method.edit)
+    /// — "must leave no trace, or undo has an entry that undoes nothing" — and
+    /// it was not being kept. The editor calls `session_table_autoexpand` after
+    /// **every** cell commit, which submits a whole-sheet bundle that almost
+    /// always differs in nothing; each one landed on the stack, so the first
+    /// Ctrl+Z after typing a value appeared to do nothing at all and the second
+    /// did the work. A user pressing undo and seeing no change does not press
+    /// it again — they conclude undo is broken, which it was.
     pub fn apply(&mut self, workbook: &mut Workbook, op: Operation) -> Result<(), TxnError> {
         let inverse = apply(workbook, op)?;
+        // Before the redo stack is cleared, because a keystroke that changed
+        // nothing is not a new edit and must not discard what redo was holding.
+        if changes_nothing(&inverse) {
+            return Ok(());
+        }
         self.undo.push(inverse);
         // Oldest first: the entry least likely to be wanted is the one furthest
         // back. A depth of zero means no undo at all, which is a legitimate
@@ -913,6 +953,17 @@ impl History {
         }
         self.redo.clear();
         Ok(())
+    }
+
+    /// Forget everything, making the current state the one nothing precedes.
+    ///
+    /// For the moment a document *becomes* the document: after a host has
+    /// populated a fresh workbook, or after opening a file. Neither is an edit
+    /// the user made, and leaving them on the stack lets Ctrl+Z walk backwards
+    /// out of the document they were given and into an empty sheet.
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
     }
 
     /// Whether there is anything to undo.

@@ -468,7 +468,7 @@ fn relative_and_absolute_refs_both_shift() {
     // The formula cell itself moved A1 -> A3; both refs shifted A5 -> A7.
     assert_eq!(
         formula_text(&wb, 0, 2, 0).as_deref(),
-        Some("(A7+$A$7)"),
+        Some("A7+$A$7"),
         "relative and absolute row refs both shift on insert"
     );
 }
@@ -489,7 +489,7 @@ fn ref_onto_deleted_row_becomes_ref_error() {
     .unwrap();
 
     // A5 sat on the deleted row -> #REF!; B1 (row 0) is untouched.
-    assert_eq!(formula_text(&wb, 0, 0, 0).as_deref(), Some("(#REF!+B1)"));
+    assert_eq!(formula_text(&wb, 0, 0, 0).as_deref(), Some("#REF!+B1"));
 }
 
 #[test]
@@ -1215,7 +1215,7 @@ fn rename_sheet_rewrites_cross_sheet_refs_and_undoes() {
     wb.sheets
         .push(Sheet::new(SheetId(Id::from_parts(2, 2)), "Report"));
     set_formula(&mut wb, 1, 0, 0, "Data!A1+1");
-    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Data!A1+1)"));
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("Data!A1+1"));
 
     // Rename Data -> Facts: the cross-sheet reference must follow.
     let inverse = apply(
@@ -1227,12 +1227,12 @@ fn rename_sheet_rewrites_cross_sheet_refs_and_undoes() {
     )
     .unwrap();
     assert_eq!(wb.sheets[0].name, "Facts");
-    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Facts!A1+1)"));
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("Facts!A1+1"));
 
     // Undo: both the name and the reference revert.
     apply(&mut wb, inverse).unwrap();
     assert_eq!(wb.sheets[0].name, "Data");
-    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("(Data!A1+1)"));
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("Data!A1+1"));
 }
 
 // ---- Defined names (M5-1): undoable define / rename / delete
@@ -1624,4 +1624,227 @@ fn a_structural_delete_drops_the_outline_it_removes_and_moves_the_rest() {
         wb.sheets[0].collapsed_cols.contains(&4),
         "a row delete leaves the column outline alone"
     );
+}
+
+/// An edit that changes nothing must leave no trace on the history.
+///
+/// Found by the `browser-smoke` gate, in the editor, as a user would find it:
+/// type a value, press Ctrl+Z, watch nothing happen, press it again and watch
+/// the value come back. The editor calls `session_table_autoexpand` after every
+/// cell commit — a whole-sheet metadata bundle that, with no table anywhere
+/// near the cell, differs in nothing — and each one was landing on the undo
+/// stack. Undo was one press behind for every user of the editor.
+mod no_op_edits {
+    use super::*;
+    use crate::{SheetFields, SheetMetadata};
+
+    /// The bundle the editor submits after every commit: captured from the
+    /// sheet and handed back unchanged.
+    fn unchanged_bundle(wb: &Workbook) -> Operation {
+        Operation::set_sheet_metadata(0, SheetMetadata::capture(&wb.sheets[0]))
+    }
+
+    #[test]
+    fn a_metadata_bundle_that_differs_in_nothing_is_not_undoable() {
+        let mut wb = workbook();
+        let mut history = History::default();
+
+        let current = wb.clone();
+        history.apply(&mut wb, unchanged_bundle(&current)).unwrap();
+
+        assert!(
+            !history.can_undo(),
+            "nothing changed, so there is nothing to undo — an entry here is \
+             one the user presses Ctrl+Z for and sees no effect from"
+        );
+    }
+
+    #[test]
+    fn the_first_undo_after_a_real_edit_reverses_that_edit() {
+        // The browser symptom, in miniature: an edit, then the no-op bundle the
+        // editor sends after it. One Ctrl+Z must put the value back.
+        let mut wb = workbook();
+        let mut history = History::default();
+
+        history
+            .apply(
+                &mut wb,
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: Some(Cell::value(CellValue::Number(7.0))),
+                },
+            )
+            .unwrap();
+        let after = wb.clone();
+        history.apply(&mut wb, unchanged_bundle(&after)).unwrap();
+
+        history.undo(&mut wb).unwrap();
+        assert_eq!(
+            value_at(&wb, CellRef::new(0, 0)),
+            CellValue::Empty,
+            "one undo, one edit reversed"
+        );
+    }
+
+    #[test]
+    fn a_no_op_does_not_discard_the_redo_stack() {
+        // Clearing redo is how the history says "a new edit happened". Nothing
+        // happened, so a redo the user is one keystroke away from must survive.
+        let mut wb = workbook();
+        let mut history = History::default();
+
+        history
+            .apply(
+                &mut wb,
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: Some(Cell::value(CellValue::Number(7.0))),
+                },
+            )
+            .unwrap();
+        history.undo(&mut wb).unwrap();
+        assert!(history.can_redo());
+
+        let current = wb.clone();
+        history.apply(&mut wb, unchanged_bundle(&current)).unwrap();
+        assert!(history.can_redo(), "the redo was not thrown away");
+
+        history.redo(&mut wb).unwrap();
+        assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(7.0));
+    }
+
+    #[test]
+    fn a_metadata_bundle_that_does_differ_is_still_undoable() {
+        // The guard must not swallow real work. Freezing a row is exactly the
+        // same shape of operation as the no-op above.
+        let mut wb = workbook();
+        let mut history = History::default();
+
+        let mut data = SheetMetadata::capture(&wb.sheets[0]);
+        data.view.frozen_rows = 2;
+        history
+            .apply(&mut wb, Operation::set_sheet_metadata(0, data))
+            .unwrap();
+
+        assert!(history.can_undo(), "a real change is on the stack");
+        history.undo(&mut wb).unwrap();
+        assert_eq!(wb.sheets[0].view.frozen_rows, 0, "and it reverses");
+    }
+
+    #[test]
+    fn a_batch_of_nothing_is_nothing() {
+        let mut wb = workbook();
+        let mut history = History::default();
+        let current = wb.clone();
+
+        history
+            .apply(
+                &mut wb,
+                Operation::Batch(vec![unchanged_bundle(&current), unchanged_bundle(&current)]),
+            )
+            .unwrap();
+        assert!(!history.can_undo());
+
+        // But a batch with one real member in it is a real edit.
+        let mut data = SheetMetadata::capture(&wb.sheets[0]);
+        data.view.frozen_cols = 1;
+        history
+            .apply(
+                &mut wb,
+                Operation::Batch(vec![
+                    unchanged_bundle(&current),
+                    Operation::set_sheet_metadata(0, data),
+                ]),
+            )
+            .unwrap();
+        assert!(history.can_undo(), "one member did something");
+    }
+
+    #[test]
+    fn the_mask_is_what_makes_it_provable() {
+        // The guard rests on `apply` handing back an inverse narrowed to the
+        // fields that actually differed. If that stopped happening, the guard
+        // would silently stop working, so it is asserted directly.
+        let mut wb = workbook();
+        let current = wb.clone();
+        let inverse = apply(&mut wb, unchanged_bundle(&current)).unwrap();
+        assert_eq!(inverse.sheet_fields(), SheetFields::NONE);
+    }
+}
+
+/// Clearing the history: the moment a document becomes the document.
+mod clearing_history {
+    use super::*;
+
+    #[test]
+    fn a_populated_workbook_starts_with_nothing_to_undo() {
+        // What a host does to seed a template. Each write is an edit to the
+        // engine, so without a way to say "this is the starting point" a user
+        // can Ctrl+Z their way out of the document they were handed.
+        let mut wb = workbook();
+        let mut history = History::default();
+        for row in 0..5u32 {
+            history
+                .apply(
+                    &mut wb,
+                    Operation::SetCell {
+                        sheet: 0,
+                        at: CellRef::new(row, 0),
+                        cell: Some(Cell::value(CellValue::Number(f64::from(row)))),
+                    },
+                )
+                .unwrap();
+        }
+        assert!(
+            history.can_undo(),
+            "the seed is on the stack, as it must be"
+        );
+
+        history.clear();
+        assert!(!history.can_undo(), "and then it is the starting point");
+        assert!(!history.can_redo());
+        assert_eq!(
+            value_at(&wb, CellRef::new(4, 0)),
+            CellValue::Number(4.0),
+            "clearing the history keeps the document — it is not an undo"
+        );
+    }
+
+    #[test]
+    fn editing_after_a_clear_is_undoable_back_to_that_point_and_no_further() {
+        let mut wb = workbook();
+        let mut history = History::default();
+        history
+            .apply(
+                &mut wb,
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: Some(Cell::value(CellValue::Number(1.0))),
+                },
+            )
+            .unwrap();
+        history.clear();
+
+        history
+            .apply(
+                &mut wb,
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: Some(Cell::value(CellValue::Number(2.0))),
+                },
+            )
+            .unwrap();
+        history.undo(&mut wb).unwrap();
+
+        assert_eq!(
+            value_at(&wb, CellRef::new(0, 0)),
+            CellValue::Number(1.0),
+            "back to the starting point"
+        );
+        assert!(!history.can_undo(), "and no further back than that");
+    }
 }

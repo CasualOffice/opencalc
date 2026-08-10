@@ -90,6 +90,44 @@ jobs:
           fi
           echo "engine/server boundary intact"
 
+  # The only gate that runs the editor as a user does. Every other job proves
+  # the engine is right; none of them would notice the WebAssembly glue failing
+  # to instantiate, a canvas that never paints, or bindings and engine that
+  # disagree about a signature — a stale `pkg/` once shipped 25 of 222 exports
+  # with every Rust gate green. AGENTS.md requires verifying in a browser
+  # before calling anything done; this is that, on every push.
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+      # Built here, never taken from the tree: `webapp/pkg/` is not committed,
+      # and a gate that would accept a stale build is a gate that cannot catch
+      # a stale build.
+      - name: Build the engine for the browser
+        run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir "$PWD/webapp/pkg"
+      - name: Install the harness
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run the smoke suite
+        working-directory: tests/browser
+        run: npm test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-smoke-failure
+          path: |
+            tests/browser/test-results/
+          retention-days: 7
+
   fuzz-build:
     runs-on: ubuntu-latest
     steps:

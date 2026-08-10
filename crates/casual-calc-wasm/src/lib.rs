@@ -8672,6 +8672,22 @@ pub fn session_redo_label() -> String {
     with_session(|s| s.redo_label().unwrap_or_default().to_owned()).unwrap_or_default()
 }
 
+/// Make the current state the document's starting point, discarding the undo
+/// history.
+///
+/// For a host that has just populated a fresh session — the demo's seeded
+/// sheet, or an embedder restoring a document from its own store. Those writes
+/// are edits as far as the engine is concerned, and without this Ctrl+Z walks
+/// backwards out of the document the user was handed, one cell at a time.
+#[wasm_bindgen]
+pub fn session_clear_history() {
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.clear_history();
+        }
+    });
+}
+
 /// Undo the last edit.
 #[wasm_bindgen]
 pub fn session_undo() -> Result<(), JsError> {
@@ -9104,7 +9120,7 @@ mod tests {
         assert_eq!(session_cell_input(0, 4, 0), "1"); // A5  (A1 stays at origin)
         assert_eq!(session_cell_input(0, 5, 0), "2"); // A6  (B1 → below origin)
         // A2's formula transposes to B5; it moved (dr=+3, dc=+1), so =A1*10 → B4*10.
-        assert_eq!(session_cell_input(0, 4, 1), "=(B4*10)"); // B5
+        assert_eq!(session_cell_input(0, 4, 1), "=B4*10"); // B5
 
         // --- Formulas-only: value+formula in, target's formatting kept. ---
         session_new();
@@ -9115,7 +9131,7 @@ mod tests {
         session_clip_copy(0, 1, 0, 1, 0, false); // copy A2
         session_clip_paste_mode(0, 4, 3, "formulas").unwrap(); // onto D5
         // A2 moved to D5 (dr=+3, dc=+3): =A1+1 → =(D4+1).
-        assert_eq!(session_cell_input(0, 4, 3), "=(D4+1)");
+        assert_eq!(session_cell_input(0, 4, 3), "=D4+1");
         // The target's bold formatting is preserved (formulas-only ignores source style).
         assert!(
             session_cell_format(0, 4, 3).contains("\"b\":1"),

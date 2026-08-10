@@ -414,6 +414,23 @@ impl WorkbookSession {
         Ok(())
     }
 
+    /// Discard the undo history, making the current state the document's
+    /// starting point.
+    ///
+    /// Call it after populating a fresh session, the way a host seeds a
+    /// template or restores a document from its own store. Those writes go
+    /// through [`edit`](Self::edit) so they recalculate and stay consistent,
+    /// which also means they land on the undo stack — and a user who presses
+    /// Ctrl+Z enough times then walks backwards out of the document they were
+    /// given, one cell at a time, into an empty sheet. No spreadsheet does
+    /// that, because opening a file is not an edit.
+    ///
+    /// [`open`](Self::open) has no need of it: it builds the workbook by import
+    /// rather than by editing, so its history is empty already.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
     /// Recompute all formula cells — Excel's Calculate Now, and the only thing
     /// that brings a manual-mode workbook up to date.
     pub fn recalculate(&mut self) {

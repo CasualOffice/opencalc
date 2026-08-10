@@ -5,10 +5,10 @@ CI is part of the architecture, not an afterthought. The job names below are a
 doc defines the gates for when the workspace exists (Phase 0 onward) and records
 which gates are not yet built.
 
-> **Current state:** ten jobs run on every push — `format`, `lint`, `test`,
-> `docs`, `wasm`, `benchmark-smoke`, `repository-policy`, `fuzz-build`,
-> `dependency-policy`, and a three-platform matrix including MSRV. `browser-smoke`
-> is the one in the table below that does not exist yet.
+> **Current state:** eleven jobs run on every push — `format`, `lint`, `test`,
+> `docs`, `wasm`, `benchmark-smoke`, `browser-smoke`, `repository-policy`,
+> `fuzz-build`, `dependency-policy`, and a three-platform matrix including MSRV.
+> Every job in the table below exists.
 
 ## PR gates
 
@@ -24,10 +24,34 @@ which gates are not yet built.
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
-| `browser-smoke` | `wasm-pack` build + Playwright unit/e2e on the grid editor | The editor loads and paints |
+| `browser-smoke` | `wasm-pack` build + Playwright against `webapp/editor.html` | The editor loads, paints, calculates, edits and undoes (**implemented**, CI-002) |
 
 Actions are pinned to full commit SHAs; workflows run read-only where possible;
 concurrency-cancel is on.
+
+### What `browser-smoke` is for
+
+It is the only gate that runs the editor the way a person does, and it exists
+because everything else here proves the *engine* is right. None of the Rust jobs
+would notice the WebAssembly glue failing to instantiate, a canvas that never
+paints, or bindings and engine that disagree about a signature — a stale
+`webapp/pkg/` once shipped 25 of 222 exports with every gate green. AGENTS.md
+requires verifying in a browser before calling anything done; this is that,
+automatically, on every push.
+
+It **builds the engine itself** rather than taking `webapp/pkg/` from the tree
+(which is not committed anyway): a gate that would accept a stale build cannot
+catch a stale build. It asserts through real user surfaces only — the name box,
+the formula bar, and the accessibility mirror the editor maintains of the
+visible cells — so there is no test-only hook to keep in step, and a failure in
+the mirror is a failure a screen-reader user would have hit.
+
+It runs with **no retries**, deliberately: the gate is here to catch a real
+breakage, and a retry turns an intermittent one — the kind most worth knowing
+about — into a pass.
+
+Its first run found four defects, all of them shipped and none visible to any
+Rust test: see CI-002 in [14](14-EXECUTION-TRACKER.md).
 
 ## Determinism & fidelity gates (spreadsheet-specific)
 

@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(shifted("$A1", 2, 3), "$A3");
         assert_eq!(shifted("A$1", 2, 3), "D$1");
         assert_eq!(shifted("SUM(A1:A3)", 1, 0), "SUM(A2:A4)");
-        assert_eq!(shifted("A1+$B$2*C1", 1, 1), "(B2+($B$2*D2))");
+        assert_eq!(shifted("A1+$B$2*C1", 1, 1), "B2+$B$2*D2");
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod tests {
         // Only the matching sheet is touched inside a larger expression.
         assert_eq!(
             renamed("Old!A1+Other!B2", "Old", "New"),
-            ("(New!A1+Other!B2)".into(), true)
+            ("New!A1+Other!B2".into(), true)
         );
     }
 
