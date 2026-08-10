@@ -2,7 +2,7 @@
 
 use casual_calc_formula::parse;
 use casual_calc_model::{
-    Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook,
+    Cell, CellComment, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook,
 };
 
 use crate::{History, Operation, apply};
@@ -963,13 +963,13 @@ fn set_sheet_metadata_is_self_inverse() {
     wb.sheets[0].view.frozen_cols = 2;
     assert_round_trip_strict(
         wb,
-        Operation::SetSheetMetadata {
-            sheet: 0,
-            data: Box::new(crate::SheetMetadata {
+        Operation::set_sheet_metadata(
+            0,
+            crate::SheetMetadata {
                 merges: vec![merge(3, 3, 4, 4)],
                 ..Default::default()
-            }),
-        },
+            },
+        ),
     );
 }
 
@@ -1385,14 +1385,14 @@ fn set_sheet_metadata_restores_the_filter_on_undo() {
 
     let inverse = apply(
         &mut wb,
-        Operation::SetSheetMetadata {
-            sheet: 0,
-            data: Box::new(crate::SheetMetadata {
+        Operation::set_sheet_metadata(
+            0,
+            crate::SheetMetadata {
                 auto_filter: Some(with_rule),
                 filter_hidden: [4u32].into_iter().collect(),
                 ..Default::default()
-            }),
-        },
+            },
+        ),
     )
     .unwrap();
     assert!(wb.sheets[0].is_row_hidden(4));
@@ -1429,14 +1429,7 @@ fn sheet_metadata_install_returns_the_exact_prior_bundle() {
     wb.sheets[0].hidden_rows.insert(3);
 
     let replacement = crate::SheetMetadata::default();
-    let inverse = apply(
-        &mut wb,
-        Operation::SetSheetMetadata {
-            sheet: 0,
-            data: Box::new(replacement),
-        },
-    )
-    .unwrap();
+    let inverse = apply(&mut wb, Operation::set_sheet_metadata(0, replacement)).unwrap();
     assert!(wb.sheets[0].row_outline_levels.is_empty());
     assert!(wb.sheets[0].collapsed_rows.is_empty());
 
@@ -1445,4 +1438,131 @@ fn sheet_metadata_install_returns_the_exact_prior_bundle() {
     assert_eq!(wb.sheets[0].row_level(3), 2);
     assert!(wb.sheets[0].collapsed_rows.contains(&5));
     assert!(wb.sheets[0].is_row_hidden(3));
+}
+
+// ---------------------------------------------------------------------------
+// The change mask (COL-02). A metadata op declares the whole bundle; `apply`
+// narrows it to what actually differs, which is what stops undo over-reaching
+// and what lets two concurrent edits to different fields merge instead of one
+// silently discarding the other.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_narrows_a_whole_bundle_to_the_fields_that_actually_changed() {
+    let mut wb = workbook();
+    let mut data = crate::SheetMetadata::capture(&wb.sheets[0]);
+    data.view.hide_gridlines = !data.view.hide_gridlines;
+
+    let inverse = apply(&mut wb, Operation::set_sheet_metadata(0, data)).unwrap();
+
+    // Declared ALL, but only the view differs — so that is all the op is.
+    assert_eq!(inverse.sheet_fields(), crate::SheetFields::VIEW);
+}
+
+#[test]
+fn an_op_that_changes_nothing_narrows_to_nothing() {
+    let mut wb = workbook();
+    let unchanged = crate::SheetMetadata::capture(&wb.sheets[0]);
+
+    let inverse = apply(&mut wb, Operation::set_sheet_metadata(0, unchanged)).unwrap();
+
+    assert!(inverse.sheet_fields().is_empty());
+}
+
+#[test]
+fn the_inverse_restores_only_the_field_the_op_touched() {
+    let mut wb = workbook();
+    wb.sheets[0].comments.clear();
+
+    // One edit changes the view.
+    let mut data = crate::SheetMetadata::capture(&wb.sheets[0]);
+    data.view.hide_gridlines = true;
+    let inverse = apply(&mut wb, Operation::set_sheet_metadata(0, data)).unwrap();
+
+    // Something else then changes a *different* field — as a second user would.
+    wb.sheets[0].hidden_rows.insert(7);
+
+    // Undoing the first edit must not reach across and undo the second. With a
+    // whole-bundle inverse it would: the snapshot predates the hidden row.
+    apply(&mut wb, inverse).unwrap();
+    assert!(!wb.sheets[0].view.hide_gridlines, "the view is restored");
+    assert!(
+        wb.sheets[0].hidden_rows.contains(&7),
+        "the unrelated field survives the undo"
+    );
+}
+
+#[test]
+fn concurrent_edits_to_different_fields_are_distinguishable() {
+    // The property the collaboration transform is built on: two ops generated
+    // from the same base that touch disjoint fields report disjoint masks, so
+    // they can be merged rather than ordered.
+    let mut wb = workbook();
+    let base = crate::SheetMetadata::capture(&wb.sheets[0]);
+
+    let mut resize = base.clone();
+    resize.columns.sizes.insert(2, 140);
+
+    let mut comment = base.clone();
+    comment
+        .comments
+        .push(CellComment::note(CellRef::new(0, 0), "second user", None));
+
+    let a = apply(&mut wb.clone(), Operation::set_sheet_metadata(0, resize))
+        .unwrap()
+        .sheet_fields();
+    let b = apply(&mut wb, Operation::set_sheet_metadata(0, comment))
+        .unwrap()
+        .sheet_fields();
+
+    assert!(
+        !a.intersects(b),
+        "a column resize and a comment do not collide"
+    );
+    assert_eq!(a, crate::SheetFields::COLUMNS);
+    assert_eq!(b, crate::SheetFields::COMMENTS);
+}
+
+#[test]
+fn concurrent_edits_to_the_same_field_do_collide() {
+    // The other half: same field, so the transform must order them rather than
+    // merge. A mask that reported these as disjoint would lose one silently.
+    let mut wb = workbook();
+    let base = crate::SheetMetadata::capture(&wb.sheets[0]);
+
+    let mut one = base.clone();
+    one.columns.sizes.insert(2, 140);
+    let mut two = base.clone();
+    two.columns.sizes.insert(5, 200);
+
+    let a = apply(&mut wb.clone(), Operation::set_sheet_metadata(0, one))
+        .unwrap()
+        .sheet_fields();
+    let b = apply(&mut wb, Operation::set_sheet_metadata(0, two))
+        .unwrap()
+        .sheet_fields();
+
+    assert!(a.intersects(b), "two column resizes are the same field");
+}
+
+#[test]
+fn a_batch_reports_the_union_of_its_metadata_fields() {
+    let mut wb = workbook();
+    let base = crate::SheetMetadata::capture(&wb.sheets[0]);
+
+    let mut view = base.clone();
+    view.view.hide_gridlines = true;
+    let mut cols = base.clone();
+    cols.columns.sizes.insert(1, 99);
+
+    let batch = Operation::Batch(vec![
+        Operation::set_sheet_metadata(0, view),
+        Operation::set_sheet_metadata(0, cols),
+    ]);
+    let inverse = apply(&mut wb, batch).unwrap();
+
+    assert_eq!(
+        inverse.sheet_fields(),
+        crate::SheetFields::VIEW.union(crate::SheetFields::COLUMNS)
+    );
 }

@@ -206,10 +206,14 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
 /// merges, sizing, hidden lines, and frozen panes the delete may have dropped —
 /// re-inserting an empty band cannot resurrect them.
 fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
-    Operation::SetSheetMetadata {
+    // `ALL` and not a narrower set on purpose: this is a *pre*-mutation
+    // snapshot, taken before anyone knows which fields the delete will drop.
+    // `apply` narrows it against the post-delete sheet when the undo runs,
+    // which is the only moment both states exist.
+    Operation::set_sheet_metadata(
         sheet,
-        data: Box::new(crate::SheetMetadata::capture(&workbook.sheets[sheet])),
-    }
+        crate::SheetMetadata::capture(&workbook.sheets[sheet]),
+    )
 }
 
 /// The along-axis sizing, hidden set, and frozen-count fields for `axis`. All

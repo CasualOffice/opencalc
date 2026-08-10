@@ -1619,10 +1619,7 @@ pub fn session_set_totals_function(
         let cell_op = build_set_op(session, sheet, at, &text);
         session
             .edit(EditOperation::Batch(vec![
-                EditOperation::SetSheetMetadata {
-                    sheet,
-                    data: Box::new(data),
-                },
+                EditOperation::set_sheet_metadata(sheet, data),
                 cell_op,
             ]))
             .map_err(js)
@@ -1841,10 +1838,7 @@ pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Resul
             }
         }
 
-        let mut ops = vec![EditOperation::SetSheetMetadata {
-            sheet,
-            data: Box::new(data),
-        }];
+        let mut ops = vec![EditOperation::set_sheet_metadata(sheet, data)];
         // Turning the row off has to clear what it held: the range shrinks but
         // the cells do not move, so a stale "Total" would be left sitting under
         // the table looking like data.
@@ -2808,10 +2802,7 @@ fn apply_pivot(
         let mut data = SheetMetadata::capture(&sh);
         data.pivots[index] = updated;
         session
-            .edit(EditOperation::SetSheetMetadata {
-                sheet,
-                data: Box::new(data),
-            })
+            .edit(EditOperation::set_sheet_metadata(sheet, data))
             .map_err(js)?;
         return Ok(String::new());
     }
@@ -2849,10 +2840,7 @@ fn apply_pivot(
     for (col, width) in plan.widths {
         data.columns.sizes.insert(col, width);
     }
-    let mut ops: Vec<EditOperation> = vec![EditOperation::SetSheetMetadata {
-        sheet,
-        data: Box::new(data),
-    }];
+    let mut ops: Vec<EditOperation> = vec![EditOperation::set_sheet_metadata(sheet, data)];
     for (at, cell) in plan.cells {
         ops.push(EditOperation::SetCell { sheet, at, cell });
     }
@@ -2942,10 +2930,7 @@ pub fn session_delete_pivot(sheet: usize, index: usize) -> Result<(), JsError> {
         };
         let mut data = SheetMetadata::capture(&sh);
         data.pivots.remove(index);
-        let mut ops: Vec<EditOperation> = vec![EditOperation::SetSheetMetadata {
-            sheet,
-            data: Box::new(data),
-        }];
+        let mut ops: Vec<EditOperation> = vec![EditOperation::set_sheet_metadata(sheet, data)];
         // The report goes with the definition. Leaving the figures behind would
         // strand a block that looks live, updates from nothing, and quietly
         // ages.
@@ -3364,10 +3349,10 @@ fn commit_edit(op: EditOperation) -> Result<(), JsError> {
 /// edits that dirty the document. `None` if the sheet index is out of range.
 fn current_sheet_metadata(session: &WorkbookSession, sheet: usize) -> Option<EditOperation> {
     let sh = session.workbook().sheets.get(sheet)?;
-    Some(EditOperation::SetSheetMetadata {
+    Some(EditOperation::set_sheet_metadata(
         sheet,
-        data: Box::new(SheetMetadata::capture(sh)),
-    })
+        SheetMetadata::capture(sh),
+    ))
 }
 
 /// Insert `count` blank rows before `at` (undoable; rewrites formula refs).
@@ -6834,10 +6819,7 @@ pub fn session_sort_range_multi(
         if let Some(sh) = session.workbook().sheets.get(sheet).cloned() {
             let mut data = SheetMetadata::capture(&sh);
             data.sort_state = Some(sort);
-            ops.push(EditOperation::SetSheetMetadata {
-                sheet,
-                data: Box::new(data),
-            });
+            ops.push(EditOperation::set_sheet_metadata(sheet, data));
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
     })
@@ -7053,10 +7035,7 @@ fn edit_sheet_metadata(
         let mut data = SheetMetadata::capture(&sh);
         edit(&sh, &mut data);
         session
-            .edit(EditOperation::SetSheetMetadata {
-                sheet,
-                data: Box::new(data),
-            })
+            .edit(EditOperation::set_sheet_metadata(sheet, data))
             .map_err(js)
     })
 }

@@ -130,6 +130,140 @@ pub struct SheetMetadata {
     pub sort_state: Option<SortState>,
 }
 
+/// Which fields of a [`SheetMetadata`] bundle an operation actually changes.
+///
+/// The bundle travels whole because that is what makes its inverse correct, but
+/// "whole" and "changed" are different questions, and only the second one is
+/// answerable by looking at the op. Recording it matters for two reasons.
+///
+/// **Undo stops over-reaching.** Installing twenty-three fields to change one
+/// means undo puts twenty-three back, so it reverses edits the user never asked
+/// it to.
+///
+/// **Concurrent edits stop destroying each other.** Under the operational
+/// transform in [ADR-011](../../../docs/56-COLLABORATION-CONCURRENCY-DESIGN.md),
+/// two ops that touch disjoint fields must merge rather than one overwriting
+/// the other. Without a mask there is no way to tell disjoint from
+/// conflicting: one person resizing a column and another adding a comment
+/// produce two indistinguishable whole-sheet bundles, and the later one wins
+/// entirely. That is silent data loss, which this project does not do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SheetFields(u32);
+
+impl SheetFields {
+    /// No fields — an operation that changes nothing.
+    pub const NONE: Self = Self(0);
+    /// Every field, including any added later.
+    pub const ALL: Self = Self(u32::MAX);
+
+    /// Whether every field in `other` is present here.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Fields present in either.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Fields present in both — how an op's declared intent is narrowed to what
+    /// it turned out to change.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Whether any two operations touch a common field, and so cannot simply be
+    /// merged.
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// Whether this changes nothing.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Generates the field constants, the diff and the masked install from **one**
+/// list, so the three cannot disagree.
+///
+/// Written as a macro rather than by hand for a specific reason: this bundle
+/// has grown from six fields to twenty-three, and every growth added a line to
+/// `capture` and a line to `install`. A mask adds two more places to forget,
+/// and a field silently missing from the diff is an edit that never merges and
+/// never conflicts — it just vanishes under concurrency. The list is written
+/// once.
+macro_rules! sheet_fields {
+    ($($bit:expr, $konst:ident, $field:ident;)+) => {
+        impl SheetFields {
+            $(
+                #[doc = concat!("The `", stringify!($field), "` field.")]
+                pub const $konst: Self = Self(1 << $bit);
+            )+
+        }
+
+        impl SheetMetadata {
+            /// The fields in which this bundle differs from `base`.
+            #[must_use]
+            pub fn diff(&self, base: &Self) -> SheetFields {
+                let mut changed = SheetFields::NONE;
+                $(
+                    if self.$field != base.$field {
+                        changed = changed.union(SheetFields::$konst);
+                    }
+                )+
+                changed
+            }
+
+            /// Install only the masked fields, returning the sheet's prior state.
+            ///
+            /// The returned bundle is a full snapshot so it remains a valid
+            /// inverse on its own, but only the masked fields are meaningful —
+            /// the inverse carries the same mask.
+            pub fn install_masked(self, sheet: &mut Sheet, mask: SheetFields) -> Self {
+                let previous = Self::capture(sheet);
+                $(
+                    if mask.contains(SheetFields::$konst) {
+                        sheet.$field = self.$field;
+                    }
+                )+
+                previous
+            }
+        }
+    };
+}
+
+sheet_fields! {
+    0,  MERGES,              merges;
+    1,  COLUMNS,             columns;
+    2,  ROWS,                rows;
+    3,  HIDDEN_ROWS,         hidden_rows;
+    4,  HIDDEN_COLS,         hidden_cols;
+    5,  VIEW,                view;
+    6,  AUTO_FILTER,         auto_filter;
+    7,  FILTER_HIDDEN,       filter_hidden;
+    8,  ROW_OUTLINE_LEVELS,  row_outline_levels;
+    9,  COL_OUTLINE_LEVELS,  col_outline_levels;
+    10, COLLAPSED_ROWS,      collapsed_rows;
+    11, COLLAPSED_COLS,      collapsed_cols;
+    12, VALIDATIONS,         validations;
+    13, CONDITIONAL_FORMATS, conditional_formats;
+    14, COMMENTS,            comments;
+    15, VISIBILITY,          visibility;
+    16, PROTECTION,          protection;
+    17, HYPERLINKS,          hyperlinks;
+    18, TABLES,              tables;
+    19, CHARTS,              charts;
+    20, PIVOTS,              pivots;
+    21, PRINT,               print;
+    22, SORT_STATE,          sort_state;
+}
+
 impl SheetMetadata {
     /// A snapshot of a sheet's positional metadata.
     pub fn capture(sheet: &Sheet) -> Self {
@@ -160,8 +294,9 @@ impl SheetMetadata {
         }
     }
 
-    /// Install this bundle on `sheet`, returning what was there before — the
-    /// exact inverse.
+    /// Install every field, returning what was there before — the exact
+    /// inverse. Equivalent to [`Self::install_masked`] with
+    /// [`SheetFields::ALL`].
     pub fn install(self, sheet: &mut Sheet) -> Self {
         Self {
             merges: std::mem::replace(&mut sheet.merges, self.merges),
@@ -312,6 +447,10 @@ pub enum Operation {
         /// and an unboxed variant would pad every `SetCell` on the undo stack up
         /// to its size.
         data: Box<SheetMetadata>,
+        /// Which fields to install. Callers may pass [`SheetFields::ALL`] and
+        /// let [`apply`] narrow it to what actually differs; the inverse always
+        /// carries the narrowed set, so undo touches only what the op touched.
+        changed: SheetFields,
     },
     /// Insert a fully-formed sheet at position `index`, shifting later sheets
     /// right. The caller assigns the sheet's id and name; the inverse removes it.
@@ -358,6 +497,41 @@ pub enum Operation {
     SetDefinedNames(Vec<DefinedName>),
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
+}
+
+impl Operation {
+    /// A metadata change whose extent [`apply`] works out for itself.
+    ///
+    /// The ergonomic path is "capture the sheet, change one field, submit", and
+    /// the caller genuinely does not know which field it changed by the time it
+    /// submits — it handed a mutable bundle to whatever edited it. Declaring
+    /// `ALL` and letting `apply` narrow to the real difference is therefore not
+    /// a shortcut; it is the only place with both the old and new state in hand.
+    #[must_use]
+    pub fn set_sheet_metadata(sheet: usize, data: SheetMetadata) -> Self {
+        Self::SetSheetMetadata {
+            sheet,
+            data: Box::new(data),
+            changed: SheetFields::ALL,
+        }
+    }
+
+    /// Which sheet-metadata fields this operation changes, if any.
+    ///
+    /// The collaboration layer's transform needs this to tell two concurrent
+    /// edits apart: disjoint sets merge, overlapping ones are resolved by
+    /// server order. Everything that is not a metadata change reports
+    /// [`SheetFields::NONE`], since it cannot collide on this axis at all.
+    #[must_use]
+    pub fn sheet_fields(&self) -> SheetFields {
+        match self {
+            Self::SetSheetMetadata { changed, .. } => *changed,
+            Self::Batch(ops) => ops
+                .iter()
+                .fold(SheetFields::NONE, |acc, op| acc.union(op.sheet_fields())),
+            _ => SheetFields::NONE,
+        }
+    }
 }
 
 /// A short, human name for an operation, for undo/redo labels.
@@ -457,17 +631,27 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         Operation::DeleteColumns { sheet, at, count } => {
             structural::delete(workbook, sheet, Axis::Col, at, count)
         }
-        Operation::SetSheetMetadata { sheet, data } => {
+        Operation::SetSheetMetadata {
+            sheet,
+            data,
+            changed,
+        } => {
             let target = workbook
                 .sheets
                 .get_mut(sheet)
                 .ok_or(TxnError::SheetNotFound { index: sheet })?;
-            // Swap the whole bundle in, handing back the prior contents as the
-            // inverse.
-            let previous = data.install(target);
+            // Narrow the declared intent to what the bundle actually differs in.
+            // A caller that passes `ALL` — which is most of them, because the
+            // ergonomic path is "capture the sheet, change one field, submit" —
+            // gets a precise op for free, and the inverse inherits it. That is
+            // what stops undo reversing twenty-two fields nobody touched, and
+            // what lets two concurrent edits to different fields merge.
+            let effective = changed.intersection(data.diff(&SheetMetadata::capture(target)));
+            let previous = data.install_masked(target, effective);
             Ok(Operation::SetSheetMetadata {
                 sheet,
                 data: Box::new(previous),
+                changed: effective,
             })
         }
         Operation::InsertSheet { index, sheet } => {
