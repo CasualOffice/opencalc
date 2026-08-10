@@ -484,3 +484,55 @@ fn a_snapshot_without_chart_ids_round_trips_byte_identically() {
         "and writing it back produces the same bytes"
     );
 }
+
+/// Retained parts survive a model snapshot, bytes intact.
+///
+/// Worth pinning because a design document asserted the opposite — that a
+/// collaboration session restoring from a snapshot would silently lose every
+/// unrecognised chart and VBA part — and built a rule on it. It does not: the
+/// retention side table is serialized like everything else. The rule was
+/// removed; this keeps the fact from drifting back into doubt.
+#[test]
+fn retained_parts_survive_a_model_snapshot() {
+    let mut wb = Workbook::new(wb_id());
+    wb.retained_parts.push(crate::RetainedPart {
+        path: "xl/charts/chart1.xml".into(),
+        bytes: b"<c:chartSpace/>".to_vec(),
+        content_type: Some("application/vnd.chart+xml".into()),
+    });
+
+    let back = Workbook::from_snapshot(&wb.to_snapshot().unwrap()).unwrap();
+
+    assert_eq!(back.retained_parts.len(), 1);
+    assert_eq!(back.retained_parts[0].bytes, b"<c:chartSpace/>");
+    assert_eq!(
+        back.retained_parts[0].content_type.as_deref(),
+        Some("application/vnd.chart+xml"),
+        "the content-type override too, without which the package is invalid"
+    );
+}
+
+/// A retained part costs roughly four times its size in a snapshot.
+///
+/// `serde_json` writes `Vec<u8>` as an array of decimal numbers — `[171,171,…]`
+/// — so a megabyte of embedded image becomes about four megabytes of JSON.
+/// That is fine for a golden fixture and expensive for something written every
+/// two hundred revisions and read on every cold start, which is what drove
+/// storing retained parts once per session rather than in each snapshot.
+#[test]
+fn retained_bytes_cost_about_four_times_their_size_in_a_snapshot() {
+    let mut wb = Workbook::new(wb_id());
+    wb.retained_parts.push(crate::RetainedPart {
+        path: "xl/media/image1.png".into(),
+        bytes: vec![0xAB; 1024],
+        content_type: Some("image/png".into()),
+    });
+
+    let baseline = Workbook::new(wb_id()).to_snapshot().unwrap().len();
+    let overhead = wb.to_snapshot().unwrap().len() - baseline;
+
+    assert!(
+        (3 * 1024..=5 * 1024).contains(&overhead),
+        "expected roughly 4x for 1 KiB of retained bytes, measured {overhead}"
+    );
+}

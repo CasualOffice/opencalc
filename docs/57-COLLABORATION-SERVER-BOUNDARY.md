@@ -91,28 +91,46 @@ setting, not only a performance one, and the default should be aggressive —
 quiesce is a save point precisely because "everyone stopped typing" is the
 cheapest moment to make the last minutes safe.
 
-## The fidelity trap this design walks into
+## Retained parts: the cost, not a trap
 
-**A session must start from the original file, not from a model snapshot.**
+**Corrected.** An earlier revision of this document asserted that a session
+restoring from a model snapshot would silently drop every unrecognised chart,
+VBA part and `customXml` — that only the original file carried them — and built
+a rule on it: *a session must start from the original bytes or refuse to
+start*.
 
-[ADR-007](08-ADR-REGISTER.md) makes retained bytes authoritative for everything
-the model does not represent — an unrecognised chart, a VBA part, `customXml`,
-a drawing with shapes we do not model. That side table is built by *importing
-the file*. A session that began from a model-only snapshot would be internally
-consistent, converge perfectly, and write back a document with every preserved
-part silently removed.
+That is wrong. `Workbook::retained_parts` is serialized like every other field,
+so a snapshot carries the retention table with the bytes intact. Restoring from
+one is faithful. The claim was made from reading the import path rather than
+from testing the snapshot, and it is now
+[pinned by a test](../crates/casual-calc-model) so it cannot drift back into
+doubt.
 
-That is the exact failure the entire fidelity effort exists to prevent, and
-collaboration is the one path that could reintroduce it — because it is the
-only path where the document is reconstructed from something other than the
-bytes it arrived as. So:
+What *is* true is a cost, and it has a number:
 
-- the session's durable state is **the original bytes, the model snapshot, and
-  the operation log** — not the snapshot alone;
-- the callback assembles from the retention path exactly as a single-user save
-  does;
-- a session that cannot obtain the original bytes **refuses to start** rather
-  than proceeding with a lossy copy.
+> **A retained part occupies about four times its size in a snapshot.**
+> `serde_json` writes `Vec<u8>` as an array of decimal numbers, so a megabyte
+> of embedded image becomes roughly four megabytes of JSON. Measured, not
+> estimated.
+
+That is unremarkable for a golden fixture and expensive for something written
+every two hundred revisions and read on every cold start — a workbook with 20 MB
+of embedded media would make each snapshot around 80 MB, and cold start is the
+normal case on hibernating compute.
+
+The design consequence is small, because retained parts have a property that
+makes it easy: **they are inert.** The model's own documentation says so — a
+retained part is never parsed, never edited, and written back byte for byte. So
+they cannot change during a session, which means they do not belong in
+something written repeatedly:
+
+- the session stores its retained parts **once**, with the document;
+- the periodic snapshot carries the **mutable** model, and refers to them;
+- restoring joins the two back together.
+
+The original file is therefore still worth keeping — not because fidelity
+depends on it, but because it is where the retained parts came from and the
+cheapest place to keep them.
 
 ## Webhooks now, WOPI later — and not foreclosed
 
@@ -307,9 +325,9 @@ outcome.
 
 ### What replication costs
 
-Memory, per copy: the workbook, and the original bytes the retention path needs
-(see the fidelity trap above — those are not optional). For a large workbook
-that is not small, and three copies of a hot document is three times it.
+Memory, per copy: the workbook, including its retained parts. For a workbook
+with embedded media that is not small, and three copies of a hot document is
+three times it.
 
 The replication factor is therefore a dial between failover speed and memory,
 not a value to fix once. Two in-sync copies gives instant promotion; one plus
@@ -366,8 +384,7 @@ thousands, so a retry is cheap and rare.
 
 Caches, and nothing that cannot be rebuilt:
 
-- the workbook, its revision, and the **original bytes** the retention path
-  needs (see the fidelity trap above — this is not optional state);
+- the workbook, its revision, and its retained parts;
 - rehydrated from snapshot-plus-tail on a miss, which is what
   [COL-07](14-EXECUTION-TRACKER.md) exists to make cheap.
 
@@ -419,14 +436,15 @@ session is at five hundred. On join the server hands out **the model snapshot
 and its revision**, which the browser engine loads directly. No re-import, and
 exactly the state everyone else is on.
 
-The **original file bytes stay with the server**, because that is where the
-retention path needs them (see the fidelity trap). This splits cleanly and has
-a consequence worth stating:
+The **original file stays with the server**, which is where the retained parts
+live (see below). A client could in principle be sent them too, but there is no
+reason to: it never assembles the file.
 
-> **A client in a session cannot save.** It does not hold the retained parts,
-> so anything it wrote would be the lossy copy this design exists to prevent.
-> `save()` in a session must be refused or routed through the server, which is
-> the one thing that has everything needed to write a faithful file.
+> **A client in a session does not save.** The server does, because it is the
+> one place holding the ordered document *and* the retained parts, and because
+> a client saving independently would produce a file from its own view of a
+> revision that may not be the committed one. `save()` in a session is routed
+> through the server rather than performed locally.
 
 That is an SDK-visible change ([55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md))
 and belongs with the collaboration work, not before it.
