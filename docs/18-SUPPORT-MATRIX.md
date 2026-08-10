@@ -55,7 +55,8 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Number formats (built-in + custom) | ● | ● | n/a | Sections, colours, literal runs, elapsed time, locale-specific month/day names |
 | Styles: fonts, fills, borders, alignment | ● | ● | n/a | Incl. gradients, patterns, diagonals, double lines, super/subscript |
 | Rich text runs | ● | ● | n/a | FID-02, FC-11 |
-| Merged ranges, frozen panes, splits | ● | ● | n/a | Frozen panes split in the canvas **and** in the PNG backend (RND-02) |
+| Frozen panes & splits | ● | ● | n/a | Split in the canvas **and** in the PNG backend (RND-02) |
+| Merged ranges | ● | ◑ | n/a | Modelled, round-tripped, and drawn by the editor canvas. **Not in the headless backend**: `casual-calc-layout` and `casual-calc-render` have no notion of a merge, so the PNG draws a merged range as separate cells (RND-03) |
 | Column/row sizing, hidden, outline | ● | ● | n/a | — |
 | Defined names | ● | n/a | ● | Incl. print area and titles; unparseable ones are retained |
 | Formulas: parse & preserve (AST) | ● | n/a | n/a | — |
@@ -98,8 +99,8 @@ The measured per-construct register is [51](51-FIDELITY-GAP-AUDIT.md).
 
 | Target | Value | Gate | Status |
 | --- | --- | --- | --- |
-| Populated cells | 1,000,000+ | memory-ceiling benchmark | ◑ benchmark-smoke runs; the ceiling is not yet asserted |
-| Grid scroll | 60 fps visible-window repaint | scroll benchmark | ◑ same |
+| Populated cells | 1,000,000+ | `casual-calc-model/tests/memory_ceiling.rs` | ◑ the per-cell **payload** ceiling is asserted and bites (PERF-01): 32 bytes a cell, 40 MB at the target against a 64 MB budget. **Resident** memory is still unmeasured — it needs a counting global allocator, therefore `unsafe`, which the workspace forbids |
+| Grid scroll | 60 fps visible-window repaint | scroll benchmark | ◑ the benchmark harness runs and validates its report's shape; the frame budget itself is not yet asserted |
 | Worst-case incremental recalc | < 50 ms | recalc-latency benchmark | ○ waits on the persistent incremental graph |
 
 These three are the reason the architecture looks the way it does, and they are
