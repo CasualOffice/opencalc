@@ -29,6 +29,8 @@
 //! Those are the two halves of the same diamond, which is why TP1 is the
 //! property that makes this work rather than a nicety.
 
+use std::collections::BTreeMap;
+
 use casual_calc_model::{ModelError, Workbook};
 
 use crate::{
@@ -113,34 +115,95 @@ impl core::fmt::Display for SessionError {
 
 impl core::error::Error for SessionError {}
 
+/// Which participant a chunk came from.
+///
+/// Assigned by the host — the engine never invents identity, for the same
+/// reason it never reads a clock. Must be unique among the live participants of
+/// a document, since it is what deduplication keys on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClientId(pub u64);
+
 /// A chunk of a client's own edits, offered to the server.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submission {
+    /// Who sent it.
+    pub client: ClientId,
+    /// Which chunk this is from that client, counted from one.
+    ///
+    /// Together with [`Self::client`] this is an idempotency key, and it exists
+    /// for one specific failure: a leader can commit a chunk and die **before
+    /// acknowledging it**. The client, having heard nothing, resends — and
+    /// without a key the new leader cannot tell a lost chunk from a duplicate,
+    /// so it applies it twice. Typing a value twice is invisible; inserting a
+    /// row twice is not.
+    ///
+    /// A resend carries the *same* sequence, which is what makes it a resend
+    /// rather than a new edit.
+    pub seq: u64,
     /// The revision the operations were written against.
     pub base: u64,
     /// The operations, in the order the client made them.
     pub ops: Vec<Operation>,
 }
 
+/// What committing a chunk did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Commit {
+    /// Newly committed. Carries the operations **as they landed** — rebased
+    /// onto whatever had been committed since the client's base — which is
+    /// what every other participant is told about.
+    Applied {
+        /// The rebased operations, in order.
+        ops: Vec<Operation>,
+        /// The revision the document reached.
+        revision: u64,
+    },
+    /// Already committed by an earlier delivery of this same chunk. Nothing was
+    /// applied a second time.
+    ///
+    /// The revision is the one the chunk landed at originally, **not** the
+    /// server's current one: acknowledging a client at a later revision would
+    /// have it skip over everything committed in between, which it would then
+    /// never receive.
+    Duplicate {
+        /// Where the chunk landed the first time.
+        revision: u64,
+    },
+}
+
 /// One participant's view: its revision, what it has sent, and what it has not.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ClientSession {
+    client: ClientId,
     revision: u64,
     /// Sent and awaiting acknowledgement. At most one chunk, by design.
     sent: Vec<Operation>,
+    /// The sequence number of the chunk in flight. A resend reuses it.
+    sent_seq: u64,
     /// Made locally and not yet sent.
     pending: Vec<Operation>,
+    /// Chunks taken from `pending` so far, which is what numbers them.
+    chunks: u64,
 }
 
 impl ClientSession {
     /// A client joined at `revision`, with nothing outstanding.
     #[must_use]
-    pub fn new(revision: u64) -> Self {
+    pub fn new(client: ClientId, revision: u64) -> Self {
         Self {
+            client,
             revision,
             sent: Vec::new(),
+            sent_seq: 0,
             pending: Vec::new(),
+            chunks: 0,
         }
+    }
+
+    /// Who this client is, as the server sees it.
+    #[must_use]
+    pub fn id(&self) -> ClientId {
+        self.client
     }
 
     /// The last revision this client has seen.
@@ -190,7 +253,30 @@ impl ClientSession {
             return None;
         }
         self.sent = core::mem::take(&mut self.pending);
+        self.chunks += 1;
+        self.sent_seq = self.chunks;
         Some(Submission {
+            client: self.client,
+            seq: self.sent_seq,
+            base: self.revision,
+            ops: self.sent.clone(),
+        })
+    }
+
+    /// The chunk in flight, to send again.
+    ///
+    /// After a leader failover a client cannot know whether its chunk was
+    /// committed, so it sends the same one again — the *same* sequence, which
+    /// is what lets the server recognise it rather than apply it twice. The
+    /// base moves with the client, because remote operations that arrived
+    /// meanwhile have already rebased the chunk.
+    pub fn resend(&self) -> Option<Submission> {
+        if self.sent.is_empty() {
+            return None;
+        }
+        Some(Submission {
+            client: self.client,
+            seq: self.sent_seq,
             base: self.revision,
             ops: self.sent.clone(),
         })
@@ -248,6 +334,12 @@ pub struct ServerSession {
     /// The revision `log[0]` starts from. Non-zero once the log has been
     /// compacted behind a snapshot.
     first: u64,
+    /// The last chunk accepted from each client, and where it landed.
+    ///
+    /// Part of the session's durable state, not a cache: a leader that dies
+    /// takes this with it, and a successor without it cannot tell a resend
+    /// from a new edit — which is the whole failure this exists to prevent.
+    accepted: BTreeMap<ClientId, (u64, u64)>,
 }
 
 impl ServerSession {
@@ -265,7 +357,22 @@ impl ServerSession {
             revision,
             log: Vec::new(),
             first: revision,
+            accepted: BTreeMap::new(),
         }
+    }
+
+    /// The per-client acceptance record, to persist alongside the log.
+    #[must_use]
+    pub fn accepted(&self) -> &BTreeMap<ClientId, (u64, u64)> {
+        &self.accepted
+    }
+
+    /// Reinstate the acceptance record on a successor leader.
+    ///
+    /// A promotion that skips this is a promotion that will double-apply the
+    /// first resend it sees.
+    pub fn restore_accepted(&mut self, accepted: BTreeMap<ClientId, (u64, u64)>) {
+        self.accepted = accepted;
     }
 
     /// The current revision.
@@ -309,7 +416,16 @@ impl ServerSession {
         &mut self,
         workbook: &mut Workbook,
         submission: &Submission,
-    ) -> Result<Vec<Operation>, SessionError> {
+    ) -> Result<Commit, SessionError> {
+        // Recognise a chunk we have already taken. Checked before the base is
+        // validated, because a resend that arrives after compaction has a base
+        // the server no longer holds — and refusing it would tell a client its
+        // committed work was lost.
+        if let Some(&(seq, revision)) = self.accepted.get(&submission.client)
+            && submission.seq <= seq
+        {
+            return Ok(Commit::Duplicate { revision });
+        }
         if submission.base < self.first || submission.base > self.revision {
             return Err(SessionError::UnknownRevision {
                 claimed: submission.base,
@@ -350,7 +466,12 @@ impl ServerSession {
             self.log.push(op.clone());
             self.revision += 1;
         }
-        Ok(rebased)
+        self.accepted
+            .insert(submission.client, (submission.seq, self.revision));
+        Ok(Commit::Applied {
+            ops: rebased,
+            revision: self.revision,
+        })
     }
 }
 

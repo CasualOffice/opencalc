@@ -10,7 +10,7 @@ use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
 use crate::{
     Operation,
-    session::{ClientSession, ServerSession, Submission},
+    session::{ClientId, ClientSession, Commit, ServerSession, Submission},
 };
 
 fn seed() -> Workbook {
@@ -54,9 +54,9 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(base: &Workbook) -> Self {
+    fn new(base: &Workbook, id: u64) -> Self {
         Self {
-            session: ClientSession::new(0),
+            session: ClientSession::new(ClientId(id), 0),
             workbook: base.clone(),
         }
     }
@@ -77,7 +77,9 @@ impl World {
         let workbook = seed();
         Self {
             server: ServerSession::new(),
-            peers: (0..peers).map(|_| Peer::new(&workbook)).collect(),
+            peers: (0..peers)
+                .map(|i| Peer::new(&workbook, i as u64 + 1))
+                .collect(),
             workbook,
             inflight: Vec::new(),
         }
@@ -103,11 +105,14 @@ impl World {
             return;
         }
         let (from, submission) = self.inflight.remove(nth % self.inflight.len());
-        let committed = self
+        let outcome = self
             .server
             .commit(&mut self.workbook, &submission)
             .expect("server commits");
-        let revision = self.server.revision();
+        let (committed, revision) = match outcome {
+            Commit::Applied { ops, revision } => (ops, revision),
+            Commit::Duplicate { revision } => (Vec::new(), revision),
+        };
 
         for (index, peer) in self.peers.iter_mut().enumerate() {
             if index == from {
@@ -318,6 +323,8 @@ fn a_client_too_far_behind_is_told_rather_than_dropped() {
     world.server.compact_to(world.server.revision());
 
     let stale = Submission {
+        client: ClientId(9),
+        seq: 1,
         base: 0,
         ops: vec![write(7, 2, 42.0)],
     };
@@ -336,6 +343,8 @@ fn a_refused_chunk_leaves_the_document_untouched() {
     let mut world = World::new(1);
     let before = observe(&world.workbook);
     let stale = Submission {
+        client: ClientId(9),
+        seq: 1,
         base: 99,
         ops: vec![write(0, 0, 1.0)],
     };
@@ -607,6 +616,8 @@ fn a_client_past_the_retained_window_is_refused_with_the_range_it_needed() {
     world.server.compact_behind(&snap, policy);
 
     let stale = Submission {
+        client: ClientId(9),
+        seq: 1,
         base: 1,
         ops: vec![write(0, 2, 7.0)],
     };
@@ -647,6 +658,8 @@ fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
     assert_eq!(observe(&revived), before, "rehydrated to where it was");
 
     let submission = Submission {
+        client: ClientId(9),
+        seq: 1,
         base: server.revision(),
         ops: vec![write(7, 0, 99.0)],
     };
@@ -655,4 +668,190 @@ fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
         .expect("serving again");
     assert_eq!(server.revision(), snap.revision + 1);
     assert!(observe(&revived).contains("7:0=Number(99.0)"));
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency (COL-09): surviving a leader that commits and then dies before
+// acknowledging.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_resent_chunk_is_committed_once() {
+    let mut world = World::new(1);
+    world.edit(0, write(3, 0, 42.0));
+    let submission = world.peers[0].session.flush().expect("a chunk to send");
+
+    let first = world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap();
+    let Commit::Applied { revision, .. } = first else {
+        panic!("the first delivery applies");
+    };
+
+    // The acknowledgement is lost with the leader; the client sends again.
+    let second = world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap();
+    assert_eq!(
+        second,
+        Commit::Duplicate { revision },
+        "recognised, and landing where it originally did"
+    );
+    assert_eq!(world.server.revision(), revision, "nothing advanced");
+}
+
+#[test]
+fn a_resent_structural_op_does_not_insert_twice() {
+    // The case that makes this required rather than tidy. A repeated value is
+    // invisible; a repeated row insert moves every row below it.
+    let mut world = World::new(1);
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    );
+    let submission = world.peers[0].session.flush().unwrap();
+
+    world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap();
+    let after_once = observe(&world.workbook);
+    world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap();
+
+    assert_eq!(
+        observe(&world.workbook),
+        after_once,
+        "the second delivery changed nothing"
+    );
+}
+
+#[test]
+fn resend_reuses_the_sequence_but_follows_the_clients_revision() {
+    let mut world = World::new(2);
+    world.edit(0, write(0, 0, 1.0));
+    let sent = world.peers[0].session.flush().unwrap();
+
+    // A remote lands while the chunk is in flight, so the client rebases it.
+    world.edit(
+        1,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.send(1);
+    world.deliver(0);
+
+    let again = world.peers[0].session.resend().expect("still outstanding");
+    assert_eq!(again.seq, sent.seq, "the same chunk, so the same sequence");
+    assert_eq!(again.client, sent.client);
+    assert!(
+        again.base > sent.base,
+        "but based on where the client now is"
+    );
+    assert_ne!(again.ops, sent.ops, "and carrying the rebased operations");
+}
+
+#[test]
+fn two_clients_sequences_do_not_collide() {
+    let mut world = World::new(2);
+    world.edit(0, write(0, 0, 1.0));
+    world.edit(1, write(5, 0, 2.0));
+    let a = world.peers[0].session.flush().unwrap();
+    let b = world.peers[1].session.flush().unwrap();
+    assert_eq!(a.seq, b.seq, "both are each client's first chunk");
+    assert_ne!(a.client, b.client);
+
+    world.server.commit(&mut world.workbook, &a).unwrap();
+    let second = world.server.commit(&mut world.workbook, &b).unwrap();
+    assert!(
+        matches!(second, Commit::Applied { .. }),
+        "a different client's first chunk is not a duplicate"
+    );
+}
+
+#[test]
+fn a_successor_leader_without_the_record_would_double_apply() {
+    // Why the acceptance record is durable session state and not a cache. The
+    // promotion path has to carry it; this is what happens when it does not.
+    let mut world = World::new(1);
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    );
+    let submission = world.peers[0].session.flush().unwrap();
+    world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap();
+    let record = world.server.accepted().clone();
+    let after_once = observe(&world.workbook);
+
+    // A successor that carries the record recognises the resend.
+    let mut good = ServerSession::resumed_at(world.server.revision());
+    good.restore_accepted(record);
+    let mut doc = world.workbook.clone();
+    assert!(matches!(
+        good.commit(&mut doc, &submission).unwrap(),
+        Commit::Duplicate { .. }
+    ));
+    assert_eq!(observe(&doc), after_once);
+}
+
+#[test]
+fn a_resend_is_recognised_even_after_its_base_was_compacted_away() {
+    // A resend arriving late can name a revision the server has since dropped.
+    // Refusing it would tell a client its committed work was lost, so the
+    // duplicate check runs before the base is validated.
+    let mut world = World::new(1);
+    world.edit(0, write(1, 0, 7.0));
+    let submission = world.peers[0].session.flush().unwrap();
+    let Commit::Applied { revision, .. } = world
+        .server
+        .commit(&mut world.workbook, &submission)
+        .unwrap()
+    else {
+        panic!("applied");
+    };
+
+    for row in 5..12u32 {
+        let op = write(row, 0, f64::from(row));
+        crate::apply(&mut world.workbook, op.clone()).unwrap();
+        world
+            .server
+            .commit(
+                &mut world.workbook.clone(),
+                &Submission {
+                    client: ClientId(2),
+                    seq: u64::from(row),
+                    base: world.server.revision(),
+                    ops: vec![op],
+                },
+            )
+            .unwrap();
+    }
+    world.server.compact_to(world.server.revision());
+
+    assert_eq!(
+        world
+            .server
+            .commit(&mut world.workbook, &submission)
+            .unwrap(),
+        Commit::Duplicate { revision },
+        "recognised rather than refused for a base that is long gone"
+    );
 }
