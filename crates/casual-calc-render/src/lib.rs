@@ -14,7 +14,7 @@ mod fonts;
 
 use casual_calc_layout::visible_range;
 use casual_calc_layout::{
-    Align, BorderLine, DisplayList, GridGeometry, PaintItem, Rect as LayoutRect, Viewport,
+    Align, BorderLine, DisplayList, GridGeometry, PaintItem, Pane, Rect as LayoutRect, Viewport,
 };
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -396,6 +396,153 @@ pub fn render_png(
     render_pixmap(display_list, geometry, viewport, dpi)?
         .encode_png()
         .map_err(|_| RenderError::Encode)
+}
+
+/// A pane and the display list laid out for it.
+///
+/// The two are separate arguments in every other signature here; a frozen
+/// sheet has several of each and they must not be paired up by index at the
+/// call site, where getting it wrong renders the body's cells in the corner.
+#[derive(Debug, Clone, Copy)]
+pub struct PanePaint<'a> {
+    /// Which region of the image, and what it looks at.
+    pub pane: Pane,
+    /// That region's display list, from
+    /// [`layout_viewport`](casual_calc_layout::layout_viewport) on
+    /// [`pane.viewport`](Pane::viewport).
+    pub display_list: &'a DisplayList,
+}
+
+/// Render a split viewport — the frozen-pane composition.
+///
+/// Each pane is rendered as its own image and copied into place, which is what
+/// makes the frozen bands hold still: they are looking at a different part of
+/// the sheet from the body, not at the same part drawn twice. Panes are clipped
+/// at the image edges, so a pane larger than the room left for it loses its
+/// overhang rather than the picture.
+///
+/// `viewport` is the whole image, the same one the panes were split from.
+/// Passing [`panes`](casual_calc_layout::panes) output for a sheet with no
+/// freeze produces exactly what [`render_pixmap`] would.
+pub fn render_panes(
+    panes: &[PanePaint<'_>],
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+) -> Result<Pixmap, RenderError> {
+    let width = twips_to_px(viewport.width.max(0), dpi).ceil() as u32;
+    let height = twips_to_px(viewport.height.max(0), dpi).ceil() as u32;
+    let mut pixmap =
+        Pixmap::new(width, height).ok_or(RenderError::InvalidSize { width, height })?;
+    pixmap.fill(Color::WHITE);
+
+    for paint in panes {
+        let rendered = render_pixmap(paint.display_list, geometry, &paint.pane.viewport, dpi)?;
+        blit(
+            &mut pixmap,
+            &rendered,
+            twips_to_px(paint.pane.origin.0, dpi).round() as i64,
+            twips_to_px(paint.pane.origin.1, dpi).round() as i64,
+        );
+    }
+
+    draw_freeze_lines(&mut pixmap, panes, dpi);
+    Ok(pixmap)
+}
+
+/// Render a split viewport to a PNG byte buffer.
+pub fn render_panes_png(
+    panes: &[PanePaint<'_>],
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+) -> Result<Vec<u8>, RenderError> {
+    render_panes(panes, geometry, viewport, dpi)?
+        .encode_png()
+        .map_err(|_| RenderError::Encode)
+}
+
+/// Copy `src` into `dst` at `(x, y)`, clipped at the destination's edges.
+///
+/// A row copy rather than `draw_pixmap`: the panes are opaque and land on whole
+/// pixels, so there is nothing to blend or resample, and a copy is exact where
+/// a shader is only very close — which matters because the render goldens
+/// compare bytes.
+fn blit(dst: &mut Pixmap, src: &Pixmap, x: i64, y: i64) {
+    let (dst_w, dst_h) = (i64::from(dst.width()), i64::from(dst.height()));
+    let (src_w, src_h) = (i64::from(src.width()), i64::from(src.height()));
+
+    // Where the copy starts in each image once the part off the top or left of
+    // the destination is dropped.
+    let (dx, dy) = (x.max(0), y.max(0));
+    let (sx, sy) = (dx - x, dy - y);
+    let w = (src_w - sx).min(dst_w - dx);
+    let h = (src_h - sy).min(dst_h - dy);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let src_data = src.data();
+    let dst_data = dst.data_mut();
+    let bytes = (w * 4) as usize;
+    for row in 0..h {
+        let from = (((sy + row) * src_w + sx) * 4) as usize;
+        let to = (((dy + row) * dst_w + dx) * 4) as usize;
+        dst_data[to..to + bytes].copy_from_slice(&src_data[from..from + bytes]);
+    }
+}
+
+/// Draw the boundary between a frozen band and what scrolls under it.
+///
+/// Darker than a gridline because it says something a gridline does not: that
+/// the two sides of it move independently. Without it a frozen header reads as
+/// an ordinary first row that happens to be still. The editor canvas draws the
+/// same boundary in the same colour.
+fn draw_freeze_lines(pixmap: &mut Pixmap, panes: &[PanePaint<'_>], dpi: u32) {
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_rgba8(95, 99, 104, 255));
+    paint.anti_alias = false;
+
+    let width = pixmap.width() as f32;
+    let height = pixmap.height() as f32;
+
+    // A boundary is wherever a pane starts that does not start at the edge, so
+    // this needs no separate account of the freeze — the split already said it.
+    let mut xs: Vec<i64> = panes
+        .iter()
+        .map(|p| p.pane.origin.0)
+        .filter(|x| *x > 0)
+        .collect();
+    let mut ys: Vec<i64> = panes
+        .iter()
+        .map(|p| p.pane.origin.1)
+        .filter(|y| *y > 0)
+        .collect();
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+
+    for x in xs {
+        fill_thin(
+            pixmap,
+            &paint,
+            twips_to_px(x, dpi).round() - 1.0,
+            0.0,
+            1.0,
+            height.max(1.0),
+        );
+    }
+    for y in ys {
+        fill_thin(
+            pixmap,
+            &paint,
+            0.0,
+            twips_to_px(y, dpi).round() - 1.0,
+            width.max(1.0),
+            1.0,
+        );
+    }
 }
 
 fn draw_gridlines(pixmap: &mut Pixmap, geometry: &GridGeometry, viewport: &Viewport, dpi: u32) {

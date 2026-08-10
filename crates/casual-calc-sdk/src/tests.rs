@@ -83,6 +83,88 @@ fn render_produces_a_png() {
 }
 
 #[test]
+fn render_honours_the_sheets_frozen_panes() {
+    // The wiring, not the arithmetic — the split and the composition are gated
+    // in their own crates. What this asserts is that the sheet's own freeze is
+    // consulted at all, which for a long time it was not: `render_png` laid out
+    // one unbroken window, so a pinned header scrolled off an exported image
+    // while holding still in the editor.
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    let scrolled = GridViewport {
+        x: 4 * 960,
+        y: 8 * 300,
+        width: 6 * 960,
+        height: 12 * 300,
+    };
+
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    for row in 0..30u32 {
+        for col in 0..10u32 {
+            sheet.cells.set(
+                CellRef::new(row, col),
+                Cell::value(CellValue::Number(f64::from(row * 100 + col))),
+            );
+        }
+    }
+    workbook.sheets.push(sheet);
+
+    let mut session = WorkbookSession::from_workbook(workbook);
+    let unfrozen = session.render_png(0, &scrolled, 96).unwrap();
+
+    session.workbook_mut().sheets[0].view.frozen_rows = 2;
+    session.workbook_mut().sheets[0].view.frozen_cols = 1;
+    let frozen = session.render_png(0, &scrolled, 96).unwrap();
+
+    assert_ne!(
+        unfrozen, frozen,
+        "freezing rows and columns changes what a scrolled render shows"
+    );
+
+    // Which count went to which axis, pinned against the composition done by
+    // hand. An asymmetric freeze is essential here: with two rows and one
+    // column, reading the two fields the wrong way round still produces a
+    // frozen-looking render, and only a comparison that names the axes catches
+    // it.
+    let geometry = session.geometry(0);
+    let regions = casual_calc_layout::panes(
+        &geometry,
+        &scrolled,
+        casual_calc_layout::Freeze { rows: 2, cols: 1 },
+    );
+    let lists: Vec<_> = regions
+        .iter()
+        .map(|pane| {
+            casual_calc_layout::layout_viewport(session.workbook(), 0, &geometry, &pane.viewport)
+        })
+        .collect();
+    let paints: Vec<_> = regions
+        .iter()
+        .zip(&lists)
+        .map(|(pane, display_list)| casual_calc_render::PanePaint {
+            pane: *pane,
+            display_list,
+        })
+        .collect();
+    assert_eq!(
+        frozen,
+        casual_calc_render::render_panes_png(&paints, &geometry, &scrolled, 96).unwrap(),
+        "two frozen rows and one frozen column, not the other way about"
+    );
+
+    // And with nothing frozen the bytes are what they always were, so the new
+    // path is not a new rendering for every existing sheet.
+    session.workbook_mut().sheets[0].view.frozen_rows = 0;
+    session.workbook_mut().sheets[0].view.frozen_cols = 0;
+    assert_eq!(
+        unfrozen,
+        session.render_png(0, &scrolled, 96).unwrap(),
+        "unfreezing restores the original render exactly"
+    );
+}
+
+#[test]
 fn blank_session_saves_and_reopens_empty() {
     let session = WorkbookSession::blank();
     let bytes = session.save().unwrap();

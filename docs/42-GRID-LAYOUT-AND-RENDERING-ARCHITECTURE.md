@@ -96,6 +96,18 @@ For each visible cell the layout engine computes:
   scrolled regions; each region runs the same visible-range query against its own
   scroll offset. Row/column headers are a always-present frozen band.
 
+  Implemented as `layout::panes(geometry, viewport, Freeze)` → up to four
+  `Pane`s, each a plain `Viewport` plus where it sits in the image, which the
+  render backend composes with `render_panes`. The split lives in layout rather
+  than in either host because both had to do it and only one did: the editor
+  canvas split panes from the start and the PNG backend did not, so an exported
+  image lost the pinned header the screen was still showing.
+
+  The scrolling panes clamp their offset to the first unfrozen line — scrolling
+  back past the freeze would show the pinned lines twice, beside themselves. A
+  sheet with nothing frozen yields one pane equal to the viewport, so the split
+  path is byte-identical to the unsplit one for every unfrozen sheet (gated).
+
 ## The display list (the render seam)
 
 Layout emits a **backend-neutral, serializable `DisplayList`** — the single

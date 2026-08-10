@@ -158,3 +158,270 @@ fn render_is_deterministic() {
         render_png(&list, &geo, &vp, 96).unwrap()
     );
 }
+
+/// Frozen-pane composition — the fidelity gap `docs/18` named.
+///
+/// The editor canvas has always split frozen panes; the PNG backend drew one
+/// unbroken window, so a pinned header scrolled off the top of an exported
+/// image while holding still on screen. These pin the behaviour that closed it.
+mod frozen {
+    use casual_calc_layout::{
+        DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, Freeze, GridGeometry, Viewport, layout_viewport,
+        panes,
+    };
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    use crate::{PanePaint, render_panes, render_pixmap};
+
+    /// A sheet whose every cell says which cell it is, so a band that moved
+    /// when it should not have shows up as different pixels rather than as an
+    /// argument about coordinates.
+    fn labelled() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..40u32 {
+            for col in 0..12u32 {
+                sheet.cells.set(
+                    CellRef::new(row, col),
+                    Cell::value(CellValue::Number(f64::from(row * 100 + col))),
+                );
+            }
+        }
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn viewport(x: i64, y: i64) -> Viewport {
+        Viewport {
+            x,
+            y,
+            width: DEFAULT_COL_WIDTH * 6,
+            height: DEFAULT_ROW_HEIGHT * 12,
+        }
+    }
+
+    /// Render the way a host does: split, lay out each pane, compose.
+    fn render(wb: &Workbook, vp: &Viewport, freeze: Freeze) -> tiny_skia::Pixmap {
+        let geo = GridGeometry::default();
+        let regions = panes(&geo, vp, freeze);
+        let lists: Vec<_> = regions
+            .iter()
+            .map(|pane| layout_viewport(wb, 0, &geo, &pane.viewport))
+            .collect();
+        let paints: Vec<PanePaint<'_>> = regions
+            .iter()
+            .zip(&lists)
+            .map(|(pane, display_list)| PanePaint {
+                pane: *pane,
+                display_list,
+            })
+            .collect();
+        render_panes(&paints, &geo, vp, 96).unwrap()
+    }
+
+    /// The pixels of `[x0,x1) x [y0,y1)`, for comparing one region across two
+    /// renders.
+    fn region(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in y0..y1.min(pixmap.height()) {
+            for x in x0..x1.min(pixmap.width()) {
+                if let Some(p) = pixmap.pixel(x, y) {
+                    out.extend_from_slice(&[p.red(), p.green(), p.blue(), p.alpha()]);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_unfrozen_sheet_composes_to_exactly_the_unsplit_render() {
+        // The compatibility guarantee, asserted on bytes rather than trusted:
+        // every existing caller moved onto the split path, so if this drifts,
+        // every render changed for sheets that froze nothing.
+        let wb = labelled();
+        let geo = GridGeometry::default();
+        let vp = viewport(2_000, 1_500);
+
+        let split = render(&wb, &vp, Freeze::default());
+        let unsplit = render_pixmap(&layout_viewport(&wb, 0, &geo, &vp), &geo, &vp, 96).unwrap();
+
+        assert_eq!(split.width(), unsplit.width());
+        assert_eq!(split.height(), unsplit.height());
+        assert_eq!(split.data(), unsplit.data(), "byte-identical");
+    }
+
+    /// Pixel width of the frozen column band at 96 dpi.
+    fn band_w(cols: u32) -> u32 {
+        ((DEFAULT_COL_WIDTH * i64::from(cols)) as f32 * 96.0 / 1440.0).round() as u32
+    }
+
+    /// Pixel height of the frozen row band at 96 dpi.
+    fn band_h(rows: u32) -> u32 {
+        ((DEFAULT_ROW_HEIGHT * i64::from(rows)) as f32 * 96.0 / 1440.0).round() as u32
+    }
+
+    #[test]
+    fn a_frozen_column_holds_still_while_the_body_scrolls_sideways() {
+        // Each band is pinned on one axis only — a frozen column still scrolls
+        // down — so the scroll here is purely horizontal.
+        let wb = labelled();
+        let freeze = Freeze { rows: 2, cols: 1 };
+        let near = render(&wb, &viewport(0, 0), freeze);
+        let far = render(&wb, &viewport(DEFAULT_COL_WIDTH * 5, 0), freeze);
+        let (fw, fh) = (band_w(1), band_h(2));
+
+        assert_eq!(
+            region(&near, 0, 0, fw, near.height()),
+            region(&far, 0, 0, fw, far.height()),
+            "the frozen column is pinned"
+        );
+        assert_ne!(
+            region(&near, fw, fh, near.width(), near.height()),
+            region(&far, fw, fh, far.width(), far.height()),
+            "and the body did scroll — otherwise the assertion above proves nothing"
+        );
+    }
+
+    #[test]
+    fn frozen_rows_hold_still_while_the_body_scrolls_down() {
+        let wb = labelled();
+        let freeze = Freeze { rows: 2, cols: 1 };
+        let near = render(&wb, &viewport(0, 0), freeze);
+        let far = render(&wb, &viewport(0, DEFAULT_ROW_HEIGHT * 15), freeze);
+        let (fw, fh) = (band_w(1), band_h(2));
+
+        assert_eq!(
+            region(&near, 0, 0, near.width(), fh),
+            region(&far, 0, 0, far.width(), fh),
+            "the frozen rows are pinned"
+        );
+        assert_ne!(
+            region(&near, fw, fh, near.width(), near.height()),
+            region(&far, fw, fh, far.width(), far.height()),
+            "and the body did scroll"
+        );
+    }
+
+    #[test]
+    fn the_pinned_corner_shows_the_top_left_of_the_sheet() {
+        // Pinned means *those* lines, not merely some unchanging ones. The
+        // corner of a scrolled frozen render must be the same pixels as the
+        // corner of an unscrolled unfrozen one: A1 onwards, drawn identically.
+        let wb = labelled();
+        let scrolled = render(
+            &wb,
+            &viewport(DEFAULT_COL_WIDTH * 3, DEFAULT_ROW_HEIGHT * 8),
+            Freeze { rows: 2, cols: 1 },
+        );
+        let home = render(&wb, &viewport(0, 0), Freeze::default());
+
+        // Stop short of the divider, which is drawn along the band's far edge
+        // and is the one thing the unfrozen render has no counterpart for.
+        let (fw, fh) = (band_w(1) - 2, band_h(2) - 2);
+        assert_eq!(
+            region(&scrolled, 0, 0, fw, fh),
+            region(&home, 0, 0, fw, fh),
+            "the corner is the sheet's own top-left, however far the body has gone"
+        );
+
+        // And it is not blank, so the comparison is of content and not of two
+        // empty rectangles.
+        assert!(
+            crate::tests::any_pixel(&scrolled, 0, 0, fw, fh, |r, g, b| r < 100
+                && g < 100
+                && b < 100),
+            "the pinned cells are painted with their text"
+        );
+    }
+
+    #[test]
+    fn the_freeze_boundary_is_drawn_darker_than_a_gridline() {
+        // Without it a pinned header reads as an ordinary first row that
+        // happens not to move.
+        let wb = labelled();
+        let freeze = Freeze { rows: 2, cols: 1 };
+        let pixmap = render(&wb, &viewport(0, 0), freeze);
+
+        let fw = (DEFAULT_COL_WIDTH as f32 * 96.0 / 1440.0).round() as u32;
+        let fh = (DEFAULT_ROW_HEIGHT as f32 * 2.0 * 96.0 / 1440.0).round() as u32;
+        // The divider colour, #5f6368 — distinctly darker than the #e0e0e0
+        // gridline it would otherwise be mistaken for.
+        let divider = |r: u8, g: u8, b: u8| (r, g, b) == (95, 99, 104);
+
+        assert!(
+            crate::tests::any_pixel(&pixmap, fw - 2, 0, fw + 1, pixmap.height(), divider),
+            "a vertical divider at the frozen column's edge"
+        );
+        assert!(
+            crate::tests::any_pixel(&pixmap, 0, fh - 2, pixmap.width(), fh + 1, divider),
+            "a horizontal divider at the frozen rows' edge"
+        );
+    }
+
+    #[test]
+    fn a_pane_boundary_on_a_fractional_pixel_does_not_run_off_the_image() {
+        // Each pane's pixmap rounds *up* to a whole pixel independently, so the
+        // panes can add up to one pixel more than the image they go into: a
+        // frozen band 64.6 px wide starts the body at pixel 65, and a body
+        // 100.2 px wide is 101 pixels, which is 166 in a 165-pixel image.
+        //
+        // Sizes chosen to produce exactly that: the fractions round up
+        // separately and down together. Without the clip in `blit` this writes
+        // past the end of a row.
+        use casual_calc_layout::Axis;
+
+        let geo = GridGeometry {
+            columns: Axis::with_sizes(1_503, [(0, 969)]),
+            rows: Axis::with_sizes(1_503, [(0, 969)]),
+        };
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 2_472,
+            height: 2_472,
+        };
+        let freeze = Freeze { rows: 1, cols: 1 };
+
+        // The premise, so this stays a test of the overhang if the arithmetic
+        // ever changes underneath it.
+        let regions = panes(&geo, &vp, freeze);
+        let px = |twips: i64| (twips as f32 * 96.0 / 1440.0).ceil() as u32;
+        let body = regions.last().unwrap();
+        assert!(
+            (body.origin.0 as f32 * 96.0 / 1440.0).round() as u32 + px(body.viewport.width)
+                > px(vp.width),
+            "the panes overhang the image, which is the case under test"
+        );
+
+        let wb = labelled();
+        let lists: Vec<_> = regions
+            .iter()
+            .map(|pane| layout_viewport(&wb, 0, &geo, &pane.viewport))
+            .collect();
+        let paints: Vec<PanePaint<'_>> = regions
+            .iter()
+            .zip(&lists)
+            .map(|(pane, display_list)| PanePaint {
+                pane: *pane,
+                display_list,
+            })
+            .collect();
+
+        let pixmap = render_panes(&paints, &geo, &vp, 96).unwrap();
+        assert_eq!(pixmap.width(), px(vp.width), "the image keeps its own size");
+        assert_eq!(pixmap.height(), px(vp.height));
+    }
+
+    #[test]
+    fn no_freeze_draws_no_divider() {
+        let wb = labelled();
+        let pixmap = render(&wb, &viewport(0, 0), Freeze::default());
+        assert!(
+            !crate::tests::any_pixel(&pixmap, 0, 0, pixmap.width(), pixmap.height(), |r, g, b| (
+                r, g, b
+            )
+                == (95, 99, 104)),
+            "nothing is pinned, so there is no boundary to mark"
+        );
+    }
+}

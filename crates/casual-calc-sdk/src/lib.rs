@@ -10,9 +10,9 @@
 use casual_calc_eval::{recalculate, recalculate_incremental};
 use casual_calc_export::{ExportError, write_workbook};
 use casual_calc_import::{CompatibilityReport, ImportError, import_package_with};
-use casual_calc_layout::{DisplayList, GridGeometry, Viewport, layout_viewport};
+use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
-use casual_calc_render::{RenderError, render_png};
+use casual_calc_render::{PanePaint, RenderError, render_panes_png};
 use casual_calc_transaction::{History, Operation, TxnError, apply};
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
@@ -481,6 +481,10 @@ impl WorkbookSession {
     }
 
     /// Render a viewport of a sheet to PNG bytes.
+    ///
+    /// Honours the sheet's frozen rows and columns: the pinned bands hold still
+    /// and the body scrolls under them, as they do in the editor canvas. An
+    /// unfrozen sheet renders exactly as before.
     pub fn render_png(
         &self,
         sheet_index: usize,
@@ -488,8 +492,7 @@ impl WorkbookSession {
         dpi: u32,
     ) -> Result<Vec<u8>, SdkError> {
         let geometry = self.geometry(sheet_index);
-        let list = layout_viewport(&self.workbook, sheet_index, &geometry, viewport);
-        Ok(render_png(&list, &geometry, viewport, dpi)?)
+        render_sheet_png(&self.workbook, sheet_index, &geometry, viewport, dpi)
     }
 
     /// Serialize the workbook to a `.xlsx` package (the semantic writer).
@@ -502,6 +505,49 @@ impl Default for WorkbookSession {
     fn default() -> Self {
         Self::blank()
     }
+}
+
+/// Render a sheet's viewport to PNG bytes, splitting its frozen panes.
+///
+/// The composition step of the headless renderer: it reads the sheet's frozen
+/// row and column counts, splits the viewport into the panes they imply, lays
+/// out each one, and hands the set to the render backend. A sheet with nothing
+/// frozen yields a single pane and the same bytes the unsplit path produced.
+///
+/// Free-standing because more than one host needs it — the session below and
+/// the WASM `render_xlsx` entry point — and a freeze honoured in one renderer
+/// and not the other is the gap this closes rather than moves.
+pub fn render_sheet_png(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+) -> Result<Vec<u8>, SdkError> {
+    let freeze = workbook
+        .sheets
+        .get(sheet_index)
+        .map(|sheet| Freeze {
+            rows: sheet.view.frozen_rows,
+            cols: sheet.view.frozen_cols,
+        })
+        .unwrap_or_default();
+
+    let regions = panes(geometry, viewport, freeze);
+    let lists: Vec<DisplayList> = regions
+        .iter()
+        .map(|pane| layout_viewport(workbook, sheet_index, geometry, &pane.viewport))
+        .collect();
+    let paints: Vec<PanePaint<'_>> = regions
+        .iter()
+        .zip(&lists)
+        .map(|(pane, display_list)| PanePaint {
+            pane: *pane,
+            display_list,
+        })
+        .collect();
+
+    Ok(render_panes_png(&paints, geometry, viewport, dpi)?)
 }
 
 /// How an operation should be recalculated.

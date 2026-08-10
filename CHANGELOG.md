@@ -46,6 +46,20 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-11 — Frozen panes render headlessly
+
+**Fixed**
+
+- **Frozen panes are split in the PNG backend** (RND-02), which the editor
+  canvas has always done and the headless renderer never did — so an exported
+  image lost the pinned header the screen was still showing. `casual-calc-layout`
+  gains `Freeze`, `Pane` and `panes()`, which divide a viewport into up to four
+  independently scrolled regions; `casual-calc-render` gains `render_panes` to
+  compose them. Both `WorkbookSession::render_png` and the WASM `render_xlsx`
+  now go through one `render_sheet_png`, so a sheet renders the same way
+  whichever host asked. A sheet with nothing frozen produces byte-identical
+  output to before, which is asserted rather than assumed.
+
 ### 2026-08-10 — Pivot tables, charts, and the embeddable SDK
 
 **Added**

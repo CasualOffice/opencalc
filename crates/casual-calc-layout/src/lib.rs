@@ -57,6 +57,97 @@ pub struct VisibleRange {
     pub cols: (u32, u32),
 }
 
+/// How many leading rows and columns stay pinned while the rest scrolls.
+///
+/// Mirrors [`SheetView::frozen_rows`](casual_calc_model::SheetView::frozen_rows)
+/// and its column counterpart. The default is no freeze, which is why every
+/// existing caller keeps the behaviour it had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Freeze {
+    /// Rows pinned at the top.
+    pub rows: u32,
+    /// Columns pinned at the left.
+    pub cols: u32,
+}
+
+impl Freeze {
+    /// Whether anything is pinned at all.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.rows == 0 && self.cols == 0
+    }
+}
+
+/// One region of a split viewport: what it looks at, and where it sits.
+///
+/// A frozen sheet is not one window onto the grid but up to four, each
+/// scrolling on its own axes. The pane owns a plain [`Viewport`], so
+/// everything downstream — [`layout_viewport`], the display list, the render
+/// backend — works on it unchanged; only the composition is new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pane {
+    /// The window into the sheet this pane shows.
+    pub viewport: Viewport,
+    /// Where the pane's top-left sits within the whole image, in twips.
+    pub origin: (i64, i64),
+}
+
+/// Split a viewport into the panes a freeze divides it into.
+///
+/// Returns the panes in painter's order — corner, top band, left band, body —
+/// omitting any the freeze leaves no room for. With no freeze the result is a
+/// single pane equal to `viewport`, so a frozen-pane-aware renderer is exactly
+/// the old renderer on an unfrozen sheet.
+///
+/// `viewport.x`/`.y` keep meaning an absolute content offset. The scrolling
+/// panes clamp it to the first unfrozen line: scrolling back past the freeze
+/// would show the pinned lines a second time, next to themselves.
+#[must_use]
+pub fn panes(geometry: &GridGeometry, viewport: &Viewport, freeze: Freeze) -> Vec<Pane> {
+    let width = viewport.width.max(0);
+    let height = viewport.height.max(0);
+
+    // A freeze wider than the image leaves the scrolling region no room. Clamp
+    // rather than hand a pane a negative size: the frozen band is the part the
+    // author asked to always see, so it is the part that survives.
+    let frozen_w = geometry.columns.offset(freeze.cols).clamp(0, width);
+    let frozen_h = geometry.rows.offset(freeze.rows).clamp(0, height);
+
+    let scroll_x = if freeze.cols > 0 {
+        viewport.x.max(geometry.columns.offset(freeze.cols))
+    } else {
+        viewport.x
+    };
+    let scroll_y = if freeze.rows > 0 {
+        viewport.y.max(geometry.rows.offset(freeze.rows))
+    } else {
+        viewport.y
+    };
+
+    let mut out = Vec::with_capacity(4);
+    let mut push = |x: i64, y: i64, origin: (i64, i64), w: i64, h: i64| {
+        if w > 0 && h > 0 {
+            out.push(Pane {
+                viewport: Viewport {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                },
+                origin,
+            });
+        }
+    };
+
+    let body_w = width - frozen_w;
+    let body_h = height - frozen_h;
+    push(0, 0, (0, 0), frozen_w, frozen_h);
+    push(scroll_x, 0, (frozen_w, 0), body_w, frozen_h);
+    push(0, scroll_y, (0, frozen_h), frozen_w, body_h);
+    push(scroll_x, scroll_y, (frozen_w, frozen_h), body_w, body_h);
+    out
+}
+
 /// Compute the inclusive row/column ranges intersecting `viewport`, in
 /// O(overrides) — independent of how many cells are populated.
 pub fn visible_range(geometry: &GridGeometry, viewport: &Viewport) -> VisibleRange {

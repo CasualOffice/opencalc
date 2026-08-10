@@ -20,7 +20,6 @@ use casual_calc_import::import_package;
 use casual_calc_layout::table_style::table_style_colors;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_color, display_text,
-    layout_viewport,
 };
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellComment, CellRange, CellRef, CellValue, CfRule,
@@ -29,8 +28,7 @@ use casual_calc_model::{
     PivotFilterField, PivotSort, PivotTable, PivotValueField, Sheet, SheetId, SheetVisibility,
     Style, StyleId, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook,
 };
-use casual_calc_render::render_png;
-use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession};
+use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession, render_sheet_png};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -100,8 +98,7 @@ pub fn render_xlsx(
         .map(GridGeometry::for_sheet)
         .unwrap_or_default();
     let viewport = viewport_px(width_px, height_px, dpi);
-    let list = layout_viewport(&workbook, 0, &geometry, &viewport);
-    render_png(&list, &geometry, &viewport, dpi).map_err(js)
+    render_sheet_png(&workbook, 0, &geometry, &viewport, dpi).map_err(js)
 }
 
 /// A short summary of an opened `.xlsx`.

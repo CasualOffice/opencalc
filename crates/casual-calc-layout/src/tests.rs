@@ -360,3 +360,160 @@ fn a_currency_symbol_before_the_locale_still_selects_the_language() {
     // `[$€-40C]` carries both; the id is after the dash.
     assert_eq!(format_number(45000.0, "[$€-40C]mmmm"), "mars");
 }
+
+/// The pane split: what a freeze does to a viewport.
+///
+/// These are the arithmetic the headless renderer needs in order to draw a
+/// frozen sheet the way the editor canvas does — for a long time it did not,
+/// and a frozen header scrolled away in a PNG while holding still on screen.
+mod panes {
+    use crate::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, Freeze, GridGeometry, Viewport, panes};
+
+    fn geometry() -> GridGeometry {
+        GridGeometry::default()
+    }
+
+    fn viewport() -> Viewport {
+        Viewport {
+            x: 4_000,
+            y: 3_000,
+            width: DEFAULT_COL_WIDTH * 10,
+            height: DEFAULT_ROW_HEIGHT * 20,
+        }
+    }
+
+    #[test]
+    fn no_freeze_is_one_pane_that_is_the_viewport_itself() {
+        // The property that lets every existing caller move to the split path
+        // without changing a pixel: an unfrozen sheet is the same window it
+        // always was, at the origin.
+        let vp = viewport();
+        let out = panes(&geometry(), &vp, Freeze::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].viewport, vp);
+        assert_eq!(out[0].origin, (0, 0));
+    }
+
+    #[test]
+    fn a_freeze_on_both_axes_makes_four_panes_that_tile_the_image() {
+        let vp = viewport();
+        let freeze = Freeze { rows: 2, cols: 1 };
+        let out = panes(&geometry(), &vp, freeze);
+        assert_eq!(out.len(), 4);
+
+        let fw = DEFAULT_COL_WIDTH;
+        let fh = DEFAULT_ROW_HEIGHT * 2;
+        let origins: Vec<_> = out.iter().map(|p| p.origin).collect();
+        assert_eq!(origins, vec![(0, 0), (fw, 0), (0, fh), (fw, fh)]);
+
+        // Together they cover the image exactly: the right edge of the frozen
+        // column plus the body's width is the whole width, and likewise down.
+        assert_eq!(out[0].viewport.width + out[1].viewport.width, vp.width);
+        assert_eq!(out[0].viewport.height + out[2].viewport.height, vp.height);
+        assert_eq!(out[3].viewport.width, vp.width - fw);
+        assert_eq!(out[3].viewport.height, vp.height - fh);
+    }
+
+    #[test]
+    fn the_frozen_bands_look_at_the_top_left_however_far_the_body_has_scrolled() {
+        // This is the entire point of a freeze. The corner never moves, the top
+        // band scrolls only sideways, the left band only downwards.
+        let freeze = Freeze { rows: 2, cols: 1 };
+        let far = Viewport {
+            x: 500_000,
+            y: 900_000,
+            ..viewport()
+        };
+        let out = panes(&geometry(), &far, freeze);
+
+        assert_eq!((out[0].viewport.x, out[0].viewport.y), (0, 0), "corner");
+        assert_eq!(out[1].viewport.y, 0, "top band does not scroll down");
+        assert_eq!(out[1].viewport.x, far.x, "but it does scroll across");
+        assert_eq!(out[2].viewport.x, 0, "left band does not scroll across");
+        assert_eq!(out[2].viewport.y, far.y, "but it does scroll down");
+        assert_eq!((out[3].viewport.x, out[3].viewport.y), (far.x, far.y));
+    }
+
+    #[test]
+    fn the_body_cannot_scroll_back_into_the_frozen_band() {
+        // Scrolled to the very top-left, the body still starts at the first
+        // unfrozen line — otherwise the pinned rows appear twice, once held and
+        // once beside themselves.
+        let freeze = Freeze { rows: 3, cols: 2 };
+        let home = Viewport {
+            x: 0,
+            y: 0,
+            ..viewport()
+        };
+        let out = panes(&geometry(), &home, freeze);
+        let body = out.last().unwrap();
+        assert_eq!(body.viewport.x, DEFAULT_COL_WIDTH * 2);
+        assert_eq!(body.viewport.y, DEFAULT_ROW_HEIGHT * 3);
+    }
+
+    #[test]
+    fn freezing_one_axis_splits_only_that_axis() {
+        let vp = viewport();
+
+        let rows_only = panes(&geometry(), &vp, Freeze { rows: 1, cols: 0 });
+        assert_eq!(rows_only.len(), 2, "a top band and a body");
+        assert_eq!(rows_only[0].origin, (0, 0));
+        assert_eq!(rows_only[1].origin, (0, DEFAULT_ROW_HEIGHT));
+        assert_eq!(rows_only[0].viewport.width, vp.width, "full width each");
+        assert_eq!(rows_only[1].viewport.x, vp.x, "and still scrolls across");
+
+        let cols_only = panes(&geometry(), &vp, Freeze { rows: 0, cols: 1 });
+        assert_eq!(cols_only.len(), 2, "a left band and a body");
+        assert_eq!(cols_only[1].origin, (DEFAULT_COL_WIDTH, 0));
+        assert_eq!(cols_only[0].viewport.height, vp.height);
+    }
+
+    #[test]
+    fn a_freeze_too_wide_for_the_image_keeps_the_frozen_part_and_drops_the_rest() {
+        // Not an error: the author asked for those lines to always be visible,
+        // so when there is only room for them, they are what is shown.
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: DEFAULT_COL_WIDTH * 2,
+            height: DEFAULT_ROW_HEIGHT * 2,
+        };
+        let out = panes(&geometry(), &vp, Freeze { rows: 50, cols: 50 });
+        assert_eq!(out.len(), 1, "the corner alone; nothing scrolls");
+        assert_eq!(out[0].origin, (0, 0));
+        assert_eq!(out[0].viewport.width, vp.width);
+        assert_eq!(out[0].viewport.height, vp.height);
+    }
+
+    #[test]
+    fn a_freeze_exactly_filling_the_image_leaves_no_body() {
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: DEFAULT_COL_WIDTH * 3,
+            height: DEFAULT_ROW_HEIGHT * 4,
+        };
+        let out = panes(&geometry(), &vp, Freeze { rows: 4, cols: 3 });
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].viewport.width, vp.width);
+    }
+
+    #[test]
+    fn a_zero_sized_viewport_yields_nothing_rather_than_a_negative_pane() {
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        assert!(panes(&geometry(), &vp, Freeze { rows: 1, cols: 1 }).is_empty());
+        assert!(panes(&geometry(), &vp, Freeze::default()).is_empty());
+    }
+
+    #[test]
+    fn is_none_is_true_only_when_nothing_is_pinned() {
+        assert!(Freeze::default().is_none());
+        assert!(!Freeze { rows: 1, cols: 0 }.is_none());
+        assert!(!Freeze { rows: 0, cols: 1 }.is_none());
+    }
+}

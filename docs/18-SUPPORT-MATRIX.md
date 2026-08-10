@@ -30,7 +30,7 @@ Tier 1 = full test matrix in CI. Tier 2 = build + smoke.
 | **Embeddable browser SDK** | `<opencalc-sheet>` custom element wrapping that editor for third-party pages | ● published as [`@opencalc/sheet`](https://www.npmjs.com/package/@opencalc/sheet); designed in [55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md). Alpha — the API is not stable until 1.0 |
 | Embedded SDK (Rust) | `casual-calc-sdk` in any Rust host app | ● `WorkbookSession` open / edit / recalc / render / save, with `SessionConfig` |
 | Headless native | Read/model/calc/write, no rendering surface | ● the same session with no render call |
-| Headless render | + display list → PNG via CPU raster | ◑ frozen panes are not split in the PNG backend (the editor canvas does split them) |
+| Headless render | + display list → PNG via CPU raster | ● incl. frozen panes, split and composed the way the editor canvas draws them (RND-02) |
 | **Tauri desktop app** | Native Rust engine via `casual-calc-sdk` from Tauri commands; calc runs native | ○ `casual-calc-tauri` not written (TAURI-001) |
 
 Both the Tauri and web hosts compose the same host-agnostic core; the calc engine
@@ -55,7 +55,7 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Number formats (built-in + custom) | ● | ● | n/a | Sections, colours, literal runs, elapsed time, locale-specific month/day names |
 | Styles: fonts, fills, borders, alignment | ● | ● | n/a | Incl. gradients, patterns, diagonals, double lines, super/subscript |
 | Rich text runs | ● | ● | n/a | FID-02, FC-11 |
-| Merged ranges, frozen panes, splits | ● | ● | n/a | Frozen panes split in the canvas, **not** in the PNG backend |
+| Merged ranges, frozen panes, splits | ● | ● | n/a | Frozen panes split in the canvas **and** in the PNG backend (RND-02) |
 | Column/row sizing, hidden, outline | ● | ● | n/a | — |
 | Defined names | ● | n/a | ● | Incl. print area and titles; unparseable ones are retained |
 | Formulas: parse & preserve (AST) | ● | n/a | n/a | — |
