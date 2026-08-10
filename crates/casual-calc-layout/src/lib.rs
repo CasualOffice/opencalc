@@ -33,7 +33,9 @@ pub use numfmt::{
     format_number_colored, format_text,
 };
 
-use casual_calc_model::{BorderEdge, Borders, Cell, CellValue, Style, Workbook};
+use casual_calc_model::{
+    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, Sheet, Style, Workbook,
+};
 
 /// A scrolled viewport rectangle, in twips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,8 +198,41 @@ fn layout_range(
         return list;
     };
 
+    // A merged range is one cell that happens to be large. Resolved before the
+    // cells are walked, because it changes both what is drawn (one rectangle,
+    // not N) and what is skipped (everything the range covers).
+    let merged = visible_merges(sheet, range);
+
+    // The anchors first, in the order `visible_merges` fixed, so the display
+    // list stays deterministic. They cannot overlap each other or an unmerged
+    // cell, so painting them before the rest costs nothing.
+    for merge in &merged {
+        let rect = merge_rect(geometry, merge);
+        let cell = sheet.cells.get(merge.start);
+        // The region carries the anchor's fill, so the backend paints ground
+        // and outline in one place and cannot order them wrongly. The anchor's
+        // text and border follow as their own items, on top.
+        list.items.push(PaintItem::MergedRegion {
+            rect,
+            fill: cell
+                .and_then(|c| c.style)
+                .and_then(|id| workbook.styles.get(id))
+                .and_then(|s| s.fill_color.clone()),
+        });
+        if let Some(cell) = cell {
+            push_cell(&mut list, workbook, cell, rect, Background::AlreadyPainted);
+        }
+    }
+
     for (at, cell) in sheet.cells.row_band(range.rows.0, range.rows.1) {
         if at.col < range.cols.0 || at.col > range.cols.1 {
+            continue;
+        }
+        // Covered by a merge — including its own anchor, which the pass above
+        // has already drawn at the full size. A covered cell may still hold a
+        // value (Excel keeps them, and so does the writer); a merge means it is
+        // not shown, not that it is gone.
+        if merged.iter().any(|m| covers(m, at)) {
             continue;
         }
         let rect = Rect {
@@ -206,43 +241,123 @@ fn layout_range(
             w: geometry.columns.size(at.col),
             h: geometry.rows.size(at.row),
         };
-        let style = cell.style.and_then(|id| workbook.styles.get(id));
-
-        // Painter's order per cell: fill behind, then text, then border on top.
-        if let Some(fill) = style.and_then(|s| s.fill_color.clone()) {
-            list.items.push(PaintItem::CellBackground {
-                rect,
-                fill: Some(fill),
-            });
-        }
-
-        let content = display_text(workbook, cell);
-        if !content.is_empty() {
-            // Effective font: the cell's own, else the workbook default.
-            let font_name = style
-                .and_then(|s| s.font_name.clone())
-                .or_else(|| workbook.default_font_name.clone());
-            let font_pt = style
-                .and_then(|s| s.font_size_hp)
-                .or(workbook.default_font_size_hp)
-                .map(|hp| hp as f32 / 2.0);
-            list.items.push(PaintItem::Text {
-                rect,
-                content,
-                align: align_for(&cell.value),
-                color: style.and_then(|s| s.font_color.clone()),
-                bold: style.is_some_and(|s| s.bold),
-                italic: style.is_some_and(|s| s.italic),
-                font_name,
-                font_pt,
-            });
-        }
-
-        if let Some(border) = style.and_then(|s| border_item(rect, s)) {
-            list.items.push(border);
-        }
+        push_cell(&mut list, workbook, cell, rect, Background::Paint);
     }
     list
+}
+
+/// Whether `at` falls inside `merge`.
+fn covers(merge: &CellRange, at: CellRef) -> bool {
+    at.row >= merge.start.row
+        && at.row <= merge.end.row
+        && at.col >= merge.start.col
+        && at.col <= merge.end.col
+}
+
+/// The union rectangle of a merged range, in twips.
+fn merge_rect(geometry: &GridGeometry, merge: &CellRange) -> Rect {
+    let x = geometry.columns.offset(merge.start.col);
+    let y = geometry.rows.offset(merge.start.row);
+    Rect {
+        x,
+        y,
+        // From the left edge of the first column to the left edge of the one
+        // past the last, which is the width however the columns in between are
+        // sized — and correct for a hidden column, which is simply zero wide.
+        w: geometry.columns.offset(merge.end.col.saturating_add(1)) - x,
+        h: geometry.rows.offset(merge.end.row.saturating_add(1)) - y,
+    }
+}
+
+/// The sheet's merged ranges that intersect `range`, in a deterministic order.
+///
+/// Intersecting, **not** contained: a merge anchored above or to the left of the
+/// window still shows inside it, and virtualization that dropped it would make a
+/// merged block appear and disappear as it was scrolled past — the anchor is
+/// often off screen precisely because the block is wide.
+///
+/// Linear in the sheet's merge count, and the result is linear in the merges
+/// *in view*, which is bounded by the cells in view. That is what makes the
+/// containment scan in `layout_range` affordable; if a sheet ever carries
+/// enough merges for it to matter, an interval index goes here rather than
+/// there.
+fn visible_merges(sheet: &Sheet, range: VisibleRange) -> Vec<CellRange> {
+    let mut out: Vec<CellRange> = sheet
+        .merges
+        .iter()
+        .filter(|m| {
+            m.start.row <= range.rows.1
+                && m.end.row >= range.rows.0
+                && m.start.col <= range.cols.1
+                && m.end.col >= range.cols.0
+        })
+        .copied()
+        .collect();
+    // The model does not promise an order for `merges`, and a display list that
+    // depends on one is a golden test that fails when a file is re-saved.
+    out.sort_by_key(|m| (m.start.row, m.start.col, m.end.row, m.end.col));
+    out.dedup();
+    out
+}
+
+/// Whether [`push_cell`] should emit the cell's background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Background {
+    /// An ordinary cell: emit it.
+    Paint,
+    /// A merged anchor, whose fill the [`PaintItem::MergedRegion`] already
+    /// carries. Emitting it again would paint over the region's outline.
+    AlreadyPainted,
+}
+
+/// Emit one cell's paint items into `list` at `rect`.
+///
+/// Shared by the merged and unmerged paths so a merged cell is styled, aligned
+/// and bordered exactly as it would be unmerged — only its rectangle differs.
+fn push_cell(
+    list: &mut DisplayList,
+    workbook: &Workbook,
+    cell: &Cell,
+    rect: Rect,
+    background: Background,
+) {
+    let style = cell.style.and_then(|id| workbook.styles.get(id));
+
+    // Painter's order per cell: fill behind, then text, then border on top.
+    if background == Background::Paint
+        && let Some(fill) = style.and_then(|s| s.fill_color.clone())
+    {
+        list.items.push(PaintItem::CellBackground {
+            rect,
+            fill: Some(fill),
+        });
+    }
+
+    let content = display_text(workbook, cell);
+    if !content.is_empty() {
+        // Effective font: the cell's own, else the workbook default.
+        let font_name = style
+            .and_then(|s| s.font_name.clone())
+            .or_else(|| workbook.default_font_name.clone());
+        let font_pt = style
+            .and_then(|s| s.font_size_hp)
+            .or(workbook.default_font_size_hp)
+            .map(|hp| hp as f32 / 2.0);
+        list.items.push(PaintItem::Text {
+            rect,
+            content,
+            align: align_for(&cell.value),
+            color: style.and_then(|s| s.font_color.clone()),
+            bold: style.is_some_and(|s| s.bold),
+            italic: style.is_some_and(|s| s.italic),
+            font_name,
+            font_pt,
+        });
+    }
+
+    if let Some(border) = style.and_then(|s| border_item(rect, s)) {
+        list.items.push(border);
+    }
 }
 
 /// Build a [`PaintItem::CellBorder`] from a style's borders, or `None` if the

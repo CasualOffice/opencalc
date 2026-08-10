@@ -56,7 +56,7 @@ results. See [02](02-ARCHITECTURE.md) §Host targets.
 | Styles: fonts, fills, borders, alignment | ● | ● | n/a | Incl. gradients, patterns, diagonals, double lines, super/subscript |
 | Rich text runs | ● | ● | n/a | FID-02, FC-11 |
 | Frozen panes & splits | ● | ● | n/a | Split in the canvas **and** in the PNG backend (RND-02) |
-| Merged ranges | ● | ◑ | n/a | Modelled, round-tripped, and drawn by the editor canvas. **Not in the headless backend**: `casual-calc-layout` and `casual-calc-render` have no notion of a merge, so the PNG draws a merged range as separate cells (RND-03) |
+| Merged ranges | ● | ● | n/a | One rectangle anchored at the top-left, in the canvas **and** in the PNG backend, with the interior grid removed and covered cells' values kept but not shown (RND-03) |
 | Column/row sizing, hidden, outline | ● | ● | n/a | — |
 | Defined names | ● | n/a | ● | Incl. print area and titles; unparseable ones are retained |
 | Formulas: parse & preserve (AST) | ● | n/a | n/a | — |

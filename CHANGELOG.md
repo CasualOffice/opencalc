@@ -46,6 +46,27 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-11 — Merged cells render headlessly; the tracker gets honest
+
+**Fixed**
+
+- **Merged cells are laid out and drawn in the headless backend** (RND-03).
+  `casual-calc-layout` and `casual-calc-render` had no notion of a merge, so a
+  PNG drew a merged range as separate cells — ruled apart, with the anchor's
+  text in the wrong box. A merge is now resolved to one rectangle before the
+  cells are walked; the cells it covers keep their values and are not drawn;
+  and the display list carries a `MergedRegion` item that erases the interior
+  grid and outlines the range as the single cell it is.
+
+**Changed**
+
+- **`docs/14` reconciled against the code** (CI-003). Seven rows said "Not
+  started" for work that had shipped — structural ops, glyph text, part
+  discovery, retention — and three more were part-done in ways no status column
+  could show. Every row now carries the evidence that settles it, and the status
+  column is a controlled vocabulary so the tracker can be counted as well as
+  read. The reconciliation is what found RND-03.
+
 ### 2026-08-11 — The editor gets a gate, and the gate finds four bugs
 
 **Added**

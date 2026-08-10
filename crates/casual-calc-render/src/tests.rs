@@ -425,3 +425,207 @@ mod frozen {
         );
     }
 }
+
+/// Merged cells in the raster — the visible half of RND-03.
+///
+/// Layout resolving a merge to one rectangle is not enough on its own: the
+/// renderer rules the grid from the geometry, so a merged block kept the
+/// interior lines it was merged to remove.
+mod merged {
+    use casual_calc_layout::{
+        DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, layout_full,
+    };
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook,
+    };
+
+    use crate::render_pixmap;
+
+    /// B2:D2 merged — a three-column header band, the commonest merge there is.
+    fn banner(fill: Option<&str>) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let style = fill.map(|hex| {
+            wb.intern_style(Style {
+                fill_color: Some(hex.to_owned()),
+                ..Style::default()
+            })
+        });
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        let mut anchor = Cell::value(CellValue::Number(1.0));
+        anchor.style = style;
+        sheet.cells.set(CellRef::new(1, 1), anchor);
+        sheet
+            .merges
+            .push(CellRange::new(CellRef::new(1, 1), CellRef::new(1, 3)));
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn viewport() -> Viewport {
+        Viewport {
+            x: 0,
+            y: 0,
+            width: DEFAULT_COL_WIDTH * 6,
+            height: DEFAULT_ROW_HEIGHT * 6,
+        }
+    }
+
+    /// Pixel geometry of the merged band at 96 dpi.
+    fn band() -> (u32, u32, u32, u32) {
+        let px = |t: i64| (t as f32 * 96.0 / 1440.0).round() as u32;
+        (
+            px(DEFAULT_COL_WIDTH),     // x0
+            px(DEFAULT_ROW_HEIGHT),    // y0
+            px(DEFAULT_COL_WIDTH * 3), // width
+            px(DEFAULT_ROW_HEIGHT),    // height
+        )
+    }
+
+    #[test]
+    fn no_gridline_is_drawn_inside_a_merged_range() {
+        // The defect exactly: the boundaries between B, C and D are not cell
+        // boundaries any more, so they must not be ruled.
+        let wb = banner(None);
+        let geo = GridGeometry::default();
+        let pixmap = render_pixmap(&layout_full(&wb, 0, &geo), &geo, &viewport(), 96).unwrap();
+
+        let (x0, y0, w, h) = band();
+        // A row through the middle of the band, between its own outlines.
+        let mid = y0 + h / 2;
+        let gridline = |r: u8, g: u8, b: u8| (r, g, b) == (224, 224, 224);
+        assert!(
+            !crate::tests::any_pixel(&pixmap, x0 + 1, mid, x0 + w - 1, mid + 1, gridline),
+            "the interior of the merge is unruled"
+        );
+    }
+
+    #[test]
+    fn the_merged_range_is_still_outlined_as_one_cell() {
+        // Erasing the interior must not erase the range itself — a merged block
+        // with no boundary reads as a hole in the grid.
+        let wb = banner(None);
+        let geo = GridGeometry::default();
+        let pixmap = render_pixmap(&layout_full(&wb, 0, &geo), &geo, &viewport(), 96).unwrap();
+
+        let (x0, y0, w, h) = band();
+        let gridline = |r: u8, g: u8, b: u8| (r, g, b) == (224, 224, 224);
+        assert!(
+            crate::tests::any_pixel(&pixmap, x0, y0, x0 + w, y0 + 1, gridline),
+            "top edge"
+        );
+        assert!(
+            crate::tests::any_pixel(&pixmap, x0, y0 + h - 1, x0 + w, y0 + h, gridline),
+            "bottom edge"
+        );
+        assert!(
+            crate::tests::any_pixel(&pixmap, x0, y0, x0 + 1, y0 + h, gridline),
+            "left edge"
+        );
+    }
+
+    #[test]
+    fn a_fill_covers_the_whole_merge_and_not_just_its_anchor() {
+        // The half-coloured header: the most visible way to get a merge wrong.
+        let wb = banner(Some("00FF00"));
+        let geo = GridGeometry::default();
+        let pixmap = render_pixmap(&layout_full(&wb, 0, &geo), &geo, &viewport(), 96).unwrap();
+
+        let (x0, y0, w, h) = band();
+        let mid = y0 + h / 2;
+        // Sample near the far end of the band — inside the merge, but two
+        // columns past the anchor cell.
+        let far = pixmap.pixel(x0 + w - 4, mid).unwrap();
+        assert!(
+            far.green() > 200 && far.red() < 100 && far.blue() < 100,
+            "the fill reaches the end of the merge, got r{} g{} b{}",
+            far.red(),
+            far.green(),
+            far.blue()
+        );
+    }
+
+    #[test]
+    fn a_sheet_without_merges_renders_exactly_as_it_did() {
+        // The compatibility property, on bytes: the merge pass must be
+        // invisible to every sheet that has none.
+        let mut wb = banner(None);
+        wb.sheets[0].merges.clear();
+        let geo = GridGeometry::default();
+        let with_pass = render_pixmap(&layout_full(&wb, 0, &geo), &geo, &viewport(), 96).unwrap();
+
+        // The grid, ruled through where the merge would have been.
+        let (x0, y0, w, h) = band();
+        let gridline = |r: u8, g: u8, b: u8| (r, g, b) == (224, 224, 224);
+        assert!(
+            crate::tests::any_pixel(
+                &with_pass,
+                x0 + 1,
+                y0 + h / 2,
+                x0 + w - 1,
+                y0 + h / 2 + 1,
+                gridline
+            ),
+            "unmerged, so B/C/D are ruled apart as they always were"
+        );
+    }
+}
+
+/// Two merged ranges side by side must not read as one.
+///
+/// The ordering trap, gated. `MergedRegion` erases the grid across its whole
+/// rectangle and then outlines it; doing those two in the other order paints
+/// the outline away, and two adjacent merged headers came out looking like a
+/// single band twice as wide. Filled, because a fill is what hides the mistake.
+#[test]
+fn adjacent_merged_ranges_keep_a_boundary_between_them() {
+    use casual_calc_layout::{
+        DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, layout_full,
+    };
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, Workbook,
+    };
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let fill = wb.intern_style(Style {
+        fill_color: Some("D9E7FF".to_owned()),
+        ..Style::default()
+    });
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    // A1:B1 and C1:D1 — two two-column headers that touch.
+    for col in [0u32, 2] {
+        let mut cell = Cell::value(CellValue::Number(f64::from(col)));
+        cell.style = Some(fill);
+        sheet.cells.set(CellRef::new(0, col), cell);
+        sheet.merges.push(CellRange::new(
+            CellRef::new(0, col),
+            CellRef::new(0, col + 1),
+        ));
+    }
+    wb.sheets.push(sheet);
+
+    let geo = GridGeometry::default();
+    let vp = Viewport {
+        x: 0,
+        y: 0,
+        width: DEFAULT_COL_WIDTH * 5,
+        height: DEFAULT_ROW_HEIGHT * 3,
+    };
+    let pixmap = crate::render_pixmap(&layout_full(&wb, 0, &geo), &geo, &vp, 96).unwrap();
+
+    let px = |t: i64| (t as f32 * 96.0 / 1440.0).round() as u32;
+    let mid_y = px(DEFAULT_ROW_HEIGHT) / 2;
+    let seam = px(DEFAULT_COL_WIDTH * 2);
+    let gridline = |r: u8, g: u8, b: u8| (r, g, b) == (224, 224, 224);
+
+    assert!(
+        any_pixel(&pixmap, seam - 1, mid_y, seam + 1, mid_y + 1, gridline),
+        "the two ranges are separated where they meet"
+    );
+    // And the interior of the left one is still unruled, so the boundary above
+    // is the ranges' own edge and not a surviving interior gridline.
+    let interior = px(DEFAULT_COL_WIDTH);
+    assert!(
+        !any_pixel(&pixmap, interior, mid_y, interior + 1, mid_y + 1, gridline),
+        "while A/B inside the first range is not"
+    );
+}

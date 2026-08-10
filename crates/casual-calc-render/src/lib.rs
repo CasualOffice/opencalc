@@ -119,6 +119,35 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
                 pixmap.fill_rect(screen, &paint, Transform::identity(), None);
             }
         }
+        PaintItem::MergedRegion { rect, fill } => {
+            let Some(screen) = to_screen(rect, viewport, dpi) else {
+                return;
+            };
+            // The anchor's fill if it has one, the ground otherwise, across the
+            // whole range — which erases the gridlines `draw_gridlines` laid
+            // down between the cells it covers, since they are not cell
+            // boundaries any more. A merged header still ruled into three is
+            // the visible half of RND-03.
+            let mut ground = Paint::default();
+            ground.set_color(
+                fill.as_deref()
+                    .and_then(parse_hex_color)
+                    .unwrap_or(Color::WHITE),
+            );
+            ground.anti_alias = false;
+            pixmap.fill_rect(screen, &ground, Transform::identity(), None);
+
+            // Then one outline for the range itself, in the gridline colour, so
+            // it reads as the single cell it is rather than as a gap in the grid.
+            let mut line = Paint::default();
+            line.set_color(Color::from_rgba8(224, 224, 224, 255));
+            line.anti_alias = false;
+            let (x, y, w, h) = (screen.x(), screen.y(), screen.width(), screen.height());
+            fill_thin(pixmap, &line, x, y, w, 1.0);
+            fill_thin(pixmap, &line, x, y + h - 1.0, w, 1.0);
+            fill_thin(pixmap, &line, x, y, 1.0, h);
+            fill_thin(pixmap, &line, x + w - 1.0, y, 1.0, h);
+        }
         PaintItem::Text {
             rect,
             content,

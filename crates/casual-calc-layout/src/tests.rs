@@ -517,3 +517,237 @@ mod panes {
         assert!(!Freeze { rows: 0, cols: 1 }.is_none());
     }
 }
+
+/// Merged ranges: one cell that happens to be large.
+///
+/// RND-03. `casual-calc-layout` had no notion of a merge at all, so the
+/// headless backend drew a merged range as separate cells — each with its own
+/// gridlines and the anchor's text in the wrong box. It survived because every
+/// surface a person looks at was right: the editor canvas handles merges and
+/// they round-trip through the model. Only the PNG was wrong, and nothing
+/// looked at the PNG.
+mod merges {
+    use casual_calc_model::{CellRange, Style};
+
+    use super::*;
+    use crate::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, PaintItem, Rect};
+
+    /// A2:C3 merged, with the anchor carrying text and a fill, and every cell
+    /// the merge covers holding a value of its own — which Excel keeps in the
+    /// file and does not show, and so must this.
+    fn merged_sheet() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let fill = wb.intern_style(Style {
+            fill_color: Some("FFCC00".to_owned()),
+            ..Style::default()
+        });
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 1..=2u32 {
+            for col in 0..=2u32 {
+                sheet.cells.set(
+                    CellRef::new(row, col),
+                    Cell::value(CellValue::Number(f64::from(row * 10 + col))),
+                );
+            }
+        }
+        let mut anchor = Cell::value(CellValue::Number(10.0));
+        anchor.style = Some(fill);
+        sheet.cells.set(CellRef::new(1, 0), anchor);
+        sheet
+            .merges
+            .push(CellRange::new(CellRef::new(1, 0), CellRef::new(2, 2)));
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn rects(list: &crate::DisplayList) -> Vec<Rect> {
+        list.items
+            .iter()
+            .map(|item| match item {
+                PaintItem::CellBackground { rect, .. }
+                | PaintItem::GridLine { rect }
+                | PaintItem::MergedRegion { rect, .. }
+                | PaintItem::Text { rect, .. }
+                | PaintItem::CellBorder { rect, .. } => *rect,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_merged_range_is_drawn_once_across_its_whole_rectangle() {
+        let wb = merged_sheet();
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+
+        let union = Rect {
+            x: 0,
+            y: DEFAULT_ROW_HEIGHT,
+            w: DEFAULT_COL_WIDTH * 3,
+            h: DEFAULT_ROW_HEIGHT * 2,
+        };
+        assert!(
+            rects(&list).contains(&union),
+            "the merge paints as its union rectangle, not as six cells"
+        );
+
+        // And exactly one text item, the anchor's — six values are stored, one
+        // is shown.
+        let texts: Vec<_> = list
+            .items
+            .iter()
+            .filter(|i| matches!(i, PaintItem::Text { .. }))
+            .collect();
+        assert_eq!(texts.len(), 1, "one visible cell, so one string");
+        let PaintItem::Text { rect, content, .. } = texts[0] else {
+            unreachable!()
+        };
+        assert_eq!(content, "10", "the anchor's value");
+        assert_eq!(*rect, union, "laid out across the merge, not its own cell");
+    }
+
+    #[test]
+    fn the_covered_cells_keep_their_values_and_are_not_drawn() {
+        // The distinction that matters: a merge hides cells, it does not empty
+        // them. Losing them on save would be data loss.
+        let wb = merged_sheet();
+        assert_eq!(
+            wb.sheets[0].cells.get(CellRef::new(2, 2)).map(|c| &c.value),
+            Some(&CellValue::Number(22.0)),
+            "still in the model"
+        );
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let own_cell = Rect {
+            x: DEFAULT_COL_WIDTH * 2,
+            y: DEFAULT_ROW_HEIGHT * 2,
+            w: DEFAULT_COL_WIDTH,
+            h: DEFAULT_ROW_HEIGHT,
+        };
+        assert!(
+            !rects(&list).contains(&own_cell),
+            "and not painted in its own right"
+        );
+    }
+
+    #[test]
+    fn the_anchors_style_covers_the_whole_merge() {
+        let wb = merged_sheet();
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        // The fill rides on the region item, not on a separate background:
+        // the two must not be orderable, or the background paints away the
+        // region's outline and two adjacent merges read as one.
+        let fills: Vec<_> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::MergedRegion { rect, fill } => Some((*rect, fill.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !list
+                .items
+                .iter()
+                .any(|i| matches!(i, PaintItem::CellBackground { .. })),
+            "a merged anchor emits no separate background"
+        );
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].1.as_deref(), Some("FFCC00"));
+        assert_eq!(
+            fills[0].0.w,
+            DEFAULT_COL_WIDTH * 3,
+            "the fill spans the merge — a merged header half-coloured is the \
+             most visible way to get this wrong"
+        );
+    }
+
+    #[test]
+    fn a_merge_anchored_off_screen_still_shows_in_the_window() {
+        // The virtualization trap: the anchor is off screen *because* the block
+        // is wide, so dropping merges whose anchor is outside the window makes
+        // a merged band vanish exactly when it is widest.
+        let wb = merged_sheet();
+        let geo = GridGeometry::default();
+        // A window over column C only — the merge is anchored at column A.
+        let vp = Viewport {
+            x: DEFAULT_COL_WIDTH * 2 + 10,
+            y: DEFAULT_ROW_HEIGHT + 10,
+            width: DEFAULT_COL_WIDTH / 2,
+            height: DEFAULT_ROW_HEIGHT / 2,
+        };
+        let list = layout_viewport(&wb, 0, &geo, &vp);
+        assert!(
+            list.items
+                .iter()
+                .any(|i| matches!(i, PaintItem::Text { content, .. } if content == "10")),
+            "the merged block is visible here, so it is laid out here"
+        );
+    }
+
+    #[test]
+    fn a_viewport_covering_everything_still_equals_the_full_layout() {
+        // The crate's founding invariant, re-checked with merges in play: the
+        // virtualized path and the reference path must not diverge.
+        let wb = merged_sheet();
+        let geo = GridGeometry::default();
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 1_000_000,
+            height: 1_000_000,
+        };
+        assert_eq!(
+            layout_full(&wb, 0, &geo),
+            layout_viewport(&wb, 0, &geo, &vp)
+        );
+    }
+
+    #[test]
+    fn the_display_list_does_not_depend_on_the_order_merges_are_stored_in() {
+        // `Sheet::merges` is a Vec with no promised order, and a re-saved file
+        // can reorder it. A display list that inherited that order would be a
+        // golden test failing for no reason anyone could see.
+        let mut a = merged_sheet();
+        a.sheets[0]
+            .merges
+            .push(CellRange::new(CellRef::new(5, 0), CellRef::new(5, 1)));
+        let mut b = a.clone();
+        b.sheets[0].merges.reverse();
+
+        let geo = GridGeometry::default();
+        assert_eq!(layout_full(&a, 0, &geo), layout_full(&b, 0, &geo));
+    }
+
+    #[test]
+    fn a_hidden_column_inside_a_merge_narrows_it_rather_than_breaking_it() {
+        // Width is measured from the offset index, not by multiplying a default,
+        // so a zero-width column inside the span simply contributes nothing.
+        let wb = merged_sheet();
+        let mut geo = GridGeometry::default();
+        geo.columns.set_size(1, 0);
+
+        let list = layout_full(&wb, 0, &geo);
+        let widths: Vec<i64> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::MergedRegion { rect, .. } => Some(rect.w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            widths,
+            vec![DEFAULT_COL_WIDTH * 2],
+            "three columns, one hidden"
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_no_merges_lays_out_exactly_as_before() {
+        // The compatibility property: the merge pass must be invisible to every
+        // sheet that has none, which is nearly all of them.
+        let wb = sample();
+        let geo = GridGeometry::default();
+        let list = layout_full(&wb, 0, &geo);
+        assert_eq!(list.items.len(), 4, "the four cells of the sample sheet");
+    }
+}

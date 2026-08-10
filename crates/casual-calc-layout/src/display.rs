@@ -59,6 +59,28 @@ pub enum PaintItem {
         /// From/to as a zero-height or zero-width rectangle.
         rect: Rect,
     },
+    /// A merged range: one cell occupying `rect`.
+    ///
+    /// A backend draws it as a single cell — `fill` if the anchor has one and
+    /// the ground otherwise, across the whole rectangle, then one outline
+    /// around the range. Filling the whole rectangle is what **erases the
+    /// gridlines between the cells it covers**, since those are no longer cell
+    /// boundaries; outlining it afterwards is what keeps the range from reading
+    /// as a hole in the grid. The order is not incidental — outlining first and
+    /// filling second paints the outline away, which is how two adjacent merged
+    /// headers first came out looking like one.
+    ///
+    /// This carries the fill rather than leaving it to a following
+    /// [`CellBackground`](Self::CellBackground) precisely so the two cannot be
+    /// ordered wrongly. The anchor's text and border still follow as their own
+    /// items, on top.
+    MergedRegion {
+        /// The union rectangle of the merged range.
+        rect: Rect,
+        /// The anchor's solid fill as `RRGGBB`, if it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<String>,
+    },
     /// Cell text to be shaped and painted, clipped to `rect`.
     Text {
         /// The cell rectangle the text is clipped to.

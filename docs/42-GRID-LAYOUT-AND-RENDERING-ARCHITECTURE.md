@@ -34,9 +34,12 @@ resolution-independent and golden-testable.
 > backend-neutral `DisplayList`/`PaintItem`, and `layout_viewport`/`layout_full`.
 > The invariant — viewport output equals the full-layout output restricted to the
 > window — is gated, and the model's `CellStore::row_band` gives O(visible) scans.
-> Layout reads cached values only (no calc engine). Still to come: number-format
-> display text (P1C-002), `parley` in-cell shaping + merged/frozen layout
-> (P1C-003), and importing real column/row sizing (P1C-004).
+> Layout reads cached values only (no calc engine). Number-format display text
+> (P1C-002) and real column/row sizing (P1C-004) have since landed, as have
+> **frozen-pane layout** (RND-02) and **merged-cell layout** (RND-03). Still to
+> come from P1C-003: `parley` in-cell shaping — the render backend outlines
+> glyphs directly, which is right for Latin text and wrong for anything needing
+> reordering, ligatures or a complex script.
 
 ## Geometry: the cumulative offset index
 
@@ -91,7 +94,17 @@ For each visible cell the layout engine computes:
 ### Merged cells & frozen panes
 
 - **Merged ranges** lay out as a single rectangle anchored at the top-left cell;
-  the offset index gives the union rectangle directly.
+  the offset index gives the union rectangle directly, so a hidden column inside
+  the span simply contributes nothing to the width.
+
+  Implemented as a pass before the cell walk (RND-03): the merges *intersecting*
+  the window are resolved first — intersecting, not contained, since a wide
+  block's anchor is often off screen precisely because it is wide — and every
+  cell they cover is then skipped. A covered cell keeps its value (Excel stores
+  them and so does the writer); a merge means it is not shown, not that it is
+  gone. The display list carries a `MergedRegion` item whose fill the anchor
+  does *not* repeat, because a backend paints ground-then-outline and a second
+  background would paint the outline away.
 - **Frozen panes / splits** partition the viewport into up to four independently
   scrolled regions; each region runs the same visible-range query against its own
   scroll offset. Row/column headers are a always-present frozen band.
