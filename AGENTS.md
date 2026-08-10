@@ -118,11 +118,14 @@ What is still open, and therefore where the work is:
 - **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
   by an `sdk-v*` tag); what remains is a *stable* API, since `0.0.x` is a
   preview.
-- **Phase 5** — the concurrency model is **decided and unbuilt**:
-  server-mediated operational transform, not a CRDT (ADR-011,
-  [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)), with state held as a
-  snapshot plus the ops since it. One editor needs no server; sessions run on
-  serverless compute. No collaboration code exists yet.
+- **Phase 5** — the **engine side is built**: `casual-calc-transaction`
+  carries `transform` (TP1 as a property), the client/server session protocol,
+  snapshots and idempotent submissions. The **server is designed and unbuilt**
+  (ADR-011, ADR-012, [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md),
+  [57](docs/57-COLLABORATION-SERVER-BOUNDARY.md)): a cluster with a leader per
+  document, replicas, epoch fencing, webhook callbacks, and a standalone mode
+  needing no external services. It belongs under `server/`, and **nothing in
+  `crates/` may depend on it**.
 
 The design-first rule has not relaxed now that code exists: a substantial
 design is discussed and written down before it is implemented, not alongside.

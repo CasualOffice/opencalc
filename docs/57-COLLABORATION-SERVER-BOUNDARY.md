@@ -1,6 +1,6 @@
 # 57 — The Collaboration Server: what it owns, and what it must not
 
-**Status: Proposed** (ADR-012). Follows [ADR-011](56-COLLABORATION-CONCURRENCY-DESIGN.md),
+**Status: Accepted** (ADR-012). Follows [ADR-011](56-COLLABORATION-CONCURRENCY-DESIGN.md),
 which settled *how* concurrent edits reconcile. This settles *where the thing
 that does it runs*, and what else it is allowed to know about.
 
@@ -409,19 +409,98 @@ editors on a single document rise. Tens should be uneventful; the hundreds that
 [Univer advertises](https://docs.univer.ai/blog/ot) would need proving rather
 than assuming.
 
+## Settled
+
+### The client gets the model; the server keeps the bytes
+
+A session's participants must all start from the *same* revision, so a client
+never fetches the document itself — it would arrive at revision zero while the
+session is at five hundred. On join the server hands out **the model snapshot
+and its revision**, which the browser engine loads directly. No re-import, and
+exactly the state everyone else is on.
+
+The **original file bytes stay with the server**, because that is where the
+retention path needs them (see the fidelity trap). This splits cleanly and has
+a consequence worth stating:
+
+> **A client in a session cannot save.** It does not hold the retained parts,
+> so anything it wrote would be the lossy copy this design exists to prevent.
+> `save()` in a session must be refused or routed through the server, which is
+> the one thing that has everything needed to write a faithful file.
+
+That is an SDK-visible change ([55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md))
+and belongs with the collaboration work, not before it.
+
+### Save cadence: four triggers, and a ceiling
+
+The window between callbacks is the work-loss window, so the triggers are
+chosen to keep it short rather than to keep traffic low:
+
+| Trigger | Default | Why |
+| --- | --- | --- |
+| Quiesce | 5s with no edits | The cheapest moment to make the last few minutes safe. |
+| Revisions | reuse `SnapshotPolicy::every` | One dial, not two that drift apart. |
+| Last participant leaves | immediately | The session is about to end; there is nothing to wait for. |
+| **Ceiling** | 60s | The one that is easy to omit: sustained editing never quiesces, so without it the window grows without bound exactly when the most work is at risk. |
+
+### The token is the whole integration contract
+
+Host-signed JWT, verified by the server, carrying everything the session needs:
+
+```text
+sub   the user            perm  "edit" | "view"
+doc   the document id     name  display name, for presence
+src   where to fetch it   color presence colour (derived from `sub` if absent)
+cb    where to send it    exp / iat / jti
+```
+
+Putting `src` and `cb` **in the token** rather than in server configuration is
+the deliberate choice, and it is what keeps the server lightweight: it holds one
+signing secret per tenant and **no per-document state of any kind**. The host
+tells it everything, signed, on every join. Nothing to provision, nothing to
+migrate, multi-tenant by construction. The capability leak that a URL in a
+token represents is bounded by `exp`.
+
+`perm` mirrors the SDK's access levels, minus `preview` — a thumbnail does not
+join a session.
+
+### Presence identity comes from the token
+
+`name` and `color` are read from the token, never from the client. A client
+that supplied its own could claim to be someone else, and presence is exactly
+the surface where that would be believed. Absent a colour, one is derived
+deterministically from `sub`, so a participant looks the same in every session
+rather than changing hue on each join.
+
+### A failing callback stops the session rather than hiding
+
+Retry with exponential backoff and jitter. What matters is not the retry policy
+but what people are told, and when:
+
+- **Tell them on the first failure, not the last.** A banner saying changes are
+  not being saved is only useful while there is still time to copy the work
+  out.
+- **Stop accepting edits when retries are exhausted.** The document goes
+  read-only with the reason shown. Continuing to accept work that provably
+  cannot be persisted is the silent loss this project refuses, dressed up as
+  availability.
+- **Keep the snapshot.** The session's state is retained past the failure so an
+  operator can recover it rather than reconstruct it.
+
+The callback carries the session id and the revision, so a retry of a POST that
+actually succeeded is recognisable to the host and does not become a second
+version.
+
 ## Open questions
 
-1. **Does the server ever serve the file to the client, or only the model?**
-   Everyone in a session must start from the same revision, which argues the
-   server hands out snapshot-plus-revision on join rather than letting each
-   client fetch the file and start somewhere different.
-2. **Save-point cadence defaults**, given the loss window above.
-3. **Token shape.** JWT is the obvious choice and what OnlyOffice uses; what
-   needs deciding is the claim set — document id, user id, permission, expiry,
-   and whether the fetch URL is inside the token or resolved by the host.
-4. **Presence identity.** The name and colour shown to other participants come
-   from the token, not from the client, or a participant can claim to be
-   someone else.
-5. **What happens when the host's callback fails.** Retry with backoff is
-   obvious; what is not is how long the server keeps trying before it has to
-   tell the participants their work is not being saved.
+Everything above is decided. What remains is measurement rather than design,
+and none of it blocks starting:
+
+1. **Commit latency under contention**, and how the replication acknowledgement
+   behaves as participants on one document rise. Tens should be uneventful; the
+   hundreds Univer advertises would need proving.
+2. **Replication factor against workbook size** — each copy holds the model
+   *and* the original bytes, so the right default may differ for a 50KB sheet
+   and a 40MB one.
+3. **Whether the quiesce and ceiling defaults are right** in front of real
+   editing, which only usage answers.
