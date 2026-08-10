@@ -78,6 +78,17 @@ jobs:
             echo "merge-conflict markers found" >&2
             exit 1
           fi
+      # ADR-012: the collaboration server is a *host*, not an engine layer. It
+      # may depend on the crates; nothing under `crates/` may depend on it, or
+      # an async runtime and an HTTP stack arrive in a library that has neither.
+      # A documented boundary that nothing checks is a boundary that erodes.
+      - name: The engine must not depend on the server
+        run: |
+          if grep -rn "casual-calc-collab-server" crates/ ; then
+            echo "::error::a crate under crates/ depends on the collaboration server (ADR-012)" >&2
+            exit 1
+          fi
+          echo "engine/server boundary intact"
 
   fuzz-build:
     runs-on: ubuntu-latest

@@ -1,0 +1,29 @@
+//! The OpenCalc collaboration server — **a session, not a filing system**.
+//!
+//! Implements [ADR-012](../../../docs/57-COLLABORATION-SERVER-BOUNDARY.md) on
+//! top of the protocol in
+//! [ADR-011](../../../docs/56-COLLABORATION-CONCURRENCY-DESIGN.md). The
+//! integrator keeps the document of record; this coordinates the editing of it
+//! and hands finished bytes back through a webhook.
+//!
+//! # Why this is a separate crate
+//!
+//! It is a **host**, not a layer. AGENTS.md's rule is that the engine computes
+//! and the host decides I/O, network and persistence, so a network service does
+//! not belong inside a dependency graph that currently contains no async
+//! runtime and no HTTP stack. It may depend on `crates/`; **nothing under
+//! `crates/` may depend on it**, and CI enforces that.
+//!
+//! # Why the policy here has no I/O either
+//!
+//! Everything in this module is a state machine over supplied time. Nothing
+//! reads a clock, opens a socket or awaits. That is the same discipline the
+//! engine follows, for the same payoff: a save cadence and a retry policy are
+//! exactly the things whose bugs live in rare timing, and they are only
+//! testable if time is an argument.
+
+#![forbid(unsafe_code)]
+
+pub mod lifecycle;
+
+pub use lifecycle::{Action, CallbackOutcome, SavePolicy, SaveReason, SessionLifecycle};
