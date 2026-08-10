@@ -118,11 +118,11 @@ What is still open, and therefore where the work is:
 - **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
   by an `sdk-v*` tag); what remains is a *stable* API, since `0.0.x` is a
   preview.
-- **Phase 5** — the concurrency model is **proposed, not accepted**:
+- **Phase 5** — the concurrency model is **decided and unbuilt**:
   server-mediated operational transform, not a CRDT (ADR-011,
-  [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)). It carries five open
-  questions and no code should be written against it until they are answered
-  and the ADR is Accepted.
+  [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)), with state held as a
+  snapshot plus the ops since it. One editor needs no server; sessions run on
+  serverless compute. No collaboration code exists yet.
 
 The design-first rule has not relaxed now that code exists: a substantial
 design is discussed and written down before it is implemented, not alongside.

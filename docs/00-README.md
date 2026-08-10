@@ -107,8 +107,8 @@ cannot quietly disagree with what shipped.
 **Alpha — engine, editor and embeddable SDK are live.** Phases 0–1E done,
 Phase 2 (calc) substantially done, Phase 3 shipped, and the browser SDK
 published to npm as `@opencalc/sheet`. The Phase 5 concurrency model is
-**proposed but not accepted** (ADR-011, [56](56-COLLABORATION-CONCURRENCY-DESIGN.md));
-no collaboration code exists.
+**decided and unbuilt** — server-mediated OT, not a CRDT (ADR-011,
+[56](56-COLLABORATION-CONCURRENCY-DESIGN.md)).
 
 `docs/` remains the source of truth for *design*: a substantial design is
 settled here before it is implemented. It is no longer the source of truth for

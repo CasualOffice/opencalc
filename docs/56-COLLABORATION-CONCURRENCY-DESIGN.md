@@ -1,12 +1,20 @@
 # 56 — Collaboration Concurrency: Operational Transform vs CRDT
 
-**Status: Proposed** (ADR-011). Resolves the open decision recorded in
-[24](24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions. Nothing is built
-until this is Accepted.
+**Status: Accepted** (ADR-011). Resolves the open decision recorded in
+[24](24-TRANSACTION-AND-EDIT-SEMANTICS.md) §Open decisions.
 
 > **Decision.** Concurrent editing is reconciled by **operational transform
 > over the existing closed op set, with a server imposing the total order**.
 > Not a CRDT, and not peer-to-peer.
+>
+> A document's state is **a snapshot plus the ops since it**, which is what
+> makes the server cheap enough to run on serverless compute and what bounds
+> the history a late or long-absent client has to be reconciled against.
+>
+> **Single-user needs no server and never has.** OT is dormant at one editor:
+> nothing is contacted, no revision log exists, no transform runs, and no
+> per-cell metadata is carried. Collaboration is something a document session
+> *acquires*, not a mode the engine is built in.
 
 ## What is being decided
 
@@ -29,7 +37,7 @@ motivated reasoning.
 
 | Commitment | Where | Why it matters here |
 | --- | --- | --- |
-| A **closed op set** — 16 variants, serializable, invertible, `apply` pure and deterministic | [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md), `casual-calc-transaction` | OT needs a transform function per interacting op *pair*. That is only tractable when the set is small, fixed, and cannot grow behind your back. |
+| A **closed op set** — 17 variants plus `Batch`, serializable, invertible, `apply` pure and deterministic | [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md), `casual-calc-transaction` | OT needs a transform function per interacting op *pair*. That is only tractable when the set is small, fixed, and cannot grow behind your back. |
 | A **per-cell byte ceiling**, asserted by a memory benchmark | ADR-004, [23](23-CELL-STORE-REPRESENTATION.md) §The `Cell` record | Chosen so 1M populated cells fit a bounded budget ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) T1). Any per-cell concurrency metadata is spent directly against it. |
 | **Loss-aware retention**: for anything unmodelled, the *retained bytes* are authoritative | ADR-007, [34](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md) | The document is not wholly described by the model, so it cannot be wholly described by a replicated data structure over the model. |
 | **Excel is the semantics oracle** | [01](01-ORD.md), [12](12-COMPETITIVE-ANALYSIS.md) | Convergence is necessary and not sufficient. Two replicas agreeing on a result Excel would not have produced is still a bug. |
@@ -114,18 +122,82 @@ what the two people *meant*, and transform functions are where that judgement
 gets written down and tested. A CRDT would answer them by whatever its merge
 rule happens to do.
 
+## The snapshot model
+
+A document at revision *N* is **a snapshot at revision *M* ≤ *N*, plus the ops
+`M+1..N`**. This is not an optimisation bolted on afterwards; it is what makes
+three otherwise-awkward things fall out cheaply, and it costs us almost nothing
+because [ADR-010](08-ADR-REGISTER.md) already gives us a deterministic,
+byte-stable snapshot of the normalized model. A snapshot is that, plus a
+revision number.
+
+- **The log does not grow without bound.** Compact on a revision interval or on
+  quiesce, and retain ops back to the last snapshot plus a margin.
+- **A late joiner gets a snapshot and a tail**, not the whole history. Joining
+  a document that has been edited for a year costs the same as joining a fresh
+  one.
+- **Cold start is cheap**, which is what makes serverless compute viable
+  (below). Rehydration is a snapshot read, not a replay.
+- **Bounded offline has a defined edge.** A client whose base revision predates
+  the oldest retained op cannot be transformed forward — there is nothing to
+  transform against. It reloads from the current snapshot, and its unsent ops
+  are **surfaced to the user, not silently dropped**. The retention window is
+  the number that defines "bounded", and it is a deployment setting.
+
+One property worth having on purpose: because snapshots are deterministic and
+byte-stable, **a snapshot can be verified rather than trusted**. Replaying the
+op log from an earlier snapshot must produce bytes identical to the stored
+later one. That is a strong integrity check on the server's own state, and it
+reuses the golden-file machinery the engine already has.
+
+## Deployment: serverless, at both ends of the range
+
+**One editor: no server.** Unchanged from today, and worth stating as a
+commitment rather than an accident. The embeddable SDK runs the whole engine
+client-side. Nothing about this decision introduces a backend into that path.
+
+**Many editors: serverless compute, not a long-running VM.** OT requires
+exactly one serialization point per document for the lifetime of a session —
+that is the whole basis of the TP2 argument above. A single-writer actor
+addressed by document id is precisely that shape, so a Cloudflare Durable
+Object (or equivalent) is a natural fit rather than a compromise: the object
+*is* the ordering authority. Sockets can hibernate; on wake the object
+rehydrates from the snapshot.
+
+The persistent state is object storage holding snapshot + op log; the compute
+between sessions is ephemeral. A queue-plus-function deployment also works but
+adds a hop and needs its own single-writer discipline, so it is the fallback,
+not the target.
+
+The important consequence: **the snapshot cadence is a latency knob, not just a
+storage one.** Too sparse and every cold start replays a long tail.
+
+## What is hybridised, and what is not
+
+Mixing reconciliation strategies is fine **partitioned by data domain** and
+wrong **layered over the same data**. The line:
+
+| Domain | Strategy | Why |
+| --- | --- | --- |
+| The document — cells, structure, styles, formulas | **OT**, server-ordered | One reconciliation system, one convergence argument, one place intention is decided. |
+| Presence — cursors, selections, who is here | **Ephemeral last-writer-wins per client, with a TTL.** Never transformed, never persisted, never in a snapshot | It is not part of the document, nothing depends on its history, and losing it costs nothing. Sending it through transform would be pure overhead. This is what Yjs's awareness protocol is, and it is the right shape. |
+
+What is deliberately **not** done is a CRDT layer over the cell grid alongside
+OT. That gives two convergence arguments that must compose — which nobody can
+reason about — and it reinstates the cost that decided this ADR in the first
+place: the moment cells carry replica identity, the per-cell budget is spent in
+every single-user session, which is most of them.
+
+Comments and annotations are a plausible future third row in that table:
+append-mostly, no structural interaction. Not decided here.
+
 ## What choosing A costs
 
-Stated plainly, because these are real and a future ADR may reverse this one.
+Stated plainly, because these are real.
 
-- **No true offline-first.** A client that diverges for a long time must be
-  transformed against the whole history since it left, so the server must
-  retain that history. We choose **bounded offline**: history is retained for a
-  configured number of revisions, and a client further behind than that
-  reloads from a snapshot and loses nothing except its unsent ops, which it is
-  told about rather than silently dropping.
-- **No peer-to-peer or serverless deployment.** The server is required and
-  stateful.
+- **No true offline-first, by choice.** Bounded offline as described above.
+  Confirmed acceptable: co-editing always goes through a server.
+- **No peer-to-peer.** Two clients never reconcile directly with each other.
 - **Transform correctness is subtle**, and this is the standard way OT ships
   broken. Mitigation is not care; it is a property-based convergence test —
   for generated concurrent pairs `(a, b)` over a shared state `S`, assert
@@ -133,9 +205,14 @@ Stated plainly, because these are real and a future ADR may reverse this one.
   (TP1) and that both sides equal a golden expectation. The op set being closed
   and `apply` being pure is what makes exhaustive generation feasible.
 
-If genuine offline-first or serverless operation becomes a requirement, this
-decision should be **superseded, not stretched** — a CRDT bolted onto an OT
-core is worse than either.
+**What would supersede this.** Exactly one thing: a requirement for two clients
+to co-edit with no server between them — peer-to-peer, or a merge after
+divergence long enough that the server no longer holds the history. That needs
+TP2 or a CRDT, and it should be a new ADR rather than an extension of this one.
+The hinge that keeps that door open is **the closed op set and the
+deterministic snapshot format**, not any CRDT machinery built in advance. A
+half-built CRDT would not ease that migration; it would start it from a worse
+position.
 
 ## Why not the others
 
@@ -166,8 +243,10 @@ These follow from the decision and are what the implementation is held to.
   then send the next — Wave's rule, and what removes TP2.
 - **`transform` must satisfy TP1** and is tested as a property, not by example.
 - **Most pairs commute trivially.** Different sheets, disjoint ranges. The
-  matrix's real content is *structural × everything*, which bounds the work to
-  a fraction of the 16×16 surface.
+  matrix's real content is *structural × everything* — four ops
+  (`InsertRows`, `DeleteRows`, `InsertColumns`, `DeleteColumns`) against the
+  rest — which bounds the work to a fraction of the 17×17 surface. `Batch`
+  transforms elementwise.
 - **Concurrent writes to one cell are last-writer-wins in server order**, not a
   character-level merge of the cell's contents. Excel and Sheets both resolve
   at cell granularity; matching them is the point.
@@ -179,19 +258,32 @@ These follow from the decision and are what the implementation is held to.
   so a server and a client recalculating the same revision agree. That is what
   makes it a free choice where recalculation runs.
 
-## Open questions — to answer before implementation
+## Settled, and by what
 
-1. **Is bounded offline acceptable?** If the product needs a week-long
-   disconnect to merge cleanly, that changes the answer and this ADR should be
-   reconsidered rather than implemented.
-2. **Presence — cursors, selections, who-is-here — in the first cut, or after?**
-   It is a separate channel and does not go through transform, but it is most
-   of what makes collaboration *feel* present.
-3. **Where does recalculation run?** Determinism makes server, client, or both
-   equally correct; this is a cost and latency question, not a correctness one.
-4. **Revision-log compaction.** How often a snapshot is written, and how many
-   revisions are retained — the number that defines "bounded" above.
-5. **What happens to the retained-bytes side table under concurrent edit?** Two
+| Question | Answer |
+| --- | --- |
+| Is bounded offline acceptable? | **Yes.** Co-editing always goes through a server; there is no offline-merge requirement. This was the one answer that could have reversed the decision. |
+| Peer-to-peer co-editing? | **No.** See *What would supersede this*. |
+| Serverless? | **Both senses.** No server at one editor; serverless *compute* for sessions. |
+| Presence through transform? | **No** — separate ephemeral channel. |
+
+## Open — scoping, not direction
+
+None of these block the decision; they are settled while building.
+
+1. **Is presence in the first cut, or after?** It does not go through
+   transform, but it is most of what makes collaboration *feel* present, so
+   shipping without it reads as broken rather than minimal.
+2. **Where does recalculation run?** Determinism makes server, client, or both
+   equally correct, so this is cost and latency, not correctness. Worth
+   deciding early because it drives whether the server holds a live engine or
+   only a model.
+3. **Snapshot cadence and retention window.** The numbers behind "bounded"
+   and behind cold-start latency.
+4. **What happens to the retained-bytes side table under concurrent edit?** Two
    clients editing a sheet whose drawing part is preserved verbatim must not
-   both rewrite it. Likely answer: retention is server-owned and never
-   transformed, but it needs stating.
+   both rewrite it. Likely answer — retention is server-owned and never
+   transformed — but it needs stating, because getting it wrong produces
+   exactly the "file needs repair" outcome the fidelity work exists to prevent.
+5. **Do comments join the presence row or the document row?** Append-mostly and
+   structurally inert, so either defensible.

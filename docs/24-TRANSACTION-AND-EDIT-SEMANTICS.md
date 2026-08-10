@@ -50,7 +50,16 @@ Owning crates: `casual-calc-transaction` (the ops + inverses) and
 
 ## The operation set (closed)
 
-Grouped; this is the authoritative list (extended only via ADR + tracker):
+Grouped; extended only via ADR + tracker.
+
+> **This is the *designed* set; the implemented one is narrower and is the
+> authoritative list.** `casual-calc-transaction` consolidates several of these
+> — `SetCell` carries value, formula and style together; `SetSheetMetadata`
+> covers the view, hidden and outline operations — arriving at **17 variants
+> plus `Batch`**. That count is what ADR-011 sizes the transform matrix
+> against, so the two must not be confused. Where a designed op below has no
+> implemented counterpart (`MoveRange`, `CopyRange`, `MergeCells`), it is
+> currently expressed as a `Batch` of cell writes.
 
 **Cell content**
 - `SetCellValue` — literal value (number/string/bool/error).
@@ -140,11 +149,12 @@ Each op returns, alongside its inverse, a **`DirtySet`** of changed addresses
 
 ## Open decisions (to ADR before Phase 1A editing lands)
 
-- ~~Exact operational-transform / CRDT choice for Phase 5~~ — **decided**:
-  server-mediated operational transform over this op set, not a CRDT
-  (ADR-011, [56](56-COLLABORATION-CONCURRENCY-DESIGN.md)). The op set is
-  unchanged, as anticipated here; if reconciliation ever needs an operation the
-  single-user editor does not have, that is evidence against the decision
-  rather than licence to widen the set.
+- ~~Exact operational-transform / CRDT choice for Phase 5~~ — **decided and
+  accepted**: server-mediated operational transform over this op set, not a
+  CRDT (ADR-011, [56](56-COLLABORATION-CONCURRENCY-DESIGN.md)), with document
+  state held as a snapshot plus the ops since it. The op set is unchanged, as
+  anticipated here; if reconciliation ever needs an operation the single-user
+  editor does not have, that is evidence against the decision rather than
+  licence to widen the set.
 - Whether `SetRangeValues` carries a dense or sparse payload for very large fills.
 - Coalescing policy for rapid same-cell edits into one undo step.

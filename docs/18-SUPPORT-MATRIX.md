@@ -92,7 +92,7 @@ The measured per-construct register is [51](51-FIDELITY-GAP-AUDIT.md).
 | Cancellable `before*` events carrying a `source` | ● |
 | Localization | ◑ menus, submenus and toolbar tooltips only; panels, dialogs and status messages are still English |
 | npm packaging (`@opencalc/sheet`, `/react`, `/engine`) | ● published, released by an `sdk-v*` tag ([15](15-CI-AND-RELEASE-GATES.md) §Release tags) |
-| Collaborative editing | ○ Phase 5. Design proposed — server-mediated OT, not a CRDT ([ADR-011](08-ADR-REGISTER.md), [56](56-COLLABORATION-CONCURRENCY-DESIGN.md)) — and not accepted; no code. Explicitly **not** in the embeddable SDK |
+| Collaborative editing | ○ Phase 5, decided and unbuilt — server-mediated OT, not a CRDT ([ADR-011](08-ADR-REGISTER.md), [56](56-COLLABORATION-CONCURRENCY-DESIGN.md)). Explicitly **not** in the embeddable SDK, which stays single-user |
 
 ## Capacity & performance targets
 
