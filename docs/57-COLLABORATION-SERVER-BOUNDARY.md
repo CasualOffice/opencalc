@@ -10,6 +10,11 @@ that does it runs*, and what else it is allowed to know about.
 > The document of record stays with the integrator. The server hands finished
 > bytes back through a **webhook callback**; it never becomes the place the
 > file lives.
+>
+> **Nodes are interchangeable.** Operational transform needs one serialization
+> point per document, and that point is the **datastore** — a conditional
+> append on the revision — not a node anyone has to route to. No sticky
+> sessions, no leases, no owner box.
 
 ## Two prior arts, and only one of them fits
 
@@ -138,6 +143,90 @@ Proposed: a workspace member under `server/`, alongside the existing `tools/`
 convention, with one boundary rule — **nothing under `crates/` may depend on
 it.** Versioned with the engine, excluded from the engine DAG, released on its
 own `server-v*` tag ([15](15-CI-AND-RELEASE-GATES.md) §Release tags).
+
+## Horizontal scale without sticky sessions
+
+A hard requirement, and the one that shapes the rest: nodes must be
+interchangeable behind a dumb load balancer. No affinity, no "route this user
+back to the box that has their document".
+
+This looks like it contradicts ADR-011, because operational transform needs
+**one serialization point per document** — two nodes ordering the same document
+concurrently diverge, and no amount of transform fixes that. The resolution is
+to notice what the serialization point has to *be*:
+
+> **The serialization point must be one, not one *node*.**
+
+Make it the datastore, and the nodes stop mattering.
+
+### The commit is a compare-and-swap
+
+Every node runs the same `ServerSession::commit` we already have. What changes
+is where the revision counter lives:
+
+1. Read the document's current revision and the operations since the client's
+   base — from cache, if the node has it.
+2. Rebase the chunk (existing code, pure, no I/O).
+3. Append at `revision + n` **conditionally**, on the document still being at
+   `revision`.
+4. If the condition fails, someone else committed first. Pull what they
+   committed, rebase onto it, and retry.
+
+The database decides the order. That is a real serialization point — it is
+simply not a machine anybody has to route to. Any node may accept any
+connection for any document, which is precisely the property being asked for.
+
+Step 4 is not a special case: it is `transform` against a handful of newly
+committed operations, which is what this layer does anyway. Contention is
+per-document, and a document has tens of concurrent editors rather than
+thousands, so a retry is cheap and rare.
+
+### What the nodes hold
+
+Caches, and nothing that cannot be rebuilt:
+
+- the workbook, its revision, and the **original bytes** the retention path
+  needs (see the fidelity trap above — this is not optional state);
+- rehydrated from snapshot-plus-tail on a miss, which is what
+  [COL-07](14-EXECUTION-TRACKER.md) exists to make cheap.
+
+A failed compare-and-swap is also a cache-invalidation signal: it says the
+node's copy is behind, and names how far.
+
+### The part that actually costs something: fan-out
+
+Without affinity, one document's participants are spread across nodes, so a
+node that commits must tell nodes it does not know about. That needs a
+per-document pub/sub channel — Redis, `LISTEN/NOTIFY`, NATS — and it is the
+genuine price of dropping stickiness. It is worth paying: fan-out is a
+well-understood, horizontally scalable problem, whereas session affinity is an
+operational tax on every deploy, restart and rebalance for as long as the
+product exists.
+
+### Why not the alternatives
+
+- **Sticky sessions** — rejected outright.
+- **A per-document lease** (Redis lock, advisory lock) — this is affinity
+  wearing a different hat. It reintroduces an owner node, and with it lease
+  expiry tuning, failover windows and split-brain, in exchange for avoiding a
+  conditional write.
+- **A single-writer actor per document** (Cloudflare Durable Objects) — a good
+  fit, and the platform provides the affinity rather than the operator
+  configuring it, so it does not violate the requirement in spirit. But it
+  binds the deployment to one vendor. The compare-and-swap design runs on
+  Postgres, Redis or DynamoDB and **does not foreclose** running on Durable
+  Objects later — the object simply becomes a very effective cache in front of
+  the same conditional append.
+- **A partitioned log** (Kafka) — correct and scalable, and a broker to operate
+  for a workload that is one conditional write per commit.
+
+### What has to be measured before this is believed
+
+Compare-and-swap trades a round trip for statelessness, so the numbers that
+matter are commit latency under contention, and the retry rate as concurrent
+editors on a single document rise. Tens should be uneventful; the hundreds that
+[Univer advertises](https://docs.univer.ai/blog/ot) would need proving rather
+than assuming.
 
 ## Open questions
 

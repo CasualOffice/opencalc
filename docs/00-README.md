@@ -89,7 +89,7 @@ the other way around. This index is the map.
 | 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
 | 55 | [SDK Embedding & Integration](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) | The embeddable element: isolation, theming, commands, events, access, i18n |
 | 56 | [Collaboration Concurrency](56-COLLABORATION-CONCURRENCY-DESIGN.md) | OT vs CRDT for Phase 5, and why the per-cell byte ceiling decides it (ADR-011) |
-| 57 | [Collaboration Server Boundary](57-COLLABORATION-SERVER-BOUNDARY.md) | What the server owns and must not own; webhook callbacks, not a file store (ADR-012) |
+| 57 | [Collaboration Server Boundary](57-COLLABORATION-SERVER-BOUNDARY.md) | What the server owns and must not own; webhook callbacks not a file store, and horizontal scale without sticky sessions (ADR-012) |
 
 ### Measured gap trackers (50–53)
 
