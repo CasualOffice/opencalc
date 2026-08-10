@@ -100,6 +100,34 @@ fn candidates() -> Vec<Operation> {
             height: Some(33),
         });
     }
+    // Metadata bundles carrying positional state, so the rebase across a
+    // structural band is exercised rather than assumed. Each changes exactly
+    // one field, which is what the mask then reports.
+    let base_meta = crate::SheetMetadata::capture(&seed().sheets[0]);
+    let mut merged = base_meta.clone();
+    merged.merges.push(casual_calc_model::CellRange::new(
+        CellRef::new(4, 0),
+        CellRef::new(5, 1),
+    ));
+    ops.push(Operation::set_sheet_metadata(0, merged));
+
+    let mut hidden = base_meta.clone();
+    hidden.hidden_rows.insert(5);
+    ops.push(Operation::set_sheet_metadata(0, hidden));
+
+    let mut widened = base_meta.clone();
+    widened.columns.sizes.insert(3, 175);
+    ops.push(Operation::set_sheet_metadata(0, widened));
+
+    let mut frozen = base_meta.clone();
+    frozen.view.frozen_rows = 2;
+    ops.push(Operation::set_sheet_metadata(0, frozen));
+
+    let mut outlined = base_meta.clone();
+    outlined.row_outline_levels.insert(6, 1);
+    outlined.collapsed_rows.insert(6);
+    ops.push(Operation::set_sheet_metadata(0, outlined));
+
     ops.push(Operation::Batch(vec![
         Operation::InsertRows {
             sheet: 0,
@@ -126,17 +154,29 @@ fn observe(workbook: &Workbook) -> String {
         .collect();
     cells.sort();
     format!(
-        "cells[{}] cols{:?} rows{:?}",
+        "cells[{}] cols{:?} rows{:?} merges{:?} hidden{:?}/{:?} frozen{:?} outline{:?}/{:?}",
         cells.join(","),
         sheet.columns.sizes,
-        sheet.rows.sizes
+        sheet.rows.sizes,
+        sheet.merges,
+        sheet.hidden_rows,
+        sheet.hidden_cols,
+        (sheet.view.frozen_rows, sheet.view.frozen_cols),
+        sheet.row_outline_levels,
+        sheet.collapsed_rows,
     )
 }
 
 #[test]
 fn tp1_holds_for_every_supported_pair() {
     let base = seed();
-    let ops = candidates();
+    // Ops enter the protocol narrowed — see `Operation::narrowed`. A metadata
+    // op still declaring ALL would read as contending with every concurrent
+    // metadata edit, and the transform has no workbook to work that out from.
+    let ops: Vec<Operation> = candidates()
+        .into_iter()
+        .map(|op| op.narrowed(&base))
+        .collect();
     let mut checked = 0usize;
     let mut skipped = 0usize;
 
@@ -364,17 +404,46 @@ fn sheet_renumbering_is_refused_rather_than_guessed() {
 }
 
 #[test]
-fn a_metadata_bundle_meeting_a_structural_op_is_refused() {
-    let structural = Operation::InsertRows {
+fn a_pending_metadata_edit_is_rebased_across_a_structural_op() {
+    // A resize of column 1 must still mean column 1 after someone inserts a
+    // column before it — the bundle's positional state moves with the sheet.
+    let inserted = Operation::InsertColumns {
         sheet: 0,
         at: 0,
-        count: 1,
+        count: 2,
     };
-    let metadata = Operation::set_sheet_metadata(0, crate::SheetMetadata::default());
-    assert!(transform(&metadata, &structural, Side::Later).is_err());
-    // ...but on another sheet there is nothing to shift.
-    let elsewhere = Operation::set_sheet_metadata(1, crate::SheetMetadata::default());
-    assert!(transform(&elsewhere, &structural, Side::Later).is_ok());
+    let mut data = crate::SheetMetadata::default();
+    data.columns.sizes.insert(1, 175);
+    data.hidden_cols.insert(1);
+    let resize = Operation::set_sheet_metadata(0, data);
+
+    let Operation::SetSheetMetadata { data, .. } =
+        transform(&resize, &inserted, Side::Later).unwrap()
+    else {
+        panic!("still a metadata change");
+    };
+    assert_eq!(data.columns.sizes.get(&3), Some(&175), "moved 1 -> 3");
+    assert!(data.hidden_cols.contains(&3));
+}
+
+#[test]
+fn a_metadata_edit_loses_what_a_concurrent_delete_removed() {
+    let deleted = Operation::DeleteRows {
+        sheet: 0,
+        at: 4,
+        count: 3,
+    };
+    let mut data = crate::SheetMetadata::default();
+    data.hidden_rows.insert(5); // inside the deleted band
+    data.hidden_rows.insert(9); // past it
+    let hide = Operation::set_sheet_metadata(0, data);
+
+    let Operation::SetSheetMetadata { data, .. } = transform(&hide, &deleted, Side::Later).unwrap()
+    else {
+        panic!("still a metadata change");
+    };
+    assert!(!data.hidden_rows.contains(&5), "the row it hid is gone");
+    assert!(data.hidden_rows.contains(&6), "the one past it moved up");
 }
 
 #[test]

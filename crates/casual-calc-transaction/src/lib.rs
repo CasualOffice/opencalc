@@ -519,6 +519,45 @@ impl Operation {
         }
     }
 
+    /// Narrow this operation's declared intent to what it actually changes,
+    /// against the state it was written on.
+    ///
+    /// [`apply`] does this internally, which is enough for undo. It is **not**
+    /// enough for the collaboration transform, which reads the mask without
+    /// ever seeing a workbook: an op still claiming [`SheetFields::ALL`] looks
+    /// like it contends with every concurrent metadata edit, and one of them
+    /// gets discarded for nothing.
+    ///
+    /// So an operation is narrowed **before it enters the protocol** — before
+    /// it is sent, logged, or transformed. Doing it here rather than inside
+    /// `transform` is forced: this needs the state the op was written against,
+    /// and by the time two ops meet, that state is gone.
+    #[must_use]
+    pub fn narrowed(self, workbook: &Workbook) -> Self {
+        match self {
+            Self::SetSheetMetadata {
+                sheet,
+                data,
+                changed,
+            } => {
+                let effective = workbook.sheets.get(sheet).map_or(changed, |target| {
+                    changed.intersection(data.diff(&SheetMetadata::capture(target)))
+                });
+                Self::SetSheetMetadata {
+                    sheet,
+                    data,
+                    changed: effective,
+                }
+            }
+            Self::Batch(ops) => Self::Batch(
+                ops.into_iter()
+                    .map(|op| op.narrowed(workbook))
+                    .collect::<Vec<_>>(),
+            ),
+            other => other,
+        }
+    }
+
     /// Which sheet-metadata fields this operation changes, if any.
     ///
     /// The collaboration layer's transform needs this to tell two concurrent
@@ -529,6 +568,12 @@ impl Operation {
     pub fn sheet_fields(&self) -> SheetFields {
         match self {
             Self::SetSheetMetadata { changed, .. } => *changed,
+            // These write the same state the bundle's sizing fields do, just
+            // one line at a time. Reporting `NONE` would say a column resize
+            // cannot collide with a bundle that replaces every column width,
+            // which is exactly backwards.
+            Self::SetColumnWidth { .. } => SheetFields::COLUMNS,
+            Self::SetRowHeight { .. } => SheetFields::ROWS,
             Self::Batch(ops) => ops
                 .iter()
                 .fold(SheetFields::NONE, |acc, op| acc.union(op.sheet_fields())),

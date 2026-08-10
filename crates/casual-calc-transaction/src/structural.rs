@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{CellReference, Expr};
-use casual_calc_model::{AxisSizing, CellRef, CellStore, Sheet, Workbook};
+use casual_calc_model::{AutoFilter, AxisSizing, CellRange, CellRef, CellStore, Sheet, Workbook};
 
 use crate::{Operation, TxnError};
 
@@ -218,33 +218,79 @@ fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
 
 /// The along-axis sizing, hidden set, and frozen-count fields for `axis`. All
 /// three are disjoint fields, so returning them together is a sound split borrow.
-fn axis_metadata_mut(
-    sheet: &mut Sheet,
-    axis: Axis,
-) -> (
-    &mut AxisSizing,
-    &mut BTreeSet<u32>,
-    &mut u32,
-    &mut BTreeMap<u32, u8>,
-    &mut BTreeSet<u32>,
-) {
-    match axis {
-        Axis::Row => (
-            &mut sheet.rows,
-            &mut sheet.hidden_rows,
-            &mut sheet.view.frozen_rows,
-            &mut sheet.row_outline_levels,
-            &mut sheet.collapsed_rows,
-        ),
-        Axis::Col => (
-            &mut sheet.columns,
-            &mut sheet.hidden_cols,
-            &mut sheet.view.frozen_cols,
-            &mut sheet.col_outline_levels,
-            &mut sheet.collapsed_cols,
-        ),
-    }
+/// Everything a structural shift has to move, reachable the same way whether it
+/// lives on a [`Sheet`] or in a [`crate::SheetMetadata`] bundle.
+///
+/// The two carry identical positional state — the bundle exists precisely to be
+/// a snapshot of it — and both need the same shift: the sheet when rows are
+/// inserted, the bundle when a pending metadata edit has to be rebased past
+/// someone else's insert
+/// ([ADR-011](../../../docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)). A trait
+/// rather than two copies, because a shift implemented twice is a shift that
+/// disagrees with itself the first time a field is added.
+pub(crate) trait Positional {
+    fn merges_mut(&mut self) -> &mut Vec<CellRange>;
+    fn auto_filter_mut(&mut self) -> &mut Option<AutoFilter>;
+    fn filter_hidden_mut(&mut self) -> &mut BTreeSet<u32>;
+    /// Sizing, hidden lines, the freeze boundary, outline levels and collapse
+    /// flags for one axis.
+    fn axis_mut(
+        &mut self,
+        axis: Axis,
+    ) -> (
+        &mut AxisSizing,
+        &mut BTreeSet<u32>,
+        &mut u32,
+        &mut BTreeMap<u32, u8>,
+        &mut BTreeSet<u32>,
+    );
 }
+
+macro_rules! impl_positional {
+    ($t:ty) => {
+        impl Positional for $t {
+            fn merges_mut(&mut self) -> &mut Vec<CellRange> {
+                &mut self.merges
+            }
+            fn auto_filter_mut(&mut self) -> &mut Option<AutoFilter> {
+                &mut self.auto_filter
+            }
+            fn filter_hidden_mut(&mut self) -> &mut BTreeSet<u32> {
+                &mut self.filter_hidden
+            }
+            fn axis_mut(
+                &mut self,
+                axis: Axis,
+            ) -> (
+                &mut AxisSizing,
+                &mut BTreeSet<u32>,
+                &mut u32,
+                &mut BTreeMap<u32, u8>,
+                &mut BTreeSet<u32>,
+            ) {
+                match axis {
+                    Axis::Row => (
+                        &mut self.rows,
+                        &mut self.hidden_rows,
+                        &mut self.view.frozen_rows,
+                        &mut self.row_outline_levels,
+                        &mut self.collapsed_rows,
+                    ),
+                    Axis::Col => (
+                        &mut self.columns,
+                        &mut self.hidden_cols,
+                        &mut self.view.frozen_cols,
+                        &mut self.col_outline_levels,
+                        &mut self.collapsed_cols,
+                    ),
+                }
+            }
+        }
+    };
+}
+
+impl_positional!(Sheet);
+impl_positional!(crate::SheetMetadata);
 
 /// Bump `cell`'s along-axis coordinate by `count` if it sits on or after `at`.
 fn insert_coord(axis: Axis, cell: &mut CellRef, at: u32, count: u32) {
@@ -257,27 +303,27 @@ fn insert_coord(axis: Axis, cell: &mut CellRef, at: u32, count: u32) {
 /// Shift all position-indexed metadata for an insert of `count` lines at `at`:
 /// every index on or after `at` moves up by `count`, and a freeze boundary that
 /// the insert falls *before* grows to keep the same lines pinned.
-fn shift_metadata_insert(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
+pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at: u32, count: u32) {
     // Merges: each endpoint moves independently, so a merge straddling `at`
     // grows (its start stays, its end shifts down) — matching spreadsheets.
-    for merge in &mut sheet.merges {
+    for merge in sheet.merges_mut().iter_mut() {
         insert_coord(axis, &mut merge.start, at, count);
         insert_coord(axis, &mut merge.end, at, count);
     }
     // The autofilter's header range moves like a merge: both endpoints shift
     // independently, so an insert inside the range grows it to cover the new rows.
-    if let Some(filter) = &mut sheet.auto_filter {
+    if let Some(filter) = sheet.auto_filter_mut() {
         insert_coord(axis, &mut filter.range.start, at, count);
         insert_coord(axis, &mut filter.range.end, at, count);
     }
     // Filter-hidden rows are position-indexed too; miss this and an insert leaves
     // the wrong rows collapsed.
     if axis == Axis::Row {
-        reindex_set(&mut sheet.filter_hidden, |k| {
+        reindex_set(sheet.filter_hidden_mut(), |k| {
             Some(if k >= at { k.saturating_add(count) } else { k })
         });
     }
-    let (sizing, hidden, frozen, outline, collapsed) = axis_metadata_mut(sheet, axis);
+    let (sizing, hidden, frozen, outline, collapsed) = sheet.axis_mut(axis);
     let shift = |k: u32| Some(if k >= at { k.saturating_add(count) } else { k });
     reindex_map(&mut sizing.sizes, shift);
     reindex_set(hidden, shift);
@@ -298,8 +344,8 @@ fn shift_metadata_insert(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
 /// indices in the band are dropped, indices past it move down by `count`, a merge
 /// wholly inside the band is removed and one straddling it is clamped, and a
 /// freeze boundary loses however many of its pinned lines fell in the band.
-fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
-    sheet.merges.retain_mut(|merge| {
+pub(crate) fn shift_metadata_delete(sheet: &mut impl Positional, axis: Axis, at: u32, count: u32) {
+    sheet.merges_mut().retain_mut(|merge| {
         let lo = axis.coord(merge.start);
         let hi = axis.coord(merge.end);
         match map_range_delete(lo, hi, at, count) {
@@ -314,7 +360,7 @@ fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
     let end = at.saturating_add(count);
     // Clamp the autofilter's range the way a straddling merge is clamped, and
     // drop the filter outright if the delete takes the whole range with it.
-    if let Some(filter) = &mut sheet.auto_filter {
+    if let Some(filter) = sheet.auto_filter_mut() {
         let lo = axis.coord(filter.range.start);
         let hi = axis.coord(filter.range.end);
         match map_range_delete(lo, hi, at, count) {
@@ -322,15 +368,15 @@ fn shift_metadata_delete(sheet: &mut Sheet, axis: Axis, at: u32, count: u32) {
                 filter.range.start = axis.with_coord(filter.range.start, new_lo);
                 filter.range.end = axis.with_coord(filter.range.end, new_hi);
             }
-            None => sheet.auto_filter = None,
+            None => *sheet.auto_filter_mut() = None,
         }
     }
     if axis == Axis::Row {
-        reindex_set(&mut sheet.filter_hidden, |k| {
+        reindex_set(sheet.filter_hidden_mut(), |k| {
             map_index_delete(k, at, end, count)
         });
     }
-    let (sizing, hidden, frozen, outline, collapsed) = axis_metadata_mut(sheet, axis);
+    let (sizing, hidden, frozen, outline, collapsed) = sheet.axis_mut(axis);
     let shift = |k: u32| map_index_delete(k, at, end, count);
     reindex_map(&mut sizing.sizes, shift);
     reindex_set(hidden, shift);

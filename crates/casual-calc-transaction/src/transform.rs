@@ -31,9 +31,12 @@
 //! Operations that renumber sheet *indices* — [`Operation::InsertSheet`],
 //! [`Operation::RemoveSheet`], [`Operation::MoveSheet`] — shift the `sheet`
 //! field of every other operation in the workbook, which is a second transform
-//! axis on top of the row/column one. So is a metadata bundle concurrent with a
-//! structural op, where the positional fields inside the bundle need the same
-//! shift the sheet got.
+//! axis on top of the row/column one.
+//!
+//! And a [`Operation::SetCell`] carrying a formula, ordered before a concurrent
+//! style change to the same cell: [`Operation::SetValue`] is the only operation
+//! that writes content while leaving the style alone, and it carries a value,
+//! so the formula has nowhere to go.
 //!
 //! Both return [`TransformError::Unsupported`] rather than an answer. Returning
 //! the untransformed op would be silently wrong, and silently wrong is the one
@@ -251,12 +254,6 @@ pub fn transform(
     if renumbers_sheets(against) || renumbers_sheets(subject) {
         return Err(unsupported(subject, against));
     }
-    if matches!(subject, Operation::SetSheetMetadata { .. })
-        && band_of(against).is_some()
-        && sheet_of(subject) == sheet_of(against)
-    {
-        return Err(unsupported(subject, against));
-    }
     if side == Side::Earlier && same_target(subject, against) && loses_a_formula(subject, against) {
         return Err(unsupported(subject, against));
     }
@@ -387,6 +384,38 @@ fn rebase_onto_band(subject: &Operation, band: Band) -> Operation {
             })
         }
 
+        // A metadata bundle carries positional state of its own — merges, axis
+        // sizing, hidden lines, the freeze band, the outline — all of which the
+        // structural op moved out from under it. Shifting the bundle by the
+        // same band is what keeps a pending resize pointing at the column the
+        // user resized. It reuses the shift `apply` performs on the sheet
+        // itself, so the two cannot disagree.
+        Operation::SetSheetMetadata {
+            sheet,
+            mut data,
+            changed,
+        } => {
+            match band.inserting {
+                true => crate::structural::shift_metadata_insert(
+                    data.as_mut(),
+                    band.axis,
+                    band.at,
+                    band.count,
+                ),
+                false => crate::structural::shift_metadata_delete(
+                    data.as_mut(),
+                    band.axis,
+                    band.at,
+                    band.count,
+                ),
+            }
+            Operation::SetSheetMetadata {
+                sheet,
+                data,
+                changed,
+            }
+        }
+
         // Everything else is positionally inert: a tab colour, a rename, the
         // defined-name table, and any cross-axis structural pair.
         other => other,
@@ -489,10 +518,71 @@ fn resolve_contention(subject: &Operation, against: &Operation, side: Side) -> O
         };
     }
 
+    // A bundle and a single-line resize write the same field at different
+    // granularities, so neither "the earlier yields the field" nor "they do not
+    // collide" is right. The bundle is the whole map and the resize is one key
+    // in it, so the earlier one concedes exactly that key.
+    if side == Side::Earlier {
+        if let Operation::SetSheetMetadata {
+            sheet,
+            data,
+            changed,
+        } = subject
+            && let Some(patched) = concede_one_line(data, *changed, against)
+        {
+            return Operation::SetSheetMetadata {
+                sheet: *sheet,
+                data: Box::new(patched),
+                changed: *changed,
+            };
+        }
+        // The mirror: a resize ordered before a bundle that replaces the whole
+        // map is overwritten by it wholesale, so it has nothing left to do.
+        if matches!(
+            subject,
+            Operation::SetColumnWidth { .. } | Operation::SetRowHeight { .. }
+        ) && matches!(against, Operation::SetSheetMetadata { .. })
+            && subject.sheet_fields().intersects(against.sheet_fields())
+        {
+            return noop();
+        }
+    }
+
     if side == Side::Later || !same_target(subject, against) {
         return subject.clone();
     }
     yield_cell_aspects(subject, against)
+}
+
+/// Patch a bundle so the line a concurrent resize owns carries the resize's
+/// value instead of the bundle's.
+///
+/// Returns `None` when the pair is not a bundle meeting a resize of a field the
+/// bundle actually writes.
+fn concede_one_line(
+    data: &crate::SheetMetadata,
+    changed: SheetFields,
+    against: &Operation,
+) -> Option<crate::SheetMetadata> {
+    let (field, index, size) = match *against {
+        Operation::SetColumnWidth { col, width, .. } => (SheetFields::COLUMNS, col, width),
+        Operation::SetRowHeight { row, height, .. } => (SheetFields::ROWS, row, height),
+        _ => return None,
+    };
+    if !changed.contains(field) {
+        return None;
+    }
+    let mut patched = data.clone();
+    let sizing = if field == SheetFields::COLUMNS {
+        &mut patched.columns
+    } else {
+        &mut patched.rows
+    };
+    match size {
+        Some(size) => sizing.sizes.insert(index, size),
+        None => sizing.sizes.remove(&index),
+    };
+    Some(patched)
 }
 
 /// A cell is written in two independent aspects, and an operation writes one or
