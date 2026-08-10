@@ -2011,6 +2011,11 @@ pub fn session_tables(sheet: usize) -> String {
 struct ChartWire {
     #[serde(default)]
     index: usize,
+    /// Stable identity, unique within the sheet. `index` is a position and
+    /// stops naming the same chart the moment one is inserted before it; this
+    /// does not. Read-only from the host's side — the engine allocates it.
+    #[serde(default)]
+    id: u32,
     /// `bar`, `column`, `line`, `area`, `pie`, `doughnut` or `scatter`.
     kind: String,
     #[serde(default)]
@@ -2077,6 +2082,7 @@ fn chart_kind_from(token: &str) -> ChartKind {
 
 fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
     ChartWire {
+        id: chart.id,
         index,
         kind: chart_kind_token(chart.kind).to_owned(),
         title: chart.title.clone(),
@@ -2258,7 +2264,11 @@ pub fn session_create_chart(
         chart.legend = Some("r".to_owned());
     }
     chart.series = series;
-    edit_sheet_metadata(sheet, move |_, data| data.charts.push(chart))?;
+    edit_sheet_metadata(sheet, move |sh, data| {
+        // Identity is the sheet's to hand out, not the chart's to invent.
+        chart.id = sh.next_chart_id();
+        data.charts.push(chart);
+    })?;
     Ok(index)
 }
 

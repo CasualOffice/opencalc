@@ -1263,6 +1263,36 @@ impl Sheet {
     pub fn is_row_hidden(&self, row: u32) -> bool {
         self.hidden_rows.contains(&row) || self.filter_hidden.contains(&row)
     }
+
+    /// The next free [`ChartView::id`] on this sheet.
+    ///
+    /// A high-water mark rather than a stored counter: charts number in the
+    /// handful, so the scan is free, and there is one fewer piece of state to
+    /// keep in step with the collection it describes. Starts at 1, because 0
+    /// means unassigned.
+    ///
+    /// The consequence of not storing it, stated rather than discovered later:
+    /// deleting the highest-numbered chart and adding another reuses the id.
+    /// Within a session that is invisible, since the deletion is ordered before
+    /// the insertion. It would matter to anything holding a chart id across a
+    /// reload, and nothing does.
+    pub fn next_chart_id(&self) -> u32 {
+        self.charts.iter().map(|c| c.id).max().unwrap_or(0) + 1
+    }
+
+    /// Give every chart without one a stable id, in list order.
+    ///
+    /// Called after import so the same file always produces the same ids, and
+    /// after loading a snapshot written before charts had them.
+    pub fn assign_chart_ids(&mut self) {
+        let mut next = self.next_chart_id();
+        for chart in &mut self.charts {
+            if chart.id == 0 {
+                chart.id = next;
+                next += 1;
+            }
+        }
+    }
 }
 
 impl ConditionalFormat {

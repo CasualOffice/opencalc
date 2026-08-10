@@ -433,13 +433,27 @@ Two stages fix it, and **both belong before collaboration, not during**:
    same field. The single-user path is unaffected. This alone removes the large
    majority of collisions, because concurrent editors are usually touching
    different things.
-2. **Identity for collection elements.** `Table` and `PivotTable` already carry
-   a stable `id`; charts, comments, validations, conditional formats and
-   hyperlinks are **positional** — a `Vec` index. Index-keyed collections are
-   exactly what breaks under concurrency, since two concurrent inserts both
-   claim index 2. Giving these elements stable ids turns the field into a keyed
-   set where inserts merge and only same-element edits conflict. This is a
-   model change, which is why it wants doing first.
+2. **Identity for collection elements.** Index-keyed collections are exactly
+   what breaks under concurrency, since two concurrent inserts both claim index
+   2. Every element needs a key that is not its position.
+
+   Building it turned up that **four of the five already have one**, and
+   inventing ids for them would have been the wrong move — a second identity to
+   keep in step with the anchor, and a new field in every snapshot:
+
+   | Collection | Key |
+   | --- | --- |
+   | `comments` | the cell it is anchored to — one thread per cell |
+   | `hyperlinks` | its range |
+   | `validations` | its range — Excel allows one rule per cell |
+   | `conditional_formats` | its OOXML `priority`, which is unique per sheet and is already the ranking |
+   | `tables`, `pivots` | a stable `id` from the file |
+   | **`charts`** | **nothing** — two charts may cover the same cells, so the anchor names neither |
+
+   So only `ChartView` gained an id. Assigned on import in document order, so
+   the same file always numbers identically; skipped on write when unassigned,
+   so a snapshot predating the field round-trips byte-identically (ADR-010).
+   This is a model change, which is why it wants doing first.
 
 **A correction to this document.** Above, under *Design commitments*, it says
 that needing an op the single-user editor lacks is evidence against the

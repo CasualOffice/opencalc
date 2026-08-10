@@ -98,10 +98,34 @@ impl Emu {
     }
 }
 
+/// Whether a [`ChartView::id`] has never been allocated.
+///
+/// Skipping it on write is what keeps a snapshot taken before this field
+/// existed byte-identical when it is read and written again (ADR-010).
+fn is_unassigned(id: &u32) -> bool {
+    *id == 0
+}
+
 /// A chart anchored on a sheet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartView {
+    /// Identity, stable for the chart's lifetime and unique within its sheet.
+    ///
+    /// Every other collection on a sheet is identified by where it points:
+    /// a comment by its cell, a hyperlink and a validation by their range, a
+    /// conditional format by its OOXML priority. A chart is the exception —
+    /// two of them may sit on the same cells, so the anchor does not name one.
+    /// Without this it can only be referred to by its index in the sheet's
+    /// list, which stops being the same chart the moment anything is inserted
+    /// before it, and which two concurrent editors would both claim
+    /// ([ADR-011](../../../docs/56-COLLABORATION-CONCURRENCY-DESIGN.md)).
+    ///
+    /// Zero means unassigned — a chart from a snapshot written before this
+    /// field existed. Assigned on import in document order, so the same file
+    /// always yields the same ids.
+    #[serde(default, skip_serializing_if = "is_unassigned")]
+    pub id: u32,
     /// The cells the chart's frame covers, from the drawing's anchor.
     ///
     /// Inclusive, like every other range in the model. OOXML's `<xdr:to>` is
@@ -151,6 +175,9 @@ impl ChartView {
     #[must_use]
     pub fn new(anchor: CellRange, kind: ChartKind) -> Self {
         Self {
+            // Unassigned: the caller adding this to a sheet allocates, because
+            // uniqueness is a property of the sheet and not of the chart.
+            id: 0,
             anchor,
             from_offset: Emu::default(),
             to_offset: Emu::default(),

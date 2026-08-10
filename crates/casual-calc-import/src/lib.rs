@@ -317,6 +317,9 @@ fn read_sheet_drawings(
         if rel.rel_type.ends_with(CHART_REL_SUFFIX) {
             let spec = chart::parse_chart(&package.read_part(&target)?)?;
             charts.push(casual_calc_model::ChartView {
+                // Numbered below, once the whole list is known, so the ids
+                // follow document order rather than relationship order.
+                id: 0,
                 anchor: anchor.range,
                 from_offset: anchor.from_offset,
                 to_offset: anchor.to_offset,
@@ -960,6 +963,11 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         let drawn = read_sheet_drawings(&mut package, &part)?;
         sheet.charts = drawn.0;
         sheet.images = drawn.1;
+        // Identity, in document order, so opening the same file twice — or on
+        // two machines — numbers the charts identically. Anything that refers
+        // to a chart by index instead stops meaning the same chart as soon as
+        // one is inserted before it.
+        sheet.assign_chart_ids();
 
         workbook.sheets.push(sheet);
     }

@@ -2,9 +2,9 @@
 //! Phase 0 exit-gate condition (`docs/06-ROADMAP-AND-DELIVERY.md`).
 
 use crate::{
-    Cell, CellRange, CellRef, CellValue, CustomFilter, DataValidation, DvKind, DvOperator,
-    FilterOp, FilterRule, Id, IdGenerator, SCHEMA_VERSION, Sheet, SheetId, StringId, StringTable,
-    Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartKind, ChartView, CustomFilter, DataValidation,
+    DvKind, DvOperator, FilterOp, FilterRule, Id, IdGenerator, SCHEMA_VERSION, Sheet, SheetId,
+    StringId, StringTable, Workbook,
 };
 
 fn wb_id() -> Id {
@@ -397,4 +397,90 @@ fn an_unparseable_operand_rejects_nothing() {
 fn between_tolerates_reversed_bounds() {
     let rule = dv(DvKind::Decimal, DvOperator::Between, "10", "1");
     assert_eq!(rule.accepts("5", Some(5.0)), Some(true));
+}
+
+// ---------------------------------------------------------------------------
+// Chart identity (COL-02, stage 2). Every other sheet collection is identified
+// by where it points — a comment by its cell, a hyperlink and a validation by
+// their range, a conditional format by its OOXML priority. Charts are the
+// exception: two may cover the same cells, so they carry an id.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chart_ids_are_assigned_in_document_order() {
+    let mut sheet = Sheet::new(SheetId(wb_id()), "S");
+    for _ in 0..3 {
+        sheet.charts.push(ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(4, 4)),
+            ChartKind::Column,
+        ));
+    }
+    sheet.assign_chart_ids();
+
+    assert_eq!(
+        sheet.charts.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the same file always numbers its charts the same way"
+    );
+}
+
+#[test]
+fn assigning_ids_leaves_existing_ones_alone() {
+    let mut sheet = Sheet::new(SheetId(wb_id()), "S");
+    let range = CellRange::new(CellRef::new(0, 0), CellRef::new(4, 4));
+    let mut kept = ChartView::new(range, ChartKind::Column);
+    kept.id = 7;
+    sheet.charts.push(kept);
+    sheet.charts.push(ChartView::new(range, ChartKind::Bar));
+
+    sheet.assign_chart_ids();
+
+    assert_eq!(
+        sheet.charts[0].id, 7,
+        "an assigned id is identity, not a slot"
+    );
+    assert_eq!(
+        sheet.charts[1].id, 8,
+        "the new one clears the high-water mark"
+    );
+}
+
+#[test]
+fn an_id_survives_an_insertion_before_it_but_an_index_does_not() {
+    // The whole point. Under concurrency two editors both name "chart 0", and
+    // an insertion by either renumbers the other's target.
+    let mut sheet = Sheet::new(SheetId(wb_id()), "S");
+    let range = CellRange::new(CellRef::new(0, 0), CellRef::new(4, 4));
+    sheet.charts.push(ChartView::new(range, ChartKind::Column));
+    sheet.assign_chart_ids();
+    let target = sheet.charts[0].id;
+
+    let mut inserted = ChartView::new(range, ChartKind::Pie);
+    inserted.id = sheet.next_chart_id();
+    sheet.charts.insert(0, inserted);
+
+    assert_ne!(
+        sheet.charts[0].id, target,
+        "index 0 is now a different chart"
+    );
+    assert_eq!(
+        sheet.charts.iter().position(|c| c.id == target),
+        Some(1),
+        "the id still finds the original"
+    );
+}
+
+#[test]
+fn a_snapshot_without_chart_ids_round_trips_byte_identically() {
+    // ADR-010: an additive field must not change the bytes of a snapshot
+    // written before it existed.
+    let json = r#"{"anchor":{"start":{"row":0,"col":0},"end":{"row":4,"col":4}},"kind":"column"}"#;
+    let chart: ChartView = serde_json::from_str(json).expect("older snapshot still loads");
+
+    assert_eq!(chart.id, 0, "unassigned, not defaulted to a real id");
+    assert_eq!(
+        serde_json::to_string(&chart).unwrap(),
+        json,
+        "and writing it back produces the same bytes"
+    );
 }
