@@ -468,3 +468,191 @@ fn concurrent_history_advances_past_each_operation_in_a_chunk() {
         observe(&world.workbook)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Snapshots: the cadence, the retained window, and verification.
+// ---------------------------------------------------------------------------
+
+use crate::session::{Snapshot, SnapshotPolicy};
+
+#[test]
+fn a_snapshot_round_trips_the_document() {
+    let mut world = World::new(1);
+    world.edit(0, write(2, 1, 55.0));
+    world.send(0);
+    world.deliver(0);
+
+    let snap = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    assert_eq!(observe(&snap.restore().unwrap()), observe(&world.workbook));
+}
+
+#[test]
+fn replaying_the_log_reproduces_a_later_snapshot_byte_for_byte() {
+    // The integrity check the deterministic snapshot format hands us for free:
+    // a stored snapshot can be verified instead of trusted.
+    let mut world = World::new(1);
+    let base = Snapshot::capture(&world.workbook, 0).unwrap();
+
+    for row in 0..6u32 {
+        world.edit(0, write(row, 0, f64::from(row) + 0.25));
+        world.send(0);
+        world.deliver(0);
+    }
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    );
+    world.send(0);
+    world.deliver(0);
+
+    let later = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    world
+        .server
+        .verify_snapshot(&base, &later)
+        .expect("replay reproduces it");
+}
+
+#[test]
+fn a_tampered_snapshot_is_caught_rather_than_trusted() {
+    let mut world = World::new(1);
+    let base = Snapshot::capture(&world.workbook, 0).unwrap();
+    world.edit(0, write(0, 0, 1.0));
+    world.send(0);
+    world.deliver(0);
+
+    // A stored snapshot that does not match what the log produces: the document
+    // and its history have diverged, and that is corruption however it happened.
+    let mut tampered = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    world.edit(0, write(9, 9, 12345.0));
+    world.send(0);
+    world.deliver(0);
+    tampered.bytes = Snapshot::capture(&world.workbook, tampered.revision)
+        .unwrap()
+        .bytes;
+
+    assert!(matches!(
+        world.server.verify_snapshot(&base, &tampered),
+        Err(crate::session::SessionError::SnapshotMismatch { .. })
+    ));
+}
+
+#[test]
+fn the_cadence_fires_on_the_configured_interval() {
+    let mut world = World::new(1);
+    let policy = SnapshotPolicy {
+        every: 3,
+        retain_intervals: 2,
+    };
+    assert!(!world.server.snapshot_due(None, policy));
+
+    for row in 0..3u32 {
+        world.edit(0, write(row, 0, 1.0));
+        world.send(0);
+        world.deliver(0);
+    }
+    assert!(
+        world.server.snapshot_due(None, policy),
+        "three revisions in"
+    );
+
+    let snap = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    assert!(
+        !world.server.snapshot_due(Some(&snap), policy),
+        "and not again until three more"
+    );
+}
+
+#[test]
+fn compaction_keeps_the_margin_that_defines_bounded_offline() {
+    let mut world = World::new(1);
+    let policy = SnapshotPolicy {
+        every: 2,
+        retain_intervals: 2,
+    };
+    for row in 0..10u32 {
+        world.edit(0, write(row, 0, 1.0));
+        world.send(0);
+        world.deliver(0);
+    }
+    let snap = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    world.server.compact_behind(&snap, policy);
+
+    // Four revisions of margin — two intervals of two — are still rebasable, so
+    // a client that stepped away briefly is not forced to reload.
+    assert_eq!(world.server.oldest_rebasable(), 10 - 4);
+    assert!(world.server.history_since(6).is_some());
+    assert!(
+        world.server.history_since(5).is_none(),
+        "anything older is past the edge, and says so"
+    );
+}
+
+#[test]
+fn a_client_past_the_retained_window_is_refused_with_the_range_it_needed() {
+    let mut world = World::new(1);
+    let policy = SnapshotPolicy {
+        every: 2,
+        retain_intervals: 1,
+    };
+    for row in 0..8u32 {
+        world.edit(0, write(row, 0, 1.0));
+        world.send(0);
+        world.deliver(0);
+    }
+    let snap = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    world.server.compact_behind(&snap, policy);
+
+    let stale = Submission {
+        base: 1,
+        ops: vec![write(0, 2, 7.0)],
+    };
+    match world.server.commit(&mut world.workbook, &stale) {
+        Err(crate::session::SessionError::UnknownRevision {
+            claimed,
+            oldest,
+            current,
+        }) => {
+            assert_eq!(claimed, 1);
+            assert_eq!(current, 8);
+            assert!(
+                oldest > claimed,
+                "the client is told what it would have needed"
+            );
+        }
+        other => panic!("expected a refusal naming the range, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
+    // What a hibernating serverless object actually does: the memory is gone,
+    // so the document is rebuilt from its snapshot and the session carries on
+    // at the revision it left off at.
+    let mut world = World::new(1);
+    for row in 0..4u32 {
+        world.edit(0, write(row, 0, f64::from(row)));
+        world.send(0);
+        world.deliver(0);
+    }
+    let snap = Snapshot::capture(&world.workbook, world.server.revision()).unwrap();
+    let before = observe(&world.workbook);
+
+    // ... the object sleeps and wakes with nothing.
+    let mut revived = snap.restore().unwrap();
+    let mut server = ServerSession::resumed_at(snap.revision);
+    assert_eq!(observe(&revived), before, "rehydrated to where it was");
+
+    let submission = Submission {
+        base: server.revision(),
+        ops: vec![write(7, 0, 99.0)],
+    };
+    server
+        .commit(&mut revived, &submission)
+        .expect("serving again");
+    assert_eq!(server.revision(), snap.revision + 1);
+    assert!(observe(&revived).contains("7:0=Number(99.0)"));
+}

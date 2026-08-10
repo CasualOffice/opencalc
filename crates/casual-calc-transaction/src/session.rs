@@ -29,7 +29,7 @@
 //! Those are the two halves of the same diamond, which is why TP1 is the
 //! property that makes this work rather than a nicety.
 
-use casual_calc_model::Workbook;
+use casual_calc_model::{ModelError, Workbook};
 
 use crate::{
     Operation, TxnError, apply,
@@ -46,6 +46,20 @@ pub enum SessionError {
     Transform(TransformError),
     /// Applying an operation failed.
     Apply(TxnError),
+    /// A snapshot could not be written or read back.
+    Snapshot(String),
+    /// Replaying the log from an earlier snapshot did not reproduce the later
+    /// one, byte for byte.
+    ///
+    /// The document on disk and the document the log describes have diverged,
+    /// which is corruption however it happened. Surfaced rather than repaired:
+    /// the two disagree and nothing here knows which is right.
+    SnapshotMismatch {
+        /// The snapshot replayed from.
+        from: u64,
+        /// The snapshot that should have been reproduced.
+        to: u64,
+    },
     /// A client submitted against a revision the server no longer has history
     /// for, or one it has never issued.
     ///
@@ -80,6 +94,11 @@ impl core::fmt::Display for SessionError {
         match self {
             Self::Transform(error) => write!(f, "{error}"),
             Self::Apply(error) => write!(f, "{error}"),
+            Self::Snapshot(why) => write!(f, "snapshot: {why}"),
+            Self::SnapshotMismatch { from, to } => write!(
+                f,
+                "replaying revisions {from}..={to} did not reproduce the stored snapshot"
+            ),
             Self::UnknownRevision {
                 claimed,
                 oldest,
@@ -332,5 +351,153 @@ impl ServerSession {
             self.revision += 1;
         }
         Ok(rebased)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+/// A document's state at one revision.
+///
+/// The bytes are the model's own deterministic snapshot (ADR-010), so this is
+/// that plus a revision number — which is the whole reason the snapshot model
+/// in ADR-011 was nearly free to adopt rather than a format to design.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    /// The revision these bytes are the state at.
+    pub revision: u64,
+    /// The deterministic normalized-JSON encoding of the workbook.
+    pub bytes: Vec<u8>,
+}
+
+impl Snapshot {
+    /// Capture `workbook` as it stands at `revision`.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Snapshot`] if the model cannot be serialized.
+    pub fn capture(workbook: &Workbook, revision: u64) -> Result<Self, SessionError> {
+        Ok(Self {
+            revision,
+            bytes: workbook.to_snapshot().map_err(snapshot_error)?,
+        })
+    }
+
+    /// Rebuild the workbook this snapshot holds.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Snapshot`] if the bytes are not a valid snapshot.
+    pub fn restore(&self) -> Result<Workbook, SessionError> {
+        Workbook::from_snapshot(&self.bytes).map_err(snapshot_error)
+    }
+}
+
+fn snapshot_error(error: ModelError) -> SessionError {
+    SessionError::Snapshot(error.to_string())
+}
+
+/// When to write a snapshot, and how much history to keep behind it.
+///
+/// The defaults are starting points to benchmark, not values derived from
+/// anything — the number that matters is time-to-first-paint on a cold start,
+/// and only a measurement settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotPolicy {
+    /// Write a snapshot once this many revisions have accumulated since the
+    /// last one.
+    ///
+    /// An order of magnitude under ShareDB's thousand-version default, for two
+    /// reasons: our operations are far coarser — a `Batch` paste is one
+    /// operation carrying a hundred thousand cells — and our snapshots are
+    /// cheap, being a serialization the model already produces.
+    pub every: u64,
+    /// How many snapshot intervals of operations to keep.
+    ///
+    /// Two, so a client that was away across a single snapshot boundary can
+    /// still be rebased rather than forced to reload. **This number is the
+    /// definition of "bounded offline"** in ADR-011.
+    pub retain_intervals: u64,
+}
+
+impl Default for SnapshotPolicy {
+    fn default() -> Self {
+        Self {
+            every: 200,
+            retain_intervals: 2,
+        }
+    }
+}
+
+impl ServerSession {
+    /// Whether enough has happened since `latest` to be worth a snapshot.
+    ///
+    /// The other trigger is quiesce, which this cannot know about: on
+    /// serverless compute the object hibernates after seconds of inactivity and
+    /// discards its memory, so the moment before it sleeps is the highest-value
+    /// snapshot there is — the next event is guaranteed to be a cold start.
+    /// That call belongs to whatever owns the lifecycle.
+    #[must_use]
+    pub fn snapshot_due(&self, latest: Option<&Snapshot>, policy: SnapshotPolicy) -> bool {
+        let since = self.revision - latest.map_or(0, |s| s.revision.min(self.revision));
+        policy.every > 0 && since >= policy.every
+    }
+
+    /// Drop the history a snapshot now covers, keeping the policy's margin.
+    ///
+    /// Deliberately keeps more than the snapshot strictly needs: trimming to
+    /// the snapshot exactly would refuse every client that had been away even
+    /// briefly across it.
+    pub fn compact_behind(&mut self, latest: &Snapshot, policy: SnapshotPolicy) {
+        let margin = policy.every.saturating_mul(policy.retain_intervals);
+        self.compact_to(latest.revision.saturating_sub(margin));
+    }
+
+    /// The operations from `revision` onward, if they are still retained.
+    #[must_use]
+    pub fn history_since(&self, revision: u64) -> Option<&[Operation]> {
+        if revision < self.oldest_rebasable() || revision > self.revision() {
+            return None;
+        }
+        let skip = usize::try_from(revision - self.oldest_rebasable()).ok()?;
+        self.log.get(skip..)
+    }
+
+    /// Check that replaying the log from `from` reproduces `to`, byte for byte.
+    ///
+    /// Free to have, and worth having: because snapshots are deterministic and
+    /// byte-stable, a stored one can be **verified rather than trusted**. If
+    /// the two disagree, the document on disk and the document the log
+    /// describes have diverged — which is corruption, whatever caused it.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::SnapshotMismatch`] when they differ, and
+    /// [`SessionError::UnknownRevision`] when the history between them is no
+    /// longer retained.
+    pub fn verify_snapshot(&self, from: &Snapshot, to: &Snapshot) -> Result<(), SessionError> {
+        let Some(ops) = self.history_since(from.revision) else {
+            return Err(SessionError::UnknownRevision {
+                claimed: from.revision,
+                oldest: self.oldest_rebasable(),
+                current: self.revision(),
+            });
+        };
+        let span = usize::try_from(to.revision.saturating_sub(from.revision)).unwrap_or(0);
+        let mut replayed = from.restore()?;
+        for op in ops.iter().take(span) {
+            if !is_noop(op) {
+                apply(&mut replayed, op.clone())?;
+            }
+        }
+        if Snapshot::capture(&replayed, to.revision)?.bytes == to.bytes {
+            Ok(())
+        } else {
+            Err(SessionError::SnapshotMismatch {
+                from: from.revision,
+                to: to.revision,
+            })
+        }
     }
 }
