@@ -11,10 +11,12 @@ that does it runs*, and what else it is allowed to know about.
 > bytes back through a **webhook callback**; it never becomes the place the
 > file lives.
 >
-> **Nodes are interchangeable.** Operational transform needs one serialization
-> point per document, and that point is the **datastore** — a conditional
-> append on the revision — not a node anyone has to route to. No sticky
-> sessions, no leases, no owner box.
+> **A cluster of interchangeable nodes.** A client connects to any of them. One
+> node **leads a given document** and the rest relay to it, so the hot path
+> stays in memory; the leader's appends are nevertheless **conditional on the
+> revision**, so a stale leader is rejected rather than believed. Leadership is
+> internal and moves on its own — it is not a sticky session, which is affinity
+> a client is subject to.
 
 ## Two prior arts, and only one of them fits
 
@@ -159,6 +161,75 @@ to notice what the serialization point has to *be*:
 
 Make it the datastore, and the nodes stop mattering.
 
+### A leader per document, and every other node relays to it
+
+A client connects to **any** node — that is the requirement, and it is
+satisfied at the load balancer, which stays dumb. Inside the cluster, one node
+is **leader for a given document** and the others relay to it:
+
+```text
+client ──▶ any node ──(not leader? forward)──▶ leader for that document
+                                                  │ commits, assigns the revision
+                ◀── pushes to its own sockets ◀────┘ broadcasts to nodes holding participants
+```
+
+The leader keeps the document in memory, so a commit is an in-process call —
+the `ServerSession::commit` that already exists — rather than a round trip to
+storage per operation. That matters because operations are small and frequent:
+paying a database write on every one puts the datastore on the typing path.
+
+This is the shape OnlyOffice, Univer and Durable Objects all converge on, and
+it is worth being clear that it does **not** reintroduce sticky sessions.
+Stickiness is affinity a *client* is subject to — the thing that makes deploys,
+restarts and rebalances painful. Leadership is internal, assigned by the
+cluster, and moves on its own.
+
+### Leadership makes it fast; the conditional append makes it safe
+
+Leader election has one failure mode that matters: two nodes believing they
+lead the same document, during a partition or a slow lease renewal. Two leaders
+ordering the same document is divergence, and no transform recovers from it.
+
+So the leader is **not** trusted to be unique. It still appends **conditionally
+on the revision** — the compare-and-swap below — and a stale leader's append is
+rejected by the store the moment a newer one has committed. It learns it is no
+longer leader by being told *no*, and steps down.
+
+That is the synthesis worth keeping:
+
+> **Leadership is an optimisation for latency. The conditional append is what
+> makes divergence impossible.** Neither alone is enough: election without the
+> guard is correct only while the election is, and the guard without a leader
+> puts a storage round trip on every keystroke.
+
+Which also means election can be cheap and approximate — a lease in shared
+state with a TTL — rather than a consensus protocol. Getting it briefly wrong
+costs a rejected append and a re-elected leader, not a corrupted document.
+
+### Failover, and the one thing the protocol still needs
+
+When a leader dies its lease expires, another node takes the document, and
+rehydrates from snapshot-plus-tail — which is exactly what
+[COL-07](14-EXECUTION-TRACKER.md) built.
+
+The client needs no special handling, because the protocol already holds
+unacknowledged work: `ClientSession` keeps its sent chunk until it is
+acknowledged, so a chunk lost with the old leader is simply still there to
+send. That falls out of ADR-011's one-chunk-in-flight rule rather than being
+designed for failover.
+
+**But it exposes a real gap.** A leader can commit a chunk and die *before
+acknowledging it*. The client, having had no acknowledgement, resends — and the
+new leader has no way to tell a lost chunk from a duplicate one, so it applies
+it twice. Typing "5" into a cell twice is invisible; inserting a row twice is
+not.
+
+`Submission` therefore needs an **idempotency key** — a client id and a
+per-client sequence number — with the server recording the last sequence it
+accepted from each client and treating anything at or below it as already
+committed. This is a small change to a type that is already written, and it is
+required before any of this runs, not optional hardening. Tracked as COL-09.
+
 ### The commit is a compare-and-swap
 
 Every node runs the same `ServerSession::commit` we already have. What changes
@@ -206,17 +277,17 @@ product exists.
 ### Why not the alternatives
 
 - **Sticky sessions** — rejected outright.
-- **A per-document lease** (Redis lock, advisory lock) — this is affinity
-  wearing a different hat. It reintroduces an owner node, and with it lease
-  expiry tuning, failover windows and split-brain, in exchange for avoiding a
-  conditional write.
-- **A single-writer actor per document** (Cloudflare Durable Objects) — a good
-  fit, and the platform provides the affinity rather than the operator
-  configuring it, so it does not violate the requirement in spirit. But it
-  binds the deployment to one vendor. The compare-and-swap design runs on
-  Postgres, Redis or DynamoDB and **does not foreclose** running on Durable
-  Objects later — the object simply becomes a very effective cache in front of
-  the same conditional append.
+- **Leader election alone**, trusting the lease — correct exactly as long as
+  the election is, and a partition is precisely when it is not. The conditional
+  append costs one comparison and removes the failure mode entirely.
+- **The conditional append alone**, with no leader — genuinely stateless and
+  the simplest thing that works, but it puts a storage round trip on every
+  commit, and commits happen at typing speed. Kept as the safety net rather
+  than as the mechanism.
+- **A single-writer actor per document** (Cloudflare Durable Objects) — the
+  same topology with the platform supplying the leadership, which is a good fit
+  and binds the deployment to one vendor. Nothing here forecloses it: a Durable
+  Object is simply a leader whose election someone else operates.
 - **A partitioned log** (Kafka) — correct and scalable, and a broker to operate
   for a workload that is one conditional write per commit.
 
