@@ -60,8 +60,8 @@ defines the fields; this doc pins the sizing intent):
 
 | Field | Representation | Budget note |
 | --- | --- | --- |
-| `value` | tagged `CellValue` (number `f64` \| bool \| `StringId` \| `ErrorValue` tag) | strings interned → a cell holds a 32-bit id, not text |
-| `style` | `StyleId` (interned index) | 1M cells sharing a format cost **one** format |
+| `value` | tagged `CellValue` (number `f64` \| bool \| `StringId` \| `ErrorValue` tag) | strings interned → a cell holds an id, not text. **Measured: 32 bytes.** `StringId` wraps a 128-bit `Id`, not the 32-bit id this row originally claimed |
+| `style` | `StyleId` (interned index) | 1M cells sharing a format cost **one** format. **Measured: `Option<StyleId>` is 32 bytes** — `StyleId` wraps a 128-bit `Id`, which has no spare bit pattern for `None`, so the option costs a second word |
 | `formula` | `Option<FormulaHandle>` (arena index) | `None` on literal cells is a niche/zero cost; a filled column shares one AST |
 | `flags` | small bitset (dirty, spill-anchor, spill-child, reserved) | packed |
 
@@ -69,8 +69,20 @@ defines the fields; this doc pins the sizing intent):
   and formula ASTs (arena) are shared, so bulk-uniform data (a million cells with
   the same format, or a filled formula) is near-constant extra cost.
 - The target is a **small, `Copy`-friendly cell** (a handful of machine words),
-  no per-cell heap allocation on the common path. The exact `size_of::<Cell>()`
-  ceiling is asserted by the memory benchmark in Phase 0.
+  no per-cell heap allocation on the common path.
+
+**The `size_of::<Cell>()` ceiling is asserted** — by
+`crates/casual-calc-model/tests/memory_ceiling.rs`, not by the benchmark
+harness this document used to name. The harness measures no memory at all and
+CI checks only its report's shape, so until that test existed the capacity
+claim rested on nothing that could fail.
+
+A cell is **80 bytes**, and the ceiling records that rather than the design's
+intent. Three quarters of it is the two id types: `CellValue` is 32 bytes and
+`Option<StyleId>` another 32, because both wrap a 128-bit `Id` where this
+document describes an interned *index* — `FormulaHandle` is a real 32-bit index
+and its option costs 8. Narrowing the other two is worth doing and is not an
+edit: it changes the ids' snapshot encoding, so it wants an ADR.
 
 ## Relationship to the offset index (T2)
 

@@ -5,11 +5,12 @@ CI is part of the architecture, not an afterthought. The job names below are a
 doc defines the gates for when the workspace exists (Phase 0 onward) and records
 which gates are not yet built.
 
-> **Current state:** no workspace, so no CI runs yet. During the documentation
-> phase the only meaningful gate is a docs/link check. Everything below is the
-> designed target, to be stood up in Phase 0 (tracker `F-###`).
+> **Current state:** ten jobs run on every push — `format`, `lint`, `test`,
+> `docs`, `wasm`, `benchmark-smoke`, `repository-policy`, `fuzz-build`,
+> `dependency-policy`, and a three-platform matrix including MSRV. `browser-smoke`
+> is the one in the table below that does not exist yet.
 
-## PR gates (target)
+## PR gates
 
 | Job | Command (intent) | Enforces |
 | --- | --- | --- |
@@ -93,8 +94,11 @@ token path is the supported one.
 ## Future gates (not built yet)
 
 - A CSV/ODS interop gate once those adapters land.
-- A memory-ceiling gate asserting the 1M-cell model stays within the
-  [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) memory budget.
+- A memory-ceiling gate measuring **resident** memory, not payload. The
+  per-cell record and the 1M-cell payload are asserted
+  (`casual-calc-model/tests/memory_ceiling.rs`); what is still unmeasured is the
+  allocator's real footprint, which needs a counting global allocator and
+  therefore `unsafe`, which this workspace forbids.
 
 When a needed gate does not exist, name it here and add a tracker row rather than
 silently proceeding without it.
