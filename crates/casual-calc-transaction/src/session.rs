@@ -121,11 +121,15 @@ impl core::error::Error for SessionError {}
 /// Assigned by the host — the engine never invents identity, for the same
 /// reason it never reads a clock. Must be unique among the live participants of
 /// a document, since it is what deduplication keys on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct ClientId(pub u64);
 
 /// A chunk of a client's own edits, offered to the server.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Submission {
     /// Who sent it.
     pub client: ClientId,
@@ -153,7 +157,8 @@ pub struct Submission {
 }
 
 /// What committing a chunk did.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
 pub enum Commit {
     /// Newly committed. Carries the operations **as they landed** — rebased
     /// onto whatever had been committed since the client's base — which is

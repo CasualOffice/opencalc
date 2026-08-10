@@ -10,9 +10,11 @@ publish = false
 [dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-formula = { path = "../casual-calc-formula" }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
+serde_json = "1"
 
 [lints]
 workspace = true

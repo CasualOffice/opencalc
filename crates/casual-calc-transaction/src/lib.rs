@@ -19,6 +19,7 @@ use casual_calc_model::{
     SheetProtection, SheetView, SheetVisibility, SortState, StyleId, Table, Workbook,
 };
 
+pub mod protocol;
 pub mod session;
 #[cfg(test)]
 mod session_tests;
@@ -69,7 +70,8 @@ impl std::error::Error for TxnError {}
 /// by re-inserting an empty band, so its inverse carries a pre-mutation snapshot
 /// of the lot. It also means adding another positional field is a change in one
 /// place rather than at every construction site.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SheetMetadata {
     /// Merged ranges.
     pub merges: Vec<CellRange>,
@@ -154,7 +156,8 @@ pub struct SheetMetadata {
 /// conflicting: one person resizing a column and another adding a comment
 /// produce two indistinguishable whole-sheet bundles, and the later one wins
 /// entirely. That is silent data loss, which this project does not do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct SheetFields(u32);
 
 impl SheetFields {
@@ -344,7 +347,8 @@ impl SheetMetadata {
 
 /// A closed set of atomic edit operations. Every operation is invertible; the
 /// inverse of any operation is expressible as a `SetCell` (or a `Batch` of them).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Operation {
     /// Replace a whole cell (or clear it with `None`). This is the primitive and
     /// the universal inverse form.

@@ -35,7 +35,8 @@ use crate::Operation;
 /// Produced with [`WireOperation::of`] against the workbook the operation was
 /// written on, and turned back into an [`Operation`] with
 /// [`WireOperation::localise`] against the workbook it is arriving at.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WireOperation {
     /// The operation, with the sender's handles still in it.
     pub op: Operation,
