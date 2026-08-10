@@ -5548,7 +5548,16 @@ function relabel() {
     else node.textContent = text;
   }
   for (const node of qsa("[data-oc-tip]")) {
-    node.title = t(`tip.${node.dataset.ocCommand ?? node.id}`, node.dataset.ocTip);
+    const text = t(`tip.${node.dataset.ocCommand ?? node.id}`, node.dataset.ocTip);
+    // Write it back where the tooltip is actually read from. A tipified node
+    // has no `title` any more — setting one would translate nothing and
+    // resurrect the native bubble beside our own.
+    if (node.dataset.tip !== undefined) {
+      node.dataset.tip = text;
+      node.setAttribute("aria-label", text);
+    } else {
+      node.title = text;
+    }
   }
   updateCellMode();
 }
@@ -9524,6 +9533,22 @@ function wireEvents() {
     if (painter && wasDragging) applyPainter(effectiveRange());
   });
 
+  // Scroll redraws are coalesced to one per frame.
+  //
+  // A trackpad delivers wheel events at 100-120Hz and a thumb drag emits one
+  // per mousemove, and each was calling `draw()` synchronously — so the main
+  // thread was asked for two or three full repaints inside a single frame, of
+  // which the browser can only ever show the last. The surplus is not just
+  // wasted, it is what makes the scroll feel heavy: the handler runs long
+  // enough to push the frame past its budget, so the thing being drawn arrives
+  // late. Moving the offsets stays synchronous, because it is cheap and the
+  // scrollbar geometry reads it; only the painting waits for the frame.
+  let drawFrame = 0;
+  const scheduleDraw = () => {
+    if (drawFrame) return;
+    drawFrame = requestAnimationFrame(() => { drawFrame = 0; draw(); });
+  };
+
   // Custom scrollbar thumb dragging.
   let sbDrag = null;
   const startThumb = (axis, el) => (e) => {
@@ -9559,7 +9584,7 @@ function wireEvents() {
       const d = e.clientX - sbDrag.start;
       state.scrollX = Math.max(0, sbDrag.scroll0 + (d / scrollMeta.hSpan) * scrollMeta.maxScrollX);
     }
-    draw();
+    scheduleDraw();
   });
   window.addEventListener("mouseup", () => {
     if (sbDrag) { vthumb.classList.remove("drag"); hthumb.classList.remove("drag"); sbDrag = null; }
@@ -9647,7 +9672,7 @@ function wireEvents() {
         state.scrollX += e.deltaX * unit * scrollDamp;
       }
       clampScroll();
-      draw();
+      scheduleDraw();
     },
     { passive: false },
   );
@@ -11108,8 +11133,15 @@ async function main() {
   }
   // Tooltips are the toolbar's only text, so they are what a translated
   // toolbar translates. The English one is kept as the fallback.
-  for (const node of qsa("[title]")) {
-    if (!node.dataset.ocTip) node.dataset.ocTip = node.title;
+  //
+  // Read from `data-tip` as well as `title`: the custom tooltip layer runs
+  // first and *moves* `title` onto `data-tip` to suppress the native bubble,
+  // so by the time this ran only the handful of nodes outside its reach still
+  // had a `title` at all. Sixty-four of the seventy-five tooltips were
+  // therefore never registered for translation, and `tip.*` — a documented
+  // part of the SDK's localization surface — silently did nothing for them.
+  for (const node of qsa("[title], [data-tip]")) {
+    if (!node.dataset.ocTip) node.dataset.ocTip = node.dataset.tip || node.title;
   }
   relabel();
   seed();
