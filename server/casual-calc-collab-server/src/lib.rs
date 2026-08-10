@@ -16,14 +16,16 @@
 //!
 //! # Why the policy here has no I/O either
 //!
-//! Everything in this module is a state machine over supplied time. Nothing
-//! reads a clock, opens a socket or awaits. That is the same discipline the
-//! engine follows, for the same payoff: a save cadence and a retry policy are
-//! exactly the things whose bugs live in rare timing, and they are only
-//! testable if time is an argument.
+//! Everything in this crate is a state machine over supplied time and supplied
+//! bytes. Nothing reads a clock, opens a socket or awaits. That is the same
+//! discipline the engine follows, for the same payoff: a save cadence and a
+//! retry policy are exactly the things whose bugs live in rare timing, and they
+//! are only testable if time is an argument.
 
 #![forbid(unsafe_code)]
 
+pub mod document;
 pub mod lifecycle;
 
+pub use document::{DocumentSession, Joined, ServerError};
 pub use lifecycle::{Action, CallbackOutcome, SavePolicy, SaveReason, SessionLifecycle};

@@ -76,6 +76,11 @@ dependencies = [
 name = "casual-calc-collab-server"
 version = "0.0.0"
 dependencies = [
+ "casual-calc-eval",
+ "casual-calc-export",
+ "casual-calc-formula",
+ "casual-calc-import",
+ "casual-calc-model",
  "casual-calc-transaction",
 ]
 

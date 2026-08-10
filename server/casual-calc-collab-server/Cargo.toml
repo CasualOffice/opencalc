@@ -9,7 +9,14 @@ publish = false
 description = "The OpenCalc collaboration server: a session, not a filing system."
 
 [dependencies]
+casual-calc-eval = { path = "../../crates/casual-calc-eval" }
+casual-calc-export = { path = "../../crates/casual-calc-export" }
+casual-calc-import = { path = "../../crates/casual-calc-import" }
+casual-calc-model = { path = "../../crates/casual-calc-model" }
 casual-calc-transaction = { path = "../../crates/casual-calc-transaction" }
+
+[dev-dependencies]
+casual-calc-formula = { path = "../../crates/casual-calc-formula" }
 
 [lints]
 workspace = true
