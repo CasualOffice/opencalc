@@ -311,20 +311,140 @@ These follow from the decision and are what the implementation is held to.
 | Serverless? | **Both senses.** No server at one editor; serverless *compute* for sessions. |
 | Presence through transform? | **No** — separate ephemeral channel. |
 | Where does recalculation run? | **Wherever the authoritative model is** — browser when there is no server, both ends in a session, native on the desktop. Determinism is what makes that a free choice; the price is a server-issued, revision-stamped environment. |
+| Presence in the first cut? | **Yes** — cheap, and its absence reads as broken rather than minimal. |
+| Snapshot cadence? | **200 ops or on quiesce**, retaining two intervals. Tuned for cold-start latency, because a Durable Object hibernates after 10s. |
+| Retained bytes under concurrent edit? | **Server-owned, never transformed**, invalidation idempotent, one writer at save. |
+| Comments — presence or document? | **Document.** They persist and round-trip; ephemerality is what earns the presence channel. |
 
-## Open — scoping, not direction
+**One prerequisite came out of this research and is not optional:**
+`SetSheetMetadata` is a 23-field whole-sheet bundle, so under OT almost every
+concurrent non-cell edit silently discards the other. It needs a change mask
+and stable ids for collection elements **before** collaboration is built. See
+below.
 
-None of these block the decision; they are settled while building.
+## Resolving the scoping items
 
-1. **Is presence in the first cut, or after?** It does not go through
-   transform, but it is most of what makes collaboration *feel* present, so
-   shipping without it reads as broken rather than minimal.
-2. **Snapshot cadence and retention window.** The numbers behind "bounded"
-   and behind cold-start latency.
-3. **What happens to the retained-bytes side table under concurrent edit?** Two
-   clients editing a sheet whose drawing part is preserved verbatim must not
-   both rewrite it. Likely answer — retention is server-owned and never
-   transformed — but it needs stating, because getting it wrong produces
-   exactly the "file needs repair" outcome the fidelity work exists to prevent.
-4. **Do comments join the presence row or the document row?** Append-mostly and
-   structurally inert, so either defensible.
+### Presence — in the first cut
+
+Not because it is important, but because it is *cheap* and its absence is
+loud. A session with no cursors does not read as a minimal collaboration
+feature; it reads as a broken one, because the only evidence anyone else exists
+is cells changing by themselves.
+
+[Yjs's awareness protocol](https://docs.yjs.dev/getting-started/adding-awareness)
+is the shape to copy, and it is deliberately not a document concern:
+
+- A `Map<clientId, state>` where each client owns **exactly one entry** and
+  overwrites it wholesale. No merge, therefore no transform.
+- **Dropped after ~30 seconds without a refresh** — Yjs's number, which is
+  roughly three missed heartbeats at a 10-second interval and is proven in
+  practice. Adopt it rather than inventing one.
+- Not persisted, not in a snapshot, not replayed. Losing it costs nothing,
+  which is exactly why it is allowed to take the cheap path.
+
+Yjs skips state vectors here on the reasoning that awareness states are small
+enough that exchanging them whole has little cost. The same holds for us: a
+cursor, a selection rectangle, a name and a colour.
+
+Payload: `{ name, colour, sheet, selection, activeCell, ts }`. Refreshed on
+change and on a heartbeat.
+
+### Snapshot cadence — on a count *or* on quiesce, whichever comes first
+
+[ShareDB's milestone snapshots default to every 1,000 versions](https://share.github.io/sharedb/adapters/milestone),
+tunable per collection. That is the right shape and the wrong number for us,
+for two reasons.
+
+**Our ops are coarser.** A `Batch` paste is one op and can carry a hundred
+thousand cells, so "1,000 ops" is a far larger span of change than it is for a
+character-wise text OT. **And our snapshots are cheap** — deterministic
+normalized JSON we already produce, not a bespoke serialization.
+
+**Serverless changes the trade entirely.** A
+[Durable Object hibernates after 10 seconds of inactivity, discarding in-memory
+state, and re-runs its constructor on the next event](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
+Cold start is therefore not a rare event to be amortised — for a document
+edited intermittently it is *the normal case*. Every wake replays the tail. So
+the cadence is tuned for **wake latency**, not for storage:
+
+| Setting | Starting value | Why |
+| --- | --- | --- |
+| Snapshot after | **200 ops** | An order of magnitude under ShareDB's default, because our ops are coarse and our snapshots are cheap. Bounds the replay a cold start pays. |
+| Snapshot on | **quiesce, before hibernation** | The highest-value moment there is: the very next event is guaranteed to be a cold start. The common pattern is to flush to durable storage and clear the accumulated partial updates. |
+| Retain ops for | **2 snapshot intervals** | So a client that was away across one snapshot boundary is still transformable rather than forced to reload. This number *is* the definition of "bounded offline". |
+
+These are starting points to be measured and revised, not derived. The metric
+that matters is time-to-first-paint on a cold start, and it should be
+benchmarked before the numbers are treated as settled.
+
+### Retained bytes — server-owned, never transformed
+
+The rule that makes this safe is that **retention is not in the op set**. Ops
+carry cell and structure changes; they never carry drawing XML. The retention
+side table is derived from the file and mutated only as a *side effect* of ops
+that invalidate a part — deleting a chart, or editing an imported one, which
+flips it from the retained-bytes regime to the model regime
+([54](54-PIVOT-TABLES.md), CHT-01).
+
+So:
+
+- **The server owns the table.** Clients hold a read-only projection for
+  rendering and never author it.
+- **Invalidation is ordered like any other op**, because it is caused by one.
+  The server applies it in server order.
+- **Invalidation is idempotent.** Two clients deleting the same chart
+  concurrently: the second is a no-op, not an error.
+- **The dangling-anchor stripper runs server-side at save** (CHT-04), so there
+  is exactly one writer of the drawing bytes. This is the whole point — two
+  writers of a preserved part is precisely the "file needs repair" outcome the
+  fidelity work exists to prevent.
+
+### Comments — the document row, not presence
+
+They are persisted, they survive the round-trip to `.xlsx`, and someone
+expects them to be there tomorrow. Ephemerality is the only thing that earns a
+place in the presence channel, and comments are not ephemeral.
+
+## The finding that blocks implementation: `SetSheetMetadata`
+
+Researching the above turned up something more important than any of it.
+
+`SetSheetMetadata` installs a **23-field whole-sheet bundle**: merges, column
+and row sizing, hidden lines, view, autofilter, outline levels, validations,
+conditional formats, comments, visibility, protection, hyperlinks, tables,
+**charts**, **pivots**, print setup and sort state. It exists for a good
+single-user reason — a structural delete drops merges and freeze bands that
+re-inserting an empty band cannot recover, so the inverse carries a
+pre-mutation snapshot.
+
+Under OT it is a **collision magnet**. One client resizes a column while
+another adds a comment: two `SetSheetMetadata` ops, no way to merge them, and
+the later one silently discards the earlier one's work. Almost every concurrent
+*non-cell* edit in the product collides this way — comments, conditional
+formats, filters, hyperlinks, table config, chart edits, pivot edits, print
+setup. Cell editing would work beautifully and everything else would quietly
+lose data, which is the worst possible failure shape for a product whose first
+principle is no silent data loss.
+
+Two stages fix it, and **both belong before collaboration, not during**:
+
+1. **A change mask.** `SetSheetMetadata` records which fields it *intends* to
+   change. Transform then merges disjoint field sets and conflicts only on the
+   same field. The single-user path is unaffected. This alone removes the large
+   majority of collisions, because concurrent editors are usually touching
+   different things.
+2. **Identity for collection elements.** `Table` and `PivotTable` already carry
+   a stable `id`; charts, comments, validations, conditional formats and
+   hyperlinks are **positional** — a `Vec` index. Index-keyed collections are
+   exactly what breaks under concurrency, since two concurrent inserts both
+   claim index 2. Giving these elements stable ids turns the field into a keyed
+   set where inserts merge and only same-element edits conflict. This is a
+   model change, which is why it wants doing first.
+
+**A correction to this document.** Above, under *Design commitments*, it says
+that needing an op the single-user editor lacks is evidence against the
+decision. That is right about new *semantics* and wrong as stated: refining an
+existing op's **granularity** — a field mask, or element identity within a
+collection — adds no operation and no semantics. It makes an op say what it
+already meant. The commitment is against widening what can be done, not against
+describing it precisely.
