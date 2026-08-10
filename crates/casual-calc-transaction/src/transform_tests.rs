@@ -37,6 +37,16 @@ fn seed() -> Workbook {
     sheet.rows.sizes.insert(2, 40);
     sheet.rows.sizes.insert(9, 60);
     workbook.sheets.push(sheet);
+    // A second sheet, so that renumbering has somewhere to renumber *to* and a
+    // wrong index lands on real content instead of on nothing.
+    let mut other = Sheet::new(SheetId(Id::from_parts(2, 2)), "T");
+    for row in 0..4u32 {
+        other.cells.set(
+            CellRef::new(row, 0),
+            Cell::value(CellValue::Number(f64::from(1000 + row))),
+        );
+    }
+    workbook.sheets.push(other);
     workbook
 }
 
@@ -128,6 +138,43 @@ fn candidates() -> Vec<Operation> {
     outlined.collapsed_rows.insert(6);
     ops.push(Operation::set_sheet_metadata(0, outlined));
 
+    // Sheet-level operations, and edits on the second sheet for them to move.
+    for index in [0usize, 1, 2] {
+        ops.push(Operation::InsertSheet {
+            index,
+            sheet: Box::new(Sheet::new(
+                SheetId(Id::from_parts(2, 9)),
+                format!("added{index}"),
+            )),
+        });
+    }
+    for index in [0usize, 1] {
+        ops.push(Operation::RemoveSheet { index });
+        ops.push(Operation::RenameSheet {
+            index,
+            name: format!("renamed{index}"),
+        });
+        ops.push(Operation::SetTabColor {
+            sheet: index,
+            color: Some("FF00FF".to_owned()),
+        });
+    }
+    for (from, to) in [(0usize, 1usize), (1, 0)] {
+        ops.push(Operation::MoveSheet { from, to });
+    }
+    for (row, col) in [(0u32, 0u32), (2, 0)] {
+        ops.push(Operation::SetCell {
+            sheet: 1,
+            at: CellRef::new(row, col),
+            cell: Some(Cell::value(CellValue::Number(f64::from(row) - 7.0))),
+        });
+    }
+    ops.push(Operation::InsertRows {
+        sheet: 1,
+        at: 1,
+        count: 2,
+    });
+
     ops.push(Operation::Batch(vec![
         Operation::InsertRows {
             sheet: 0,
@@ -146,25 +193,37 @@ fn candidates() -> Vec<Operation> {
 /// The observable state, as the comparison sees it. Every cell that could have
 /// moved, plus the axis sizing the structural ops rewrite.
 fn observe(workbook: &Workbook) -> String {
-    let sheet = &workbook.sheets[0];
-    let mut cells: Vec<String> = sheet
-        .cells
+    // Every sheet, by name rather than by index: renumbering is exactly what is
+    // being tested, so comparing position by position would call two different
+    // orderings equal.
+    let mut sheets: Vec<String> = workbook
+        .sheets
         .iter()
-        .map(|(at, cell)| format!("{}:{}={:?}", at.row, at.col, cell.value))
+        .map(|sheet| {
+            let mut cells: Vec<String> = sheet
+                .cells
+                .iter()
+                .map(|(at, cell)| format!("{}:{}={:?}", at.row, at.col, cell.value))
+                .collect();
+            cells.sort();
+            format!(
+                "{}[{}] tab{:?} cols{:?} rows{:?} merges{:?} hidden{:?}/{:?} frozen{:?} outline{:?}/{:?}",
+                sheet.name,
+                cells.join(","),
+                sheet.tab_color,
+                sheet.columns.sizes,
+                sheet.rows.sizes,
+                sheet.merges,
+                sheet.hidden_rows,
+                sheet.hidden_cols,
+                (sheet.view.frozen_rows, sheet.view.frozen_cols),
+                sheet.row_outline_levels,
+                sheet.collapsed_rows,
+            )
+        })
         .collect();
-    cells.sort();
-    format!(
-        "cells[{}] cols{:?} rows{:?} merges{:?} hidden{:?}/{:?} frozen{:?} outline{:?}/{:?}",
-        cells.join(","),
-        sheet.columns.sizes,
-        sheet.rows.sizes,
-        sheet.merges,
-        sheet.hidden_rows,
-        sheet.hidden_cols,
-        (sheet.view.frozen_rows, sheet.view.frozen_cols),
-        sheet.row_outline_levels,
-        sheet.collapsed_rows,
-    )
+    sheets.sort();
+    sheets.join(" | ")
 }
 
 #[test]
@@ -214,8 +273,15 @@ fn tp1_holds_for_every_supported_pair() {
     // A guard against the test passing because everything was skipped. The
     // seed deliberately contains no formulas and no sheet-renumbering ops, so
     // every generated pair must be answerable.
-    assert_eq!(skipped, 0, "no generated pair should have been skipped");
+    // Concurrent sheet reordering is the one refused corner, so the skips are
+    // expected here — but they are counted, not waved through, and the pairs
+    // that *are* answered still have to outnumber them heavily.
+    assert!(
+        skipped * 8 < checked,
+        "{skipped} refused against {checked} answered — too much is being skipped"
+    );
     assert!(checked > 3_000, "only {checked} pairs checked");
+    println!("TP1: {checked} pairs converged, {skipped} refused");
 }
 
 #[test]
@@ -388,9 +454,7 @@ fn a_row_band_does_not_move_a_column_width() {
 }
 
 #[test]
-fn sheet_renumbering_is_refused_rather_than_guessed() {
-    // Returning the op untransformed would diverge the replicas silently, which
-    // is the one outcome this layer must not produce.
+fn an_edit_follows_its_sheet_when_another_is_inserted_before_it() {
     let insert_sheet = Operation::InsertSheet {
         index: 0,
         sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 1)), "new")),
@@ -400,7 +464,77 @@ fn sheet_renumbering_is_refused_rather_than_guessed() {
         at: CellRef::new(0, 0),
         cell: None,
     };
-    assert!(transform(&edit, &insert_sheet, Side::Later).is_err());
+    let Operation::SetCell { sheet, .. } = transform(&edit, &insert_sheet, Side::Later).unwrap()
+    else {
+        panic!("still a cell edit");
+    };
+    assert_eq!(
+        sheet, 2,
+        "sheet 1 is sheet 2 once one is added at the front"
+    );
+}
+
+#[test]
+fn an_edit_on_a_removed_sheet_becomes_a_no_op() {
+    let removed = Operation::RemoveSheet { index: 1 };
+    let edit = Operation::SetCell {
+        sheet: 1,
+        at: CellRef::new(0, 0),
+        cell: None,
+    };
+    assert!(crate::transform::is_noop(
+        &transform(&edit, &removed, Side::Later).unwrap()
+    ));
+
+    // And a sheet after it moves down rather than vanishing.
+    let elsewhere = Operation::SetTabColor {
+        sheet: 2,
+        color: None,
+    };
+    assert_eq!(
+        transform(&elsewhere, &removed, Side::Later).unwrap(),
+        Operation::SetTabColor {
+            sheet: 1,
+            color: None
+        }
+    );
+}
+
+#[test]
+fn an_edit_follows_a_moved_sheet() {
+    // [A, B, C, D] with from=0 to=2 becomes [B, C, A, D].
+    let moved = Operation::MoveSheet { from: 0, to: 2 };
+    for (before, after) in [(0usize, 2usize), (1, 0), (2, 1), (3, 3)] {
+        let edit = Operation::SetTabColor {
+            sheet: before,
+            color: None,
+        };
+        assert_eq!(
+            transform(&edit, &moved, Side::Later).unwrap(),
+            Operation::SetTabColor {
+                sheet: after,
+                color: None
+            },
+            "sheet {before} should land at {after}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_sheet_reordering_is_refused_rather_than_guessed() {
+    // The subtle corner, and a rare one. Returning either op untransformed
+    // would diverge the replicas silently.
+    let a = Operation::MoveSheet { from: 0, to: 2 };
+    let b = Operation::MoveSheet { from: 1, to: 0 };
+    assert!(transform(&a, &b, Side::Later).is_err());
+
+    // An insertion *position* under a move is refused for the same reason: a
+    // bare index does not record which sheets it meant to sit between.
+    let insert = Operation::InsertSheet {
+        index: 1,
+        sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 1)), "new")),
+    };
+    assert!(transform(&insert, &a, Side::Later).is_err());
 }
 
 #[test]

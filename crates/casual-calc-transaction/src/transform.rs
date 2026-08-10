@@ -28,15 +28,17 @@
 //!
 //! # What is not handled yet
 //!
-//! Operations that renumber sheet *indices* — [`Operation::InsertSheet`],
-//! [`Operation::RemoveSheet`], [`Operation::MoveSheet`] — shift the `sheet`
-//! field of every other operation in the workbook, which is a second transform
-//! axis on top of the row/column one.
+//! **Concurrent sheet reordering.** An ordinary edit follows its sheet across
+//! an insert, a remove or a move; what is refused is a [`Operation::MoveSheet`]
+//! being rebased across another sheet-level operation. A move is defined by the
+//! sheets it lands between, and a bare pair of indices does not record that, so
+//! two concurrent reorderings have no answer that is obviously the intended
+//! one. It is also rare, which is why refusing costs little.
 //!
-//! And a [`Operation::SetCell`] carrying a formula, ordered before a concurrent
-//! style change to the same cell: [`Operation::SetValue`] is the only operation
-//! that writes content while leaving the style alone, and it carries a value,
-//! so the formula has nowhere to go.
+//! **A [`Operation::SetCell`] carrying a formula, ordered before a concurrent
+//! style change to the same cell.** [`Operation::SetValue`] is the only
+//! operation that writes content while leaving the style alone, and it carries
+//! a value, so the formula has nowhere to go.
 //!
 //! Both return [`TransformError::Unsupported`] rather than an answer. Returning
 //! the untransformed op would be silently wrong, and silently wrong is the one
@@ -251,8 +253,15 @@ pub fn transform(
 
     // Anything that renumbers sheets, or a bundle meeting a structural op, has
     // no answer yet — and a wrong answer here is invisible divergence.
-    if renumbers_sheets(against) || renumbers_sheets(subject) {
-        return Err(unsupported(subject, against));
+    // Sheet-level operations renumber every `sheet` index in the workbook, which
+    // is a second transform axis on top of the row/column one.
+    if renumbers_sheets(against) {
+        return rebase_across_sheets(subject, against, side);
+    }
+    // A sheet-level operation being rebased across a *cell-level* one needs
+    // nothing: adding or removing a sheet is unaffected by what is in the cells.
+    if renumbers_sheets(subject) {
+        return Ok(subject.clone());
     }
     if side == Side::Earlier && same_target(subject, against) && loses_a_formula(subject, against) {
         return Err(unsupported(subject, against));
@@ -280,6 +289,124 @@ fn renumbers_sheets(op: &Operation) -> bool {
         op,
         Operation::InsertSheet { .. } | Operation::RemoveSheet { .. } | Operation::MoveSheet { .. }
     )
+}
+
+/// Where the sheet at position `index` ends up after `against` runs, or `None`
+/// when `against` removed it.
+fn map_sheet_index(index: usize, against: &Operation) -> Option<usize> {
+    match *against {
+        Operation::InsertSheet { index: at, .. } => {
+            Some(if index >= at { index + 1 } else { index })
+        }
+        Operation::RemoveSheet { index: at } => match index.cmp(&at) {
+            core::cmp::Ordering::Equal => None,
+            core::cmp::Ordering::Greater => Some(index - 1),
+            core::cmp::Ordering::Less => Some(index),
+        },
+        // A move is a remove followed by an insert, and mapping it as those two
+        // steps is both simpler to follow and impossible to get inconsistent
+        // with `apply`, which does exactly that.
+        Operation::MoveSheet { from, to } => {
+            if index == from {
+                return Some(to);
+            }
+            let after_remove = if index > from { index - 1 } else { index };
+            Some(if after_remove >= to {
+                after_remove + 1
+            } else {
+                after_remove
+            })
+        }
+        _ => Some(index),
+    }
+}
+
+/// Where an insertion *position* — not a sheet — ends up after `against` runs.
+///
+/// A position and an element shift differently at the boundary: inserting at
+/// the same index as another insert still means "before whatever is there now",
+/// so it shifts; an element at that index is the thing being pushed along.
+fn map_sheet_position(position: usize, against: &Operation) -> Option<usize> {
+    match *against {
+        Operation::InsertSheet { index: at, .. } => Some(if position >= at {
+            position + 1
+        } else {
+            position
+        }),
+        Operation::RemoveSheet { index: at } => Some(if position > at {
+            position - 1
+        } else {
+            position
+        }),
+        // A move changes what sits where without changing how many sheets there
+        // are, so an insertion position is only well defined relative to the
+        // sheets around it — which a bare index does not record. Refused.
+        Operation::MoveSheet { .. } => None,
+        _ => Some(position),
+    }
+}
+
+/// Rebase an operation across one that renumbers sheets.
+fn rebase_across_sheets(
+    subject: &Operation,
+    against: &Operation,
+    side: Side,
+) -> Result<Operation, TransformError> {
+    // Two sheet-level operations meeting is the subtle corner — concurrent
+    // reordering especially — and it is rare enough that refusing beats
+    // guessing. The common case, and the one that matters, is an ordinary edit
+    // meeting someone else adding or removing a sheet.
+    if let Operation::MoveSheet { .. } = subject {
+        return Err(unsupported(subject, against));
+    }
+
+    let mut rebased = subject.clone();
+    match &mut rebased {
+        // An insertion position, not a sheet.
+        Operation::InsertSheet { index, .. } => match map_sheet_position(*index, against) {
+            Some(mapped) => *index = mapped,
+            None => return Err(unsupported(subject, against)),
+        },
+        // These name a sheet, and vanish with it.
+        Operation::RemoveSheet { index } | Operation::RenameSheet { index, .. } => {
+            match map_sheet_index(*index, against) {
+                Some(mapped) => *index = mapped,
+                None => return Ok(noop()),
+            }
+        }
+        _ => {
+            if let Some(sheet) = sheet_field_mut(&mut rebased) {
+                match map_sheet_index(*sheet, against) {
+                    Some(mapped) => *sheet = mapped,
+                    None => return Ok(noop()),
+                }
+            }
+        }
+    }
+
+    // Renumbering moved nothing *within* a sheet, so once the index is right the
+    // only question left is contention — and two operations on what is now the
+    // same sheet can still contend, e.g. two renames of it.
+    Ok(resolve_contention(&rebased, against, side))
+}
+
+/// The `sheet` field of an operation that has one.
+fn sheet_field_mut(op: &mut Operation) -> Option<&mut usize> {
+    match op {
+        Operation::SetCell { sheet, .. }
+        | Operation::SetValue { sheet, .. }
+        | Operation::SetStyle { sheet, .. }
+        | Operation::ClearCell { sheet, .. }
+        | Operation::SetColumnWidth { sheet, .. }
+        | Operation::SetRowHeight { sheet, .. }
+        | Operation::InsertRows { sheet, .. }
+        | Operation::DeleteRows { sheet, .. }
+        | Operation::InsertColumns { sheet, .. }
+        | Operation::DeleteColumns { sheet, .. }
+        | Operation::SetSheetMetadata { sheet, .. }
+        | Operation::SetTabColor { sheet, .. } => Some(sheet),
+        _ => None,
+    }
 }
 
 fn unsupported(subject: &Operation, against: &Operation) -> TransformError {
@@ -689,8 +816,15 @@ fn same_target(a: &Operation, b: &Operation) -> bool {
             x == y
         }
         (Operation::SetRowHeight { row: x, .. }, Operation::SetRowHeight { row: y, .. }) => x == y,
+        // Both name a sheet by index, and `sheet_of` does not see a rename's
+        // index — so without this, renaming two *different* sheets read as
+        // contention and one of them was silently dropped.
+        (Operation::RenameSheet { index: x, .. }, Operation::RenameSheet { index: y, .. }) => {
+            x == y
+        }
+        // Sheet already matched by the caller, and the defined-name table is
+        // one workbook-wide value.
         (Operation::SetTabColor { .. }, Operation::SetTabColor { .. })
-        | (Operation::RenameSheet { .. }, Operation::RenameSheet { .. })
         | (Operation::SetDefinedNames(_), Operation::SetDefinedNames(_)) => true,
         _ => false,
     }
