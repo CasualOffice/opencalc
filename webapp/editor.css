@@ -246,14 +246,39 @@ body {
 .toolbar .tb-collapsed[hidden] { display: none; }
 .tb-collapsed .tbc-caret { width: 9px; height: 6px; opacity: .75; }
 .tb-group[hidden] { display: none; }
-/* Flyout holding a collapsed group's tools, laid out like a mini-toolbar. */
+/* Flyout holding a collapsed group's tools.
+   Laid out as a labelled list, not as a mini-toolbar. In the toolbar an icon
+   sits next to five neighbours in a known group, and hovering for a tooltip
+   costs nothing because the thing is already on screen. Once the group has
+   collapsed, three unlabelled glyphs in a floating box are a guessing game —
+   you have to hover each one to find out what you opened. Every other menu in
+   this application is a labelled list; a collapsed group is a menu. */
 .tb-flyout { display: none; }
 .tb-flyout:not([hidden]) {
-  display: flex; flex-flow: row wrap; align-items: center; gap: 2px;
-  padding: 6px; min-width: 0; max-width: min(92vw, 440px);
+  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  padding: 5px; min-width: 190px; max-width: min(92vw, 320px);
 }
-/* Sub-menu-wrap buttons inside a flyout keep their normal icon-button size. */
-.tb-flyout .menu-wrap { display: inline-flex; }
+/* Full-width rows: icon at a fixed offset so the labels line up, which is what
+   makes a list scannable rather than merely vertical. */
+.tb-flyout .tb-btn {
+  width: 100% !important; height: 28px; padding: 0 9px !important;
+  justify-content: flex-start; gap: 10px; border-radius: 6px;
+}
+/* The label comes from the tooltip the button already carries, so there is no
+   second copy of the text to translate and none to fall out of step: the i18n
+   pass rewrites `data-tip`, and this follows it. */
+.tb-flyout .tb-btn[data-tip]::after {
+  content: attr(data-tip);
+  font: 400 12.5px/1 var(--oc-font-family, inherit);
+  color: var(--oc-text-color); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tb-flyout .tb-btn .icon { flex: 0 0 auto; }
+/* Controls that are not icon buttons — the font box, a colour swatch, a size
+   field — keep their own shape and simply take a row each. */
+.tb-flyout .menu-wrap { display: flex; }
+.tb-flyout select, .tb-flyout input { width: 100%; }
+.tb-flyout .tb-sep { display: none; }
 
 /* ---- Application menu bar (File / Edit / View / …) ---- */
 .menubar {
