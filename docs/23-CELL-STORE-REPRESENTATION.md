@@ -77,12 +77,12 @@ harness this document used to name. The harness measures no memory at all and
 CI checks only its report's shape, so until that test existed the capacity
 claim rested on nothing that could fail.
 
-A cell is **80 bytes**, and the ceiling records that rather than the design's
-intent. Three quarters of it is the two id types: `CellValue` is 32 bytes and
-`Option<StyleId>` another 32, because both wrap a 128-bit `Id` where this
-document describes an interned *index* — `FormulaHandle` is a real 32-bit index
-and its option costs 8. Narrowing the other two is worth doing and is not an
-edit: it changes the ids' snapshot encoding, so it wants an ADR.
+A cell is **32 bytes**. It was 80 until [ADR-013](58-INTERNED-ID-WIDTH.md)
+narrowed `StyleId` and `StringId` to `NonZeroU32`: they had always been `u32`
+indices, boxed in a 128-bit `Id` with a constant namespace tag around them, so
+`Option<StyleId>` cost 32 bytes and `CellValue` another 32. This document's
+description — an interned index, "a 32-bit id, not text" — was right about the
+intent all along; only the representation was not.
 
 ## Relationship to the offset index (T2)
 

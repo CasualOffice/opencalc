@@ -44,7 +44,7 @@ fn empty_workbook_snapshot_is_byte_stable() {
     // The empty workbook omits its empty `sheets` vec.
     assert_eq!(
         String::from_utf8(first).unwrap(),
-        r#"{"schemaVersion":0,"workbookId":"00000000000000010000000000000001"}"#
+        r#"{"schemaVersion":1,"workbookId":"00000000000000010000000000000001"}"#
     );
 }
 
@@ -113,8 +113,11 @@ fn strings_intern_dedupe_and_resolve() {
     assert_eq!(table.len(), 2);
     assert_eq!(table.get(a), Some("hello"));
     assert_eq!(table.get(b), Some("world"));
-    // An id from another namespace does not resolve here.
-    assert_eq!(table.get(StringId(Id::from_parts(1, 1))), None);
+    // An id past the end of this table does not resolve here. The check that
+    // used to live here — a namespace tag distinguishing a string from a style
+    // — is now the type system's job, and cost twelve bytes in every cell
+    // (docs/58).
+    assert_eq!(table.get(StringId::at(99)), None);
 }
 
 #[test]
@@ -124,10 +127,7 @@ fn dangling_string_reference_is_rejected() {
     // A shared-string id that was never interned.
     sheet.cells.set(
         CellRef::new(0, 0),
-        Cell::value(CellValue::SharedString(StringId(Id::from_parts(
-            0x5354_5200_0000_0000,
-            99,
-        )))),
+        Cell::value(CellValue::SharedString(StringId::at(99))),
     );
     wb.sheets.push(sheet);
     let err = wb.validate().unwrap_err();

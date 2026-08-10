@@ -112,11 +112,66 @@ id_newtype!(
     /// Identifies a worksheet.
     SheetId
 );
-id_newtype!(
+/// An index into a per-workbook interned table, numbered from one.
+///
+/// Deliberately **not** an [`Id`]. These sit inside every populated cell, so
+/// their width is the 1M-cell budget: a `u128` costs 16 bytes and, having no
+/// spare bit pattern, makes `Option` cost 32. `NonZeroU32` costs four and its
+/// option costs four, which is why the numbering starts at one
+/// ([58](../../../docs/58-INTERNED-ID-WIDTH.md)).
+macro_rules! index_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Debug,
+            serde::Serialize,
+            serde::Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(pub core::num::NonZeroU32);
+
+        impl $name {
+            /// The id for a zero-based table position.
+            ///
+            /// # Panics
+            ///
+            /// If `index` is `u32::MAX`, which would need a table of four
+            /// billion entries to reach.
+            #[must_use]
+            pub fn at(index: u32) -> Self {
+                Self(
+                    core::num::NonZeroU32::new(index + 1)
+                        .expect("index + 1 is never zero below u32::MAX"),
+                )
+            }
+
+            /// The zero-based table position this id names.
+            #[must_use]
+            pub fn index(self) -> u32 {
+                self.0.get() - 1
+            }
+        }
+
+        impl core::fmt::Display for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                self.0.get().fmt(f)
+            }
+        }
+    };
+}
+
+index_newtype!(
     /// Identifies an interned style record.
     StyleId
 );
-id_newtype!(
+index_newtype!(
     /// Identifies an interned string.
     StringId
 );

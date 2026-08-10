@@ -95,7 +95,7 @@ fn candidates() -> Vec<Operation> {
         ops.push(Operation::SetStyle {
             sheet: 0,
             at: CellRef::new(row, col),
-            style: Some(StyleId(Id::from_parts(3, 1))),
+            style: Some(StyleId::at(1)),
         });
     }
     for line in [0u32, 2, 4, 9] {
@@ -592,7 +592,7 @@ fn the_earlier_write_yields_only_the_aspect_the_later_one_takes() {
     let bolded = Operation::SetStyle {
         sheet: 0,
         at: CellRef::new(0, 0),
-        style: Some(StyleId(Id::from_parts(3, 1))),
+        style: Some(StyleId::at(1)),
     };
 
     assert_eq!(
@@ -645,7 +645,7 @@ fn a_formula_that_cannot_be_rebased_is_refused_not_degraded() {
     let bolded = Operation::SetStyle {
         sheet: 0,
         at: CellRef::new(0, 0),
-        style: Some(StyleId(Id::from_parts(3, 1))),
+        style: Some(StyleId::at(1)),
     };
     assert!(transform(&typed, &bolded, Side::Earlier).is_err());
     // The other direction is fine: the style write needs no rebasing.

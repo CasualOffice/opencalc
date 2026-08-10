@@ -5,11 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{Id, StringId};
+use crate::ids::StringId;
 use crate::style::TextRun;
-
-/// Namespace for string ids (high 64 bits of the `Id`).
-const STRING_NAMESPACE: u64 = 0x5354_5200_0000_0000; // "STR\0"
 
 /// A deduplicated table of strings, serialized as an ordered list. Interning is
 /// deterministic: a string's id encodes its insertion index, so the same
@@ -103,11 +100,14 @@ impl StringTable {
 
     /// The zero-based index encoded by `id`, if it is from this table.
     pub fn index_of(&self, id: StringId) -> Option<u32> {
-        let raw = id.0.get();
-        if (raw >> 64) as u64 != STRING_NAMESPACE {
-            return None;
-        }
-        u32::try_from((raw as u64).checked_sub(1)?).ok()
+        // Fallible still, because the caller's question is "does this resolve
+        // *here*" and an id from another workbook's table answers no. The
+        // namespace tag that used to be checked here could not answer that
+        // either — it distinguished a style from a string, which the type
+        // system already does — and cost twelve bytes in every cell to do it
+        // (docs/58).
+        let index = id.index();
+        ((index as usize) < self.entries.len()).then_some(index)
     }
 
     /// Iterate the interned strings in index order.
@@ -127,7 +127,7 @@ impl StringTable {
     }
 
     fn id_for(index: u32) -> StringId {
-        StringId(Id::from_parts(STRING_NAMESPACE, index as u64 + 1))
+        StringId::at(index)
     }
 }
 

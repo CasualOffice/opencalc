@@ -16,7 +16,7 @@ use crate::value::CellValue;
 
 /// The current workbook schema version. Snapshots record this so migrations can
 /// upgrade older ones deterministically.
-pub const SCHEMA_VERSION: u32 = 0;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// A part carried through the round trip without being modelled.
 ///

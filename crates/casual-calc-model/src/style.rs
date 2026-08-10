@@ -9,10 +9,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{Id, StyleId};
-
-/// Namespace for style ids (high 64 bits of the `Id`).
-const STYLE_NAMESPACE: u64 = 0x5354_5900_0000_0000; // "STY\0"
+use crate::ids::StyleId;
 
 /// One edge of a cell border: an OOXML line-style token (e.g. `thin`, `medium`,
 /// `dashed`, `double`) plus an optional `RRGGBB` color. The token is stored raw
@@ -519,11 +516,14 @@ impl StyleTable {
 
     /// The zero-based index encoded by `id`, if it is from this table.
     pub fn index_of(&self, id: StyleId) -> Option<u32> {
-        let raw = id.0.get();
-        if (raw >> 64) as u64 != STYLE_NAMESPACE {
-            return None;
-        }
-        u32::try_from((raw as u64).checked_sub(1)?).ok()
+        // Fallible still, because the caller's question is "does this resolve
+        // *here*" and an id from another workbook's table answers no. The
+        // namespace tag that used to be checked here could not answer that
+        // either — it distinguished a style from a string, which the type
+        // system already does — and cost twelve bytes in every cell to do it
+        // (docs/58).
+        let index = id.index();
+        ((index as usize) < self.entries.len()).then_some(index)
     }
 
     /// Iterate the interned styles in index order.
@@ -537,7 +537,7 @@ impl StyleTable {
     }
 
     fn id_for(index: u32) -> StyleId {
-        StyleId(Id::from_parts(STYLE_NAMESPACE, index as u64 + 1))
+        StyleId::at(index)
     }
 }
 
