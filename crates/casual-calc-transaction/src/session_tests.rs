@@ -1328,3 +1328,130 @@ fn a_chain_with_nothing_to_chain_to_is_refused_rather_than_guessed_at() {
         "inventing a base is how two documents quietly stop agreeing"
     );
 }
+
+// --- Adopting an already-ordered batch (ADR-017) -----------------------------
+
+/// A relay's copy has to end up identical to the leader's.
+///
+/// The whole point of `adopt`: the batch arrives rebased, so it is applied as
+/// it is. Transforming it again would rebase it past the operations it was
+/// already rebased past — which does not fail, and produces two documents that
+/// quietly disagree.
+#[test]
+fn a_relay_that_adopts_a_committed_batch_matches_the_leader_exactly() {
+    let mut leader_book = seed();
+    let mut leader = ServerSession::new();
+    let mut relay_book = seed();
+    let mut relay = ServerSession::new();
+
+    // Two clients write concurrently against the same base, so the leader has
+    // to rebase the second — which is what makes this batch different from
+    // what its author sent, and therefore worth carrying rather than replaying.
+    let first = Submission {
+        client: ClientId(1),
+        seq: 1,
+        base: Base::Revision(0),
+        ops: vec![WireOperation::of(
+            Operation::InsertRows {
+                sheet: 0,
+                at: 0,
+                count: 2,
+            },
+            &leader_book,
+        )],
+    };
+    // Carrying *text*, not just a number. A number has no handles, so a batch
+    // of them would pass whether or not the relay localised anything — and the
+    // handles are the part that means something different on every replica.
+    let text = leader_book.intern_string("written by somebody else");
+    let second = Submission {
+        client: ClientId(2),
+        seq: 1,
+        base: Base::Revision(0),
+        ops: vec![WireOperation::of(
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(4, 0),
+                cell: Some(Cell::value(CellValue::SharedString(text))),
+            },
+            &leader_book,
+        )],
+    };
+
+    for submission in [&first, &second] {
+        let Commit::Applied { ops, revision } = leader
+            .commit(&mut leader_book, submission)
+            .expect("committed")
+        else {
+            panic!("applied")
+        };
+        relay
+            .adopt(&mut relay_book, &ops, revision)
+            .expect("the relay adopts what the leader ordered");
+    }
+
+    assert_eq!(relay.revision(), leader.revision());
+    // Compared as *text*, not as ids: the two replicas intern independently, so
+    // the same word is a different id on each and matching ids would prove
+    // nothing while matching words proves everything.
+    let read = |book: &Workbook| {
+        let cell = book.sheets[0].cells.get(CellRef::new(6, 0)).cloned();
+        match cell.map(|c| c.value) {
+            Some(CellValue::SharedString(id)) => book.strings.get(id).map(str::to_owned),
+            other => panic!("expected the text, found {other:?}"),
+        }
+    };
+    assert_eq!(
+        read(&relay_book),
+        Some("written by somebody else".to_owned()),
+        "the relay resolved the text into its own table"
+    );
+    assert_eq!(read(&relay_book), read(&leader_book));
+}
+
+#[test]
+fn a_batch_that_does_not_follow_directly_is_refused_rather_than_skipped_to() {
+    // The failure this guards is silent. Applying a later batch without the one
+    // before it lands operations at coordinates that were never real, because
+    // the missing operations are what these were transformed against.
+    let mut book = seed();
+    let mut relay = ServerSession::new();
+    let ops = vec![WireOperation::of(write(0, 0, 1.0), &book)];
+
+    assert!(
+        relay.adopt(&mut book, &ops, 5).is_err(),
+        "a gap must send the caller to the log, not be skipped over"
+    );
+    assert_eq!(relay.revision(), 0, "and nothing was applied");
+    assert!(
+        relay.adopt(&mut book, &ops, 1).is_ok(),
+        "while the next one is"
+    );
+}
+
+#[test]
+fn a_relay_records_what_it_adopted_so_a_reconnect_is_still_safe() {
+    // A relay learns that a client's chunk was ordered by seeing the batch,
+    // not by ordering it. Without recording that, a client reconnecting to
+    // this node would resend a chunk this node has no record of, and the
+    // duplicate suppression that makes reconnecting safe would not fire.
+    let mut book = seed();
+    let mut relay = ServerSession::new();
+    let ops = vec![WireOperation::of(write(0, 0, 1.0), &book)];
+    relay.adopt(&mut book, &ops, 1).unwrap();
+    relay.note_accepted(ClientId(7), 3, 1);
+
+    let resent = Submission {
+        client: ClientId(7),
+        seq: 3,
+        base: Base::Revision(0),
+        ops,
+    };
+    assert!(
+        matches!(
+            relay.commit(&mut book, &resent),
+            Ok(Commit::Duplicate { revision: 1 })
+        ),
+        "recognised as something already ordered, not applied a second time"
+    );
+}

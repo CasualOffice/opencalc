@@ -660,6 +660,70 @@ impl ServerSession {
             revision: self.revision,
         })
     }
+
+    /// Take operations that have **already been ordered** by somebody else.
+    ///
+    /// What a node that is not the leader does with a committed batch. The
+    /// operations arrive rebased — the leader transformed them against
+    /// everything committed before them — so they are applied as they are and
+    /// **not** transformed again. Transforming them here would rebase them past
+    /// the very operations they were already rebased past, which does not fail;
+    /// it produces a document that quietly disagrees with the leader's.
+    ///
+    /// `revision` is where the batch leaves the document, and it must follow
+    /// directly from where this session is. A caller that has missed something
+    /// has to read the log rather than skip forward, because the operations in
+    /// between are what these were transformed against
+    /// ([ADR-017](../../../docs/63-COLLABORATION-RELAY.md)).
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownRevision`] when the batch does not follow
+    /// directly, and [`SessionError::Apply`] if an operation cannot be applied.
+    /// On either, nothing is applied: the batch is checked before any of it
+    /// lands, so a refusal leaves the document where it was rather than half
+    /// advanced.
+    pub fn adopt(
+        &mut self,
+        workbook: &mut Workbook,
+        ops: &[WireOperation],
+        revision: u64,
+    ) -> Result<(), SessionError> {
+        let expected = self.revision.saturating_add(ops.len() as u64);
+        if revision != expected {
+            return Err(SessionError::UnknownRevision {
+                claimed: revision,
+                oldest: self.first,
+                current: self.revision,
+            });
+        }
+        // Localised first — into this workbook's own formula, style and string
+        // tables — because the handles in them index the *leader's* tables and
+        // mean something different, or nothing, here.
+        let incoming: Vec<Operation> = ops
+            .iter()
+            .cloned()
+            .map(|wire| wire.localise(workbook))
+            .collect();
+        for op in incoming {
+            if !is_noop(&op) {
+                apply(workbook, op.clone())?;
+            }
+            self.log.push(op);
+            self.revision += 1;
+        }
+        Ok(())
+    }
+
+    /// Record that `client`'s chunk `seq` was ordered at `revision`.
+    ///
+    /// A relay learns this from a committed batch rather than from having
+    /// ordered it. Without it, the client's next reconnect would resend a chunk
+    /// this node has no record of accepting, and the duplicate suppression that
+    /// makes reconnection safe would not fire.
+    pub fn note_accepted(&mut self, client: ClientId, seq: u64, revision: u64) {
+        self.accepted.insert(client, (seq, revision));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -47,19 +47,32 @@ the way it orders anything: transform against what has been committed since its
 base, append to the log conditional on the revision and fenced by the epoch,
 then publish the result to the document's channel.
 
-**Every node applies from the channel, including the one that sent it.** The
-published batch carries the revision, the operations as they landed, and *who
-wrote them*: the originating client and its sequence number. That last part is
-what removes the ack channel. A node seeing a batch:
+**The published batch says who wrote it** — the originating client and its
+sequence number — and that is what removes the acknowledgement channel. A node
+seeing a batch sends `Ack { through: seq, revision }` to the writing client if
+that client is one of its own, and `Apply` to every other client it holds on
+that document. Nothing is routed back to the node that forwarded, so nothing
+about that routing can be wrong.
 
-- sends `Ack { through: seq, revision }` to the client that wrote it, if that
-  client is one of its own;
-- sends `Apply` to every other client it holds on that document.
+**One fan-out, two feeds.** An earlier draft of this decision said every node
+applies from the channel *including the leader*, so that there would be exactly
+one code path. That is not implementable and the reason is worth recording:
+ordering an operation and applying it are the same step. `commit` transforms a
+submission against what has been committed since its base — which it can only do
+by applying it — so a leader that waited for its own publication before applying
+would have to transform the *next* submission against a document that did not
+yet contain the previous one.
 
-The leader is not a special case in that rule. It publishes and then reacts to
-its own publication like everybody else, so there is one code path for "an
-operation was committed" rather than one for local and one for remote — and the
-two-path version is where the divergence would be.
+So the leader applies at commit and a relay applies when the batch arrives, and
+these are two feeds. What they feed is the same thing: the per-document
+broadcast every connection on this node already subscribes to. "Tell my clients"
+stays one path, which is the part that matters; "apply to my copy" is two, and
+they are two because the leader's copy is the thing the ordering is defined
+against.
+
+A leader that receives its own publication therefore finds it already applied,
+and ignores it by the same rule that ignores any duplicate delivery — no special
+case for being the writer.
 
 **A gap is detected and closed, not tolerated.** Pub/sub is fire-and-forget: a
 node can miss a message and Redis will not know. So each node tracks the
