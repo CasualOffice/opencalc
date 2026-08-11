@@ -842,8 +842,35 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                 last_heard = now_ms();
                 lock(&live.roster).heartbeat(client, last_heard);
                 let Message::Text(text) = frame else { continue };
-                let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
-                    continue;
+                let message = match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(message) => message,
+                    Err(why) => {
+                        // Said, rather than dropped. This used to `continue`
+                        // silently, and a client whose messages could not be
+                        // read looked *connected and working* from both ends:
+                        // the socket was open, the heartbeat was answered, the
+                        // roster showed them present, and every edit they made
+                        // went nowhere. It took two browsers and a real server
+                        // to notice, because every unit test on both sides
+                        // constructed the message rather than parsing one.
+                        //
+                        // The client is told which submission — when the text
+                        // is well-formed enough to say — so it can stop waiting
+                        // for an acknowledgement that is never coming.
+                        tracing::warn!(%why, "could not read a message from a client");
+                        let seq = serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|v| v.get("seq").and_then(serde_json::Value::as_u64));
+                        let _ = send(
+                            &mut socket,
+                            &ServerMessage::Refused {
+                                seq,
+                                reason: Refusal::CannotMerge,
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                 };
                 if !handle(&state, &live, &claims, client, message, &mut socket).await {
                     break;

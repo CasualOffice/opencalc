@@ -41,8 +41,10 @@ pub struct WireOperation {
     /// The operation, with the sender's handles still in it.
     pub op: Operation,
     /// Every formula the operation's handles refer to, by the sender's index.
+    #[serde(with = "interned_keys")]
     pub formulas: BTreeMap<FormulaHandle, Expr>,
     /// Every style the operation's ids refer to, by the sender's index.
+    #[serde(with = "interned_keys")]
     pub styles: BTreeMap<StyleId, Style>,
     /// Every string the operation's ids refer to, by the sender's index.
     ///
@@ -56,8 +58,93 @@ pub struct WireOperation {
     /// a word, each interns it as id 1, and each ends up seeing the other's
     /// operation resolve to their own word. Nothing errors, both sides are
     /// self-consistent, and the documents differ.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "interned_keys"
+    )]
     pub strings: BTreeMap<StringId, String>,
+}
+
+/// Serializing a map whose key is an interned id.
+///
+/// # Why this exists
+///
+/// JSON object keys are strings, always. A `serde_json` map with an integer key
+/// therefore writes the number as a string and parses it back on the way in —
+/// but only for the *primitive* integer types, which it recognises by the hint
+/// the key's deserializer asks with. [`StyleId`] and [`StringId`] wrap a
+/// `NonZeroU32`, whose deserializer asks for something `serde_json`'s map-key
+/// path does not special-case, and the parse fails with `invalid type: string
+/// "8", expected a nonzero u32`.
+///
+/// The half that matters: **serializing works perfectly.** A sender produces a
+/// message that looks completely correct and no receiver can read it. The
+/// server dropped every such message without a word, so a browser could join a
+/// document, type, see its own text locally, and silently send nothing anybody
+/// else would ever get — for every text edit and every style edit there is.
+///
+/// It was invisible to the tests because the round-trip tests that go through
+/// JSON carried operations with these tables *empty*, and the tests that
+/// carried them full round-tripped through [`localise`](WireOperation::localise)
+/// rather than through serde. Each half was covered and the crossing was not.
+///
+/// Nothing about the format changes: the wire looked like this already. What
+/// changes is that it can now be read back.
+mod interned_keys {
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::str::FromStr;
+
+    use serde::de::{Error as _, MapAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub(super) fn serialize<S, K, V>(map: &BTreeMap<K, V>, out: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Display,
+        V: serde::Serialize,
+    {
+        out.collect_map(map.iter().map(|(k, v)| (k.to_string(), v)))
+    }
+
+    pub(super) fn deserialize<'de, D, K, V>(input: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: FromStr + Ord,
+        K::Err: Display,
+        V: serde::Deserialize<'de>,
+    {
+        struct Keyed<K, V>(std::marker::PhantomData<(K, V)>);
+
+        impl<'de, K, V> Visitor<'de> for Keyed<K, V>
+        where
+            K: FromStr + Ord,
+            K::Err: Display,
+            V: serde::Deserialize<'de>,
+        {
+            type Value = BTreeMap<K, V>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map keyed by interned ids written as decimal strings")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+                let mut map = BTreeMap::new();
+                while let Some((key, value)) = access.next_entry::<String, V>()? {
+                    // A key that is not a number is a corrupt or hostile
+                    // message, and refusing it is right: the alternative is
+                    // dropping one entry of a table and localising an operation
+                    // against a meaning that is no longer there.
+                    let key = key.parse().map_err(M::Error::custom)?;
+                    map.insert(key, value);
+                }
+                Ok(map)
+            }
+        }
+
+        input.deserialize_map(Keyed(std::marker::PhantomData))
+    }
 }
 
 impl WireOperation {

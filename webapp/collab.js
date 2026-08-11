@@ -92,10 +92,22 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
   function receive(message) {
     switch (message.type) {
       case "welcome": {
+        if (message.protocol !== wasm.protocol_version()) {
+          // Should be unreachable — the server checks this before it welcomes
+          // anyone. Checked anyway because proceeding means applying a
+          // document from a peer that does not agree what the words mean.
+          status("stopped", "protocolVersion");
+          close();
+          break;
+        }
         // The snapshot is the document as everyone else has it *at this
         // revision*. Loading the file instead would start this participant at
         // revision zero while the session was at five hundred.
-        wasm.session_load_snapshot(message.snapshot);
+        //
+        // `Uint8Array`, not the array JSON gave us: a `Vec<u8>` crosses as an
+        // array of numbers, and the binding takes a byte slice. Handing it the
+        // plain array throws at the boundary rather than converting.
+        wasm.session_load_snapshot(new Uint8Array(message.snapshot));
         wasm.collab_begin(message.client, message.revision);
         joined = true;
         retryMs = RETRY_FLOOR_MS;
@@ -124,12 +136,12 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         // when it names none. Either way the connection survives: being told
         // "not saving" is precisely the moment a user wants their document
         // still on screen so they can copy out of it.
-        status("refused", message.reason);
+        status("refused", why(message.reason));
         break;
       case "stopped":
         // The server is finished with this session. Reconnecting would be
         // refused for the same reason, so stop rather than loop.
-        status("stopped", message.reason);
+        status("stopped", why(message.reason));
         close();
         break;
       default:
@@ -170,9 +182,24 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     send({ type: "presence", sheet, selection });
   }
 
+  /// The name of a refusal.
+  ///
+  /// A `Refusal` is tagged on its own `reason` key, so the reason *of* a
+  /// message that has a `reason` field is one level further in. Reading the
+  /// field directly yields the object, and a status line that says
+  /// `[object Object]` is how a user learns nothing.
+  function why(reason) {
+    return reason?.reason ?? "unknown";
+  }
+
   function close() {
     closed = true;
     stopTimers();
+    // Said out loud rather than left to a dropped socket. Both work, but a
+    // silent disconnect leaves this participant's cursor on everyone else's
+    // screen until presence expires, which looks like someone who is still
+    // there and is not.
+    send({ type: "leave" });
     wasm.collab_end();
     socket?.close();
     socket = null;

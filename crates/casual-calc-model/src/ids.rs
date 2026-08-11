@@ -164,6 +164,21 @@ macro_rules! index_newtype {
                 self.0.get().fmt(f)
             }
         }
+
+        /// The inverse of [`Display`](core::fmt::Display).
+        ///
+        /// Needed because these ids are used as **JSON map keys**, and JSON has
+        /// only string keys. `serde_json` parses integer keys back for the
+        /// primitive integer types and not for a `NonZeroU32`, so a map keyed by
+        /// one of these serializes correctly and then cannot be read — see
+        /// `casual-calc-transaction`'s `wire::interned_keys`.
+        impl core::str::FromStr for $name {
+            type Err = core::num::ParseIntError;
+
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                text.parse::<core::num::NonZeroU32>().map(Self)
+            }
+        }
     };
 }
 
@@ -191,3 +206,21 @@ id_newtype!(
 )]
 #[serde(transparent)]
 pub struct FormulaHandle(pub u32);
+
+impl core::fmt::Display for FormulaHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The inverse of [`Display`](core::fmt::Display), for the same reason the
+/// interned index ids have one: these are used as JSON map keys, and a
+/// `#[serde(transparent)]` newtype is not one of the types `serde_json` parses
+/// an integer key back into.
+impl core::str::FromStr for FormulaHandle {
+    type Err = core::num::ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse::<u32>().map(Self)
+    }
+}

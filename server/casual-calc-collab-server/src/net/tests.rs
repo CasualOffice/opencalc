@@ -409,9 +409,12 @@ async fn a_mismatched_protocol_is_told_so_at_once() {
     )
     .await;
     let answer = hear(&mut socket).await;
-    let Some(ServerMessage::Refused {
+    // `Stopped`, not `Refused`. A refusal invites a retry, and a client that
+    // retries a version mismatch is refused identically for as long as it keeps
+    // trying — a permanent reconnect loop against a server that can never
+    // accept it.
+    let Some(ServerMessage::Stopped {
         reason: Refusal::ProtocolVersion { server, client },
-        ..
     }) = answer
     else {
         panic!(

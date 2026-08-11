@@ -29,6 +29,7 @@ use casual_calc_model::{
     Style, StyleId, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook,
 };
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession, render_sheet_png};
+use casual_calc_transaction::protocol::ClientMessage;
 use casual_calc_transaction::session::ClientSession;
 use wasm_bindgen::prelude::*;
 
@@ -8803,11 +8804,18 @@ pub fn collab_revision() -> f64 {
     COLLAB.with(|cell| cell.borrow().as_ref().map_or(0, ClientSession::revision)) as f64
 }
 
-/// Take the next chunk of local edits to send, as a JSON `Submission`.
+/// Take the next chunk of local edits to send, as a JSON `ClientMessage`.
 ///
 /// Empty string when there is nothing to send **or** a chunk is already in
 /// flight — one at a time, by design, because a client with two outstanding
 /// chunks cannot say which the server's acknowledgement was for.
+///
+/// A whole `ClientMessage`, not the bare `Submission` inside it. The host
+/// carries this string to a socket and no further, so the tag that tells the
+/// server which message it is has to be put on here — a host that had to wrap
+/// it would be reimplementing the protocol in whatever language it is written
+/// in, and the first version of this returned the bare submission and produced
+/// a chunk the server could not parse at all.
 #[wasm_bindgen]
 pub fn collab_flush() -> String {
     // Collect what the editor applied since last time, then package it. Two
@@ -8830,7 +8838,7 @@ pub fn collab_flush() -> String {
     with_session_and_collab(|workbook, collab| {
         collab
             .flush(workbook)
-            .and_then(|s| serde_json::to_string(&s).ok())
+            .and_then(|s| serde_json::to_string(&ClientMessage::Submit(s)).ok())
             .unwrap_or_default()
     })
     .unwrap_or_default()
@@ -8846,7 +8854,7 @@ pub fn collab_resend() -> String {
     with_session_and_collab(|workbook, collab| {
         collab
             .resend(workbook)
-            .and_then(|s| serde_json::to_string(&s).ok())
+            .and_then(|s| serde_json::to_string(&ClientMessage::Submit(s)).ok())
             .unwrap_or_default()
     })
     .unwrap_or_default()

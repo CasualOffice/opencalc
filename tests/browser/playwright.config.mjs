@@ -12,6 +12,11 @@ import { defineConfig, devices } from "@playwright/test";
 /// Nothing else in the project listens here; 8099 is `serve.py`'s own default
 /// and is often already running on a developer's machine.
 const PORT = Number(process.env.OPENCALC_SMOKE_PORT ?? 8123);
+/// The collaboration gate's two extra servers. Kept in step with
+/// `collab.spec.mjs`, which reads the same variables with the same defaults.
+const ORIGIN_PORT = Number(process.env.OPENCALC_ORIGIN_PORT ?? 8124);
+const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
+const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-tests-shared-secret";
 
 export default defineConfig({
   testDir: ".",
@@ -37,12 +42,57 @@ export default defineConfig({
     permissions: ["clipboard-read", "clipboard-write"],
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  webServer: {
-    command: `python3 ../../webapp/serve.py ${PORT}`,
-    url: `http://127.0.0.1:${PORT}/editor.html`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-    stdout: "ignore",
-    stderr: "pipe",
-  },
+  webServer: [
+    {
+      command: `python3 ../../webapp/serve.py ${PORT}`,
+      url: `http://127.0.0.1:${PORT}/editor.html`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+    // The integrator's origin, as far as the collaboration server is concerned:
+    // somewhere it fetches a package from over HTTP. A session starts from the
+    // *file*, so something has to be serving one.
+    {
+      command: `python3 -m http.server ${ORIGIN_PORT} --bind 127.0.0.1 --directory ../../fixtures/generated`,
+      url: `http://127.0.0.1:${ORIGIN_PORT}/minimal.xlsx`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+    // The real server binary, with the environment a deployment gives it.
+    //
+    // `cargo run` rather than a prebuilt path so the gate cannot pass against a
+    // stale binary somebody built last week — which is the same reason the
+    // WebAssembly module is rebuilt rather than reused.
+    {
+      command: "cargo run --locked -p casual-calc-collab-server",
+      url: `http://127.0.0.1:${COLLAB_PORT}/healthz`,
+      reuseExistingServer: !process.env.CI,
+      // A cold compile of the server and its dependency tree, on a CI runner.
+      timeout: 300_000,
+      cwd: "../..",
+      stdout: "ignore",
+      stderr: "pipe",
+      env: {
+        OPENCALC_BIND: `127.0.0.1:${COLLAB_PORT}`,
+        // HS256. The server warns that a process holding a shared secret can
+        // mint tokens as well as check them; for a test that is the point.
+        OPENCALC_SHARED_SECRET: SECRET,
+        OPENCALC_AUDIENCE: "opencalc-test",
+        // The origin is plain HTTP on loopback. Both of these are exactly the
+        // "local development only" case each setting documents, and neither is
+        // defaulted on.
+        OPENCALC_ALLOW_PLAIN_CALLBACKS: "1",
+        OPENCALC_ALLOWED_HOSTS: "127.0.0.1",
+        // Short enough that a test can watch a participant time out, long
+        // enough that a loaded runner does not evict one mid-assertion.
+        OPENCALC_TICK_MS: "100",
+        OPENCALC_PRESENCE_TTL_MS: "3000",
+        RUST_LOG: "casual_calc_collab_server=debug,warn",
+      },
+    },
+  ],
 });

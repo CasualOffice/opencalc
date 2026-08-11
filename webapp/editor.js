@@ -2341,6 +2341,7 @@ function draw() {
   updateCellMode();
   updateScrollbars(v);
   updateStats();
+  announceCollabSelection();
   if (wasm) refreshFormulaBar();
   if (wasm && activePanel) refreshPanel();
   // Last, so a host's listener sees the state the frame just painted rather
@@ -11132,6 +11133,124 @@ export function relayout() {
 /// session would be a second workbook.
 export function wasmApi() {
   return wasm;
+}
+
+// --- Collaboration ----------------------------------------------------------
+//
+// The transport lives in `collab.js` and knows nothing about a grid. This is
+// the other half: what the editor does when a document arrives, when somebody
+// else's edit lands, and when a participant moves.
+//
+// The join is *here*, rather than left to the host, for one concrete reason.
+// The engine is a module-scope binding imported under a cache-busting
+// specifier, and each mounted element imports its own copy — so a host that
+// imported the glue itself would get a second, uninitialised instance and every
+// call would throw from inside the generated bindings. Handing the host a
+// `collaborate()` that closes over *this* editor's engine removes a decision
+// nobody can make correctly from outside.
+
+/// The live session, or null.
+let collabSession = null;
+
+/// Everyone else, by client id. What draws a remote cursor, and what a host
+/// reads to render a participant list.
+const collabRoster = new Map();
+
+/// The selection last announced, so presence is sent when it moves and not on
+/// every frame. `draw()` polls this the way `emitStateEvents` does, for the
+/// same reason: there are dozens of places the selection changes and one of
+/// them will always be forgotten.
+let collabAnnounced = "";
+
+/// Join a collaborative session.
+///
+/// `url` is the server's WebSocket endpoint and `token` the host-signed token
+/// that says who this is and what they may do. Returns the session handle, or
+/// throws if one is already open — joining twice would leave two transports
+/// submitting the same edits under different client ids.
+export async function collaborate({ url, token, document: documentKey, onStatus, onDocument, onPresence } = {}) {
+  if (collabSession) throw new Error("already in a collaborative session");
+  const { collaborate: connect } = await import(`./collab.js?b=${BUILD}`);
+  collabSession = connect({
+    url,
+    token,
+    document: documentKey,
+    wasm,
+    onStatus: (event) => {
+      // The status line is the only place the editor says this out loud, and
+      // "reconnecting" is the one a user needs to see before they wonder why
+      // their typing stopped mattering.
+      if (event.state === "live") status.textContent = "collaborating";
+      else if (event.state === "reconnecting") status.textContent = "reconnecting…";
+      else if (event.state === "refused") status.textContent = `not saved: ${event.detail}`;
+      else if (event.state === "stopped") status.textContent = `disconnected: ${event.detail}`;
+      onStatus?.(event);
+    },
+    onDocument: (event) => {
+      adoptCollabDocument(event);
+      onDocument?.(event);
+    },
+    onPresence: (event) => {
+      if (event.kind === "gone") collabRoster.delete(event.client);
+      else collabRoster.set(event.client, event);
+      draw();
+      onPresence?.(event);
+    },
+  });
+  return collabSession;
+}
+
+/// Leave, if in a session. Safe to call when not.
+export function stopCollaborating() {
+  collabSession?.close();
+  collabSession = null;
+  collabRoster.clear();
+  collabAnnounced = "";
+}
+
+/// The other participants, as a host would show them.
+export function collaborators() {
+  return [...collabRoster.values()];
+}
+
+/// Take on what the transport just did to the model.
+function adoptCollabDocument(event) {
+  if (event.reason === "joined") {
+    // The whole workbook was replaced by the session's snapshot, so this is the
+    // same refresh a file open needs and for the same reason — every cache
+    // below is keyed to a document that is no longer there.
+    invalidateGrowth();
+    imageCache.clear();
+    syncClock();
+    try { state.sheet = wasm.session_active_sheet(); } catch { state.sheet = 0; }
+    state.scrollX = state.scrollY = 0;
+    renderTabs();
+    select(0, 0);
+    // The engine refuses the edit, not the toolbar. A viewer whose buttons were
+    // merely hidden is one bug away from editing a document they may not.
+    if (event.editable === false) setReadOnly(true);
+    return;
+  }
+  // A remote edit. Cheaper than a join — the model is continuous — but the
+  // sheet list can have changed too, since adding or renaming one is an
+  // ordinary operation like any other.
+  invalidateGrowth();
+  renderTabs();
+  draw();
+}
+
+/// Tell the others where this participant is looking, when it has moved.
+///
+/// Called from `draw()`. Presence is ephemeral and never transformed, so
+/// sending it late costs nothing and sending it per frame would cost everyone
+/// else a message per frame.
+function announceCollabSelection() {
+  if (!collabSession) return;
+  const r = selRect();
+  const key = `${state.sheet}:${r.r0},${r.c0},${r.r1},${r.c1}`;
+  if (key === collabAnnounced) return;
+  collabAnnounced = key;
+  collabSession.present(state.sheet, [r.r0, r.c0, r.r1, r.c1]);
 }
 
 /// Distinguishes this module instance's engine from any other on the page.

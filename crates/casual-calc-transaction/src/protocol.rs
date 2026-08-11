@@ -183,11 +183,17 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
-    /// The refusal to send a client whose protocol does not match.
+    /// What to send a client whose protocol does not match.
+    ///
+    /// [`Stopped`](Self::Stopped) rather than [`Refused`](Self::Refused), and
+    /// the distinction is the whole point of having both. A refusal is about
+    /// something that might go differently next time; a version mismatch will
+    /// not. A client that treats it as retryable — which is the reasonable
+    /// reading of "refused" — reconnects, is refused identically, and settles
+    /// into a permanent loop against a server that can never accept it.
     #[must_use]
     pub fn version_mismatch(client: u32) -> Self {
-        Self::Refused {
-            seq: None,
+        Self::Stopped {
             reason: Refusal::ProtocolVersion {
                 server: PROTOCOL_VERSION,
                 client,
@@ -319,6 +325,113 @@ mod tests {
         for reply in &replies {
             assert_eq!(&round_trip(reply), reply);
         }
+    }
+
+    /// `Submit` is the one variant whose tagging is not obvious, and it was the
+    /// one variant this test did not cover.
+    ///
+    /// It is a *newtype* variant in an internally-tagged enum, so the tag has
+    /// to be folded in beside the `Submission`'s own fields rather than
+    /// wrapping them. That works only because a `Submission` serializes as a
+    /// map, and nothing states that requirement anywhere it could be checked —
+    /// so it is checked here.
+    ///
+    /// The absence of this cost a real bug: the WebAssembly binding handed the
+    /// browser a bare `Submission`, which is a `ClientMessage::Submit` with the
+    /// tag missing, and the server could not parse a single edit any browser
+    /// ever made. Both sides were individually correct and no test put them in
+    /// a room together.
+    #[test]
+    fn a_submission_on_the_wire_is_a_tagged_message_not_a_bare_submission() {
+        let submission = Submission {
+            client: ClientId(3),
+            seq: 1,
+            base: 0,
+            ops: vec![],
+        };
+        let json = serde_json::to_string(&ClientMessage::Submit(submission.clone())).unwrap();
+        assert!(json.contains("\"type\":\"submit\""), "{json}");
+        // Folded in beside the submission's fields, not nested under a key.
+        assert!(json.contains("\"seq\":1"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::Submit(submission.clone())
+        );
+
+        // And the bare form — what the binding used to send — is not accepted,
+        // which is what makes the assertion above worth making.
+        let bare = serde_json::to_string(&submission).unwrap();
+        assert!(
+            serde_json::from_str::<ClientMessage>(&bare).is_err(),
+            "an untagged submission must not parse as a message"
+        );
+    }
+
+    /// A submission carrying every interned table, through JSON, both ways.
+    ///
+    /// The gap this closes: the round-trip tests above went through JSON with
+    /// these tables *empty*, and the tests that filled them went through
+    /// `localise` rather than through serde. So the one thing no test did was
+    /// send a populated table through the format it actually travels in — and
+    /// it did not survive. `StyleId` and `StringId` wrap a `NonZeroU32`, JSON
+    /// object keys are strings, and `serde_json` parses integer keys back for
+    /// the primitive integer types only.
+    ///
+    /// The result was a message that serialized perfectly and could not be
+    /// read by anyone, for every text edit and every style edit there is.
+    #[test]
+    fn a_submission_carrying_text_and_style_survives_json_in_both_directions() {
+        use casual_calc_model::Style;
+
+        let mut wb = workbook();
+        let text = wb.intern_string("typed by a person");
+        let style = wb.intern_style(Style::default());
+        let handle = wb.store_formula(casual_calc_formula::parse("1+2").unwrap());
+
+        let mut cell = Cell::value(CellValue::SharedString(text));
+        cell.style = Some(style);
+        cell.formula = Some(handle);
+
+        let message = ClientMessage::Submit(Submission {
+            client: ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![WireOperation::of(
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(4, 1),
+                    cell: Some(cell),
+                },
+                &wb,
+            )],
+        });
+
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(
+            json.contains("typed by a person"),
+            "the text is carried: {json}"
+        );
+        let back: ClientMessage = serde_json::from_str(&json)
+            .expect("a populated interned table must survive the format it travels in");
+        assert_eq!(back, message);
+
+        // And it still means the same thing on the far side, which is the point
+        // of carrying the tables at all.
+        let ClientMessage::Submit(back) = back else {
+            panic!("still a submission")
+        };
+        let mut receiver = workbook();
+        let op = back.ops[0].clone().localise(&mut receiver);
+        let Operation::SetCell {
+            cell: Some(cell), ..
+        } = op
+        else {
+            panic!("still a cell edit")
+        };
+        let CellValue::SharedString(id) = cell.value else {
+            panic!("still shared text")
+        };
+        assert_eq!(receiver.strings.get(id), Some("typed by a person"));
     }
 
     #[test]
