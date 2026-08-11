@@ -115,6 +115,12 @@ jobs:
       # a stale build.
       - name: Build the engine for the browser
         run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir "$PWD/webapp/pkg"
+      # The collaboration suite runs two browsers against the real server
+      # binary. Built as its own step so a compile failure says so, instead of
+      # surfacing as Playwright giving up on a port that never opened — and so
+      # the compile is not racing that job's readiness timeout.
+      - name: Build the collaboration server
+        run: cargo build --locked -p casual-calc-collab-server
       - name: Install the harness
         working-directory: tests/browser
         run: |
