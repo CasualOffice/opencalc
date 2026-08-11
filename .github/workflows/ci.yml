@@ -32,9 +32,24 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # The cluster's rules are written once and run against both coordinators —
+    # the in-memory one and Redis. Without a server here the Redis half skips,
+    # and a suite that always skips half of itself is a suite that reports on
+    # half of itself while looking green.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --workspace --all-features --locked
+        env:
+          OPENCALC_TEST_REDIS: redis://127.0.0.1:6379
 
   docs:
     runs-on: ubuntu-latest

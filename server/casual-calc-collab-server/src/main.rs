@@ -16,6 +16,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use casual_calc_collab_server::cluster::redis::Redis;
 use casual_calc_collab_server::config::{Endpoint, Exposure, NodeIdentity, ProxyTrust};
 use casual_calc_collab_server::http::{HttpConfig, HttpTransport};
 use casual_calc_collab_server::lifecycle::SavePolicy;
@@ -63,6 +64,14 @@ async fn start() -> Result<(), String> {
         }
     }
 
+    // Built before the listener opens, so a cluster that cannot reach its
+    // coordinator refuses to start. The alternative is worse than it sounds: a
+    // node that comes up believing it is in a cluster it cannot see will take
+    // leadership of every document it is asked about and be wrong about all of
+    // them, and the symptom is divergence somewhere else entirely.
+    let coordinator = read_coordinator(exposure.node.as_ref()).await?;
+    tracing::info!(coordination = coordinator, "coordination");
+
     let transport = Arc::new(
         HttpTransport::new(HttpConfig {
             timeout: std::time::Duration::from_millis(env_u64("OPENCALC_HTTP_TIMEOUT_MS", 30_000)),
@@ -88,6 +97,37 @@ async fn start() -> Result<(), String> {
         "starting"
     );
     serve(config).await.map_err(|e| e.to_string())
+}
+
+/// Connect to the coordinator this deployment is configured for.
+///
+/// Returns what to log about it. Standalone is a **first-class mode** (ADR-012),
+/// not a degraded one — one process, leader of every document by definition, and
+/// a network round trip to agree with itself would be pure cost — so no Redis is
+/// entirely normal and says so quietly.
+async fn read_coordinator(node: Option<&NodeIdentity>) -> Result<&'static str, String> {
+    let url = std::env::var("OPENCALC_REDIS_URL").ok();
+    match (url, node) {
+        (Some(url), _) => {
+            let namespace = std::env::var("OPENCALC_REDIS_NAMESPACE").unwrap_or_else(|_| {
+                casual_calc_collab_server::cluster::redis::DEFAULT_NAMESPACE.to_owned()
+            });
+            Redis::connect_within(&url, &namespace)
+                .await
+                .map_err(|e| format!("{e}; set OPENCALC_REDIS_URL to a reachable server"))?;
+            Ok("redis")
+        }
+        // A node with an identity and nowhere to announce it is not in a
+        // cluster; it is a standalone node that believes otherwise, which is
+        // the most expensive way to be wrong here. Its peers never see it, no
+        // lease is ever contended, and every node happily leads everything.
+        (None, Some(_)) => Err(
+            "OPENCALC_NODE_ID is set, so this node expects to be in a cluster, but \
+             OPENCALC_REDIS_URL is not: there is nowhere to announce itself or take a lease"
+                .to_owned(),
+        ),
+        (None, None) => Ok("standalone"),
+    }
 }
 
 fn read_exposure() -> Result<Exposure, String> {

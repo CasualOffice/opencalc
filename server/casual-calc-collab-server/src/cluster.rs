@@ -66,6 +66,7 @@
 //! append is refused by an epoch that has moved past it.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Mutex;
 
 /// A node, as its peers see it.
@@ -97,8 +98,41 @@ pub struct Lease {
     pub expires_ms: u64,
 }
 
+/// The coordination store could not be reached.
+///
+/// A separate outcome from every "no" the protocol has, and the distinction is
+/// load-bearing. "Somebody else leads" is an answer; "I could not ask" is not,
+/// and a caller that treats them alike will carry on as though it had been
+/// refused — or worse, as though it had been granted. A node that cannot reach
+/// the store **does not know** whether it leads, and the only safe thing it can
+/// do with that is stop, which it cannot decide to do if the failure is dressed
+/// up as an answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unavailable(pub String);
+
+impl core::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the coordination store is unreachable: {}", self.0)
+    }
+}
+
+impl core::error::Error for Unavailable {}
+
+/// A future returned by a [`Coordinator`] method.
+///
+/// Boxed rather than `async fn` in the trait, because the service holds an
+/// `Arc<dyn Coordinator>` — the whole point being that standalone uses
+/// [`Memory`] and a cluster uses Redis, chosen at startup from configuration.
+type Answer<'a, T> = core::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One entry of a document's log: the revision it is at, and its bytes.
+///
+/// Named because the pair appears in a return type nested three deep, where
+/// `(u64, Vec<u8>)` reads as neither.
+pub type Logged = (u64, Vec<u8>);
+
 /// Why an append was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendError {
     /// The appender's epoch has been superseded — it is a zombie leader.
     ///
@@ -118,6 +152,14 @@ pub enum AppendError {
     },
     /// Nobody holds a lease on this document.
     Unled,
+    /// The store could not be reached, so nothing is known.
+    ///
+    /// Emphatically not a refusal. An append that was refused did not happen;
+    /// an append that could not be attempted **may have happened** — the request
+    /// can fail after the store applied it — so a caller must not treat this as
+    /// "it did not land" and must not retry blindly either. The sequence number
+    /// is what makes the retry safe, which is why it exists.
+    Unavailable(String),
 }
 
 /// The store a cluster coordinates through.
@@ -126,17 +168,41 @@ pub enum AppendError {
 /// of this crate does: these are the operations whose bugs live in rare timing.
 pub trait Coordinator: Send + Sync {
     /// Announce this node, or refresh its announcement.
-    fn register(&self, peer: Peer, ttl_ms: u64, now_ms: u64);
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the store cannot be reached.
+    fn register(&self, peer: Peer, ttl_ms: u64, now_ms: u64)
+    -> Answer<'_, Result<(), Unavailable>>;
 
     /// Every node that has announced itself recently enough.
-    fn peers(&self, now_ms: u64) -> Vec<Peer>;
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the store cannot be reached. Deliberately not an
+    /// empty list: "no peers" and "I cannot see the peers" are opposite
+    /// situations, and a node that confuses them concludes it is alone and
+    /// takes over everything.
+    fn peers(&self, now_ms: u64) -> Answer<'_, Result<Vec<Peer>, Unavailable>>;
 
     /// Take or renew leadership of `document`.
     ///
     /// Returns the lease whoever holds it now has — which may be somebody
     /// else's, and a caller that assumes otherwise is the bug this signature
     /// exists to prevent.
-    fn claim(&self, document: &str, node: &str, ttl_ms: u64, now_ms: u64) -> Lease;
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the store cannot be reached, which is **not** the
+    /// same as being refused: a node that could not ask does not know whether
+    /// it leads, and must not act as though it does.
+    fn claim(
+        &self,
+        document: String,
+        node: String,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Answer<'_, Result<Lease, Unavailable>>;
 
     /// Append to a document's log, fenced by `epoch` and conditional on
     /// `after`.
@@ -144,18 +210,26 @@ pub trait Coordinator: Send + Sync {
     /// # Errors
     ///
     /// [`AppendError`] when the epoch has been superseded, the revision has
-    /// moved on, or nobody leads the document.
+    /// moved on, nobody leads the document, or the store is unreachable.
     fn append(
         &self,
-        document: &str,
+        document: String,
         epoch: u64,
         after: u64,
         payload: Vec<u8>,
         now_ms: u64,
-    ) -> Result<u64, AppendError>;
+    ) -> Answer<'_, Result<u64, AppendError>>;
 
     /// Everything logged for `document` after `revision`.
-    fn since(&self, document: &str, revision: u64) -> Vec<(u64, Vec<u8>)>;
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the store cannot be reached.
+    fn since(
+        &self,
+        document: String,
+        revision: u64,
+    ) -> Answer<'_, Result<Vec<Logged>, Unavailable>>;
 }
 
 /// A coordinator in this process's memory.
@@ -178,7 +252,12 @@ struct State {
 }
 
 impl Coordinator for Memory {
-    fn register(&self, peer: Peer, ttl_ms: u64, now_ms: u64) {
+    fn register(
+        &self,
+        peer: Peer,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Answer<'_, Result<(), Unavailable>> {
         let _ = ttl_ms;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.peers.insert(
@@ -188,22 +267,31 @@ impl Coordinator for Memory {
                 ..peer
             },
         );
+        Box::pin(async { Ok(()) })
     }
 
-    fn peers(&self, now_ms: u64) -> Vec<Peer> {
+    fn peers(&self, now_ms: u64) -> Answer<'_, Result<Vec<Peer>, Unavailable>> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // A node that stopped announcing itself is gone. Expiry on read rather
         // than on a timer: there is no moment at which a peer needs to have
         // been forgotten except the moment somebody asks.
-        state
+        let found: Vec<Peer> = state
             .peers
             .values()
             .filter(|p| now_ms.saturating_sub(p.seen_ms) < PEER_TTL_MS)
             .cloned()
-            .collect()
+            .collect();
+        Box::pin(async move { Ok(found) })
     }
 
-    fn claim(&self, document: &str, node: &str, ttl_ms: u64, now_ms: u64) -> Lease {
+    fn claim(
+        &self,
+        document: String,
+        node: String,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Answer<'_, Result<Lease, Unavailable>> {
+        let (document, node) = (document.as_str(), node.as_str());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let existing = state.leases.get(document).cloned();
         let lease = match existing {
@@ -229,44 +317,48 @@ impl Coordinator for Memory {
             },
         };
         state.leases.insert(document.to_owned(), lease.clone());
-        lease
+        Box::pin(async move { Ok(lease) })
     }
 
     fn append(
         &self,
-        document: &str,
+        document: String,
         epoch: u64,
         after: u64,
         payload: Vec<u8>,
         now_ms: u64,
-    ) -> Result<u64, AppendError> {
+    ) -> Answer<'_, Result<u64, AppendError>> {
         let _ = now_ms;
+        let document = document.as_str();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(lease) = state.leases.get(document).cloned() else {
-            return Err(AppendError::Unled);
+            return Box::pin(async { Err(AppendError::Unled) });
         };
         // The fence, and it is checked **before** the revision: a zombie whose
         // revision happens to line up must still be refused, and telling it
         // "stale" would send it to re-read the log and try again forever.
         if epoch < lease.epoch {
-            return Err(AppendError::Fenced {
-                current: lease.epoch,
-            });
+            let current = lease.epoch;
+            return Box::pin(async move { Err(AppendError::Fenced { current }) });
         }
         let log = state.logs.entry(document.to_owned()).or_default();
         let current = log.len() as u64;
         if after != current {
-            return Err(AppendError::Stale { current });
+            return Box::pin(async move { Err(AppendError::Stale { current }) });
         }
         log.push(payload);
-        Ok(current + 1)
+        Box::pin(async move { Ok(current + 1) })
     }
 
-    fn since(&self, document: &str, revision: u64) -> Vec<(u64, Vec<u8>)> {
+    fn since(
+        &self,
+        document: String,
+        revision: u64,
+    ) -> Answer<'_, Result<Vec<Logged>, Unavailable>> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state
+        let found = state
             .logs
-            .get(document)
+            .get(document.as_str())
             .map(|log| {
                 log.iter()
                     .enumerate()
@@ -274,7 +366,8 @@ impl Coordinator for Memory {
                     .map(|(i, payload)| (i as u64 + 1, payload.clone()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Box::pin(async move { Ok(found) })
     }
 }
 
@@ -293,6 +386,8 @@ pub fn elect(peers: &[Peer]) -> Option<&Peer> {
         .iter()
         .min_by(|a, b| a.load.cmp(&b.load).then_with(|| a.id.cmp(&b.id)))
 }
+
+pub mod redis;
 
 #[cfg(test)]
 mod tests;
