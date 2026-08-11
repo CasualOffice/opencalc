@@ -306,3 +306,128 @@ fn redundant_brackets_are_not_preserved() {
         assert_eq!(parse(typed).unwrap().to_string(), shown);
     }
 }
+
+/// The bounds that keep an untrusted formula from aborting the process.
+///
+/// PROD-02. A stack overflow is `SIGABRT` — not an `Err`, not a catchable
+/// panic, and not something a `Result` signature can express — so it has to be
+/// prevented rather than handled, and prevented *here*, because every caller
+/// downstream is powerless. Reachable from an imported `.xlsx`, from the
+/// formula bar and from the collaboration wire, where one document would take
+/// down every other on the node.
+mod depth_bounds {
+    use crate::FormulaError;
+    use crate::parse::{MAX_CHAIN, MAX_DEPTH};
+
+    use super::*;
+
+    fn nested(open: &str, close: &str, times: usize) -> String {
+        format!("{}1{}", open.repeat(times), close.repeat(times))
+    }
+
+    #[test]
+    fn nesting_is_refused_rather_than_followed_off_the_stack() {
+        // Verified before the fix: twenty thousand of these was
+        // "fatal runtime error: stack overflow, aborting".
+        for src in [
+            nested("(", ")", 20_000),
+            nested("SUM(", ")", 20_000),
+            format!("{}1", "-".repeat(20_000)),
+        ] {
+            assert!(
+                matches!(parse(&src), Err(FormulaError::TooDeep { .. })),
+                "should refuse a {}-deep expression",
+                src.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_operator_chain_is_refused_even_though_parsing_it_never_recurses() {
+        // The second, stranger crash. A left-associative chain is parsed in a
+        // *loop*, so the recursion counter never rises — and the tree it builds
+        // is a left spine as long as the chain, which `Drop` and `Display` walk
+        // recursively. It parsed cleanly and aborted on the way out of scope.
+        let src = format!("1{}", "+1".repeat(200_000));
+        assert!(matches!(parse(&src), Err(FormulaError::TooDeep { .. })));
+    }
+
+    #[test]
+    fn what_is_accepted_can_also_be_printed_and_dropped() {
+        // The property that actually matters: the parser must not hand back a
+        // tree that the rest of the program cannot walk. Printing and dropping
+        // are both recursive, and both were where the chain bug landed.
+        for src in [
+            nested("(", ")", (MAX_DEPTH - 1) as usize),
+            format!("1{}", "+1".repeat((MAX_CHAIN - 1) as usize)),
+        ] {
+            let expr = parse(&src).expect("inside the bounds");
+            let printed = expr.to_string();
+            assert!(!printed.is_empty());
+            assert!(parse(&printed).is_ok(), "and it round-trips");
+            drop(expr);
+        }
+    }
+
+    #[test]
+    fn the_limits_leave_room_for_formulas_people_actually_write() {
+        // Excel stops at 64 levels of function nesting and 8,192 characters of
+        // formula, so both bounds are generous against the format rather than
+        // tight against the stack.
+        assert!(
+            parse(&nested("SUM(", ")", 64)).is_ok(),
+            "Excel's own ceiling"
+        );
+        assert!(parse("SUM(A1:A9)/COUNT(A1:A9)+MAX(B1:B9)").is_ok());
+        assert!(
+            parse(&format!("1{}", "+1".repeat((MAX_CHAIN - 1) as usize))).is_ok(),
+            "and a chain up to the measured limit"
+        );
+    }
+
+    #[test]
+    fn the_chain_limit_is_measured_against_the_smallest_stack_not_the_largest() {
+        // The first attempt at this bound reasoned from the file format — 8,192
+        // characters, so about four thousand operators — passed on the main
+        // thread's eight megabytes, and aborted the moment a *test* thread ran
+        // it with two. This runs the accepted maximum on a megabyte, which is
+        // what a WebAssembly thread gets, and does the three things that recurse
+        // over the tree: print it, re-parse what was printed, and drop it.
+        let survived = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let src = format!("1{}", "+1".repeat((MAX_CHAIN - 1) as usize));
+                let expr = parse(&src).expect("the accepted maximum");
+                let printed = expr.to_string();
+                assert!(parse(&printed).is_ok());
+                drop(expr);
+            })
+            .expect("spawn")
+            .join();
+        assert!(
+            survived.is_ok(),
+            "the accepted maximum must fit the smallest stack"
+        );
+    }
+
+    #[test]
+    fn the_nesting_limit_is_excels_own() {
+        // Measured against the stack and then found to coincide with Excel's
+        // documented ceiling, which means it costs no compatibility. It is
+        // deliberately *not* the evaluator's `MAX_DEPTH`: that one bounds a
+        // chain of cell references, which no formula's own shape constrains.
+        // Sixty-five expression levels: Excel's sixty-four levels of nesting,
+        // plus the outermost expression they nest inside. Writing 64 here
+        // rejects a formula Excel accepts, which is how this off-by-one showed
+        // itself.
+        assert_eq!(MAX_DEPTH, 65);
+        assert!(
+            parse(&nested("SUM(", ")", 64)).is_ok(),
+            "exactly Excel's ceiling must parse"
+        );
+        assert!(matches!(
+            parse(&nested("SUM(", ")", 65)),
+            Err(FormulaError::TooDeep { .. })
+        ));
+    }
+}

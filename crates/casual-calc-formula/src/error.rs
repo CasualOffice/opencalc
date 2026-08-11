@@ -18,6 +18,18 @@ pub enum FormulaError {
     TrailingInput,
     /// A reference was malformed.
     InvalidReference(String),
+    /// The expression nests deeper than the parser will follow.
+    ///
+    /// A bound rather than a capability: the parser is recursive descent, so
+    /// depth is stack, and without a limit a formula of twenty thousand nested
+    /// brackets aborts the process — `SIGABRT`, not an error any signature can
+    /// express. That is reachable from an imported file, from the formula bar
+    /// and from the collaboration wire, where it would take down every other
+    /// document on the node.
+    TooDeep {
+        /// The limit that was exceeded.
+        limit: u32,
+    },
 }
 
 impl FormulaError {
@@ -37,6 +49,9 @@ impl fmt::Display for FormulaError {
             FormulaError::UnexpectedToken(t) => write!(f, "unexpected token: {t}"),
             FormulaError::TrailingInput => write!(f, "trailing input after expression"),
             FormulaError::InvalidReference(r) => write!(f, "invalid reference: {r:?}"),
+            FormulaError::TooDeep { limit } => {
+                write!(f, "the expression nests deeper than {limit} levels")
+            }
         }
     }
 }

@@ -20,7 +20,7 @@ mod ast;
 mod error;
 pub mod future;
 mod lex;
-mod parse;
+pub mod parse;
 mod print;
 mod reference;
 mod refscan;

@@ -5,10 +5,74 @@ use crate::error::FormulaError;
 use crate::lex::{Token, tokenize};
 use crate::reference::{CellReference, parse_a1, parse_a1_axis};
 
+/// How deep an expression may nest before the parser refuses it.
+///
+/// The parser is recursive descent, so nesting depth is stack depth, and stack
+/// exhaustion is not an error — it is `SIGABRT`, which no `Result` can carry
+/// and no caller can catch. The limit therefore has to be here rather than in
+/// whatever is calling.
+///
+/// **Sixty-four is measured, and happens to be Excel's own limit too.**
+///
+/// The first attempt used 256, reasoning that it matched the evaluator's
+/// `MAX_DEPTH` and was four times Excel's documented ceiling. It aborted a test
+/// thread. Measuring each shape in its own process — a stack overflow aborts
+/// rather than unwinding, so it cannot be observed from inside — gave this, on
+/// a megabyte of stack in a debug build:
+///
+/// | shape | dies at |
+/// | --- | --- |
+/// | `SUM(SUM(…))` | between 64 and 128 |
+/// | `((((…))))` | between 128 and 192 |
+/// | `----…` | past 256 |
+///
+/// Function nesting is the worst because it costs the most frames per level, so
+/// it sets the bound. Sixty-four survives it with room, and is exactly what
+/// Excel permits — which means the limit costs no compatibility at all.
+///
+/// The number is **sixty-five** because this counts *expression levels* and the
+/// outermost expression is one of them: Excel's sixty-four levels of nesting sit
+/// underneath it. Writing 64 here and calling it Excel-compatible would reject
+/// `SUM(` nested exactly sixty-four deep, which Excel accepts — an off-by-one a
+/// test caught.
+///
+/// Note this is **not** the evaluator's `MAX_DEPTH`, and they should not be
+/// forced to agree: the evaluator's bounds a chain of *cell references*
+/// (`A1`→`B1`→`C1`…), which no formula's own shape constrains.
+pub const MAX_DEPTH: u32 = 65;
+
+/// How long a chain of same-level operators may be — `1+1+1+…`.
+///
+/// A separate bound from [`MAX_DEPTH`], because it is a separate crash. The
+/// parser handles a left-associative chain in a **loop**, so no amount of it
+/// recurses and the depth counter never rises — but the *tree* it builds is a
+/// left spine as long as the chain, and `Expr`'s `Drop` and `Display` are both
+/// recursive. A quarter of a million terms therefore parses cleanly and then
+/// aborts the process on the way out of scope, which is a stranger failure than
+/// the one [`MAX_DEPTH`] prevents and reachable the same three ways.
+///
+/// Five hundred and twelve is **measured, not chosen**. The first attempt at
+/// this used four thousand, reasoning from the format — SpreadsheetML caps a
+/// formula at 8,192 characters, so a chain cannot hold many more operators than
+/// that. It passed on the main thread, with eight megabytes of stack, and
+/// aborted the moment a *test* thread ran it with two. A megabyte, which is
+/// what a WebAssembly thread gets, dies at a thousand in a debug build.
+///
+/// So the bound is the largest that survives print-and-drop on the smallest
+/// stack this code runs on, in the least favourable build. It is below what the
+/// format permits, and that is a deliberate trade: a chain longer than this
+/// gets a clear error, where before it got `SIGABRT`. Anyone summing five
+/// hundred cells with `+` wants `SUM` anyway.
+pub const MAX_CHAIN: u32 = 512;
+
 /// Parse a formula body (the text after a leading `=`) into an [`Expr`].
 pub fn parse(input: &str) -> Result<Expr, FormulaError> {
     let tokens = tokenize(input)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = parser.parse_expr(0)?;
     if parser.pos != parser.tokens.len() {
         return Err(FormulaError::TrailingInput);
@@ -19,6 +83,9 @@ pub fn parse(input: &str) -> Result<Expr, FormulaError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// How deep the recursion currently is. Every path that recurses passes
+    /// through `parse_expr`, so counting there counts all of them.
+    depth: u32,
 }
 
 const PREFIX_BP: u8 = 50;
@@ -64,10 +131,32 @@ impl Parser {
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, FormulaError> {
+        // Every recursive path — a bracketed subexpression, a function
+        // argument, an operand — comes back through here, so one counter
+        // covers them all.
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            self.depth -= 1;
+            return Err(FormulaError::TooDeep { limit: MAX_DEPTH });
+        }
+        let parsed = self.parse_expr_inner(min_bp);
+        self.depth -= 1;
+        parsed
+    }
+
+    fn parse_expr_inner(&mut self, min_bp: u8) -> Result<Expr, FormulaError> {
         let mut left = self.parse_prefix()?;
+        let mut chain: u32 = 0;
         while let Some((op, lbp, rbp)) = self.peek().and_then(binary_op) {
             if lbp < min_bp {
                 break;
+            }
+            // Each turn of this loop adds a level to the left spine of the tree
+            // — no recursion here, and a tree whose recursive `Drop` would
+            // exhaust the stack all the same.
+            chain += 1;
+            if chain > MAX_CHAIN {
+                return Err(FormulaError::TooDeep { limit: MAX_CHAIN });
             }
             self.advance();
             let right = self.parse_expr(rbp)?;

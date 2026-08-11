@@ -11,6 +11,7 @@ rust-version = "1.88.0"
 cargo-fuzz = true
 
 [dependencies]
+casual-calc-formula = { path = "../crates/casual-calc-formula" }
 libfuzzer-sys = "0.4"
 casual-calc-package = { path = "../crates/casual-calc-package" }
 
@@ -23,3 +24,10 @@ bench = false
 
 # Detach from the parent workspace.
 [workspace]
+
+[[bin]]
+name = "formula_parse"
+path = "fuzz_targets/formula_parse.rs"
+test = false
+doc = false
+bench = false
