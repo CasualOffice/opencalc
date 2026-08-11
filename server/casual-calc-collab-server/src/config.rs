@@ -43,13 +43,25 @@ pub struct Endpoint {
     /// which situation it is in, so it does not pretend to: see
     /// [`Exposure::warnings`], which says so at startup rather than never.
     pub tls: Option<TlsFiles>,
+    /// A CA whose certificates a *connecting* peer must present.
+    ///
+    /// Mutual TLS, and it belongs on the internal endpoint rather than the
+    /// public one: the peers are a known, small, operator-controlled set, which
+    /// is exactly the situation client certificates are good at and the
+    /// situation a browser is not. On the public endpoint this would mean
+    /// issuing a certificate to every user's browser.
+    pub client_ca: Option<PathBuf>,
 }
 
 impl Endpoint {
     /// A plain listener on `bind`.
     #[must_use]
     pub fn plain(bind: SocketAddr) -> Self {
-        Self { bind, tls: None }
+        Self {
+            bind,
+            tls: None,
+            client_ca: None,
+        }
     }
 
     /// A TLS listener on `bind`.
@@ -58,7 +70,21 @@ impl Endpoint {
         Self {
             bind,
             tls: Some(TlsFiles { certificate, key }),
+            client_ca: None,
         }
+    }
+
+    /// Also require a connecting peer to present a certificate from `client_ca`.
+    #[must_use]
+    pub fn requiring_client_certificate(mut self, client_ca: PathBuf) -> Self {
+        self.client_ca = Some(client_ca);
+        self
+    }
+
+    /// Whether a connecting peer must present a certificate.
+    #[must_use]
+    pub fn requires_client_certificate(&self) -> bool {
+        self.client_ca.is_some()
     }
 
     /// Whether this endpoint terminates TLS itself.
@@ -207,6 +233,27 @@ impl ProxyTrust {
 
 /// Who this node is, and how a peer reaches it.
 ///
+/// # Two address spaces, and this is the internal one
+///
+/// A client reaches a node **through** whatever the operator put in front of
+/// it — an ingress, a load balancer, a reverse proxy — and often the node does
+/// not know that address at all, because the proxy owns it.
+///
+/// Relay and replication do not go that way. A node dials another **directly**,
+/// on the cluster network, at the address it found in Redis. So this is an
+/// internal address for an internal endpoint, and routing peer traffic back out
+/// through the public proxy would be both slower and a way for cluster traffic
+/// to arrive looking like a client.
+///
+/// Two consequences are enforced rather than described:
+///
+/// - It is checked against the **internal** endpoint's port, not the public
+///   one. A node advertising its public address sends every peer through the
+///   proxy.
+/// - The internal endpoint never honours forwarded headers. A peer is not a
+///   proxy, there is no hop between them to describe, and believing one there
+///   would let anything that can reach the cluster port claim to be anything.
+///
 /// # Advertising is not binding
 ///
 /// A node binds `0.0.0.0:8443` so it accepts connections on every interface,
@@ -229,8 +276,8 @@ pub struct NodeIdentity {
     pub id: String,
     /// The address **other nodes** should connect to, host and port.
     ///
-    /// Reachable from the cluster network, which the bind address usually is
-    /// not.
+    /// On the cluster network, reaching the *internal* endpoint — not the
+    /// public one, and not the proxy in front of it.
     pub advertise: SocketAddr,
 }
 
@@ -284,7 +331,12 @@ pub struct Exposure {
     /// terminate TLS at an ingress for the first and require it end-to-end for
     /// the second, or the reverse.
     pub internal: Option<Endpoint>,
-    /// Whose forwarded headers to believe.
+    /// Whose forwarded headers to believe **on the public endpoint**.
+    ///
+    /// It does not apply to [`internal`](Self::internal), and that is not an
+    /// omission: a peer is not a proxy, there is no hop between two nodes for a
+    /// header to describe, and honouring one there would let anything that
+    /// reaches the cluster port claim to be anything.
     pub proxy: ProxyTrust,
     /// Who this node is to its peers. Absent in standalone, where there are
     /// none — which is why it is an `Option` rather than a value nobody uses.
@@ -341,6 +393,34 @@ impl Exposure {
                      peer can be told where to find it"
                         .to_owned(),
                 );
+            }
+            if let Some(node) = &self.node {
+                if node.advertise.port() != internal.bind.port() {
+                    out.push(format!(
+                        "this node advertises port {} but its internal endpoint listens on {}: \
+                         peers will dial a port nothing is serving them on",
+                        node.advertise.port(),
+                        internal.bind.port()
+                    ));
+                }
+                if node.advertise.port() == self.public.bind.port()
+                    && self.public.bind.port() != internal.bind.port()
+                {
+                    out.push(
+                        "this node advertises its public port to peers: relay and replication \
+                         would go out through the proxy in front of it, which is slower and \
+                         makes cluster traffic arrive looking like a client"
+                            .to_owned(),
+                    );
+                }
+                if internal.is_tls() && !internal.requires_client_certificate() {
+                    out.push(
+                        "the internal endpoint is encrypted but accepts any peer that can \
+                         reach it: without a client CA, TLS here proves the traffic is \
+                         private and not that the peer is one of yours"
+                            .to_owned(),
+                    );
+                }
             }
             if internal.bind == self.public.bind {
                 out.push(

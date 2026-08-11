@@ -7,6 +7,9 @@ fn peer(ip: &str) -> SocketAddr {
     SocketAddr::new(ip.parse().unwrap(), 40_000)
 }
 
+/// A node advertising the *internal* endpoint's port, which is what a peer
+/// dials. `peer()` builds addresses on port 40,000, so the internal endpoints
+/// in these tests use it too.
 fn node() -> NodeIdentity {
     NodeIdentity {
         id: "node-a".into(),
@@ -250,13 +253,17 @@ fn sharing_one_address_between_the_client_and_cluster_ports_is_called_out() {
 
 #[test]
 fn a_fully_secured_deployment_has_nothing_to_say() {
+    // "Fully secured" includes the internal endpoint knowing *who* connected
+    // and not only that the connection was private — the peers are a known,
+    // small, operator-controlled set, which is what client certificates are
+    // for. An earlier version of this test omitted the client CA and passed,
+    // which is how that check earned its place.
     let exposure = Exposure {
         public: Endpoint::secured(peer("0.0.0.0"), "c.pem".into(), "k.pem".into()),
-        internal: Some(Endpoint::secured(
-            peer("10.0.0.1"),
-            "c.pem".into(),
-            "k.pem".into(),
-        )),
+        internal: Some(
+            Endpoint::secured(peer("10.0.0.1"), "c.pem".into(), "k.pem".into())
+                .requiring_client_certificate("ca.pem".into()),
+        ),
         proxy: ProxyTrust::none(),
         node: Some(node()),
     };
@@ -339,4 +346,103 @@ fn a_cluster_endpoint_without_an_identity_is_called_out() {
         "{:?}",
         exposure.warnings()
     );
+}
+
+// --- The two address spaces -------------------------------------------------
+
+/// A public endpoint on a different port from the internal one, which is the
+/// shape these checks are about.
+fn split_ports(node: Option<NodeIdentity>) -> Exposure {
+    Exposure {
+        public: Endpoint::plain(SocketAddr::new(ip("0.0.0.0"), 443)),
+        internal: Some(
+            Endpoint::secured(
+                SocketAddr::new(ip("10.0.0.1"), 9443),
+                "c.pem".into(),
+                "k.pem".into(),
+            )
+            .requiring_client_certificate("ca.pem".into()),
+        ),
+        proxy: ProxyTrust::behind(vec![ip("10.0.0.7")]),
+        node,
+    }
+}
+
+#[test]
+fn advertising_the_internal_port_is_the_correct_shape() {
+    let exposure = split_ports(Some(NodeIdentity {
+        id: "node-a".into(),
+        advertise: SocketAddr::new(ip("10.0.0.1"), 9443),
+    }));
+    assert!(exposure.warnings().is_empty(), "{:?}", exposure.warnings());
+}
+
+#[test]
+fn advertising_a_port_the_internal_endpoint_does_not_serve_is_called_out() {
+    // Peers dial a port nothing is listening on for them, and the symptom is
+    // an absence of peers rather than an error.
+    let exposure = split_ports(Some(NodeIdentity {
+        id: "node-a".into(),
+        advertise: SocketAddr::new(ip("10.0.0.1"), 9999),
+    }));
+    assert!(
+        exposure
+            .warnings()
+            .iter()
+            .any(|w| w.contains("nothing is serving them on")),
+        "{:?}",
+        exposure.warnings()
+    );
+}
+
+#[test]
+fn advertising_the_public_port_sends_peers_through_the_proxy() {
+    // Relay and replication do not go through whatever is in front of the
+    // node. Routing them back out that way is slower and makes cluster traffic
+    // arrive looking like a client.
+    let exposure = split_ports(Some(NodeIdentity {
+        id: "node-a".into(),
+        advertise: SocketAddr::new(ip("10.0.0.1"), 443),
+    }));
+    assert!(
+        exposure
+            .warnings()
+            .iter()
+            .any(|w| w.contains("out through the proxy")),
+        "{:?}",
+        exposure.warnings()
+    );
+}
+
+#[test]
+fn an_internal_endpoint_with_tls_but_no_client_ca_is_called_out() {
+    // TLS there proves the traffic is private, not that the peer is one of
+    // yours — and the peers are a known, small, operator-controlled set, which
+    // is exactly what client certificates are good at.
+    let mut exposure = split_ports(Some(NodeIdentity {
+        id: "node-a".into(),
+        advertise: SocketAddr::new(ip("10.0.0.1"), 9443),
+    }));
+    exposure.internal = Some(Endpoint::secured(
+        SocketAddr::new(ip("10.0.0.1"), 9443),
+        "c.pem".into(),
+        "k.pem".into(),
+    ));
+    assert!(
+        exposure
+            .warnings()
+            .iter()
+            .any(|w| w.contains("not that the peer is one of yours")),
+        "{:?}",
+        exposure.warnings()
+    );
+}
+
+#[test]
+fn requiring_a_client_certificate_is_recorded_on_the_endpoint() {
+    let plain = Endpoint::plain(peer("10.0.0.1"));
+    assert!(!plain.requires_client_certificate());
+    let mutual = Endpoint::secured(peer("10.0.0.1"), "c.pem".into(), "k.pem".into())
+        .requiring_client_certificate("ca.pem".into());
+    assert!(mutual.requires_client_certificate());
 }

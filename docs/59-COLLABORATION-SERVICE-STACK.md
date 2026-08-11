@@ -208,6 +208,28 @@ them.
 
 ## 3c. Discovery: Redis, and the address you advertise
 
+**There are two address spaces, and only one of them is the proxy's.** A client
+reaches a node *through* whatever the operator put in front of it — an ingress,
+a load balancer, a reverse proxy — and often the node does not know that address
+at all, because the proxy owns it. Relay and replication do not go that way: a
+node dials another **directly**, on the cluster network, at the address it found
+in Redis. Sending peer traffic back out through the public proxy would be slower
+and would make cluster traffic arrive looking like a client.
+
+Three things follow, and are checked rather than described:
+
+- The advertised address is checked against the **internal** endpoint's port. A
+  node advertising its public port sends every peer through the proxy.
+- The internal endpoint **never** honours forwarded headers. A peer is not a
+  proxy, there is no hop between two nodes for a header to describe, and
+  honouring one there would let anything that reaches the cluster port claim to
+  be anything.
+- The internal endpoint is where **mutual TLS** belongs. Its peers are a known,
+  small, operator-controlled set — exactly what client certificates are good at,
+  and exactly what a browser is not. TLS without a client CA there proves the
+  traffic is private, not that the peer is one of yours, and that combination is
+  called out at startup.
+
 Discovery uses the same Redis the rest of the cluster does — a node registers
 itself under a TTL'd key carrying its **advertised address**, refreshes it, and
 reads the others. No second dependency, and a node that dies stops refreshing
