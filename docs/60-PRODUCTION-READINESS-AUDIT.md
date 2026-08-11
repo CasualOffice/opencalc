@@ -6,6 +6,13 @@ performance". It exists because the engine is in far better shape than the
 things around it, and a strong engine inside a service that loses data is a
 demo.
 
+**A correction to this document's own scope.** It says it audits the whole
+application, and its first pass swept the engine and the server. It did not
+sweep the **browser**, which is how S5-1 below came to be found afterwards
+rather than in the sweep — and found by following a loose end, not by looking.
+An audit that misses a whole tier is worth less than its findings suggest, and
+saying so is cheaper than the next person discovering it.
+
 **How to read the evidence column.** `Verified` means it was made to happen.
 `Observed` means it was read out of the code and not run. That distinction has
 earned its place: in this repository, claims made from reading have repeatedly
@@ -181,6 +188,31 @@ One committed fixture, generated here. The oracle (P2-003) and package
 validation (P1B-003) diff against LibreOffice, which is a genuine independent
 check — but no corpus of real-world `.xlsx` files from Excel, Google Sheets or
 Numbers is exercised. Fidelity is asserted against files whose shape we chose.
+
+---
+
+## S5 — The tier the first sweep missed
+
+### S5-1 · There is no collaboration client in the browser · **Verified**
+
+`grep` for `WebSocket`, `collab`, `Submit` and `heartbeat` across
+`webapp/editor.js` and `webapp/embed.js` returns **zero**. Not a missing
+heartbeat, which is how this was first written up — the entire browser half of
+collaboration is unbuilt.
+
+Everything it would need exists and is gated: `ClientSession` in
+`casual-calc-transaction` (`flush`, `resend`, `receive`, `acknowledge`), the
+protocol messages, the transform, and now the server. The **WASM bridge exposes
+none of it** — zero references to `ClientSession` in `casual-calc-wasm` — so
+there is no seam for a browser client to sit on even if one were written.
+
+Nothing overclaims this: [18](18-SUPPORT-MATRIX.md) reads "○ Phase 5, decided
+and unbuilt", and the SDK is documented as single-user. The finding is not that
+a promise was broken; it is that "the collaboration work is nearly done" is a
+reasonable thing to conclude from the server's state and is wrong. Three pieces
+remain, in order: WASM bindings for `ClientSession`, a JavaScript transport
+speaking the protocol, and editor integration for remote operations and
+presence.
 
 ---
 
