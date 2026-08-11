@@ -39,11 +39,33 @@ use casual_calc_transaction::session::ClientId;
 use tokio::sync::broadcast;
 
 use crate::document::DocumentSession;
-use crate::lifecycle::SavePolicy;
+use crate::lifecycle::{Action, CallbackOutcome, SavePolicy};
 use crate::presence::Roster;
-use crate::token::Claims;
+use crate::token::{Callback, Claims};
 use crate::verify::Verifier;
 use casual_calc_transaction::session::SnapshotPolicy;
+
+/// Take a lock, surviving a poisoned one.
+///
+/// Rust poisons a mutex when a thread panics holding it, and every later
+/// `lock()` then returns `Err`. Turning that into another panic — which
+/// `.expect()` does — means one panic makes a document permanently unreachable
+/// while the process keeps serving, so nothing restarts it and no health check
+/// notices. For the registry lock it would take **every** document on the node.
+///
+/// The data behind these locks is a document and a roster, not an invariant
+/// that a half-finished mutation corrupts beyond use: recovering and carrying
+/// on is strictly better than refusing forever. The poisoning is worth a loud
+/// line in the log, and is not worth an outage.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        eprintln!(
+            "collab: recovered a poisoned lock — a task panicked while holding it; \
+             the document continues"
+        );
+        poisoned.into_inner()
+    })
+}
 
 /// How the server obtains a document's bytes.
 ///
@@ -53,6 +75,65 @@ use casual_calc_transaction::session::SnapshotPolicy;
 pub trait Fetch: Send + Sync + 'static {
     /// Fetch the package at `url`.
     fn get(&self, url: String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>>;
+}
+
+/// How the server returns a finished document to the integrator.
+///
+/// Injected for the same reasons as [`Fetch`]: an integrator may need mutual
+/// TLS, a proxy or a signed request, and a test needs to observe a save without
+/// a network. The two callback shapes — an OnlyOffice-style URL and a WOPI
+/// `PutFile` — are both described by [`Callback`], and which request to make is
+/// this implementation's business.
+pub trait Deliver: Send + Sync + 'static {
+    /// Send `bytes` to `destination`, reporting whether the host accepted them.
+    fn put(
+        &self,
+        destination: Callback,
+        title: String,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+}
+
+/// Bounds on what a node will hold and accept.
+///
+/// Every one of these was unbounded, which is the difference between a service
+/// that degrades under load and one that dies: without them a node holds every
+/// workbook it has ever opened until the OOM killer arrives, and one client can
+/// open connections until it runs out of descriptors.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// How many documents this node will hold at once.
+    pub max_documents: usize,
+    /// How many connections one document will accept.
+    pub max_participants: usize,
+    /// The largest WebSocket message accepted, in bytes.
+    pub max_message_bytes: usize,
+    /// How long a document with nobody in it and nothing unsaved is kept before
+    /// it is dropped.
+    ///
+    /// Not zero: a participant who reloads the page is gone for a second or
+    /// two, and rebuilding the session from the origin for that is wasteful and
+    /// slow. Not long either — it is memory.
+    pub idle_eviction_ms: u64,
+    /// How often the sweeper runs.
+    pub tick_ms: u64,
+    /// How long a participant may go unheard before it is presumed gone.
+    pub presence_ttl_ms: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_documents: 1_000,
+            max_participants: 200,
+            // Comfortably above a large submission and far below a memory
+            // problem. A client with more to say than this is misbehaving.
+            max_message_bytes: 4 * 1024 * 1024,
+            idle_eviction_ms: 30_000,
+            tick_ms: 1_000,
+            presence_ttl_ms: crate::presence::DEFAULT_TTL_MS,
+        }
+    }
 }
 
 /// What the service needs to run.
@@ -69,6 +150,12 @@ pub struct ServiceConfig {
     pub snapshots: SnapshotPolicy,
     /// How to fetch a document.
     pub fetch: Arc<dyn Fetch>,
+    /// How to return a finished document to the integrator. Without one the
+    /// server cannot save, and says so at startup rather than discovering it
+    /// when the first document quiesces.
+    pub deliver: Arc<dyn Deliver>,
+    /// What this node will hold and accept.
+    pub limits: Limits,
 }
 
 impl core::fmt::Debug for ServiceConfig {
@@ -77,6 +164,7 @@ impl core::fmt::Debug for ServiceConfig {
             .field("bind", &self.bind)
             .field("save", &self.save)
             .field("snapshots", &self.snapshots)
+            .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
@@ -100,6 +188,12 @@ struct Live {
     /// The next participant id. Ids are per-document and per-process, which is
     /// all `ClientId` promises.
     next_client: Mutex<u64>,
+    /// Where the finished document goes, from the token that opened it.
+    callback: Option<Callback>,
+    /// The document's name, for the callback and the log.
+    title: String,
+    /// When this document became empty, or zero while somebody is in it.
+    idle_since: std::sync::atomic::AtomicU64,
 }
 
 /// Every document this node currently holds.
@@ -141,7 +235,158 @@ pub async fn serve_on(
         config,
         registry: Registry::default(),
     });
+    // The sweeper is what makes this a service rather than a relay. Without it
+    // the save lifecycle — quiesce timer, ceiling, revision cadence, callback
+    // retry, read-only fencing — is built, tested and driven by nothing, and
+    // the node holds the only copy of every edit until it restarts.
+    tokio::spawn(sweep(Arc::clone(&state)));
     axum::serve(listener, router(state)).await
+}
+
+/// Drive every document's clock: save when the lifecycle says so, forget
+/// participants who stopped talking, and let go of documents nobody is in.
+///
+/// One task for all documents rather than one per document. A thousand idle
+/// timers is a thousand things to cancel correctly on eviction, and the work
+/// per tick is proportional to the documents that actually need something.
+async fn sweep(state: Arc<Service>) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
+        state.config.limits.tick_ms.max(1),
+    ));
+    // A tick missed under load should not produce a burst of catch-up ticks
+    // afterwards, which would run the save cadence several times over.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let now = now_ms();
+
+        // Snapshot the keys, so the registry lock is not held while a document
+        // is saved — which involves a network round-trip to the integrator.
+        let documents: Vec<(String, Arc<Live>)> = lock(&state.registry.live)
+            .iter()
+            .map(|(key, live)| (key.clone(), Arc::clone(live)))
+            .collect();
+
+        for (key, live) in documents {
+            expire_presence(&live, now);
+            service_lifecycle(&state, &live, now).await;
+            evict_if_idle(&state, &key, &live, now);
+        }
+    }
+}
+
+/// Drop participants who stopped talking, and tell the others.
+fn expire_presence(live: &Arc<Live>, now: u64) {
+    let gone = lock(&live.roster).expire(now);
+    for client in gone {
+        // Returned rather than merely removed, because the others have to be
+        // told: a cursor that stops moving and never disappears reads as
+        // somebody watching.
+        let _ = live
+            .fan_out
+            .send((client, ServerMessage::Departed { client }));
+    }
+}
+
+/// Ask the lifecycle what to do, and do it.
+async fn service_lifecycle(state: &Arc<Service>, live: &Arc<Live>, now: u64) {
+    let action = { lock(&live.session).tick(now) };
+    let Some(action) = action else { return };
+
+    match action {
+        Action::Save { revision, .. } => {
+            let Some(destination) = live.callback.clone() else {
+                // No callback in the token means the host is not asking for the
+                // document back — a preview, or a session it collects another
+                // way. Recording the attempt as accepted keeps the lifecycle
+                // from retrying forever against nothing.
+                let follow_up =
+                    lock(&live.session).callback(CallbackOutcome::Accepted(revision), now);
+                act_on_follow_up(live, follow_up);
+                return;
+            };
+
+            // Assembled under the lock, delivered outside it: a slow or
+            // unreachable integrator must not stop everyone editing.
+            let assembled = { lock(&live.session).assemble() };
+            let outcome = match assembled {
+                Ok(bytes) => {
+                    match state
+                        .config
+                        .deliver
+                        .put(destination, live.title.clone(), bytes)
+                        .await
+                    {
+                        Ok(()) => CallbackOutcome::Accepted(revision),
+                        Err(why) => {
+                            eprintln!("collab: the callback failed for {}: {why}", live.title);
+                            CallbackOutcome::Failed
+                        }
+                    }
+                }
+                Err(why) => {
+                    eprintln!("collab: could not assemble {}: {why}", live.title);
+                    CallbackOutcome::Failed
+                }
+            };
+            let follow_up = { lock(&live.session).callback(outcome, now) };
+            act_on_follow_up(live, follow_up);
+        }
+        other => act_on_follow_up(live, Some(other)),
+    }
+}
+
+/// Tell the participants what the lifecycle decided, when it concerns them.
+fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
+    match action {
+        Some(Action::WarnNotSaving { .. }) => {
+            // On the *first* failure, not the last: a warning is only useful
+            // while there is still time to copy the work out.
+            let _ = live.fan_out.send((
+                ClientId(0),
+                ServerMessage::Refused {
+                    seq: None,
+                    reason: Refusal::NotSaving,
+                },
+            ));
+        }
+        Some(Action::GoReadOnly) => {
+            // Continuing to accept work that provably cannot be persisted is
+            // silent loss dressed up as availability.
+            let _ = live.fan_out.send((
+                ClientId(0),
+                ServerMessage::Stopped {
+                    reason: Refusal::NotSaving,
+                },
+            ));
+        }
+        Some(Action::Save { .. }) | None => {}
+    }
+}
+
+/// Let go of a document nobody is in and nothing is owed for.
+fn evict_if_idle(state: &Arc<Service>, key: &str, live: &Arc<Live>, now: u64) {
+    let empty = lock(&live.roster).is_empty();
+    if !empty {
+        live.idle_since
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    // Never evict with work outstanding: the whole point of the lifecycle is
+    // that the host gets the document back.
+    if lock(&live.session).has_unsaved() {
+        return;
+    }
+    let since = live.idle_since.load(std::sync::atomic::Ordering::Relaxed);
+    if since == 0 {
+        live.idle_since
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    if now.saturating_sub(since) < state.config.limits.idle_eviction_ms {
+        return;
+    }
+    lock(&state.registry.live).remove(key);
 }
 
 fn router(state: Arc<Service>) -> Router {
@@ -152,7 +397,31 @@ fn router(state: Arc<Service>) -> Router {
         // node out of rotation and make it worse.
         .route("/healthz", get(|| async { "ok" }))
         .route("/collab", get(upgrade))
+        // What an operator needs to answer "is it working" without trying it,
+        // and the only window onto state that is otherwise private. Counts
+        // rather than identities: a document key names a customer's file.
+        .route("/stats", get(stats))
         .with_state(state)
+}
+
+/// A node's current load, as counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stats {
+    /// Documents held on this node.
+    pub documents: usize,
+    /// Participants across all of them.
+    pub participants: usize,
+}
+
+async fn stats(State(state): State<Arc<Service>>) -> axum::Json<Stats> {
+    let live: Vec<Arc<Live>> = lock(&state.registry.live)
+        .values()
+        .map(Arc::clone)
+        .collect();
+    axum::Json(Stats {
+        documents: live.len(),
+        participants: live.iter().map(|l| lock(&l.roster).len()).sum(),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -168,6 +437,12 @@ async fn upgrade(
     Query(join): Query<Join>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Bounded before a byte is read. A frame limit is the cheapest of the
+    // limits and the one whose absence is most easily exploited: a client that
+    // can send an unbounded message can make the server allocate one.
+    let ws = ws
+        .max_message_size(state.config.limits.max_message_bytes)
+        .max_frame_size(state.config.limits.max_message_bytes);
     ws.on_upgrade(move |socket| connection(state, join.doc, socket))
 }
 
@@ -194,10 +469,23 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         }
     };
 
+    // A document that is already full turns the next arrival away rather than
+    // degrading for everybody in it.
+    if lock(&live.roster).len() >= state.config.limits.max_participants {
+        let _ = send(
+            &mut socket,
+            &ServerMessage::Stopped {
+                reason: Refusal::NotSaving,
+            },
+        )
+        .await;
+        return;
+    }
+
     // Everything from here is a participant in a document that exists.
     let mut updates = live.fan_out.subscribe();
     let client = {
-        let mut next = live.next_client.lock().expect("registry lock");
+        let mut next = lock(&live.next_client);
         *next += 1;
         ClientId(*next)
     };
@@ -207,7 +495,7 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     // future non-`Send`, and — worse — parks every other participant on this
     // document behind one slow socket.
     let joined = {
-        let mut session = live.session.lock().expect("session lock");
+        let mut session = lock(&live.session);
         session.join()
     };
     let Ok(joined) = joined else {
@@ -220,14 +508,14 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         .await;
         return;
     };
-    live.roster.lock().expect("roster lock").joined(
+    lock(&live.roster).joined(
         client,
         claims.user.name.clone(),
         claims.user.color.clone(),
         now_ms(),
     );
 
-    let read_only = live.session.lock().expect("session lock").is_read_only();
+    let read_only = lock(&live.session).is_read_only();
     let editable = claims.permissions.access >= crate::token::Access::Comment && !read_only;
     if send(
         &mut socket,
@@ -281,8 +569,8 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         }
     }
 
-    live.roster.lock().expect("roster lock").left(client);
-    live.session.lock().expect("session lock").left();
+    lock(&live.roster).left(client);
+    lock(&live.session).left();
     // Addressed from this client so the envelope is consistent; every *other*
     // connection is the audience, which is exactly who needs to know.
     let _ = live
@@ -337,7 +625,7 @@ async fn authorise(
 /// Find the document, or open it from the URL the token named.
 async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refusal> {
     let key = claims.document.key.clone();
-    if let Some(live) = state.registry.live.lock().expect("registry lock").get(&key) {
+    if let Some(live) = lock(&state.registry.live).get(&key) {
         return Ok(Arc::clone(live));
     }
 
@@ -353,16 +641,24 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
     let session = DocumentSession::open(bytes, state.config.save, state.config.snapshots, now_ms())
         .map_err(|_| Refusal::NotSaving)?;
 
-    let mut registry = state.registry.live.lock().expect("registry lock");
+    let mut registry = lock(&state.registry.live);
+    // Checked here rather than before the fetch, because the wasted fetch is
+    // cheaper than holding the registry lock across a network round-trip.
+    if !registry.contains_key(&key) && registry.len() >= state.config.limits.max_documents {
+        return Err(Refusal::NotSaving);
+    }
     // Somebody else may have opened it while this was fetching. Theirs wins:
     // two sessions over one document is the one outcome that must not happen,
     // and the wasted fetch is the cheaper mistake.
     Ok(Arc::clone(registry.entry(key).or_insert_with(|| {
         Arc::new(Live {
             session: Mutex::new(session),
-            roster: Mutex::new(Roster::default()),
+            roster: Mutex::new(Roster::new(state.config.limits.presence_ttl_ms)),
             fan_out: broadcast::channel(256).0,
             next_client: Mutex::new(0),
+            callback: claims.callback.clone(),
+            title: claims.document.title.clone(),
+            idle_since: std::sync::atomic::AtomicU64::new(0),
         })
     })))
 }
@@ -383,17 +679,11 @@ async fn handle(
             true
         }
         ClientMessage::Heartbeat => {
-            live.roster
-                .lock()
-                .expect("roster lock")
-                .heartbeat(client, now_ms());
+            lock(&live.roster).heartbeat(client, now_ms());
             true
         }
         ClientMessage::Presence { sheet, selection } => {
-            live.roster
-                .lock()
-                .expect("roster lock")
-                .moved(client, sheet, selection, now_ms());
+            lock(&live.roster).moved(client, sheet, selection, now_ms());
             let _ = live.fan_out.send((
                 client,
                 ServerMessage::Presence {
@@ -430,7 +720,7 @@ async fn handle(
             }
 
             let outcome = {
-                let mut session = live.session.lock().expect("session lock");
+                let mut session = lock(&live.session);
                 session.commit(&submission, now_ms())
             };
             match outcome {

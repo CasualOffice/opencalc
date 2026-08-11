@@ -225,6 +225,15 @@ impl DocumentSession {
         write_workbook(&self.workbook).map_err(|e| ServerError::Write(e.to_string()))
     }
 
+    /// Whether the host has not yet confirmed the newest revision.
+    ///
+    /// The question an eviction has to ask: letting go of a document with work
+    /// outstanding loses exactly the thing the lifecycle exists to deliver.
+    #[must_use]
+    pub fn has_unsaved(&self) -> bool {
+        self.life.has_unsaved()
+    }
+
     /// The most recent snapshot, for the storage layer to persist.
     #[must_use]
     pub fn snapshot(&self) -> Option<&Snapshot> {

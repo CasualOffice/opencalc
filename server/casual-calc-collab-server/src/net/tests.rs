@@ -7,7 +7,7 @@
 //! another.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use casual_calc_transaction::protocol::{ClientMessage, PROTOCOL_VERSION, Refusal, ServerMessage};
@@ -42,6 +42,39 @@ impl Fetch for Canned {
     fn get(&self, _url: String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>> {
         let bytes = self.0.clone();
         Box::pin(async move { Ok(bytes) })
+    }
+}
+
+/// Records what was delivered, so a test can watch the server save.
+#[derive(Clone, Default)]
+struct Collected(Arc<Mutex<Vec<(String, usize)>>>);
+
+impl Deliver for Collected {
+    fn put(
+        &self,
+        _destination: Callback,
+        title: String,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        let seen = Arc::clone(&self.0);
+        Box::pin(async move {
+            seen.lock().unwrap().push((title, bytes.len()));
+            Ok(())
+        })
+    }
+}
+
+/// A host that refuses everything, for the not-saving path.
+struct Refusing;
+
+impl Deliver for Refusing {
+    fn put(
+        &self,
+        _destination: Callback,
+        _title: String,
+        _bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async move { Err("the host said no".to_owned()) })
     }
 }
 
@@ -99,6 +132,15 @@ fn token(claims: &Claims) -> String {
 
 /// Start a server on an ephemeral port and return its address.
 async fn start(fetch: Arc<dyn Fetch>) -> SocketAddr {
+    start_with(fetch, Arc::new(Collected::default()), Limits::default()).await
+}
+
+/// Start a server, choosing how it delivers and what it will hold.
+async fn start_with(
+    fetch: Arc<dyn Fetch>,
+    deliver: Arc<dyn Deliver>,
+    limits: Limits,
+) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let config = ServiceConfig {
@@ -115,6 +157,8 @@ async fn start(fetch: Arc<dyn Fetch>) -> SocketAddr {
         save: SavePolicy::default(),
         snapshots: SnapshotPolicy::default(),
         fetch,
+        deliver,
+        limits,
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
@@ -556,4 +600,283 @@ impl Tiny {
         let _ = self.stream.read_to_end(&mut out).await;
         String::from_utf8_lossy(&out).into_owned()
     }
+}
+
+// --- The service actually saves (PROD-03) ----------------------------------
+
+/// A save policy that fires almost immediately, so a test does not wait five
+/// seconds for the quiesce timer.
+fn prompt_saves() -> SavePolicy {
+    SavePolicy {
+        quiesce_ms: 10,
+        ceiling_ms: 100,
+        ..SavePolicy::default()
+    }
+}
+
+async fn start_saving(deliver: Arc<dyn Deliver>) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = ServiceConfig {
+        bind: addr,
+        verifier: Verifier {
+            policy: TokenPolicy {
+                audience: "opencalc-collab".into(),
+                leeway_secs: 60,
+                allowed_hosts: BTreeSet::new(),
+                require_https: true,
+            },
+            keys: KeySet::shared_secret(SECRET),
+        },
+        save: prompt_saves(),
+        snapshots: SnapshotPolicy::default(),
+        fetch: Arc::new(Canned(package())),
+        deliver,
+        limits: Limits {
+            tick_ms: 10,
+            idle_eviction_ms: 50,
+            presence_ttl_ms: 60,
+            ..Limits::default()
+        },
+    };
+    tokio::spawn(async move {
+        let _ = serve_on(listener, config).await;
+    });
+    addr
+}
+
+/// A token whose callback the server will deliver to.
+fn saving_claims(name: &str) -> Claims {
+    let mut c = claims(name, Access::Edit);
+    c.callback = Some(Callback::Url {
+        url: "https://host.example/callback".into(),
+    });
+    c
+}
+
+#[tokio::test]
+async fn an_edit_is_eventually_delivered_to_the_host() {
+    // The finding that made the audit worth doing: the save lifecycle was
+    // fully built, fully tested, and driven by nothing, so the service ordered
+    // edits correctly and held the only copy in memory.
+    let seen = Collected::default();
+    let addr = start_saving(Arc::new(seen.clone())).await;
+
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    hear(&mut ada).await; // the ack
+
+    // The quiesce timer is ten milliseconds; give it room without making the
+    // test wait on a real cadence.
+    for _ in 0..100 {
+        if !seen.0.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let delivered = seen.0.lock().unwrap().clone();
+    assert!(
+        !delivered.is_empty(),
+        "the document was never sent to the host"
+    );
+    let (title, bytes) = &delivered[0];
+    assert_eq!(title, "Budget.xlsx", "named as the token named it");
+    assert!(*bytes > 1000, "and it is a real package, not an empty one");
+}
+
+#[tokio::test]
+async fn a_host_that_refuses_gets_the_participants_warned() {
+    // On the first failure, not the last: a warning is only useful while there
+    // is still time to copy the work out.
+    let addr = start_saving(Arc::new(Refusing)).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+
+    let mut warned = false;
+    for _ in 0..40 {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), hear(&mut ada)).await {
+            Ok(Some(ServerMessage::Refused {
+                reason: Refusal::NotSaving,
+                ..
+            }))
+            | Ok(Some(ServerMessage::Stopped {
+                reason: Refusal::NotSaving,
+            })) => {
+                warned = true;
+                break;
+            }
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
+    assert!(
+        warned,
+        "participants were never told their work is not being saved"
+    );
+}
+
+/// Read `/stats` — the node's own view of what it is holding.
+async fn stats_of(addr: SocketAddr) -> Stats {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /stats HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let _ = stream.read_to_end(&mut out).await;
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let body = text.rsplit("\r\n\r\n").next().unwrap_or_default();
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("stats body {body:?}: {e}"))
+}
+
+/// Poll until `f` holds, or give up. Time-based state needs a window rather
+/// than a sleep, or the test is a race on a slow machine.
+async fn until(addr: SocketAddr, f: impl Fn(Stats) -> bool) -> Stats {
+    let mut last = stats_of(addr).await;
+    for _ in 0..100 {
+        if f(last) {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        last = stats_of(addr).await;
+    }
+    last
+}
+
+#[tokio::test]
+async fn a_document_nobody_is_in_is_eventually_let_go_of() {
+    // Nothing removed a document from the registry, so a node held every
+    // workbook it had ever opened until the OOM killer arrived. Asserted
+    // against the node's own count: an earlier version of this test checked
+    // that rejoining worked, which it does whether or not anything was
+    // evicted — a mutation that deleted the eviction call passed it.
+    let addr = start_saving(Arc::new(Collected::default())).await;
+    {
+        let mut ada = connect(addr).await;
+        join(&mut ada, &saving_claims("Ada")).await.unwrap();
+        assert_eq!(until(addr, |s| s.documents == 1).await.documents, 1);
+        say(&mut ada, &ClientMessage::Leave).await;
+    }
+    let after = until(addr, |s| s.documents == 0).await;
+    assert_eq!(after.documents, 0, "the document was never let go of");
+
+    // And it reopens cleanly afterwards.
+    let mut grace = connect(addr).await;
+    assert!(matches!(
+        join(&mut grace, &saving_claims("Grace")).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_participant_who_stops_talking_is_forgotten() {
+    // `Roster::expire` was written, tested and never called, so cursors
+    // accumulated for people who had left.
+    let addr = start_saving(Arc::new(Collected::default())).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    assert_eq!(until(addr, |s| s.participants == 1).await.participants, 1);
+
+    // Say nothing for longer than the TTL. The connection stays open, which is
+    // the case that matters: a dropped socket is noticed anyway.
+    let after = until(addr, |s| s.participants == 0).await;
+    assert_eq!(
+        after.participants, 0,
+        "a silent participant was never expired"
+    );
+}
+
+#[tokio::test]
+async fn a_document_with_unsaved_work_is_not_evicted() {
+    // Letting go of a document with work outstanding loses exactly the thing
+    // the lifecycle exists to deliver.
+    let addr = start_saving(Arc::new(Refusing)).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    hear(&mut ada).await;
+    say(&mut ada, &ClientMessage::Leave).await;
+
+    // The host refuses every save, so the work stays outstanding. Well past the
+    // eviction window, the document must still be here.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        stats_of(addr).await.documents,
+        1,
+        "a document with unsaved work was evicted, losing it"
+    );
+}
+
+#[tokio::test]
+async fn a_full_node_turns_a_new_document_away_rather_than_degrading() {
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            max_documents: 0,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let mut socket = connect(addr).await;
+    let answer = join(&mut socket, &claims("Ada", Access::Edit)).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "got {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_full_document_turns_the_next_arrival_away() {
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            max_participants: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let mut ada = connect(addr).await;
+    assert!(matches!(
+        join(&mut ada, &claims("Ada", Access::Edit)).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
+
+    let mut grace = connect(addr).await;
+    let answer = join(&mut grace, &claims("Grace", Access::Edit)).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "the second arrival is refused rather than everyone degrading: {answer:?}"
+    );
 }
