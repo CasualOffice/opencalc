@@ -22,12 +22,14 @@
 //! a list kept twice is a list that drifts. The walk belongs here for the plainer
 //! reason that this crate owns [`Expr`].
 //!
-//! # What is still missing
+//! # The second prefix
 //!
-//! `LAMBDA`'s *parameters* carry their own `_xlpm.` prefix in the file, which
-//! this does not yet write. A `LAMBDA` therefore still round-trips wrongly
-//! through Excel; the function name is now right and the parameter names are
-//! not.
+//! The names `LAMBDA` and `LET` *bind* carry their own prefix, `_xlpm.`, for
+//! the same reason: without it a reader cannot tell a bound parameter from a
+//! defined name, and would look `x` up in the workbook's names and find
+//! nothing. Both halves are needed — a `LAMBDA` whose function name is
+//! qualified but whose parameters are not is still a formula Excel will not
+//! evaluate.
 
 use crate::ast::Expr;
 
@@ -120,9 +122,164 @@ pub fn qualify_future_functions(expr: &mut Expr) -> bool {
 /// one. The name is what the file said it was.
 pub fn strip_future_prefixes(expr: &mut Expr) -> bool {
     map_function_names(expr, &mut |name| {
-        let rest = name.strip_prefix(XLFN)?;
-        Some(rest.strip_prefix(XLWS).unwrap_or(rest).to_owned())
+        let rest = strip_prefix_ignoring_case(name, XLFN)?;
+        Some(
+            strip_prefix_ignoring_case(rest, XLWS)
+                .unwrap_or(rest)
+                .to_owned(),
+        )
     })
+}
+
+/// The prefix SpreadsheetML puts on a name bound by `LAMBDA` or `LET`.
+const XLPM: &str = "_XLPM.";
+
+/// Add the `_xlpm.` prefix to every name bound by a `LAMBDA` or a `LET`, for
+/// writing.
+///
+/// Scope-aware, and it has to be: a bare [`Expr::Name`] is a *defined name*
+/// unless something binds it, and prefixing one of those would point the
+/// formula at a name no workbook contains. So the walk tracks what is in scope
+/// and prefixes only a reference to a binding it can see.
+///
+/// Two details follow the language rather than convenience. `LET` binds
+/// **sequentially** — `LET(x,1,y,x+1,y)` — so each value expression is
+/// qualified against the bindings before it and not against its own name. And
+/// scope is a stack, so an inner `LAMBDA` parameter shadowing an outer one is
+/// handled by both being prefixed, which is what the file wants anyway.
+pub fn qualify_bound_names(expr: &mut Expr) -> bool {
+    let mut scope: Vec<String> = Vec::new();
+    qualify_in_scope(expr, &mut scope)
+}
+
+/// Remove the `_xlpm.` prefix from every name in `expr`, for reading.
+///
+/// Needs no scope: the prefix is only ever written on a bound name, so its
+/// presence is the whole answer.
+pub fn strip_bound_name_prefixes(expr: &mut Expr) -> bool {
+    map_names(expr, &mut |name| {
+        strip_prefix_ignoring_case(name, XLPM).map(str::to_owned)
+    })
+}
+
+/// `str::strip_prefix`, without caring about case.
+///
+/// Needed because Excel writes these prefixes in **lower case** — `_xlpm.x` —
+/// while the constants here are upper. Function names survive a case-sensitive
+/// compare only by accident: the parser upper-cases them, and a bound name is
+/// not a function name, so it arrives exactly as the file spelled it.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    if text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return Some(&text[prefix.len()..]);
+    }
+    None
+}
+
+fn qualify_in_scope(expr: &mut Expr, scope: &mut Vec<String>) -> bool {
+    match expr {
+        Expr::Name(name) => {
+            if scope.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+                *name = format!("{XLPM}{name}");
+                return true;
+            }
+            false
+        }
+        Expr::Function { name, args } if is_binder(name, "LAMBDA") && !args.is_empty() => {
+            let depth = scope.len();
+            let last = args.len() - 1;
+            let mut changed = false;
+            for param in &mut args[..last] {
+                if let Expr::Name(n) = param {
+                    scope.push(n.clone());
+                    *n = format!("{XLPM}{n}");
+                    changed = true;
+                }
+            }
+            changed |= qualify_in_scope(&mut args[last], scope);
+            scope.truncate(depth);
+            changed
+        }
+        Expr::Function { name, args } if is_binder(name, "LET") && args.len() >= 3 => {
+            let depth = scope.len();
+            let last = args.len() - 1;
+            let mut changed = false;
+            let mut i = 0;
+            while i + 1 < last {
+                // The value first: `LET` binds in order, so a value sees the
+                // names before it and not the one it is defining.
+                changed |= qualify_in_scope(&mut args[i + 1], scope);
+                if let Some(Expr::Name(n)) = args.get_mut(i) {
+                    scope.push(n.clone());
+                    *n = format!("{XLPM}{n}");
+                    changed = true;
+                }
+                i += 2;
+            }
+            changed |= qualify_in_scope(&mut args[last], scope);
+            scope.truncate(depth);
+            changed
+        }
+        Expr::Function { args, .. } => {
+            let mut changed = false;
+            for arg in args {
+                changed |= qualify_in_scope(arg, scope);
+            }
+            changed
+        }
+        Expr::Call { callee, args } => {
+            let mut changed = qualify_in_scope(callee, scope);
+            for arg in args {
+                changed |= qualify_in_scope(arg, scope);
+            }
+            changed
+        }
+        Expr::Unary { operand, .. } => qualify_in_scope(operand, scope),
+        Expr::Binary { left, right, .. } => {
+            let l = qualify_in_scope(left, scope);
+            let r = qualify_in_scope(right, scope);
+            l || r
+        }
+        _ => false,
+    }
+}
+
+/// Whether `name` is the binder `want`, with or without its `_xlfn.` prefix —
+/// so the two passes may run in either order.
+fn is_binder(name: &str, want: &str) -> bool {
+    name.eq_ignore_ascii_case(want)
+        || strip_prefix_ignoring_case(name, XLFN)
+            .is_some_and(|rest| rest.eq_ignore_ascii_case(want))
+}
+
+/// Apply `f` to every [`Expr::Name`] in the tree.
+fn map_names(expr: &mut Expr, f: &mut impl FnMut(&str) -> Option<String>) -> bool {
+    let mut changed = false;
+    match expr {
+        Expr::Name(name) => {
+            if let Some(next) = f(name) {
+                *name = next;
+                changed = true;
+            }
+        }
+        Expr::Function { args, .. } => {
+            for arg in args {
+                changed |= map_names(arg, f);
+            }
+        }
+        Expr::Call { callee, args } => {
+            changed |= map_names(callee, f);
+            for arg in args {
+                changed |= map_names(arg, f);
+            }
+        }
+        Expr::Unary { operand, .. } => changed |= map_names(operand, f),
+        Expr::Binary { left, right, .. } => {
+            changed |= map_names(left, f);
+            changed |= map_names(right, f);
+        }
+        _ => {}
+    }
+    changed
 }
 
 /// Apply `f` to every function name in the tree, replacing it where `f` returns
@@ -250,6 +407,18 @@ mod tests {
     }
 
     #[test]
+    fn the_prefixes_are_matched_however_the_file_spells_them() {
+        // Excel writes them in lower case. Function names survive a
+        // case-sensitive compare only because the parser upper-cases them; a
+        // bound name arrives exactly as the file spelled it, and the first
+        // version of this stripped nothing at all.
+        let mut expr = parse("_xlfn.LAMBDA(_xlpm.x,_xlpm.x+1)").unwrap();
+        strip_future_prefixes(&mut expr);
+        strip_bound_name_prefixes(&mut expr);
+        assert_eq!(expr.to_string(), "LAMBDA(x,x+1)");
+    }
+
+    #[test]
     fn the_worksheet_prefix_is_stripped_too() {
         // Excel writes `_xlfn._xlws.FILTER`; both come off.
         assert_eq!(
@@ -279,5 +448,110 @@ mod tests {
         let mut expr = parse("SUM(A1:A3)").unwrap();
         assert!(!qualify_future_functions(&mut expr));
         assert!(!strip_future_prefixes(&mut expr));
+    }
+
+    fn bound(src: &str) -> String {
+        let mut expr = parse(src).unwrap();
+        qualify_bound_names(&mut expr);
+        expr.to_string()
+    }
+
+    #[test]
+    fn a_lambda_parameter_is_prefixed_where_it_binds_and_where_it_is_used() {
+        assert_eq!(
+            bound("LAMBDA(x,x+1)"),
+            "LAMBDA(_XLPM.x,_XLPM.x+1)",
+            "the parameter and the body reference are the same name"
+        );
+        assert_eq!(
+            bound("LAMBDA(a,b,a*b)"),
+            "LAMBDA(_XLPM.a,_XLPM.b,_XLPM.a*_XLPM.b)"
+        );
+    }
+
+    #[test]
+    fn a_defined_name_is_left_alone() {
+        // The distinction the whole pass exists for. A bare name is a defined
+        // name unless something binds it, and prefixing one of those points the
+        // formula at a name no workbook contains.
+        assert_eq!(bound("TaxRate*2"), "TaxRate*2");
+        assert_eq!(
+            bound("LAMBDA(x,x*TaxRate)"),
+            "LAMBDA(_XLPM.x,_XLPM.x*TaxRate)",
+            "bound and free names side by side"
+        );
+    }
+
+    #[test]
+    fn a_binding_does_not_escape_the_expression_that_made_it() {
+        // `x` inside the lambda is bound; `x` after it is a defined name again.
+        assert_eq!(
+            bound("LAMBDA(x,x+1)(1)+x"),
+            "LAMBDA(_XLPM.x,_XLPM.x+1)(1)+x"
+        );
+    }
+
+    #[test]
+    fn let_binds_in_order_so_a_value_cannot_see_its_own_name() {
+        // `LET(x,1,y,x+1,y)`: the value `x+1` sees `x`, and the name `y` is not
+        // in scope in its own value expression.
+        assert_eq!(
+            bound("LET(x,1,y,x+1,y)"),
+            "LET(_XLPM.x,1,_XLPM.y,_XLPM.x+1,_XLPM.y)"
+        );
+        // A value naming the variable being defined is a *different*, free name
+        // — a defined name — and must not be prefixed.
+        assert_eq!(bound("LET(x,x,x)"), "LET(_XLPM.x,x,_XLPM.x)");
+    }
+
+    #[test]
+    fn an_inner_binding_shadows_an_outer_one() {
+        assert_eq!(
+            bound("LET(x,1,LET(x,x+1,x))"),
+            "LET(_XLPM.x,1,LET(_XLPM.x,_XLPM.x+1,_XLPM.x))"
+        );
+    }
+
+    #[test]
+    fn the_bound_names_survive_a_round_trip() {
+        for src in [
+            "LAMBDA(x,x+1)",
+            "LET(x,1,y,x+1,y)",
+            "LAMBDA(x,x*TaxRate)",
+            "MAP(A1:A3,LAMBDA(v,v*2))",
+        ] {
+            let mut expr = parse(src).unwrap();
+            qualify_bound_names(&mut expr);
+            qualify_future_functions(&mut expr);
+            strip_future_prefixes(&mut expr);
+            strip_bound_name_prefixes(&mut expr);
+            assert_eq!(expr, parse(src).unwrap(), "round trip of {src}");
+        }
+    }
+
+    #[test]
+    fn the_two_passes_compose_into_what_the_file_carries() {
+        let mut expr = parse("LAMBDA(x,x+1)").unwrap();
+        qualify_bound_names(&mut expr);
+        qualify_future_functions(&mut expr);
+        assert_eq!(expr.to_string(), "_XLFN.LAMBDA(_XLPM.x,_XLPM.x+1)");
+    }
+
+    #[test]
+    fn the_bound_name_pass_tolerates_an_already_qualified_binder() {
+        // Order-independence is asserted rather than assumed, because relying
+        // on it silently would make the writer's ordering a coincidence.
+        let mut expr = parse("LAMBDA(x,x+1)").unwrap();
+        qualify_future_functions(&mut expr);
+        qualify_bound_names(&mut expr);
+        assert_eq!(expr.to_string(), "_XLFN.LAMBDA(_XLPM.x,_XLPM.x+1)");
+    }
+
+    #[test]
+    fn reading_strips_the_prefix_wherever_it_appears() {
+        let mut expr = parse("_xlfn.LAMBDA(_xlpm.x,_xlpm.x+1)").unwrap();
+        strip_future_prefixes(&mut expr);
+        strip_bound_name_prefixes(&mut expr);
+        assert_eq!(expr.to_string(), "LAMBDA(x,x+1)");
     }
 }

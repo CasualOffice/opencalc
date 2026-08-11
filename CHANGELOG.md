@@ -48,6 +48,17 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ### 2026-08-12 — An unedited file saves as itself
 
+**Fixed**
+
+- **`LAMBDA` and `LET` now round-trip through Excel** (FID-08). The names they
+  bind carry their own `_xlpm.` prefix in the file; without it a reader cannot
+  tell a bound parameter from a defined name. FID-06 fixed the function names
+  and named this as still open — a `LAMBDA` with `_xlfn.LAMBDA` and bare
+  parameters is still a formula Excel will not evaluate. The pass is
+  scope-aware, because a bare name is a defined name unless something binds it:
+  `LAMBDA(x,x*TaxRate)` qualifies `x` and leaves `TaxRate` alone. Confirmed by
+  the oracle — `LET`, `REDUCE` and `MAP` now agree with LibreOffice.
+
 **Added**
 
 - **Byte-identical repackaging** (P1B-002): a `.xlsx` that was opened and not

@@ -28,7 +28,9 @@ pub use theme::stock_theme_slots;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use casual_calc_formula::{Expr, FormulaError, shift_references, strip_future_prefixes};
+use casual_calc_formula::{
+    Expr, FormulaError, shift_references, strip_bound_name_prefixes, strip_future_prefixes,
+};
 
 /// Parse a formula **as the file writes it**, which is not quite the language.
 ///
@@ -40,6 +42,7 @@ use casual_calc_formula::{Expr, FormulaError, shift_references, strip_future_pre
 fn parse_formula(text: &str) -> Result<Expr, FormulaError> {
     let mut expr = casual_calc_formula::parse(text)?;
     strip_future_prefixes(&mut expr);
+    strip_bound_name_prefixes(&mut expr);
     Ok(expr)
 }
 use casual_calc_model::{

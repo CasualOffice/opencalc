@@ -238,3 +238,10 @@ SUM(H1:H5)
 COUNT(H1:H5)
 "abc"&""
 -"5"
+
+# --- First-class functions (LET/LAMBDA), which need both prefixes -----------
+LET(x,5,x*2)
+LET(x,5,y,x+1,x*y)
+LAMBDA(x,x+1)(4)  @differs: LibreOffice 26.2 cannot call a LAMBDA literal inline (Err:509)
+SUM(MAP(C1:C3,LAMBDA(v,v*2)))
+REDUCE(0,C1:C5,LAMBDA(a,b,a+b))

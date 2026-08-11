@@ -18,7 +18,7 @@ pub use error::ExportError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 
-use casual_calc_formula::{Expr, column_to_letters, qualify_future_functions};
+use casual_calc_formula::{Expr, column_to_letters, qualify_bound_names, qualify_future_functions};
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind,
     DvOperator, ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId,
@@ -243,6 +243,10 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
 /// formula bar must not carry it.
 fn formula_text(expr: &Expr) -> String {
     let mut owned = expr.clone();
+    // Bound names first: the pass that finds them matches `LAMBDA` and `LET`,
+    // which the next pass is about to rename. (It tolerates either order, but
+    // depending on that would be a coincidence rather than a decision.)
+    qualify_bound_names(&mut owned);
     qualify_future_functions(&mut owned);
     owned.to_string()
 }

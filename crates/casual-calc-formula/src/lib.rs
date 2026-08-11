@@ -29,7 +29,8 @@ mod rewrite;
 pub use ast::{BinaryOp, Expr, UnaryOp};
 pub use error::FormulaError;
 pub use future::{
-    FUTURE_FUNCTIONS, is_future_function, qualify_future_functions, strip_future_prefixes,
+    FUTURE_FUNCTIONS, is_future_function, qualify_bound_names, qualify_future_functions,
+    strip_bound_name_prefixes, strip_future_prefixes,
 };
 pub use parse::parse;
 pub use reference::{CellReference, MAX_COL, MAX_ROW, column_to_letters, parse_a1};
