@@ -46,6 +46,23 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-11 — The editing suite, and the selection bug it found
+
+**Added**
+
+- **A core-editing browser suite** (CI-004) beside the smoke gate: copy/paste
+  with reference adjustment, cut, fill down and right, insert and delete lines,
+  bold, a second sheet with a cross-sheet reference, keyboard navigation, and
+  saving a genuine `.xlsx`. Fourteen tests.
+
+**Fixed**
+
+- **Extending a selection no longer drags the active cell with it** (UX-NV5).
+  Select H2, Shift+Down twice, type — the value went into H4. Excel and Sheets
+  keep the active cell where the selection began and travel the far corner, so
+  it belonged in H2, the cell still highlighted. Anyone selecting a range with
+  the keyboard and typing was writing to the wrong cell.
+
 ### 2026-08-11 — Merged cells render headlessly; the tracker gets honest
 
 **Fixed**

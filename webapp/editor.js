@@ -2617,12 +2617,25 @@ function addRowRange(r) {
   draw();
 }
 
-// Extend the selection to (row, col), keeping the anchor.
+// Extend the selection to (row, col), keeping the active cell where it is.
+//
+// The corner that travels is `state.anchor`, not `state.sel`. That reads
+// backwards until you remember that `state.sel` is the **active cell**
+// everywhere in this file (UX-NV4) — and in Excel and Sheets the active cell
+// stays where the selection began while the far corner follows the keyboard or
+// the pointer. Moving `sel` instead put the active cell at the end of the
+// travel, so selecting B2:B4 with Shift+Down and typing wrote into B4: the
+// value landed in the last cell the user passed over rather than the one the
+// selection was still highlighting.
+//
+// `selRect` takes the min and max of the two, so which end moves makes no
+// difference to the block; it decides only where the active cell ends up.
 function extend(row, col) {
-  state.sel = { row: Math.max(0, row), col: Math.max(0, col) };
+  state.anchor = { row: Math.max(0, row), col: Math.max(0, col) };
   state.selKind = "cells";
   extending = true;
-  ensureVisible();
+  // Follow the travelling corner, not the active cell, which is not moving.
+  ensureVisible(state.anchor.row, state.anchor.col);
   draw();
 }
 
@@ -9709,7 +9722,11 @@ function wireEvents() {
       // Ctrl+Arrow: jump to the data-edge (Excel block-jump).
       const arrow = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
       if (arrow) {
-        const to = JSON.parse(wasm.session_edge(state.sheet, state.sel.row, state.sel.col, arrow[0], arrow[1]));
+        // Jump from the travelling corner when extending, so a second
+        // Ctrl+Shift+Arrow carries on from where the first one reached rather
+        // than measuring again from the stationary active cell.
+        const from = e.shiftKey ? state.anchor : state.sel;
+        const to = JSON.parse(wasm.session_edge(state.sheet, from.row, from.col, arrow[0], arrow[1]));
         if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
         e.preventDefault(); return;
       }
@@ -9814,8 +9831,12 @@ function wireEvents() {
       if (e.key === "-" || e.key === "_") { deleteLines(); e.preventDefault(); return; }
     }
 
+    // A Shift-step continues from the corner that is travelling — which is
+    // `state.anchor` (see `extend`) — while a plain step moves the active cell.
+    // After a plain `select` the two are the same cell, so this is only ever
+    // different mid-extension, which is exactly when it matters.
     const move = (dr, dc) => {
-      if (e.shiftKey) extend(state.sel.row + dr, state.sel.col + dc);
+      if (e.shiftKey) extend(state.anchor.row + dr, state.anchor.col + dc);
       else select(state.sel.row + dr, state.sel.col + dc);
     };
     switch (e.key) {
@@ -9825,8 +9846,8 @@ function wireEvents() {
       case "ArrowLeft": move(0, -1); e.preventDefault(); break;
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
       case "Tab": tabStep(e.shiftKey); e.preventDefault(); break;
-      case "Home": if (e.shiftKey) extend(state.sel.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
-      case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.sel.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
+      case "Home": if (e.shiftKey) extend(state.anchor.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
+      case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.anchor.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete":

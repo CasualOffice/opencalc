@@ -31,6 +31,10 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
+    // Copy and paste go through the async Clipboard API, as they do for a real
+    // user who has already granted the page access. Without this the editor's
+    // copy silently rejects and the paste tests would be testing the fallback.
+    permissions: ["clipboard-read", "clipboard-write"],
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {

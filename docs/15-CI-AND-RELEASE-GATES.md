@@ -24,7 +24,7 @@ which gates are not yet built.
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
-| `browser-smoke` | `wasm-pack` build + Playwright against `webapp/editor.html` | The editor loads, paints, calculates, edits and undoes (**implemented**, CI-002) |
+| `browser-smoke` | `wasm-pack` build + Playwright against `webapp/editor.html` | The editor loads, paints, calculates, edits, undoes — and copies, fills, inserts, formats, references another sheet and saves (**implemented**, CI-002 + CI-004) |
 
 Actions are pinned to full commit SHAs; workflows run read-only where possible;
 concurrency-cancel is on.
@@ -50,8 +50,15 @@ It runs with **no retries**, deliberately: the gate is here to catch a real
 breakage, and a retry turns an intermittent one — the kind most worth knowing
 about — into a pass.
 
-Its first run found four defects, all of them shipped and none visible to any
-Rust test: see CI-002 in [14](14-EXECUTION-TRACKER.md).
+Two suites run under it: `editor.smoke.spec.mjs` asks whether the editor works
+at all, and `editor.editing.spec.mjs` (CI-004) asks whether the things people do
+with a spreadsheet all day work — copy and paste with reference adjustment,
+fill, insert and delete lines, formatting, a second sheet, keyboard navigation,
+and saving a genuine `.xlsx`.
+
+Between them their first runs found **five defects, all shipped, none visible to
+any Rust test**: UX-B04, UX-B05, UX-B06, FID-05 and UX-NV5 in
+[14](14-EXECUTION-TRACKER.md). That ratio is the argument for the gate.
 
 ## Determinism & fidelity gates (spreadsheet-specific)
 
