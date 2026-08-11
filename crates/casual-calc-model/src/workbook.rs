@@ -72,10 +72,43 @@ pub struct RetainedRel {
 /// `calcPr` is the one to watch: it is inert while the calc engine is held back,
 /// and becomes load-bearing the moment it lands, because a workbook that needs
 /// iterative calculation must not be recalculated without it.
+/// What `<calcPr>` says about resolving a circular reference.
+///
+/// A workbook that needs iteration is one whose author *meant* the loop — a
+/// balance that depends on the interest it accrues, a rate that depends on the
+/// balance. Recalculating it without iteration does not merely lose a feature;
+/// it turns a working model into a sheet of `#REF!`, which is why the settings
+/// have been carried verbatim since before there was an engine to read them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Iteration {
+    /// Whether a circular reference should be resolved by iterating rather than
+    /// reported as an error.
+    pub enabled: bool,
+    /// How many passes to make before giving up on convergence. Excel's
+    /// default is 100.
+    pub max_count: u32,
+    /// The largest change across a pass that still counts as converged. Excel's
+    /// default is 0.001.
+    pub max_change: f64,
+}
+
+impl Default for Iteration {
+    fn default() -> Self {
+        // Off, with Excel's own defaults for the other two so that a file which
+        // enables iteration without saying how much gets what its author saw.
+        Self {
+            enabled: false,
+            max_count: 100,
+            max_change: 0.001,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkbookSettings {
-    /// `<calcPr>` attributes as read.
+    /// `<calcPr>` attributes as read. Interpreted by
+    /// [`iteration`](Self::iteration); everything else here travels verbatim.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub calc: BTreeMap<String, String>,
     /// `<fileVersion>` attributes.
@@ -96,6 +129,39 @@ pub struct WorkbookSettings {
 }
 
 impl WorkbookSettings {
+    /// What `<calcPr>` asks for when a formula depends on itself.
+    ///
+    /// Read from the carried attributes rather than stored separately, so the
+    /// verbatim round-trip stays the single source of truth and there is no
+    /// second copy to fall out of step with it.
+    ///
+    /// An unparseable count or delta falls back to Excel's default rather than
+    /// disabling iteration: the author asked for a loop to be resolved, and
+    /// refusing on the strength of a malformed *limit* would turn their working
+    /// model into a sheet of errors over a detail they cannot see.
+    #[must_use]
+    pub fn iteration(&self) -> Iteration {
+        let flag = |key: &str| {
+            self.calc
+                .get(key)
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        };
+        let default = Iteration::default();
+        Iteration {
+            enabled: flag("iterate"),
+            max_count: self
+                .calc
+                .get("iterateCount")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_count),
+            max_change: self
+                .calc
+                .get("iterateDelta")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_change),
+        }
+    }
+
     /// Whether nothing at all was carried.
     pub fn is_empty(&self) -> bool {
         self.calc.is_empty()

@@ -46,6 +46,22 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-12 — Iterative calculation, and the service stack decided
+
+**Added**
+
+- **Iterative calculation** (P2-004). A workbook whose author enabled iteration
+  — the only way some financial models can be written, where a balance depends
+  on the interest it accrues — opened here as a sheet of `#REF!`. With
+  `<calcPr iterate>` on, a re-entrant cell now returns its previous pass's
+  value rather than an error, and the recalculation repeats until nothing moves
+  by more than `iterateDelta` or `iterateCount` passes have run. Off by default;
+  one map lookup when off.
+- **ADR-014** ([docs/59](docs/59-COLLABORATION-SERVICE-STACK.md)): the
+  collaboration service's transport (WebSocket over `axum`), identity
+  (host-signed JWT via JWKS), coordination (Redis in a cluster, nothing
+  standalone) and durability (append to the log before acknowledging).
+
 ### 2026-08-12 — An unedited file saves as itself
 
 **Fixed**

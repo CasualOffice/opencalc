@@ -1,0 +1,143 @@
+# 59 — The collaboration service: transport, identity, coordination, durability
+
+**Status: Accepted** (ADR-014). Triggered by [COL-16](14-EXECUTION-TRACKER.md),
+which is the network service [ADR-012](57-COLLABORATION-SERVER-BOUNDARY.md)
+designed the boundary for.
+
+> **Decision.** Clients speak **WebSocket** to an `axum` server. Identity is a
+> **host-signed JWT** verified against a JWKS endpoint. A cluster coordinates
+> through **Redis** — leases, pub/sub and Streams — and a standalone process
+> uses none of it. An operation is **appended to the log before it is
+> acknowledged**.
+
+[ADR-011](56-COLLABORATION-CONCURRENCY-DESIGN.md) chose server-mediated OT and
+[ADR-012](57-COLLABORATION-SERVER-BOUNDARY.md) drew the boundary: what the
+server is for, what it refuses to be, and how a cluster keeps a document
+consistent without sticky sessions. Both are about *spreadsheets*. This one is
+about the four choices that are about **infrastructure**, and it exists as a
+separate record because they are the ones an operator has to live with and the
+ones that are expensive to reverse after a deployment exists.
+
+## 1. Transport: WebSocket over `axum`
+
+The protocol is already message-shaped — `ClientMessage` and `ServerMessage` in
+`casual-calc-transaction::protocol` — so a bidirectional frame transport is a
+direct carrier for it rather than a translation.
+
+It does **not** reintroduce affinity. A WebSocket pins a *connection* to a node,
+which is unavoidable for any long-lived connection; a sticky session pins a
+*client's identity* to a node, so that reconnecting has to land in the same
+place. Under ADR-012 a client may connect to any node and that node relays to
+whichever one currently leads the document. Losing a node drops its
+connections; the clients reconnect anywhere and resume from their last
+acknowledged revision.
+
+**Rejected: SSE down, POST up.** It survives proxies that break the WebSocket
+upgrade, which is a real problem in some corporate networks. It costs two
+channels to correlate, a second failure mode when only one of them dies, and
+latency on exactly the path — the edit — that must feel immediate. Worth
+revisiting as a *fallback* if a deployment actually hits the proxy problem;
+not worth paying for before then.
+
+**Rejected: gRPC bidirectional streaming.** Excellent between servers, and the
+replication path may yet use it. From a browser it needs grpc-web and a
+translating proxy, which adds a hop and an operational component to the case
+that matters most.
+
+## 2. Identity: a host-signed JWT, verified against JWKS
+
+ADR-012 already established that **the token is the whole integration
+contract** — it names the document, the participant, their access level, and
+where the finished bytes are to be sent. This settles how the signature is
+checked.
+
+The integrator signs with an asymmetric key (RS256 or ES256) and publishes the
+public half at a JWKS URL the server is configured with and caches. Three
+consequences, in the order they matter:
+
+- **The server never holds a signing key.** It can verify a token and cannot
+  mint one. A compromised collaboration node cannot issue itself access to a
+  document; with a shared secret it could.
+- **Rotation is the integrator's business alone.** They publish a new key,
+  the server picks it up at the next fetch, and no coordinated restart is
+  needed.
+- **`kid` selects the key**, so old and new coexist during a rotation instead of
+  there being a moment when both halves must change at once.
+
+HS256 with a shared secret is supported for **standalone and development**,
+where there is one process and no key server, and where requiring one would
+make the simple case need infrastructure the whole standalone mode exists to
+avoid. It is documented as what it is: the weaker option, chosen for
+convenience, not offered as an equal.
+
+**Rejected: opaque token plus an introspection callback.** The most flexible,
+and it puts the integrator's endpoint on the join path — so their outage
+becomes an outage for documents already open. A JWT is verifiable offline,
+which is the property that matters when the network is the thing failing.
+
+## 3. Coordination: Redis, and only in a cluster
+
+One dependency doing three jobs, each with a Redis primitive that already fits:
+
+| Job | Primitive | Why this one |
+| --- | --- | --- |
+| Per-document leader lease | `SET key value NX PX ttl` | Atomic acquire with expiry. The **epoch** in the value is what makes a cheap TTL safe (ADR-012): a lease can expire wrongly under load, and the epoch means a zombie leader's appends are rejected rather than believed. |
+| Relay fan-out | pub/sub | Non-leader nodes forward a submission to the leader and receive the broadcast. Fire-and-forget is correct here: the op log, not the channel, is the record. |
+| The op log | Streams | Ordered, append-only, with consumer positions — which is what a replica replaying from a leader needs, and what makes §4 possible at all. |
+
+**A standalone process uses none of it.** One node leads every document by
+definition, the log is in memory, and there is nothing to fan out to. This is
+not a degraded mode; it is the mode most deployments will run, and requiring
+Redis for it would be requiring infrastructure to solve a problem the operator
+does not have.
+
+**Rejected: etcd/Consul for leases plus NATS for fan-out.** Better primitives
+for each job taken separately — real leases with watches, proper subject
+routing. Two more things to run, monitor, secure and upgrade, for a system
+whose stated requirement is to be lightweight.
+
+**Rejected: in-process Raft.** No external dependency at all, which is
+genuinely attractive. It also makes this a consensus system that somebody has
+to operate and debug, and consensus bugs are the kind that appear under
+partition at 3am. Redis plus the epoch fence gets the same *correctness*
+guarantee — divergence is impossible because appends are conditional on the
+revision — while keeping the hard part in a component that is already
+understood.
+
+## 4. Durability: append before acknowledging
+
+An operation is written to the log **before** the client is told it was
+accepted.
+
+The alternative — acknowledge immediately, replicate afterwards — is faster and
+fails in the way this project refuses. A client that has been told its edit
+landed will show it as landed, and will not send it again. If the leader then
+dies before replicating, that edit is gone while every participant's screen
+still shows it. That is silent data loss with a receipt.
+
+The cost is one round-trip on the edit path. It is worth it here because the
+receipt is the whole point: `Commit::Applied` is a promise, and a promise that
+is sometimes false is worse than a slower one that is always true.
+
+**On `acks=all`**, which prompted this question: acknowledging after *k*
+replicas confirm is stronger still, and carries the trap that if the in-sync
+set collapses to the leader alone, `k=1` is satisfied and the guarantee
+evaporates without any error being raised. If a deployment wants that
+guarantee it needs a **minimum in-sync count enforced separately** — refusing
+writes when redundancy drops below it, which ADR-012 already describes. That
+remains configurable and is not the default, because refusing writes is a
+visible outage and most integrators would rather have the log.
+
+## Consequences
+
+- The server gains an async runtime, an HTTP stack, a JWT verifier and an
+  optional Redis client. All of it lives under `server/`; the CI boundary check
+  from ADR-012 keeps it out of `crates/`.
+- **Standalone has no new required dependency.** Redis is behind a feature and
+  a configuration; absent both, the server runs as one node.
+- A JWKS URL becomes required configuration for the recommended auth path. The
+  server must tolerate the endpoint being briefly unreachable — a cached key set
+  keeps working, since an integrator's key server going down should not evict
+  everybody from a document they already joined.
+- The edit path has one more hop than it strictly needs. If that ever shows up
+  in a latency budget, the honest fix is a faster log, not a weaker promise.

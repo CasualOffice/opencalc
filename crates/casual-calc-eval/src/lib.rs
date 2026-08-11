@@ -56,6 +56,75 @@ pub fn recalculate(workbook: &mut Workbook) {
     if recalculate_once(workbook) {
         recalculate_once(workbook);
     }
+    iterate_to_convergence(workbook);
+}
+
+/// Run further passes while `<calcPr iterate>` asks for them and the values are
+/// still moving.
+///
+/// A workbook with iteration on is one whose author meant the loop — a balance
+/// that depends on the interest it accrues, a rate that depends on the balance.
+/// The single pass above has already produced one round of it, with each
+/// self-referential cell reading its predecessor's value; this repeats that
+/// until either nothing changes by more than `iterateDelta` or `iterateCount`
+/// passes have been made.
+///
+/// **Both stopping conditions are needed.** Convergence is the one that
+/// matters, and a divergent or oscillating model has none — so the count is
+/// what guarantees this returns at all. Excel's defaults (100 and 0.001) apply
+/// when the file enables iteration without saying how much.
+///
+/// Costs nothing when iteration is off, which is almost every workbook: one
+/// map lookup, then return.
+fn iterate_to_convergence(workbook: &mut Workbook) {
+    let iteration = workbook.settings.iteration();
+    if !iteration.enabled || iteration.max_count == 0 {
+        return;
+    }
+    // The first pass already happened, so this budget is for the rest.
+    for _ in 1..iteration.max_count {
+        let before = formula_values(workbook);
+        recalculate_once(workbook);
+        let after = formula_values(workbook);
+        if converged(&before, &after, iteration.max_change) {
+            return;
+        }
+    }
+}
+
+/// Every formula cell's value, in a stable order, for comparing two passes.
+fn formula_values(workbook: &Workbook) -> Vec<CellValue> {
+    let mut out = Vec::new();
+    for sheet in &workbook.sheets {
+        for (_, cell) in sheet.cells.iter() {
+            if cell.formula.is_some() {
+                out.push(cell.value.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whether no value moved by more than `max_change` between two passes.
+///
+/// A numeric pair converges when the difference is within the tolerance. Any
+/// other change — a value becoming an error, a string changing, a cell
+/// appearing — counts as *not* converged, because the tolerance is a statement
+/// about arithmetic and says nothing about those.
+fn converged(before: &[CellValue], after: &[CellValue], max_change: f64) -> bool {
+    if before.len() != after.len() {
+        return false;
+    }
+    before.iter().zip(after).all(|(a, b)| match (a, b) {
+        (CellValue::Number(x), CellValue::Number(y)) => {
+            // Both non-finite compare equal; one of each does not.
+            if x.is_nan() && y.is_nan() {
+                return true;
+            }
+            (x - y).abs() <= max_change
+        }
+        _ => a == b,
+    })
 }
 
 /// One evaluate-and-write cycle. Returns whether any array spilled.

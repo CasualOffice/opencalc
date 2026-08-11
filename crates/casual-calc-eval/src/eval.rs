@@ -27,6 +27,8 @@ pub struct Evaluator<'a> {
     memo: HashMap<CellKey, Value>,
     in_progress: HashSet<CellKey>,
     dirty: Option<&'a HashSet<CellKey>>,
+    /// What `<calcPr>` asks for when a formula depends on itself.
+    iteration: casual_calc_model::Iteration,
     /// The cell whose formula is currently being evaluated — what `ROW()` /
     /// `COLUMN()` with no argument report. Saved and restored around each
     /// formula so a referenced cell's own formula sees its own address.
@@ -57,6 +59,7 @@ impl<'a> Evaluator<'a> {
             workbook,
             memo: HashMap::new(),
             in_progress: HashSet::new(),
+            iteration: workbook.settings.iteration(),
             dirty: None,
             current: None,
             scope: Vec::new(),
@@ -72,6 +75,7 @@ impl<'a> Evaluator<'a> {
             workbook,
             memo: HashMap::new(),
             in_progress: HashSet::new(),
+            iteration: workbook.settings.iteration(),
             dirty: Some(dirty),
             current: None,
             scope: Vec::new(),
@@ -100,13 +104,37 @@ impl<'a> Evaluator<'a> {
             return value.clone();
         }
         if !self.in_progress.insert(key) {
-            // Circular reference (iterative calc is not enabled).
+            // A cell that depends on itself.
+            //
+            // With iteration off this is a mistake, and `#REF!` says so. With
+            // it on the author *meant* the loop — a balance that depends on the
+            // interest it accrues — and the answer is the value from the
+            // previous pass, which is what makes the loop a sequence that can
+            // converge instead of an error.
+            if self.iteration.enabled {
+                return self.cached_value(sheet_index, at);
+            }
             return Value::Error(ErrorValue::Ref);
         }
         let value = self.compute_cell(sheet_index, at);
         self.in_progress.remove(&key);
         self.memo.insert(key, value.clone());
         value
+    }
+
+    /// A cell's last written value, without evaluating it.
+    ///
+    /// The seed for an iterative pass: on the first one it is whatever the file
+    /// carried (or empty, which reads as zero), and on each pass after it is
+    /// what the previous pass computed.
+    fn cached_value(&self, sheet_index: usize, at: CellRef) -> Value {
+        self.workbook
+            .sheets
+            .get(sheet_index)
+            .and_then(|sheet| sheet.cells.get(at))
+            .map_or(Value::Empty, |cell| {
+                value_from_cell(&cell.value, &self.workbook.strings)
+            })
     }
 
     fn compute_cell(&mut self, sheet_index: usize, at: CellRef) -> Value {

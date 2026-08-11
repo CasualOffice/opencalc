@@ -3752,3 +3752,150 @@ fn a_spill_is_not_blocked_by_its_own_previous_output() {
     );
     assert_eq!(value_at(&wb, 0, 4), CellValue::Number(99.0), "untouched");
 }
+
+/// Iterative calculation: a formula that depends on itself, on purpose.
+///
+/// P2-004. Circular references were detected and reported, never resolved — so
+/// a workbook whose author enabled iteration, which is the only way some
+/// financial models can be written at all, opened here as a sheet of `#REF!`.
+/// `docs/29`'s note on `<calcPr>` said exactly this would happen: the settings
+/// have been carried verbatim since before there was an engine to read them.
+mod iterative {
+    use casual_calc_formula::parse;
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    use crate::recalculate;
+
+    /// `A1 = A1 + 1`, the smallest loop there is, with iteration configurable.
+    fn self_incrementing(settings: &[(&str, &str)]) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        for (k, v) in settings {
+            wb.settings.calc.insert((*k).to_owned(), (*v).to_owned());
+        }
+        let handle = wb.store_formula(parse("A1+1").unwrap());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn value(wb: &Workbook) -> CellValue {
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(0, 0))
+            .unwrap()
+            .value
+            .clone()
+    }
+
+    #[test]
+    fn without_iteration_a_loop_is_still_an_error() {
+        // Unchanged behaviour, asserted so the new path cannot quietly become
+        // the old one: a circular reference nobody asked for is a mistake, and
+        // silently returning a number would hide it.
+        let mut wb = self_incrementing(&[]);
+        recalculate(&mut wb);
+        assert_eq!(
+            value(&wb),
+            CellValue::Error(casual_calc_model::ErrorValue::Ref)
+        );
+    }
+
+    #[test]
+    fn with_iteration_the_loop_runs_the_number_of_passes_asked_for() {
+        // `A1 = A1 + 1` never converges, so the count is what stops it — and
+        // makes the result exactly countable: five passes from empty is 5.
+        let mut wb = self_incrementing(&[("iterate", "1"), ("iterateCount", "5")]);
+        recalculate(&mut wb);
+        assert_eq!(value(&wb), CellValue::Number(5.0));
+    }
+
+    #[test]
+    fn a_converging_loop_stops_early_rather_than_running_the_full_count() {
+        // `A1 = (A1 + 10) / 2` converges on 10. With a hundred passes allowed
+        // and a loose tolerance it must stop well before the hundredth, which
+        // is the difference between a convergence test and a fixed loop.
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.settings.calc.insert("iterate".into(), "1".into());
+        wb.settings.calc.insert("iterateCount".into(), "100".into());
+        wb.settings.calc.insert("iterateDelta".into(), "0.5".into());
+        let handle = wb.store_formula(parse("(A1+10)/2").unwrap());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        recalculate(&mut wb);
+
+        let CellValue::Number(n) = value(&wb) else {
+            panic!("expected a number, got {:?}", value(&wb));
+        };
+        // Halving the gap each pass from 0: 5, 7.5, 8.75… The tolerance of 0.5
+        // is first met between the fourth and fifth pass, so it stops there —
+        // near 10 but not at it, which is what "converged to a tolerance" means.
+        assert!(n > 9.0 && n < 10.0, "stopped short of the cap at {n}");
+    }
+
+    #[test]
+    fn a_zero_iteration_count_does_not_hang() {
+        // A degenerate setting a file may legitimately carry.
+        let mut wb = self_incrementing(&[("iterate", "1"), ("iterateCount", "0")]);
+        recalculate(&mut wb);
+        assert!(matches!(value(&wb), CellValue::Number(_)));
+    }
+
+    #[test]
+    fn the_settings_are_read_from_the_file_and_default_to_excels() {
+        use casual_calc_model::WorkbookSettings;
+
+        let mut settings = WorkbookSettings::default();
+        assert!(!settings.iteration().enabled, "off unless the file says so");
+
+        settings.calc.insert("iterate".into(), "1".into());
+        let it = settings.iteration();
+        assert!(it.enabled);
+        assert_eq!(it.max_count, 100, "Excel's default");
+        assert!((it.max_change - 0.001).abs() < f64::EPSILON);
+
+        // A malformed limit falls back rather than disabling the loop: the
+        // author asked for iteration, and refusing over a detail they cannot
+        // see would turn a working model into a sheet of errors.
+        settings.calc.insert("iterateCount".into(), "lots".into());
+        assert_eq!(settings.iteration().max_count, 100);
+    }
+
+    #[test]
+    fn iteration_does_not_disturb_a_workbook_that_has_no_loop() {
+        // The cost of the feature for the workbooks that do not use it.
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.settings.calc.insert("iterate".into(), "1".into());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(4.0)));
+        let handle = wb.store_formula(parse("A1*2").unwrap());
+        sheet.cells.set(
+            CellRef::new(1, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        recalculate(&mut wb);
+        assert_eq!(
+            wb.sheets[0].cells.get(CellRef::new(1, 0)).unwrap().value,
+            CellValue::Number(8.0)
+        );
+    }
+}
