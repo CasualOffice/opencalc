@@ -8781,6 +8781,58 @@ pub fn collab_begin(client: f64, revision: f64) {
     });
 }
 
+/// Continue an existing session after a reconnect, keeping unsent work.
+///
+/// The counterpart to [`collab_begin`], and using the wrong one is the bug this
+/// exists to prevent: `collab_begin` starts a participant with nothing
+/// outstanding, so calling it on a reconnect silently discards the edits made
+/// just before the socket dropped — the ones most likely to be unacknowledged,
+/// and the ones a user most recently watched themselves type.
+///
+/// The document must **not** be reloaded around this. A resuming client's
+/// workbook is continuous; the server sends only what was missed, precisely so
+/// the local unsent operations still mean something against it.
+///
+/// Returns `false` when there was no session to continue, in which case the
+/// caller must join afresh.
+///
+/// See [ADR-015](../../../docs/61-COLLABORATION-RESUME.md).
+#[wasm_bindgen]
+pub fn collab_resume(client: f64, revision: f64) -> bool {
+    COLLAB.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(session) = guard.as_mut() else {
+            return false;
+        };
+        session.resume(
+            casual_calc_transaction::session::ClientId(client as u64),
+            revision as u64,
+        );
+        true
+    })
+}
+
+/// Whether anything is written and not yet acknowledged.
+///
+/// What a host shows as "saving", and what tells a user whether closing the tab
+/// now would lose something.
+///
+/// **Both** places have to be asked. Work made by the editor lands in the
+/// session's applied log first and only moves into the collaborative session at
+/// the next flush — so between an edit and that flush, which is where a
+/// disconnected client spends all of its time, the collaborative session knows
+/// nothing about it. Asking only that one reports "nothing unsaved" to somebody
+/// who has been typing for a minute into a dropped connection.
+#[wasm_bindgen]
+pub fn collab_unacknowledged() -> bool {
+    let in_flight = COLLAB.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(ClientSession::has_unacknowledged)
+    });
+    in_flight || with_session(WorkbookSession::has_applied).unwrap_or(false)
+}
+
 /// Leave the session. Local edits stop being tracked for submission.
 #[wasm_bindgen]
 pub fn collab_end() {

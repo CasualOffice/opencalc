@@ -28,6 +28,17 @@ const HEARTBEAT_MS = 10_000;
 // enough that somebody typing sees their work land continuously.
 const FLUSH_MS = 120;
 
+/// An opaque key for this editor's participation.
+///
+/// `randomUUID` where it exists, which is everywhere a browser supports
+/// WebSockets and secure contexts. The fallback is not a security measure — the
+/// key is not a credential — only enough uniqueness that two tabs do not
+/// collide.
+function newKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 /// Join a collaborative session.
 ///
 /// `wasm` is the engine module. `onStatus`, `onDocument` and `onPresence` are
@@ -40,10 +51,29 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
   let retryMs = RETRY_FLOOR_MS;
   let heartbeat = null;
   let flusher = null;
-  // Set once a Welcome has arrived. Until then nothing may be sent: the
-  // engine's session does not exist and a submission would be against a
-  // revision nobody agreed on.
+  // Set once a Welcome or a Resumed has arrived. Until then nothing may be
+  // sent: the engine's session does not exist and a submission would be against
+  // a revision nobody agreed on.
   let joined = false;
+
+  // This editor's claim to be the participant it was, for reconnecting.
+  //
+  // Generated once and held for the life of this session — deliberately *not*
+  // derived from the user, because the same person with the same token in two
+  // tabs is two participants, and sharing an id would have each tab's
+  // submissions suppress the other's as duplicates.
+  //
+  // Not a secret and not treated as one: the token is what authorises, and the
+  // server only honours a key for the user it issued it to. See ADR-015.
+  const resumeKey = newKey();
+
+  /// Where the engine believes the document is. Sent on a reconnect so the
+  /// server knows what to catch us up on.
+  let revision = 0;
+  /// Set when a resume succeeded and the chunk in flight has not been sent
+  /// again yet. The resend has to wait for the missed operations to be applied,
+  /// because they are what rebase it.
+  let mustResend = false;
 
   const status = (state, detail) => onStatus({ state, detail });
 
@@ -55,7 +85,15 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
 
     socket.onopen = () => {
       status("connecting");
-      send({ type: "join", protocol: wasm.protocol_version(), token });
+      send({
+        type: "join",
+        protocol: wasm.protocol_version(),
+        token,
+        // Offered from the first connection onward, because the point of a key
+        // is the *next* one. A server that has never seen it treats this as an
+        // ordinary join.
+        resume: { key: resumeKey, revision },
+      });
     };
 
     socket.onmessage = (event) => {
@@ -110,19 +148,44 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         wasm.session_load_snapshot(new Uint8Array(message.snapshot));
         wasm.collab_begin(message.client, message.revision);
         joined = true;
+        revision = message.revision;
+        mustResend = false;
         retryMs = RETRY_FLOOR_MS;
         onDocument({ reason: "joined", revision: message.revision, editable: message.editable });
         status("live");
         startTimers();
         break;
       }
+      case "resumed": {
+        // No snapshot, and that is the whole point: this client's document is
+        // continuous and may hold edits the server never received. Replacing it
+        // would discard exactly the unsent work resuming exists to preserve.
+        wasm.collab_resume(message.client, revision);
+        for (const op of message.missed) {
+          wasm.collab_receive(JSON.stringify(op), message.revision);
+        }
+        revision = message.revision;
+        joined = true;
+        // Now, and not before: the chunk in flight had to be rebased past what
+        // arrived above, or it would be submitted against a revision the server
+        // has moved beyond.
+        mustResend = true;
+        retryMs = RETRY_FLOOR_MS;
+        onDocument({ reason: "resumed", revision, editable: message.editable });
+        status("live");
+        startTimers();
+        flush();
+        break;
+      }
       case "ack":
         wasm.collab_acknowledge(message.revision);
+        revision = message.revision;
         break;
       case "apply":
         for (const op of message.ops) {
           wasm.collab_receive(JSON.stringify(op), message.revision);
         }
+        revision = message.revision;
         onDocument({ reason: "remote", revision: message.revision });
         break;
       case "presence":
@@ -164,6 +227,18 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
 
   function flush() {
     if (!joined || socket?.readyState !== WebSocket.OPEN) return;
+    if (mustResend) {
+      mustResend = false;
+      // The *same* sequence number as before. That is what lets the server
+      // recognise a chunk it already committed and answer with where it landed,
+      // rather than applying it a second time — which, for an insert-rows, is
+      // corruption rather than a glitch.
+      const again = wasm.collab_resend();
+      if (again) {
+        socket.send(again);
+        return;
+      }
+    }
     const submission = wasm.collab_flush();
     // Empty means nothing to send *or* a chunk already in flight. One at a
     // time, by design: with two outstanding, an acknowledgement does not say
@@ -205,6 +280,20 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     socket = null;
   }
 
+  /// Drop the connection and start a new one now.
+  ///
+  /// For a host that knows something the socket does not: a network changed, a
+  /// laptop woke, a VPN came up. A dead TCP connection can look open for
+  /// minutes before the operating system gives up on it, and every one of those
+  /// minutes is a user typing into an editor that is quietly not sending
+  /// anything. The reconnect resumes, so nothing typed in the meantime is lost.
+  function reconnect() {
+    // `close()` on the socket, not on this session: `onclose` then schedules
+    // the reconnect through the same path a real drop takes, which is what
+    // makes this exercise the real thing rather than a shortcut around it.
+    socket?.close();
+  }
+
   open();
-  return { present, close, flush };
+  return { present, close, flush, reconnect };
 }

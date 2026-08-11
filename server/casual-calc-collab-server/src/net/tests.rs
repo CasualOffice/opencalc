@@ -207,6 +207,29 @@ async fn join(socket: &mut Socket, claims: &Claims) -> Option<ServerMessage> {
         &ClientMessage::Join {
             protocol: PROTOCOL_VERSION,
             token: token(claims),
+            resume: None,
+        },
+    )
+    .await;
+    hear(socket).await
+}
+
+/// Join offering a resume key, and return whatever the server answers.
+async fn join_resuming(
+    socket: &mut Socket,
+    claims: &Claims,
+    key: &str,
+    revision: u64,
+) -> Option<ServerMessage> {
+    say(
+        socket,
+        &ClientMessage::Join {
+            protocol: PROTOCOL_VERSION,
+            token: token(claims),
+            resume: Some(Resume {
+                key: key.to_owned(),
+                revision,
+            }),
         },
     )
     .await;
@@ -385,6 +408,7 @@ async fn a_badly_signed_token_is_refused() {
         &ClientMessage::Join {
             protocol: PROTOCOL_VERSION,
             token: forged,
+            resume: None,
         },
     )
     .await;
@@ -405,6 +429,7 @@ async fn a_mismatched_protocol_is_told_so_at_once() {
         &ClientMessage::Join {
             protocol: PROTOCOL_VERSION + 99,
             token: token(&claims("Ada", Access::Edit)),
+            resume: None,
         },
     )
     .await;
@@ -1264,4 +1289,197 @@ async fn answering_keeps_a_participant_in_the_roster_rather_than_expiring_their_
         1,
         "a connected, responsive participant was expired from the roster"
     );
+}
+
+// --- Resuming after a disconnect (ADR-015) ----------------------------------
+
+#[tokio::test]
+async fn a_reconnecting_participant_is_the_same_participant() {
+    // The property everything else here rests on. The server suppresses
+    // duplicate submissions by `(client, seq)`; if a reconnect were a new
+    // client, a chunk the server had already committed and not yet
+    // acknowledged would be committed a second time when the client resent it.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let ada = claims("Ada", Access::Edit);
+
+    let mut first = connect(addr).await;
+    let Some(ServerMessage::Welcome { client: was, .. }) =
+        join_resuming(&mut first, &ada, "key-ada", 0).await
+    else {
+        panic!("a first join gets a welcome, key or no key")
+    };
+    drop(first);
+
+    let mut again = connect(addr).await;
+    let Some(ServerMessage::Resumed { client: now, .. }) =
+        join_resuming(&mut again, &ada, "key-ada", 0).await
+    else {
+        panic!("presenting a key the server issued should resume, not start over")
+    };
+    assert_eq!(
+        now, was,
+        "the same participant, so duplicate suppression holds"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_participant_is_given_what_it_missed_and_not_a_snapshot() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let ada = claims("Ada", Access::Edit);
+    let bob = claims("Bob", Access::Edit);
+
+    let mut hers = connect(addr).await;
+    join_resuming(&mut hers, &ada, "key-ada", 0).await.unwrap();
+    drop(hers);
+
+    // While she is away, somebody else edits.
+    let mut his = connect(addr).await;
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join(&mut his, &bob).await
+    else {
+        panic!("joined")
+    };
+    say(
+        &mut his,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: revision,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    assert!(matches!(
+        hear(&mut his).await,
+        Some(ServerMessage::Ack { .. })
+    ));
+
+    let mut again = connect(addr).await;
+    let Some(ServerMessage::Resumed {
+        revision: caught_up,
+        missed,
+        ..
+    }) = join_resuming(&mut again, &ada, "key-ada", 0).await
+    else {
+        panic!("resumed")
+    };
+    assert_eq!(missed.len(), 1, "exactly what happened while she was away");
+    assert_eq!(caught_up, 1, "and where that leaves the document");
+}
+
+#[tokio::test]
+async fn a_resend_after_reconnecting_is_recognised_rather_than_applied_twice() {
+    // The whole point of ADR-015, end to end at the protocol level: a client
+    // submits, the socket dies before the acknowledgement reaches it, and it
+    // reconnects and sends the same chunk again because it cannot know whether
+    // the first one landed.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let ada = claims("Ada", Access::Edit);
+
+    let mut first = connect(addr).await;
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join_resuming(&mut first, &ada, "key-ada", 0).await
+    else {
+        panic!("joined")
+    };
+    let chunk = Submission {
+        client,
+        seq: 1,
+        base: revision,
+        ops: vec![cell_edit(7.0)],
+    };
+    say(&mut first, &ClientMessage::Submit(chunk.clone())).await;
+    let Some(ServerMessage::Ack {
+        revision: landed, ..
+    }) = hear(&mut first).await
+    else {
+        panic!("committed")
+    };
+    // The acknowledgement is thrown away, standing in for a socket that died
+    // between the server sending it and the client reading it — the exact
+    // window in which a client cannot know what happened.
+    drop(first);
+
+    let mut again = connect(addr).await;
+    let Some(ServerMessage::Resumed { .. }) = join_resuming(&mut again, &ada, "key-ada", 0).await
+    else {
+        panic!("resumed")
+    };
+    say(&mut again, &ClientMessage::Submit(chunk)).await;
+    let Some(ServerMessage::Ack { revision: told, .. }) = hear(&mut again).await else {
+        panic!("the resend is acknowledged rather than refused")
+    };
+    assert_eq!(
+        told, landed,
+        "told where it landed the first time, not committed a second time"
+    );
+
+    // And the document moved once, not twice.
+    let mut watcher = connect(addr).await;
+    let Some(ServerMessage::Welcome { revision: now, .. }) = join(&mut watcher, &ada).await else {
+        panic!("joined")
+    };
+    assert_eq!(now, landed, "one edit, one revision");
+}
+
+#[tokio::test]
+async fn a_resume_key_is_not_honoured_for_a_different_user() {
+    // A key is a disambiguator, not a credential — but it must not be usable as
+    // one either. Someone holding a valid token for this document who guessed
+    // another participant's key could otherwise adopt their client id and have
+    // that participant's submissions suppressed as duplicates of their own.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let ada = claims("Ada", Access::Edit);
+    let bob = claims("Bob", Access::Edit);
+
+    let mut hers = connect(addr).await;
+    let Some(ServerMessage::Welcome { client: ada_is, .. }) =
+        join_resuming(&mut hers, &ada, "key-ada", 0).await
+    else {
+        panic!("joined")
+    };
+
+    let mut his = connect(addr).await;
+    let answer = join_resuming(&mut his, &bob, "key-ada", 0).await;
+    let Some(ServerMessage::Welcome { client: bob_is, .. }) = answer else {
+        panic!("another user presenting her key starts afresh; got {answer:?}")
+    };
+    assert_ne!(bob_is, ada_is, "and is emphatically not her");
+}
+
+#[tokio::test]
+async fn a_client_too_far_behind_to_catch_up_is_told_before_its_document_is_replaced() {
+    // The bounded-offline edge of ADR-011. The work is still lost — what
+    // changes is that it is lost audibly, so a host can offer to put the unsent
+    // cells somewhere before the snapshot lands on top of them.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let ada = claims("Ada", Access::Edit);
+
+    // First, so the key is one the server recognises: a key it has never seen
+    // is a participant joining for the first time, which has lost nothing and
+    // must *not* be warned.
+    let mut first = connect(addr).await;
+    join_resuming(&mut first, &ada, "key-ada", 0).await.unwrap();
+    drop(first);
+
+    let mut socket = connect(addr).await;
+    // A revision this document's history cannot reach back to — here by being
+    // implausibly far ahead, which is the same unanswerable question as being
+    // too far behind: there is no run of operations that gets from there to
+    // here.
+    let answer = join_resuming(&mut socket, &ada, "key-ada", 9_000).await;
+    let Some(ServerMessage::Refused {
+        reason: Refusal::TooFarBehind { .. },
+        ..
+    }) = answer
+    else {
+        panic!("said so first; got {answer:?}")
+    };
+    // And only then the fresh start.
+    assert!(matches!(
+        hear(&mut socket).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
 }

@@ -212,6 +212,30 @@ impl ClientSession {
         }
     }
 
+    /// Continue after a reconnect, keeping everything outstanding.
+    ///
+    /// The counterpart to [`new`](Self::new), and the difference is the whole
+    /// point: `new` starts a participant with nothing written and nothing sent,
+    /// which on a reconnect would discard the edits made just before the socket
+    /// dropped — the ones most likely to be unacknowledged, and the ones a user
+    /// most recently watched themselves type.
+    ///
+    /// The chunk counter is kept too. It numbers submissions, the server
+    /// suppresses duplicates by `(client, seq)`, and restarting the count would
+    /// have a *new* chunk collide with an old one's number and be discarded as
+    /// something already seen.
+    ///
+    /// `client` is normally the id this session already had — the server
+    /// reissues it, which is what makes the suppression work across the gap. It
+    /// is taken as an argument rather than assumed so the server stays the only
+    /// authority on identity.
+    ///
+    /// See [ADR-015](../../../docs/61-COLLABORATION-RESUME.md).
+    pub fn resume(&mut self, client: ClientId, revision: u64) {
+        self.client = client;
+        self.revision = revision;
+    }
+
     /// Who this client is, as the server sees it.
     #[must_use]
     pub fn id(&self) -> ClientId {
@@ -254,12 +278,6 @@ impl ClientSession {
         Ok(())
     }
 
-    /// Take the pending edits as a chunk to send, if any and if the previous
-    /// chunk has been acknowledged.
-    ///
-    /// Returns `None` when there is nothing to send or a chunk is already in
-    /// flight — the one-at-a-time rule, which is what keeps a single server
-    /// order sufficient.
     /// Record an operation the **host already applied**, for sending on.
     ///
     /// The counterpart to [`edit`](Self::edit) for a host that owns the apply
@@ -274,6 +292,14 @@ impl ClientSession {
         self.pending.push(op);
     }
 
+    /// Take the pending edits as a chunk to send, if any and if the previous
+    /// chunk has been acknowledged.
+    ///
+    /// Returns `None` when there is nothing to send or a chunk is already in
+    /// flight — the one-at-a-time rule, which is what keeps a single server
+    /// order sufficient. (This paragraph had drifted onto
+    /// [`record`](Self::record), leaving the two functions describing each
+    /// other.)
     pub fn flush(&mut self, workbook: &Workbook) -> Option<Submission> {
         if !self.sent.is_empty() || self.pending.is_empty() {
             return None;

@@ -987,3 +987,153 @@ fn a_style_applied_by_one_client_arrives_at_another() {
         assert_eq!(landed, Some(bold.clone()), "client {index} sees it bold");
     }
 }
+
+// --- Resuming after a disconnect (ADR-015) ----------------------------------
+
+/// The reason [`ClientSession::resume`] exists rather than reusing
+/// [`ClientSession::new`].
+///
+/// A reconnecting client that started over would arrive with nothing
+/// outstanding, silently dropping the edits made in the seconds before the
+/// socket died — which are precisely the ones least likely to have been
+/// acknowledged, and the ones the user most recently watched themselves type.
+#[test]
+fn resuming_keeps_the_work_a_fresh_start_would_have_thrown_away() {
+    let mut workbook = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    client
+        .edit(
+            &mut workbook,
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(99.0))),
+            },
+        )
+        .unwrap();
+    let sent = client.flush(&workbook).expect("a chunk to send");
+    assert!(client.has_unacknowledged());
+
+    // The socket dies here: sent, never acknowledged.
+    client.resume(ClientId(1), 0);
+
+    assert!(
+        client.has_unacknowledged(),
+        "the chunk in flight survives the reconnect"
+    );
+    let again = client.resend(&workbook).expect("the same chunk again");
+    assert_eq!(
+        again.seq, sent.seq,
+        "and with its original sequence number, which is what lets the server \
+         recognise it instead of applying it twice"
+    );
+}
+
+/// The other half: the numbering has to continue, not restart.
+///
+/// The server suppresses duplicates by `(client, seq)`. If a resumed session
+/// numbered its next chunk 1 again, that genuinely new work would be discarded
+/// as something already seen — a silent loss caused by the mechanism meant to
+/// prevent one.
+#[test]
+fn resuming_continues_the_numbering_so_new_work_is_not_mistaken_for_old() {
+    let mut workbook = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    let write = |client: &mut ClientSession, workbook: &mut Workbook, row: u32| {
+        client
+            .edit(
+                workbook,
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(row, 0),
+                    cell: Some(Cell::value(CellValue::Number(f64::from(row)))),
+                },
+            )
+            .unwrap();
+    };
+
+    write(&mut client, &mut workbook, 1);
+    let first = client.flush(&workbook).unwrap();
+    client.acknowledge(1);
+
+    client.resume(ClientId(1), 1);
+
+    write(&mut client, &mut workbook, 2);
+    let after = client.flush(&workbook).expect("a second chunk");
+    assert!(
+        after.seq > first.seq,
+        "a resumed session numbers onward ({} must exceed {})",
+        after.seq,
+        first.seq
+    );
+}
+
+/// What the client does with the catch-up it is handed.
+///
+/// The missed operations are not merely applied: they rebase the client's own
+/// outstanding chunk, so that when it is resent it is expressed against the
+/// revision the server has actually reached.
+#[test]
+fn what_was_missed_rebases_the_chunk_that_is_about_to_be_resent() {
+    let mut server_book = seed();
+    let mut server = ServerSession::new();
+
+    let mut mine = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    // I insert a row at the top and my chunk never arrives.
+    client
+        .edit(
+            &mut mine,
+            Operation::InsertRows {
+                sheet: 0,
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+    let lost = client.flush(&mine).expect("a chunk");
+
+    // Meanwhile somebody else writes a cell, and it is committed.
+    let theirs = Submission {
+        client: ClientId(2),
+        seq: 1,
+        base: 0,
+        ops: vec![WireOperation::of(
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(4, 0),
+                cell: Some(Cell::value(CellValue::Number(500.0))),
+            },
+            &server_book,
+        )],
+    };
+    let Commit::Applied { ops, revision } = server.commit(&mut server_book, &theirs).unwrap()
+    else {
+        panic!("committed")
+    };
+
+    // I reconnect and am caught up.
+    client.resume(ClientId(1), 0);
+    for op in &ops {
+        client.receive(&mut mine, op, revision).unwrap();
+    }
+
+    // Now the resend, which the server must be able to order.
+    let again = client.resend(&mine).expect("the chunk, rebased");
+    assert_eq!(
+        again.base, revision,
+        "written against where the document is now"
+    );
+    assert_eq!(again.seq, lost.seq, "and still the same chunk");
+    let outcome = server.commit(&mut server_book, &again);
+    assert!(
+        outcome.is_ok(),
+        "a rebased resend is orderable: {outcome:?}"
+    );
+
+    // Both sides agree afterwards, which is the claim that matters.
+    assert_eq!(observe(&mine), observe(&server_book));
+}

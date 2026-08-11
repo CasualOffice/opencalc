@@ -472,6 +472,17 @@ impl WorkbookSession {
         self.applied = None;
     }
 
+    /// Whether anything applied is waiting to be collected.
+    ///
+    /// A read, where [`take_applied`](Self::take_applied) is a take. A host
+    /// asking "is there unsaved work" must not empty the queue to find out, and
+    /// must not miss what is sitting here: between an edit and the next flush,
+    /// this buffer is the *only* place that work exists.
+    #[must_use]
+    pub fn has_applied(&self) -> bool {
+        self.applied.as_ref().is_some_and(|log| !log.is_empty())
+    }
+
     /// Take everything applied since the last call.
     #[must_use]
     pub fn take_applied(&mut self) -> Vec<Operation> {

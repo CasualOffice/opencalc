@@ -31,6 +31,12 @@ const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
 const ORIGIN_PORT = Number(process.env.OPENCALC_ORIGIN_PORT ?? 8124);
 const COLLAB_URL = `ws://127.0.0.1:${COLLAB_PORT}/collab`;
 const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
+/// The protocol version the raw-socket client below speaks.
+///
+/// Asserted against the engine's own number in the first test, because a client
+/// that states the wrong version is refused *before* it joins — which, from the
+/// test's side, is indistinguishable from the server hanging.
+const PROTOCOL = 2;
 
 
 
@@ -124,6 +130,9 @@ const setCellIn = (page, row, col, text) =>
 ///
 /// Resolves with the first message the server sends after `act` runs.
 function speakDirectly(key, user, access, act) {
+  // Kept in step with the engine by `the protocol version this file speaks is
+  // the one the engine speaks`, below. A raw client has to state a version, and
+  // a stale one here would look like the server going silent.
   const { claims } = tokenFor({ document: key, user, origin: ORIGIN, access });
   const token = mint(claims, SECRET);
   return new Promise((resolve, reject) => {
@@ -133,7 +142,8 @@ function speakDirectly(key, user, access, act) {
       reject(new Error("the server said nothing at all"));
     }, 10_000);
     let acted = false;
-    socket.onopen = () => socket.send(JSON.stringify({ type: "join", protocol: 1, token }));
+    socket.onopen = () =>
+      socket.send(JSON.stringify({ type: "join", protocol: PROTOCOL, token }));
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data);
       if (message.type === "welcome") {
@@ -141,7 +151,14 @@ function speakDirectly(key, user, access, act) {
         act((m) => socket.send(JSON.stringify(m)), message.client, message.revision);
         return;
       }
-      if (!acted) return;
+      if (!acted) {
+        // Refused before it even joined. Reported rather than waited out, so
+        // the failure names itself instead of timing out as silence.
+        clearTimeout(timer);
+        socket.close();
+        reject(new Error(`refused before joining: ${JSON.stringify(message)}`));
+        return;
+      }
       clearTimeout(timer);
       socket.close();
       resolve(message);
@@ -154,6 +171,18 @@ function speakDirectly(key, user, access, act) {
 }
 
 test.describe("collaboration", () => {
+  test("the protocol version this file speaks is the one the engine speaks", async ({ browser }) => {
+    const page = await browser.newPage();
+    await boot(page);
+    expect(await page.evaluate(() => window.__editorModule && null)).toBe(null);
+    const engine = await page.evaluate(async () => {
+      const editor = await import(window.__editorModule);
+      return editor.wasmApi().protocol_version();
+    });
+    expect(engine, "bump PROTOCOL in this file when the protocol changes").toBe(PROTOCOL);
+    await page.close();
+  });
+
   test("an edit made in one browser arrives in another", async ({ browser }) => {
     const key = freshDocument();
     const alice = await browser.newPage();
@@ -295,5 +324,92 @@ test.describe("collaboration", () => {
 
     await alice.close();
     await bob.close();
+  });
+
+  // --- Reconnecting (ADR-015) -----------------------------------------------
+
+  test("an edit made while disconnected arrives once the browser comes back", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    // Separate contexts, because going offline is a property of a context and
+    // taking both offline would prove nothing.
+    const away = await browser.newContext();
+    const watching = await browser.newContext();
+    const alice = await away.newPage();
+    const bob = await watching.newPage();
+    await boot(alice);
+    await boot(bob);
+    await join(alice, { document: key, user: { id: "u-alice", name: "Alice" } });
+    await join(bob, { document: key, user: { id: "u-bob", name: "Bob" } });
+
+    // Alice loses the network — a lid closing, a tunnel, a Wi-Fi handover, a
+    // rolling deployment of the server. All ordinary, which is why losing work
+    // to one is not acceptable.
+    // Offline first so the reconnection attempts fail, then the socket is
+    // dropped. Taking a context offline does not tear down an *established*
+    // WebSocket — it stops new connections — so both halves are needed to hold
+    // a client in the reconnecting state for as long as the test wants.
+    await away.setOffline(true);
+    await alice.evaluate(() => window.__session.reconnect());
+    await expect
+      .poll(() => alice.evaluate(() => window.__collab.statuses.map((s) => s.state)))
+      .toContain("reconnecting");
+
+    // And types anyway, which is the whole point: her editor still works, and
+    // what she writes must not evaporate when the socket comes back.
+    await setCellIn(alice, 30, 1, "written while offline");
+    expect(await alice.evaluate(() => window.__editor.wasmApi().collab_unacknowledged())).toBe(true);
+
+    await away.setOffline(false);
+
+    await expect
+      .poll(() => cellIn(bob, 30, 1), {
+        message: "work done during a disconnect was lost on reconnect",
+        timeout: 30_000,
+      })
+      .toBe("written while offline");
+
+    // Resumed rather than restarted — a fresh join would have replaced her
+    // document with a snapshot, which is exactly how the work used to vanish.
+    expect(
+      await alice.evaluate(() => window.__collab.documents.some((d) => d.reason === "resumed")),
+    ).toBe(true);
+
+    await away.close();
+    await watching.close();
+  });
+
+  test("a remote edit made during a disconnect is caught up on, not lost", async ({ browser }) => {
+    const key = freshDocument();
+    const away = await browser.newContext();
+    const watching = await browser.newContext();
+    const alice = await away.newPage();
+    const bob = await watching.newPage();
+    await boot(alice);
+    await boot(bob);
+    await join(alice, { document: key, user: { id: "u-alice", name: "Alice" } });
+    await join(bob, { document: key, user: { id: "u-bob", name: "Bob" } });
+
+    await away.setOffline(true);
+    await alice.evaluate(() => window.__session.reconnect());
+    await expect
+      .poll(() => alice.evaluate(() => window.__collab.statuses.map((s) => s.state)))
+      .toContain("reconnecting");
+
+    // The other direction: the world moved while she was away, and she has to
+    // be told what she slept through rather than handed a whole new document.
+    await setCellIn(bob, 31, 1, "happened while she was away");
+
+    await away.setOffline(false);
+    await expect
+      .poll(() => cellIn(alice, 31, 1), {
+        message: "a reconnecting client was never caught up",
+        timeout: 30_000,
+      })
+      .toBe("happened while she was away");
+
+    await away.close();
+    await watching.close();
   });
 });

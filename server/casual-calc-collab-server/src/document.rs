@@ -10,9 +10,11 @@ use casual_calc_eval::recalculate;
 use casual_calc_export::write_workbook;
 use casual_calc_import::import_package;
 use casual_calc_model::Workbook;
+use casual_calc_transaction::Operation;
 use casual_calc_transaction::session::{
     Commit, ServerSession, SessionError, Snapshot, SnapshotPolicy, Submission,
 };
+use casual_calc_transaction::wire::WireOperation;
 
 use crate::lifecycle::{Action, CallbackOutcome, SavePolicy, SessionLifecycle};
 
@@ -69,6 +71,21 @@ pub struct Joined {
     pub snapshot: Vec<u8>,
     /// The revision that snapshot is at.
     pub revision: u64,
+}
+
+/// What a reconnecting participant is told: where the document is, and the
+/// operations it slept through.
+///
+/// The counterpart to [`Joined`], and the contrast is the point — a joining
+/// participant is given the whole document because it has none, and a resuming
+/// one is given only the difference because replacing what it has would throw
+/// away its unsent edits.
+#[derive(Debug, Clone)]
+pub struct Resumption {
+    /// The revision the document has reached, once `missed` is applied.
+    pub revision: u64,
+    /// Everything committed while this participant was away, oldest first.
+    pub missed: Vec<WireOperation>,
 }
 
 /// A document being edited by one or more participants.
@@ -172,6 +189,43 @@ impl DocumentSession {
             snapshot: snapshot.bytes,
             revision: snapshot.revision,
         })
+    }
+
+    /// A participant reconnects, and is told only what it missed.
+    ///
+    /// Named for the participant, not the document: [`resume`](Self::resume) is
+    /// this *document* coming back from a snapshot after a promotion or a cold
+    /// start, which is a different thing that happens to a different noun.
+    ///
+    /// Deliberately **not** a snapshot. A reconnecting client's document is
+    /// continuous and may hold edits the server never received; replacing it
+    /// would discard exactly the unacknowledged work that resuming exists to
+    /// preserve ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)).
+    ///
+    /// Returns `None` when `from` is older than the history still retained, in
+    /// which case the caller must fall back to a fresh join and say so — the
+    /// bounded-offline limit of ADR-011, which this makes audible rather than
+    /// silent.
+    pub fn rejoin(&mut self, from: u64) -> Option<Resumption> {
+        self.life.joined();
+        let missed: Vec<Operation> = self.server.history_since(from)?.to_vec();
+        // Packaged against this workbook, which is the last place the handles
+        // in them mean anything: an operation's formula and style ids index
+        // tables the receiver does not share.
+        let missed = missed
+            .into_iter()
+            .map(|op| WireOperation::of(op, &self.workbook))
+            .collect();
+        Some(Resumption {
+            revision: self.revision(),
+            missed,
+        })
+    }
+
+    /// The oldest revision a client may still resume from.
+    #[must_use]
+    pub fn oldest_rebasable(&self) -> u64 {
+        self.server.oldest_rebasable()
     }
 
     /// A participant leaves. The last one leaving is a save point.

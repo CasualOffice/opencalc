@@ -25,7 +25,10 @@ use crate::session::{ClientId, Submission};
 use crate::wire::WireOperation;
 
 /// The conversation's version. Bumped when a message changes shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2 added [`Resume`] and [`ServerMessage::Resumed`]
+/// ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +83,13 @@ pub enum ClientMessage {
         /// where the server may fetch and send back. The server holds no
         /// per-document state, so the token is the whole contract.
         token: String,
+        /// Set when this is a reconnect rather than a first join.
+        ///
+        /// Optional so a client that never disconnected, and a host that has
+        /// not implemented resumption, both still work — they simply always
+        /// start afresh, which is what happened before ADR-015.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<Resume>,
     },
     /// A chunk of the client's own edits.
     ///
@@ -104,6 +114,21 @@ pub enum ClientMessage {
     Leave,
 }
 
+/// A reconnecting client's claim to be who it was.
+///
+/// Not a credential. The token authorises; this only says *which participant*
+/// of that user's this connection continues, so the server can hand back the
+/// same [`ClientId`] and its duplicate suppression keeps working across the
+/// gap. The server checks the recorded user matches the token's before honouring
+/// it, which is what keeps a guessed key from being worth guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resume {
+    /// The client's own opaque key, stable for the life of one editor.
+    pub key: String,
+    /// The revision it last saw, which is where its catch-up starts.
+    pub revision: u64,
+}
+
 /// Server to client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -124,6 +149,33 @@ pub enum ServerMessage {
         snapshot: Vec<u8>,
         /// Whether this participant may edit.
         editable: bool,
+    },
+    /// Rejoined as the same participant, with what was missed.
+    ///
+    /// Sent instead of [`Welcome`](Self::Welcome) when a reconnecting client
+    /// presented a [`Resume`] the server honoured. There is no snapshot: the
+    /// client's document is continuous, and replacing it would discard exactly
+    /// the unacknowledged work this message exists to preserve.
+    Resumed {
+        /// The protocol the server speaks.
+        protocol: u32,
+        /// The **same** id as before, which is what makes a resend of an
+        /// already-committed chunk recognisable as a duplicate rather than a
+        /// second edit.
+        client: ClientId,
+        /// The revision the document has reached, after `missed`.
+        revision: u64,
+        /// Whether this participant may edit. Re-stated rather than assumed:
+        /// the token is verified again on reconnect and may say something
+        /// different by then.
+        editable: bool,
+        /// Everything committed while this client was away, oldest first.
+        ///
+        /// Carried in this message rather than following it, so a client cannot
+        /// resend its outstanding chunk before rebasing it past them — which
+        /// would submit edits written against a revision the server has moved
+        /// beyond.
+        missed: Vec<WireOperation>,
     },
     /// A submission was committed.
     ///
@@ -286,6 +338,15 @@ mod tests {
             ClientMessage::Join {
                 protocol: PROTOCOL_VERSION,
                 token: "signed".into(),
+                resume: None,
+            },
+            ClientMessage::Join {
+                protocol: PROTOCOL_VERSION,
+                token: "signed".into(),
+                resume: Some(Resume {
+                    key: "opaque".into(),
+                    revision: 12,
+                }),
             },
             ClientMessage::Heartbeat,
             ClientMessage::Presence {
@@ -316,6 +377,13 @@ mod tests {
             },
             ServerMessage::Departed {
                 client: ClientId(1),
+            },
+            ServerMessage::Resumed {
+                protocol: PROTOCOL_VERSION,
+                client: ClientId(1),
+                revision: 12,
+                editable: true,
+                missed: vec![],
             },
             ServerMessage::Stopped {
                 reason: Refusal::NotSaving,

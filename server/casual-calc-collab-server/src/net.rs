@@ -34,7 +34,9 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use casual_calc_transaction::protocol::{ClientMessage, PROTOCOL_VERSION, Refusal, ServerMessage};
+use casual_calc_transaction::protocol::{
+    ClientMessage, PROTOCOL_VERSION, Refusal, Resume, ServerMessage,
+};
 use casual_calc_transaction::session::ClientId;
 use tokio::sync::broadcast;
 
@@ -218,6 +220,60 @@ struct Live {
     title: String,
     /// When this document became empty, or zero while somebody is in it.
     idle_since: std::sync::atomic::AtomicU64,
+    /// Resume keys, to the participant each one continues.
+    ///
+    /// What lets a reconnecting client be *the same* participant rather than a
+    /// new one — which is what makes the server's `(client, seq)` duplicate
+    /// suppression work across a dropped socket, and so what makes resending an
+    /// unacknowledged chunk safe. See
+    /// [ADR-015](../../../docs/61-COLLABORATION-RESUME.md).
+    ///
+    /// The user id is stored beside the client id and checked before a key is
+    /// honoured. Without that, anyone holding a valid token for this document
+    /// could adopt another participant's identity by presenting their key, and
+    /// have that participant's submissions suppressed as duplicates of their
+    /// own. With it, a key is only ever useful to the person it was issued to.
+    resumes: Mutex<Resumes>,
+}
+
+/// The resume keys one document has issued.
+///
+/// Bounded, and evicted oldest-first. A key costs memory and is supplied by the
+/// client, so an unbounded map is a participant with a loop and a document that
+/// grows until the node dies. The cap is generous next to any real number of
+/// tabs on one document, and reaching it only means the oldest participant
+/// cannot resume — it rejoins fresh, which is what happened before this existed.
+#[derive(Debug, Default)]
+struct Resumes {
+    /// Key to `(user id, client id)`, in insertion order.
+    entries: Vec<(String, String, ClientId)>,
+}
+
+impl Resumes {
+    /// How many keys one document will remember.
+    const CAP: usize = 512;
+    /// The longest key accepted. A key is an opaque identifier, not a payload.
+    const MAX_KEY: usize = 128;
+
+    /// The participant `key` continues, if it is this user's.
+    fn honour(&self, key: &str, user: &str) -> Option<ClientId> {
+        self.entries
+            .iter()
+            .find(|(k, u, _)| k == key && u == user)
+            .map(|(_, _, client)| *client)
+    }
+
+    /// Remember that `key` names `client`, replacing any earlier meaning.
+    fn remember(&mut self, key: &str, user: &str, client: ClientId) {
+        if key.len() > Self::MAX_KEY {
+            return;
+        }
+        self.entries.retain(|(k, _, _)| k != key);
+        if self.entries.len() >= Self::CAP {
+            self.entries.remove(0);
+        }
+        self.entries.push((key.to_owned(), user.to_owned(), client));
+    }
 }
 
 /// Every document this node currently holds.
@@ -699,7 +755,7 @@ fn now_ms() -> u64 {
 }
 
 async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSocket) {
-    let Some(claims) = authorise(&state, &document_key, &mut socket).await else {
+    let Some((claims, resume)) = authorise(&state, &document_key, &mut socket).await else {
         return;
     };
 
@@ -737,53 +793,128 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
 
     // Everything from here is a participant in a document that exists.
     let mut updates = live.fan_out.subscribe();
-    let client = {
-        let mut next = lock(&live.next_client);
-        *next += 1;
-        ClientId(*next)
-    };
 
-    // No lock is ever held across an `await` in this module. That is not a
-    // style preference: a `MutexGuard` held over a suspension point makes the
-    // future non-`Send`, and — worse — parks every other participant on this
-    // document behind one slow socket.
-    let joined = {
+    // A reconnecting client that can be resumed keeps the id it had. That is
+    // what makes the server's `(client, seq)` duplicate suppression span the
+    // gap, and so what makes it safe for the client to resend a chunk it never
+    // heard back about — the alternative being to lose it or to apply it twice
+    // (ADR-015). A resume is honoured only for the user it was issued to.
+    // Two questions, and they must be kept apart. *Is this a participant we
+    // know?* — and only if so, *can we still catch it up?* A client whose key we
+    // have never seen is simply joining for the first time and has lost
+    // nothing; a client we recognise and cannot catch up is about to have its
+    // unsent work replaced by a snapshot, and has to be told.
+    let recognised = resume
+        .as_ref()
+        .and_then(|ask| lock(&live.resumes).honour(&ask.key, &claims.user.id));
+    let resumed = recognised.and_then(|client| {
+        // Locking twice rather than holding one guard across both: no lock is
+        // held across an await anywhere in this module.
         let mut session = lock(&live.session);
-        session.join()
+        session
+            .rejoin(resume.as_ref().map_or(0, |ask| ask.revision))
+            .map(|caught_up| (client, caught_up))
+    });
+
+    let client = match &resumed {
+        Some((client, _)) => *client,
+        None => {
+            let mut next = lock(&live.next_client);
+            *next += 1;
+            ClientId(*next)
+        }
     };
-    let Ok(joined) = joined else {
-        let _ = send(
-            &mut socket,
-            &ServerMessage::Stopped {
-                reason: Refusal::NotSaving,
-            },
-        )
-        .await;
-        return;
-    };
-    lock(&live.roster).joined(
-        client,
-        claims.user.name.clone(),
-        claims.user.color.clone(),
-        now_ms(),
-    );
+    if let Some(ask) = &resume {
+        // Remembered on every join that offers a key, not only on a resumed
+        // one: the point of a key is the *next* reconnect.
+        lock(&live.resumes).remember(&ask.key, &claims.user.id, client);
+    }
 
     let read_only = lock(&live.session).is_read_only();
     let editable = claims.permissions.access >= crate::token::Access::Comment && !read_only;
-    if send(
-        &mut socket,
-        &ServerMessage::Welcome {
-            protocol: PROTOCOL_VERSION,
+
+    if let Some((_, caught_up)) = resumed {
+        lock(&live.roster).joined(
             client,
-            revision: joined.revision,
-            snapshot: joined.snapshot,
-            editable,
-        },
-    )
-    .await
-    .is_err()
-    {
-        return;
+            claims.user.name.clone(),
+            claims.user.color.clone(),
+            now_ms(),
+        );
+        if send(
+            &mut socket,
+            &ServerMessage::Resumed {
+                protocol: PROTOCOL_VERSION,
+                client,
+                revision: caught_up.revision,
+                editable,
+                missed: caught_up.missed,
+            },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+    } else {
+        // Either a first join, or a participant we recognise and cannot catch
+        // up. Only the second has anything to lose, and it is told *before* the
+        // snapshot arrives — because the snapshot is what destroys the unsent
+        // work, and a client that is told can offer to put it somewhere first.
+        // Silent is the one thing this must not be.
+        if recognised.is_some() {
+            let (oldest, current) = {
+                let session = lock(&live.session);
+                (session.oldest_rebasable(), session.revision())
+            };
+            let _ = send(
+                &mut socket,
+                &ServerMessage::Refused {
+                    seq: None,
+                    reason: Refusal::TooFarBehind { oldest, current },
+                },
+            )
+            .await;
+        }
+
+        // No lock is ever held across an `await` in this module. That is not a
+        // style preference: a `MutexGuard` held over a suspension point makes
+        // the future non-`Send`, and — worse — parks every other participant on
+        // this document behind one slow socket.
+        let joined = {
+            let mut session = lock(&live.session);
+            session.join()
+        };
+        let Ok(joined) = joined else {
+            let _ = send(
+                &mut socket,
+                &ServerMessage::Stopped {
+                    reason: Refusal::NotSaving,
+                },
+            )
+            .await;
+            return;
+        };
+        lock(&live.roster).joined(
+            client,
+            claims.user.name.clone(),
+            claims.user.color.clone(),
+            now_ms(),
+        );
+        if send(
+            &mut socket,
+            &ServerMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                client,
+                revision: joined.revision,
+                snapshot: joined.snapshot,
+                editable,
+            },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
     }
 
     // A quiet connection is pinged, and one that has not answered anything for
@@ -895,12 +1026,17 @@ async fn authorise(
     state: &Arc<Service>,
     document_key: &str,
     socket: &mut WebSocket,
-) -> Option<Claims> {
+) -> Option<(Claims, Option<Resume>)> {
     let first = socket.recv().await?;
     let Ok(Message::Text(text)) = first else {
         return None;
     };
-    let Ok(ClientMessage::Join { protocol, token }) = serde_json::from_str(&text) else {
+    let Ok(ClientMessage::Join {
+        protocol,
+        token,
+        resume,
+    }) = serde_json::from_str(&text)
+    else {
         // A connection that opens with anything else is not speaking this
         // protocol, and there is nothing useful to say back to it.
         return None;
@@ -916,7 +1052,7 @@ async fn authorise(
 
     let now_secs = now_ms() / 1_000;
     match state.config.verifier.verify(&token, document_key, now_secs) {
-        Ok(claims) => Some(claims),
+        Ok(claims) => Some((claims, resume)),
         Err(refusal) => {
             // The client is told one thing; the operator's log gets the detail.
             tracing_refusal(&refusal);
@@ -969,6 +1105,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
             callback: claims.callback.clone(),
             title: claims.document.title.clone(),
             idle_since: std::sync::atomic::AtomicU64::new(0),
+            resumes: Mutex::default(),
         })
     })))
 }
