@@ -386,18 +386,23 @@ pub async fn serve_on_with_shutdown(
     // the save lifecycle — quiesce timer, ceiling, revision cadence, callback
     // retry, read-only fencing — is built, tested and driven by nothing, and
     // the node holds the only copy of every edit until it restarts.
-    tokio::spawn(sweep(Arc::clone(&state), shutdown.clone()));
+    let sweeper = tokio::spawn(sweep(Arc::clone(&state), shutdown.clone()));
 
     let signalled = shutdown.clone();
     axum::serve(listener, router(Arc::clone(&state)))
         .with_graceful_shutdown(async move { signalled.wait().await })
         .await?;
 
-    // The sweeper has been told to stop; give it the moment it needs to notice,
-    // so the drain below is the only thing saving.
-    tokio::time::sleep(std::time::Duration::from_millis(
-        state.config.limits.tick_ms.saturating_mul(2).max(20),
-    ))
+    // Wait for the sweeper to actually stop, rather than sleeping long enough
+    // that it probably has. The first version slept twice the tick interval,
+    // which was two seconds of dead time on every deploy for a task that
+    // notices in microseconds — and would still have been a guess at a longer
+    // tick. Bounded anyway, because a sweeper wedged inside a save must not
+    // hold the process open.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(state.config.limits.drain_timeout_ms),
+        sweeper,
+    )
     .await;
 
     // Then the part that matters. A rolling deploy that drops connections has

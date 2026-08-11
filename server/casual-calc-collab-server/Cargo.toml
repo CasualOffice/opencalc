@@ -20,6 +20,7 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
@@ -35,3 +36,11 @@ casual-calc-formula = { path = "../../crates/casual-calc-formula" }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "casual-calc-collab-server"
+path = "src/main.rs"
+
+[lib]
+name = "casual_calc_collab_server"
+path = "src/lib.rs"
