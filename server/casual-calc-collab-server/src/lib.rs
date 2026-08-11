@@ -27,7 +27,9 @@
 pub mod document;
 pub mod lifecycle;
 pub mod presence;
+pub mod token;
 
 pub use document::{DocumentSession, Joined, ServerError};
 pub use lifecycle::{Action, CallbackOutcome, SavePolicy, SaveReason, SessionLifecycle};
 pub use presence::{Presence, Roster};
+pub use token::{Access, Callback, Claims, Document, Permissions, TokenPolicy, User};

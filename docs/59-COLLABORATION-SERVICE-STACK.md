@@ -75,6 +75,72 @@ and it puts the integrator's endpoint on the join path — so their outage
 becomes an outage for documents already open. A JWT is verifiable offline,
 which is the property that matters when the network is the thing failing.
 
+### The claims
+
+ADR-012 said the token is the whole integration contract; this is that contract
+written out. A host signs one of these per join:
+
+```json
+{
+  "iss": "https://host.example",
+  "aud": "opencalc-collab",
+  "exp": 1786500000,
+
+  "user": {
+    "id": "u-17", "name": "Ada Lovelace",
+    "email": "ada@host.example", "avatarUrl": "https://…/ada.png",
+    "group": "Finance", "color": "2F6DF6"
+  },
+  "document": {
+    "key": "file-1:rev-9", "id": "file-1", "title": "Budget.xlsx",
+    "version": "9", "ownerId": "u-1",
+    "url": "https://host.example/files/1"
+  },
+  "permissions": {
+    "access": "edit", "download": true, "print": true, "copy": true
+  },
+  "callback": { "kind": "url", "url": "https://host.example/callback" }
+}
+```
+
+`callback` may instead be `{"kind":"wopi","src":…,"token":…}` for a WOPI host,
+which is why it is tagged rather than being a bare URL: the two need different
+requests, and guessing from the shape of a string is how that goes wrong.
+
+Four things about it are decisions rather than fields:
+
+- **`document.key` is not `document.id`.** The key identifies an *editing
+  session*; the id identifies the file. To start a fresh session over the same
+  file — after restoring an old version, or after a save the host wants to be
+  the new baseline — the host issues a **new key**. Reusing the old one joins
+  the session that is still running, which is still holding the content the
+  host just replaced.
+- **`access` is a mode, not a label.** `comment` refuses a cell edit at the
+  operation level, including one hidden inside a batch or a metadata bundle
+  that names comments among other fields. A permission that is transported and
+  then ignored reads like a guarantee in the integrator's code and is a
+  suggestion in ours.
+- **The absent default is the least.** A token that omits `permissions` grants
+  `view`, not `edit`.
+- **`copy` is honestly client-side.** The bytes are on the participant's
+  machine by the time they can see them, and any system claiming otherwise is
+  describing a screenshot it cannot prevent. It is honoured because
+  integrators' policies ask for it, and documented as a deterrent.
+
+### The URLs are the dangerous part
+
+A token names addresses this server will connect to — one to fetch the document
+from, one to post it back to. That makes a leaked or mis-issued token a
+**request-forgery primitive** aimed at whatever the server can reach, including
+addresses inside the deployment that nothing outside it can.
+
+The host signed the URL, so a valid token means the host chose it. That is not
+enough on its own, so the server also holds an **allow-list of hosts** and
+insists on `https` unless told otherwise. The check parses the authority
+properly rather than looking for the allowed host as a substring, because
+`https://host.example@attacker.example/` and
+`https://host.example.attacker.example/` both contain it.
+
 ## 3. Coordination: Redis, and only in a cluster
 
 One dependency doing three jobs, each with a Redis primitive that already fits:

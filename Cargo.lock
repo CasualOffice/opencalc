@@ -82,6 +82,8 @@ dependencies = [
  "casual-calc-import",
  "casual-calc-model",
  "casual-calc-transaction",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
