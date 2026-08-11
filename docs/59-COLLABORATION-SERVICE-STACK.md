@@ -170,6 +170,67 @@ guarantee — divergence is impossible because appends are conditional on the
 revision — while keeping the hard part in a component that is already
 understood.
 
+## 3b. Exposure: TLS, plain, and the reverse proxy
+
+Every deployment answers this differently and none of the answers is a default
+worth imposing, so all of it is configuration: an evaluation wants plain HTTP on
+one port; a Kubernetes deployment terminates TLS at an ingress and runs plain
+behind it; a regulated one wants TLS to the process and between its own nodes.
+A node therefore has a **public endpoint** and, in a cluster, a separate
+**internal endpoint**, each independently plain or TLS — they are different
+security problems (browsers over the internet, versus a handful of known peers
+on a network the operator controls) and deserve different answers.
+
+**The dangerous part is the forwarded headers, not the certificates.**
+`X-Forwarded-For` is a header, so anyone who can reach the port can write one. A
+server that believes it unconditionally has no idea who its clients are, and
+every rate limit, audit line and allow-list downstream is keyed on a value the
+client chose. Two rules follow:
+
+- Forwarded headers are believed **only when the immediate peer is a configured
+  proxy**. The default is to trust nothing.
+- The chain is walked **right to left**. Each hop *appends*, so the rightmost
+  entries came from the proxies nearest this server — the ones whose honesty is
+  a configuration decision — and the leftmost was written by whoever spoke
+  first, which includes the client. Taking the leftmost is the common
+  implementation and is exactly backwards: it lets a client choose its own
+  address by sending the header itself.
+
+An unreadable entry **ends** the walk rather than being skipped past: a chain
+this server cannot parse is one it should stop believing at, not one to step
+over on the way to something less accountable.
+
+`Exposure::warnings` says the probably-wrong combinations out loud at startup —
+plain with no proxy in front of it, TLS that also trusts any peer, a plain
+internal endpoint, one address shared between the client and cluster ports.
+None of these will ever *fail*, which is exactly why nothing else would mention
+them.
+
+## 3c. Discovery: Redis, and the address you advertise
+
+Discovery uses the same Redis the rest of the cluster does — a node registers
+itself under a TTL'd key carrying its **advertised address**, refreshes it, and
+reads the others. No second dependency, and a node that dies stops refreshing
+and disappears on its own.
+
+**Advertising is not binding, and this is the trap.** A node binds
+`0.0.0.0:8443` so it accepts on every interface, and that is precisely the
+address no peer can dial. The same goes for a container's `127.0.0.1` and for a
+pod IP that is right until the pod moves. So the address peers are told is
+separate configuration — `NodeIdentity { id, advertise }` — and is never
+derived from the listener.
+
+Deriving it is the mistake that makes a cluster look configured and never form,
+and every symptom points elsewhere: peers that never appear, a leader that is
+never elected, several nodes quietly running the same document standalone. So
+`NodeIdentity::problems` refuses the shapes that cannot work — an unspecified
+address, loopback, port zero, an empty id — at the point the configuration is
+read, rather than letting them present later as an unexplained absence of
+peers. The **id** is the discovery key and part of the leader lease, so two
+nodes sharing one are two nodes claiming to be the same leader: it wants
+something the orchestrator already guarantees is unique, like a pod name, not a
+hostname that may repeat.
+
 ## 4. Durability: append before acknowledging
 
 An operation is written to the log **before** the client is told it was

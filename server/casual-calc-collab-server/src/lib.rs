@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod document;
 pub mod lifecycle;
 pub mod net;
@@ -31,6 +32,7 @@ pub mod presence;
 pub mod token;
 pub mod verify;
 
+pub use config::{Endpoint, Exposure, ProxyTrust, TlsFiles};
 pub use document::{DocumentSession, Joined, ServerError};
 pub use lifecycle::{Action, CallbackOutcome, SavePolicy, SaveReason, SessionLifecycle};
 pub use presence::{Presence, Roster};
