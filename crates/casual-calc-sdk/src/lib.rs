@@ -220,6 +220,17 @@ pub struct WorkbookSession {
     /// Whether an edit has changed a value since the last recalculation. Only
     /// meaningful in manual mode; automatic never leaves it set.
     stale: bool,
+    /// The package this session was opened from, kept while nothing has been
+    /// edited so that saving an untouched file returns it unchanged (P1B-002).
+    ///
+    /// Dropped the moment anything is edited, which both frees the memory and
+    /// makes the invariant impossible to get wrong: there is no way to hand
+    /// back stale bytes, because after an edit there are no bytes to hand back.
+    ///
+    /// The cost is the package's own size, held until the first edit. For a
+    /// host that opens from a `Vec<u8>` and drops it — which is the normal
+    /// shape — this is the only copy rather than a second one.
+    source: Option<Vec<u8>>,
 }
 
 impl WorkbookSession {
@@ -239,6 +250,9 @@ impl WorkbookSession {
             report: CompatibilityReport::default(),
             config,
             stale: false,
+            // Not opened from a package, so there is nothing to give back
+            // unchanged.
+            source: None,
         }
     }
 
@@ -258,6 +272,9 @@ impl WorkbookSession {
             report: CompatibilityReport::default(),
             config,
             stale: false,
+            // Not opened from a package, so there is nothing to give back
+            // unchanged.
+            source: None,
         }
     }
 
@@ -274,6 +291,9 @@ impl WorkbookSession {
     /// full recalc is slow enough to be disruptive; doing one anyway before
     /// they have seen the file is the opposite of what they asked for.
     pub fn open_with(bytes: Vec<u8>, config: SessionConfig) -> Result<Self, SdkError> {
+        // Kept before the import consumes it: an untouched file saves as
+        // itself, and that is only possible if the original survives the read.
+        let source = bytes.clone();
         let outcome = import_package_with(bytes, config.limits)?;
         let mut workbook = outcome.workbook;
         apply_environment(&mut workbook, &config);
@@ -293,6 +313,7 @@ impl WorkbookSession {
             // what its author last saw; nothing is stale until something is
             // edited.
             stale: false,
+            source: Some(source),
         })
     }
 
@@ -365,6 +386,7 @@ impl WorkbookSession {
         }
         let plan = recalc_plan(&op);
         self.history.apply(&mut self.workbook, op)?;
+        self.source = None;
         // Manual mode still applies the edit — it is calculation that is
         // deferred, not editing — and records that something is outstanding so
         // the host can say so.
@@ -403,6 +425,7 @@ impl WorkbookSession {
     /// Undo the last edit, then recalculate.
     pub fn undo(&mut self) -> Result<(), SdkError> {
         self.history.undo(&mut self.workbook)?;
+        self.source = None;
         self.recalculate_if_automatic();
         Ok(())
     }
@@ -410,6 +433,7 @@ impl WorkbookSession {
     /// Redo the last undone edit, then recalculate.
     pub fn redo(&mut self) -> Result<(), SdkError> {
         self.history.redo(&mut self.workbook)?;
+        self.source = None;
         self.recalculate_if_automatic();
         Ok(())
     }
@@ -467,6 +491,7 @@ impl WorkbookSession {
     /// when it wants to bypass undo, and a read-only mode with a documented
     /// bypass is not one.
     pub fn apply_raw(&mut self, op: Operation) -> Result<Operation, SdkError> {
+        self.source = None;
         if self.config.read_only {
             return Err(SdkError::ReadOnly);
         }
@@ -475,6 +500,12 @@ impl WorkbookSession {
 
     /// A mutable view of the workbook, for programmatic construction/setup.
     pub fn workbook_mut(&mut self) -> &mut Workbook {
+        // Handing out a `&mut Workbook` is handing out the right to change
+        // anything, and this cannot see what happens next — so the untouched
+        // guarantee ends here whether or not the caller writes a single byte.
+        // Conservative on purpose: giving back a stale package is silent data
+        // loss, and re-serializing an unchanged workbook costs only time.
+        self.source = None;
         &mut self.workbook
     }
 
@@ -512,9 +543,40 @@ impl WorkbookSession {
         render_sheet_png(&self.workbook, sheet_index, &geometry, viewport, dpi)
     }
 
-    /// Serialize the workbook to a `.xlsx` package (the semantic writer).
+    /// Serialize the workbook to a `.xlsx` package.
+    ///
+    /// A file that was **opened and not edited saves as itself, byte for byte**
+    /// (P1B-002). That is not an optimisation: the semantic writer reconstructs
+    /// canonical OOXML, so anything this engine does not model is rebuilt from
+    /// what it *does* model, and a part it merely retained comes back in a
+    /// package that is no longer the one the author had. Opening a workbook to
+    /// look at it and saving it should not rewrite it.
+    ///
+    /// After any edit the semantic writer runs, and the guarantee narrows to the
+    /// documented one: retained parts survive, and the model round-trips to an
+    /// equal model.
+    ///
+    /// The limit worth knowing: an unedited save returns the file's **own**
+    /// cached values, not the ones this engine computed on open. If the two
+    /// disagree the file was already inconsistent, and reproducing it exactly is
+    /// the more conservative answer — this engine does not model every construct
+    /// that might explain the difference, so overwriting the author's cached
+    /// values on the strength of its own recalculation is the riskier of the two.
     pub fn save(&self) -> Result<Vec<u8>, SdkError> {
+        if let Some(source) = &self.source {
+            return Ok(source.clone());
+        }
         Ok(write_workbook(&self.workbook)?)
+    }
+
+    /// Whether saving now would return the opened file unchanged.
+    ///
+    /// A host uses it to leave "Save" disabled, or to skip a write it does not
+    /// need. `false` for a session that was not opened from a package, and for
+    /// one where anything has been edited.
+    #[must_use]
+    pub fn is_unmodified(&self) -> bool {
+        self.source.is_some()
     }
 }
 

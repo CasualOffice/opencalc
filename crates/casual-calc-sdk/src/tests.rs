@@ -409,3 +409,142 @@ fn a_read_only_session_still_reads_recalculates_and_saves() {
     assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
     assert!(session.save().is_ok());
 }
+
+/// Byte-identical repackaging: an unedited file saves as itself (P1B-002).
+mod untouched_saves {
+    use super::*;
+
+    /// A package with something the engine does not model, so the test is about
+    /// the whole file rather than the part of it we happen to rebuild well.
+    fn source_package() -> Vec<u8> {
+        let mut wb = casual_calc_model::Workbook::new(casual_calc_model::Id::from_parts(1, 1));
+        let mut sheet = casual_calc_model::Sheet::new(
+            casual_calc_model::SheetId(casual_calc_model::Id::from_parts(2, 1)),
+            "S",
+        );
+        sheet.cells.set(
+            casual_calc_model::CellRef::new(0, 0),
+            casual_calc_model::Cell::value(casual_calc_model::CellValue::Number(1.0)),
+        );
+        wb.sheets.push(sheet);
+        WorkbookSession::from_workbook(wb).save().unwrap()
+    }
+
+    #[test]
+    fn opening_and_saving_without_editing_returns_the_same_bytes() {
+        // The guarantee itself. Reconstructing canonical OOXML instead would
+        // rewrite a file the user only looked at.
+        let original = source_package();
+        let session = WorkbookSession::open(original.clone()).unwrap();
+        assert!(session.is_unmodified());
+        assert_eq!(
+            session.save().unwrap(),
+            original,
+            "an untouched workbook saves as the file it was opened from"
+        );
+    }
+
+    #[test]
+    fn an_edit_ends_the_guarantee_and_the_semantic_writer_takes_over() {
+        let original = source_package();
+        let mut session = WorkbookSession::open(original.clone()).unwrap();
+        session
+            .edit(EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(5, 5),
+                cell: Some(casual_calc_model::Cell::value(CellValue::Number(9.0))),
+            })
+            .unwrap();
+
+        assert!(!session.is_unmodified());
+        let saved = session.save().unwrap();
+        assert_ne!(saved, original, "the edit is in the file");
+        // And it is still a real package.
+        let reopened = WorkbookSession::open(saved).unwrap();
+        assert_eq!(
+            reopened.workbook().sheets[0]
+                .cells
+                .get(CellRef::new(5, 5))
+                .map(|c| c.value.clone()),
+            Some(CellValue::Number(9.0))
+        );
+    }
+
+    #[test]
+    fn undo_back_to_the_start_does_not_restore_the_guarantee() {
+        // Deliberate. Undoing to the opening state leaves a workbook that is
+        // *equal* to the one opened, but this cannot prove the package would be
+        // too — and the failure mode of guessing wrong is handing back a file
+        // that silently is not what the session holds.
+        let original = source_package();
+        let mut session = WorkbookSession::open(original.clone()).unwrap();
+        session
+            .edit(EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(5, 5),
+                cell: Some(casual_calc_model::Cell::value(CellValue::Number(9.0))),
+            })
+            .unwrap();
+        session.undo().unwrap();
+        assert!(!session.is_unmodified());
+    }
+
+    #[test]
+    fn reaching_for_the_workbook_directly_ends_it_too() {
+        // `workbook_mut` hands out the right to change anything and the session
+        // cannot see what happens next, so the guarantee ends at the call
+        // whether or not the caller writes a byte.
+        let original = source_package();
+        let mut session = WorkbookSession::open(original).unwrap();
+        assert!(session.is_unmodified());
+        let _ = session.workbook_mut();
+        assert!(!session.is_unmodified());
+    }
+
+    #[test]
+    fn a_package_this_engine_did_not_write_comes_back_exactly() {
+        // The one that matters. A file we wrote ourselves proves little — the
+        // guarantee is for the file somebody else made, carrying parts this
+        // engine does not model and would rebuild differently if it tried.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/generated/minimal.xlsx");
+        let original = std::fs::read(&path).expect("the committed fixture");
+        let session = WorkbookSession::open(original.clone()).unwrap();
+        assert!(session.is_unmodified());
+        assert_eq!(
+            session.save().unwrap(),
+            original,
+            "a foreign package saves as itself"
+        );
+    }
+
+    #[test]
+    fn a_session_that_was_never_opened_from_a_package_makes_no_such_claim() {
+        let session = WorkbookSession::blank();
+        assert!(!session.is_unmodified());
+        // And it still saves.
+        assert_eq!(&session.save().unwrap()[0..2], b"PK");
+    }
+
+    #[test]
+    fn a_read_only_session_keeps_the_guarantee_through_a_refused_edit() {
+        // A refused edit must leave no trace — the same rule the history keeps.
+        let original = source_package();
+        let mut session =
+            WorkbookSession::open_with(original.clone(), SessionConfig::new().read_only()).unwrap();
+        assert!(
+            session
+                .edit(EditOperation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: None,
+                })
+                .is_err()
+        );
+        assert!(
+            session.is_unmodified(),
+            "nothing happened, so nothing changed"
+        );
+        assert_eq!(session.save().unwrap(), original);
+    }
+}

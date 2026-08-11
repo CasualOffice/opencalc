@@ -46,6 +46,23 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-12 — An unedited file saves as itself
+
+**Added**
+
+- **Byte-identical repackaging** (P1B-002): a `.xlsx` that was opened and not
+  edited now saves as the exact bytes it was opened from, verified against
+  packages this engine did not write. The semantic writer reconstructs
+  canonical OOXML, so without this, opening a workbook to look at it rewrote
+  it — anything unmodelled rebuilt from what is modelled, and a merely-retained
+  part returned in a package that was no longer the author's.
+
+  The guarantee lives in the session rather than the model, because it is about
+  *this opening of this file* and not about the document. It ends at the first
+  edit, at undo or redo, and at `workbook_mut` — that last one conservatively,
+  whether or not the caller writes a byte. `WorkbookSession::is_unmodified`
+  reports it, so a host can leave Save disabled or skip a write.
+
 ### 2026-08-11 — An oracle that is not us, and the Excel-breaking bug it found
 
 **Added**

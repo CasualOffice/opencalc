@@ -21,9 +21,17 @@ There are **two writers**, chosen by whether the workbook was edited:
 > `casual-calc-export::write_workbook` emits a deterministic `.xlsx` from the
 > model — values, formulas (from the AST via the pretty-printer), number formats
 > (`cellXfs`), merges, frozen panes, and defined names. The **semantic fixed
-> point** `import → write → import` is gated by tests. The byte-identical
-> repackager (retention mode) and LibreOffice-Calc differential validation are
-> the next increments.
+> point** `import → write → import` is gated by tests.
+>
+> **Both remaining increments have since landed.** The byte-identical
+> repackager is P1B-002: `WorkbookSession` keeps the bytes it opened and returns
+> them from `save` while nothing has been edited, so a file opened and not
+> edited comes back exactly — verified against packages this engine did not
+> write. It lives in the session rather than the model because it is a fact
+> about *this opening of this file*, not about the document, and putting the
+> original in the `Workbook` would double every model snapshot for it.
+> LibreOffice-Calc differential validation is P1B-003, in
+> `tools/casual-calc-fidelity --validate-package`.
 
 ## 2. Semantic writer (edited workbooks)
 
