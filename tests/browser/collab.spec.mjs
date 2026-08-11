@@ -36,7 +36,7 @@ const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
 /// Asserted against the engine's own number in the first test, because a client
 /// that states the wrong version is refused *before* it joins — which, from the
 /// test's side, is indistinguishable from the server hanging.
-const PROTOCOL = 2;
+const PROTOCOL = 3;
 
 
 
@@ -411,5 +411,26 @@ test.describe("collaboration", () => {
 
     await away.close();
     await watching.close();
+  });
+
+  test("the connection is measured, not merely assumed", async ({ browser }) => {
+    const key = freshDocument();
+    const page = await browser.newPage();
+    await boot(page);
+    await join(page, { document: key, user: { id: "u-a", name: "Ada" } });
+
+    // A round trip that came back. This is the only signal a client has that
+    // the far end is still there: a socket that claims to be open proves
+    // nothing, and neither does a send that did not throw.
+    await page.evaluate(() => window.__session.ping?.() ?? null);
+    await expect
+      .poll(() => page.evaluate(() => window.__session.latency()), {
+        message: "no answer ever came back",
+        timeout: 30_000,
+      })
+      .not.toBeNull();
+    expect(await page.evaluate(() => window.__session.latency())).toBeGreaterThanOrEqual(0);
+
+    await page.close();
   });
 });

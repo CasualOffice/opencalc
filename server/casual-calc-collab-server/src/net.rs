@@ -1129,6 +1129,17 @@ async fn handle(
             lock(&live.roster).heartbeat(client, now_ms());
             true
         }
+        ClientMessage::Ping { nonce } => {
+            // Answered here rather than anywhere earlier, deliberately: a pong
+            // is only worth having if it proves the *whole* path works, and one
+            // sent from the read loop before the message was dispatched would
+            // prove only that bytes arrived. This is the far end of everything
+            // a submission goes through.
+            //
+            // The nonce goes back untouched. Generating a fresh one would make
+            // the answer unmatchable, which is the entire point of having it.
+            send(socket, &ServerMessage::Pong { nonce }).await.is_ok()
+        }
         ClientMessage::Presence { sheet, selection } => {
             lock(&live.roster).moved(client, sheet, selection, now_ms());
             let _ = live.fan_out.send((

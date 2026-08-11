@@ -1483,3 +1483,42 @@ async fn a_client_too_far_behind_to_catch_up_is_told_before_its_document_is_repl
         Some(ServerMessage::Welcome { .. })
     ));
 }
+
+#[tokio::test]
+async fn a_ping_is_answered_with_its_own_nonce() {
+    // The client's only way to tell a live connection from a half-open one. The
+    // nonce is the part that matters: without it a late answer to an earlier
+    // ping satisfies the current one, and a connection that is failing reads as
+    // healthy for as long as it keeps failing.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    join(&mut socket, &claims("Ada", Access::Edit))
+        .await
+        .unwrap();
+
+    for nonce in [1u64, 2, 7_000_000] {
+        say(&mut socket, &ClientMessage::Ping { nonce }).await;
+        assert_eq!(
+            hear(&mut socket).await,
+            Some(ServerMessage::Pong { nonce }),
+            "answered, and with the nonce that was asked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_viewer_may_still_ping() {
+    // Liveness is not an edit. A read-only participant whose connection died
+    // needs to find out as much as anyone — arguably more, since nothing else
+    // they do would ever draw an answer out of the server.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    join(&mut socket, &claims("Vic", Access::View))
+        .await
+        .unwrap();
+    say(&mut socket, &ClientMessage::Ping { nonce: 4 }).await;
+    assert_eq!(
+        hear(&mut socket).await,
+        Some(ServerMessage::Pong { nonce: 4 })
+    );
+}

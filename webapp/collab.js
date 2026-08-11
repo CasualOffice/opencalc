@@ -21,6 +21,24 @@ const RETRY_CEILING_MS = 15_000;
 // present.
 const HEARTBEAT_MS = 10_000;
 
+/// How often to ask the server whether this connection is still alive, and how
+/// long to wait for the answer.
+//
+// This is the only thing on the client that can notice a **half-open**
+// connection — a slept laptop, a vanished network, a load balancer that dropped
+// the flow without saying so. Such a socket looks perfectly open to the browser
+// holding it for as long as the operating system takes to give up, which is
+// minutes; and for all of those minutes the editor works, accepts typing, and
+// writes into nothing. The socket does not notice. The flush does not notice:
+// `send` on a dead socket does not fail, it just goes nowhere.
+//
+// The deadline is generous next to the interval, because the cost of being
+// wrong is asymmetric — a reconnect that was not needed is invisible, and one
+// that was needed and did not happen is a user losing everything typed since.
+// Since ADR-015 a reconnect resumes, so being wrong costs a round trip.
+const PING_MS = 15_000;
+const PONG_DEADLINE_MS = 10_000;
+
 /// How long local edits accumulate before being sent.
 //
 // Not zero. A submission per keystroke is a submission per keystroke for every
@@ -74,6 +92,14 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
   /// again yet. The resend has to wait for the missed operations to be applied,
   /// because they are what rebase it.
   let mustResend = false;
+
+  /// The ping timer, the nonce counter, and the ping still waiting for an
+  /// answer — `{ nonce, sentAt }`, or null when nothing is outstanding.
+  let pinger = null;
+  let nonce = 0;
+  let awaiting = null;
+  /// The last measured round trip, for a host that wants to show it.
+  let roundTripMs = null;
 
   const status = (state, detail) => onStatus({ state, detail });
 
@@ -177,6 +203,15 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         flush();
         break;
       }
+      case "pong":
+        // Matched, not merely counted. A late answer to an earlier ping would
+        // otherwise satisfy the current one, and a connection dying slowly
+        // would read as healthy — which is exactly the connection this is for.
+        if (awaiting?.nonce === message.nonce) {
+          roundTripMs = Date.now() - awaiting.sentAt;
+          awaiting = null;
+        }
+        break;
       case "ack":
         wasm.collab_acknowledge(message.revision);
         revision = message.revision;
@@ -216,13 +251,41 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     stopTimers();
     heartbeat = setInterval(() => send({ type: "heartbeat" }), HEARTBEAT_MS);
     flusher = setInterval(flush, FLUSH_MS);
+    pinger = setInterval(ping, PING_MS);
   }
 
   function stopTimers() {
     clearInterval(heartbeat);
     clearInterval(flusher);
+    clearInterval(pinger);
     heartbeat = null;
     flusher = null;
+    pinger = null;
+    // Cleared with the timers. A ping outstanding across a reconnect would be
+    // answered by nobody and would condemn the *new* connection for the old
+    // one's silence.
+    awaiting = null;
+  }
+
+  /// Ask whether this connection is alive, and judge the previous answer.
+  function ping() {
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    if (awaiting && Date.now() - awaiting.sentAt > PONG_DEADLINE_MS) {
+      // Asked, and nothing came back in time. The socket still claims to be
+      // open and it is not; every edit made from here goes nowhere and no other
+      // signal will ever say so.
+      status("stale");
+      awaiting = null;
+      reconnect();
+      return;
+    }
+    // One outstanding at a time. Piling them up would mean the deadline above
+    // measured the oldest rather than the most recent, and a connection that
+    // has just started failing would take several intervals to be noticed.
+    if (awaiting) return;
+    nonce += 1;
+    awaiting = { nonce, sentAt: Date.now() };
+    send({ type: "ping", nonce });
   }
 
   function flush() {
@@ -294,6 +357,12 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     socket?.close();
   }
 
+  /// The last measured round trip in milliseconds, or null before the first
+  /// answer. What a host shows as a connection-quality indicator.
+  function latency() {
+    return roundTripMs;
+  }
+
   open();
-  return { present, close, flush, reconnect };
+  return { present, close, flush, reconnect, latency, ping };
 }

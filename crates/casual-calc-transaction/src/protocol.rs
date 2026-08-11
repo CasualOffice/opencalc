@@ -27,8 +27,9 @@ use crate::wire::WireOperation;
 /// The conversation's version. Bumped when a message changes shape.
 ///
 /// 2 added [`Resume`] and [`ServerMessage::Resumed`]
-/// ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)). 3 added
+/// [`ClientMessage::Ping`] and [`ServerMessage::Pong`].
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +100,40 @@ pub enum ClientMessage {
     Submit(Submission),
     /// Still here. Presence entries expire on silence, so this is what keeps
     /// one alive.
+    ///
+    /// Distinct from [`Ping`](Self::Ping), which they are easily confused with.
+    /// A heartbeat is about **this participant** — it keeps a cursor on other
+    /// people's screens while its user reads rather than types — and expects no
+    /// answer. A ping is about **the connection**, and its whole purpose is the
+    /// answer.
     Heartbeat,
+    /// Is this connection still alive?
+    ///
+    /// The client's own liveness check, and the only one it has. The server
+    /// already pings at the WebSocket level and a browser answers those without
+    /// the page being told, which detects a dead client — and leaves the
+    /// opposite case entirely uncovered.
+    ///
+    /// That case is not exotic. A **half-open** connection — a laptop that
+    /// slept, a network that vanished, a load balancer that dropped the flow
+    /// without a FIN — looks perfectly open to the browser holding it, for as
+    /// long as the operating system takes to give up on the socket, which is
+    /// measured in minutes. For all of those minutes the editor works, accepts
+    /// typing, and sends into nothing. Nothing else notices: not the socket,
+    /// not the heartbeat, not the flush, which cannot tell a message that was
+    /// delivered from one that was written to a socket nobody is reading.
+    ///
+    /// So the client asks, and starts a clock. Silence past the deadline is the
+    /// signal to reconnect — which, since ADR-015, costs nothing and loses
+    /// nothing.
+    Ping {
+        /// Matched by the answer.
+        ///
+        /// Without it a late pong for an earlier ping satisfies the current
+        /// one, and a connection that is dying slowly reads as healthy — which
+        /// is precisely the connection this exists to catch.
+        nonce: u64,
+    },
     /// Where this participant is looking.
     ///
     /// Not an edit and never transformed: it is ephemeral, nothing depends on
@@ -224,6 +258,15 @@ pub enum ServerMessage {
     Stopped {
         /// Why.
         reason: Refusal,
+    },
+    /// Yes.
+    ///
+    /// Echoes the nonce it is answering, so the client can match it to the ping
+    /// it sent and measure the round trip rather than merely note that
+    /// something came back.
+    Pong {
+        /// The nonce from the [`Ping`](ClientMessage::Ping).
+        nonce: u64,
     },
     /// Something was refused.
     Refused {
