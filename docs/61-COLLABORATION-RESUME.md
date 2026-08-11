@@ -84,8 +84,9 @@ document now is — *before* the fresh `Welcome` that replaces the workbook. The
 work is still lost in that case; what changes is that it is lost loudly, and a
 host can offer to put the unsaved cells somewhere before the snapshot lands.
 
-`PROTOCOL_VERSION` goes to **2**. The two ends check it before anything else, so
-a mismatched pair stops rather than misreading each other.
+`PROTOCOL_VERSION` goes to **2** for this change. It has since moved on — 3 for
+`Ping`/`Pong`, 4 for `Opening` — and the number is checked for equality before
+anything else, so a mismatched pair stops rather than misreading each other.
 
 ## What this does not solve
 
