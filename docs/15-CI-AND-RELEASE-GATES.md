@@ -24,7 +24,7 @@ which gates are not yet built.
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
-| `oracle-diff` | build a corpus workbook, recalculate it in LibreOffice Calc, diff the values | The evaluator against an implementation that does not share our reading of the spec (**implemented**, P2-003) |
+| `oracle-diff` | recalculate a corpus in LibreOffice Calc and diff the values; re-save a feature workbook through it and diff the structure | The evaluator and the **writer**, against an implementation that shares neither our code nor our reading of the spec (**implemented**, P2-003 + P1B-003) |
 | `browser-smoke` | `wasm-pack` build + Playwright against `webapp/editor.html` | The editor loads, paints, calculates, edits, undoes — and copies, fills, inserts, formats, references another sheet and saves (**implemented**, CI-002 + CI-004) |
 
 Actions are pinned to full commit SHAs; workflows run read-only where possible;
@@ -73,6 +73,17 @@ OpenDoc's set:
   committed and diffed.
 - **Golden display lists** — layout output for fixture sheets is golden-tested,
   including the virtualized-viewport path (which must equal the full-layout path).
+- **Package acceptance** — a workbook exercising the structure a `.xlsx` has to
+  carry (values of every kind, formulas, a future function, merges, a freeze, a
+  hidden row, a resized column, two sheets, a cross-sheet formula, a defined
+  name) is **re-saved through LibreOffice** and re-imported. A full re-save,
+  not merely an open: it drives another implementation's reader over every part
+  and then writes back what it understood, which is what catches a part it
+  skipped or a merge it never saw (P1B-003). The differences LibreOffice
+  legitimately introduces — rewriting boolean and error literals — are listed
+  with reasons rather than normalised away, so they stay visible. **This is
+  LibreOffice's acceptance, not Excel's**; Excel's repair prompt cannot be
+  tested without Excel.
 - **Recalc oracle** — computed cell values are diffed against LibreOffice Calc
   for the formula corpus (`oracle-diff`, P2-003). It exists because every other
   test of the evaluator was written from the specification by whoever wrote the

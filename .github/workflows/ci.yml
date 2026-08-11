@@ -16,8 +16,7 @@ env:
   CARGO_TERM_COLOR: always
 
 # Job names are the CI contract; see docs/15-CI-AND-RELEASE-GATES.md.
-# Jobs whose harnesses do not exist yet (benchmark-smoke, fuzz-build,
-# repository-policy, browser-smoke) are added in their Phase-0/1 items.
+# Every job named in that document's table exists here.
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -144,11 +143,19 @@ jobs:
           soffice --version
       - name: Diff the corpus against LibreOffice Calc
         run: cargo run -q -p casual-calc-fidelity -- --json oracle-report.json
+      # P1B-003: does an independent implementation accept *and understand* the
+      # packages we write? A full re-save drives its reader over every part and
+      # then writes back what it understood, which catches the structural
+      # mistakes an "it opened" check cannot.
+      - name: Validate the package LibreOffice gets
+        run: cargo run -q -p casual-calc-fidelity -- --validate-package --json package-report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: oracle-report
-          path: oracle-report.json
+          path: |
+            oracle-report.json
+            package-report.json
           retention-days: 14
 
   fuzz-build:

@@ -50,6 +50,14 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 **Added**
 
+- **Package acceptance validation** (P1B-003), on the same harness: a workbook
+  carrying the structure a `.xlsx` has to hold is **re-saved through
+  LibreOffice** and re-imported. A full re-save rather than an open, because it
+  drives another implementation's reader over every part and then writes back
+  what it understood — which is what catches a part skipped or a merge never
+  seen. 26 of 29 properties survive identically; the three that do not are
+  LibreOffice rewriting boolean and error literals, listed with reasons rather
+  than normalised away. This is LibreOffice's acceptance, not Excel's.
 - **`oracle-diff`** (P2-003): `tools/casual-calc-fidelity` builds a workbook
   from a committed corpus of 190 formulas, has LibreOffice Calc recalculate it,
   and diffs the values. It exists because every other test of the evaluator was
