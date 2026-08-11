@@ -117,6 +117,11 @@ return {'ok', tostring(current + 1)}
 /// A cluster's shared state, in Redis.
 pub struct Redis {
     connection: Mutex<MultiplexedConnection>,
+    /// Kept because a **subscription needs its own connection**: a Redis
+    /// connection in subscribe mode accepts almost nothing else, so sharing the
+    /// multiplexed one would take the coordinator offline the moment anything
+    /// subscribed.
+    client: redis::Client,
     namespace: String,
     claim: redis::Script,
     append: redis::Script,
@@ -156,10 +161,82 @@ impl Redis {
             .map_err(|e| Unavailable(e.to_string()))?;
         Ok(Self {
             connection: Mutex::new(connection),
+            client,
             namespace: namespace.to_owned(),
             claim: redis::Script::new(CLAIM),
             append: redis::Script::new(APPEND),
         })
+    }
+
+    /// The namespace every key and channel of this node sits under.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Publish `payload` to `channel`.
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the store cannot be reached. Worth handling rather
+    /// than logging: a publication that did not go out is a batch every other
+    /// node will notice as a gap and read from the log — which is correct, and
+    /// slower, and worth knowing about.
+    pub async fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), Unavailable> {
+        let mut c = self.connection().await;
+        let _: () = c
+            .publish(channel, payload)
+            .await
+            .map_err(|e| Unavailable(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Subscribe to `channel`, receiving payloads until the receiver is dropped.
+    ///
+    /// The subscription runs on its own task with its own connection, and stops
+    /// when the returned receiver is dropped — which is what makes a document
+    /// being evicted also close its subscription, rather than leaving a task
+    /// per document this node has ever held.
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the connection cannot be opened or the subscription
+    /// refused.
+    pub async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<Vec<u8>>, Unavailable> {
+        let mut pubsub = self
+            .client
+            .get_async_pubsub()
+            .await
+            .map_err(|e| Unavailable(e.to_string()))?;
+        pubsub
+            .subscribe(channel)
+            .await
+            .map_err(|e| Unavailable(e.to_string()))?;
+
+        // Bounded. A subscriber that stops reading must not let the channel
+        // grow without limit — and dropping the oldest would be worse than
+        // stopping, since a missed batch is a gap the receiver detects and
+        // closes from the log, whereas unbounded growth is the node dying.
+        let (out, into) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            let mut stream = pubsub.on_message();
+            while let Some(message) = stream.next().await {
+                let Ok(payload) = message.get_payload::<Vec<u8>>() else {
+                    continue;
+                };
+                if out.send(payload).await.is_err() {
+                    // The receiver is gone: the document was evicted, or the
+                    // node is shutting down. Either way there is nobody to
+                    // deliver to and the connection should be released.
+                    break;
+                }
+            }
+        });
+        Ok(into)
     }
 
     async fn connection(&self) -> MultiplexedConnection {

@@ -31,6 +31,7 @@ pub mod http;
 pub mod lifecycle;
 pub mod net;
 pub mod presence;
+pub mod relay;
 pub mod token;
 pub mod verify;
 

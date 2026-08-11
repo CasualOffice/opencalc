@@ -396,3 +396,82 @@ contract!(
         assert!(taken.epoch > 1, "with an epoch that fences the old leader");
     }
 );
+
+// --- The relay's transport (ADR-017) ----------------------------------------
+//
+// Only meaningful against Redis: standalone has no second node to relay to, so
+// there is nothing for `Memory` to implement and nothing it would prove.
+
+#[tokio::test]
+async fn a_published_batch_reaches_a_subscriber() {
+    let Some(store) = redis_store("publish").await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let channel = crate::relay::committed_channel(store.namespace(), "doc");
+    let mut inbox = store.subscribe(&channel).await.expect("subscribed");
+
+    // Subscribing is asynchronous on Redis's side: a publish that races the
+    // subscription is dropped, and pub/sub has no way to say so. Retried rather
+    // than slept past, so the test is neither flaky nor slower than it needs to
+    // be.
+    let heard = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            store
+                .publish(&channel, b"a batch".to_vec())
+                .await
+                .expect("published");
+            if let Ok(Some(payload)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), inbox.recv()).await
+            {
+                return payload;
+            }
+        }
+    })
+    .await
+    .expect("a subscriber hears what is published");
+    assert_eq!(heard, b"a batch");
+}
+
+#[tokio::test]
+async fn a_batch_published_for_one_document_does_not_reach_another() {
+    // Channels are per document, and getting that wrong applies one customer's
+    // edits to another customer's file.
+    let Some(store) = redis_store("isolation").await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mine = crate::relay::committed_channel(store.namespace(), "doc-1");
+    let theirs = crate::relay::committed_channel(store.namespace(), "doc-2");
+    let mut inbox = store.subscribe(&mine).await.expect("subscribed");
+
+    for _ in 0..10 {
+        store.publish(&theirs, b"not yours".to_vec()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        inbox.try_recv().is_err(),
+        "a subscriber to one document heard another's traffic"
+    );
+}
+
+#[tokio::test]
+async fn a_forwarded_submission_survives_the_wire() {
+    // The relay carries a submission *unaltered* — not rebased, not renumbered.
+    // A relay that adjusts what it carries has become a second implementation
+    // of ordering, running on the node that does not have the log.
+    use casual_calc_transaction::session::{Base, ClientId, Submission};
+
+    let forwarded = crate::relay::Forwarded {
+        document: "doc".to_owned(),
+        submission: Submission {
+            client: ClientId(4),
+            seq: 9,
+            base: Base::Chained,
+            ops: vec![],
+        },
+    };
+    let json = serde_json::to_vec(&forwarded).unwrap();
+    let back: crate::relay::Forwarded = serde_json::from_slice(&json).unwrap();
+    assert_eq!(back, forwarded);
+}
