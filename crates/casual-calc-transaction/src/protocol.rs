@@ -29,8 +29,10 @@ use crate::wire::WireOperation;
 /// 2 added [`Resume`] and [`ServerMessage::Resumed`]
 /// ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)). 3 added
 /// [`ClientMessage::Ping`] and [`ServerMessage::Pong`]. 4 added
-/// [`ServerMessage::Opening`].
-pub const PROTOCOL_VERSION: u32 = 4;
+/// [`ServerMessage::Opening`]. 5 made [`ServerMessage::Ack`] cumulative and
+/// `Submission`'s base a [`Base`](crate::session::Base)
+/// ([ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md)).
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,15 +237,23 @@ pub enum ServerMessage {
         /// beyond.
         missed: Vec<WireOperation>,
     },
-    /// A submission was committed.
+    /// Submissions were committed.
     ///
-    /// `revision` is where *this* chunk landed, not where the document has
-    /// since reached: acknowledging at a later revision would have the client
-    /// skip everything committed in between, which it would then never
+    /// **Cumulative**, as TCP's acknowledgement is: every sequence up to and
+    /// including `through` has been ordered, not just that one. The server
+    /// orders a client's chunks in sequence, so acknowledging one already
+    /// implies the ones before it — saying so lets a lost or skipped
+    /// acknowledgement heal itself on the next one, instead of leaving a chunk
+    /// outstanding forever with nothing to say why
+    /// ([ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md)).
+    ///
+    /// `revision` is where the *acknowledged chunk* landed, not where the
+    /// document has since reached. Naming a later revision would have the
+    /// client skip everything committed in between, which it would then never
     /// receive.
     Ack {
-        /// The sequence being acknowledged.
-        seq: u64,
+        /// Every sequence up to and including this one has been ordered.
+        through: u64,
         /// Where it landed.
         revision: u64,
     },
@@ -327,6 +337,7 @@ mod tests {
 
     use super::*;
     use crate::Operation;
+    use crate::session::Base;
 
     fn workbook() -> Workbook {
         let mut wb = Workbook::new(Id::from_parts(1, 1));
@@ -353,7 +364,7 @@ mod tests {
         let submission = Submission {
             client: ClientId(7),
             seq: 3,
-            base: 12,
+            base: Base::Revision(12),
             ops: vec![WireOperation::of(
                 Operation::SetCell {
                     sheet: 0,
@@ -435,7 +446,7 @@ mod tests {
                 editable: true,
             },
             ServerMessage::Ack {
-                seq: 2,
+                through: 2,
                 revision: 10,
             },
             ServerMessage::Apply {
@@ -481,7 +492,7 @@ mod tests {
         let submission = Submission {
             client: ClientId(3),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![],
         };
         let json = serde_json::to_string(&ClientMessage::Submit(submission.clone())).unwrap();
@@ -530,7 +541,7 @@ mod tests {
         let message = ClientMessage::Submit(Submission {
             client: ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![WireOperation::of(
                 Operation::SetCell {
                     sheet: 0,
@@ -575,7 +586,7 @@ mod tests {
         assert!(json.contains("\"type\":\"heartbeat\""), "{json}");
 
         let json = serde_json::to_string(&ServerMessage::Ack {
-            seq: 1,
+            through: 1,
             revision: 2,
         })
         .unwrap();

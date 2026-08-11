@@ -8896,28 +8896,43 @@ pub fn collab_flush() -> String {
     .unwrap_or_default()
 }
 
-/// The chunk in flight again, for a reconnect.
+/// Everything still outstanding, to send again after a reconnect.
 ///
-/// A resend reuses the sequence number, so a server that already applied it
-/// answers `Duplicate` rather than applying it twice. That is what makes
-/// reconnecting safe rather than merely likely to work.
+/// A JSON **array** of messages, oldest first, and the order is not cosmetic:
+/// each chunk was written on top of the one before it and only the first names
+/// a revision, so delivering them out of order asks the server to resolve a
+/// chain whose start it has not seen.
+///
+/// A resend reuses each chunk's original sequence number, so a server that
+/// already applied one answers `Duplicate` rather than applying it twice. That
+/// is what makes reconnecting safe rather than merely likely to work.
+///
+/// An array rather than one chunk since ADR-016, which allows several in
+/// flight: a client that reconnects mid-flight may have any number of them.
 #[wasm_bindgen]
 pub fn collab_resend() -> String {
     with_session_and_collab(|workbook, collab| {
-        collab
+        let messages: Vec<ClientMessage> = collab
             .resend(workbook)
-            .and_then(|s| serde_json::to_string(&ClientMessage::Submit(s)).ok())
-            .unwrap_or_default()
+            .into_iter()
+            .map(ClientMessage::Submit)
+            .collect();
+        serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_owned())
     })
-    .unwrap_or_default()
+    .unwrap_or_else(|| "[]".to_owned())
 }
 
-/// Record that the chunk in flight was ordered at `revision`.
+/// Record that everything up to `through` was ordered, the last of it at
+/// `revision`.
+///
+/// **Cumulative**: chunks before `through` are settled by it without being
+/// named, which is what lets a lost acknowledgement heal on the next one rather
+/// than stranding a chunk in flight forever.
 #[wasm_bindgen]
-pub fn collab_acknowledge(revision: f64) {
+pub fn collab_acknowledge(through: f64, revision: f64) {
     COLLAB.with(|cell| {
         if let Some(collab) = cell.borrow_mut().as_mut() {
-            collab.acknowledge(revision as u64);
+            collab.acknowledge(through as u64, revision as u64);
         }
     });
 }
@@ -9812,15 +9827,20 @@ mod collab_tests {
         assert!(first.contains("\"seq\""), "got {first}");
 
         session_set_cell(0, 1, 0, "43").unwrap();
+        // Sent without waiting for the first to be acknowledged, and chained to
+        // it: only the first chunk after joining knows an absolute revision.
+        // This asserted the opposite before ADR-016, which is the rule that
+        // change removed.
+        let second = collab_flush();
+        assert!(second.contains("\"chained\""), "got {second}");
+
+        collab_acknowledge(2.0, 2.0);
+        assert_eq!(collab_revision(), 2.0);
         assert_eq!(
             collab_flush(),
             "",
-            "a second chunk waits until the first is acknowledged"
+            "and with both settled there is nothing left to send"
         );
-
-        collab_acknowledge(1.0);
-        assert_eq!(collab_revision(), 1.0);
-        assert!(collab_flush().contains("\"seq\""), "and then it goes");
     }
 
     #[test]
@@ -9830,8 +9850,34 @@ mod collab_tests {
         fresh(1, 0);
         session_set_cell(0, 0, 0, "42").unwrap();
         let sent = collab_flush();
-        let again = collab_resend();
-        assert_eq!(sent, again);
+        // An array since ADR-016: several chunks may be outstanding, so a
+        // reconnect may have several to send again.
+        let again: Vec<serde_json::Value> =
+            serde_json::from_str(&collab_resend()).expect("a list of messages");
+        assert_eq!(again.len(), 1);
+        // Compared as values, not as text: `serde_json::Value` sorts its keys,
+        // so a string comparison here would fail on field order alone and say
+        // nothing about the content.
+        assert_eq!(
+            again[0],
+            serde_json::from_str::<serde_json::Value>(&sent).unwrap(),
+            "the same chunk, so the server recognises it rather than applying it twice"
+        );
+
+        // And a second, chained chunk comes back with it, in order.
+        session_set_cell(0, 1, 0, "43").unwrap();
+        collab_flush();
+        let again: Vec<serde_json::Value> =
+            serde_json::from_str(&collab_resend()).expect("a list of messages");
+        assert_eq!(again.len(), 2, "both outstanding chunks");
+        assert_eq!(again[0]["seq"], 1, "oldest first");
+        assert_eq!(again[1]["seq"], 2);
+        assert!(
+            again[0]["base"].get("revision").is_some(),
+            "only the first names a revision: {}",
+            again[0]["base"]
+        );
+        assert_eq!(again[1]["base"], "chained");
     }
 
     #[test]
@@ -9855,14 +9901,14 @@ mod collab_tests {
         for op in &from_a.ops {
             collab_receive(&serde_json::to_string(op).unwrap(), 1.0).expect("applied");
         }
-        collab_acknowledge(2.0);
+        collab_acknowledge(1.0, 2.0);
         let b_final = session_cells(0, 0, 0, 1, 0);
 
         // And A receives B's, ordered second.
         fresh(1, 0);
         session_set_cell(0, 0, 0, "mine").unwrap();
         collab_flush();
-        collab_acknowledge(1.0);
+        collab_acknowledge(1.0, 1.0);
         for op in &from_b.ops {
             collab_receive(&serde_json::to_string(op).unwrap(), 2.0).expect("applied");
         }
@@ -9903,7 +9949,7 @@ mod collab_tests {
         session_set_cell(0, 0, 0, "2").unwrap();
         session_set_cell(0, 1, 0, "=A1*10").unwrap();
         collab_flush();
-        collab_acknowledge(1.0);
+        collab_acknowledge(1.0, 1.0);
         for op in &submission.ops {
             collab_receive(&serde_json::to_string(op).unwrap(), 2.0).expect("applied");
         }

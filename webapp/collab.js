@@ -227,7 +227,10 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         }
         break;
       case "ack":
-        wasm.collab_acknowledge(message.revision);
+        // Cumulative: this settles every chunk up to `through`, not only the
+        // one it names. A skipped or lost acknowledgement is covered by the
+        // next, rather than leaving a chunk outstanding with nothing to say so.
+        wasm.collab_acknowledge(message.through, message.revision);
         revision = message.revision;
         break;
       case "apply":
@@ -312,20 +315,24 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     if (!joined || socket?.readyState !== WebSocket.OPEN) return;
     if (mustResend) {
       mustResend = false;
-      // The *same* sequence number as before. That is what lets the server
-      // recognise a chunk it already committed and answer with where it landed,
-      // rather than applying it a second time — which, for an insert-rows, is
-      // corruption rather than a glitch.
-      const again = wasm.collab_resend();
-      if (again) {
-        socket.send(again);
-        return;
+      // Each with the *same* sequence number as before. That is what lets the
+      // server recognise a chunk it already committed and answer with where it
+      // landed, rather than applying it a second time — which, for an
+      // insert-rows, is corruption rather than a glitch.
+      //
+      // In order, and all of them before anything new: only the first names a
+      // revision and the rest chain from it, so one delivered early asks the
+      // server to resolve a chain whose start it has not seen.
+      for (const again of JSON.parse(wasm.collab_resend())) {
+        socket.send(JSON.stringify(again));
       }
     }
+    // One chunk, because a flush drains everything pending into one. What
+    // changed with ADR-016 is that this is no longer *blocked* by chunks
+    // already in flight: the next tick sends the next chunk rather than waiting
+    // out a round trip first. Empty still means nothing to send — or that the
+    // engine has hit its bound on outstanding chunks and is holding the rest.
     const submission = wasm.collab_flush();
-    // Empty means nothing to send *or* a chunk already in flight. One at a
-    // time, by design: with two outstanding, an acknowledgement does not say
-    // which it was for.
     if (submission) socket.send(submission);
   }
 

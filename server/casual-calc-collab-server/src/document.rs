@@ -328,6 +328,7 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::SaveReason;
+    use casual_calc_transaction::session::Base;
 
     fn document() -> Vec<u8> {
         include_bytes!("../../../fixtures/generated/minimal.xlsx").to_vec()
@@ -360,7 +361,7 @@ mod tests {
         Submission {
             client: ClientId(1),
             seq,
-            base,
+            base: Base::Revision(base),
             ops: vec![WireOperation::of(
                 Operation::SetCell {
                     sheet: 0,
@@ -536,7 +537,7 @@ mod tests {
                 &Submission {
                     client: ClientId(1),
                     seq: 1,
-                    base: 0,
+                    base: Base::Revision(0),
                     ops: vec![WireOperation::of(
                         Operation::SetCell {
                             sheet: 0,

@@ -36,7 +36,7 @@ const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
 /// Asserted against the engine's own number in the first test, because a client
 /// that states the wrong version is refused *before* it joins — which, from the
 /// test's side, is indistinguishable from the server hanging.
-const PROTOCOL = 4;
+const PROTOCOL = 5;
 
 
 
@@ -128,8 +128,8 @@ const setCellIn = (page, row, col, text) =>
 /// what a client does. A browser cannot test those, because the browser client
 /// is the thing being assumed away.
 ///
-/// Resolves with the first message the server sends after `act` runs.
-function speakDirectly(key, user, access, act) {
+/// Resolves with the first `replies` messages the server sends after `act` runs.
+function speakDirectly(key, user, access, act, replies = 1) {
   // Kept in step with the engine by `the protocol version this file speaks is
   // the one the engine speaks`, below. A raw client has to state a version, and
   // a stale one here would look like the server going silent.
@@ -142,6 +142,7 @@ function speakDirectly(key, user, access, act) {
       reject(new Error("the server said nothing at all"));
     }, 10_000);
     let acted = false;
+    const heard = [];
     socket.onopen = () =>
       socket.send(JSON.stringify({ type: "join", protocol: PROTOCOL, token }));
     socket.onmessage = (event) => {
@@ -163,9 +164,11 @@ function speakDirectly(key, user, access, act) {
         reject(new Error(`refused before joining: ${JSON.stringify(message)}`));
         return;
       }
+      heard.push(message);
+      if (heard.length < replies) return;
       clearTimeout(timer);
       socket.close();
-      resolve(message);
+      resolve(replies === 1 ? heard[0] : heard);
     };
     socket.onerror = () => {
       clearTimeout(timer);
@@ -281,7 +284,7 @@ test.describe("collaboration", () => {
         type: "submit",
         client: me,
         seq: 1,
-        base: revision,
+        base: { revision },
         ops: [
           {
             op: { setValue: { sheet: 0, at: { row: 20, col: 1 }, value: { inlineString: 1 } } },
@@ -461,5 +464,67 @@ test.describe("collaboration", () => {
     ).toBe("minimal.xlsx");
 
     await page.close();
+  });
+
+  test("a second chunk sent before the first is acknowledged lands correctly", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const watcher = await browser.newPage();
+    await boot(watcher);
+    await join(watcher, { document: key, user: { id: "u-w", name: "Watcher" } });
+
+    // Both chunks go out back to back, with no round trip between them. The
+    // second names no revision — it was written on top of the first and only
+    // the server knows where that landed — and the server resolves it from the
+    // chunk before. Getting this wrong rebases the second chunk against its own
+    // predecessor, which it already contains, and it lands at the wrong place
+    // with no error anywhere.
+    const acks = await speakDirectly(
+      key,
+      { id: "u-p", name: "Pipeliner" },
+      "edit",
+      (send, me, revision) => {
+        send({
+          type: "submit",
+          client: me,
+          seq: 1,
+          base: { revision },
+          ops: [
+            {
+              op: { setValue: { sheet: 0, at: { row: 40, col: 0 }, value: { inlineString: 1 } } },
+              formulas: {},
+              styles: {},
+              strings: { 1: "first" },
+            },
+          ],
+        });
+        send({
+          type: "submit",
+          client: me,
+          seq: 2,
+          base: "chained",
+          ops: [
+            {
+              op: { setValue: { sheet: 0, at: { row: 41, col: 0 }, value: { inlineString: 1 } } },
+              formulas: {},
+              styles: {},
+              strings: { 1: "second" },
+            },
+          ],
+        });
+      },
+      2,
+    );
+
+    expect(acks.map((a) => a.type)).toEqual(["ack", "ack"]);
+    // Cumulative: the second names everything through sequence two.
+    expect(acks[1].through).toBe(2);
+    expect(acks[1].revision).toBeGreaterThan(acks[0].revision);
+
+    await expect.poll(() => cellIn(watcher, 40, 0)).toBe("first");
+    await expect.poll(() => cellIn(watcher, 41, 0)).toBe("second");
+
+    await watcher.close();
   });
 });

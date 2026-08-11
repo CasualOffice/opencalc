@@ -1272,7 +1272,7 @@ async fn handle(
                     if send(
                         socket,
                         &ServerMessage::Ack {
-                            seq: submission.seq,
+                            through: submission.seq,
                             revision,
                         },
                     )

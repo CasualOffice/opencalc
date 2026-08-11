@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use casual_calc_transaction::protocol::{ClientMessage, PROTOCOL_VERSION, Refusal, ServerMessage};
-use casual_calc_transaction::session::{SnapshotPolicy, Submission};
+use casual_calc_transaction::session::{Base, SnapshotPolicy, Submission};
 use casual_calc_transaction::wire::WireOperation;
 use casual_calc_transaction::{Operation, SheetFields, SheetMetadata};
 use futures_util::{SinkExt, StreamExt};
@@ -317,14 +317,18 @@ async fn what_one_participant_edits_reaches_the_other() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
     .await;
 
     // Ada is acked; the ack is what tells her the edit is ordered.
-    let Some(ServerMessage::Ack { seq, revision }) = hear(&mut ada).await else {
+    let Some(ServerMessage::Ack {
+        through: seq,
+        revision,
+    }) = hear(&mut ada).await
+    else {
         panic!("expected an ack");
     };
     assert_eq!(seq, 1);
@@ -353,7 +357,7 @@ async fn two_participants_join_the_same_session_rather_than_two_of_them() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -490,7 +494,7 @@ async fn a_viewer_is_refused_an_edit_by_the_server() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -521,7 +525,7 @@ async fn a_commenter_may_comment_and_may_not_edit() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![comment_change()],
         }),
     )
@@ -536,7 +540,7 @@ async fn a_commenter_may_comment_and_may_not_edit() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 2,
-            base: 1,
+            base: Base::Revision(1),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -713,7 +717,7 @@ async fn an_edit_is_eventually_delivered_to_the_host() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -750,7 +754,7 @@ async fn a_host_that_refuses_gets_the_participants_warned() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -863,7 +867,7 @@ async fn a_document_with_unsaved_work_is_not_evicted() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -1003,7 +1007,7 @@ async fn shutting_down_saves_the_work_that_was_outstanding() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -1088,7 +1092,7 @@ async fn a_host_that_hangs_does_not_stop_the_node_exiting() {
         &ClientMessage::Submit(Submission {
             client: casual_calc_transaction::session::ClientId(1),
             seq: 1,
-            base: 0,
+            base: Base::Revision(0),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -1359,7 +1363,7 @@ async fn a_resumed_participant_is_given_what_it_missed_and_not_a_snapshot() {
         &ClientMessage::Submit(Submission {
             client,
             seq: 1,
-            base: revision,
+            base: Base::Revision(revision),
             ops: vec![cell_edit(42.0)],
         }),
     )
@@ -1401,7 +1405,7 @@ async fn a_resend_after_reconnecting_is_recognised_rather_than_applied_twice() {
     let chunk = Submission {
         client,
         seq: 1,
-        base: revision,
+        base: Base::Revision(revision),
         ops: vec![cell_edit(7.0)],
     };
     say(&mut first, &ClientMessage::Submit(chunk.clone())).await;

@@ -145,8 +145,8 @@ pub struct Submission {
     /// A resend carries the *same* sequence, which is what makes it a resend
     /// rather than a new edit.
     pub seq: u64,
-    /// The revision the operations were written against.
-    pub base: u64,
+    /// What the operations were written against.
+    pub base: Base,
     /// The operations, in the order the client made them, **each packaged with
     /// what its handles mean**.
     ///
@@ -154,6 +154,38 @@ pub struct Submission {
     /// index into the sending workbook's own tables, which names something
     /// different — or nothing — anywhere else. See [`WireOperation`].
     pub ops: Vec<WireOperation>,
+}
+
+/// What a chunk was written on top of.
+///
+/// Two answers rather than one revision number, and the second is what lets a
+/// client keep sending without waiting to be acknowledged
+/// ([ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md)).
+///
+/// A second chunk is written on top of the first, locally, before the first has
+/// been ordered. If it named the same revision the first did, the server would
+/// rebase it against the first as well — and it already contains the first, so
+/// it would be transformed twice and land wrong. Silently: there is no error to
+/// raise, only two documents that no longer agree.
+///
+/// The client cannot name the right revision, because the right revision is
+/// wherever the first chunk landed and it will not know that until the
+/// acknowledgement arrives. That circle is what stop-and-wait avoided by never
+/// having a second chunk in flight.
+///
+/// So it does not name one. A sender does not need to know the receiver's
+/// position; it says "after my last one" and the server, which does know,
+/// substitutes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Base {
+    /// Written against this revision.
+    ///
+    /// The first chunk after a join or a resume, which is the only moment a
+    /// client knows an absolute answer.
+    Revision(u64),
+    /// Written on top of this client's previous chunk, wherever it landed.
+    Chained,
 }
 
 /// What committing a chunk did.
@@ -183,15 +215,33 @@ pub enum Commit {
     },
 }
 
+/// A chunk that has been sent and not yet acknowledged.
+#[derive(Debug, Clone)]
+struct Outstanding {
+    seq: u64,
+    ops: Vec<Operation>,
+}
+
+/// How many chunks a client will have in flight before it stops making more.
+///
+/// Unbounded pipelining is unbounded memory here and unbounded queued work at
+/// the server, reachable by one participant on a bad link. Past this, `flush`
+/// produces nothing and edits accumulate in `pending` exactly as they did
+/// before — which is to say it degrades to stop-and-wait, which is a good thing
+/// to degrade to, being what this replaced.
+const MAX_OUTSTANDING: usize = 32;
+
 /// One participant's view: its revision, what it has sent, and what it has not.
 #[derive(Debug, Clone)]
 pub struct ClientSession {
     client: ClientId,
     revision: u64,
-    /// Sent and awaiting acknowledgement. At most one chunk, by design.
-    sent: Vec<Operation>,
-    /// The sequence number of the chunk in flight. A resend reuses it.
-    sent_seq: u64,
+    /// Sent and awaiting acknowledgement, oldest first.
+    ///
+    /// A queue rather than a single chunk since ADR-016. Ordered, and it must
+    /// stay ordered: each chunk was written on top of the one before it, so
+    /// they mean nothing rearranged.
+    sent: Vec<Outstanding>,
     /// Made locally and not yet sent.
     pending: Vec<Operation>,
     /// Chunks taken from `pending` so far, which is what numbers them.
@@ -206,7 +256,6 @@ impl ClientSession {
             client,
             revision,
             sent: Vec::new(),
-            sent_seq: 0,
             pending: Vec::new(),
             chunks: 0,
         }
@@ -292,60 +341,94 @@ impl ClientSession {
         self.pending.push(op);
     }
 
-    /// Take the pending edits as a chunk to send, if any and if the previous
-    /// chunk has been acknowledged.
+    /// Take the pending edits as a chunk to send.
     ///
-    /// Returns `None` when there is nothing to send or a chunk is already in
-    /// flight — the one-at-a-time rule, which is what keeps a single server
-    /// order sufficient. (This paragraph had drifted onto
-    /// [`record`](Self::record), leaving the two functions describing each
-    /// other.)
+    /// Returns `None` when there is nothing to send, or when
+    /// a bounded number of chunks are already in flight — at which point edits
+    /// keep accumulating and go out as one larger chunk later, which is what
+    /// this did unconditionally before ADR-016.
+    ///
+    /// The base is [`Base::Chained`] whenever anything is already outstanding,
+    /// because this chunk was written on top of it and only the server knows
+    /// where that landed.
     pub fn flush(&mut self, workbook: &Workbook) -> Option<Submission> {
-        if !self.sent.is_empty() || self.pending.is_empty() {
+        if self.pending.is_empty() || self.sent.len() >= MAX_OUTSTANDING {
             return None;
         }
-        self.sent = core::mem::take(&mut self.pending);
+        let base = if self.sent.is_empty() {
+            Base::Revision(self.revision)
+        } else {
+            Base::Chained
+        };
         self.chunks += 1;
-        self.sent_seq = self.chunks;
-        self.package(workbook)
+        let chunk = Outstanding {
+            seq: self.chunks,
+            ops: core::mem::take(&mut self.pending),
+        };
+        let submission = self.package(&chunk, base, workbook);
+        self.sent.push(chunk);
+        Some(submission)
     }
 
-    /// The chunk in flight, to send again.
+    /// Everything outstanding, to send again, oldest first.
     ///
-    /// After a leader failover a client cannot know whether its chunk was
-    /// committed, so it sends the same one again — the *same* sequence, which
-    /// is what lets the server recognise it rather than apply it twice. The
-    /// base moves with the client, because remote operations that arrived
-    /// meanwhile have already rebased the chunk.
-    pub fn resend(&self, workbook: &Workbook) -> Option<Submission> {
-        self.package(workbook)
+    /// After a reconnect a client cannot know which of its chunks were
+    /// committed, so it sends them all again — each with its *original*
+    /// sequence number, which is what lets the server recognise the ones it
+    /// already has instead of applying them twice.
+    ///
+    /// Only the first names a revision. The rest were written on top of it and
+    /// are chained, exactly as they were the first time; the server resolves
+    /// them the same way whether this is a first delivery or a resend, which is
+    /// what keeps the two paths from diverging.
+    ///
+    /// The absolute base is the client's *current* revision rather than the one
+    /// it originally sent, because remote operations that arrived meanwhile
+    /// have already rebased these chunks.
+    #[must_use]
+    pub fn resend(&self, workbook: &Workbook) -> Vec<Submission> {
+        self.sent
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let base = if i == 0 {
+                    Base::Revision(self.revision)
+                } else {
+                    Base::Chained
+                };
+                self.package(chunk, base, workbook)
+            })
+            .collect()
     }
 
-    /// The chunk in flight, packaged against `workbook`.
+    /// A chunk, packaged against `workbook`.
     ///
     /// The workbook is required because an operation's handles mean nothing
     /// apart from the tables they index, and this is the last point at which
     /// those are to hand.
-    fn package(&self, workbook: &Workbook) -> Option<Submission> {
-        if self.sent.is_empty() {
-            return None;
-        }
-        Some(Submission {
+    fn package(&self, chunk: &Outstanding, base: Base, workbook: &Workbook) -> Submission {
+        Submission {
             client: self.client,
-            seq: self.sent_seq,
-            base: self.revision,
-            ops: self
-                .sent
+            seq: chunk.seq,
+            base,
+            ops: chunk
+                .ops
                 .iter()
                 .cloned()
                 .map(|op| WireOperation::of(op, workbook))
                 .collect(),
-        })
+        }
     }
 
-    /// The server committed our chunk. It is now part of the order.
-    pub fn acknowledge(&mut self, revision: u64) {
-        self.sent.clear();
+    /// The server has ordered everything up to and including `through`.
+    ///
+    /// **Cumulative**, as TCP's is, and for the same reason: the server orders
+    /// one client's chunks in sequence, so acknowledging chunk *n* already
+    /// implies every chunk before it. Letting the client rely on that makes a
+    /// lost or skipped acknowledgement self-healing — the next one covers it —
+    /// rather than leaving a chunk outstanding forever with nothing to say so.
+    pub fn acknowledge(&mut self, through: u64, revision: u64) {
+        self.sent.retain(|chunk| chunk.seq > through);
         self.revision = revision;
     }
 
@@ -369,7 +452,12 @@ impl ClientSession {
         // sides as we go. Both halves are needed: the arrival has to be
         // expressed in coordinates that include our edits, and our edits have
         // to be expressed in coordinates that include the arrival.
-        for local in self.sent.iter_mut().chain(self.pending.iter_mut()) {
+        // Through every outstanding chunk in order, then everything not yet
+        // sent. The order is not incidental: each chunk was written on top of
+        // the one before it, so rebasing them in any other order rebases an
+        // operation against coordinates it was never expressed in.
+        let outstanding = self.sent.iter_mut().flat_map(|chunk| chunk.ops.iter_mut());
+        for local in outstanding.chain(self.pending.iter_mut()) {
             let rebased_arrival = transform(&arriving, local, Side::Earlier)?;
             *local = transform(local, &arriving, Side::Later)?;
             arriving = rebased_arrival;
@@ -489,9 +577,31 @@ impl ServerSession {
         {
             return Ok(Commit::Duplicate { revision });
         }
-        if submission.base < self.first || submission.base > self.revision {
+        // Resolved here, and only here. A chained chunk was written on top of
+        // this client's previous one and names no revision, because the client
+        // could not have known which — this table does, having recorded where
+        // that chunk landed, and it is correct to consult because one client's
+        // chunks arrive in order on one connection, so chunk n-1 is ordered
+        // before chunk n is read.
+        let base = match submission.base {
+            Base::Revision(revision) => revision,
+            Base::Chained => {
+                let Some(&(_, landed)) = self.accepted.get(&submission.client) else {
+                    // A client with nothing accepted has nothing to chain to.
+                    // Impossible from a correct client, and inventing a base
+                    // here is how two documents quietly stop agreeing.
+                    return Err(SessionError::UnknownRevision {
+                        claimed: 0,
+                        oldest: self.first,
+                        current: self.revision,
+                    });
+                };
+                landed
+            }
+        };
+        if base < self.first || base > self.revision {
             return Err(SessionError::UnknownRevision {
-                claimed: submission.base,
+                claimed: base,
                 oldest: self.first,
                 current: self.revision,
             });
@@ -499,7 +609,7 @@ impl ServerSession {
 
         // Rebase the whole chunk before applying any of it, so a failure part
         // way through leaves the document untouched rather than half-committed.
-        let skip = usize::try_from(submission.base - self.first).unwrap_or(usize::MAX);
+        let skip = usize::try_from(base - self.first).unwrap_or(usize::MAX);
         let mut rebased = Vec::with_capacity(submission.ops.len());
         let mut history: Vec<Operation> = self.log[skip.min(self.log.len())..].to_vec();
 

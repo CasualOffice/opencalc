@@ -10,7 +10,7 @@ use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
 use crate::{
     Operation,
-    session::{ClientId, ClientSession, Commit, ServerSession, Submission},
+    session::{Base, ClientId, ClientSession, Commit, ServerSession, Submission},
     wire::WireOperation,
 };
 
@@ -101,12 +101,32 @@ impl World {
         }
     }
 
-    /// Deliver the `nth` queued chunk to the server and broadcast the result.
+    /// Deliver the `nth` deliverable chunk to the server and broadcast the
+    /// result.
+    ///
+    /// "Deliverable" means the *oldest* chunk still in flight from its client.
+    /// One client's chunks travel over one connection and therefore arrive in
+    /// the order they were sent — a guarantee the protocol now relies on, since
+    /// a chained chunk names no revision and is resolved from where its
+    /// predecessor landed.
+    ///
+    /// Reordering *between* clients stays completely free, which is where the
+    /// interesting interleavings are: two participants racing is the case OT
+    /// exists for, and one participant's own chunks overtaking each other is
+    /// not a thing a network does.
     fn deliver(&mut self, nth: usize) {
         if self.inflight.is_empty() {
             return;
         }
-        let (from, submission) = self.inflight.remove(nth % self.inflight.len());
+        let mut seen = std::collections::BTreeSet::new();
+        let heads: Vec<usize> = self
+            .inflight
+            .iter()
+            .enumerate()
+            .filter(|(_, (peer, _))| seen.insert(*peer))
+            .map(|(index, _)| index)
+            .collect();
+        let (from, submission) = self.inflight.remove(heads[nth % heads.len()]);
         let outcome = self
             .server
             .commit(&mut self.workbook, &submission)
@@ -118,7 +138,7 @@ impl World {
 
         for (index, peer) in self.peers.iter_mut().enumerate() {
             if index == from {
-                peer.session.acknowledge(revision);
+                peer.session.acknowledge(submission.seq, revision);
             } else {
                 for op in &committed {
                     peer.session
@@ -216,21 +236,21 @@ fn an_edit_below_a_concurrent_insert_lands_on_the_right_row() {
 
 #[test]
 fn a_client_keeps_editing_while_its_chunk_is_in_flight() {
-    // The case the one-chunk-at-a-time rule exists for: edits made *after*
-    // sending are rebased onto whatever the server accepted meanwhile.
+    // Edits made *after* sending are rebased onto whatever the server accepted
+    // meanwhile.
+    //
+    // This used to assert the opposite of what it asserts now — that nothing
+    // further could be sent until the first chunk came back. ADR-016 removed
+    // that rule, so what is worth checking is that a second chunk *can* go out
+    // and that everybody still converges, which is the property the rule was
+    // protecting and the one that has to survive without it.
     let mut world = World::new(2);
     world.edit(0, write(0, 0, 1.0));
     world.send(0); // in flight, unacknowledged
 
-    world.edit(0, write(0, 1, 2.0)); // still pending behind it
+    world.edit(0, write(0, 1, 2.0));
     world.edit(0, write(0, 2, 3.0));
-    assert!(
-        world.peers[0]
-            .session
-            .flush(&world.workbook.clone())
-            .is_none(),
-        "nothing more is sent until the first chunk is acknowledged"
-    );
+    world.send(0); // and so is this one, chained behind it
 
     world.edit(
         1,
@@ -330,7 +350,7 @@ fn a_client_too_far_behind_is_told_rather_than_dropped() {
     let stale = Submission {
         client: ClientId(9),
         seq: 1,
-        base: 0,
+        base: Base::Revision(0),
         ops: vec![WireOperation::of(
             write(7, 2, 42.0),
             &Workbook::new(Id::from_parts(1, 1)),
@@ -353,7 +373,7 @@ fn a_refused_chunk_leaves_the_document_untouched() {
     let stale = Submission {
         client: ClientId(9),
         seq: 1,
-        base: 99,
+        base: Base::Revision(99),
         ops: vec![WireOperation::of(
             write(0, 0, 1.0),
             &Workbook::new(Id::from_parts(1, 1)),
@@ -629,7 +649,7 @@ fn a_client_past_the_retained_window_is_refused_with_the_range_it_needed() {
     let stale = Submission {
         client: ClientId(9),
         seq: 1,
-        base: 1,
+        base: Base::Revision(1),
         ops: vec![WireOperation::of(
             write(0, 2, 7.0),
             &Workbook::new(Id::from_parts(1, 1)),
@@ -674,7 +694,7 @@ fn a_cold_start_resumes_from_a_snapshot_and_keeps_serving() {
     let submission = Submission {
         client: ClientId(9),
         seq: 1,
-        base: server.revision(),
+        base: Base::Revision(server.revision()),
         ops: vec![WireOperation::of(
             write(7, 0, 99.0),
             &Workbook::new(Id::from_parts(1, 1)),
@@ -779,15 +799,15 @@ fn resend_reuses_the_sequence_but_follows_the_clients_revision() {
     world.deliver(0);
 
     let book = world.peers[0].workbook.clone();
-    let again = world.peers[0]
-        .session
-        .resend(&book)
-        .expect("still outstanding");
+    let outstanding = world.peers[0].session.resend(&book);
+    let again = outstanding.first().expect("still outstanding");
     assert_eq!(again.seq, sent.seq, "the same chunk, so the same sequence");
     assert_eq!(again.client, sent.client);
     assert!(
-        again.base > sent.base,
-        "but based on where the client now is"
+        matches!((again.base, sent.base), (Base::Revision(now), Base::Revision(was)) if now > was),
+        "but based on where the client now is: {:?} then {:?}",
+        sent.base,
+        again.base
     );
     assert_ne!(again.ops, sent.ops, "and carrying the rebased operations");
 }
@@ -880,7 +900,7 @@ fn a_resend_is_recognised_even_after_its_base_was_compacted_away() {
                 &Submission {
                     client: ClientId(2),
                     seq: u64::from(row),
-                    base: world.server.revision(),
+                    base: Base::Revision(world.server.revision()),
                     ops: vec![WireOperation::of(op, &world.workbook)],
                 },
             )
@@ -1022,7 +1042,8 @@ fn resuming_keeps_the_work_a_fresh_start_would_have_thrown_away() {
         client.has_unacknowledged(),
         "the chunk in flight survives the reconnect"
     );
-    let again = client.resend(&workbook).expect("the same chunk again");
+    let outstanding = client.resend(&workbook);
+    let again = outstanding.first().expect("the same chunk again");
     assert_eq!(
         again.seq, sent.seq,
         "and with its original sequence number, which is what lets the server \
@@ -1056,7 +1077,7 @@ fn resuming_continues_the_numbering_so_new_work_is_not_mistaken_for_old() {
 
     write(&mut client, &mut workbook, 1);
     let first = client.flush(&workbook).unwrap();
-    client.acknowledge(1);
+    client.acknowledge(1, 1);
 
     client.resume(ClientId(1), 1);
 
@@ -1100,7 +1121,7 @@ fn what_was_missed_rebases_the_chunk_that_is_about_to_be_resent() {
     let theirs = Submission {
         client: ClientId(2),
         seq: 1,
-        base: 0,
+        base: Base::Revision(0),
         ops: vec![WireOperation::of(
             Operation::SetCell {
                 sheet: 0,
@@ -1122,13 +1143,15 @@ fn what_was_missed_rebases_the_chunk_that_is_about_to_be_resent() {
     }
 
     // Now the resend, which the server must be able to order.
-    let again = client.resend(&mine).expect("the chunk, rebased");
+    let outstanding = client.resend(&mine);
+    let again = outstanding.first().expect("the chunk, rebased");
     assert_eq!(
-        again.base, revision,
+        again.base,
+        Base::Revision(revision),
         "written against where the document is now"
     );
     assert_eq!(again.seq, lost.seq, "and still the same chunk");
-    let outcome = server.commit(&mut server_book, &again);
+    let outcome = server.commit(&mut server_book, again);
     assert!(
         outcome.is_ok(),
         "a rebased resend is orderable: {outcome:?}"
@@ -1136,4 +1159,172 @@ fn what_was_missed_rebases_the_chunk_that_is_about_to_be_resent() {
 
     // Both sides agree afterwards, which is the claim that matters.
     assert_eq!(observe(&mine), observe(&server_book));
+}
+
+// --- Pipelining and cumulative acknowledgement (ADR-016) ---------------------
+
+/// The point of the whole change: a client does not stop to be acknowledged.
+#[test]
+fn several_chunks_can_be_in_flight_at_once_and_everyone_still_agrees() {
+    let mut world = World::new(2);
+
+    // Four chunks from one client with nothing acknowledged in between, while
+    // the other inserts a row underneath them. Before ADR-016 the second, third
+    // and fourth could not have been sent at all.
+    for col in 0..4u32 {
+        world.edit(0, write(0, col, f64::from(col)));
+        world.send(0);
+    }
+    assert_eq!(world.inflight.len(), 4, "all of them are on the wire");
+
+    world.edit(
+        1,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.send(1);
+
+    world.settle();
+    world.assert_converged("four chunks in flight against a concurrent insert");
+
+    // And they landed where the insert put them, rather than where they were
+    // written — which is what would have gone wrong had a chained chunk been
+    // rebased against its own predecessor.
+    let seen = observe(&world.workbook);
+    for col in 0..4u32 {
+        assert!(
+            seen.contains(&format!("1:{col}=Number({col}.0)")),
+            "chunk {col} followed the inserted row: {seen}"
+        );
+    }
+}
+
+/// A chained chunk must be rebased against what happened *concurrently*, and
+/// not against its own predecessor — which it already contains.
+///
+/// This is the failure the `Base` enum exists to prevent, and it is silent: a
+/// double-transformed operation lands at the wrong coordinates with no error
+/// anywhere, leaving two documents that quietly disagree.
+#[test]
+fn a_chained_chunk_is_not_rebased_against_the_chunk_it_follows() {
+    let mut world = World::new(1);
+
+    world.edit(
+        0,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.send(0);
+    // Written *after* the insert, so already in coordinates that include it.
+    world.edit(0, write(3, 0, 42.0));
+    world.send(0);
+    world.settle();
+
+    let seen = observe(&world.workbook);
+    assert!(
+        seen.contains("3:0=Number(42.0)"),
+        "the second chunk stayed where it was written; shifting it again would \
+         put it at row 4: {seen}"
+    );
+}
+
+#[test]
+fn an_acknowledgement_covers_every_chunk_up_to_it() {
+    let mut workbook = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    for col in 0..3u32 {
+        client.edit(&mut workbook, write(0, col, 1.0)).unwrap();
+        client.flush(&workbook).expect("a chunk");
+    }
+    assert!(client.has_unacknowledged());
+
+    // One acknowledgement, naming the last of them. Cumulative: the two before
+    // it are covered without ever being named, which is what makes a lost
+    // acknowledgement heal itself instead of stranding a chunk forever.
+    client.acknowledge(3, 7);
+    assert!(
+        !client.has_unacknowledged(),
+        "all three are settled by the one that names the last"
+    );
+    assert_eq!(client.revision(), 7);
+}
+
+#[test]
+fn an_acknowledgement_that_covers_only_some_leaves_the_rest_outstanding() {
+    let mut workbook = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+    for col in 0..3u32 {
+        client.edit(&mut workbook, write(0, col, 1.0)).unwrap();
+        client.flush(&workbook).expect("a chunk");
+    }
+
+    client.acknowledge(1, 4);
+    let still = client.resend(&workbook);
+    assert_eq!(still.len(), 2, "the two the server has not confirmed");
+    assert_eq!(still[0].seq, 2, "oldest first");
+    assert_eq!(still[1].seq, 3);
+    assert!(
+        matches!(still[0].base, Base::Revision(4)),
+        "the first names where the client now is: {:?}",
+        still[0].base
+    );
+    assert_eq!(
+        still[1].base,
+        Base::Chained,
+        "and the rest chain, as they did the first time"
+    );
+}
+
+/// Pipelining without a bound is a client on a bad link turning into unbounded
+/// memory here and unbounded queued work at the server.
+#[test]
+fn a_client_that_is_never_acknowledged_stops_making_new_chunks() {
+    let mut workbook = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    let mut chunks = 0;
+    for row in 0..200u32 {
+        client.edit(&mut workbook, write(row, 0, 1.0)).unwrap();
+        if client.flush(&workbook).is_some() {
+            chunks += 1;
+        }
+    }
+
+    assert!(
+        chunks <= 32,
+        "the queue is bounded, not merely large: {chunks}"
+    );
+    // Nothing was dropped: what could not be sent is still waiting to be.
+    assert!(client.has_unacknowledged());
+    client.acknowledge(chunks, 1);
+    assert!(
+        client.flush(&workbook).is_some(),
+        "and it resumes once there is room"
+    );
+}
+
+/// A chained chunk from a client the server has never accepted anything from
+/// has nothing to chain to.
+#[test]
+fn a_chain_with_nothing_to_chain_to_is_refused_rather_than_guessed_at() {
+    let mut workbook = seed();
+    let mut server = ServerSession::new();
+    let submission = Submission {
+        client: ClientId(9),
+        seq: 1,
+        base: Base::Chained,
+        ops: vec![WireOperation::of(write(0, 0, 1.0), &workbook)],
+    };
+    let outcome = server.commit(&mut workbook, &submission);
+    assert!(
+        outcome.is_err(),
+        "inventing a base is how two documents quietly stop agreeing"
+    );
 }
