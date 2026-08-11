@@ -50,6 +50,16 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 **Added**
 
+- **The collaboration token and its verifier** (COL-17, COL-18). The token is
+  the whole integration contract: participant identity, document (session key,
+  file id, title, version, owner, fetch URL), permissions, and a callback that
+  is either an OnlyOffice-style URL or a WOPI `src`+`token`. Permissions are
+  **enforced, not carried** — `comment` refuses a cell edit at the operation
+  level, including one hidden inside a batch. The verifier treats the accepted
+  algorithms as configuration rather than input, so `alg: none` and
+  RSA-public-key-as-HMAC-secret are both refused, and an unknown `kid` is a
+  refusal rather than a reason to try the other keys.
+
 - **Iterative calculation** (P2-004). A workbook whose author enabled iteration
   — the only way some financial models can be written, where a balance depends
   on the interest it accrues — opened here as a sheet of `#REF!`. With

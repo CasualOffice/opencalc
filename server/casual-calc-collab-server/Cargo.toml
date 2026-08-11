@@ -15,9 +15,10 @@ casual-calc-import = { path = "../../crates/casual-calc-import" }
 casual-calc-model = { path = "../../crates/casual-calc-model" }
 casual-calc-transaction = { path = "../../crates/casual-calc-transaction" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 
 [dev-dependencies]
-serde_json = "1"
 casual-calc-formula = { path = "../../crates/casual-calc-formula" }
 
 [lints]
