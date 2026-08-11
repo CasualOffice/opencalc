@@ -880,3 +880,185 @@ async fn a_full_document_turns_the_next_arrival_away() {
         "the second arrival is refused rather than everyone degrading: {answer:?}"
     );
 }
+
+// --- Shutdown drains rather than dropping (PROD-06) ------------------------
+
+/// Start a server that can be told to stop, returning its address and handle.
+type Serving = tokio::task::JoinHandle<()>;
+
+async fn start_stoppable(deliver: Arc<dyn Deliver>) -> (SocketAddr, Shutdown, Serving) {
+    start_stoppable_with(
+        deliver,
+        Limits {
+            tick_ms: 10,
+            ..Limits::default()
+        },
+    )
+    .await
+}
+
+async fn start_stoppable_with(
+    deliver: Arc<dyn Deliver>,
+    limits: Limits,
+) -> (SocketAddr, Shutdown, Serving) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = Shutdown::new();
+    let config = ServiceConfig {
+        bind: addr,
+        verifier: Verifier {
+            policy: TokenPolicy {
+                audience: "opencalc-collab".into(),
+                leeway_secs: 60,
+                allowed_hosts: BTreeSet::new(),
+                require_https: true,
+            },
+            keys: KeySet::shared_secret(SECRET),
+        },
+        // A long quiesce, so nothing saves on the ordinary cadence and the only
+        // save that can happen is the one shutdown forces.
+        save: SavePolicy {
+            quiesce_ms: 600_000,
+            ceiling_ms: 600_000,
+            ..SavePolicy::default()
+        },
+        snapshots: SnapshotPolicy::default(),
+        fetch: Arc::new(Canned(package())),
+        deliver,
+        limits,
+    };
+    let handle = shutdown.clone();
+    let serving = tokio::spawn(async move {
+        let _ = serve_on_with_shutdown(listener, config, handle).await;
+    });
+    (addr, shutdown, serving)
+}
+
+/// Wait for the service to finish shutting down — including the drain, which
+/// happens *after* the listener closes. Waiting on the port instead measures
+/// only that `serve` returned, which it does whatever the drain is doing.
+async fn finished(serving: Serving) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(5), serving)
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn shutting_down_saves_the_work_that_was_outstanding() {
+    // The data-loss case. A rolling deploy that drops connections has
+    // inconvenienced people; one that drops connections with unsaved edits
+    // behind them has lost their work — and the lifecycle's own cadence is no
+    // help, because it is waiting for a quiesce that will never come.
+    let seen = Collected::default();
+    let (addr, shutdown, serving) = start_stoppable(Arc::new(seen.clone())).await;
+
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    hear(&mut ada).await;
+
+    // Nothing has been saved: the cadence is ten minutes away.
+    assert!(
+        seen.0.lock().unwrap().is_empty(),
+        "the ordinary cadence must not have fired, or this proves nothing"
+    );
+
+    shutdown.begin();
+    drop(ada);
+    assert!(
+        finished(serving).await,
+        "the service never finished shutting down"
+    );
+
+    let delivered = seen.0.lock().unwrap().clone();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "expected exactly one final save, got {delivered:?} — more than one \
+         means the sweeper is still running alongside the drain and the host \
+         receives the same document twice"
+    );
+    assert_eq!(delivered[0].0, "Budget.xlsx");
+}
+
+#[tokio::test]
+async fn shutting_down_with_nothing_outstanding_saves_nothing() {
+    // Draining must not manufacture a save. A host that receives a spurious
+    // callback for a document nobody edited has to reason about why.
+    let seen = Collected::default();
+    let (addr, shutdown, serving) = start_stoppable(Arc::new(seen.clone())).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+
+    shutdown.begin();
+    drop(ada);
+    assert!(finished(serving).await);
+    assert!(
+        seen.0.lock().unwrap().is_empty(),
+        "nothing was edited, so nothing should have been sent: {:?}",
+        seen.0.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_host_that_hangs_does_not_stop_the_node_exiting() {
+    // Bounded best effort: a node that refuses to exit is a worse failure than
+    // one that exits having tried, and the host is often being restarted too.
+    struct Hangs;
+    impl Deliver for Hangs {
+        fn put(
+            &self,
+            _d: Callback,
+            _t: String,
+            _b: Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+                Ok(())
+            })
+        }
+    }
+
+    let (addr, shutdown, serving) = start_stoppable_with(
+        Arc::new(Hangs),
+        Limits {
+            tick_ms: 10,
+            drain_timeout_ms: 50,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &saving_claims("Ada")).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: 0,
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    hear(&mut ada).await;
+
+    // The drain is bounded, so the node finishes despite the host never
+    // answering. Asserted on the service *task* finishing rather than the port
+    // closing: the listener goes as soon as `serve` returns, which happens
+    // before the drain runs and therefore proves nothing about it.
+    shutdown.begin();
+    drop(ada);
+    assert!(
+        finished(serving).await,
+        "the node never finished: a hanging host held the drain open"
+    );
+}

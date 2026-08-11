@@ -94,10 +94,21 @@ submission rate, operations per submission, or WebSocket frame size. One client
 can open connections until the node runs out of descriptors, or submit until it
 saturates a document's lock.
 
-### S2-5 · No graceful shutdown · **Observed**
+### S2-5 · No graceful shutdown · **Closed**
 
-No `SIGTERM` handling. A rolling deploy drops every connection mid-edit and
-loses everything unsaved — which, per S1-2, is currently everything.
+`SIGTERM` and Ctrl-C now trigger a drain: the listener stops, the **sweeper
+stops first**, and every document with work outstanding gets one bounded final
+save. Stopping the sweeper before draining is not tidiness — both assemble and
+deliver, so a sweeper still ticking during shutdown races the final save and can
+send the host the same document twice.
+
+Two of the three mutations against this were caught only after the tests were
+rewritten. They had been waiting on the *port* closing, which happens when
+`serve` returns and therefore says nothing about the drain that runs afterwards;
+they now await the service task itself. The third — the sweeper racing the drain
+— is prevented by construction and is **not** gated: making it fail on demand
+needs a deliberately slow deliverer and precise ordering, and a timing-dependent
+test that usually passes is worse than an honest note.
 
 ---
 

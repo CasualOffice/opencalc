@@ -119,6 +119,13 @@ pub struct Limits {
     pub tick_ms: u64,
     /// How long a participant may go unheard before it is presumed gone.
     pub presence_ttl_ms: u64,
+    /// How long the final save at shutdown may take before the node exits
+    /// anyway.
+    ///
+    /// Bounded on purpose: the host is often being restarted at the same
+    /// moment, and a node that refuses to exit is a worse failure than one that
+    /// exits having tried. What it must not do is exit *without* trying.
+    pub drain_timeout_ms: u64,
 }
 
 impl Default for Limits {
@@ -132,6 +139,7 @@ impl Default for Limits {
             idle_eviction_ms: 30_000,
             tick_ms: 1_000,
             presence_ttl_ms: crate::presence::DEFAULT_TTL_MS,
+            drain_timeout_ms: 10_000,
         }
     }
 }
@@ -208,14 +216,64 @@ struct Service {
     registry: Registry,
 }
 
-/// Run the service until the process ends.
+/// A way to ask the service to stop, and to know when it has.
+///
+/// Handed out rather than only installed on a signal, because a test has to be
+/// able to shut a server down deterministically — and because an orchestrator
+/// sometimes wants to drain a node without killing the process.
+#[derive(Debug, Clone)]
+pub struct Shutdown(tokio::sync::watch::Sender<bool>);
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Shutdown {
+    /// A handle that has not been triggered.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(tokio::sync::watch::channel(false).0)
+    }
+
+    /// Ask the service to stop accepting connections and drain.
+    pub fn begin(&self) {
+        let _ = self.0.send(true);
+    }
+
+    async fn wait(&self) {
+        let mut rx = self.0.subscribe();
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.changed().await;
+    }
+}
+
+/// Run the service until the process is asked to stop.
 ///
 /// # Errors
 ///
 /// Whatever binding the listener or serving produces.
 pub async fn serve(config: ServiceConfig) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    serve_on(listener, config).await
+    let shutdown = Shutdown::new();
+    let on_signal = shutdown.clone();
+    tokio::spawn(async move {
+        // SIGTERM is how an orchestrator asks; Ctrl-C is how a person does.
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(term) => term,
+                Err(_) => return,
+            };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        on_signal.begin();
+    });
+    serve_on_with_shutdown(listener, config, shutdown).await
 }
 
 /// Run the service on an already-bound listener.
@@ -231,6 +289,19 @@ pub async fn serve_on(
     listener: tokio::net::TcpListener,
     config: ServiceConfig,
 ) -> std::io::Result<()> {
+    serve_on_with_shutdown(listener, config, Shutdown::new()).await
+}
+
+/// As [`serve_on`], stopping when `shutdown` is triggered.
+///
+/// # Errors
+///
+/// Whatever serving produces.
+pub async fn serve_on_with_shutdown(
+    listener: tokio::net::TcpListener,
+    config: ServiceConfig,
+    shutdown: Shutdown,
+) -> std::io::Result<()> {
     let state = Arc::new(Service {
         config,
         registry: Registry::default(),
@@ -239,8 +310,81 @@ pub async fn serve_on(
     // the save lifecycle — quiesce timer, ceiling, revision cadence, callback
     // retry, read-only fencing — is built, tested and driven by nothing, and
     // the node holds the only copy of every edit until it restarts.
-    tokio::spawn(sweep(Arc::clone(&state)));
-    axum::serve(listener, router(state)).await
+    tokio::spawn(sweep(Arc::clone(&state), shutdown.clone()));
+
+    let signalled = shutdown.clone();
+    axum::serve(listener, router(Arc::clone(&state)))
+        .with_graceful_shutdown(async move { signalled.wait().await })
+        .await?;
+
+    // The sweeper has been told to stop; give it the moment it needs to notice,
+    // so the drain below is the only thing saving.
+    tokio::time::sleep(std::time::Duration::from_millis(
+        state.config.limits.tick_ms.saturating_mul(2).max(20),
+    ))
+    .await;
+
+    // Then the part that matters. A rolling deploy that drops connections has
+    // merely inconvenienced people; one that drops connections with unsaved
+    // edits behind them has lost their work, and the lifecycle's own cadence is
+    // no help because it was waiting for a quiesce that will never come.
+    drain(&state).await;
+    Ok(())
+}
+
+/// Save everything outstanding, once, before the process goes.
+///
+/// Best effort and bounded: a host that is also being restarted cannot be
+/// waited for indefinitely, and a node that refuses to exit is a worse failure
+/// than one that exits having tried. What it must not do is exit *without*
+/// trying, which is what happens with no shutdown path at all.
+async fn drain(state: &Arc<Service>) {
+    let documents: Vec<Arc<Live>> = lock(&state.registry.live)
+        .values()
+        .map(Arc::clone)
+        .collect();
+    let outstanding = documents
+        .iter()
+        .filter(|live| lock(&live.session).has_unsaved())
+        .count();
+    if outstanding == 0 {
+        return;
+    }
+    eprintln!("collab: draining {outstanding} document(s) with unsaved work");
+
+    let now = now_ms();
+    for live in documents {
+        if !lock(&live.session).has_unsaved() {
+            continue;
+        }
+        let Some(destination) = live.callback.clone() else {
+            continue;
+        };
+        let assembled = { lock(&live.session).assemble() };
+        let Ok(bytes) = assembled else { continue };
+        // Tell everyone still connected that this is the last word, whichever
+        // way it goes.
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_millis(state.config.limits.drain_timeout_ms),
+            state
+                .config
+                .deliver
+                .put(destination, live.title.clone(), bytes),
+        )
+        .await
+        {
+            Ok(Ok(())) => CallbackOutcome::Accepted(lock(&live.session).revision()),
+            Ok(Err(why)) => {
+                eprintln!("collab: the final save failed for {}: {why}", live.title);
+                CallbackOutcome::Failed
+            }
+            Err(_) => {
+                eprintln!("collab: the final save timed out for {}", live.title);
+                CallbackOutcome::Failed
+            }
+        };
+        let _ = lock(&live.session).callback(outcome, now);
+    }
 }
 
 /// Drive every document's clock: save when the lifecycle says so, forget
@@ -249,7 +393,7 @@ pub async fn serve_on(
 /// One task for all documents rather than one per document. A thousand idle
 /// timers is a thousand things to cancel correctly on eviction, and the work
 /// per tick is proportional to the documents that actually need something.
-async fn sweep(state: Arc<Service>) {
+async fn sweep(state: Arc<Service>, shutdown: Shutdown) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
         state.config.limits.tick_ms.max(1),
     ));
@@ -257,7 +401,13 @@ async fn sweep(state: Arc<Service>) {
     // afterwards, which would run the save cadence several times over.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        // Stop before the drain runs, not alongside it. Both assemble and
+        // deliver, so a sweeper still ticking during shutdown races the final
+        // save and can send the host the same document twice.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.wait() => return,
+        }
         let now = now_ms();
 
         // Snapshot the keys, so the registry lock is not held while a document
