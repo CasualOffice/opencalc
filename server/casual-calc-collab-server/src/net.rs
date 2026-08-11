@@ -59,9 +59,8 @@ use casual_calc_transaction::session::SnapshotPolicy;
 /// line in the log, and is not worth an outage.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
-        eprintln!(
-            "collab: recovered a poisoned lock — a task panicked while holding it; \
-             the document continues"
+        tracing::error!(
+            "recovered a poisoned lock: a task panicked while holding it; the document continues"
         );
         poisoned.into_inner()
     })
@@ -251,6 +250,66 @@ impl Shutdown {
     }
 }
 
+/// Build a rustls server configuration from a [`crate::config::Endpoint`]'s files.
+///
+/// Client authentication is wired here rather than left to the caller because
+/// it is the half that is easy to configure and forget: TLS on the internal
+/// endpoint proves the traffic is private, and a **client CA** is what proves
+/// the peer is one of yours. `Exposure::warnings` says so at startup; this is
+/// what honours it.
+///
+/// # Errors
+///
+/// If a file cannot be read, or does not hold what its name says it does.
+pub fn tls_config(endpoint: &crate::config::Endpoint) -> Result<rustls::ServerConfig, String> {
+    use std::io::BufReader;
+
+    let files = endpoint
+        .tls
+        .as_ref()
+        .ok_or_else(|| "this endpoint is not configured for TLS".to_owned())?;
+
+    let read = |path: &std::path::Path| -> Result<Vec<u8>, String> {
+        std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    };
+
+    let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(&read(&files.certificate)?[..]))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("{}: {e}", files.certificate.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "{} holds no certificate",
+            files.certificate.display()
+        ));
+    }
+    let key = rustls_pemfile::private_key(&mut BufReader::new(&read(&files.key)?[..]))
+        .map_err(|e| format!("{}: {e}", files.key.display()))?
+        .ok_or_else(|| format!("{} holds no private key", files.key.display()))?;
+
+    let builder = if let Some(ca_path) = &endpoint.client_ca {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut BufReader::new(&read(ca_path)?[..])) {
+            let cert = cert.map_err(|e| format!("{}: {e}", ca_path.display()))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("{}: {e}", ca_path.display()))?;
+        }
+        if roots.is_empty() {
+            return Err(format!("{} holds no CA certificate", ca_path.display()));
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(roots))
+            .build()
+            .map_err(|e| e.to_string())?;
+        rustls::ServerConfig::builder().with_client_cert_verifier(verifier)
+    } else {
+        rustls::ServerConfig::builder().with_no_client_auth()
+    };
+
+    builder
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("the certificate and key do not go together: {e}"))
+}
+
 /// Run the service until the process is asked to stop.
 ///
 /// # Errors
@@ -350,7 +409,10 @@ async fn drain(state: &Arc<Service>) {
     if outstanding == 0 {
         return;
     }
-    eprintln!("collab: draining {outstanding} document(s) with unsaved work");
+    tracing::info!(
+        documents = outstanding,
+        "draining documents with unsaved work"
+    );
 
     let now = now_ms();
     for live in documents {
@@ -375,11 +437,11 @@ async fn drain(state: &Arc<Service>) {
         {
             Ok(Ok(())) => CallbackOutcome::Accepted(lock(&live.session).revision()),
             Ok(Err(why)) => {
-                eprintln!("collab: the final save failed for {}: {why}", live.title);
+                tracing::error!(document = %live.title, error = %why, "the final save failed");
                 CallbackOutcome::Failed
             }
             Err(_) => {
-                eprintln!("collab: the final save timed out for {}", live.title);
+                tracing::error!(document = %live.title, "the final save timed out");
                 CallbackOutcome::Failed
             }
         };
@@ -469,16 +531,19 @@ async fn service_lifecycle(state: &Arc<Service>, live: &Arc<Live>, now: u64) {
                     {
                         Ok(()) => CallbackOutcome::Accepted(revision),
                         Err(why) => {
-                            eprintln!("collab: the callback failed for {}: {why}", live.title);
+                            tracing::warn!(document = %live.title, error = %why, "the callback failed");
                             CallbackOutcome::Failed
                         }
                     }
                 }
                 Err(why) => {
-                    eprintln!("collab: could not assemble {}: {why}", live.title);
+                    tracing::error!(document = %live.title, error = %why, "could not assemble the document");
                     CallbackOutcome::Failed
                 }
             };
+            if matches!(outcome, CallbackOutcome::Accepted(_)) {
+                tracing::info!(document = %live.title, revision, "saved");
+            }
             let follow_up = { lock(&live.session).callback(outcome, now) };
             act_on_follow_up(live, follow_up);
         }
@@ -489,7 +554,11 @@ async fn service_lifecycle(state: &Arc<Service>, live: &Arc<Live>, now: u64) {
 /// Tell the participants what the lifecycle decided, when it concerns them.
 fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
     match action {
-        Some(Action::WarnNotSaving { .. }) => {
+        Some(Action::WarnNotSaving { attempt }) => {
+            tracing::warn!(
+                attempt,
+                "telling participants their work is not being saved"
+            );
             // On the *first* failure, not the last: a warning is only useful
             // while there is still time to copy the work out.
             let _ = live.fan_out.send((
@@ -501,6 +570,7 @@ fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
             ));
         }
         Some(Action::GoReadOnly) => {
+            tracing::error!("a document has gone read-only: its work cannot be saved");
             // Continuing to accept work that provably cannot be persisted is
             // silent loss dressed up as availability.
             let _ = live.fan_out.send((
@@ -610,6 +680,17 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     let Some(claims) = authorise(&state, &document_key, &mut socket).await else {
         return;
     };
+
+    // One span per connection, carrying the fields every event under it should
+    // be filterable by. The document *key* is deliberately absent: it names a
+    // customer's file, and a log is the easiest place for that to leak.
+    let span = tracing::info_span!(
+        "connection",
+        user = %claims.user.id,
+        document = %claims.document.id,
+        access = ?claims.permissions.access,
+    );
+    let _guard = span.enter();
 
     let live = match obtain(&state, &claims).await {
         Ok(live) => live,
@@ -933,8 +1014,9 @@ async fn send(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), axu
 fn tracing_refusal(error: &crate::verify::VerifyError) {
     // Deliberately not returned to the client: telling a caller which of
     // malformed, wrong-key, bad-signature and expired it was hands them an
-    // oracle. An operator needs it and an attacker must not have it.
-    eprintln!("collab: refused a join: {error}");
+    // oracle. An operator needs it and an attacker must not have it, and a log
+    // line is exactly the place that distinction can be kept.
+    tracing::warn!(reason = %error, "refused a join");
 }
 
 #[cfg(test)]

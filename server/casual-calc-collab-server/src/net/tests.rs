@@ -1062,3 +1062,96 @@ async fn a_host_that_hangs_does_not_stop_the_node_exiting() {
         "the node never finished: a hanging host held the drain open"
     );
 }
+
+// --- TLS is wired, not merely modelled (PROD-06) ---------------------------
+
+/// Write a self-signed certificate and key, and a CA, into a temp directory.
+///
+/// Generated rather than committed: a checked-in private key is a private key
+/// somebody will eventually use somewhere real.
+fn certificate_files() -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("opencalc-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    if !cert_path.exists() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+    }
+    (cert_path, key_path)
+}
+
+#[tokio::test]
+async fn a_tls_endpoint_produces_a_usable_server_configuration() {
+    // Exposure modelled TLS with validation and startup warnings, and `serve`
+    // ignored all of it — so the TLS choice was documentation.
+    let (cert, key) = certificate_files();
+    let endpoint = crate::config::Endpoint::secured("127.0.0.1:0".parse().unwrap(), cert, key);
+    assert!(
+        tls_config(&endpoint).is_ok(),
+        "a well-formed endpoint must produce a configuration"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_endpoint_is_refused_rather_than_silently_downgraded() {
+    let endpoint = crate::config::Endpoint::plain("127.0.0.1:0".parse().unwrap());
+    assert!(tls_config(&endpoint).is_err());
+}
+
+#[tokio::test]
+async fn a_missing_or_empty_certificate_is_named_rather_than_guessed_at() {
+    let (cert, key) = certificate_files();
+    let missing = crate::config::Endpoint::secured(
+        "127.0.0.1:0".parse().unwrap(),
+        "/nonexistent/cert.pem".into(),
+        key.clone(),
+    );
+    let err = tls_config(&missing).unwrap_err();
+    assert!(err.contains("cert.pem"), "the file must be named: {err}");
+
+    // A file that exists and holds nothing useful is the more confusing case.
+    let empty = std::env::temp_dir().join("opencalc-empty.pem");
+    std::fs::write(&empty, b"not a certificate").unwrap();
+    let err = tls_config(&crate::config::Endpoint::secured(
+        "127.0.0.1:0".parse().unwrap(),
+        empty,
+        key,
+    ))
+    .unwrap_err();
+    assert!(err.contains("no certificate"), "got {err}");
+
+    // And a certificate with no key behind it.
+    let err = tls_config(&crate::config::Endpoint::secured(
+        "127.0.0.1:0".parse().unwrap(),
+        cert,
+        "/nonexistent/key.pem".into(),
+    ))
+    .unwrap_err();
+    assert!(err.contains("key.pem"), "got {err}");
+}
+
+#[tokio::test]
+async fn requiring_a_client_certificate_builds_a_verifier() {
+    // The half that is easy to configure and forget: TLS proves the traffic is
+    // private, and a client CA is what proves the peer is one of yours.
+    let (cert, key) = certificate_files();
+    let mutual =
+        crate::config::Endpoint::secured("127.0.0.1:0".parse().unwrap(), cert.clone(), key)
+            .requiring_client_certificate(cert);
+    assert!(tls_config(&mutual).is_ok());
+}
+
+#[tokio::test]
+async fn a_client_ca_that_holds_no_certificate_is_refused() {
+    // Otherwise the endpoint comes up demanding client certificates it can
+    // never accept, which reads as a client problem and is a configuration one.
+    let (cert, key) = certificate_files();
+    let empty = std::env::temp_dir().join("opencalc-empty-ca.pem");
+    std::fs::write(&empty, b"nothing here").unwrap();
+    let endpoint = crate::config::Endpoint::secured("127.0.0.1:0".parse().unwrap(), cert, key)
+        .requiring_client_certificate(empty);
+    let err = tls_config(&endpoint).unwrap_err();
+    assert!(err.contains("no CA certificate"), "got {err}");
+}
