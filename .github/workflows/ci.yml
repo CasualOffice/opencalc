@@ -49,7 +49,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add wasm32-unknown-unknown
-      - run: cargo check --target wasm32-unknown-unknown
+      # The **engine** must stay WASM-clean, which is `crates/`. The
+      # collaboration server is a host (ADR-012) and was never meant to run in a
+      # browser: it has an async runtime and an HTTP stack, and checking it here
+      # would be asserting something nobody wants to be true.
+      - run: cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server
 
   benchmark-smoke:
     runs-on: ubuntu-latest

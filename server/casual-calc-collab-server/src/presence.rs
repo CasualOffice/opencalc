@@ -169,7 +169,7 @@ impl Roster {
 /// Deterministic in the id, so the same person is the same colour on every
 /// machine and in every session. The palette avoids red, which reads as an
 /// error in a spreadsheet, and stays clear of the greens used for validation.
-fn colour_for(client: ClientId) -> String {
+pub(crate) fn colour_for(client: ClientId) -> String {
     const PALETTE: [&str; 8] = [
         "2F6DF6", "7C3AED", "0891B2", "C2410C", "9333EA", "0D9488", "B45309", "4F46E5",
     ];

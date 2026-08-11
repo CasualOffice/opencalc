@@ -18,7 +18,7 @@ which gates are not yet built.
 | `lint` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Lints as errors |
 | `test` | `cargo test --workspace --all-features --locked` (+ doc tests) | Correctness, determinism, round-trip, recalc goldens |
 | `docs` | `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings` | Doc builds; intra-doc links valid |
-| `wasm` | `cargo check --target wasm32-unknown-unknown` | The engine stays WASM-clean |
+| `wasm` | `cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server` | The **engine** stays WASM-clean. The collaboration server is a host (ADR-012) with an async runtime and an HTTP stack, and was never meant to run in a browser |
 | `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + determinism (**implemented**, F-007) |
 | `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile (**implemented**, F-008) |
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |

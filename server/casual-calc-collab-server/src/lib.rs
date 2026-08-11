@@ -26,6 +26,7 @@
 
 pub mod document;
 pub mod lifecycle;
+pub mod net;
 pub mod presence;
 pub mod token;
 pub mod verify;
