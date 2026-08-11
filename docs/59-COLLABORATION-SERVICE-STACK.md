@@ -253,6 +253,38 @@ nodes sharing one are two nodes claiming to be the same leader: it wants
 something the orchestrator already guarantees is unique, like a pod name, not a
 hostname that may repeat.
 
+### Who decides the leader is down: nobody
+
+There is no failure detector, and that is the design rather than an omission.
+No replica watches the leader, no node forms an opinion about another's
+liveness, and nothing votes.
+
+A leader proves it is alive by **renewing its own lease**. If it stops — dead,
+partitioned, paused by a long garbage collection, or merely slow — the lease
+lapses on Redis's clock without anybody having judged it. Any node that wants
+the document calls `claim` periodically: while the lease is held it is told who
+holds it and relays there, and the moment the lease has lapsed the same call
+takes it over. The changeover is a consequence of an atomic operation, not of a
+decision.
+
+**Heartbeat detection is the obvious design and the wrong one.** A replica
+noticing silence and declaring the leader dead needs the replicas to *agree*
+that it is down, which is the consensus problem wearing a disguise: under a
+partition each side sees the other's silence, each concludes the other is gone,
+and both promote. Liveness cannot be observed remotely, only inferred, and two
+nodes can infer differently from the same silence.
+
+The lease sidesteps it by never asking the question. The only signal is the
+absence of a renewal; it is evaluated in one place, atomically, by the store.
+Two nodes claiming at the same instant do not race — one succeeds and the other
+is **told who won**, which is also what it needs in order to relay.
+
+That leaves exactly one hole, and it is the one the epoch fills: a leader that
+was alive all along and lost its lease to a slow moment. It still believes it
+leads, it cannot be told in time, and its next append is refused by an epoch
+that has moved past it. It learns by being refused, which is the only way it
+can.
+
 ## 4. Durability: append before acknowledging
 
 An operation is written to the log **before** the client is told it was

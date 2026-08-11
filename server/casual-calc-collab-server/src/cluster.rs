@@ -1,0 +1,298 @@
+//! The cluster: who leads a document, and how a stale leader is stopped.
+//!
+//! [ADR-012](../../../docs/57-COLLABORATION-SERVER-BOUNDARY.md) describes the
+//! shape — interchangeable nodes, one leading a given document, the rest
+//! relaying to it — and [ADR-014](../../../docs/59-COLLABORATION-SERVICE-STACK.md)
+//! chose Redis to coordinate it. This module is the part that has to be right,
+//! and it is deliberately **not** the part that talks to Redis.
+//!
+//! # Why the logic is separate from the store
+//!
+//! Leadership bugs are timing bugs: a lease that expires under load, two nodes
+//! that both believe they lead, an append from a leader that has already been
+//! replaced. Those are the failures that appear once a quarter, in production,
+//! at three in the morning — and they are only testable if time and the store
+//! are both arguments. So [`Coordinator`] is a trait, [`Memory`] implements it
+//! for tests and for standalone, and every rule below is exercised against a
+//! clock the test controls.
+//!
+//! # The two mechanisms, and which does what
+//!
+//! **A lease** is liveness. It says a node holds a document *for now*, expires
+//! on its own, and is cheap. It is not correctness: under load a lease can
+//! expire while its holder is perfectly alive and still working, and there is
+//! no way to prevent that without making it expensive.
+//!
+//! **An epoch** is correctness. Every time a lease is taken afresh the epoch
+//! increases, and an append carries the epoch it was made under. A leader whose
+//! lease expired wrongly — a *zombie* — still thinks it leads, and its appends
+//! are refused because they name an epoch that has been superseded. It finds
+//! out by being told, which is the only way it can.
+//!
+//! That division is what makes the cheap thing safe. Without the epoch, the
+//! lease would have to be correct, and a lease that must never expire wrongly
+//! is a consensus protocol.
+//!
+//! # Who decides the leader is down: nobody
+//!
+//! There is no failure detector here, and that is the point. No replica watches
+//! the leader, no node forms an opinion about another's liveness, and nothing
+//! votes.
+//!
+//! A leader proves it is alive by **renewing its own lease**. If it stops — dead,
+//! partitioned, paused by a long garbage collection, or merely slow — the lease
+//! lapses on the store's clock, without anybody having judged it. Any node that
+//! wants the document calls [`Coordinator::claim`] periodically; while the
+//! lease is held it is told who holds it and relays there, and the moment the
+//! lease has lapsed the same call takes it over. The changeover is a
+//! consequence of an atomic operation, not of a decision.
+//!
+//! Heartbeat-based detection — a replica noticing silence and declaring the
+//! leader dead — is the obvious design and the wrong one. It needs the replicas
+//! to *agree* that the leader is down, which is the consensus problem wearing a
+//! disguise: under a partition each side sees the other's silence, each
+//! concludes the other is gone, and both promote. Liveness cannot be observed
+//! remotely, only inferred, and two nodes can infer differently from the same
+//! silence.
+//!
+//! The lease sidesteps it by never asking the question. The only signal is the
+//! absence of a renewal, and it is evaluated in one place, atomically, by the
+//! store. Two nodes claiming at the same instant do not race: one call succeeds
+//! and the other is told who won.
+//!
+//! Which leaves exactly one hole, and it is the one the epoch fills: a leader
+//! that was alive all along and lost its lease to a slow moment. It still
+//! believes it leads. It is wrong, it cannot be told in time, and its next
+//! append is refused by an epoch that has moved past it.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+/// A node, as its peers see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    /// Its stable id.
+    pub id: String,
+    /// Where to reach it — the **internal** address, not the public one.
+    pub advertise: String,
+    /// How loaded it is, for election. Lower leads.
+    pub load: u32,
+    /// When it last said it was alive.
+    pub seen_ms: u64,
+}
+
+/// A node's claim on leading one document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    /// The document session key.
+    pub document: String,
+    /// Who holds it.
+    pub node: String,
+    /// Which generation of leadership this is.
+    ///
+    /// The fence. It increases whenever leadership *changes hands*, never on a
+    /// renewal, so a holder keeps its epoch for as long as it keeps the lease.
+    pub epoch: u64,
+    /// When it lapses unless renewed.
+    pub expires_ms: u64,
+}
+
+/// Why an append was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendError {
+    /// The appender's epoch has been superseded — it is a zombie leader.
+    ///
+    /// Carries the epoch that is current, so the caller learns it has been
+    /// replaced rather than merely that it failed.
+    Fenced {
+        /// The epoch that now leads.
+        current: u64,
+    },
+    /// The document has moved on since the revision this was written against.
+    ///
+    /// Not a leadership problem: the leader is right and simply behind, which
+    /// happens when its own view has not caught up with the log.
+    Stale {
+        /// The revision the log is actually at.
+        current: u64,
+    },
+    /// Nobody holds a lease on this document.
+    Unled,
+}
+
+/// The store a cluster coordinates through.
+///
+/// Every method takes the time rather than reading it, for the reason the rest
+/// of this crate does: these are the operations whose bugs live in rare timing.
+pub trait Coordinator: Send + Sync {
+    /// Announce this node, or refresh its announcement.
+    fn register(&self, peer: Peer, ttl_ms: u64, now_ms: u64);
+
+    /// Every node that has announced itself recently enough.
+    fn peers(&self, now_ms: u64) -> Vec<Peer>;
+
+    /// Take or renew leadership of `document`.
+    ///
+    /// Returns the lease whoever holds it now has — which may be somebody
+    /// else's, and a caller that assumes otherwise is the bug this signature
+    /// exists to prevent.
+    fn claim(&self, document: &str, node: &str, ttl_ms: u64, now_ms: u64) -> Lease;
+
+    /// Append to a document's log, fenced by `epoch` and conditional on
+    /// `after`.
+    ///
+    /// # Errors
+    ///
+    /// [`AppendError`] when the epoch has been superseded, the revision has
+    /// moved on, or nobody leads the document.
+    fn append(
+        &self,
+        document: &str,
+        epoch: u64,
+        after: u64,
+        payload: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, AppendError>;
+
+    /// Everything logged for `document` after `revision`.
+    fn since(&self, document: &str, revision: u64) -> Vec<(u64, Vec<u8>)>;
+}
+
+/// A coordinator in this process's memory.
+///
+/// Two uses, and the second is not a lesser one. It backs the **tests** for
+/// every rule in this module, which is what lets leadership be exercised
+/// against a clock rather than a stopwatch. And it backs **standalone**, where
+/// one node leads every document by definition and a network round-trip to
+/// agree with itself would be pure cost.
+#[derive(Debug, Default)]
+pub struct Memory {
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    peers: BTreeMap<String, Peer>,
+    leases: BTreeMap<String, Lease>,
+    logs: BTreeMap<String, Vec<Vec<u8>>>,
+}
+
+impl Coordinator for Memory {
+    fn register(&self, peer: Peer, ttl_ms: u64, now_ms: u64) {
+        let _ = ttl_ms;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.peers.insert(
+            peer.id.clone(),
+            Peer {
+                seen_ms: now_ms,
+                ..peer
+            },
+        );
+    }
+
+    fn peers(&self, now_ms: u64) -> Vec<Peer> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // A node that stopped announcing itself is gone. Expiry on read rather
+        // than on a timer: there is no moment at which a peer needs to have
+        // been forgotten except the moment somebody asks.
+        state
+            .peers
+            .values()
+            .filter(|p| now_ms.saturating_sub(p.seen_ms) < PEER_TTL_MS)
+            .cloned()
+            .collect()
+    }
+
+    fn claim(&self, document: &str, node: &str, ttl_ms: u64, now_ms: u64) -> Lease {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let existing = state.leases.get(document).cloned();
+        let lease = match existing {
+            // Held by somebody else and still live: they keep it. Returning
+            // theirs rather than an error is deliberate — the caller needs to
+            // know *who* leads in order to relay to them.
+            Some(held) if held.node != node && held.expires_ms > now_ms => held,
+            // Ours: renew without touching the epoch. A renewal is not a change
+            // of leadership, and bumping the epoch here would fence the holder
+            // against itself.
+            Some(held) if held.node == node && held.expires_ms > now_ms => Lease {
+                expires_ms: now_ms.saturating_add(ttl_ms),
+                ..held
+            },
+            // Lapsed, or never held. Taking it is a change of leadership, so
+            // the epoch moves — which is what fences whoever had it before,
+            // including a holder that is still alive and merely slow.
+            other => Lease {
+                document: document.to_owned(),
+                node: node.to_owned(),
+                epoch: other.map_or(1, |held| held.epoch.saturating_add(1)),
+                expires_ms: now_ms.saturating_add(ttl_ms),
+            },
+        };
+        state.leases.insert(document.to_owned(), lease.clone());
+        lease
+    }
+
+    fn append(
+        &self,
+        document: &str,
+        epoch: u64,
+        after: u64,
+        payload: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<u64, AppendError> {
+        let _ = now_ms;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(lease) = state.leases.get(document).cloned() else {
+            return Err(AppendError::Unled);
+        };
+        // The fence, and it is checked **before** the revision: a zombie whose
+        // revision happens to line up must still be refused, and telling it
+        // "stale" would send it to re-read the log and try again forever.
+        if epoch < lease.epoch {
+            return Err(AppendError::Fenced {
+                current: lease.epoch,
+            });
+        }
+        let log = state.logs.entry(document.to_owned()).or_default();
+        let current = log.len() as u64;
+        if after != current {
+            return Err(AppendError::Stale { current });
+        }
+        log.push(payload);
+        Ok(current + 1)
+    }
+
+    fn since(&self, document: &str, revision: u64) -> Vec<(u64, Vec<u8>)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .logs
+            .get(document)
+            .map(|log| {
+                log.iter()
+                    .enumerate()
+                    .skip(revision as usize)
+                    .map(|(i, payload)| (i as u64 + 1, payload.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// How long a node may go unannounced before its peers forget it.
+const PEER_TTL_MS: u64 = 15_000;
+
+/// Who should lead, given who is available.
+///
+/// Least loaded first, and **the id breaks a tie** rather than the iteration
+/// order. Two nodes electing from the same peer list must reach the same
+/// answer, or they both take the lease and the epoch fence has to clean up
+/// after an avoidable race every time.
+#[must_use]
+pub fn elect(peers: &[Peer]) -> Option<&Peer> {
+    peers
+        .iter()
+        .min_by(|a, b| a.load.cmp(&b.load).then_with(|| a.id.cmp(&b.id)))
+}
+
+#[cfg(test)]
+mod tests;

@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cluster;
 pub mod config;
 pub mod document;
 pub mod http;
@@ -33,6 +34,7 @@ pub mod presence;
 pub mod token;
 pub mod verify;
 
+pub use cluster::{AppendError, Coordinator, Lease, Memory, Peer, elect};
 pub use config::{Endpoint, Exposure, ProxyTrust, TlsFiles};
 pub use document::{DocumentSession, Joined, ServerError};
 pub use lifecycle::{Action, CallbackOutcome, SavePolicy, SaveReason, SessionLifecycle};
