@@ -1155,3 +1155,108 @@ async fn a_client_ca_that_holds_no_certificate_is_refused() {
     let err = tls_config(&endpoint).unwrap_err();
     assert!(err.contains("no CA certificate"), "got {err}");
 }
+
+// --- Client inactivity ------------------------------------------------------
+
+/// A server that gives up on a quiet connection quickly.
+async fn start_impatient() -> (SocketAddr, Shutdown, Serving) {
+    start_stoppable_with(
+        Arc::new(Collected::default()),
+        Limits {
+            tick_ms: 10,
+            presence_ttl_ms: 10_000,
+            client_ping_ms: 20,
+            client_idle_ms: 100,
+            ..Limits::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_connection_nobody_answers_on_is_closed() {
+    // The half-open case: a laptop that slept, a network that vanished. The
+    // socket looks open to us and there is nobody on the far end, and without
+    // this it stays that way forever — holding a slot, a subscription and a
+    // place in the participant cap.
+    //
+    // The client here stops polling its stream, so tungstenite never sends the
+    // pong it would otherwise send automatically. That is exactly what a
+    // vanished peer looks like from here.
+    let (addr, _shutdown, _serving) = start_impatient().await;
+    let mut socket = connect(addr).await;
+    join(&mut socket, &claims("Ada", Access::Edit))
+        .await
+        .unwrap();
+    assert_eq!(until(addr, |s| s.participants == 1).await.participants, 1);
+
+    // Say nothing and answer nothing.
+    let gone = until(addr, |s| s.participants == 0).await;
+    assert_eq!(
+        gone.participants, 0,
+        "a connection nobody is on was held open"
+    );
+}
+
+#[tokio::test]
+async fn a_client_that_answers_pings_is_kept_even_while_it_says_nothing() {
+    // The other half, and the one that matters more: closing a connection
+    // because its user went to lunch is worse than holding it. A live client
+    // answers a WebSocket ping without the page doing anything, so reading the
+    // socket is enough to stay.
+    let (addr, _shutdown, _serving) = start_impatient().await;
+    let mut socket = connect(addr).await;
+    join(&mut socket, &claims("Ada", Access::Edit))
+        .await
+        .unwrap();
+
+    // Keep polling the stream — which is what answers the pings — for well past
+    // the idle limit, without sending a single application message.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(30), socket.next()).await;
+    }
+
+    assert_eq!(
+        stats_of(addr).await.participants,
+        1,
+        "a client that answers pings was dropped for being quiet"
+    );
+}
+
+#[tokio::test]
+async fn answering_keeps_a_participant_in_the_roster_rather_than_expiring_their_cursor() {
+    // Presence and the connection must agree. Before this they did not: the
+    // roster expired a quiet participant while their socket stayed open, so
+    // the node held a connection that could still submit edits and belonged to
+    // nobody as far as presence was concerned.
+    let (addr, _shutdown, _serving) = start_stoppable_with(
+        Arc::new(Collected::default()),
+        Limits {
+            tick_ms: 10,
+            // A presence TTL far shorter than the idle limit, so the roster
+            // would expire first if nothing refreshed it.
+            presence_ttl_ms: 60,
+            client_ping_ms: 20,
+            client_idle_ms: 10_000,
+            ..Limits::default()
+        },
+    )
+    .await;
+
+    let mut socket = connect(addr).await;
+    join(&mut socket, &claims("Ada", Access::Edit))
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(20), socket.next()).await;
+    }
+
+    assert_eq!(
+        stats_of(addr).await.participants,
+        1,
+        "a connected, responsive participant was expired from the roster"
+    );
+}

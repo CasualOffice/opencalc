@@ -118,6 +118,21 @@ pub struct Limits {
     pub tick_ms: u64,
     /// How long a participant may go unheard before it is presumed gone.
     pub presence_ttl_ms: u64,
+    /// How often the server pings a quiet connection.
+    ///
+    /// A WebSocket ping is answered automatically by any live client, so this
+    /// is a liveness check that costs a browser nothing and does not depend on
+    /// the application protocol. It is also the only thing that notices a
+    /// **half-open** connection — a laptop that slept, a network that vanished
+    /// — where the socket looks open to us and there is nobody on the far end.
+    pub client_ping_ms: u64,
+    /// How long a connection may go without a word before it is closed.
+    ///
+    /// Deliberately longer than [`presence_ttl_ms`](Self::presence_ttl_ms) and
+    /// several times [`client_ping_ms`](Self::client_ping_ms): a client that
+    /// answers pings is alive even if nobody is typing, and closing a
+    /// connection because its user went to lunch is worse than holding it.
+    pub client_idle_ms: u64,
     /// How long the final save at shutdown may take before the node exits
     /// anyway.
     ///
@@ -138,6 +153,8 @@ impl Default for Limits {
             idle_eviction_ms: 30_000,
             tick_ms: 1_000,
             presence_ttl_ms: crate::presence::DEFAULT_TTL_MS,
+            client_ping_ms: 15_000,
+            client_idle_ms: 90_000,
             drain_timeout_ms: 10_000,
         }
     }
@@ -764,8 +781,32 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         return;
     }
 
+    // A quiet connection is pinged, and one that has not answered anything for
+    // long enough is closed. Without this a client that vanished — a closed
+    // laptop, a dropped network — leaves a socket that looks open forever,
+    // holding a slot, a broadcast subscription and a place in the participant
+    // cap, while presence has already forgotten it. That inconsistency is the
+    // worse half: a connection nobody is on that can still submit edits.
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(
+        state.config.limits.client_ping_ms.max(1),
+    ));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_heard = now_ms();
+
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if now_ms().saturating_sub(last_heard) > state.config.limits.client_idle_ms {
+                    tracing::debug!("closing a connection nobody answered on");
+                    break;
+                }
+                // Any live client answers this without the page doing anything,
+                // so it is a liveness check that does not depend on the
+                // application protocol being spoken.
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             // Something another participant did.
             update = updates.recv() => {
                 match update {
@@ -789,6 +830,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
             // Something this participant did.
             incoming = socket.recv() => {
                 let Some(Ok(frame)) = incoming else { break };
+                // *Anything* from the far end is proof somebody is there,
+                // including the pong a browser sends without being asked. That
+                // is what keeps a connected-but-quiet participant in the roster
+                // rather than expiring their cursor while they read.
+                last_heard = now_ms();
+                lock(&live.roster).heartbeat(client, last_heard);
                 let Message::Text(text) = frame else { continue };
                 let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
                     continue;
