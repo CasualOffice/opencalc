@@ -107,6 +107,13 @@ dependencies = [
 [[package]]
 name = "casual-calc-fidelity"
 version = "0.0.0"
+dependencies = [
+ "casual-calc-formula",
+ "casual-calc-model",
+ "casual-calc-sdk",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "casual-calc-formula"

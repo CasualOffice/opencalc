@@ -28,7 +28,20 @@ pub use theme::stock_theme_slots;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use casual_calc_formula::{Expr, parse as parse_formula, shift_references};
+use casual_calc_formula::{Expr, FormulaError, shift_references, strip_future_prefixes};
+
+/// Parse a formula **as the file writes it**, which is not quite the language.
+///
+/// SpreadsheetML prefixes any function it postdates with `_xlfn.`, so a file
+/// says `_xlfn.CONCAT` where the formula says `CONCAT`. Everything downstream —
+/// the evaluator, the formula bar, the transform — works in the language, so the
+/// prefix comes off here, at the one point where file text becomes an `Expr`,
+/// and nowhere else has to know about it.
+fn parse_formula(text: &str) -> Result<Expr, FormulaError> {
+    let mut expr = casual_calc_formula::parse(text)?;
+    strip_future_prefixes(&mut expr);
+    Ok(expr)
+}
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, CommentReply,
     ConditionalFormat, CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue,

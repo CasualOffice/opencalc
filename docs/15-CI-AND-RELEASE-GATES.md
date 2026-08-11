@@ -5,10 +5,10 @@ CI is part of the architecture, not an afterthought. The job names below are a
 doc defines the gates for when the workspace exists (Phase 0 onward) and records
 which gates are not yet built.
 
-> **Current state:** eleven jobs run on every push — `format`, `lint`, `test`,
-> `docs`, `wasm`, `benchmark-smoke`, `browser-smoke`, `repository-policy`,
-> `fuzz-build`, `dependency-policy`, and a three-platform matrix including MSRV.
-> Every job in the table below exists.
+> **Current state:** twelve jobs run on every push — `format`, `lint`, `test`,
+> `docs`, `wasm`, `benchmark-smoke`, `browser-smoke`, `oracle-diff`,
+> `repository-policy`, `fuzz-build`, `dependency-policy`, and a three-platform
+> matrix including MSRV. Every job in the table below exists.
 
 ## PR gates
 
@@ -24,6 +24,7 @@ which gates are not yet built.
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
+| `oracle-diff` | build a corpus workbook, recalculate it in LibreOffice Calc, diff the values | The evaluator against an implementation that does not share our reading of the spec (**implemented**, P2-003) |
 | `browser-smoke` | `wasm-pack` build + Playwright against `webapp/editor.html` | The editor loads, paints, calculates, edits, undoes — and copies, fills, inserts, formats, references another sheet and saves (**implemented**, CI-002 + CI-004) |
 
 Actions are pinned to full commit SHAs; workflows run read-only where possible;
@@ -72,8 +73,21 @@ OpenDoc's set:
   committed and diffed.
 - **Golden display lists** — layout output for fixture sheets is golden-tested,
   including the virtualized-viewport path (which must equal the full-layout path).
-- **Recalc oracle** *(Phase 2)* — computed cell values are diffed against a
-  LibreOffice Calc / Excel oracle for the formula corpus.
+- **Recalc oracle** — computed cell values are diffed against LibreOffice Calc
+  for the formula corpus (`oracle-diff`, P2-003). It exists because every other
+  test of the evaluator was written from the specification by whoever wrote the
+  code it tests: that catches mistakes but not **misreadings**, where the test
+  agrees with the bug. An independent implementation does not share the
+  misreading.
+
+  Two honest limits. The oracle is LibreOffice and the target is Excel, so
+  where those two differ, matching LibreOffice proves nothing — such a case is
+  recorded in the corpus as `@differs: <reason>`, and the run then fails if the
+  difference ever *disappears*, so an excuse cannot quietly rot. And LibreOffice
+  exports its own error codes (`Err:502`), which SpreadsheetML has no token for,
+  so where both sides error but spell it differently the run reports
+  **error-class agreement** rather than claiming to have adjudicated `#NUM!`
+  against `#VALUE!`.
 - **Recalc latency budget** *(Phase 2)* — the benchmark harness asserts the
   worst-case incremental recalc stays under the [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)
   budget on the named baseline environment.

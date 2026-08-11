@@ -18,6 +18,7 @@
 
 mod ast;
 mod error;
+pub mod future;
 mod lex;
 mod parse;
 mod print;
@@ -27,6 +28,9 @@ mod rewrite;
 
 pub use ast::{BinaryOp, Expr, UnaryOp};
 pub use error::FormulaError;
+pub use future::{
+    FUTURE_FUNCTIONS, is_future_function, qualify_future_functions, strip_future_prefixes,
+};
 pub use parse::parse;
 pub use reference::{CellReference, MAX_COL, MAX_ROW, column_to_letters, parse_a1};
 pub use refscan::{RefSpan, reference_spans};

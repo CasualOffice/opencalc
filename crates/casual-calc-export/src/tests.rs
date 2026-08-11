@@ -2777,3 +2777,119 @@ fn deleting_an_imported_chart_takes_its_anchor_with_it() {
     let back = import_package(written).unwrap().workbook;
     assert!(back.sheets[0].charts.is_empty());
 }
+
+/// SpreadsheetML's `_xlfn.` prefix, which the writer must add and the reader
+/// must take off again.
+///
+/// Found by the oracle diff (P2-003): a corpus put through LibreOffice came
+/// back with `#NAME?` for `CONCAT`, `TEXTJOIN`, `SWITCH`, `IFNA` and `UNICHAR`,
+/// because the format requires a function it postdates to be written prefixed
+/// and this writer emitted the bare name. No test here could have caught it —
+/// both ends of every round-trip were this codebase, which agreed with itself
+/// perfectly while producing a file Excel would not read.
+mod future_functions {
+    use casual_calc_formula::parse;
+    use casual_calc_model::{Cell, CellRef, Id, Sheet, SheetId, Workbook};
+
+    use super::*;
+
+    fn book_with(formula: &str) -> Vec<u8> {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let handle = wb.store_formula(parse(formula).unwrap());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        write_workbook(&wb).unwrap()
+    }
+
+    fn sheet_xml(bytes: &[u8]) -> String {
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
+        let mut out = String::new();
+        use std::io::Read;
+        zip.by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn a_function_the_format_postdates_is_written_with_its_prefix() {
+        // The exact bug: without this the cell reads `#NAME?` in Excel and the
+        // user has no way to see what the formula used to say.
+        let xml = sheet_xml(&book_with("CONCAT(\"a\",\"b\")"));
+        assert!(
+            xml.contains(r#"<f>_XLFN.CONCAT("a","b")</f>"#),
+            "expected a prefixed function in: {xml}"
+        );
+    }
+
+    #[test]
+    fn a_function_the_format_already_had_is_written_bare() {
+        // The other half: prefixing `SUM` breaks it just as thoroughly.
+        let xml = sheet_xml(&book_with("SUM(A1:A3)"));
+        assert!(xml.contains("<f>SUM(A1:A3)</f>"), "in: {xml}");
+        assert!(!xml.contains("_XLFN.SUM"));
+    }
+
+    #[test]
+    fn what_the_writer_prefixed_the_reader_takes_off_again() {
+        // The round trip must land back in the language, not in the format:
+        // everything downstream — the evaluator, the formula bar, the transform
+        // — knows `CONCAT` and not `_XLFN.CONCAT`.
+        for formula in [
+            "CONCAT(\"a\",\"b\")",
+            "TEXTJOIN(\",\",TRUE,A1:A3)",
+            "SWITCH(2,1,\"one\",2,\"two\")",
+            "IF(ISFORMULA(A1),XLOOKUP(1,A1:A3,B1:B3),SUM(C1:C3))",
+        ] {
+            let reopened = import_package(book_with(formula)).unwrap().workbook;
+            let cell = reopened.sheets[0].cells.get(CellRef::new(0, 0)).unwrap();
+            let expr = reopened.formula(cell.formula.unwrap()).unwrap();
+            assert_eq!(
+                expr.to_string(),
+                formula,
+                "round trip of {formula} came back as {expr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_defined_name_carries_the_prefix_too() {
+        // The second place a formula reaches the file, and the one easiest to
+        // forget: a defined name is an expression as much as a cell is.
+        use casual_calc_model::DefinedName;
+
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        wb.defined_names.push(DefinedName {
+            name: "Joined".to_owned(),
+            sheet: None,
+            formula: parse("TEXTJOIN(\",\",TRUE,A1:A3)").unwrap(),
+        });
+
+        let bytes = write_workbook(&wb).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        let mut xml = String::new();
+        use std::io::Read;
+        zip.by_name("xl/workbook.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("_XLFN.TEXTJOIN"), "in: {xml}");
+
+        let reopened = import_package(bytes).unwrap().workbook;
+        assert_eq!(
+            reopened.defined_names[0].formula.to_string(),
+            "TEXTJOIN(\",\",TRUE,A1:A3)",
+            "and comes back as the language, not the format"
+        );
+    }
+}

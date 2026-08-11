@@ -25,6 +25,14 @@ pub fn shift_references(expr: &Expr, dr: i64, dc: i64) -> Expr {
             name: name.clone(),
             args: args.iter().map(|a| shift_references(a, dr, dc)).collect(),
         },
+        // A first-class call — `LAMBDA(x,x+1)(A1)`. Its arguments are ordinary
+        // expressions and can hold references like any others; falling through
+        // to the catch-all left them unshifted, so filling such a formula down a
+        // column gave every row the first row's answer.
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(shift_references(callee, dr, dc)),
+            args: args.iter().map(|a| shift_references(a, dr, dc)).collect(),
+        },
         other => other.clone(),
     }
 }
@@ -64,6 +72,16 @@ pub fn rename_sheet_references(expr: &mut Expr, old: &str, new: &str) -> bool {
         }
         Expr::Function { args, .. } => {
             let mut changed = false;
+            for arg in args {
+                changed |= rename_sheet_references(arg, old, new);
+            }
+            changed
+        }
+        // As in `shift_references`: a first-class call's callee and arguments
+        // are expressions and can name a sheet. Missing them left a stale sheet
+        // name behind after a rename, which reads as `#REF!` on the next recalc.
+        Expr::Call { callee, args } => {
+            let mut changed = rename_sheet_references(callee, old, new);
             for arg in args {
                 changed |= rename_sheet_references(arg, old, new);
             }
@@ -142,6 +160,37 @@ mod tests {
         assert_eq!(
             renamed("Old!A1", "Old", "My Data"),
             ("'My Data'!A1".into(), true)
+        );
+    }
+
+    /// A first-class call is an expression like any other, and both rewrites
+    /// used to walk straight past it.
+    ///
+    /// `LAMBDA(x,…)(A1)` parses as `Call { callee, args }`, which fell to the
+    /// catch-all arm in both functions. Filling such a formula down a column
+    /// therefore gave every row the first row's references, and renaming a sheet
+    /// left a stale name inside the call — which reads as `#REF!` on the next
+    /// recalculation, somewhere the user never edited.
+    #[test]
+    fn a_first_class_calls_arguments_shift_with_everything_else() {
+        assert_eq!(shifted("LAMBDA(x,x+1)(A1)", 2, 0), "LAMBDA(x,x+1)(A3)");
+        assert_eq!(shifted("LAMBDA(x,x+1)($A$1)", 2, 0), "LAMBDA(x,x+1)($A$1)");
+        // And through the callee, which can itself contain references.
+        assert_eq!(
+            shifted("IF(TRUE,LAMBDA(x,x+A1),LAMBDA(x,x))(B1)", 1, 0),
+            "IF(TRUE,LAMBDA(x,x+A2),LAMBDA(x,x))(B2)"
+        );
+    }
+
+    #[test]
+    fn a_first_class_calls_arguments_follow_a_sheet_rename() {
+        assert_eq!(
+            renamed("LAMBDA(x,x+1)(Old!A1)", "Old", "New"),
+            ("LAMBDA(x,x+1)(New!A1)".into(), true)
+        );
+        assert_eq!(
+            renamed("LAMBDA(x,x+Old!B2)(1)", "Old", "New"),
+            ("LAMBDA(x,x+New!B2)(1)".into(), true)
         );
     }
 }

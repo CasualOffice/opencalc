@@ -18,7 +18,7 @@ pub use error::ExportError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 
-use casual_calc_formula::column_to_letters;
+use casual_calc_formula::{Expr, column_to_letters, qualify_future_functions};
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind,
     DvOperator, ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId,
@@ -233,6 +233,20 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
 ///
 /// Retained parts are appended rather than merged into `parts` because they are
 /// raw bytes, not XML we generated: an image or an OLE stream is not a string.
+/// A formula **as the file must carry it**, which is not quite the language.
+///
+/// SpreadsheetML prefixes any function it postdates with `_xlfn.`; a writer that
+/// emits the bare name produces a file that opens, looks complete, and shows
+/// `#NAME?` in every cell that used one — with no way for a reader to recover
+/// what the formula said. Applied here rather than in the printer because it is
+/// a fact about the file, not about the expression: the same tree printed into a
+/// formula bar must not carry it.
+fn formula_text(expr: &Expr) -> String {
+    let mut owned = expr.clone();
+    qualify_future_functions(&mut owned);
+    owned.to_string()
+}
+
 fn package_with_retained(
     parts: &[(String, String)],
     workbook: &Workbook,
@@ -763,7 +777,7 @@ fn workbook_xml(workbook: &Workbook) -> String {
             s.push_str(&format!(
                 "<definedName name=\"{}\"{scope}>{}</definedName>",
                 escape_attr(&name.name),
-                escape_text(&name.formula.to_string())
+                escape_text(&formula_text(&name.formula))
             ));
         }
         s.push_str("</definedNames>");
@@ -2244,7 +2258,7 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
     if let Some(handle) = cell.formula
         && let Some(expr) = workbook.formula(handle)
     {
-        s.push_str(&format!("<f>{}</f>", escape_text(&expr.to_string())));
+        s.push_str(&format!("<f>{}</f>", escape_text(&formula_text(expr))));
     }
 
     match effective_value {

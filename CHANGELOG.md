@@ -46,6 +46,33 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-08-11 — An oracle that is not us, and the Excel-breaking bug it found
+
+**Added**
+
+- **`oracle-diff`** (P2-003): `tools/casual-calc-fidelity` builds a workbook
+  from a committed corpus of 190 formulas, has LibreOffice Calc recalculate it,
+  and diffs the values. It exists because every other test of the evaluator was
+  written from the specification by whoever wrote the code it tests — which
+  catches mistakes but not *misreadings*, where the test agrees with the bug.
+
+**Fixed**
+
+- **Formulas using any function newer than the file format were unreadable in
+  Excel** (FID-06). SpreadsheetML requires a function it postdates to be written
+  `_xlfn.CONCAT`; OpenCalc wrote the bare name. A workbook saved here containing
+  `CONCAT`, `TEXTJOIN`, `SWITCH`, `IFNA`, `XLOOKUP`, `LET`, `LAMBDA` or
+  thirty-six others **opened in Excel with `#NAME?`** in every one of those
+  cells, with nothing left to say what the formula had been. The reader had the
+  matching hole and would have failed on any file Excel wrote. No test here
+  could have caught it: both ends of every round-trip were this codebase, which
+  agreed with itself while producing a file Excel would not read.
+- **Reference rewrites walked past a first-class call** (FID-07). `LAMBDA(x,…)(A1)`
+  parses as a call, and both the fill/copy shifter and the sheet-renamer fell
+  through to their catch-all arm on it — so filling such a formula down a column
+  gave every row the first row's references, and renaming a sheet left a stale
+  name inside the call.
+
 ### 2026-08-11 — The editing suite, and the selection bug it found
 
 **Added**

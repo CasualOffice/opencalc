@@ -128,6 +128,29 @@ jobs:
             tests/browser/test-results/
           retention-days: 7
 
+  # Every other test of the calc engine was written from the specification by
+  # whoever wrote the code it tests, so a *misreading* of the spec produces a
+  # test that agrees with the bug. LibreOffice does not share our misreadings.
+  # Its first run found the `_xlfn.` writer bug (P2-003): five functions were
+  # being written in a form Excel reads as #NAME?.
+  oracle-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-calc
+          soffice --version
+      - name: Diff the corpus against LibreOffice Calc
+        run: cargo run -q -p casual-calc-fidelity -- --json oracle-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oracle-report
+          path: oracle-report.json
+          retention-days: 14
+
   fuzz-build:
     runs-on: ubuntu-latest
     steps:

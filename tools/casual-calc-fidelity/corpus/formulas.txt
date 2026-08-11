@@ -1,0 +1,240 @@
+# The oracle corpus: one formula per line, evaluated by OpenCalc and by
+# LibreOffice Calc and compared.
+#
+# Lines starting with `#` are comments. A line may end with a marker:
+#
+#   <formula>            compared; a difference fails the run
+#   <formula>  @differs: <reason>
+#                        compared and *expected* to differ, with the reason
+#                        recorded. A difference is reported and does not fail;
+#                        an unexpected *agreement* does fail, so a marker that
+#                        stops being true gets removed rather than rotting.
+#
+# Formulas may reference the fixture block, which the harness writes into every
+# generated workbook:
+#
+#   C1:C10   1, 2, 3 … 10
+#   D1:D10   10, 20, 30 … 100
+#   E1:E5    "alpha", "beta", "gamma", "delta", "epsilon"
+#   F1:F5    TRUE, FALSE, TRUE, FALSE, TRUE
+#   G1:G5    2.5, -3.5, 0, 1e10, -0.25
+#   H1:H5    "10", "-2.5", "abc", "", "3"      (text that looks numeric)
+#
+# Keep each line a single expression. The point of the corpus is breadth of
+# *semantics*, not of syntax.
+
+# --- Arithmetic and precedence ---------------------------------------------
+1+2*3
+(1+2)*3
+2^3^2
+-2^2
+8/4/2
+10%
+1/3
+7-3-2
+1e308*10
+-1e308*10
+
+# --- Comparison and logic ---------------------------------------------------
+1<2
+"a"<"b"
+1=1
+TRUE
+NOT(TRUE)
+AND(TRUE,FALSE)
+OR(FALSE,TRUE)
+XOR(TRUE,FALSE)
+IF(1>0,"yes","no")
+IF(FALSE,1)
+IFS(FALSE,1,TRUE,2)
+IFERROR(1/0,"caught")
+IFNA(NA(),"caught")
+SWITCH(2,1,"one",2,"two","other")
+
+# --- Errors -----------------------------------------------------------------
+1/0
+SQRT(-1)
+LOG(0)
+VALUE("abc")
+NA()
+ISERROR(1/0)
+ISERR(NA())
+ISNA(NA())
+ERROR.TYPE(1/0)
+
+# --- Rounding, which is where implementations diverge most ------------------
+ROUND(2.5,0)
+ROUND(-2.5,0)
+ROUND(2.567,2)
+ROUND(1234.5678,-2)
+ROUNDUP(2.1,0)
+ROUNDDOWN(2.9,0)
+MROUND(10,3)
+CEILING(2.1,1)
+FLOOR(2.9,1)
+TRUNC(2.789,2)
+INT(-2.5)
+INT(2.5)
+EVEN(2.1)
+ODD(2.1)
+QUOTIENT(7,2)
+MOD(-7,3)
+MOD(7,-3)
+
+# --- Maths ------------------------------------------------------------------
+ABS(-4.5)
+SQRT(2)
+POWER(2,0.5)
+EXP(1)
+LN(10)
+LOG10(1000)
+LOG(8,2)
+PI()
+SIGN(-3)
+GCD(12,18)
+LCM(4,6)
+FACT(5)
+COMBIN(5,2)
+PERMUT(5,2)
+SUMPRODUCT(C1:C5,D1:D5)
+SUMSQ(3,4)
+PRODUCT(C1:C5)
+
+# --- Trigonometry -----------------------------------------------------------
+SIN(1)
+COS(1)
+TAN(1)
+ASIN(0.5)
+ACOS(0.5)
+ATAN(1)
+ATAN2(1,1)
+DEGREES(PI())
+RADIANS(180)
+SINH(1)
+COSH(1)
+TANH(1)
+
+# --- Aggregation ------------------------------------------------------------
+SUM(C1:C10)
+AVERAGE(C1:C10)
+MIN(C1:C10)
+MAX(C1:C10)
+COUNT(C1:C10)
+COUNTA(E1:E5)
+COUNTBLANK(H1:H5)
+MEDIAN(C1:C10)
+MODE(1,2,2,3)
+STDEV(C1:C10)
+STDEVP(C1:C10)
+VAR(C1:C10)
+VARP(C1:C10)
+LARGE(C1:C10,3)
+SMALL(C1:C10,3)
+RANK(5,C1:C10)
+PERCENTILE(C1:C10,0.5)
+QUARTILE(C1:C10,1)
+AVERAGEA(C1:C10)
+SUMIF(C1:C10,">5")
+SUMIFS(D1:D10,C1:C10,">5")
+COUNTIF(C1:C10,">5")
+COUNTIFS(C1:C10,">2",C1:C10,"<8")
+AVERAGEIF(C1:C10,">5")
+MAXIFS(D1:D10,C1:C10,">5")
+MINIFS(D1:D10,C1:C10,">5")
+
+# --- Text -------------------------------------------------------------------
+LEN("hello")
+LEFT("hello",2)
+RIGHT("hello",2)
+MID("hello",2,3)
+UPPER("hello")
+LOWER("HELLO")
+PROPER("hello world")
+TRIM("  a  b  ")
+CONCATENATE("a","b")
+CONCAT("a","b","c")
+TEXTJOIN(",",TRUE,E1:E5)
+SUBSTITUTE("banana","a","o")
+SUBSTITUTE("banana","a","o",2)
+REPLACE("abcdef",2,3,"X")
+FIND("b","abc")
+SEARCH("B","abc")
+REPT("ab",3)
+EXACT("a","A")
+CHAR(65)
+CODE("A")
+VALUE("10")
+T("abc")
+T(1)
+UNICHAR(9731)
+UNICODE("A")
+LEFTB("hello",2)
+
+# --- Lookup -----------------------------------------------------------------
+VLOOKUP(3,C1:D10,2,FALSE)
+VLOOKUP(3,C1:D10,2,TRUE)
+HLOOKUP(1,C1:D2,2,FALSE)
+INDEX(C1:C10,3)
+MATCH(3,C1:C10,0)
+MATCH(3.5,C1:C10,1)
+LOOKUP(3,C1:C10,D1:D10)
+CHOOSE(2,"a","b","c")
+OFFSET(C1,2,0)
+INDIRECT("C3")
+ROW(C5)
+COLUMN(D1)
+ROWS(C1:C10)
+COLUMNS(C1:D10)
+XLOOKUP(3,C1:C10,D1:D10)
+
+# --- Information ------------------------------------------------------------
+ISNUMBER(1)
+ISTEXT("a")
+ISBLANK(H4)
+ISLOGICAL(TRUE)
+ISEVEN(4)
+ISODD(3)
+N(1)
+N("a")
+TYPE(1)
+TYPE("a")
+
+# --- Financial --------------------------------------------------------------
+PMT(0.05/12,60,-10000)
+FV(0.05/12,60,-100)
+PV(0.05/12,60,-100)
+NPER(0.05/12,-100,10000)
+RATE(60,-100,5000)
+NPV(0.1,C1:C5)
+IRR(G1:G5)
+SLN(10000,1000,5)
+DB(10000,1000,5,1)
+DDB(10000,1000,5,1)
+SYD(10000,1000,5,1)
+
+# --- Dates ------------------------------------------------------------------
+DATE(2024,3,15)
+YEAR(DATE(2024,3,15))
+MONTH(DATE(2024,3,15))
+DAY(DATE(2024,3,15))
+WEEKDAY(DATE(2024,3,15))
+EOMONTH(DATE(2024,3,15),0)
+EDATE(DATE(2024,3,15),1)
+DAYS(DATE(2024,3,15),DATE(2024,1,1))
+DATEDIF(DATE(2024,1,1),DATE(2024,3,15),"d")
+TIME(13,30,0)
+HOUR(TIME(13,30,0))
+MINUTE(TIME(13,30,0))
+NETWORKDAYS(DATE(2024,3,1),DATE(2024,3,31))
+WORKDAY(DATE(2024,3,1),10)
+YEARFRAC(DATE(2024,1,1),DATE(2024,7,1))
+
+# --- Coercion, where a spreadsheet is at its least obvious -------------------
+"10"+5
+"10"&5
+TRUE+1
+1&2
+SUM(H1:H5)
+COUNT(H1:H5)
+"abc"&""
+-"5"
