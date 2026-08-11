@@ -29,6 +29,7 @@ use casual_calc_model::{
     Style, StyleId, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook,
 };
 use casual_calc_sdk::{EditOperation, SheetMetadata, WorkbookSession, render_sheet_png};
+use casual_calc_transaction::session::ClientSession;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -8688,6 +8689,179 @@ pub fn session_clear_history() {
     });
 }
 
+// --- Collaboration: the client half ---------------------------------------
+//
+// The seam a browser collaboration client sits on. `ClientSession` in
+// `casual-calc-transaction` holds this participant's revision, what it has sent
+// and what it has not, and rebases in both directions when something arrives —
+// all of it gated, and until now reachable from Rust and from nowhere else, so
+// the browser had no way to join a session even though everything it needed
+// existed.
+//
+// Deliberately no transport here. The protocol is message-shaped and the
+// messages serialize, so the JavaScript side owns the socket, the reconnect and
+// the backoff — which is where a browser wants them, and which keeps this
+// testable without one.
+
+thread_local! {
+    /// This participant's view, once it has joined a document.
+    static COLLAB: RefCell<Option<ClientSession>> = const { RefCell::new(None) };
+}
+
+/// Join a collaborative session as `client`, starting from `revision`.
+///
+/// The revision comes from the server's `Welcome`, alongside the snapshot the
+/// document was loaded from: everyone in a session must start from the same
+/// one, and a client that guessed would rebase against a history it never saw.
+#[wasm_bindgen]
+pub fn collab_begin(client: f64, revision: f64) {
+    let session = ClientSession::new(
+        casual_calc_transaction::session::ClientId(client as u64),
+        revision as u64,
+    );
+    COLLAB.with(|cell| *cell.borrow_mut() = Some(session));
+    // From here the editor's own edit path reports what it applies, which is
+    // what makes local work sendable. Without it every entry point that edits —
+    // and there are more than forty — would have to know about collaboration.
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.record_applied();
+        }
+    });
+}
+
+/// Leave the session. Local edits stop being tracked for submission.
+#[wasm_bindgen]
+pub fn collab_end() {
+    COLLAB.with(|cell| *cell.borrow_mut() = None);
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.stop_recording();
+        }
+    });
+}
+
+/// Whether this participant is in a session.
+#[wasm_bindgen]
+pub fn collab_active() -> bool {
+    COLLAB.with(|cell| cell.borrow().is_some())
+}
+
+/// The revision this participant believes the document is at.
+#[wasm_bindgen]
+pub fn collab_revision() -> f64 {
+    COLLAB.with(|cell| cell.borrow().as_ref().map_or(0, ClientSession::revision)) as f64
+}
+
+/// Take the next chunk of local edits to send, as a JSON `Submission`.
+///
+/// Empty string when there is nothing to send **or** a chunk is already in
+/// flight — one at a time, by design, because a client with two outstanding
+/// chunks cannot say which the server's acknowledgement was for.
+#[wasm_bindgen]
+pub fn collab_flush() -> String {
+    // Collect what the editor applied since last time, then package it. Two
+    // steps rather than one because the editor owns the apply path — it has its
+    // own undo history, and an operation applied twice is worse than one sent
+    // late.
+    let applied = SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(WorkbookSession::take_applied)
+            .unwrap_or_default()
+    });
+    COLLAB.with(|cell| {
+        if let Some(collab) = cell.borrow_mut().as_mut() {
+            for op in applied {
+                collab.record(op);
+            }
+        }
+    });
+    with_session_and_collab(|workbook, collab| {
+        collab
+            .flush(workbook)
+            .and_then(|s| serde_json::to_string(&s).ok())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// The chunk in flight again, for a reconnect.
+///
+/// A resend reuses the sequence number, so a server that already applied it
+/// answers `Duplicate` rather than applying it twice. That is what makes
+/// reconnecting safe rather than merely likely to work.
+#[wasm_bindgen]
+pub fn collab_resend() -> String {
+    with_session_and_collab(|workbook, collab| {
+        collab
+            .resend(workbook)
+            .and_then(|s| serde_json::to_string(&s).ok())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// Record that the chunk in flight was ordered at `revision`.
+#[wasm_bindgen]
+pub fn collab_acknowledge(revision: f64) {
+    COLLAB.with(|cell| {
+        if let Some(collab) = cell.borrow_mut().as_mut() {
+            collab.acknowledge(revision as u64);
+        }
+    });
+}
+
+/// Apply an operation from another participant, arriving at `revision`.
+///
+/// `wire` is one `WireOperation` as JSON. It is localised into this workbook's
+/// own tables before anything is compared — an interned id is replica-local, so
+/// another participant's style 7 is not this one's (COL-12) — and then rebased
+/// against every local edit still outstanding, in both directions.
+///
+/// # Errors
+///
+/// If the JSON is not a `WireOperation`, if there is no session, or if the
+/// transform refuses the pair.
+#[wasm_bindgen]
+pub fn collab_receive(wire: &str, revision: f64) -> Result<(), JsError> {
+    let incoming: casual_calc_transaction::wire::WireOperation =
+        serde_json::from_str(wire).map_err(js)?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        COLLAB.with(|collab| {
+            let mut collab = collab.borrow_mut();
+            let collab = collab
+                .as_mut()
+                .ok_or_else(|| JsError::new("not in a collaborative session"))?;
+            collab
+                .receive(session.workbook_mut(), &incoming, revision as u64)
+                .map_err(js)
+        })
+    })?;
+    // A remote edit changes values, so the same recalculation a local one gets.
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.recalculate();
+        }
+    });
+    Ok(())
+}
+
+/// Run `f` with the workbook and the collaborative session, if both exist.
+fn with_session_and_collab<T>(f: impl FnOnce(&Workbook, &mut ClientSession) -> T) -> Option<T> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let session = guard.as_ref()?;
+        COLLAB.with(|collab| {
+            let mut collab = collab.borrow_mut();
+            let collab = collab.as_mut()?;
+            Some(f(session.workbook(), collab))
+        })
+    })
+}
+
 /// Undo the last edit.
 #[wasm_bindgen]
 pub fn session_undo() -> Result<(), JsError> {
@@ -9487,5 +9661,146 @@ mod base64_tests {
         // High bytes must not be sign-extended or mangled.
         assert_eq!(base64_encode(&[0xff, 0xfe, 0xfd]), "//79");
         assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
+    }
+}
+
+#[cfg(test)]
+mod collab_tests {
+    //! The collaboration seam, exercised the way a browser client would.
+    //!
+    //! These bindings were the missing piece: everything under them was gated
+    //! and reachable from Rust and from nowhere else, so the browser had no way
+    //! to join a session even though the engine could.
+
+    use super::*;
+
+    fn fresh(client: u64, revision: u64) {
+        session_new();
+        collab_begin(client as f64, revision as f64);
+    }
+
+    #[test]
+    fn a_session_starts_from_the_revision_the_server_named() {
+        // Everyone in a session must start from the same revision. A client
+        // that guessed would rebase against a history it never saw.
+        fresh(1, 9);
+        assert!(collab_active());
+        assert_eq!(collab_revision(), 9.0);
+        collab_end();
+        assert!(!collab_active());
+    }
+
+    #[test]
+    fn local_edits_come_out_as_one_chunk_at_a_time() {
+        // One in flight by design: a client with two outstanding chunks cannot
+        // say which the server's acknowledgement was for.
+        fresh(1, 0);
+        assert_eq!(collab_flush(), "", "nothing to send yet");
+
+        session_set_cell(0, 0, 0, "42").unwrap();
+        let first = collab_flush();
+        assert!(first.contains("\"seq\""), "got {first}");
+
+        session_set_cell(0, 1, 0, "43").unwrap();
+        assert_eq!(
+            collab_flush(),
+            "",
+            "a second chunk waits until the first is acknowledged"
+        );
+
+        collab_acknowledge(1.0);
+        assert_eq!(collab_revision(), 1.0);
+        assert!(collab_flush().contains("\"seq\""), "and then it goes");
+    }
+
+    #[test]
+    fn a_resend_reuses_its_sequence_number_so_a_reconnect_is_safe() {
+        // The server answers `Duplicate` rather than applying it twice, which
+        // is what makes reconnecting safe rather than merely likely to work.
+        fresh(1, 0);
+        session_set_cell(0, 0, 0, "42").unwrap();
+        let sent = collab_flush();
+        let again = collab_resend();
+        assert_eq!(sent, again);
+    }
+
+    #[test]
+    fn two_participants_editing_different_cells_both_end_up_with_both_edits() {
+        // The whole point, through the bindings a browser would call. One
+        // engine plays each participant in turn, exchanging wire operations the
+        // way a server would relay them.
+        fresh(1, 0);
+        session_set_cell(0, 0, 0, "mine").unwrap();
+        let from_a: casual_calc_transaction::session::Submission =
+            serde_json::from_str(&collab_flush()).expect("a submission");
+        let a_saw = session_cells(0, 0, 0, 1, 0);
+
+        // The other participant, from the same starting revision.
+        fresh(2, 0);
+        session_set_cell(0, 1, 0, "theirs").unwrap();
+        let from_b: casual_calc_transaction::session::Submission =
+            serde_json::from_str(&collab_flush()).expect("a submission");
+
+        // B receives A's edit, ordered first.
+        for op in &from_a.ops {
+            collab_receive(&serde_json::to_string(op).unwrap(), 1.0).expect("applied");
+        }
+        collab_acknowledge(2.0);
+        let b_final = session_cells(0, 0, 0, 1, 0);
+
+        // And A receives B's, ordered second.
+        fresh(1, 0);
+        session_set_cell(0, 0, 0, "mine").unwrap();
+        collab_flush();
+        collab_acknowledge(1.0);
+        for op in &from_b.ops {
+            collab_receive(&serde_json::to_string(op).unwrap(), 2.0).expect("applied");
+        }
+        let a_final = session_cells(0, 0, 0, 1, 0);
+
+        assert!(a_saw.contains("mine"));
+        assert_eq!(
+            a_final, b_final,
+            "the two participants converged on different orders of the same edits"
+        );
+        assert!(a_final.contains("mine") && a_final.contains("theirs"));
+    }
+
+    #[test]
+    fn a_remote_edit_recalculates_what_depends_on_it() {
+        // A remote edit changes values, so it must get the same recalculation a
+        // local one does — otherwise a formula shows a stale answer until its
+        // own cell is touched.
+        fresh(1, 0);
+        session_set_cell(0, 0, 0, "2").unwrap();
+        session_set_cell(0, 1, 0, "=A1*10").unwrap();
+        assert!(session_cells(0, 1, 0, 1, 0).contains("20"));
+
+        // Somebody else changes A1.
+        let other = {
+            session_new();
+            let mut scratch = ClientSession::new(casual_calc_transaction::session::ClientId(2), 0);
+            let _ = &mut scratch;
+            session_set_cell(0, 0, 0, "5").unwrap();
+            collab_begin(2.0, 0.0);
+            session_set_cell(0, 0, 0, "5").unwrap();
+            collab_flush()
+        };
+        let submission: casual_calc_transaction::session::Submission =
+            serde_json::from_str(&other).expect("a submission");
+
+        fresh(1, 0);
+        session_set_cell(0, 0, 0, "2").unwrap();
+        session_set_cell(0, 1, 0, "=A1*10").unwrap();
+        collab_flush();
+        collab_acknowledge(1.0);
+        for op in &submission.ops {
+            collab_receive(&serde_json::to_string(op).unwrap(), 2.0).expect("applied");
+        }
+        assert!(
+            session_cells(0, 1, 0, 1, 0).contains("50"),
+            "the formula did not recalculate after a remote edit: {}",
+            session_cells(0, 1, 0, 1, 0)
+        );
     }
 }

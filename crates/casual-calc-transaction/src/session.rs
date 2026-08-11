@@ -260,6 +260,20 @@ impl ClientSession {
     /// Returns `None` when there is nothing to send or a chunk is already in
     /// flight — the one-at-a-time rule, which is what keeps a single server
     /// order sufficient.
+    /// Record an operation the **host already applied**, for sending on.
+    ///
+    /// The counterpart to [`edit`](Self::edit) for a host that owns the apply
+    /// path itself — an editor with its own undo history, say, which cannot
+    /// have the operation applied twice.
+    ///
+    /// The contract is that `op` is already **narrowed** against the state it
+    /// was written against. It cannot be narrowed here: by the time this is
+    /// called that state is gone, and an operation still claiming to change
+    /// everything contends with every concurrent edit and loses one of them.
+    pub fn record(&mut self, op: Operation) {
+        self.pending.push(op);
+    }
+
     pub fn flush(&mut self, workbook: &Workbook) -> Option<Submission> {
         if !self.sent.is_empty() || self.pending.is_empty() {
             return None;

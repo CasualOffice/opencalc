@@ -222,6 +222,7 @@ fn cell_edit(value: f64) -> WireOperation {
         },
         formulas: Default::default(),
         styles: Default::default(),
+        strings: Default::default(),
     }
 }
 
@@ -234,6 +235,7 @@ fn comment_change() -> WireOperation {
         },
         formulas: Default::default(),
         styles: Default::default(),
+        strings: Default::default(),
     }
 }
 

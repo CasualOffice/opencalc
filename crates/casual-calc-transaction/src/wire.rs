@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 
 use casual_calc_formula::Expr;
-use casual_calc_model::{FormulaHandle, Sheet, Style, StyleId, Workbook};
+use casual_calc_model::{CellValue, FormulaHandle, Sheet, StringId, Style, StyleId, Workbook};
 
 use crate::Operation;
 
@@ -44,6 +44,20 @@ pub struct WireOperation {
     pub formulas: BTreeMap<FormulaHandle, Expr>,
     /// Every style the operation's ids refer to, by the sender's index.
     pub styles: BTreeMap<StyleId, Style>,
+    /// Every string the operation's ids refer to, by the sender's index.
+    ///
+    /// The third interned id, and the one COL-12 missed. A `StringId` is as
+    /// replica-local as a `FormulaHandle` or a `StyleId` — the tables are
+    /// separate and number independently — so a cell whose text is
+    /// `SharedString(1)` means *the sender's* first string and not the
+    /// receiver's.
+    ///
+    /// Without this the failure is silent and total: two participants each type
+    /// a word, each interns it as id 1, and each ends up seeing the other's
+    /// operation resolve to their own word. Nothing errors, both sides are
+    /// self-consistent, and the documents differ.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub strings: BTreeMap<StringId, String>,
 }
 
 impl WireOperation {
@@ -56,6 +70,12 @@ impl WireOperation {
     pub fn of(op: Operation, workbook: &Workbook) -> Self {
         let mut formulas = BTreeMap::new();
         let mut styles = BTreeMap::new();
+        let mut strings = BTreeMap::new();
+        visit_strings(&op, &mut |id| {
+            if let Some(text) = workbook.strings.get(id) {
+                strings.insert(id, text.to_owned());
+            }
+        });
         visit(&op, &mut |formula, style| {
             if let Some(handle) = formula
                 && let Some(expr) = workbook.formula(handle)
@@ -72,6 +92,7 @@ impl WireOperation {
             op,
             formulas,
             styles,
+            strings,
         }
     }
 
@@ -86,6 +107,7 @@ impl WireOperation {
             mut op,
             formulas,
             styles,
+            strings,
         } = self;
 
         let mut formula_map = BTreeMap::new();
@@ -97,6 +119,21 @@ impl WireOperation {
             style_map.insert(theirs, workbook.intern_style(style));
         }
 
+        let mut string_map = BTreeMap::new();
+        for (theirs, text) in strings {
+            string_map.insert(theirs, workbook.intern_string(&text));
+        }
+        visit_strings_mut(&mut op, &mut |id| {
+            // An id with no accompanying text is left alone rather than
+            // dropped: unlike a formula handle it addresses a *value*, and
+            // clearing it would erase the cell's contents rather than degrade
+            // them. Leaving it is wrong in a visible way; dropping it is wrong
+            // in an invisible one.
+            if let Some(mine) = string_map.get(id) {
+                *id = *mine;
+            }
+        });
+
         visit_mut(&mut op, &mut |formula, style| {
             // A handle with no accompanying meaning is dropped, not kept: kept,
             // it would index this workbook's arena and silently name some other
@@ -105,6 +142,66 @@ impl WireOperation {
             *style = style.and_then(|id| style_map.get(&id).copied());
         });
         op
+    }
+}
+
+/// Visit every interned **string** id an operation carries.
+///
+/// Separate from [`visit`] because the slot is a different shape: a string id
+/// lives inside a [`CellValue`], not beside it, and a cell has exactly one
+/// value where it has both a formula handle and a style id.
+fn visit_strings(op: &Operation, f: &mut impl FnMut(StringId)) {
+    let mut note = |value: &CellValue| {
+        if let CellValue::SharedString(id) | CellValue::InlineString(id) = value {
+            f(*id);
+        }
+    };
+    match op {
+        Operation::SetCell {
+            cell: Some(cell), ..
+        } => note(&cell.value),
+        Operation::SetValue { value, .. } => note(value),
+        Operation::InsertSheet { sheet, .. } => {
+            for (_, cell) in sheet.cells.iter() {
+                note(&cell.value);
+            }
+        }
+        Operation::Batch(ops) => {
+            for member in ops {
+                visit_strings(member, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The same walk, rewriting each id through `f`.
+fn visit_strings_mut(op: &mut Operation, f: &mut impl FnMut(&mut StringId)) {
+    fn rewrite(value: &mut CellValue, f: &mut impl FnMut(&mut StringId)) {
+        if let CellValue::SharedString(id) | CellValue::InlineString(id) = value {
+            f(id);
+        }
+    }
+    match op {
+        Operation::SetCell {
+            cell: Some(cell), ..
+        } => rewrite(&mut cell.value, f),
+        Operation::SetValue { value, .. } => rewrite(value, f),
+        Operation::InsertSheet { sheet, .. } => {
+            let addresses: Vec<_> = sheet.cells.iter().map(|(at, _)| at).collect();
+            for at in addresses {
+                if let Some(mut cell) = sheet.cells.get(at).cloned() {
+                    rewrite(&mut cell.value, f);
+                    sheet.cells.set(at, cell);
+                }
+            }
+        }
+        Operation::Batch(ops) => {
+            for member in ops {
+                visit_strings_mut(member, f);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -430,5 +527,168 @@ mod tests {
             dangling_handle(&op, &wb),
             Some(casual_calc_model::FormulaHandle(3))
         );
+    }
+}
+
+#[cfg(test)]
+mod string_tests {
+    //! The third interned id.
+    //!
+    //! COL-12 established that a `FormulaHandle` and a `StyleId` are
+    //! replica-local and must be translated rather than trusted. A `StringId`
+    //! is exactly as local, from a table that numbers exactly as independently,
+    //! and it was left out — found when two participants typing one word each
+    //! ended up reading the other's.
+
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    use super::*;
+    use crate::Operation;
+
+    fn workbook_with(words: &[&str]) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        for word in words {
+            wb.intern_string(word);
+        }
+        wb
+    }
+
+    fn text_at(wb: &Workbook, at: CellRef) -> Option<String> {
+        let cell = wb.sheets[0].cells.get(at)?;
+        match &cell.value {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(*id).map(str::to_owned)
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn text_crossing_replicas_stays_the_text_that_was_typed() {
+        // The bug, exactly. Each replica interns one word, so each holds a
+        // different string at id 1. Without translation the receiver resolves
+        // the sender's id against its own table and reads its own word — no
+        // error, both sides self-consistent, the documents different.
+        let sender = workbook_with(&["mine"]);
+        let mine = sender.strings.id_at(0).expect("interned");
+
+        let op = Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            cell: Some(Cell::value(CellValue::SharedString(mine))),
+        };
+        let wire = WireOperation::of(op, &sender);
+        assert_eq!(wire.strings.len(), 1, "the text travels with the id");
+
+        let mut receiver = workbook_with(&["theirs"]);
+        let localised = wire.localise(&mut receiver);
+        crate::apply(&mut receiver, localised).unwrap();
+
+        assert_eq!(
+            text_at(&receiver, CellRef::new(0, 0)).as_deref(),
+            Some("mine"),
+            "the receiver read its own string table instead of the sender's"
+        );
+    }
+
+    #[test]
+    fn interning_is_by_value_so_a_shared_word_does_not_duplicate() {
+        // Both replicas already know the word; crossing must converge on the
+        // receiver's existing id rather than growing the table every time an
+        // operation arrives.
+        let sender = workbook_with(&["shared"]);
+        let theirs = sender.strings.id_at(0).unwrap();
+        let mut receiver = workbook_with(&["shared"]);
+        let before = receiver.strings.len();
+
+        let wire = WireOperation::of(
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::SharedString(theirs))),
+            },
+            &sender,
+        );
+        let _ = wire.localise(&mut receiver);
+        assert_eq!(receiver.strings.len(), before, "no duplicate was interned");
+    }
+
+    #[test]
+    fn a_value_set_without_a_cell_carries_its_text_too() {
+        // `SetValue` holds the value directly rather than inside a `Cell`, and
+        // a walk that covers one shape and not the other is how half the edits
+        // cross correctly and half do not.
+        let sender = workbook_with(&["typed"]);
+        let id = sender.strings.id_at(0).unwrap();
+        let wire = WireOperation::of(
+            Operation::SetValue {
+                sheet: 0,
+                at: CellRef::new(1, 1),
+                value: CellValue::SharedString(id),
+            },
+            &sender,
+        );
+        assert_eq!(wire.strings.len(), 1);
+
+        let mut receiver = workbook_with(&["something else"]);
+        let localised = wire.localise(&mut receiver);
+        crate::apply(&mut receiver, localised).unwrap();
+        assert_eq!(
+            text_at(&receiver, CellRef::new(1, 1)).as_deref(),
+            Some("typed")
+        );
+    }
+
+    #[test]
+    fn a_batch_carries_every_string_its_members_use() {
+        let sender = workbook_with(&["one", "two"]);
+        let (a, b) = (
+            sender.strings.id_at(0).unwrap(),
+            sender.strings.id_at(1).unwrap(),
+        );
+        let wire = WireOperation::of(
+            Operation::Batch(vec![
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(0, 0),
+                    cell: Some(Cell::value(CellValue::SharedString(a))),
+                },
+                Operation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(1, 0),
+                    cell: Some(Cell::value(CellValue::SharedString(b))),
+                },
+            ]),
+            &sender,
+        );
+        assert_eq!(wire.strings.len(), 2);
+
+        let mut receiver = workbook_with(&["x", "y", "z"]);
+        let localised = wire.localise(&mut receiver);
+        crate::apply(&mut receiver, localised).unwrap();
+        assert_eq!(
+            text_at(&receiver, CellRef::new(0, 0)).as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            text_at(&receiver, CellRef::new(1, 0)).as_deref(),
+            Some("two")
+        );
+    }
+
+    #[test]
+    fn an_operation_with_no_text_carries_no_strings() {
+        let sender = workbook_with(&["unused"]);
+        let wire = WireOperation::of(
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(1.0))),
+            },
+            &sender,
+        );
+        assert!(wire.strings.is_empty(), "nothing to carry, nothing carried");
     }
 }

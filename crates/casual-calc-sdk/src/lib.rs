@@ -220,6 +220,17 @@ pub struct WorkbookSession {
     /// Whether an edit has changed a value since the last recalculation. Only
     /// meaningful in manual mode; automatic never leaves it set.
     stale: bool,
+    /// Operations applied since the host last collected them, **narrowed**.
+    ///
+    /// Off unless a host asks for it. A collaborative host has to send what it
+    /// applied, and the alternative is threading a return value through every
+    /// one of the forty-odd entry points that edit — which is the same thing
+    /// done forty times, and wrong the first time somebody adds the forty-first.
+    ///
+    /// Narrowed here rather than by the collector, because narrowing needs the
+    /// state the operation was written against and this is the last moment that
+    /// state exists.
+    applied: Option<Vec<Operation>>,
     /// The package this session was opened from, kept while nothing has been
     /// edited so that saving an untouched file returns it unchanged (P1B-002).
     ///
@@ -250,6 +261,7 @@ impl WorkbookSession {
             report: CompatibilityReport::default(),
             config,
             stale: false,
+            applied: None,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -272,6 +284,7 @@ impl WorkbookSession {
             report: CompatibilityReport::default(),
             config,
             stale: false,
+            applied: None,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -313,6 +326,7 @@ impl WorkbookSession {
             // what its author last saw; nothing is stale until something is
             // edited.
             stale: false,
+            applied: None,
             source: Some(source),
         })
     }
@@ -385,6 +399,15 @@ impl WorkbookSession {
             return Err(SdkError::ReadOnly);
         }
         let plan = recalc_plan(&op);
+        // Narrowed before it is applied and before it is recorded: afterwards
+        // the state it was written against is gone, and an operation still
+        // claiming to change everything contends with every concurrent edit.
+        if self.applied.is_some() {
+            let narrowed = op.clone().narrowed(&self.workbook);
+            if let Some(log) = self.applied.as_mut() {
+                log.push(narrowed);
+            }
+        }
         self.history.apply(&mut self.workbook, op)?;
         self.source = None;
         // Manual mode still applies the edit — it is calculation that is
@@ -436,6 +459,26 @@ impl WorkbookSession {
         self.source = None;
         self.recalculate_if_automatic();
         Ok(())
+    }
+
+    /// Start recording what this session applies, for a host that has to send
+    /// it on.
+    pub fn record_applied(&mut self) {
+        self.applied.get_or_insert_with(Vec::new);
+    }
+
+    /// Stop recording, discarding anything uncollected.
+    pub fn stop_recording(&mut self) {
+        self.applied = None;
+    }
+
+    /// Take everything applied since the last call.
+    #[must_use]
+    pub fn take_applied(&mut self) -> Vec<Operation> {
+        self.applied
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default()
     }
 
     /// Discard the undo history, making the current state the document's
