@@ -28,8 +28,9 @@ use crate::wire::WireOperation;
 ///
 /// 2 added [`Resume`] and [`ServerMessage::Resumed`]
 /// ([ADR-015](../../../docs/61-COLLABORATION-RESUME.md)). 3 added
-/// [`ClientMessage::Ping`] and [`ServerMessage::Pong`].
-pub const PROTOCOL_VERSION: u32 = 3;
+/// [`ClientMessage::Ping`] and [`ServerMessage::Pong`]. 4 added
+/// [`ServerMessage::Opening`].
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +168,29 @@ pub struct Resume {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMessage {
+    /// Authorised, and the document is being fetched.
+    ///
+    /// Sent as soon as the token checks out, **before** the document exists on
+    /// this node. Opening one means fetching it from the integrator, and that
+    /// is a request to somebody else's server: it can take as long as the
+    /// configured timeout allows, and the first participant of the day pays for
+    /// it every time.
+    ///
+    /// Without this the client sees nothing at all during that wait — an open
+    /// socket and silence, which is indistinguishable from a server that has
+    /// hung, and which a user reasonably responds to by reloading and starting
+    /// the whole wait again. With it there is a difference between *slow* and
+    /// *broken*, on both sides: the client can say "opening", and it can go on
+    /// pinging, so it still knows whether the connection beneath the wait is
+    /// alive.
+    ///
+    /// It is a promise of nothing except that the token was accepted. A
+    /// [`Welcome`](Self::Welcome) or a [`Stopped`](Self::Stopped) follows.
+    Opening {
+        /// The document's name, so a client can title the window it is showing
+        /// the wait in.
+        title: String,
+    },
     /// Joined. Carries the document and where in its history it is.
     Welcome {
         /// The protocol the server speaks.

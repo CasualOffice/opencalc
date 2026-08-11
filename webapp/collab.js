@@ -155,6 +155,20 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
 
   function receive(message) {
     switch (message.type) {
+      case "opening":
+        // Authorised, and the server is fetching the document from the host.
+        // Reported rather than waited out silently: this can take as long as
+        // the server's HTTP timeout allows, and silence on an open socket is
+        // what a user reloads over — starting a second wait while the first is
+        // still running.
+        status("opening", message.title);
+        // The pinger starts *here*, not at the welcome. This wait is the
+        // longest stretch of the session with no traffic on it, so it is the
+        // most likely place for a connection to die unnoticed — and without
+        // this, the one state where "slow" and "broken" look identical would be
+        // the one state where telling them apart matters most.
+        startPinger();
+        break;
       case "welcome": {
         if (message.protocol !== wasm.protocol_version()) {
           // Should be unreachable — the server checks this before it welcomes
@@ -251,6 +265,12 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     stopTimers();
     heartbeat = setInterval(() => send({ type: "heartbeat" }), HEARTBEAT_MS);
     flusher = setInterval(flush, FLUSH_MS);
+    startPinger();
+  }
+
+  /// Start the liveness check on its own, for the stretch before joining.
+  function startPinger() {
+    clearInterval(pinger);
     pinger = setInterval(ping, PING_MS);
   }
 

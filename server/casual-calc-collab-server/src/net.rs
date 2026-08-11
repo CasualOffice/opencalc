@@ -280,6 +280,24 @@ impl Resumes {
 #[derive(Default)]
 struct Registry {
     live: Mutex<HashMap<String, Arc<Live>>>,
+    /// Documents currently being fetched and opened, so it happens **once**.
+    ///
+    /// Without this, a document is opened once per arriving participant. Thirty
+    /// people opening the same workbook at the start of a meeting is thirty
+    /// simultaneous downloads of the same file from the integrator, twenty-nine
+    /// of them thrown away — each holding a connection, a task and however much
+    /// memory that workbook takes, and all of it aimed at somebody else's
+    /// server at the moment it is already busiest.
+    ///
+    /// The previous code noticed the *race* and settled it after the fact
+    /// ("theirs wins, the wasted fetch is the cheaper mistake"), which is true
+    /// for two and badly false for thirty. A [`OnceCell`] settles it before the
+    /// fact: the first arrival fetches and the rest wait on that same fetch.
+    ///
+    /// `get_or_try_init` and not `get_or_init`, so a failure is **not**
+    /// remembered. An origin that was briefly down would otherwise poison the
+    /// document until the process restarted.
+    opening: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<Live>>>>>,
 }
 
 /// The service's shared state.
@@ -770,6 +788,28 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     );
     let _guard = span.enter();
 
+    // Said before the document is fetched, not after. Opening one is a request
+    // to the integrator's server, and until it answers there is nothing to send
+    // — which from the client's side looks exactly like a server that has hung.
+    // A user responds to that by reloading, which starts the same wait again
+    // while the first one is still running.
+    //
+    // This is also what keeps the *connection* legible during the wait: the
+    // client can go on pinging, so it can tell a slow origin from a dead
+    // socket. Those need completely different reactions and used to be the same
+    // silence.
+    if send(
+        &mut socket,
+        &ServerMessage::Opening {
+            title: claims.document.title.clone(),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
     let live = match obtain(&state, &claims).await {
         Ok(live) => live,
         Err(reason) => {
@@ -1075,39 +1115,74 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
         return Ok(Arc::clone(live));
     }
 
-    // Fetched outside the lock: a slow origin must not stop every other
-    // document on this node.
-    let bytes = state
-        .config
-        .fetch
-        .get(claims.document.url.clone())
-        .await
-        .map_err(|_| Refusal::NotSaving)?;
-
-    let session = DocumentSession::open(bytes, state.config.save, state.config.snapshots, now_ms())
-        .map_err(|_| Refusal::NotSaving)?;
-
-    let mut registry = lock(&state.registry.live);
-    // Checked here rather than before the fetch, because the wasted fetch is
-    // cheaper than holding the registry lock across a network round-trip.
-    if !registry.contains_key(&key) && registry.len() >= state.config.limits.max_documents {
+    // Refused before a byte is fetched. Downloading a document in order to
+    // decide there is no room for it wastes the origin's bandwidth and this
+    // node's memory to reach the same answer more slowly. The count is checked
+    // again after, because it can change while this awaits, and that one is the
+    // authority.
+    if lock(&state.registry.live).len() >= state.config.limits.max_documents {
         return Err(Refusal::NotSaving);
     }
-    // Somebody else may have opened it while this was fetching. Theirs wins:
-    // two sessions over one document is the one outcome that must not happen,
-    // and the wasted fetch is the cheaper mistake.
-    Ok(Arc::clone(registry.entry(key).or_insert_with(|| {
-        Arc::new(Live {
-            session: Mutex::new(session),
-            roster: Mutex::new(Roster::new(state.config.limits.presence_ttl_ms)),
-            fan_out: broadcast::channel(256).0,
-            next_client: Mutex::new(0),
-            callback: claims.callback.clone(),
-            title: claims.document.title.clone(),
-            idle_since: std::sync::atomic::AtomicU64::new(0),
-            resumes: Mutex::default(),
+
+    // One cell per document key, so everybody who wants this document waits on
+    // the *same* fetch rather than starting their own.
+    let cell = {
+        let mut opening = lock(&state.registry.opening);
+        Arc::clone(
+            opening
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    };
+
+    let outcome = cell
+        .get_or_try_init(|| async {
+            // Fetched with no lock held: a slow origin must not stop every
+            // other document on this node, and this await can last as long as
+            // the configured HTTP timeout.
+            let bytes = state
+                .config
+                .fetch
+                .get(claims.document.url.clone())
+                .await
+                .map_err(|_| Refusal::NotSaving)?;
+
+            let session =
+                DocumentSession::open(bytes, state.config.save, state.config.snapshots, now_ms())
+                    .map_err(|_| Refusal::NotSaving)?;
+
+            let mut registry = lock(&state.registry.live);
+            if !registry.contains_key(&key) && registry.len() >= state.config.limits.max_documents {
+                return Err(Refusal::NotSaving);
+            }
+            // `entry` rather than `insert`: a document evicted and reopened
+            // between the two checks would otherwise be replaced under the
+            // people still in it. Two sessions over one document is the one
+            // outcome that must not happen.
+            Ok(Arc::clone(registry.entry(key.clone()).or_insert_with(
+                || {
+                    Arc::new(Live {
+                        session: Mutex::new(session),
+                        roster: Mutex::new(Roster::new(state.config.limits.presence_ttl_ms)),
+                        fan_out: broadcast::channel(256).0,
+                        next_client: Mutex::new(0),
+                        callback: claims.callback.clone(),
+                        title: claims.document.title.clone(),
+                        idle_since: std::sync::atomic::AtomicU64::new(0),
+                        resumes: Mutex::default(),
+                    })
+                },
+            )))
         })
-    })))
+        .await
+        .map(Arc::clone);
+
+    // Dropped whatever happened. On success the document lives in the registry
+    // and the cell is a duplicate reference keeping it alive after eviction; on
+    // failure leaving it would make the next attempt reuse a cell whose failure
+    // it never saw.
+    lock(&state.registry.opening).remove(&claims.document.key);
+    outcome
 }
 
 /// Act on one client message. Returns whether the connection continues.

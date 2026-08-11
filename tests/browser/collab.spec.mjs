@@ -36,7 +36,7 @@ const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
 /// Asserted against the engine's own number in the first test, because a client
 /// that states the wrong version is refused *before* it joins — which, from the
 /// test's side, is indistinguishable from the server hanging.
-const PROTOCOL = 3;
+const PROTOCOL = 4;
 
 
 
@@ -146,6 +146,10 @@ function speakDirectly(key, user, access, act) {
       socket.send(JSON.stringify({ type: "join", protocol: PROTOCOL, token }));
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data);
+      // The server says the token was accepted before it fetches the document.
+      // Not the answer to anything; just an acknowledgement that the wait about
+      // to happen is a wait rather than a hang.
+      if (message.type === "opening") return;
       if (message.type === "welcome") {
         acted = true;
         act((m) => socket.send(JSON.stringify(m)), message.client, message.revision);
@@ -430,6 +434,31 @@ test.describe("collaboration", () => {
       })
       .not.toBeNull();
     expect(await page.evaluate(() => window.__session.latency())).toBeGreaterThanOrEqual(0);
+
+    await page.close();
+  });
+
+  test("a joining client is told the document is being fetched", async ({ browser }) => {
+    const key = freshDocument();
+    const page = await browser.newPage();
+    await boot(page);
+    await join(page, { document: key, user: { id: "u-a", name: "Ada" } });
+
+    // Between the token being accepted and the document arriving there used to
+    // be nothing at all — an open socket and silence, which is what a server
+    // that has hung also looks like. Fetching from the integrator can take as
+    // long as the server's HTTP timeout allows.
+    const statuses = await page.evaluate(() => window.__collab.statuses.map((s) => s.state));
+    expect(statuses).toContain("opening");
+    expect(statuses.indexOf("opening")).toBeLessThan(statuses.indexOf("live"));
+
+    // And it carries the name, so the wait can be shown against the document
+    // it is a wait for.
+    expect(
+      await page.evaluate(() =>
+        window.__collab.statuses.find((s) => s.state === "opening")?.detail,
+      ),
+    ).toBe("minimal.xlsx");
 
     await page.close();
   });

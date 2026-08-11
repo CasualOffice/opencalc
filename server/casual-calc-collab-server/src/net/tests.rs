@@ -200,6 +200,20 @@ async fn hear(socket: &mut Socket) -> Option<ServerMessage> {
     }
 }
 
+/// The next message that is not the `Opening` notice.
+///
+/// Every join now begins with one — the server says the token was accepted
+/// before it goes to the integrator for the document — and a test that cares
+/// what the *answer* was should not have to restate that each time. The notice
+/// itself is asserted on directly, once, in
+/// [`a_join_is_acknowledged_before_the_document_is_fetched`].
+async fn hear_past_opening(socket: &mut Socket) -> Option<ServerMessage> {
+    match hear(socket).await {
+        Some(ServerMessage::Opening { .. }) => hear(socket).await,
+        other => other,
+    }
+}
+
 /// Join, and return the `Welcome`.
 async fn join(socket: &mut Socket, claims: &Claims) -> Option<ServerMessage> {
     say(
@@ -211,7 +225,7 @@ async fn join(socket: &mut Socket, claims: &Claims) -> Option<ServerMessage> {
         },
     )
     .await;
-    hear(socket).await
+    hear_past_opening(socket).await
 }
 
 /// Join offering a resume key, and return whatever the server answers.
@@ -233,7 +247,7 @@ async fn join_resuming(
         },
     )
     .await;
-    hear(socket).await
+    hear_past_opening(socket).await
 }
 
 fn cell_edit(value: f64) -> WireOperation {
@@ -1520,5 +1534,92 @@ async fn a_viewer_may_still_ping() {
     assert_eq!(
         hear(&mut socket).await,
         Some(ServerMessage::Pong { nonce: 4 })
+    );
+}
+
+#[tokio::test]
+async fn a_join_is_acknowledged_before_the_document_is_fetched() {
+    // Opening a document means asking the integrator's server for it, which can
+    // take as long as the configured HTTP timeout. Before this, the client saw
+    // nothing during that wait — an open socket and silence, which is precisely
+    // what a hung server looks like, and which a user answers by reloading and
+    // starting a second wait alongside the first.
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    say(
+        &mut socket,
+        &ClientMessage::Join {
+            protocol: PROTOCOL_VERSION,
+            token: token(&claims("Ada", Access::Edit)),
+            resume: None,
+        },
+    )
+    .await;
+
+    let first = hear(&mut socket).await;
+    let Some(ServerMessage::Opening { title }) = first else {
+        panic!("the token being accepted is said first; got {first:?}")
+    };
+    // Named, so a client can show the wait against the document it is for.
+    assert_eq!(title, "Budget.xlsx");
+    assert!(matches!(
+        hear(&mut socket).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_document_is_fetched_once_however_many_arrive_at_the_same_moment() {
+    // The start of a meeting: everybody opens the same workbook at once. Each
+    // arrival used to fetch it for itself — thirty downloads of one file from
+    // the integrator, twenty-nine thrown away, aimed at that server at the
+    // moment it is already busiest. The race was settled after the fact, which
+    // is fine for two and badly wrong for thirty.
+    #[derive(Default)]
+    struct Counting {
+        bytes: Vec<u8>,
+        calls: Arc<Mutex<usize>>,
+    }
+    impl Fetch for Counting {
+        fn get(
+            &self,
+            _url: String,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>> {
+            *self.calls.lock().unwrap() += 1;
+            let bytes = self.bytes.clone();
+            Box::pin(async move {
+                // Long enough that the others are certainly waiting on it,
+                // which is the situation being tested.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                Ok(bytes)
+            })
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(0));
+    let addr = start(Arc::new(Counting {
+        bytes: package(),
+        calls: Arc::clone(&calls),
+    }))
+    .await;
+
+    let ada = claims("Ada", Access::Edit);
+    let arrivals = (0..8).map(|_| {
+        let ada = ada.clone();
+        async move {
+            let mut socket = connect(addr).await;
+            let answer = join(&mut socket, &ada).await;
+            assert!(
+                matches!(answer, Some(ServerMessage::Welcome { .. })),
+                "everybody gets in: {answer:?}"
+            );
+        }
+    });
+    futures_util::future::join_all(arrivals).await;
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "fetched once, shared by all of them"
     );
 }
