@@ -8708,6 +8708,56 @@ thread_local! {
     static COLLAB: RefCell<Option<ClientSession>> = const { RefCell::new(None) };
 }
 
+/// The protocol version this engine speaks.
+///
+/// Checked by the server on the first message, so a mismatched pair stops at
+/// once rather than proceeding until a missing field produces something more
+/// confusing. Exposed because the *client* has to state it, and hard-coding the
+/// number in JavaScript is how the two drift.
+#[wasm_bindgen]
+pub fn protocol_version() -> u32 {
+    casual_calc_transaction::protocol::PROTOCOL_VERSION
+}
+
+/// Replace the workbook with a normalized-model snapshot.
+///
+/// What a joining participant is given, and **not** the file: everyone in a
+/// session must start from the same revision, and a client that fetched the
+/// document itself would arrive at revision zero while the session was at five
+/// hundred.
+///
+/// # Errors
+///
+/// If the bytes are not a snapshot this engine can read — including one written
+/// by a different `SCHEMA_VERSION`, which is refused rather than half-loaded.
+#[wasm_bindgen]
+pub fn session_load_snapshot(bytes: &[u8]) -> Result<(), JsError> {
+    // `from_snapshot`, not bare `serde_json`: the snapshot format carries a
+    // `SCHEMA_VERSION` and refuses a version it does not know, and the server
+    // writes it with the matching `to_snapshot`. Reading it as a plain
+    // `Workbook` happens to work today and would fail the first time the schema
+    // moved — at runtime, in a browser, on somebody's document.
+    // Parsed before anything is replaced, so a snapshot this cannot read
+    // leaves the open document untouched rather than half-loaded. (Not tested
+    // natively: constructing the `JsError` that failure returns panics off
+    // wasm, and a test that cannot run is worse than one that is missing.)
+    let workbook = Workbook::from_snapshot(bytes).map_err(js)?;
+    SESSION.with(|cell| {
+        *cell.borrow_mut() = Some(WorkbookSession::from_workbook(workbook));
+    });
+    Ok(())
+}
+
+/// The workbook as a snapshot, for handing to a joining participant.
+#[wasm_bindgen]
+pub fn session_snapshot() -> Result<Vec<u8>, JsError> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let session = guard.as_ref().ok_or_else(|| JsError::new("no session"))?;
+        session.workbook().to_snapshot().map_err(js)
+    })
+}
+
 /// Join a collaborative session as `client`, starting from `revision`.
 ///
 /// The revision comes from the server's `Welcome`, alongside the snapshot the
@@ -9802,5 +9852,35 @@ mod collab_tests {
             "the formula did not recalculate after a remote edit: {}",
             session_cells(0, 1, 0, 1, 0)
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_boundary_tests {
+    //! The snapshot the server hands a joining participant must be one this
+    //! engine can load.
+    //!
+    //! Two crates, two calls, and nothing that would notice them drifting: the
+    //! server captures with `to_snapshot` and this loads with `from_snapshot`.
+    //! Written as bare `serde_json` first, which round-trips a `Workbook`
+    //! perfectly and skips the `SCHEMA_VERSION` the format carries — so it
+    //! would have worked until the schema moved, then failed in a browser, on
+    //! somebody's document.
+
+    use super::*;
+
+    #[test]
+    fn a_snapshot_written_the_way_the_server_writes_one_loads_here() {
+        session_new();
+        session_set_cell(0, 0, 0, "before").unwrap();
+
+        // Exactly what `DocumentSession::join` produces: `Snapshot::capture`
+        // calls `Workbook::to_snapshot`.
+        let bytes = session_snapshot().expect("captured");
+
+        session_new();
+        session_set_cell(0, 0, 0, "something else").unwrap();
+        session_load_snapshot(&bytes).expect("the server's snapshot must load");
+        assert!(session_cells(0, 0, 0, 0, 0).contains("before"));
     }
 }
