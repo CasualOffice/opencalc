@@ -143,3 +143,89 @@ fn opening_a_real_file_twice_gives_the_same_workbook() {
         );
     }
 }
+
+/// Strict Open XML, which Excel can save and which uses different namespaces.
+///
+/// Recorded as a defect on the strength of a grep — 22 matches for the
+/// transitional namespace, none for the strict one — and the grep was right
+/// about the counts and wrong about the conclusion. The readers match element
+/// **local names** rather than namespace URIs, in forty-nine places, so a strict
+/// file parses without anything special. It was designed that way; nobody had
+/// checked it since.
+///
+/// The test exists so it stays true. A reader tightened later to match on a
+/// namespace would be a reasonable-looking change that silently stops opening
+/// files Excel produces, and nothing else here would notice.
+#[test]
+fn a_strict_open_xml_workbook_reads_the_same_as_a_transitional_one() {
+    const TRANSITIONAL_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+    const TRANSITIONAL_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const STRICT_REL: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    for path in files() {
+        let bytes = std::fs::read(&path).expect("readable");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Ok(transitional) = casual_calc_import::import_package(bytes.clone()) else {
+            continue; // refused either way; nothing to compare
+        };
+
+        // Rewrite every part's namespaces, which is the difference between the
+        // two flavours as far as a reader is concerned.
+        let mut strict = Vec::new();
+        {
+            let reader = std::io::Cursor::new(&bytes);
+            let mut zin = zip::ZipArchive::new(reader).expect("a package");
+            let mut zout = zip::ZipWriter::new(std::io::Cursor::new(&mut strict));
+            for i in 0..zin.len() {
+                let mut entry = zin.by_index(i).expect("entry");
+                let entry_name = entry.name().to_owned();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data).expect("read");
+                if entry_name.ends_with(".xml")
+                    && let Ok(text) = String::from_utf8(data.clone())
+                {
+                    data = text
+                        .replace(TRANSITIONAL_MAIN, STRICT_MAIN)
+                        .replace(TRANSITIONAL_REL, STRICT_REL)
+                        .into_bytes();
+                }
+                zout.start_file(entry_name, zip::write::SimpleFileOptions::default())
+                    .expect("start");
+                std::io::Write::write_all(&mut zout, &data).expect("write");
+            }
+            zout.finish().expect("finish");
+        }
+
+        let strict = casual_calc_import::import_package(strict)
+            .unwrap_or_else(|e| panic!("{name} in strict form was refused: {e}"));
+
+        // The *modelled* content, not the whole snapshot. ADR-007's retained
+        // parts are preserved byte for byte, and this test rewrote namespaces
+        // inside them — so a snapshot comparison fails on a difference the test
+        // itself introduced. That is what the first version did, and the
+        // "failure" was mine rather than the importer's.
+        let seen = |import: &casual_calc_import::Import| -> Vec<String> {
+            import
+                .workbook
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    let mut cells: Vec<String> = sheet
+                        .cells
+                        .iter()
+                        .map(|(at, cell)| format!("{}:{}={:?}", at.row, at.col, cell.value))
+                        .collect();
+                    cells.sort();
+                    format!("{}|{}", sheet.name, cells.join(","))
+                })
+                .collect()
+        };
+        assert_eq!(
+            seen(&strict),
+            seen(&transitional),
+            "{name} read differently in strict form"
+        );
+    }
+}

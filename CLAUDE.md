@@ -5,6 +5,23 @@ full contract. This file only restates the essentials.
 
 - **Design first, then execute.** Get the layer division and virtualization right
   the first time; do not defer design or plan for do-overs.
+- **Every task runs the same cycle**, and none of it is optional:
+
+      design → execute → check → find issues → fix → push, with tests
+
+  **Check** means running the thing, not re-reading it. This project's expensive
+  bugs have all been invisible to reading — a wire format that serialized
+  perfectly and could not be read back, a submission the server silently
+  dropped, an autofit that measured rotated text as flat. Every one was found by
+  running something new.
+
+  **Find issues** is a step, not an outcome. A change that passes first time has
+  usually been checked too narrowly: the question to ask is what would have to
+  be true for this to be wrong, and then to go and look.
+
+  **With tests** means a test that fails without the fix. A test written after a
+  green run, never seen red, is a test that asserts the code does what it does.
+  Prove it by breaking the fix and watching the test catch it.
 - **Discuss and finalize** substantial designs before implementing.
 - **Track everything.** Every unit of work has a row in
   [docs/14-EXECUTION-TRACKER.md](docs/14-EXECUTION-TRACKER.md), created when it
