@@ -529,19 +529,44 @@ pub async fn serve(config: ServiceConfig) -> std::io::Result<()> {
     let shutdown = Shutdown::new();
     let on_signal = shutdown.clone();
     tokio::spawn(async move {
-        // SIGTERM is how an orchestrator asks; Ctrl-C is how a person does.
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(term) => term,
-                Err(_) => return,
-            };
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
+        stop_requested().await;
         on_signal.begin();
     });
     serve_on_with_shutdown(listener, config, shutdown).await
+}
+
+/// Wait until the process is asked to stop.
+///
+/// Split by platform because `SIGTERM` does not exist on Windows and naming it
+/// there does not compile. That was not caught locally or by the Linux jobs —
+/// only by the Windows leg of the platform matrix, which is the whole reason
+/// that leg exists: the engine crates have to build wherever a contributor
+/// works, and a workspace that only compiles on Unix is one they cannot test.
+///
+/// The server itself is deployed in Linux containers, so this is about being
+/// buildable rather than about Windows being a target for it.
+#[cfg(unix)]
+async fn stop_requested() {
+    // SIGTERM is how an orchestrator asks; Ctrl-C is how a person does.
+    let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    else {
+        return;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+/// Wait until the process is asked to stop.
+///
+/// Ctrl-C alone: Windows has no `SIGTERM`, and its nearest equivalents arrive
+/// through console control handlers that `tokio` surfaces separately. Enough for
+/// somebody running the server on a workstation, which is what this platform is
+/// for here.
+#[cfg(not(unix))]
+async fn stop_requested() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Run the service on an already-bound listener.
