@@ -224,9 +224,10 @@ fn read_exposure() -> Result<Exposure, String> {
     ) {
         (Ok(id), Ok(advertise)) => Some(NodeIdentity {
             id,
-            advertise: advertise
-                .parse()
-                .map_err(|e| format!("OPENCALC_ADVERTISE is not an address: {e}"))?,
+            // Not parsed as an IP: a service name is how nodes reach each
+            // other on a compose or Kubernetes network. `problems()` checks the
+            // shape.
+            advertise,
         }),
         // Both or neither: half an identity is a cluster that cannot form, and
         // guessing the other half is how a node advertises an address nobody

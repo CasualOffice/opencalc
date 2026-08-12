@@ -13,7 +13,7 @@ fn peer(ip: &str) -> SocketAddr {
 fn node() -> NodeIdentity {
     NodeIdentity {
         id: "node-a".into(),
-        advertise: peer("10.0.0.1"),
+        advertise: format!("10.0.0.1:{}", peer("10.0.0.1").port()),
     }
 }
 
@@ -322,7 +322,10 @@ fn an_empty_id_or_a_zero_port_is_refused() {
     let problems = identity.problems();
     assert_eq!(problems.len(), 2, "{problems:?}");
     assert!(problems.iter().any(|p| p.contains("node id is empty")));
-    assert!(problems.iter().any(|p| p.contains("port 0")));
+    assert!(
+        problems.iter().any(|p| p.contains("port")),
+        "a port nothing can listen on is called out: {problems:?}"
+    );
 }
 
 #[test]
@@ -372,7 +375,7 @@ fn split_ports(node: Option<NodeIdentity>) -> Exposure {
 fn advertising_the_internal_port_is_the_correct_shape() {
     let exposure = split_ports(Some(NodeIdentity {
         id: "node-a".into(),
-        advertise: SocketAddr::new(ip("10.0.0.1"), 9443),
+        advertise: "10.0.0.1:9443".to_owned(),
     }));
     assert!(exposure.warnings().is_empty(), "{:?}", exposure.warnings());
 }
@@ -383,7 +386,7 @@ fn advertising_a_port_the_internal_endpoint_does_not_serve_is_called_out() {
     // an absence of peers rather than an error.
     let exposure = split_ports(Some(NodeIdentity {
         id: "node-a".into(),
-        advertise: SocketAddr::new(ip("10.0.0.1"), 9999),
+        advertise: "10.0.0.1:9999".to_owned(),
     }));
     assert!(
         exposure
@@ -402,7 +405,7 @@ fn advertising_the_public_port_sends_peers_through_the_proxy() {
     // arrive looking like a client.
     let exposure = split_ports(Some(NodeIdentity {
         id: "node-a".into(),
-        advertise: SocketAddr::new(ip("10.0.0.1"), 443),
+        advertise: "10.0.0.1:443".to_owned(),
     }));
     assert!(
         exposure
@@ -421,7 +424,7 @@ fn an_internal_endpoint_with_tls_but_no_client_ca_is_called_out() {
     // is exactly what client certificates are good at.
     let mut exposure = split_ports(Some(NodeIdentity {
         id: "node-a".into(),
-        advertise: SocketAddr::new(ip("10.0.0.1"), 9443),
+        advertise: "10.0.0.1:9443".to_owned(),
     }));
     exposure.internal = Some(Endpoint::secured(
         SocketAddr::new(ip("10.0.0.1"), 9443),

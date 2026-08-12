@@ -274,14 +274,28 @@ pub struct NodeIdentity {
     /// the orchestrator already guarantees is unique — a pod name, a task id —
     /// rather than a hostname that may repeat.
     pub id: String,
-    /// The address **other nodes** should connect to, host and port.
+    /// The address **other nodes** should connect to, as `host:port`.
     ///
-    /// On the cluster network, reaching the *internal* endpoint — not the
-    /// public one, and not the proxy in front of it.
-    pub advertise: SocketAddr,
+    /// On the cluster network, reaching the *internal* endpoint — not the public
+    /// one, and not the proxy in front of it.
+    ///
+    /// A **string, not a `SocketAddr`**, and that is a correction rather than
+    /// laxity. Requiring a literal IP is wrong for every deployment this targets:
+    /// on a compose network or in Kubernetes a node is reached by service name,
+    /// and its IP changes when it restarts — so an operator would have to
+    /// configure an address that is wrong by the time it is used. It was found
+    /// by the cluster compose refusing to start on `collab-a:8443`, which is
+    /// exactly what such a deployment must supply.
+    pub advertise: String,
 }
 
 impl NodeIdentity {
+    /// The port peers are told to connect to, if the address names one.
+    #[must_use]
+    pub fn advertised_port(&self) -> Option<u16> {
+        self.advertise.rsplit_once(':')?.1.parse().ok()
+    }
+
     /// Why this identity could not be used to form a cluster, if it could not.
     ///
     /// Checked rather than assumed because every failure here presents the same
@@ -294,24 +308,43 @@ impl NodeIdentity {
         if self.id.trim().is_empty() {
             out.push("the node id is empty, and it is the key other nodes find this one by".into());
         }
-        if self.advertise.ip().is_unspecified() {
+        let (host, port) = match self.advertise.rsplit_once(':') {
+            Some((host, port)) => (host, port),
+            None => {
+                out.push(format!(
+                    "advertising {:?} has no port: peers need somewhere to connect, not just \
+                     somewhere to look",
+                    self.advertise
+                ));
+                return out;
+            }
+        };
+        // Brackets are how an IPv6 literal carries a port; the address inside
+        // is what the checks below are about. Missing this let `[::]:8443` —
+        // "every interface", which is not somewhere to dial — pass as an
+        // ordinary hostname.
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        // The checks that were here for an IP, kept for the cases a name cannot
+        // rescue: these are wrong however they are spelled.
+        if host.is_empty() || host == "0.0.0.0" || host == "::" {
             out.push(format!(
-                "advertising {} tells peers to connect to \"any address\", which is not one: \
+                "advertising {:?} tells peers to connect to \"any address\", which is not one: \
                  a bind address of 0.0.0.0 accepts from everywhere and can be dialled from \
                  nowhere",
                 self.advertise
             ));
         }
-        if self.advertise.ip().is_loopback() {
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" {
             out.push(format!(
-                "advertising {} tells every peer to connect to itself",
+                "advertising {:?} tells every peer to connect to itself",
                 self.advertise
             ));
         }
-        if self.advertise.port() == 0 {
-            out.push(
-                "advertising port 0 tells peers to connect to a port nothing listens on".into(),
-            );
+        if port.parse::<u16>().map_or(true, |p| p == 0) {
+            out.push(format!(
+                "advertising {:?} names a port nothing can listen on",
+                self.advertise
+            ));
         }
         out
     }
@@ -395,15 +428,16 @@ impl Exposure {
                 );
             }
             if let Some(node) = &self.node {
-                if node.advertise.port() != internal.bind.port() {
+                if let Some(advertised) = node.advertised_port()
+                    && advertised != internal.bind.port()
+                {
                     out.push(format!(
-                        "this node advertises port {} but its internal endpoint listens on {}: \
-                         peers will dial a port nothing is serving them on",
-                        node.advertise.port(),
+                        "this node advertises port {advertised} but its internal endpoint listens \
+                         on {}: peers will dial a port nothing is serving them on",
                         internal.bind.port()
                     ));
                 }
-                if node.advertise.port() == self.public.bind.port()
+                if node.advertised_port() == Some(self.public.bind.port())
                     && self.public.bind.port() != internal.bind.port()
                 {
                     out.push(
