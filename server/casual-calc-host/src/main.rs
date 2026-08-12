@@ -56,6 +56,61 @@ struct Config {
     collab_ws: String,
     /// The audience the collaboration server is configured to require.
     audience: String,
+    /// Enables the admin page when set. Absent means there is no admin page,
+    /// which is the right default for something that ships as a demo.
+    admin_token: Option<String>,
+}
+
+/// Settings an operator may change **while it is running**.
+///
+/// # What is here, and what is deliberately not
+///
+/// Everything in this struct can change under a live server without anybody
+/// losing work: the next browser to ask for a session gets the new value.
+///
+/// What is **not** here is the rest of the configuration — bind addresses, TLS,
+/// the signing secret, the Redis URL, a node's identity — and that is a decision
+/// rather than an omission. Those cannot change beneath an open connection: a
+/// new secret invalidates every token in flight, a new bind address is a
+/// different server, and a node changing identity mid-lease is the zombie the
+/// epoch exists to fence. They stay environment-only, where changing one means
+/// restarting the thing it configures, which is the honest cost.
+///
+/// Stored beside the documents so it survives a restart, which is the "apart
+/// from env or a config file" part: the file *is* written here, by the admin
+/// page, rather than being something an operator edits and then restarts for.
+#[derive(Clone, Serialize, Deserialize)]
+struct Settings {
+    /// What the browser is told to connect to. Changing it moves every *new*
+    /// session; the ones already open keep the socket they have.
+    collab_ws: String,
+    /// Whether the landing page accepts uploads.
+    allow_uploads: bool,
+    /// Shown on the landing page, so a demo can be labelled for who it is for.
+    banner: String,
+}
+
+impl Settings {
+    fn path(config: &Config) -> PathBuf {
+        config.store.join("settings.json")
+    }
+
+    /// The stored settings, or the ones the environment implies.
+    fn load(config: &Config) -> Self {
+        std::fs::read(Self::path(config))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(|| Self {
+                collab_ws: config.collab_ws.clone(),
+                allow_uploads: true,
+                banner: String::new(),
+            })
+    }
+
+    fn save(&self, config: &Config) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(self).unwrap_or_default();
+        std::fs::write(Self::path(config), bytes)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -354,10 +409,97 @@ async fn session(
         "token": mint(&config, &meta, &name, access),
         "document": meta.id,
         "title": meta.title,
-        "collab": config.collab_ws,
+        "collab": Settings::load(&config).collab_ws,
         "editable": access == "edit",
     }))
     .into_response()
+}
+
+/// Whether a request may administer this host.
+///
+/// Admin is **off unless a token is set**, rather than on with a default. A demo
+/// that ships with a known password is a demo somebody exposes to the internet
+/// once and then explains, and "it was only a demo" is not a thing anybody says
+/// afterwards.
+fn admin_ok(config: &Config, headers: &axum::http::HeaderMap) -> bool {
+    let Some(expected) = config.admin_token.as_deref() else {
+        return false;
+    };
+    headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|got| got == expected)
+}
+
+/// Everything an operator can see: what is running, what is stored, and every
+/// effective setting — including the ones they cannot change here, and why.
+async fn admin_state(
+    State(config): State<Arc<Config>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !admin_ok(&config, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let settings = Settings::load(&config);
+
+    let mut documents = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&config.store) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && path.file_stem().is_some_and(|s| s != "settings")
+                && let Ok(bytes) = std::fs::read(&path)
+                && let Ok(meta) = serde_json::from_slice::<DocumentMeta>(&bytes)
+            {
+                let size = std::fs::metadata(path.with_extension("xlsx"))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                documents.push(serde_json::json!({
+                    "id": meta.id, "title": meta.title, "bytes": size,
+                }));
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "runtime": settings,
+        "fixed": {
+            "audience": config.audience,
+            "store": config.store.to_string_lossy(),
+            "host_internal": config.internal_base,
+            "secret_set": !config.secret.is_empty(),
+        },
+        "documents": documents,
+    }))
+    .into_response()
+}
+
+/// Change what can be changed.
+async fn admin_update(
+    State(config): State<Arc<Config>>,
+    headers: axum::http::HeaderMap,
+    Json(next): Json<Settings>,
+) -> impl IntoResponse {
+    if !admin_ok(&config, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    // Refused rather than accepted-and-ignored: a setting that silently does
+    // not apply is worse than one that cannot be set, because the operator
+    // believes it took.
+    if next.collab_ws.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    match next.save(&config) {
+        Ok(()) => {
+            tracing::info!(collab_ws = %next.collab_ws, "settings changed");
+            StatusCode::OK
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("admin.html"))
 }
 
 async fn index() -> Html<&'static str> {
@@ -402,6 +544,9 @@ async fn main() {
         collab_ws: std::env::var("OPENCALC_COLLAB_WS")
             .unwrap_or_else(|_| "ws://127.0.0.1:8443/collab".to_owned()),
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_else(|_| "opencalc-demo".to_owned()),
+        admin_token: std::env::var("OPENCALC_ADMIN_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty()),
     });
     if let Err(why) = std::fs::create_dir_all(&config.store) {
         tracing::error!(?why, store = ?config.store, "cannot use the document store");
@@ -419,6 +564,9 @@ async fn main() {
         .route("/api/documents/{id}/download", get(download))
         .route("/api/documents/{id}/session", get(session))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/admin", get(admin_page))
+        .route("/api/admin/state", get(admin_state))
+        .route("/api/admin/settings", post(admin_update))
         // The editor itself, served from the same origin as the API so a share
         // link is one host and there is no CORS to explain to anybody.
         .nest_service("/editor", tower_http::services::ServeDir::new(editor))

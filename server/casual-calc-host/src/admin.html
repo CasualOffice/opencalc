@@ -1,0 +1,83 @@
+<!-- The admin page. Token-gated, and honest about what it cannot change. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenCalc — admin</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 3rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.35rem; } h2 { font-size: 1rem; margin-top: 2rem; }
+  input, button { font: inherit; padding: .45rem .6rem; border-radius: .35rem;
+                  border: 1px solid #8886; background: transparent; color: inherit; }
+  button { background: #4472c4; color: #fff; border-color: transparent; cursor: pointer; }
+  label { display: block; margin: .7rem 0; }
+  label span { display: block; opacity: .75; font-size: .87rem; margin-bottom: .2rem; }
+  label input[type=text] { width: 100%; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8883; }
+  .fixed { opacity: .72; }
+  .note { border-left: 3px solid #8884; padding-left: .9rem; font-size: .92rem; opacity: .85; }
+  #msg { margin-left: .6rem; opacity: .8; }
+</style>
+
+<h1>OpenCalc admin</h1>
+
+<label><span>Admin token — set as <code>OPENCALC_ADMIN_TOKEN</code>. Without one, this page does nothing.</span>
+  <input id="token" type="password" placeholder="admin token" style="width:22rem">
+  <button id="load">Load</button></label>
+
+<div id="body" hidden>
+  <h2>Changeable while running</h2>
+  <p class="note">Applied to the next session anybody opens. Connections already
+    open keep the socket they have — a live socket cannot be re-pointed without
+    dropping it, and dropping it to apply a setting is worse than waiting.</p>
+  <label><span>WebSocket endpoint the browser connects to</span><input id="collab_ws" type="text"></label>
+  <label><span>Banner shown on the landing page</span><input id="banner" type="text"></label>
+  <label><input id="allow_uploads" type="checkbox"> Allow uploads</label>
+  <button id="save">Save</button><span id="msg"></span>
+
+  <h2>Restart-only</h2>
+  <p class="note">Not editable here, and that is deliberate rather than unfinished.
+    A new signing secret invalidates every token in flight; a new bind address is
+    a different server; a node changing identity mid-lease is exactly the zombie
+    the epoch fence exists to stop. These are environment variables, and changing
+    one means restarting the thing it configures.</p>
+  <table id="fixed" class="fixed"></table>
+
+  <h2>Documents</h2>
+  <table id="docs"><thead><tr><th>Title</th><th>Id</th><th>Size</th><th></th></tr></thead><tbody></tbody></table>
+</div>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const headers = () => ({ "x-admin-token": $("token").value, "content-type": "application/json" });
+
+  $("load").addEventListener("click", async () => {
+    const r = await fetch("/api/admin/state", { headers: headers() });
+    if (!r.ok) { $("msg").textContent = r.status === 401 ? "wrong or unset token" : "failed"; return; }
+    const s = await r.json();
+    $("body").hidden = false;
+    $("collab_ws").value = s.runtime.collab_ws;
+    $("banner").value = s.runtime.banner;
+    $("allow_uploads").checked = s.runtime.allow_uploads;
+    $("fixed").innerHTML = Object.entries(s.fixed)
+      .map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+    $("docs").querySelector("tbody").innerHTML = s.documents
+      .map((d) => `<tr><td>${d.title}</td><td><code>${d.id}</code></td>` +
+                  `<td>${(d.bytes / 1024).toFixed(1)} kB</td>` +
+                  `<td><a href="/d/${d.id}">open</a> · <a href="/api/documents/${d.id}/download">download</a></td></tr>`)
+      .join("") || "<tr><td colspan=4>none yet</td></tr>";
+  });
+
+  $("save").addEventListener("click", async () => {
+    const r = await fetch("/api/admin/settings", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        collab_ws: $("collab_ws").value,
+        banner: $("banner").value,
+        allow_uploads: $("allow_uploads").checked,
+      }),
+    });
+    $("msg").textContent = r.ok ? "saved" : `failed (${r.status})`;
+  });
+</script>

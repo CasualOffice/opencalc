@@ -27,6 +27,9 @@ services:
       # What the *collaboration server* calls this host. A service name, not
       # localhost — localhost inside that container is that container.
       OPENCALC_HOST_INTERNAL: http://host:8080
+      # Unset by default, which switches the admin page off entirely. A demo
+      # shipping with a known password is a demo somebody exposes once.
+      OPENCALC_ADMIN_TOKEN: ${OPENCALC_ADMIN_TOKEN:-}
     volumes:
       - documents:/data
     ports:
