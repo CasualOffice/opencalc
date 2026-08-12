@@ -4899,6 +4899,38 @@ fn resize_px_to_twips(px: u32) -> i64 {
     (px.max(8) as i64) * 1440 / 96
 }
 
+/// A row's height in device-independent pixels, explicit or default.
+///
+/// The read to go with [`session_set_row_height`]. Added because a test could
+/// not otherwise ask what autofit had done — the height is written into the
+/// document and there was no way to read it back, so the only thing that could
+/// be asserted about autofit was that it did not crash.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_row_height(sheet: usize, row: u32) -> f64 {
+    with_session(|s| {
+        let geometry = geometry_of(s, sheet);
+        twips_to_px_f64(geometry.rows.size(row))
+    })
+    .unwrap_or(0.0)
+}
+
+/// A column's width in device-independent pixels, explicit or default.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_col_width(sheet: usize, col: u32) -> f64 {
+    with_session(|s| {
+        let geometry = geometry_of(s, sheet);
+        twips_to_px_f64(geometry.columns.size(col))
+    })
+    .unwrap_or(0.0)
+}
+
+/// Twips to pixels at 96 dpi, the inverse of [`resize_px_to_twips`].
+fn twips_to_px_f64(twips: i64) -> f64 {
+    twips as f64 * 96.0 / 1440.0
+}
+
 /// The grid geometry (column widths / row heights) of a sheet.
 fn geometry_of(s: &WorkbookSession, sheet: usize) -> GridGeometry {
     s.workbook()

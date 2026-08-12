@@ -318,3 +318,41 @@ test("Shift+Space selects the whole row, and plain Space starts typing", async (
   await expect(page.locator("#inline-edit")).toBeVisible();
   expect(await page.locator("#inline-edit").inputValue()).toBe(" ");
 });
+
+test("autofit sizes a rotated heading by its rotated height, not its flat one", async ({ page }) => {
+  // `autofitRow` used to carry its own copy of the row-measuring arithmetic,
+  // under a comment saying to match the shared one exactly. The copy had no
+  // rotation case, so a row of rotated headings was measured as though the text
+  // were horizontal and clipped — and because autofit *persists* the height,
+  // and a persisted height pins the row against further auto-growth, it did not
+  // correct itself on the next draw.
+  await boot(page);
+  await goTo(page, "A1");
+  await type(page, "A heading long enough that turning it needs real room");
+
+  const heightOf = () =>
+    page.evaluate(() => window.__ed.wasmApi().session_row_height(0, 0));
+
+  await page.evaluate(async () => {
+    window.__ed = await import(
+      document.querySelector('script[type="module"][src*="editor.js"]').src
+    );
+  });
+
+  // Autofit it flat, and again rotated. Driven through the engine and the
+  // editor's own autofit, so what is asserted is what a double-click on the row
+  // boundary actually does.
+  await page.evaluate(() => window.__ed.wasmApi().session_clear_row_height(0, 0));
+  await page.evaluate(() => window.__ed.autofitRowForTest(0));
+  const flat = await heightOf();
+
+  await page.evaluate(() => window.__ed.wasmApi().session_set_rotation(0, 0, 0, 0, 0, 90));
+  await page.evaluate(() => window.__ed.wasmApi().session_clear_row_height(0, 0));
+  await page.evaluate(() => window.__ed.autofitRowForTest(0));
+  const rotated = await heightOf();
+
+  expect(rotated, `rotated ${rotated} should exceed flat ${flat}`).toBeGreaterThan(flat);
+  // And by a real amount: the text is long, so turned on its side it needs
+  // several times an ordinary row rather than a few pixels more.
+  expect(rotated).toBeGreaterThan(flat * 2);
+});

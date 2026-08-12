@@ -11152,6 +11152,16 @@ export function relayout() {
   resize();
 }
 
+/// Autofit a row, for the browser gate.
+///
+/// Exported because the alternative was asserting nothing about autofit: it is
+/// reached by double-clicking a row boundary, which a test can only simulate by
+/// guessing at pixel coordinates on a canvas — and a test that guesses wrong
+/// passes for the wrong reason.
+export function autofitRowForTest(row) {
+  autofitRow(row);
+}
+
 /// The raw engine bindings, for a host that needs something the element does
 /// not wrap. Deliberately the same object the editor itself uses: a second
 /// session would be a second workbook.
