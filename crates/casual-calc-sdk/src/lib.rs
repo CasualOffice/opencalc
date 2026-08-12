@@ -7,7 +7,7 @@
 //! bridge) embeds. The public surface is deliberately narrower than the internal
 //! crates. See `docs/02-ARCHITECTURE.md`.
 
-use casual_calc_eval::{recalculate, recalculate_incremental};
+use casual_calc_eval::{Recalculator, recalculate};
 use casual_calc_export::{ExportError, write_workbook};
 use casual_calc_import::{CompatibilityReport, ImportError, import_package_with};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
@@ -220,6 +220,9 @@ pub struct WorkbookSession {
     /// Whether an edit has changed a value since the last recalculation. Only
     /// meaningful in manual mode; automatic never leaves it set.
     stale: bool,
+    /// Recalculation, and from step three of docs/66 the precedent graph it
+    /// keeps between edits.
+    recalc: Recalculator,
     /// Operations applied since the host last collected them, **narrowed**.
     ///
     /// Off unless a host asks for it. A collaborative host has to send what it
@@ -262,6 +265,7 @@ impl WorkbookSession {
             config,
             stale: false,
             applied: None,
+            recalc: Recalculator::new(),
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -285,6 +289,7 @@ impl WorkbookSession {
             config,
             stale: false,
             applied: None,
+            recalc: Recalculator::new(),
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -327,6 +332,7 @@ impl WorkbookSession {
             // edited.
             stale: false,
             applied: None,
+            recalc: Recalculator::new(),
             source: Some(source),
         })
     }
@@ -419,8 +425,15 @@ impl WorkbookSession {
         }
         match plan {
             RecalcPlan::Skip => {}
-            RecalcPlan::Cells(cells) => recalculate_incremental(&mut self.workbook, &cells),
-            RecalcPlan::Full => recalculate(&mut self.workbook),
+            RecalcPlan::Cells(cells) => self.recalc.recalculate(&mut self.workbook, &cells),
+            RecalcPlan::Full => {
+                // A full recalculation follows a structural edit, which shifts
+                // every reference past its insertion point — so whatever the
+                // graph said about this document is about a document that no
+                // longer exists. Says so now, before step three makes it matter.
+                self.recalc.invalidate();
+                recalculate(&mut self.workbook);
+            }
         }
         Ok(())
     }
@@ -449,6 +462,11 @@ impl WorkbookSession {
     pub fn undo(&mut self) -> Result<(), SdkError> {
         self.history.undo(&mut self.workbook)?;
         self.source = None;
+        // Undo replays whatever it reverses, which may have been structural.
+        // The history does not say which, and guessing to keep a graph is
+        // exactly the trade that makes staleness possible for a saving that
+        // does not matter here: undo is not a keystroke.
+        self.recalc.invalidate();
         self.recalculate_if_automatic();
         Ok(())
     }
@@ -457,6 +475,7 @@ impl WorkbookSession {
     pub fn redo(&mut self) -> Result<(), SdkError> {
         self.history.redo(&mut self.workbook)?;
         self.source = None;
+        self.recalc.invalidate();
         self.recalculate_if_automatic();
         Ok(())
     }

@@ -264,6 +264,58 @@ fn write_result(workbook: &mut Workbook, sheet_index: usize, at: CellRef, value:
 /// `changed` is `(sheet_index, cell)` for each cell an edit set a new value on
 /// (or a formula on). Caller guarantees those new values/formulas are already
 /// written into `workbook`.
+/// Recalculation that can keep its precedent graph between edits.
+///
+/// Step two of [66](../../../docs/66-INCREMENTAL-RECALC-GRAPH.md), and it is
+/// **all plumbing on purpose**. It rebuilds the graph on every call, exactly as
+/// the free function does, so nothing about the answer or the cost changes yet.
+/// What changes is ownership: there is now somewhere for a kept graph to live,
+/// and a host that will hold it.
+///
+/// Separated from step three deliberately. Moving where state lives and changing
+/// when it is invalidated are two changes, and the second is the one where a
+/// mistake is silent — a stale graph does not fail, it just stops dirtying a
+/// cell that should have been dirtied, and the wrong number appears somewhere
+/// nobody was looking.
+///
+/// [`invalidate`](Self::invalidate) exists now and does nothing yet, so callers
+/// can be taught the discipline before it matters: a structural edit shifts
+/// every reference past its insertion point, and after step three a graph that
+/// survives one is a graph that describes a document that no longer exists.
+#[derive(Debug, Default)]
+pub struct Recalculator {
+    /// Kept from step three onward. `None` means "build one when next needed",
+    /// which is what every call does today.
+    graph: Option<graph::Precedents>,
+}
+
+impl Recalculator {
+    /// A recalculator with nothing remembered.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Recalculate the cells that `changed` affects.
+    ///
+    /// Identical to [`recalculate_incremental`] today, and the seam where step
+    /// three stops rebuilding.
+    pub fn recalculate(&mut self, workbook: &mut Workbook, changed: &[(usize, CellRef)]) {
+        // Dropped rather than reused: keeping it is step three, and keeping it
+        // *before* invalidation is written is how a graph goes stale.
+        self.graph = None;
+        recalculate_incremental(workbook, changed);
+    }
+
+    /// Forget the graph, because the document moved under it.
+    ///
+    /// Called for the edits that shift references workbook-wide — inserting or
+    /// deleting rows and columns — and for undo and redo, which replay them.
+    pub fn invalidate(&mut self) {
+        self.graph = None;
+    }
+}
+
 pub fn recalculate_incremental(workbook: &mut Workbook, changed: &[(usize, CellRef)]) {
     let keys: Vec<(usize, u32, u32)> = changed.iter().map(|(s, c)| (*s, c.row, c.col)).collect();
     let dirty = graph::dirty_set(workbook, &keys);

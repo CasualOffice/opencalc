@@ -45,6 +45,7 @@ struct RangeEdge {
 /// Extracted rather than rewritten on purpose. The propagation below is the part
 /// where being wrong is silent, so the change that introduces the type must not
 /// also change how the type is filled.
+#[derive(Debug)]
 pub(crate) struct Precedents {
     /// Precedent cell to the formula cells that read it directly.
     direct: HashMap<CellKey, Vec<CellKey>>,
