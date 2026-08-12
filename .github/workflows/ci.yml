@@ -68,7 +68,7 @@ jobs:
       # collaboration server is a host (ADR-012) and was never meant to run in a
       # browser: it has an async runtime and an HTTP stack, and checking it here
       # would be asserting something nobody wants to be true.
-      - run: cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server
+      - run: cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server --exclude casual-calc-host
 
   benchmark-smoke:
     runs-on: ubuntu-latest

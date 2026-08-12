@@ -274,58 +274,49 @@ sheet.on(<span class="s">"cellsChanged"</span>, (e) =&gt; {
     </section>
 
     <!-- Compare -->
+    <!-- Self-host / try it -->
     <section id="selfhost" class="section">
       <div class="wrap">
-        <h2>Run the whole thing yourself, before you integrate anything</h2>
-        <p class="lede">
+        <p class="eyebrow">Try it</p>
+        <h2>Run the whole thing yourself, before you integrate anything.</h2>
+        <p class="section-lede">
           Co-editing is not a feature you should have to take on trust. Two containers,
           one command, and you are sharing a link with a colleague and typing into the
           same sheet.
         </p>
 
-<pre><code>git clone https://github.com/CasualOffice/opencalc
-cd opencalc
+        <div class="steps">
+          <article class="step">
+            <h4>Bring it up</h4>
+            <p>The editor, a collaboration server and a reference host. Nothing else to install.</p>
+<pre><span class="c"># change OPENCALC_SHARED_SECRET in .env</span>
 cp .env.example .env
-docker compose up --build</code></pre>
+docker compose up --build</pre>
+          </article>
+          <article class="step">
+            <h4>Share a link</h4>
+            <p>Open <code>localhost:8080</code>, make a spreadsheet, press <strong>Share</strong>, send the link. You will both see each other's cursors and each other's edits.</p>
+<pre><span class="c"># and a cluster, when one node is not enough</span>
+docker compose -f docker-compose.cluster.yml up</pre>
+          </article>
+          <article class="step">
+            <h4>Take the file away</h4>
+            <p>Download gives you an <code>.xlsx</code> with what you both typed — the server hands the finished bytes back to the host rather than keeping them.</p>
+          </article>
+        </div>
 
-        <p>
-          Open <code>http://localhost:8080</code>, make a spreadsheet, press <strong>Share</strong>,
-          send the link. You will both see each other's cursors and each other's edits.
-          Either of you can download the <code>.xlsx</code> afterwards — with what you
-          both typed in it, because the server hands the finished bytes back to the host
-          rather than keeping them.
+        <p class="section-lede" style="margin-top:28px">
+          The two containers are the integration boundary, not a demo artefact. The
+          <strong>collaboration server</strong> is what OpenCalc supplies — ordering,
+          presence, the socket. The <strong>host</strong> is what your product supplies —
+          documents, identity, tokens, saving. It holds no per-document state and cannot
+          mint tokens, so it is told, per join, by a party that already knows. That is
+          four endpoints and a signature, and the host you just ran is the worked example
+          of the one you would write.
         </p>
-
-        <h3>Two containers, because they are two things</h3>
-        <p>
-          The <strong>collaboration server</strong> is what OpenCalc supplies: ordering,
-          presence, the socket. The <strong>host</strong> is what your product supplies:
-          documents, identity, tokens, saving. The demo splits them exactly where a real
-          integration splits them — so what you try is what you would build against, and
-          the host you are running is the worked example of the one you would write.
-        </p>
-        <p>
-          The server holds no per-document state and deliberately cannot mint tokens. It
-          is told, per join, by a party that already knows: where the file lives, where
-          the bytes go back, who is joining and what they may do. That is four endpoints
-          and a signature, and it is the whole contract.
-        </p>
-
-        <h3>And a cluster, when one node is not enough</h3>
-<pre><code>docker compose -f docker-compose.cluster.yml up --build</code></pre>
-        <p>
-          Two collaboration nodes behind nginx, coordinating through Redis. A client
-          lands on whichever node the proxy chose; one node leads a given document and
-          the others relay to it. Two people editing the same sheet may be on different
-          nodes and cannot tell — which is the point. Standalone is not a lesser version
-          of this: one process leads every document by definition and needs no Redis at
-          all.
-        </p>
-
-        <p class="hero-note">
-          Reverse-proxy configuration for nginx and Caddy, an admin page, and the
-          honest notes on what the demo defaults are not safe for are in
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/65-RUNNING-IT.md">the deployment guide</a>.
+        <p class="section-lede">
+          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/65-RUNNING-IT.md">The deployment guide</a>
+          covers reverse proxies, the admin page, and what the demo defaults are not safe for.
         </p>
       </div>
     </section>
