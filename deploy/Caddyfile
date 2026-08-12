@@ -1,0 +1,16 @@
+# The same deployment in Caddy, which needs less said because it obtains
+# certificates itself and proxies WebSockets without being told to.
+opencalc.example.com {
+	# Longer than the server's own idle timeout, so the server decides when a
+	# participant is gone rather than the proxy deciding for it.
+	reverse_proxy /collab* collab:8443 {
+		transport http {
+			read_timeout 3600s
+		}
+	}
+	reverse_proxy host:8080
+
+	request_body {
+		max_size 64MB
+	}
+}

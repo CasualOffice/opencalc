@@ -6,10 +6,13 @@
 # --- The editor, compiled to WebAssembly ------------------------------------
 FROM rust:1.96-slim-bookworm AS editor
 WORKDIR /src
-RUN apt-get update && apt-get install --no-install-recommends -y curl \
- && rm -rf /var/lib/apt/lists/* \
- && curl -sSfL https://github.com/drager/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-x86_64-unknown-linux-musl.tar.gz \
-    | tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-pack'
+# Built from source rather than fetched as a release tarball. The tarballs are
+# per-architecture, and a hardcoded `x86_64` URL fails on an arm64 machine with
+# a tar error that says nothing about architecture — which is exactly how this
+# was got wrong the first time. `cargo install` is slower and works everywhere
+# the builder image runs.
+RUN cargo install wasm-pack --version 0.13.1 --locked
+RUN rustup target add wasm32-unknown-unknown
 COPY . .
 RUN wasm-pack build crates/casual-calc-wasm --release --target web --out-dir /src/webapp/pkg
 
