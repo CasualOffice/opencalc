@@ -314,6 +314,7 @@ dependencies = [
 name = "casual-calc-import"
 version = "0.0.0"
 dependencies = [
+ "casual-calc-eval",
  "casual-calc-formula",
  "casual-calc-model",
  "casual-calc-ooxml",

@@ -287,3 +287,54 @@ fn deliberately_broken_packages_are_answered_rather_than_survived() {
         files.len()
     );
 }
+
+/// A file written by LibreOffice, recalculated here, compared against the values
+/// LibreOffice itself computed.
+///
+/// This is the independent oracle the corpus exists for. Every other fidelity
+/// assertion in the repository compares this engine against this engine: our
+/// importer against our exporter, our evaluator against our own expectations.
+/// Here a different implementation wrote the formulas *and* the answers, and if
+/// we disagree with it about `=B2*C2` then one of us is wrong and it is worth
+/// knowing which.
+///
+/// The cached values are the point. An `.xlsx` stores what the writing
+/// application calculated alongside the formula, so the file carries both the
+/// question and that application's answer.
+#[test]
+fn our_evaluator_agrees_with_libreoffice_about_libreoffices_own_formulas() {
+    let path = corpus().join("libreoffice-formulas.xlsx");
+    let bytes = std::fs::read(&path).expect("the LibreOffice fixture is present");
+    let import = casual_calc_import::import_package(bytes).expect("opens");
+
+    // What LibreOffice stored, for every cell that has a formula.
+    let cached: Vec<(casual_calc_model::CellRef, f64)> = import.workbook.sheets[0]
+        .cells
+        .iter()
+        .filter(|(_, cell)| cell.formula.is_some())
+        .filter_map(|(at, cell)| match cell.value {
+            casual_calc_model::CellValue::Number(n) => Some((at, n)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        cached.len() >= 4,
+        "the fixture should carry formulas with cached values; found {}",
+        cached.len()
+    );
+
+    // Recalculate from the formulas alone and compare.
+    let mut workbook = import.workbook.clone();
+    casual_calc_eval::recalculate(&mut workbook);
+
+    for (at, theirs) in cached {
+        let ours = match workbook.sheets[0].cells.get(at).map(|c| c.value.clone()) {
+            Some(casual_calc_model::CellValue::Number(n)) => n,
+            other => panic!("{at:?}: we produced {other:?} where LibreOffice had {theirs}"),
+        };
+        assert!(
+            (ours - theirs).abs() < 1e-9,
+            "{at:?}: we say {ours}, LibreOffice said {theirs}"
+        );
+    }
+}

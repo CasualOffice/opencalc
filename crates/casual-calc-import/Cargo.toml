@@ -14,6 +14,7 @@ casual-calc-ooxml = { path = "../casual-calc-ooxml" }
 quick-xml = "0.37"
 
 [dev-dependencies]
+casual-calc-eval = { path = "../casual-calc-eval" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
