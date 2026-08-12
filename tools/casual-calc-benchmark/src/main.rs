@@ -218,6 +218,47 @@ struct ScalingReport {
 /// tuning.
 const SCALING_BUDGET_CENTI: u64 = 2_500;
 
+/// Measure `work` at two sizes, with `setup` outside the clock.
+///
+/// The distinction matters more than it looks. The first version of the
+/// incremental-recalculation case built its workbook *inside* the timed closure
+/// and reported 10.4x — a number that says nothing about recalculation, because
+/// constructing ten times the sheet is ten times the work on its own. A case
+/// measuring its own fixture is a case that will always look linear.
+fn measure_scaling_with_setup<T>(
+    id: &str,
+    iterations: u32,
+    setup: impl Fn(u32) -> T,
+    work: impl Fn(&mut T) -> u64,
+) -> ScalingReport {
+    let time = |cells: u32| {
+        let mut samples: Vec<u128> = (0..iterations)
+            .map(|_| {
+                // Rebuilt per iteration, outside the clock: the edit mutates the
+                // workbook, and measuring the second edit of the same cell would
+                // measure a dirty set that is already clean.
+                let mut fixture = setup(cells);
+                let started = std::time::Instant::now();
+                std::hint::black_box(work(&mut fixture));
+                started.elapsed().as_nanos()
+            })
+            .collect();
+        samples.sort_unstable();
+        percentile(&samples, 0.5)
+    };
+    let small_ns = time(1_000).max(1);
+    let large_ns = time(10_000);
+    let ratio_centi = large_ns * 100 / small_ns;
+    ScalingReport {
+        id: id.to_owned(),
+        small_ns,
+        large_ns,
+        ratio_centi,
+        budget_centi: SCALING_BUDGET_CENTI,
+        within_budget: ratio_centi <= SCALING_BUDGET_CENTI,
+    }
+}
+
 /// Measure `work` at two input sizes an order of magnitude apart.
 ///
 /// Ten times the input: far enough that linear and quadratic differ by an order
@@ -358,7 +399,50 @@ fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
             workbook.sheets[0].cells.iter().count() as u64
         }),
         measure_frame(iterations.max(5)),
+        // One edit to one cell, in a sheet of `cells` formulas that do not
+        // depend on it. The dirty set is one cell either way, so the *only*
+        // thing that can grow with the sheet is the work done to discover that
+        // — which is the per-pass precedent graph P2-002 records as needing to
+        // become persistent.
+        //
+        // Measured rather than assumed. If this scales flat, the remaining work
+        // is not on the critical path; if it scales with the sheet, this says by
+        // how much, which is the number that decides whether the 50 ms target
+        // at a million cells is reachable without it.
+        measure_scaling_with_setup(
+            "eval-incremental-edit-scaling",
+            iterations,
+            build_formula_workbook,
+            |workbook| {
+                let at = CellRef::new(0, 1);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(1.0)));
+                casual_calc_eval::recalculate_incremental(workbook, &[(0, at)]);
+                workbook.sheets[0].cells.iter().count() as u64
+            },
+        ),
     ]
+}
+
+/// A sheet of independent formulas, so an edit's dirty set is one cell however
+/// large the sheet is.
+fn build_formula_workbook(cells: u32) -> Workbook {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Calc");
+    for row in 0..cells {
+        sheet.cells.set(
+            CellRef::new(row, 0),
+            Cell::value(CellValue::Number(f64::from(row))),
+        );
+        let mut formula = Cell::value(CellValue::Number(0.0));
+        formula.formula = Some(workbook.store_formula(
+            casual_calc_formula::parse(&format!("A{}*2", row + 1)).expect("parses"),
+        ));
+        sheet.cells.set(CellRef::new(row, 2), formula);
+    }
+    workbook.sheets.push(sheet);
+    workbook
 }
 
 fn main() {

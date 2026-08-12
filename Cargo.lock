@@ -217,6 +217,8 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "casual-calc-benchmark"
 version = "0.0.0"
 dependencies = [
+ "casual-calc-eval",
+ "casual-calc-formula",
  "casual-calc-layout",
  "casual-calc-model",
  "casual-calc-package",

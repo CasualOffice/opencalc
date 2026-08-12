@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+casual-calc-eval = { path = "../../crates/casual-calc-eval" }
+casual-calc-formula = { path = "../../crates/casual-calc-formula" }
 casual-calc-layout = { path = "../../crates/casual-calc-layout" }
 casual-calc-render = { path = "../../crates/casual-calc-render" }
 casual-calc-model = { path = "../../crates/casual-calc-model" }
