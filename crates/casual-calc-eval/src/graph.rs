@@ -18,6 +18,7 @@ pub(crate) type CellKey = (usize, u32, u32);
 
 /// A rectangular precedent range on one sheet (inclusive), plus the formula
 /// cell that reads it.
+#[derive(PartialEq, Eq, Debug)]
 struct RangeEdge {
     sheet: usize,
     r0: u32,
@@ -33,44 +34,88 @@ struct RangeEdge {
 /// that transitively references a changed cell. Formulas that use a defined
 /// name are treated conservatively as always-dirty (a name's target is not
 /// resolved here), which keeps the result correct if not maximally minimal.
-pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<CellKey> {
-    // precedent cell -> formula cells that read it directly.
-    let mut direct: HashMap<CellKey, Vec<CellKey>> = HashMap::new();
-    // range precedents, scanned linearly (a cell may fall inside any of them).
-    let mut ranges: Vec<RangeEdge> = Vec::new();
-    // formulas that reference a defined name: recompute on any change.
-    let mut name_users: Vec<CellKey> = Vec::new();
+/// Which formulas read what, for one workbook.
+///
+/// Step one of [66](../../../docs/66-INCREMENTAL-RECALC-GRAPH.md): the same
+/// three collections `dirty_set` has always built per pass, given a name and a
+/// constructor so that a later step can **keep** one instead of rebuilding it on
+/// every edit. Nothing yet keeps one — this is a refactor, and the measurement
+/// it exists to fix is unchanged until step three.
+///
+/// Extracted rather than rewritten on purpose. The propagation below is the part
+/// where being wrong is silent, so the change that introduces the type must not
+/// also change how the type is filled.
+pub(crate) struct Precedents {
+    /// Precedent cell to the formula cells that read it directly.
+    direct: HashMap<CellKey, Vec<CellKey>>,
+    /// Range precedents, scanned linearly: a changed cell may fall inside any.
+    ///
+    /// The linear scan is what step four replaces with row-band buckets. It is
+    /// correct and it is why a workbook of range formulas costs more per edit
+    /// than one of cell references.
+    ranges: Vec<RangeEdge>,
+    /// Formulas that reference a defined name, recomputed on any change.
+    ///
+    /// Conservative, and staying that way: a name's target can be an expression,
+    /// so resolving it precisely is a second dependency problem for a small
+    /// population.
+    name_users: Vec<CellKey>,
+}
 
-    for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
-        for (at, cell) in sheet.cells.iter() {
-            let Some(handle) = cell.formula else { continue };
-            let Some(expr) = workbook.formula(handle) else {
-                continue;
-            };
-            let dependent = (sheet_index, at.row, at.col);
-            let mut uses_name = false;
-            collect_precedents(
-                expr,
-                sheet_index,
-                workbook,
-                &mut |p| direct.entry(p).or_default().push(dependent),
-                &mut |sheet, r0, c0, r1, c1| {
-                    ranges.push(RangeEdge {
-                        sheet,
-                        r0,
-                        c0,
-                        r1,
-                        c1,
-                        dependent,
-                    })
-                },
-                &mut uses_name,
-            );
-            if uses_name {
-                name_users.push(dependent);
+impl Precedents {
+    /// Walk every formula in the workbook and record what it reads.
+    pub(crate) fn build(workbook: &Workbook) -> Self {
+        let mut this = Self {
+            direct: HashMap::new(),
+            ranges: Vec::new(),
+            name_users: Vec::new(),
+        };
+        this.fill_from(workbook);
+        this
+    }
+
+    fn fill_from(&mut self, workbook: &Workbook) {
+        let (direct, ranges, name_users) =
+            (&mut self.direct, &mut self.ranges, &mut self.name_users);
+        for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
+            for (at, cell) in sheet.cells.iter() {
+                let Some(handle) = cell.formula else { continue };
+                let Some(expr) = workbook.formula(handle) else {
+                    continue;
+                };
+                let dependent = (sheet_index, at.row, at.col);
+                let mut uses_name = false;
+                collect_precedents(
+                    expr,
+                    sheet_index,
+                    workbook,
+                    &mut |p| direct.entry(p).or_default().push(dependent),
+                    &mut |sheet, r0, c0, r1, c1| {
+                        ranges.push(RangeEdge {
+                            sheet,
+                            r0,
+                            c0,
+                            r1,
+                            c1,
+                            dependent,
+                        })
+                    },
+                    &mut uses_name,
+                );
+                if uses_name {
+                    name_users.push(dependent);
+                }
             }
         }
     }
+}
+
+pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<CellKey> {
+    let Precedents {
+        direct,
+        ranges,
+        name_users,
+    } = Precedents::build(workbook);
 
     let is_formula = |k: CellKey| {
         workbook
@@ -302,5 +347,78 @@ fn resolve_sheet(r: &CellReference, ctx_sheet: usize, workbook: &Workbook) -> Op
             .iter()
             .position(|s| s.name.eq_ignore_ascii_case(name)),
         None => Some(ctx_sheet),
+    }
+}
+
+#[cfg(test)]
+mod precedents_tests {
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    use super::*;
+
+    /// A sheet with one of each edge the graph distinguishes.
+    fn workbook() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..4u32 {
+            sheet.cells.set(
+                CellRef::new(row, 0),
+                Cell::value(CellValue::Number(f64::from(row))),
+            );
+        }
+        wb.sheets.push(sheet);
+
+        let put = |wb: &mut Workbook, at: CellRef, formula: &str| {
+            let handle = wb.store_formula(casual_calc_formula::parse(formula).unwrap());
+            let mut cell = Cell::value(CellValue::Number(0.0));
+            cell.formula = Some(handle);
+            wb.sheets[0].cells.set(at, cell);
+        };
+        put(&mut wb, CellRef::new(0, 1), "A1*2"); // a direct edge
+        put(&mut wb, CellRef::new(1, 1), "SUM(A1:A4)"); // a range edge
+        wb
+    }
+
+    /// The three collections, asserted as themselves.
+    ///
+    /// `dirty_set` has always exercised these indirectly, which is enough while
+    /// they are rebuilt from scratch every time and not enough once step three
+    /// starts *mutating* them: a patch that puts an edge in the wrong collection
+    /// still produces the right answer for the edit that made it, and the wrong
+    /// one later. This is the baseline that catches that.
+    #[test]
+    fn the_graph_separates_direct_edges_from_ranges() {
+        let wb = workbook();
+        let graph = Precedents::build(&wb);
+
+        // A1 is read directly by B1, and is inside the range B2 reads — the
+        // direct edge must not silently also be a range edge, or removing one
+        // hides the loss of the other.
+        let a1 = (0usize, 0u32, 0u32);
+        assert_eq!(
+            graph.direct.get(&a1).map(Vec::as_slice),
+            Some([(0usize, 0u32, 1u32)].as_slice()),
+            "A1 is read directly by exactly B1"
+        );
+        assert_eq!(graph.ranges.len(), 1, "and by exactly one range");
+        assert_eq!(graph.ranges[0].dependent, (0, 1, 1), "which B2 reads");
+        assert!(
+            graph.name_users.is_empty(),
+            "nothing here uses a defined name"
+        );
+    }
+
+    /// Rebuilt from the same document, the graph is the same graph.
+    ///
+    /// Trivial today — nothing keeps one yet — and the property step three has
+    /// to preserve, so it is written now while it is obviously true rather than
+    /// after it stops being.
+    #[test]
+    fn building_twice_gives_the_same_graph() {
+        let wb = workbook();
+        let (a, b) = (Precedents::build(&wb), Precedents::build(&wb));
+        assert_eq!(a.direct, b.direct);
+        assert_eq!(a.name_users, b.name_users);
+        assert_eq!(a.ranges.len(), b.ranges.len());
     }
 }
