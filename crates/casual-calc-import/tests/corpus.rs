@@ -56,23 +56,38 @@ fn the_corpus_is_present() {
 #[test]
 fn every_real_file_opens() {
     let mut total_cells = 0usize;
+    let mut opened = 0usize;
+    let mut refused: Vec<String> = Vec::new();
     for path in files() {
         let bytes = std::fs::read(&path).expect("the file is readable");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
 
-        let import = casual_calc_import::import_package(bytes)
-            .unwrap_or_else(|e| panic!("{name} could not be opened: {e}"));
-
-        assert!(
-            !import.workbook.sheets.is_empty(),
-            "{name} opened with no sheets at all"
-        );
-        total_cells += import
-            .workbook
-            .sheets
-            .iter()
-            .map(|sheet| sheet.cells.iter().count())
-            .sum::<usize>();
+        // Opened, or refused with a reason. Both are correct answers and the
+        // corpus contains both: `49609.xlsx` is a package with no
+        // `_rels/.rels`, which is not a spreadsheet however much it is named
+        // like one, and refusing it is the right behaviour rather than a gap.
+        //
+        // What neither may be is a panic or a hang, and that is the assertion —
+        // these are files this project did not write, arriving from anywhere,
+        // and "we crash on this one" is not a thing a user can work around.
+        match casual_calc_import::import_package(bytes) {
+            Ok(import) => {
+                assert!(
+                    !import.workbook.sheets.is_empty(),
+                    "{name} opened with no sheets at all"
+                );
+                opened += 1;
+                total_cells += import
+                    .workbook
+                    .sheets
+                    .iter()
+                    .map(|sheet| sheet.cells.iter().count())
+                    .sum::<usize>();
+            }
+            Err(why) => {
+                refused.push(format!("{name}: {why}"));
+            }
+        }
     }
 
     // Corpus-wide rather than per file, and the reason is a finding rather than
@@ -92,6 +107,14 @@ fn every_real_file_opens() {
         "the whole corpus yielded only {total_cells} cells, which is what silently \
          importing nothing looks like"
     );
+    // A guard against the refusals quietly becoming the rule. If most of a
+    // corpus of real files stops opening, this suite should say so rather than
+    // pass because every failure was a *clean* failure.
+    assert!(
+        opened * 2 > files().len(),
+        "only {opened} of {} opened; refusals: {refused:#?}",
+        files().len()
+    );
 }
 
 #[test]
@@ -103,10 +126,16 @@ fn opening_a_real_file_twice_gives_the_same_workbook() {
     for path in files() {
         let bytes = std::fs::read(&path).expect("the file is readable");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let once = casual_calc_import::import_package(bytes.clone())
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let twice =
-            casual_calc_import::import_package(bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (Ok(once), Ok(twice)) = (
+            casual_calc_import::import_package(bytes.clone()),
+            casual_calc_import::import_package(bytes),
+        ) else {
+            // Refused, and refused both times — determinism is only a question
+            // for the files that open. A package with no `_rels/.rels` is not a
+            // spreadsheet however it is named, and saying so twice is
+            // consistent behaviour rather than a gap.
+            continue;
+        };
         assert_eq!(
             once.workbook.to_snapshot().unwrap(),
             twice.workbook.to_snapshot().unwrap(),

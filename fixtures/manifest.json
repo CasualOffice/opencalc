@@ -19,10 +19,42 @@
     {
       "kind": "corpus",
       "license": "Apache-2.0",
+      "path": "corpus/49609.xlsx",
+      "producer": "various (Apache POI test data)",
+      "sha256": "4237e7a06cfba518904fac9d2085bc38c4912290c9c698acd38234b86691c546",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/49609.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/56278.xlsx",
+      "producer": "various (Apache POI test data)",
+      "sha256": "b82c3e993e54c89323afe50a44c8259de22bad42e1d705a64bb3f02a9ae37833",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/56278.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/58325_lt.xlsx",
+      "producer": "various (Apache POI test data)",
+      "sha256": "0f8733f7948f5d343e958d1f5b698506825ba531879fe64a4a9a37497bc82fa7",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/58325_lt.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
       "path": "corpus/SampleSS.xlsx",
       "producer": "Microsoft Excel",
       "sha256": "44f1b6ef310c370d4902ee3452e6174da25a67bdb09f47850d51b3287cb3db71",
       "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/SampleSS.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/StructuredReferences.xlsx",
+      "producer": "various (Apache POI test data)",
+      "sha256": "a746e336176f8157c50a0a3b017c4633b7b1d546bd1b8af0f8165a48d1bacc56",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/StructuredReferences.xlsx"
     },
     {
       "kind": "corpus",
