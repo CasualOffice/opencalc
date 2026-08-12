@@ -729,7 +729,20 @@ function measureRowHeight(it, colWidth) {
     }
     return Math.min(needed, 409); // Excel's row-height ceiling
   }
-  if (it.w) return wrapLines(it, colWidth - 8).length * cellLineH(it) + 6;
+  if (it.w) {
+    // Explicit newlines split first, then each segment wraps: a hard break is a
+    // break whether or not the text after it would have fitted.
+    const lines = String(it.t)
+      .split("\n")
+      .flatMap((seg) => wrapLines({ ...it, t: seg }, colWidth - 8));
+    return lines.length * cellLineH(it) + 6;
+  }
+  // Newlines make a cell tall even without wrap, which this did not account
+  // for: `autofitRow` had its own copy of this arithmetic that did, so the two
+  // disagreed about the same cell — and the copy was the one missing rotation.
+  // Both cases live here now.
+  const hard = String(it.t).split("\n").length;
+  if (hard > 1) return hard * cellLineH(it) + 6;
   // A tall font grows its row by the font's own box plus Excel's leading; at the
   // 11 pt default this comes to exactly the default row height, so an ordinary
   // styled row is left alone instead of being inflated by 25%.
@@ -3216,7 +3229,22 @@ function autofitColumn(col) {
   for (const it of items) {
     if (!it.t) continue;
     ctx.font = cellFont(it);
-    maxw = Math.max(maxw, ctx.measureText(String(it.t)).width);
+    const flat = ctx.measureText(String(it.t)).width;
+    // Rotated text needs *less* width, not more: what the column has to hold is
+    // the run projected onto the horizontal axis. Sizing to the flat width
+    // leaves a column several times wider than the text in it, which is the
+    // opposite of what autofit is for.
+    if (it.rot === 255) {
+      // Stacked: one glyph per line, so the width is the widest single glyph.
+      let widest = 0;
+      for (const ch of String(it.t)) widest = Math.max(widest, ctx.measureText(ch).width);
+      maxw = Math.max(maxw, widest);
+    } else if (it.rot) {
+      const deg = it.rot <= 90 ? it.rot : it.rot - 90;
+      maxw = Math.max(maxw, Math.abs(Math.cos((deg * Math.PI) / 180)) * flat + cellPx(it));
+    } else {
+      maxw = Math.max(maxw, flat);
+    }
   }
   try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); } catch {}
   draw();
@@ -3229,17 +3257,13 @@ function autofitRow(row) {
   let maxh = ROW_H;
   for (const it of items) {
     if (!it.t) continue;
-    // Match measure()'s per-cell math exactly, or autofit and the renderer
-    // disagree — and since autofit *persists* the height (which pins the row
-    // against further auto-height), a mismatch here is not self-correcting.
-    if (it.w) {
-      const colW = Math.max(8, colWAt(it.c) - 8);
-      const lines = String(it.t).split("\n").flatMap((seg) => wrapLines({ ...it, t: seg }, colW));
-      maxh = Math.max(maxh, lines.length * cellLineH(it) + 6);
-    } else {
-      const lines = String(it.t).split("\n").length;
-      maxh = Math.max(maxh, lines === 1 ? cellPx(it) + 5 : lines * cellLineH(it) + 6);
-    }
+    // `measureRowHeight` rather than a copy of its arithmetic. This used to
+    // reimplement it — under a comment saying to match it exactly — and the
+    // copy had no rotation case, so autofitting a row of rotated headings sized
+    // it as though the text were flat and clipped every one of them. Since
+    // autofit *persists* the height, and a persisted height pins the row
+    // against further auto-growth, that was not self-correcting.
+    maxh = Math.max(maxh, measureRowHeight(it, colWAt(it.c)) ?? ROW_H);
   }
   try { wasm.session_set_row_height(state.sheet, row, Math.ceil(maxh)); } catch {}
   draw();
