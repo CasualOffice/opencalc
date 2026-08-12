@@ -64,6 +64,45 @@
 //! that was alive all along and lost its lease to a slow moment. It still
 //! believes it leads. It is wrong, it cannot be told in time, and its next
 //! append is refused by an epoch that has moved past it.
+//!
+//! ## Why not gossip
+//!
+//! The obvious modern answer to "how do nodes learn one is gone" is a
+//! SWIM-style gossip membership protocol, and it is the right tool for a
+//! question this module does not ask.
+//!
+//! Gossip is a **weakly consistent failure detector**. That is its design point
+//! rather than a shortcoming: it disseminates a view of who is alive cheaply and
+//! at scale, and it explicitly tolerates two nodes holding different views at
+//! the same moment. What leadership needs here is **mutual exclusion** — one
+//! writer per document, because the transform requires a total order — and a
+//! protocol that permits divergent views cannot provide it. Under a partition
+//! each side sees the other's silence, each concludes the other is gone, and
+//! both promote. That is the same objection as replica heartbeats, in a stronger
+//! form, because gossip is *designed* to allow it.
+//!
+//! The distinction worth keeping: gossip gives membership, consensus (Raft,
+//! Paxos) gives agreement, and a lease against a linearizable store gives mutual
+//! exclusion. This needs the third. A deployment that genuinely wanted no Redis
+//! would want Raft, or a Raft-backed store; gossip alone would not be enough.
+//!
+//! Where it *would* earn its place, and might later: **discovery** — [`elect`]
+//! and [`Coordinator::peers`] are advisory, and getting them wrong costs an
+//! extra contended claim rather than correctness — and as a **hint** to try
+//! claiming early rather than waiting out a lease, which is safe precisely
+//! because the claim is still refused while the lease is live. Both are
+//! complements. Neither replaces the fence.
+//!
+//! Against that, two concrete costs here. Gossip needs node-to-node
+//! connectivity, which
+//! [ADR-017](../../../docs/63-COLLABORATION-RELAY.md) rejected for the relay
+//! because nodes are pods behind a service and are not individually addressable
+//! without extra machinery. And the marginal cost of Redis-backed discovery is
+//! close to nothing, because Redis is **already in the write path** — an
+//! operation is appended to the log before it is acknowledged — so gossip would
+//! add a second membership mechanism rather than remove a dependency. The fair
+//! counterpoint is that Redis then needs its own availability story; true, and
+//! unchanged by gossip, since the log needs it regardless.
 
 use std::collections::BTreeMap;
 use std::future::Future;
