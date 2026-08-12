@@ -1953,3 +1953,53 @@ async fn a_node_that_missed_a_publication_catches_up_without_being_prompted() {
     assert_eq!(revision, 1);
     assert_eq!(ops.len(), 1, "and it is the batch that was never announced");
 }
+
+#[tokio::test]
+async fn a_node_announces_itself_and_says_how_loaded_it_is() {
+    // `peers` and `elect` were built and tested and called by nothing, because
+    // no node ever registered — both returned empty forever, and the cluster
+    // worked regardless, since leadership is a lease and a lease needs no
+    // discovery. A gap that looks exactly like working.
+    let space = namespace("announce");
+    let Some(addr) = start_clustered("node-one", &space).await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let store = crate::cluster::redis::Redis::connect_within(
+        &std::env::var("OPENCALC_TEST_REDIS").unwrap(),
+        &space,
+    )
+    .await
+    .expect("connected");
+
+    // Open a document, so the load this node reports is not zero for want of
+    // anything to count.
+    let mut socket = connect_to(addr).await;
+    join(&mut socket, &claims("Ada", Access::Edit))
+        .await
+        .unwrap();
+
+    let found = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let peers = store.peers(now_ms()).await.expect("the store answered");
+            if let Some(peer) = peers.into_iter().find(|p| p.id == "node-one") {
+                if peer.load > 0 {
+                    return peer;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the node announced itself, with a load, within twenty seconds");
+
+    assert_eq!(
+        found.load, 1,
+        "the load is the document count, not a constant"
+    );
+    assert!(
+        found.advertise.contains("10.0.0.1"),
+        "peers are told the internal address, not the public one: {}",
+        found.advertise
+    );
+}

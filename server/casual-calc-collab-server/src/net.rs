@@ -540,9 +540,6 @@ pub async fn serve(config: ServiceConfig) -> std::io::Result<()> {
         stop_requested().await;
         on_signal.begin();
     });
-    if let Some(membership) = config.membership.clone() {
-        tokio::spawn(announce(membership));
-    }
     serve_on_with_shutdown(listener, config, shutdown).await
 }
 
@@ -615,6 +612,12 @@ pub async fn serve_on_with_shutdown(
     // retry, read-only fencing — is built, tested and driven by nothing, and
     // the node holds the only copy of every edit until it restarts.
     let sweeper = tokio::spawn(sweep(Arc::clone(&state), shutdown.clone()));
+    // Spawned here rather than in `serve`, so it can see the registry: the load
+    // a node announces is the number of documents it holds, and that is only
+    // knowable from this side of the service being built.
+    if state.config.membership.is_some() {
+        tokio::spawn(announce(Arc::clone(&state)));
+    }
 
     let signalled = shutdown.clone();
     axum::serve(listener, router(Arc::clone(&state)))
@@ -1907,18 +1910,19 @@ async fn order(
 /// decided by a lease that needs no discovery at all. That is a real gap
 /// wearing the appearance of working.
 ///
-/// The load is reported as **zero**, and that is a stated gap rather than a
-/// value. Reaching the document count from here means reaching the registry,
-/// which this task deliberately does not hold — and a field carrying a number
-/// nobody computed would be worse than one carrying an honest nothing, which is
-/// the mistake `max_regression_basis_points` made a few commits ago.
+/// The load announced is this node's **document count**. Documents are what
+/// placement should balance: they hold the memory and are what a leader does
+/// work for, where connections come and go cheaply.
 ///
-/// The consequence is bounded and safe: with every load equal, `elect` breaks
-/// the tie on the id, so all nodes reach the *same* answer and leadership is
-/// still uncontended — it is simply not balanced. When the count is wired,
-/// documents are the right thing to count: they hold memory and are what a
-/// leader does work for, where connections come and go cheaply.
-async fn announce(membership: Membership) {
+/// An earlier version of this sent a hard zero. That was safe — equal loads make
+/// `elect` fall through to the id, so every node still reaches the same answer
+/// and leadership stays uncontended — but it left placement unbalanced while
+/// looking as though it worked, which is the failure mode this file has now
+/// produced twice.
+async fn announce(state: Arc<Service>) {
+    let Some(membership) = state.config.membership.clone() else {
+        return;
+    };
     // Comfortably more often than the peer TTL, so a node stays visible through
     // a missed round rather than flickering out of the list and back.
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(5_000));
@@ -1928,7 +1932,10 @@ async fn announce(membership: Membership) {
         let peer = crate::cluster::Peer {
             id: membership.node.clone(),
             advertise: membership.advertise.clone(),
-            load: 0,
+            // Read afresh each round rather than cached: the number this is
+            // announcing is the one placement will act on, and a stale count
+            // sends work to a node that filled up a minute ago.
+            load: u32::try_from(lock(&state.registry.live).len()).unwrap_or(u32::MAX),
             seen_ms: now_ms(),
         };
         if let Err(why) = membership.store.register(peer, 30_000, now_ms()).await {
