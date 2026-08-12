@@ -255,6 +255,89 @@ fn measure_scaling(id: &str, iterations: u32, work: impl Fn(u32) -> u64) -> Scal
 /// says nothing about the others — and the cell store is the one the
 /// million-cell target is actually about, where the snapshot round trip is what
 /// opening and saving a document goes through.
+/// A sheet with every cell populated across `rows` by `cols`.
+///
+/// Distinct from [`build_workbook`], which fills a single column: that shape is
+/// right for measuring the *store*, and wrong for measuring a frame, where what
+/// costs is the number of cells actually on screen.
+fn build_dense_workbook(rows: u32, cols: u32) -> Workbook {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Frame");
+    for row in 0..rows {
+        for col in 0..cols {
+            sheet.cells.set(
+                CellRef::new(row, col),
+                Cell::value(CellValue::Number(f64::from(row * cols + col))),
+            );
+        }
+    }
+    workbook.sheets.push(sheet);
+    workbook
+}
+
+/// One rendered frame: lay out the visible window, then draw it.
+///
+/// # Why this one is a duration and the others are ratios
+///
+/// Everywhere else a ratio is the right gate, because absolute times on a
+/// shared runner say more about the runner than the code. A frame budget is the
+/// exception: sixty frames a second **is** an absolute number — 16.6 ms — and a
+/// ratio cannot express "fast enough for a human to scroll".
+///
+/// So this measures a duration, and then guards against the flakiness that
+/// invites by setting the ceiling at four times the budget rather than at it.
+/// That will not notice a frame drifting from 4 ms to 12 ms, and it is not
+/// meant to: it is there to catch a regression that puts scrolling *visibly*
+/// on the floor, which is the thing that would otherwise reach a user. The
+/// honest number to look at is `medianNs`, reported whether or not it passes.
+///
+/// The viewport is a realistic window over a sheet with far more cells than fit
+/// in it, because rendering everything and rendering what is visible are
+/// different amounts of work, and only one of them is what a frame costs.
+fn measure_frame(iterations: u32) -> ScalingReport {
+    use casual_calc_layout::{GridGeometry, Viewport, layout_viewport};
+
+    // A *dense* sheet, not `build_workbook`, which fills column A only. A
+    // viewport over that is a frame with forty cells of text in it, and it
+    // renders in a fraction of a millisecond — a number that looks like a pass
+    // and measures an empty screen. A real frame has content in every cell it
+    // shows, and that is what has to fit in the budget.
+    let workbook = build_dense_workbook(200, 40);
+    let geometry = GridGeometry::for_sheet(&workbook.sheets[0]);
+    // Roughly a maximised window on a laptop.
+    let viewport = Viewport {
+        x: 0,
+        y: 0,
+        width: 1_600,
+        height: 900,
+    };
+
+    let mut samples: Vec<u128> = (0..iterations)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            let list = layout_viewport(&workbook, 0, &geometry, &viewport);
+            let pixmap = casual_calc_render::render_pixmap(&list, &geometry, &viewport, 96);
+            std::hint::black_box(pixmap.is_ok());
+            started.elapsed().as_nanos()
+        })
+        .collect();
+    samples.sort_unstable();
+    let median_ns = percentile(&samples, 0.5);
+
+    // 16.6 ms is one frame at sixty a second; the ceiling is four of them.
+    let budget_ns = 16_666_667 * 4;
+    ScalingReport {
+        id: "render-frame-1600x900".to_owned(),
+        small_ns: median_ns,
+        large_ns: median_ns,
+        // Expressed against the budget so the report stays one shape: 100 means
+        // exactly at the ceiling, and under is passing.
+        ratio_centi: median_ns * 100 / budget_ns,
+        budget_centi: 100,
+        within_budget: median_ns <= budget_ns,
+    }
+}
+
 fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
     vec![
         measure_scaling("model-snapshot-roundtrip-scaling", iterations, |cells| {
@@ -274,6 +357,7 @@ fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
             let workbook = build_workbook(cells);
             workbook.sheets[0].cells.iter().count() as u64
         }),
+        measure_frame(iterations.max(5)),
     ]
 }
 
