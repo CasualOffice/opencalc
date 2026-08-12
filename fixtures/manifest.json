@@ -1,6 +1,54 @@
 {
   "fixtures": [
     {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/45540_classic_Header.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "f1096655276b5cb2301c830f190017499b4e5a6aefb113cff434868b85178e7a",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/45540_classic_Header.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/47668.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "41c504cc8fe4eebab5cbd9dfd4521661d043a5ebdfe212ded3134fbef808e3c4",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/47668.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/SampleSS.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "44f1b6ef310c370d4902ee3452e6174da25a67bdb09f47850d51b3287cb3db71",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/SampleSS.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/WithChart.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "51f27aabf7417f5aaa0542857b6bb56a92d4afbabdc5c63f084c06f92b67429d",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/WithChart.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/WithMoreVariousData.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "9cf5ac25bbe59ee30d954983e7803a854909be6d53e184933d4c47e8f6b248bb",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/WithMoreVariousData.xlsx"
+    },
+    {
+      "kind": "corpus",
+      "license": "Apache-2.0",
+      "path": "corpus/sample.xlsx",
+      "producer": "Microsoft Excel",
+      "sha256": "7c88883ea9ff72d8f90239cb1a5f5d9744014b611d9b1588a090ba7629a381de",
+      "source": "https://github.com/apache/poi/blob/trunk/test-data/spreadsheet/sample.xlsx"
+    },
+    {
       "kind": "generated",
       "path": "generated/minimal.xlsx",
       "sha256": "337fa1fb161fbaf5e28979270b59825e132e2f9f47e45c5eff45c7287c81a7ce"
