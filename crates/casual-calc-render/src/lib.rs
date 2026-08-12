@@ -11,6 +11,8 @@
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 mod fonts;
+
+pub use fonts::{register_face, registered_count};
 #[cfg(feature = "shaping")]
 mod shape;
 

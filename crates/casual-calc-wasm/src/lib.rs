@@ -8741,6 +8741,34 @@ thread_local! {
     static COLLAB: RefCell<Option<ClientSession>> = const { RefCell::new(None) };
 }
 
+/// Supply a font for rendering, ahead of the bundled ones.
+///
+/// The bundled faces cover Latin, and the WebAssembly build carries one family
+/// because they were 72% of the bundle and the editor draws its own text with
+/// the browser's fonts. What they do not cover — Arabic, Devanagari, Thai, CJK —
+/// is supplied here instead of embedded, for two reasons: megabytes in every
+/// tab for scripts most deployments never see, and because which languages are
+/// worth carrying is not this project's judgement to make on anybody's behalf.
+///
+/// A host fetches the face it needs and hands over the bytes. It knows which
+/// scripts its documents are in and already serves static assets.
+///
+/// Returns `false` if the bytes are not a readable face — a caller that fetched
+/// a 404 page should be told, rather than finding out from a thumbnail full of
+/// boxes.
+#[wasm_bindgen]
+#[must_use]
+pub fn register_font(bytes: &[u8]) -> bool {
+    casual_calc_render::register_face(bytes.to_vec())
+}
+
+/// How many fonts have been supplied at runtime.
+#[wasm_bindgen]
+#[must_use]
+pub fn registered_font_count() -> usize {
+    casual_calc_render::registered_count()
+}
+
 /// The protocol version this engine speaks.
 ///
 /// Checked by the server on the first message, so a mismatched pair stops at

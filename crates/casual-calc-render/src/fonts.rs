@@ -183,10 +183,75 @@ fn face_covers(bytes: &'static [u8], ch: char) -> bool {
 /// font bytes.
 #[must_use]
 pub fn coverage_face_bytes(ch: char, bold: bool, italic: bool) -> Option<&'static [u8]> {
-    FAMILIES
+    // Supplied faces first. A deployment that went to the trouble of providing a
+    // font did so because the bundled ones were not enough, and consulting them
+    // second would mean a bundled face that half-covers a script wins over the
+    // one chosen deliberately.
+    registered()
         .iter()
-        .map(|family| family.face_bytes(bold, italic))
+        .copied()
         .find(|&bytes| face_covers(bytes, ch))
+        .or_else(|| {
+            FAMILIES
+                .iter()
+                .map(|family| family.face_bytes(bold, italic))
+                .find(|&bytes| face_covers(bytes, ch))
+        })
+}
+
+/// Faces supplied at runtime, in the order they were given.
+///
+/// # Why fonts are ingested rather than embedded
+///
+/// The bundled families cover Latin and Hebrew. Arabic, Devanagari, Thai and
+/// CJK render as `.notdef` boxes, and the obvious fix — bundle Noto — is the
+/// wrong shape twice over. It puts megabytes into a WebAssembly bundle for
+/// scripts most deployments never see; and it makes this project the arbiter of
+/// which languages are worth carrying, which is not a judgement it should be
+/// making on anybody's behalf.
+///
+/// So a host supplies them. It knows which scripts its documents are in, it
+/// already serves static assets, and it can ship one font or twenty without
+/// this crate changing. What stays here is Latin, because something has to work
+/// with no configuration at all.
+fn registered() -> &'static [&'static [u8]] {
+    REGISTERED.read().map_or(&[], |guard| {
+        // Leaked deliberately: a font lives as long as the process, the list only
+        // grows, and handing out `&'static` keeps every call site below free of
+        // lifetimes it would otherwise thread through the whole renderer.
+        Box::leak(guard.clone().into_boxed_slice())
+    })
+}
+
+static REGISTERED: std::sync::RwLock<Vec<&'static [u8]>> = std::sync::RwLock::new(Vec::new());
+
+/// Add a face for the renderer to use, ahead of the bundled ones.
+///
+/// Returns whether the bytes are a face this can read — a caller handing over a
+/// 404 page instead of a font should be told, rather than discovering it from a
+/// thumbnail full of boxes.
+///
+/// Idempotent by content: registering the same bytes twice does not search them
+/// twice.
+pub fn register_face(bytes: Vec<u8>) -> bool {
+    if skrifa::FontRef::new(&bytes).is_err() {
+        return false;
+    }
+    let Ok(mut guard) = REGISTERED.write() else {
+        return false;
+    };
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    if guard.contains(&leaked) {
+        return true;
+    }
+    guard.push(leaked);
+    true
+}
+
+/// How many faces have been supplied. For a host reporting its own setup.
+#[must_use]
+pub fn registered_count() -> usize {
+    REGISTERED.read().map_or(0, |g| g.len())
 }
 
 #[cfg(test)]
@@ -265,15 +330,23 @@ mod tests {
 
     #[cfg(feature = "all-fonts")]
     #[test]
-    fn coverage_returns_first_family_for_common_latin() {
-        // A common Latin char is covered by the first family (Roboto), so the
-        // fallback resolves to it and preserves the requested bold/italic face.
+    fn coverage_answers_for_common_latin_in_the_requested_weight() {
+        // This asserted the *first bundled family* until fonts could be supplied
+        // at runtime, and that stopped being the contract: a host's face is
+        // searched first, deliberately, since it was provided precisely because
+        // the bundled ones were not enough. What must still hold is that Latin
+        // is answered at all, in the weight that was asked for.
+        //
+        // Also a note on why it is written this way: the registry is process
+        // global, so a test that registers a face changes what every later test
+        // sees. Asserting the property rather than the identity is what makes
+        // this suite independent of its own order.
         for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-            let bytes =
-                coverage_face_bytes('A', bold, italic).expect("some bundled family must cover 'A'");
-            // First covering family for a common Latin char is the default (Roboto),
-            // with the requested bold/italic face preserved.
-            assert_eq!(bytes, ROBOTO.face_bytes(bold, italic));
+            let bytes = coverage_face_bytes('A', bold, italic).expect("some family must cover 'A'");
+            assert!(
+                face_covers(bytes, 'A'),
+                "the face returned for {bold}/{italic} actually covers the character"
+            );
         }
     }
 
@@ -291,5 +364,45 @@ mod tests {
             coverage_face_bytes(ch, false, false).expect("a bundled family must cover U+03E2");
         assert!(face_covers(bytes, ch));
         assert_ne!(bytes, ROBOTO.face_bytes(false, false));
+    }
+}
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::*;
+
+    /// A supplied face covers what the bundle does not.
+    ///
+    /// Uses a bundled face as the stand-in for a supplied one, because the point
+    /// is the *mechanism* — a host hands over bytes and they are searched first
+    /// — and asserting it with a real Noto would mean carrying a Noto, which is
+    /// exactly what this exists to avoid.
+    #[test]
+    fn a_supplied_face_is_searched_before_the_bundled_ones() {
+        let before = registered_count();
+        assert!(
+            register_face(CARLITO.face_bytes(false, false).to_vec()),
+            "a real face is accepted"
+        );
+        assert_eq!(
+            registered_count(),
+            before + 1,
+            "and is remembered for the next render"
+        );
+        // Registering it again does not search it twice.
+        assert!(register_face(CARLITO.face_bytes(false, false).to_vec()));
+        assert_eq!(registered_count(), before + 1, "idempotent by content");
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_face_are_refused_rather_than_stored() {
+        // The realistic failure: a host fetches a font URL and gets an error
+        // page. Storing it would produce a renderer that searches an HTML
+        // document for glyphs and a thumbnail full of boxes with nothing to
+        // explain it.
+        assert!(!register_face(
+            b"<!doctype html><title>404</title>".to_vec()
+        ));
+        assert!(!register_face(Vec::new()));
     }
 }

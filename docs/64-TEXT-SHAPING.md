@@ -70,6 +70,30 @@ a server than in a tab, and the headless backend would stop being headless.
 which is trying to be an alternative to Excel. A thumbnail that mangles Arabic
 is not a missing feature; it is a wrong picture of somebody's document.
 
+## Fonts are ingested, not embedded
+
+The scripts the bundle does not cover — Arabic, Devanagari, Thai, CJK — are
+**supplied by the host at runtime** rather than bundled. `register_font(bytes)`
+in the browser, `register_face` natively; supplied faces are searched before the
+bundled ones, because a host that went to the trouble of providing one did so
+precisely because the bundled faces were not enough.
+
+Bundling Noto was the obvious answer and is the wrong shape twice. It puts
+megabytes into every tab for scripts most deployments never see — and the
+bundle had only just been halved by taking fonts *out*. And it makes this
+project the arbiter of which languages are worth carrying, which is not a
+judgement it should be making on anybody's behalf. A host knows which scripts
+its documents are in, already serves static assets, and can ship one font or
+twenty without this crate changing.
+
+What stays embedded is Latin, because something has to work with no
+configuration at all.
+
+`register_face` returns whether the bytes were a readable face. The realistic
+failure is a host fetching a font URL and getting an error page; storing that
+would produce a renderer searching an HTML document for glyphs, and a thumbnail
+full of boxes with nothing to explain it.
+
 ## Shaping is necessary and not sufficient
 
 Building it surfaced something the plan did not account for: **the bundled fonts
