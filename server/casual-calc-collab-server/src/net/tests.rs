@@ -1681,6 +1681,7 @@ async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
             // Short, so a test that wants a leadership change does not wait on
             // a production-sized lease.
             lease_ms: 1_000,
+            advertise: format!("10.0.0.1:9443/{node}"),
         }),
     };
     tokio::spawn(async move {

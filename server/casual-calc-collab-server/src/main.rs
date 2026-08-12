@@ -131,6 +131,7 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
                 node: node.map_or_else(|| format!("node-{}", std::process::id()), |n| n.id.clone()),
                 store: Arc::new(store),
                 lease_ms: env_u64("OPENCALC_LEASE_MS", 6_000),
+                advertise: node.map_or_else(String::new, |n| n.advertise.to_string()),
             }))
         }
         // A node with an identity and nowhere to announce it is not in a

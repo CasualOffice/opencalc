@@ -182,6 +182,14 @@ pub struct Membership {
     /// live one under load does not lose it constantly — and losing it wrongly
     /// is survivable anyway, which is what the epoch is for.
     pub lease_ms: u64,
+    /// Where peers reach this node — the **internal** address, never the public
+    /// one.
+    ///
+    /// A client is given an address by a load balancer and a node is not; the
+    /// two are different networks in the deployments this is for, and
+    /// announcing the public one would have peers discover an address that
+    /// routes back through the proxy they are behind.
+    pub advertise: String,
 }
 
 impl core::fmt::Debug for Membership {
@@ -532,6 +540,9 @@ pub async fn serve(config: ServiceConfig) -> std::io::Result<()> {
         stop_requested().await;
         on_signal.begin();
     });
+    if let Some(membership) = config.membership.clone() {
+        tokio::spawn(announce(membership));
+    }
     serve_on_with_shutdown(listener, config, shutdown).await
 }
 
@@ -1880,4 +1891,52 @@ async fn order(
     // And this node's own clients, which do not learn of work ordered here from
     // the channel: it was applied at commit, above.
     fan(live, &batch, batch.revision, &membership.node);
+}
+
+/// Tell the cluster this node exists, and keep telling it.
+///
+/// Registration expires, so this is a heartbeat in the only sense the design
+/// has one: a node announcing **itself**, never an opinion about anybody else.
+/// Nothing here decides another node is down — a node that stops announcing is
+/// forgotten when somebody next reads the list, which is expiry rather than a
+/// judgement.
+///
+/// Without this, `peers` returns nothing and `elect` has nothing to pick from,
+/// so the load-aware placement they exist for never happens: every node is
+/// invisible to every other, and the cluster works only because leadership is
+/// decided by a lease that needs no discovery at all. That is a real gap
+/// wearing the appearance of working.
+///
+/// The load is reported as **zero**, and that is a stated gap rather than a
+/// value. Reaching the document count from here means reaching the registry,
+/// which this task deliberately does not hold — and a field carrying a number
+/// nobody computed would be worse than one carrying an honest nothing, which is
+/// the mistake `max_regression_basis_points` made a few commits ago.
+///
+/// The consequence is bounded and safe: with every load equal, `elect` breaks
+/// the tie on the id, so all nodes reach the *same* answer and leadership is
+/// still uncontended — it is simply not balanced. When the count is wired,
+/// documents are the right thing to count: they hold memory and are what a
+/// leader does work for, where connections come and go cheaply.
+async fn announce(membership: Membership) {
+    // Comfortably more often than the peer TTL, so a node stays visible through
+    // a missed round rather than flickering out of the list and back.
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(5_000));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let peer = crate::cluster::Peer {
+            id: membership.node.clone(),
+            advertise: membership.advertise.clone(),
+            load: 0,
+            seen_ms: now_ms(),
+        };
+        if let Err(why) = membership.store.register(peer, 30_000, now_ms()).await {
+            // Worth saying and not worth stopping for. A node that cannot
+            // announce itself is invisible to placement and still perfectly able
+            // to serve the documents it leads, because leadership is a lease and
+            // does not depend on discovery.
+            tracing::warn!(%why, "could not announce this node to its peers");
+        }
+    }
 }
