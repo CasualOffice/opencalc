@@ -57,3 +57,10 @@ path = "fuzz_targets/ooxml_xml.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "transform_tp1"
+path = "fuzz_targets/transform_tp1.rs"
+test = false
+doc = false
+bench = false
