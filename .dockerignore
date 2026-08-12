@@ -1,0 +1,13 @@
+# The build context is the whole repository, because the server depends on nine
+# path crates and a context narrowed to its own directory cannot see them. What
+# it does not need is everything below — which is most of the bytes, and all of
+# the ones that would invalidate the layer cache on every edit.
+target/
+fuzz/target/
+webapp/pkg/
+tests/browser/node_modules/
+tests/browser/test-results/
+sdk/*/node_modules/
+.git/
+docs/
+*.png

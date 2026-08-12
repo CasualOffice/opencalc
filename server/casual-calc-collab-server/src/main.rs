@@ -33,6 +33,20 @@ async fn main() -> std::process::ExitCode {
         )
         .init();
 
+    // A health check the image can run without a shell or an HTTP client in it.
+    // The runtime layer is `debian:bookworm-slim` plus a CA bundle: no curl, no
+    // wget, and adding one to answer a question the binary can answer itself is
+    // weight in every deployment for the benefit of the orchestrator.
+    if std::env::args().any(|a| a == "--healthcheck") {
+        return match healthy().await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(why) => {
+                tracing::error!("{why}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
     match start().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(why) => {
@@ -41,6 +55,52 @@ async fn main() -> std::process::ExitCode {
             tracing::error!("{why}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Ask the running server whether it is serving.
+///
+/// Reads the same `OPENCALC_BIND` the server did, so the check cannot drift from
+/// the thing it checks by being told a port twice.
+///
+/// Over plain HTTP it fetches `/healthz`, which proves the whole request path
+/// works and not merely that something is holding the port. With TLS configured
+/// it settles for a TCP connection: verifying the certificate would need the
+/// hostname an operator's clients use rather than the loopback address this
+/// connects on, and disabling verification to get around that would make the
+/// check pass against anything at all.
+async fn healthy() -> Result<(), String> {
+    let bind = std::env::var("OPENCALC_BIND").unwrap_or_else(|_| "0.0.0.0:8443".to_owned());
+    let addr: SocketAddr = bind
+        .parse()
+        .map_err(|e| format!("OPENCALC_BIND is not an address: {e}"))?;
+    // 0.0.0.0 means "every interface" to a listener and nothing to a client.
+    let target = if addr.ip().is_unspecified() {
+        SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        )
+    } else {
+        addr
+    };
+
+    if std::env::var("OPENCALC_TLS_CERT").is_ok() {
+        return tokio::net::TcpStream::connect(target)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("nothing is listening on {target}: {e}"));
+    }
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{target}/healthz"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach {target}: {e}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("{target} answered {}", response.status()))
     }
 }
 
