@@ -1982,10 +1982,10 @@ async fn a_node_announces_itself_and_says_how_loaded_it_is() {
     let found = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let peers = store.peers(now_ms()).await.expect("the store answered");
-            if let Some(peer) = peers.into_iter().find(|p| p.id == "node-one") {
-                if peer.load > 0 {
-                    return peer;
-                }
+            if let Some(peer) = peers.into_iter().find(|p| p.id == "node-one")
+                && peer.load > 0
+            {
+                return peer;
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
