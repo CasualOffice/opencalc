@@ -4,6 +4,28 @@
 is worked on without a row here; nothing merges without its row updated. This is
 the discipline: *track everything, update as it moves.*
 
+
+## What to do next, in order
+
+Priority is by **failure class first**, which is this project's own hierarchy: a
+silent wrong answer outranks a loud failure, which outranks a missing feature.
+Then by whether the work *finds* other bugs, because a fixed bug is worth one bug
+and a gate is worth the ones nobody has met yet.
+
+| | Item | Why here |
+| --- | --- | --- |
+| **1** | **FID-09 — verify** | An hour, and it decides whether the item below exists. Right now "strict OOXML imports as empty" is inferred from a grep, not observed. Produce a strict file, import it, look. |
+| **2** | **FID-09 — detect and refuse** | If confirmed: a *silent wrong answer on a file Excel produced*. Every expensive bug this project has had was silent — COL-22, the interned-key wire format, the unparseable submission. Refusing loudly is a day's work; supporting strict fully is not, and is separate. |
+| **3** | **FID-11, FID-10** | The finders. Ten corpus files from one upstream, and one malformed package. These are cheap and they are how the next FID-09 gets found rather than reported by a customer. |
+| **4** | **P2-002 / PERF-04** | Measured 16x over a published target. Large and delicate — it touches the correctness core — but the differential tests exist and the baseline is recorded. |
+| **5** | **RND-04** | Small. The runtime-font mechanism works and nothing tells a deployment which faces it needs, so a document in an unsupported script is boxes with no explanation. |
+| **6** | **FID-12** | Odd-but-valid semantics asserted against real files rather than our own, which is the circularity the corpus exists to break. |
+| — | **PIV-02** | Blocked, and not on us: a malformed pivot part makes Excel offer to repair the file, so it cannot ship without being validated against Excel. |
+| — | **TAURI-001, ODS** | Deferred deliberately; sequenced last. |
+
+Two things this list is deliberately *not* ordered by: how interesting the work
+is, and how nearly finished it looks. Both have misled this project before.
+
 ## How to use this tracker
 
 - **Every unit of work gets a row** with a **stable ID** the moment it starts
@@ -173,7 +195,7 @@ Grid geometry, viewport virtualization, and the display list
 | --- | --- | --- | --- |
 | P1C-001 | Offset index + viewport virtualization + display list | Done | `casual-calc-layout`: `Axis` cumulative offset index (offset/line_at, inverse-gated), `GridGeometry`, backend-neutral `DisplayList`/`PaintItem`, `layout_viewport`/`layout_full`; model `CellStore::row_band` for O(visible) scans. Invariant gated: viewport == full restricted to window. Reads cached values only (no calc). 8 tests |
 | P1C-002 | Number-format-aware display text | Done | `numfmt` interpreter: General, fixed decimals, thousands grouping, percent, and date/time (serial→civil date). `display_text` applies the cell's style number format. 5 tests. Deferred: negative/zero/text sections, currency/literals, token-exact date layout |
-| P1C-003 | In-cell text shaping (`parley`) + merged-cell/frozen-pane layout | Partial | **Frozen-pane layout** (RND-02) and **merged-cell layout** (RND-03) shipped. **Text shaping: decided ([ADR-018](64-TEXT-SHAPING.md)) and the primitive is built** — `rustybuzz` behind a `shaping` feature, on for native and off for wasm, because the editor draws with `ctx.fillText` and the browser already shapes what a user sees. Building it found what the plan missed: **the bundled fonts cover Latin and Hebrew only** — no Arabic, Devanagari, Thai or CJK — so a shaper cannot fix those; they are `.notdef` boxes and need a *font* decision measured in megabytes. What shaping does fix is **Hebrew**, which is covered and right-to-left and renders backwards today; gated by a test asserting the shaped run equals the naive run reversed. Coverage is asserted as a test so adding a font is deliberate. **Remaining:** wire the shaped run into `draw_glyphs`, which still walks per `char`. |
+| P1C-003 | In-cell text shaping (`parley`) + merged-cell/frozen-pane layout | Partial | **Frozen-pane layout** (RND-02) and **merged-cell layout** (RND-03) shipped. **Text shaping: decided ([ADR-018](64-TEXT-SHAPING.md)) and the primitive is built** — `rustybuzz` behind a `shaping` feature, on for native and off for wasm, because the editor draws with `ctx.fillText` and the browser already shapes what a user sees. Building it found what the plan missed: **the bundled fonts cover Latin and Hebrew only** — no Arabic, Devanagari, Thai or CJK — so a shaper cannot fix those; they are `.notdef` boxes and need a *font* decision measured in megabytes. What shaping does fix is **Hebrew**, which is covered and right-to-left and renders backwards today; gated by a test asserting the shaped run equals the naive run reversed. Coverage is asserted as a test so adding a font is deliberate. **Remaining:** wire the shaped run into `draw_glyphs`, which still walks per `char`. Font *coverage* — which scripts a build can draw at all — moved to [RND-04](#) when fonts became runtime-supplied; this row is shaping only, and shaping is done. |
 | P1C-004 | Import column/row sizing → geometry | Done | `AxisSizing` (default + per-line twips) on `Sheet.columns`/`rows`; import parses `<cols>`, `<row @ht>`, `<sheetFormatPr>` defaults; export writes them back (coalesced spans); `GridGeometry::for_sheet` feeds layout/render; wasm `session_col_px`/`session_row_px` drive the editor's variable-width grid (cumulative offsets, hit-test, scroll). Round-trip gated by the semantic fixed point. Verified in-browser: wide/narrow columns + tall rows render. Editor adds **interactive drag-to-resize** (undoable `SetColumnWidth`/`SetRowHeight` ops, live preview, double-click-to-reset) and **fluid pixel scrolling** (absolute `scrollX/scrollY`, sub-cell offsets, clipped body/headers). Hidden/outline still pending |
 
 ## Phase rows — Phase 1B (Semantic writer)
@@ -383,7 +405,7 @@ is (re)started under the pipeline.
 
 | FID-12 | Odd-but-valid documents are asserted only against fixtures we wrote | Open | 1904 dates, inline strings versus the shared table, shared and array formulas, and a `dimension` of `A1:XFD1048576` are all handled, and all of them are checked against documents this project produced — which is the circularity the corpus exists to break. Assert them against real files instead. |
 
-| PERF-04 | Incremental recalculation is linear in sheet size, not in dirty set | Open | Measured, not asserted: editing one cell in a sheet of independent formulas scales **9.2x for 10x the sheet** (898 µs → 8.3 ms) because the precedent graph is rebuilt per pass. Extrapolated, a million cells is ~830 ms against the 50 ms target of [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) — about 16x over, so the persistent graph P2-002 records is required rather than an optimisation. Sequenced: a design note on graph lifetime and invalidation; the structure with no behaviour change, held by the existing differential tests; maintenance across edits; range-bucketed edges; then re-measure against the 9.2x baseline. |
+| PERF-04 | Incremental recalculation is linear in sheet size, not in dirty set | Open | **The measurement for [P2-002](#)'s remaining half, kept as its own row because it is a number and that row is a plan.** Editing one cell in a sheet of independent formulas scales **9.2x for 10x the sheet** (898 µs → 8.3 ms): the dirty set is one cell either way, so all of that is the precedent graph being rebuilt per pass. Extrapolated, a million cells is ~830 ms against the 50 ms target of [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md) — about 16x over. Closing P2-002 closes this, and the 9.2x is what to re-measure against. Do not fix them separately. |
 
 | RND-04 | Which scripts the bundled build covers is now a host's decision | Open | Fonts are ingested at runtime (`register_font`), so Arabic, Devanagari, Thai and CJK are supplied rather than embedded — the bundle carries Latin so something works unconfigured. What is missing is the other half of making that usable: the demo host does not offer a font, nothing documents which faces a deployment needs for which scripts, and a document in a script with no face registered renders as boxes with nothing saying why. A one-line note in the deployment guide and a registered face in the demo would close it. |
 
