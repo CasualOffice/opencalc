@@ -11332,6 +11332,15 @@ async function main() {
   // asset and still have it found.
   await init(new URL(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`, import.meta.url));
 
+  // A handle for a host that embeds this page rather than importing the module
+  // itself — an iframe's exports cannot be reached from the parent frame, and a
+  // host has no way to name the cache-busted specifier this module was loaded
+  // under. Importing `import.meta.url` returns this same instance from the
+  // module cache rather than building a second one.
+  if (typeof window !== "undefined") {
+    try { window.opencalcEditor = await import(import.meta.url); } catch {}
+  }
+
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();
   readColors();

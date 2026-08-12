@@ -23,6 +23,7 @@ members = [
     # is what keeps an async runtime and an HTTP stack out of a library that
     # has neither. Enforced by the `repository-policy` CI job.
     "server/casual-calc-collab-server",
+    "server/casual-calc-host",
 ]
 # The fuzz workspace is separate: it pulls nightly-only cargo-fuzz deps that must
 # stay out of the product dependency graph (docs/19, docs/29).

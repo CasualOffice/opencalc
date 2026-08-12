@@ -1,0 +1,70 @@
+# OpenCalc, standalone. The demo somebody runs before deciding to integrate.
+#
+#   cp .env.example .env      # and change the secret
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Two containers, because they are two things: the **host** is what a product
+# supplies (documents, identity, tokens, saving) and the **collaboration server**
+# is what OpenCalc supplies. Keeping them apart in the demo is the point — it is
+# the same boundary a real integration has, so what you try is what you would
+# build against.
+
+name: opencalc
+
+services:
+  host:
+    build:
+      context: .
+      dockerfile: server/casual-calc-host/Dockerfile
+    environment:
+      OPENCALC_HOST_BIND: 0.0.0.0:8080
+      OPENCALC_STORE: /data
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
+      # What the *browser* uses. Behind a proxy, your public wss:// URL.
+      OPENCALC_COLLAB_WS: ${OPENCALC_COLLAB_WS:-ws://127.0.0.1:8443/collab}
+      # What the *collaboration server* calls this host. A service name, not
+      # localhost — localhost inside that container is that container.
+      OPENCALC_HOST_INTERNAL: http://host:8080
+    volumes:
+      - documents:/data
+    ports:
+      - "${OPENCALC_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/casual-calc-host", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  collab:
+    build:
+      context: .
+      dockerfile: server/casual-calc-collab-server/Dockerfile
+    environment:
+      OPENCALC_BIND: 0.0.0.0:8443
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
+      # The demo talks plain HTTP on a private network. Both of these are the
+      # "local development only" cases the server documents, and neither is on
+      # by default — they are opted into here, visibly.
+      OPENCALC_ALLOW_PLAIN_CALLBACKS: "1"
+      OPENCALC_ALLOWED_HOSTS: ${OPENCALC_ALLOWED_HOSTS:-host,127.0.0.1,localhost}
+      OPENCALC_MAX_DOCUMENTS: ${OPENCALC_MAX_DOCUMENTS:-1000}
+      OPENCALC_MAX_PARTICIPANTS: ${OPENCALC_MAX_PARTICIPANTS:-200}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${OPENCALC_COLLAB_PORT:-8443}:8443"
+    depends_on:
+      host:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/casual-calc-collab-server", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  documents:

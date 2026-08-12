@@ -1,0 +1,121 @@
+<!-- One document, open, with the Share and Download a demo needs to make the
+     point. Everything below the toolbar is the editor exactly as shipped; this
+     page only fetches a token and hands it to `collaborate()`. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenCalc</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: .6rem; padding: .5rem .8rem;
+           border-bottom: 1px solid #8883; flex: none; }
+  header .title { font-weight: 600; margin-right: auto; }
+  button { font: inherit; padding: .4rem .8rem; border-radius: .35rem;
+           border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
+  button.primary { background: #4472c4; color: #fff; border-color: transparent; }
+  #status { opacity: .7; font-size: .85rem; }
+  #who { display: flex; gap: .3rem; }
+  .dot { width: .95rem; height: .95rem; border-radius: 50%; font-size: .6rem; color: #fff;
+         display: grid; place-items: center; }
+  #frame { flex: 1; border: 0; width: 100%; }
+  dialog { border: 1px solid #8884; border-radius: .5rem; padding: 1.1rem; max-width: 30rem; }
+  dialog input { width: 100%; font: inherit; padding: .45rem; margin: .6rem 0;
+                 border: 1px solid #8886; border-radius: .3rem; background: transparent; color: inherit; }
+</style>
+
+<header>
+  <span class="title" id="title">…</span>
+  <span id="status">connecting…</span>
+  <span id="who"></span>
+  <button id="share" class="primary">Share</button>
+  <button id="download">Download</button>
+</header>
+<iframe id="frame" title="Spreadsheet"></iframe>
+
+<dialog id="sharebox">
+  <strong>Anyone with this link can edit</strong>
+  <input id="link" readonly>
+  <div style="display:flex;gap:.5rem;justify-content:flex-end">
+    <button id="copy" class="primary">Copy</button>
+    <button id="close">Close</button>
+  </div>
+</dialog>
+
+<script type="module">
+  const id = location.pathname.split("/").pop();
+  const status = document.getElementById("status");
+
+  // A name per tab, so two windows of the same browser are two participants
+  // with two cursors rather than one that teleports.
+  const name =
+    sessionStorage.getItem("oc-name") ||
+    (sessionStorage.setItem("oc-name", "Guest " + Math.floor(Math.random() * 90 + 10)),
+     sessionStorage.getItem("oc-name"));
+
+  const session = await (await fetch(`/api/documents/${id}/session?name=${encodeURIComponent(name)}`)).json();
+  document.getElementById("title").textContent = session.title;
+
+  // The editor is loaded in an iframe so this page can keep its own chrome
+  // without forking the editor's HTML — the same way a host embeds it.
+  const frame = document.getElementById("frame");
+  frame.src = "/editor/editor.html";
+  frame.addEventListener("load", async () => {
+    const win = frame.contentWindow;
+    // Wait for the engine, which the editor signals by writing its version into
+    // the status line — the same readiness signal the browser tests use.
+    for (let i = 0; i < 300; i++) {
+      const el = win.document.getElementById("tb-status");
+      if (el && /^engine v\d/.test(el.textContent || "")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // The editor publishes its own module for exactly this: a parent frame
+    // cannot import into the iframe's realm, and could not name the
+    // cache-busted specifier if it could.
+    for (let i = 0; i < 100 && !win.opencalcEditor; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const editor = win.opencalcEditor;
+    if (!editor) { status.textContent = "editor did not load"; return; }
+
+    await editor.collaborate({
+      url: session.collab,
+      token: session.token,
+      document: session.document,
+      onStatus: (s) => {
+        status.textContent =
+          { live: "connected", opening: "opening…", reconnecting: "reconnecting…" }[s.state] ??
+          `${s.state}${s.detail ? ": " + s.detail : ""}`;
+      },
+      onPresence: () => {
+        const seen = new Map();
+        for (const p of editor.collaborators()) seen.set(p.client, p);
+        document.getElementById("who").innerHTML = "";
+        for (const p of seen.values()) {
+          const d = document.createElement("span");
+          d.className = "dot";
+          d.style.background = p.color || "#4472c4";
+          d.title = p.name || "Someone";
+          d.textContent = (p.name || "?").slice(0, 1);
+          document.getElementById("who").appendChild(d);
+        }
+      },
+    });
+  });
+
+  const box = document.getElementById("sharebox");
+  document.getElementById("share").addEventListener("click", () => {
+    document.getElementById("link").value = location.href;
+    box.showModal();
+  });
+  document.getElementById("copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(location.href); } catch {}
+    document.getElementById("copy").textContent = "Copied";
+  });
+  document.getElementById("close").addEventListener("click", () => box.close());
+  document.getElementById("download").addEventListener("click", () => {
+    // Downloads what the collaboration server has saved back, which is why the
+    // callback matters: without it this is the file as it was uploaded.
+    location.href = `/api/documents/${id}/download`;
+  });
+</script>

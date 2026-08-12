@@ -1,0 +1,53 @@
+<!-- The landing page: make a document, or open one you already have. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenCalc — demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 system-ui, sans-serif; max-width: 46rem; margin: 4rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.5rem; margin-bottom: .25rem; }
+  p.lede { opacity: .75; margin-top: 0; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; margin: 1.5rem 0; }
+  button, .btn { font: inherit; padding: .55rem 1rem; border-radius: .4rem; border: 1px solid #8884;
+                 background: #4472c4; color: #fff; cursor: pointer; }
+  .btn.ghost { background: transparent; color: inherit; }
+  code { background: #8881; padding: .1rem .3rem; border-radius: .2rem; }
+  .note { border-left: 3px solid #8884; padding-left: .9rem; opacity: .8; font-size: .93rem; }
+</style>
+
+<h1>OpenCalc</h1>
+<p class="lede">A spreadsheet you can co-edit. This page is the demo host — the part a
+product supplies when it integrates.</p>
+
+<div class="row">
+  <button id="new">New spreadsheet</button>
+  <form id="up" method="post" action="/api/upload" enctype="multipart/form-data" style="display:contents">
+    <label class="btn ghost">Open an .xlsx<input id="file" type="file" name="file" accept=".xlsx" hidden></label>
+  </form>
+</div>
+
+<p class="note">
+  Open a document, press <strong>Share</strong>, and send the link to somebody else.
+  You will both be editing the same sheet, and either of you can download it afterwards.
+</p>
+
+<p class="note" style="margin-top:1.25rem">
+  <strong>Reading this to decide whether to integrate?</strong> The whole contract is
+  <code>server/casual-calc-host/src/main.rs</code> — four endpoints and a signed token.
+  Your product replaces this host; the collaboration server and the editor stay as they are.
+</p>
+
+<script type="module">
+  document.getElementById("new").addEventListener("click", async () => {
+    const r = await fetch("/api/documents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Untitled.xlsx" }),
+    });
+    if (!r.ok) return alert("could not create a document");
+    location.href = (await r.json()).open;
+  });
+  document.getElementById("file").addEventListener("change", () => {
+    document.getElementById("up").submit();
+  });
+</script>
