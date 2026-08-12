@@ -356,3 +356,32 @@ test("autofit sizes a rotated heading by its rotated height, not its flat one", 
   // several times an ordinary row rather than a few pixels more.
   expect(rotated).toBeGreaterThan(flat * 2);
 });
+
+test("a title merged across columns does not decide any one column's width", async ({ page }) => {
+  // Autofit measured every cell in the column, merged ones included. A title
+  // merged across a table is as wide as the whole table, so charging it to the
+  // first column made that column as wide as the title — the "naive" merged
+  // handling, and the reason Excel leaves merged cells out of autofit rather
+  // than trying to apportion them.
+  await boot(page);
+  await page.evaluate(async () => {
+    window.__ed = await import(
+      document.querySelector('script[type="module"][src*="editor.js"]').src
+    );
+  });
+
+  // A short value in A2, and a long title merged across A1:D1 above it.
+  await goTo(page, "A2");
+  await type(page, "7");
+  await goTo(page, "A1");
+  await type(page, "A title that is very much longer than the column below it");
+  await page.evaluate(() => window.__ed.wasmApi().session_merge_cells(0, 0, 0, 0, 3));
+
+  await page.evaluate(() => window.__ed.wasmApi().session_clear_col_width(0, 0));
+  await page.evaluate(() => window.__ed.autofitColumnForTest(0));
+  const width = await page.evaluate(() => window.__ed.wasmApi().session_col_width(0, 0));
+
+  // Sized to "7", not to the title. Generous bound: the point is the order of
+  // magnitude, not a pixel count that would break when a font is swapped.
+  expect(width, `column A came out ${width}px wide`).toBeLessThan(120);
+});

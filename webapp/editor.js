@@ -3225,9 +3225,20 @@ function allRanges() {
 function autofitColumn(col) {
   const b = usedBounds();
   const items = JSON.parse(wasm.session_cells(state.sheet, 0, col, b.rows - 1, col));
+  // Read fresh rather than trusting `sheetMerges`, which is refreshed on draw:
+  // autofit can run against a sheet edited since the last one.
+  const merges = JSON.parse(wasm.session_merges(state.sheet));
+  const spansColumns = (row) =>
+    merges.some((m) => row >= m.r0 && row <= m.r1 && col >= m.c0 && col <= m.c1 && m.c1 > m.c0);
   let maxw = 24;
   for (const it of items) {
     if (!it.t) continue;
+    // A cell merged across columns cannot size one of them. Its text is as wide
+    // as the whole span, so charging it to a single column makes that column as
+    // wide as the title above the table — which is what "naive" meant here, and
+    // it is why Excel leaves merged cells out of autofit rather than trying to
+    // apportion them.
+    if (spansColumns(it.r)) continue;
     ctx.font = cellFont(it);
     const flat = ctx.measureText(String(it.t)).width;
     // Rotated text needs *less* width, not more: what the column has to hold is
@@ -3254,9 +3265,16 @@ function autofitColumn(col) {
 function autofitRow(row) {
   const b = usedBounds();
   const items = JSON.parse(wasm.session_cells(state.sheet, row, 0, row, b.cols - 1));
+  const merges = JSON.parse(wasm.session_merges(state.sheet));
+  const spansRows = (col) =>
+    merges.some((m) => row >= m.r0 && row <= m.r1 && col >= m.c0 && col <= m.c1 && m.r1 > m.r0);
   let maxh = ROW_H;
   for (const it of items) {
     if (!it.t) continue;
+    // The same rule the other way round: text in a cell merged down several
+    // rows is as tall as the span, and giving one row all of that height
+    // over-sizes it by however many rows it shares with.
+    if (spansRows(it.c)) continue;
     // `measureRowHeight` rather than a copy of its arithmetic. This used to
     // reimplement it — under a comment saying to match it exactly — and the
     // copy had no rotation case, so autofitting a row of rotated headings sized
@@ -11150,6 +11168,11 @@ export function resetToOrigin() {
 export function relayout() {
   invalidateGrowth();
   resize();
+}
+
+/// Autofit a column, for the browser gate. See [`autofitRowForTest`].
+export function autofitColumnForTest(col) {
+  autofitColumn(col);
 }
 
 /// Autofit a row, for the browser gate.
