@@ -293,3 +293,28 @@ test.describe("keyboard navigation", () => {
     ).toHaveValue("A5");
   });
 });
+
+// --- Space, which does three different things (M4-3) -------------------------
+
+test("Shift+Space selects the whole row, and plain Space starts typing", async ({ page }) => {
+  // The tracker recorded "plain Space still starts inline edit" as though it
+  // were an unfinished corner. It is what Excel does: Space is the first
+  // character of the value you are typing, and the row/column chords are the
+  // modified forms. Asserted here so the behaviour is a decision on the record
+  // rather than a line in a document nobody can check.
+  await boot(page);
+  await goTo(page, "B3");
+
+  await page.locator("#grid").press("Shift+ ");
+  // The whole row is selected, which the engine reports as the selected range
+  // rather than the canvas showing it — read back through the name box's
+  // companion, the stats line, which only appears for a multi-cell selection.
+  await expect(page.locator("#sel-stats")).not.toHaveText("");
+
+  // And plain Space begins an edit whose first character is the space, rather
+  // than selecting anything: Space is the value you are typing.
+  await goTo(page, "B3");
+  await page.locator("#grid").press(" ");
+  await expect(page.locator("#inline-edit")).toBeVisible();
+  expect(await page.locator("#inline-edit").inputValue()).toBe(" ");
+});
