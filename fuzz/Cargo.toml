@@ -16,6 +16,7 @@ libfuzzer-sys = "0.4"
 casual-calc-package = { path = "../crates/casual-calc-package" }
 casual-calc-layout = { path = "../crates/casual-calc-layout" }
 casual-calc-ooxml = { path = "../crates/casual-calc-ooxml" }
+casual-calc-collab-server = { path = "../server/casual-calc-collab-server" }
 casual-calc-model = { path = "../crates/casual-calc-model" }
 casual-calc-transaction = { path = "../crates/casual-calc-transaction" }
 serde_json = "1"
@@ -61,6 +62,13 @@ bench = false
 [[bin]]
 name = "transform_tp1"
 path = "fuzz_targets/transform_tp1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_verify"
+path = "fuzz_targets/token_verify.rs"
 test = false
 doc = false
 bench = false

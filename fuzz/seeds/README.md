@@ -20,3 +20,13 @@ cargo +nightly fuzz run ooxml_xml corpus/ooxml_xml seeds/ooxml_xml
 `ooxml_xml/` is every XML and `.rels` part of `fixtures/generated/minimal.xlsx`,
 which is small, checksummed and produced by this project — so a seed changing is
 a fixture changing, and both are visible in review.
+
+`token_verify/` is a valid token plus the near misses worth starting adjacent
+to: `alg: none`, a header claiming RS256 against a shared secret, a `kid`
+carrying a path, a signature made with the wrong key, an expired token, and one
+minted for a different document. A fuzzer will not discover the *shape* of a JWT
+by mutating noise — three base64 segments and an HMAC over the first two — so
+without these it would spend its whole budget failing to parse and prove
+nothing. They are signed with the same secret the target hands the verifier,
+which is the point: the question is not whether a fuzzer can be kept out, it is
+whether anything it builds is **accepted**.
