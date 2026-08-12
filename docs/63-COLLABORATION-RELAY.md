@@ -110,10 +110,20 @@ bounds it.
 An operation published but never appended cannot happen — the append comes
 first — but an operation appended and never published can, if the node dies in
 between. The gap detection covers it: the next publication does not follow, and
-every node catches up from the log. What is not covered is a document where
-*nothing further happens*, whose subscribers then sit one revision behind until
-something does. A periodic reconciliation against the log would close it, and is
-not built.
+every node catches up from the log.
+
+What that leaves is a document where *nothing further happens*, whose
+subscribers then sit behind indefinitely, showing people a stale document with
+no way to tell. An earlier version of this decision named that and left it
+unbuilt. It is built now: **every node reads the log from where it is on each
+lease renewal**, so being behind is corrected by the passage of time rather than
+by the next edit. It also covers a node taking over a document, whose copy may
+be behind whatever the previous leader committed and never announced — ordering
+anything before catching up would build on a revision the log has moved past.
+
+The channel is therefore only ever a prompt. Everything that reaches a client
+comes from the log, or from a batch that directly follows what the node already
+had.
 
 ## How it is verified
 
@@ -122,4 +132,6 @@ arrangement where a relay exists at all. Specifically: an edit made on a relay
 reaching a client on the leader and coming back acknowledged; an edit made on
 the leader reaching a client on the relay; both nodes agreeing afterwards; and a
 node that has missed a publication catching up from the log rather than applying
-out of order.
+out of order — and a batch written straight into the log and never published at
+all, on a document that then goes quiet, which is what a leader dying between
+its append and its publish looks like from everywhere else.

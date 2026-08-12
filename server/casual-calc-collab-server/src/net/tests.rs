@@ -1885,3 +1885,70 @@ async fn two_clustered_nodes_both_serve_a_join() {
         "the second node; got {second:?}"
     );
 }
+
+#[tokio::test]
+async fn a_node_that_missed_a_publication_catches_up_without_being_prompted() {
+    // The gap ADR-017 named and did not close. A batch is written straight into
+    // the log, bypassing the channel entirely — which is what a leader dying
+    // between its append and its publish looks like from every other node. The
+    // usual gap detection cannot help, because it fires on the *next*
+    // publication and there is no next: the document goes quiet.
+    //
+    // Without the periodic reconciliation, the client below waits forever and
+    // is shown a document that is silently a revision behind.
+    let space = namespace("reconcile");
+    let Some(addr) = start_clustered("node-one", &space).await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mut socket = connect_to(addr).await;
+    let Some(ServerMessage::Welcome { .. }) = join(&mut socket, &claims("Ada", Access::Edit)).await
+    else {
+        panic!("joined")
+    };
+
+    // Wait for this node to hold the lease, so the append below is not fenced.
+    let store = crate::cluster::redis::Redis::connect_within(
+        &std::env::var("OPENCALC_TEST_REDIS").unwrap(),
+        &space,
+    )
+    .await
+    .expect("connected");
+    let epoch = loop {
+        let lease = store
+            .claim(DOC.to_owned(), "node-one".to_owned(), 1_000, now_ms())
+            .await
+            .expect("claimed");
+        if lease.node == "node-one" {
+            break lease.epoch;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    let batch = crate::relay::Committed {
+        revision: 1,
+        node: "somebody-else".to_owned(),
+        client: ClientId(999),
+        seq: 1,
+        ops: vec![cell_at(30, 7.0)],
+    };
+    store
+        .append(
+            DOC.to_owned(),
+            epoch,
+            0,
+            serde_json::to_vec(&batch).unwrap(),
+            now_ms(),
+        )
+        .await
+        .expect("appended straight to the log, and never published");
+
+    // Nothing else happens on this document. The only thing that can rescue it
+    // is the node reconciling against the log of its own accord.
+    let arrived = hear_edit(&mut socket, std::time::Duration::from_secs(15)).await;
+    let Some(ServerMessage::Apply { revision, ops }) = arrived else {
+        panic!("a quiet document left this node behind forever; got {arrived:?}")
+    };
+    assert_eq!(revision, 1);
+    assert_eq!(ops.len(), 1, "and it is the batch that was never announced");
+}

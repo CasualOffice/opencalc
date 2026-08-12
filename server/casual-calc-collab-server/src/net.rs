@@ -1643,7 +1643,23 @@ async fn attend(state: Arc<Service>, key: String, live: Arc<Live>, channels: Sub
                     .claim(key.clone(), membership.node.clone(), membership.lease_ms, now_ms())
                     .await
                 {
-                    Ok(lease) => *lock(&live.leader) = Some(lease),
+                    Ok(lease) => {
+                        *lock(&live.leader) = Some(lease);
+                        // Every tick, not only when a gap is noticed. A gap is
+                        // noticed by the *next* publication failing to follow —
+                        // so a document where nothing further happens leaves
+                        // whoever missed the last batch sitting behind it
+                        // indefinitely, showing a stale document to people who
+                        // have no way to tell. ADR-017 named this and did not
+                        // close it; this closes it.
+                        //
+                        // It also covers the moment a node takes over a
+                        // document, when its copy may be behind whatever the
+                        // previous leader committed and never published.
+                        // Ordering anything before catching up would build on a
+                        // revision the log has moved past.
+                        catch_up(&store, &key, &live, &membership.node).await;
+                    }
                     // Left as it was on purpose. A node that cannot reach the
                     // store does not know whether it still leads, and the two
                     // wrong answers are not equally wrong: assuming it does not
@@ -1699,24 +1715,46 @@ async fn take(
         // ordered it, because ordering and applying are the same step.
         crate::relay::Reaction::Seen => return,
         crate::relay::Reaction::Apply => {}
-        crate::relay::Reaction::CatchUp { from } => {
+        crate::relay::Reaction::CatchUp { .. } => {
             // The batch is *not* applied first. The operations in between are
             // what it was transformed against; without them it lands at
-            // coordinates that were never real.
-            let Ok(missed) = store.since(key.to_owned(), from).await else {
-                tracing::warn!(document = %key, "could not read the log to catch up");
-                return;
-            };
-            for (revision, payload) in &missed {
-                let Ok(older) = serde_json::from_slice::<crate::relay::Committed>(payload) else {
-                    continue;
-                };
-                deliver(live, &older, *revision, mine);
-            }
+            // coordinates that were never real. Read from where this node
+            // actually is, and this batch arrives again as part of that.
+            catch_up(store, key, live, mine).await;
             return;
         }
     }
     deliver(live, &batch, batch.revision, mine);
+}
+
+/// Read the log from wherever this node is, and apply whatever it has missed.
+///
+/// The authority. The channel is only a prompt — pub/sub loses messages without
+/// saying so — and everything that reaches a client goes through here or through
+/// a batch that directly follows what this node already had.
+///
+/// Reads under no lock and applies one batch at a time, so a long catch-up does
+/// not park every other participant on the document.
+async fn catch_up(
+    store: &Arc<crate::cluster::redis::Redis>,
+    key: &str,
+    live: &Arc<Live>,
+    mine: &str,
+) {
+    let from = lock(&live.session).revision();
+    let missed = match store.since(key.to_owned(), from).await {
+        Ok(missed) => missed,
+        Err(why) => {
+            tracing::warn!(document = %key, %why, "could not read the log to catch up");
+            return;
+        }
+    };
+    for (revision, payload) in &missed {
+        let Ok(older) = serde_json::from_slice::<crate::relay::Committed>(payload) else {
+            continue;
+        };
+        deliver(live, &older, *revision, mine);
+    }
 }
 
 /// Apply one batch locally and fan it out.
