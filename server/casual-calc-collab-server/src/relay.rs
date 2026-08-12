@@ -39,6 +39,17 @@ use serde::{Deserialize, Serialize};
 pub struct Forwarded {
     /// The document's session key.
     pub document: String,
+    /// The node the writing client is connected to.
+    ///
+    /// Not the leader, and the difference is the bug this field exists to
+    /// prevent: the leader orders the submission but does not hold its author,
+    /// so attributing the committed batch to whoever ordered it tells every
+    /// node the wrong thing about whose edit it was. The author's node then
+    /// receives it as somebody else's work, and the *leader* withholds it from
+    /// whichever local participant happens to share a client number with the
+    /// remote writer — which, since client ids are per-node counters, is
+    /// usually the first one.
+    pub node: String,
     /// The submission exactly as the client sent it.
     ///
     /// Not re-based, not re-numbered, not re-signed. A relay is a pipe: the
@@ -54,7 +65,20 @@ pub struct Forwarded {
 pub struct Committed {
     /// The revision the document reached.
     pub revision: u64,
-    /// Who wrote it, so exactly one node acknowledges and the rest apply.
+    /// The node holding the client that wrote it.
+    ///
+    /// Required, and its absence was a real bug. A [`ClientId`] is a
+    /// **per-node counter** — that is all it has ever promised — so the first
+    /// participant on every node is client 1. Identifying the writer by client
+    /// alone therefore names a different person on each node: the first two
+    /// nodes to serve a document both believe the edit was theirs, so one
+    /// acknowledges a submission it never made and, worse, withholds the edit
+    /// from the participant who should have received it. Found by two nodes and
+    /// invisible to one.
+    ///
+    /// [`ClientId`]: casual_calc_transaction::session::ClientId
+    pub node: String,
+    /// Who wrote it, within [`node`](Self::node).
     pub client: casual_calc_transaction::session::ClientId,
     /// The sequence number to acknowledge, cumulative as always.
     pub seq: u64,

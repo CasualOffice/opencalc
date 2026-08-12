@@ -40,6 +40,7 @@ use casual_calc_transaction::protocol::{
 use casual_calc_transaction::session::ClientId;
 use tokio::sync::broadcast;
 
+use crate::cluster::Coordinator;
 use crate::document::DocumentSession;
 use crate::lifecycle::{Action, CallbackOutcome, SavePolicy};
 use crate::presence::Roster;
@@ -162,6 +163,35 @@ impl Default for Limits {
     }
 }
 
+/// What a node needs to be part of a cluster.
+///
+/// Absent for standalone, which is a **first-class mode** and not a degraded one
+/// (ADR-012): one process, leader of every document by definition, and a
+/// network round trip to agree with itself would be pure cost. Everything below
+/// is written so that `None` here means the cluster code never runs at all,
+/// rather than running against a coordinator that happens to be local.
+#[derive(Clone)]
+pub struct Membership {
+    /// This node's stable id, which is what a lease names.
+    pub node: String,
+    /// The shared store: leases, the log, and the channels.
+    pub store: Arc<crate::cluster::redis::Redis>,
+    /// How long a lease is taken for.
+    ///
+    /// Short enough that a dead leader is replaced promptly, long enough that a
+    /// live one under load does not lose it constantly — and losing it wrongly
+    /// is survivable anyway, which is what the epoch is for.
+    pub lease_ms: u64,
+}
+
+impl core::fmt::Debug for Membership {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Membership")
+            .field("node", &self.node)
+            .finish()
+    }
+}
+
 /// What the service needs to run.
 pub struct ServiceConfig {
     // `Debug` is hand-written below rather than derived: `Verifier` holds keys,
@@ -182,6 +212,12 @@ pub struct ServiceConfig {
     pub deliver: Arc<dyn Deliver>,
     /// What this node will hold and accept.
     pub limits: Limits,
+    /// The cluster this node belongs to, if any.
+    ///
+    /// `None` is standalone, and the cluster code then never runs — rather than
+    /// running against a coordinator that happens to be local, which would make
+    /// the common deployment pay for the uncommon one.
+    pub membership: Option<Membership>,
 }
 
 impl core::fmt::Debug for ServiceConfig {
@@ -210,7 +246,7 @@ struct Live {
     /// Capacity is bounded: a subscriber that falls far enough behind is
     /// dropped by the channel and resyncs, which is better than growing without
     /// limit because one client stopped reading.
-    fan_out: broadcast::Sender<(ClientId, ServerMessage)>,
+    fan_out: broadcast::Sender<(Audience, ServerMessage)>,
     /// The next participant id. Ids are per-document and per-process, which is
     /// all `ClientId` promises.
     next_client: Mutex<u64>,
@@ -220,6 +256,31 @@ struct Live {
     title: String,
     /// When this document became empty, or zero while somebody is in it.
     idle_since: std::sync::atomic::AtomicU64,
+    /// Held across ordering one submission, so a leader orders them one at a
+    /// time.
+    ///
+    /// The revision is assigned inside `commit` under a lock, and the append
+    /// that records it happens afterwards — so without this, two submissions
+    /// being ordered concurrently can reach the log in the opposite order to
+    /// the one they were given. The conditional append then refuses the one
+    /// that arrives second, and its edit is **lost after having already been
+    /// applied to this node's document**: the leader has it, the log does not,
+    /// and nobody is told.
+    ///
+    /// Found by two nodes writing at the same moment, which is the first
+    /// arrangement in which one connection's submission and one inbox's
+    /// submission are ordered at the same time.
+    ///
+    /// `tokio`'s mutex rather than the standard one because it is held across
+    /// awaits — the append and the publish are both round trips.
+    writing: tokio::sync::Mutex<()>,
+    /// The lease as this node last saw it, or `None` in standalone.
+    ///
+    /// Kept rather than asked for per submission: a claim is a round trip, and
+    /// one per edit would put the coordinator in the typing path. Refreshed on a
+    /// timer, and stale by at most that interval — which is safe because being
+    /// wrong about it is what the epoch fences.
+    leader: Mutex<Option<crate::cluster::Lease>>,
     /// Resume keys, to the participant each one continues.
     ///
     /// What lets a reconnecting client be *the same* participant rather than a
@@ -276,6 +337,33 @@ impl Resumes {
     }
 }
 
+/// Who a broadcast message is for.
+///
+/// A second case exists only because of the relay. A node that forwarded a
+/// submission to the leader learns it was ordered from the document's channel,
+/// which every node reads — so the acknowledgement has to name the client it
+/// belongs to, and only the node holding that client acts on it. Broadcasting
+/// it to everybody would acknowledge one client's work to another
+/// ([ADR-017](../../../docs/63-COLLABORATION-RELAY.md)).
+#[derive(Debug, Clone)]
+enum Audience {
+    /// Everyone on this document except the one named.
+    ///
+    /// Excluded rather than included because a client has already applied its
+    /// own operations locally — that is what makes editing feel immediate — and
+    /// sending them back would apply them a second time.
+    OthersThan(ClientId),
+    /// Exactly one client, if it is on this node.
+    Only(ClientId),
+    /// Everyone on this document.
+    ///
+    /// For a batch written on another node: nobody here wrote it, so nobody
+    /// here has applied it already, and excluding a client id would exclude
+    /// whichever local participant happens to share a number with the remote
+    /// writer.
+    All,
+}
+
 /// Every document this node currently holds.
 #[derive(Default)]
 struct Registry {
@@ -298,6 +386,36 @@ struct Registry {
     /// remembered. An origin that was briefly down would otherwise poison the
     /// document until the process restarted.
     opening: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<Live>>>>>,
+}
+
+impl Service {
+    /// Turn this node's own counter into an id unique across the cluster.
+    ///
+    /// A `ClientId` used to be a bare per-node counter, so the first
+    /// participant on **every** node was client 1. That is fine for one node
+    /// and wrong the moment there are two, because the things keyed by it are
+    /// per *document* and now see submissions from every node: the duplicate
+    /// suppression that makes reconnecting safe would discard a second
+    /// person's first chunk as a redelivery of the first person's, and the
+    /// broadcast would acknowledge one node's writer to another node's reader.
+    ///
+    /// Both were real, and both were invisible until two nodes served one
+    /// document. So the node's name goes in the high half. It is a hash rather
+    /// than a registry because it must be derivable without coordination, and
+    /// a collision costs what the bare counter cost before — which is to say
+    /// this is strictly better, and not a guarantee.
+    fn identify(&self, counter: u64) -> u64 {
+        let Some(membership) = &self.config.membership else {
+            // Standalone: one node, so the counter alone is already unique and
+            // the ids stay small and readable in a log.
+            return counter;
+        };
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        membership.node.hash(&mut hasher);
+        let node = (hasher.finish() as u32) as u64;
+        (node << 32) | (counter & 0xffff_ffff)
+    }
 }
 
 /// The service's shared state.
@@ -590,9 +708,10 @@ fn expire_presence(live: &Arc<Live>, now: u64) {
         // Returned rather than merely removed, because the others have to be
         // told: a cursor that stops moving and never disappears reads as
         // somebody watching.
-        let _ = live
-            .fan_out
-            .send((client, ServerMessage::Departed { client }));
+        let _ = live.fan_out.send((
+            Audience::OthersThan(client),
+            ServerMessage::Departed { client },
+        ));
     }
 }
 
@@ -658,7 +777,7 @@ fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
             // On the *first* failure, not the last: a warning is only useful
             // while there is still time to copy the work out.
             let _ = live.fan_out.send((
-                ClientId(0),
+                Audience::OthersThan(ClientId(0)),
                 ServerMessage::Refused {
                     seq: None,
                     reason: Refusal::NotSaving,
@@ -670,7 +789,7 @@ fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
             // Continuing to accept work that provably cannot be persisted is
             // silent loss dressed up as availability.
             let _ = live.fan_out.send((
-                ClientId(0),
+                Audience::OthersThan(ClientId(0)),
                 ServerMessage::Stopped {
                     reason: Refusal::NotSaving,
                 },
@@ -861,7 +980,7 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         None => {
             let mut next = lock(&live.next_client);
             *next += 1;
-            ClientId(*next)
+            ClientId(state.identify(*next))
         }
     };
     if let Some(ask) = &resume {
@@ -989,9 +1108,13 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                     // Skip what this connection caused: it applied those
                     // locally before sending them, and the ack is what
                     // confirmed the order.
-                    Ok((origin, _)) if origin == client => {}
-                    Ok((_, message)) => {
-                        if send(&mut socket, &message).await.is_err() {
+                    Ok((audience, message)) => {
+                        let mine = match audience {
+                            Audience::OthersThan(origin) => origin != client,
+                            Audience::Only(target) => target == client,
+                            Audience::All => true,
+                        };
+                        if mine && send(&mut socket, &message).await.is_err() {
                             break;
                         }
                     }
@@ -1054,9 +1177,10 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     lock(&live.session).left();
     // Addressed from this client so the envelope is consistent; every *other*
     // connection is the audience, which is exactly who needs to know.
-    let _ = live
-        .fan_out
-        .send((client, ServerMessage::Departed { client }));
+    let _ = live.fan_out.send((
+        Audience::OthersThan(client),
+        ServerMessage::Departed { client },
+    ));
 }
 
 /// Read the first message, which must be a `Join`, and check it.
@@ -1169,6 +1293,8 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                         callback: claims.callback.clone(),
                         title: claims.document.title.clone(),
                         idle_since: std::sync::atomic::AtomicU64::new(0),
+                        writing: tokio::sync::Mutex::default(),
+                        leader: Mutex::default(),
                         resumes: Mutex::default(),
                     })
                 },
@@ -1176,6 +1302,29 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
         })
         .await
         .map(Arc::clone);
+
+    // One attendant per document, started as it is opened. It ends when its
+    // subscriptions close, which happens when the document is evicted — so a
+    // node does not accumulate a task per document it has ever held.
+    if let Ok(live) = &outcome
+        && let Some(membership) = state.config.membership.as_ref()
+    {
+        match listen(membership, &claims.document.key).await {
+            Ok(channels) => {
+                tokio::spawn(attend(
+                    Arc::clone(state),
+                    claims.document.key.clone(),
+                    Arc::clone(live),
+                    channels,
+                ));
+            }
+            Err(why) => {
+                tracing::error!(%why, "could not subscribe: this node cannot serve this document");
+                lock(&state.registry.live).remove(&claims.document.key);
+                return Err(Refusal::NotSaving);
+            }
+        }
+    }
 
     // Dropped whatever happened. On success the document lives in the registry
     // and the cell is a duplicate reference keeping it alive after eviction; on
@@ -1187,7 +1336,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
 
 /// Act on one client message. Returns whether the connection continues.
 async fn handle(
-    _state: &Arc<Service>,
+    state: &Arc<Service>,
     live: &Arc<Live>,
     claims: &Claims,
     client: ClientId,
@@ -1218,7 +1367,7 @@ async fn handle(
         ClientMessage::Presence { sheet, selection } => {
             lock(&live.roster).moved(client, sheet, selection, now_ms());
             let _ = live.fan_out.send((
-                client,
+                Audience::OthersThan(client),
                 ServerMessage::Presence {
                     client,
                     // From the token, never from the client: presence is the one
@@ -1249,6 +1398,72 @@ async fn handle(
                     },
                 )
                 .await;
+                return true;
+            }
+
+            // In a cluster, only the leader orders. A node that does not lead
+            // forwards and says nothing to its client yet: the acknowledgement
+            // comes back on the document's channel, addressed to that client,
+            // and arrives the same way the edit itself would have.
+            if let Some(membership) = state.config.membership.as_ref() {
+                // Nobody has claimed yet: this is the first edit on a document
+                // that has only just opened, and the attendant's first claim is
+                // still in flight. Claimed here rather than raced, because the
+                // alternative is what the two-node test caught — the submission
+                // is forwarded to an inbox no node is yet leading, every node
+                // declines it, and the client waits forever for an
+                // acknowledgement that nothing will ever send. One round trip on
+                // the first edit of a document is a small price for that.
+                if lock(&live.leader).is_none()
+                    && let Ok(lease) = membership
+                        .store
+                        .claim(
+                            claims.document.key.clone(),
+                            membership.node.clone(),
+                            membership.lease_ms,
+                            now_ms(),
+                        )
+                        .await
+                {
+                    *lock(&live.leader) = Some(lease);
+                }
+
+                if leads(live, membership) {
+                    order(
+                        state,
+                        &claims.document.key,
+                        live,
+                        submission,
+                        &membership.node,
+                    )
+                    .await;
+                } else {
+                    let forwarded = crate::relay::Forwarded {
+                        document: claims.document.key.clone(),
+                        node: membership.node.clone(),
+                        submission,
+                    };
+                    let channel = crate::relay::inbox_channel(
+                        membership.store.namespace(),
+                        &claims.document.key,
+                    );
+                    if let Ok(payload) = serde_json::to_vec(&forwarded)
+                        && let Err(why) = membership.store.publish(&channel, payload).await
+                    {
+                        // Nothing was ordered and the client is still waiting.
+                        // Told, rather than left to time out into a resend that
+                        // would meet the same unreachable store.
+                        tracing::warn!(%why, "could not forward a submission to the leader");
+                        let _ = send(
+                            socket,
+                            &ServerMessage::Refused {
+                                seq: Some(forwarded.submission.seq),
+                                reason: Refusal::NotSaving,
+                            },
+                        )
+                        .await;
+                    }
+                }
                 return true;
             }
 
@@ -1285,9 +1500,10 @@ async fn handle(
                     // it — its own ops are already applied locally, and the ack
                     // is what tells it they are ordered.
                     if !ops.is_empty() {
-                        let _ = live
-                            .fan_out
-                            .send((client, ServerMessage::Apply { revision, ops }));
+                        let _ = live.fan_out.send((
+                            Audience::OthersThan(client),
+                            ServerMessage::Apply { revision, ops },
+                        ));
                     }
                     true
                 }
@@ -1323,3 +1539,282 @@ fn tracing_refusal(error: &crate::verify::VerifyError) {
 
 #[cfg(test)]
 mod tests;
+
+// --- The cluster half (ADR-017) ---------------------------------------------
+
+/// Keep this node's claim on `document` current, and act on what arrives.
+///
+/// One task per document held on this node, started when the document is opened
+/// and ended when it is evicted. It does three things, all of them on a timer or
+/// a channel and none of them in a client's path:
+///
+/// - **claims**, so this node either leads or knows who does;
+/// - reads the **committed channel**, applying batches other nodes ordered;
+/// - reads the **inbox** while it leads, ordering what relays forwarded.
+///
+/// Nothing here decides that another node is down. A claim that returns somebody
+/// else's lease means relay; a claim that returns ours means lead; and the
+/// change from one to the other is a consequence of an atomic operation rather
+/// than of an opinion about anybody's liveness.
+/// Subscribe to a document's channels, before anybody can use it.
+///
+/// Awaited while the document is being opened rather than spawned alongside it,
+/// and that ordering is the whole point. Redis pub/sub has no history: a message
+/// published before a subscription exists is simply gone. Spawning this left a
+/// window in which the node was serving clients and not yet listening, and a
+/// submission forwarded during it vanished — the client waited forever for an
+/// acknowledgement nobody would ever send. It is a small window and it is
+/// exactly the moment a document is busiest, because opening one is what
+/// everybody does at the same time.
+///
+/// # Errors
+///
+/// [`Unavailable`](crate::cluster::Unavailable) if either subscription cannot be
+/// made, which must prevent the document from opening at all: a node serving a
+/// document it cannot hear about the changes to is worse than one that refuses.
+async fn listen(
+    membership: &Membership,
+    key: &str,
+) -> Result<Subscriptions, crate::cluster::Unavailable> {
+    let namespace = membership.store.namespace();
+    Ok(Subscriptions {
+        committed: membership
+            .store
+            .subscribe(&crate::relay::committed_channel(namespace, key))
+            .await?,
+        inbox: membership
+            .store
+            .subscribe(&crate::relay::inbox_channel(namespace, key))
+            .await?,
+    })
+}
+
+/// A document's two channels, already subscribed.
+struct Subscriptions {
+    committed: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    inbox: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+async fn attend(state: Arc<Service>, key: String, live: Arc<Live>, channels: Subscriptions) {
+    let Some(membership) = state.config.membership.clone() else {
+        return;
+    };
+    let store = Arc::clone(&membership.store);
+    let Subscriptions {
+        mut committed,
+        mut inbox,
+    } = channels;
+
+    // Half the lease, so a renewal is missed twice before the lease is lost.
+    let mut renewal = tokio::time::interval(std::time::Duration::from_millis(
+        (membership.lease_ms / 2).max(1),
+    ));
+    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = renewal.tick() => {
+                match store
+                    .claim(key.clone(), membership.node.clone(), membership.lease_ms, now_ms())
+                    .await
+                {
+                    Ok(lease) => *lock(&live.leader) = Some(lease),
+                    // Left as it was on purpose. A node that cannot reach the
+                    // store does not know whether it still leads, and the two
+                    // wrong answers are not equally wrong: assuming it does not
+                    // lead stops it serving anybody, while assuming it does is
+                    // fenced by the epoch the moment it tries to write.
+                    Err(why) => tracing::warn!(document = %key, %why, "could not refresh the lease"),
+                }
+            }
+            batch = committed.recv() => {
+                let Some(payload) = batch else { break };
+                if let Ok(batch) = serde_json::from_slice::<crate::relay::Committed>(&payload) {
+                    take(&store, &key, &live, batch, &membership.node).await;
+                }
+            }
+            forwarded = inbox.recv() => {
+                let Some(payload) = forwarded else { break };
+                if !leads(&live, &membership) {
+                    // Somebody else's to order. Every node subscribes to the
+                    // inbox so that a leadership change needs no re-subscribe,
+                    // and the check is what keeps two nodes from both ordering
+                    // the same submission during the moment one is taking over.
+                    continue;
+                }
+                let Ok(forwarded) = serde_json::from_slice::<crate::relay::Forwarded>(&payload)
+                else {
+                    continue;
+                };
+                order(&state, &key, &live, forwarded.submission, &forwarded.node).await;
+            }
+        }
+    }
+}
+
+/// Whether this node currently holds the document's lease.
+fn leads(live: &Arc<Live>, membership: &Membership) -> bool {
+    lock(&live.leader)
+        .as_ref()
+        .is_some_and(|lease| lease.node == membership.node && lease.expires_ms > now_ms())
+}
+
+/// Apply a batch another node ordered, and tell this node's clients.
+async fn take(
+    store: &Arc<crate::cluster::redis::Redis>,
+    key: &str,
+    live: &Arc<Live>,
+    batch: crate::relay::Committed,
+    mine: &str,
+) {
+    let applied = lock(&live.session).revision();
+    match crate::relay::react(applied, batch.revision, batch.ops.len()) {
+        // Already had it. Redis redelivers, a resubscribe replays, and this is
+        // also the leader seeing its own publication — which it applied when it
+        // ordered it, because ordering and applying are the same step.
+        crate::relay::Reaction::Seen => return,
+        crate::relay::Reaction::Apply => {}
+        crate::relay::Reaction::CatchUp { from } => {
+            // The batch is *not* applied first. The operations in between are
+            // what it was transformed against; without them it lands at
+            // coordinates that were never real.
+            let Ok(missed) = store.since(key.to_owned(), from).await else {
+                tracing::warn!(document = %key, "could not read the log to catch up");
+                return;
+            };
+            for (revision, payload) in &missed {
+                let Ok(older) = serde_json::from_slice::<crate::relay::Committed>(payload) else {
+                    continue;
+                };
+                deliver(live, &older, *revision, mine);
+            }
+            return;
+        }
+    }
+    deliver(live, &batch, batch.revision, mine);
+}
+
+/// Apply one batch locally and fan it out.
+fn deliver(live: &Arc<Live>, batch: &crate::relay::Committed, revision: u64, mine: &str) {
+    {
+        let mut session = lock(&live.session);
+        if session.adopt(&batch.ops, revision).is_err() {
+            return;
+        }
+        // So a client that reconnects to *this* node is still protected from
+        // having a resent chunk applied twice: this node learned the chunk was
+        // ordered by seeing it, not by ordering it.
+        session.note_accepted(batch.client, batch.seq, revision);
+    }
+    fan(live, batch, revision, mine);
+}
+
+/// Tell this node's clients about a committed batch.
+///
+/// The one place a batch becomes messages, whether it was ordered here or
+/// arrived on the channel. Whose it was is decided by **node and client**, never
+/// by client alone: a `ClientId` is a per-node counter, so the first participant
+/// on every node is client 1, and matching on it alone acknowledges one node's
+/// writer to another node's reader — and withholds the edit from the person who
+/// should have received it.
+fn fan(live: &Arc<Live>, batch: &crate::relay::Committed, revision: u64, mine: &str) {
+    if batch.node == mine {
+        let _ = live.fan_out.send((
+            Audience::Only(batch.client),
+            ServerMessage::Ack {
+                through: batch.seq,
+                revision,
+            },
+        ));
+        let _ = live.fan_out.send((
+            Audience::OthersThan(batch.client),
+            ServerMessage::Apply {
+                revision,
+                ops: batch.ops.clone(),
+            },
+        ));
+    } else {
+        // Written elsewhere, so nobody here has it yet.
+        let _ = live.fan_out.send((
+            Audience::All,
+            ServerMessage::Apply {
+                revision,
+                ops: batch.ops.clone(),
+            },
+        ));
+    }
+}
+
+/// Order a submission as the leader, and publish the result.
+async fn order(
+    state: &Arc<Service>,
+    key: &str,
+    live: &Arc<Live>,
+    submission: casual_calc_transaction::session::Submission,
+    origin: &str,
+) {
+    let Some(membership) = state.config.membership.as_ref() else {
+        return;
+    };
+    // One at a time, from here to the publish. Everything in between assigns a
+    // revision and then records it, and those two steps have to stay adjacent
+    // or a later revision can reach the log before an earlier one.
+    let _ordering = live.writing.lock().await;
+
+    let outcome = {
+        let mut session = lock(&live.session);
+        session.commit(&submission, now_ms())
+    };
+    let Ok(casual_calc_transaction::session::Commit::Applied { ops, revision }) = outcome else {
+        // A duplicate needs no publication — it happened once — and a failure
+        // is the submitting node's to report to its own client, which it will
+        // when nothing arrives and it asks again.
+        return;
+    };
+
+    let batch = crate::relay::Committed {
+        revision,
+        node: origin.to_owned(),
+        client: submission.client,
+        seq: submission.seq,
+        ops,
+    };
+    let Ok(payload) = serde_json::to_vec(&batch) else {
+        return;
+    };
+
+    // Appended before it is published, and published before anybody is told.
+    // The order is the whole guarantee: an operation in the log that nobody
+    // heard about is caught by the next gap, where one announced and not
+    // recorded is lost the moment this node stops.
+    let epoch = lock(&live.leader).as_ref().map_or(0, |lease| lease.epoch);
+    match membership
+        .store
+        .append(
+            key.to_owned(),
+            epoch,
+            revision - 1,
+            payload.clone(),
+            now_ms(),
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(why) => {
+            // Refused: this node's copy has moved somewhere the log has not, so
+            // it is no longer a leader in any useful sense. Said plainly; the
+            // recovery is a resync, which is not built.
+            tracing::error!(document = %key, ?why, "the log refused this leader's append");
+            return;
+        }
+    }
+    let channel = crate::relay::committed_channel(membership.store.namespace(), key);
+    if let Err(why) = membership.store.publish(&channel, payload).await {
+        // Every other node will notice the gap and read the log, so this is
+        // slow rather than wrong — and worth knowing about for that reason.
+        tracing::warn!(document = %key, %why, "could not publish a committed batch");
+    }
+    // And this node's own clients, which do not learn of work ordered here from
+    // the channel: it was applied at commit, above.
+    fan(live, &batch, batch.revision, &membership.node);
+}

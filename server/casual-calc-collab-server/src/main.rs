@@ -20,7 +20,7 @@ use casual_calc_collab_server::cluster::redis::Redis;
 use casual_calc_collab_server::config::{Endpoint, Exposure, NodeIdentity, ProxyTrust};
 use casual_calc_collab_server::http::{HttpConfig, HttpTransport};
 use casual_calc_collab_server::lifecycle::SavePolicy;
-use casual_calc_collab_server::net::{Limits, ServiceConfig, serve};
+use casual_calc_collab_server::net::{Limits, Membership, ServiceConfig, serve};
 use casual_calc_collab_server::token::TokenPolicy;
 use casual_calc_collab_server::verify::{KeySet, Signing, Verifier};
 use casual_calc_transaction::session::SnapshotPolicy;
@@ -69,8 +69,15 @@ async fn start() -> Result<(), String> {
     // node that comes up believing it is in a cluster it cannot see will take
     // leadership of every document it is asked about and be wrong about all of
     // them, and the symptom is divergence somewhere else entirely.
-    let coordinator = read_coordinator(exposure.node.as_ref()).await?;
-    tracing::info!(coordination = coordinator, "coordination");
+    let membership = read_membership(exposure.node.as_ref()).await?;
+    tracing::info!(
+        coordination = if membership.is_some() {
+            "redis"
+        } else {
+            "standalone"
+        },
+        "coordination"
+    );
 
     let transport = Arc::new(
         HttpTransport::new(HttpConfig {
@@ -88,6 +95,7 @@ async fn start() -> Result<(), String> {
         fetch: Arc::clone(&transport) as Arc<_>,
         deliver: transport as Arc<_>,
         limits: read_limits(),
+        membership,
     };
 
     tracing::info!(
@@ -99,23 +107,31 @@ async fn start() -> Result<(), String> {
     serve(config).await.map_err(|e| e.to_string())
 }
 
-/// Connect to the coordinator this deployment is configured for.
+/// Join the cluster this deployment is configured for, if any.
 ///
-/// Returns what to log about it. Standalone is a **first-class mode** (ADR-012),
-/// not a degraded one — one process, leader of every document by definition, and
-/// a network round trip to agree with itself would be pure cost — so no Redis is
-/// entirely normal and says so quietly.
-async fn read_coordinator(node: Option<&NodeIdentity>) -> Result<&'static str, String> {
+/// Standalone is a **first-class mode** (ADR-012), not a degraded one — one
+/// process, leader of every document by definition, and a network round trip to
+/// agree with itself would be pure cost — so no Redis is entirely normal and
+/// says so quietly.
+async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membership>, String> {
     let url = std::env::var("OPENCALC_REDIS_URL").ok();
     match (url, node) {
-        (Some(url), _) => {
+        (Some(url), node) => {
             let namespace = std::env::var("OPENCALC_REDIS_NAMESPACE").unwrap_or_else(|_| {
                 casual_calc_collab_server::cluster::redis::DEFAULT_NAMESPACE.to_owned()
             });
-            Redis::connect_within(&url, &namespace)
+            let store = Redis::connect_within(&url, &namespace)
                 .await
                 .map_err(|e| format!("{e}; set OPENCALC_REDIS_URL to a reachable server"))?;
-            Ok("redis")
+            Ok(Some(Membership {
+                // A node with a Redis but no declared identity is still one node
+                // among others. It needs a name to hold a lease under, and one
+                // derived from the process is better than refusing to start over
+                // a field that otherwise only matters to logs.
+                node: node.map_or_else(|| format!("node-{}", std::process::id()), |n| n.id.clone()),
+                store: Arc::new(store),
+                lease_ms: env_u64("OPENCALC_LEASE_MS", 6_000),
+            }))
         }
         // A node with an identity and nowhere to announce it is not in a
         // cluster; it is a standalone node that believes otherwise, which is
@@ -126,7 +142,7 @@ async fn read_coordinator(node: Option<&NodeIdentity>) -> Result<&'static str, S
              OPENCALC_REDIS_URL is not: there is nowhere to announce itself or take a lease"
                 .to_owned(),
         ),
-        (None, None) => Ok("standalone"),
+        (None, None) => Ok(None),
     }
 }
 

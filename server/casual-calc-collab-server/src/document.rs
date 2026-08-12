@@ -228,6 +228,38 @@ impl DocumentSession {
         self.server.oldest_rebasable()
     }
 
+    /// Take a batch another node has already ordered.
+    ///
+    /// The relay half of [`commit`](Self::commit): the operations arrive
+    /// rebased, so they are applied rather than transformed again
+    /// ([ADR-017](../../../docs/63-COLLABORATION-RELAY.md)).
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Session`] when the batch does not follow directly from
+    /// where this session is, in which case nothing is applied and the caller
+    /// must read the log.
+    pub fn adopt(&mut self, ops: &[WireOperation], revision: u64) -> Result<(), ServerError> {
+        self.server.adopt(&mut self.workbook, ops, revision)?;
+        // Values are left stale deliberately, as they are after a commit:
+        // recalculation happens where the document is read, not on every
+        // arriving edit, because edits arrive at typing speed.
+        self.stale = true;
+        self.life.committed(revision, 0);
+        Ok(())
+    }
+
+    /// Record that a client's chunk was ordered, having seen it rather than
+    /// ordered it.
+    pub fn note_accepted(
+        &mut self,
+        client: casual_calc_transaction::session::ClientId,
+        seq: u64,
+        revision: u64,
+    ) {
+        self.server.note_accepted(client, seq, revision);
+    }
+
     /// A participant leaves. The last one leaving is a save point.
     pub fn left(&mut self) {
         self.life.left();

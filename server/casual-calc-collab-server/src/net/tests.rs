@@ -159,6 +159,7 @@ async fn start_with(
         fetch,
         deliver,
         limits,
+        membership: None,
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
@@ -255,6 +256,20 @@ fn cell_edit(value: f64) -> WireOperation {
         op: Operation::SetCell {
             sheet: 0,
             at: CellRef::new(5, 5),
+            cell: Some(Cell::value(CellValue::Number(value))),
+        },
+        formulas: Default::default(),
+        styles: Default::default(),
+        strings: Default::default(),
+    }
+}
+
+/// An edit to a named row, so two writers can be told apart.
+fn cell_at(row: u32, value: f64) -> WireOperation {
+    WireOperation {
+        op: Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(row, 0),
             cell: Some(Cell::value(CellValue::Number(value))),
         },
         formulas: Default::default(),
@@ -686,6 +701,7 @@ async fn start_saving(deliver: Arc<dyn Deliver>) -> SocketAddr {
             presence_ttl_ms: 60,
             ..Limits::default()
         },
+        membership: None,
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
@@ -974,6 +990,7 @@ async fn start_stoppable_with(
         fetch: Arc::new(Canned(package())),
         deliver,
         limits,
+        membership: None,
     };
     let handle = shutdown.clone();
     let serving = tokio::spawn(async move {
@@ -1625,5 +1642,246 @@ async fn a_document_is_fetched_once_however_many_arrive_at_the_same_moment() {
         *calls.lock().unwrap(),
         1,
         "fetched once, shared by all of them"
+    );
+}
+
+// --- Two nodes, one document (ADR-017) --------------------------------------
+//
+// The only arrangement in which a relay exists at all. Everything below this
+// has been tested with one node, which is precisely the configuration where the
+// relay code never runs.
+
+/// Start a node that is part of a cluster, and return where to reach it.
+async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
+    let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
+    let store = crate::cluster::redis::Redis::connect_within(&url, namespace)
+        .await
+        .ok()?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = ServiceConfig {
+        bind: addr,
+        verifier: Verifier {
+            policy: TokenPolicy {
+                audience: "opencalc-collab".into(),
+                leeway_secs: 60,
+                allowed_hosts: BTreeSet::new(),
+                require_https: true,
+            },
+            keys: KeySet::shared_secret(SECRET),
+        },
+        save: SavePolicy::default(),
+        snapshots: SnapshotPolicy::default(),
+        fetch: Arc::new(Canned(package())),
+        deliver: Arc::new(Collected::default()),
+        limits: Limits::default(),
+        membership: Some(Membership {
+            node: node.to_owned(),
+            store: Arc::new(store),
+            // Short, so a test that wants a leadership change does not wait on
+            // a production-sized lease.
+            lease_ms: 1_000,
+        }),
+    };
+    tokio::spawn(async move {
+        let _ = serve_on(listener, config).await;
+    });
+    Some(addr)
+}
+
+/// A namespace nothing else uses, so a real Redis can be run against repeatedly.
+fn namespace(name: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "opencalc-two-node:{}:{}:{name}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+async fn connect_to(addr: SocketAddr) -> Socket {
+    let url = format!("ws://{addr}/collab?doc={DOC}");
+    let (socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    socket
+}
+
+/// Wait up to `within` for a message of interest, ignoring presence chatter.
+///
+/// Returns `None` on silence rather than panicking, unlike [`hear`]: a test
+/// that reads until a socket goes quiet needs silence to be an answer.
+async fn hear_edit(socket: &mut Socket, within: std::time::Duration) -> Option<ServerMessage> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let frame = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .ok()??;
+        let tokio_tungstenite::tungstenite::Message::Text(text) = frame.ok()? else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::Presence { .. } | ServerMessage::Departed { .. }) | Err(_) => {}
+            Ok(other) => return Some(other),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_edit_on_a_relay_is_ordered_by_the_leader_and_reaches_both() {
+    let space = namespace("relayed-edit");
+    let (Some(one), Some(two)) = (
+        start_clustered("node-one", &space).await,
+        start_clustered("node-two", &space).await,
+    ) else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+
+    let ada = claims("Ada", Access::Edit);
+    let bob = claims("Bob", Access::Edit);
+    let mut hers = connect_to(one).await;
+    let mut his = connect_to(two).await;
+    let Some(ServerMessage::Welcome {
+        client: ada_is,
+        revision,
+        ..
+    }) = join(&mut hers, &ada).await
+    else {
+        panic!("joined")
+    };
+    let Some(ServerMessage::Welcome { .. }) = join(&mut his, &bob).await else {
+        panic!("joined")
+    };
+
+    // One of these two nodes leads and the other relays. Which is not knowable
+    // from here and must not matter — that is the property.
+    say(
+        &mut hers,
+        &ClientMessage::Submit(Submission {
+            client: ada_is,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(64.0)],
+        }),
+    )
+    .await;
+
+    let acknowledged = hear_edit(&mut hers, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(acknowledged, Some(ServerMessage::Ack { through: 1, .. })),
+        "the acknowledgement comes back however the edit was routed; got {acknowledged:?}"
+    );
+
+    let arrived = hear_edit(&mut his, std::time::Duration::from_secs(10)).await;
+    let Some(ServerMessage::Apply { ops, .. }) = arrived else {
+        panic!("the edit reached a client on the other node; got {arrived:?}")
+    };
+    assert_eq!(ops.len(), 1, "and it is the edit that was made");
+}
+
+#[tokio::test]
+async fn both_nodes_can_write_and_neither_loses_the_other_s_edit() {
+    let space = namespace("both-write");
+    let (Some(one), Some(two)) = (
+        start_clustered("node-one", &space).await,
+        start_clustered("node-two", &space).await,
+    ) else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+
+    let ada = claims("Ada", Access::Edit);
+    let bob = claims("Bob", Access::Edit);
+    let mut hers = connect_to(one).await;
+    let mut his = connect_to(two).await;
+    let Some(ServerMessage::Welcome {
+        client: ada_is,
+        revision,
+        ..
+    }) = join(&mut hers, &ada).await
+    else {
+        panic!("joined")
+    };
+    let Some(ServerMessage::Welcome { client: bob_is, .. }) = join(&mut his, &bob).await else {
+        panic!("joined")
+    };
+
+    say(
+        &mut hers,
+        &ClientMessage::Submit(Submission {
+            client: ada_is,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_at(20, 1.0)],
+        }),
+    )
+    .await;
+    say(
+        &mut his,
+        &ClientMessage::Submit(Submission {
+            client: bob_is,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_at(21, 2.0)],
+        }),
+    )
+    .await;
+
+    // Both are ordered, whichever node leads and whichever way round they land.
+    for (who, socket) in [("Ada", &mut hers), ("Bob", &mut his)] {
+        let mut acknowledged = false;
+        let mut saw_the_other = false;
+        while let Some(message) = hear_edit(socket, std::time::Duration::from_secs(5)).await {
+            match message {
+                ServerMessage::Ack { through: 1, .. } => acknowledged = true,
+                ServerMessage::Apply { .. } => saw_the_other = true,
+                _ => {}
+            }
+            if acknowledged && saw_the_other {
+                break;
+            }
+        }
+        assert!(acknowledged, "{who}'s own edit was never acknowledged");
+        assert!(saw_the_other, "{who} never received the other's edit");
+    }
+}
+
+#[tokio::test]
+async fn a_single_clustered_node_still_serves_a_join() {
+    // Isolating the join from the relay: if this fails, nothing about two nodes
+    // is worth looking at yet.
+    let Some(addr) = start_clustered("only", &namespace("single")).await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mut socket = connect_to(addr).await;
+    let answer = join(&mut socket, &claims("Ada", Access::Edit)).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Welcome { .. })),
+        "a clustered node joins like any other; got {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn two_clustered_nodes_both_serve_a_join() {
+    let space = namespace("two-joins");
+    let (Some(one), Some(two)) = (
+        start_clustered("node-one", &space).await,
+        start_clustered("node-two", &space).await,
+    ) else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mut hers = connect_to(one).await;
+    let first = join(&mut hers, &claims("Ada", Access::Edit)).await;
+    assert!(
+        matches!(first, Some(ServerMessage::Welcome { .. })),
+        "the first node; got {first:?}"
+    );
+    let mut his = connect_to(two).await;
+    let second = join(&mut his, &claims("Bob", Access::Edit)).await;
+    assert!(
+        matches!(second, Some(ServerMessage::Welcome { .. })),
+        "the second node; got {second:?}"
     );
 }

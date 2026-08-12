@@ -464,6 +464,7 @@ async fn a_forwarded_submission_survives_the_wire() {
 
     let forwarded = crate::relay::Forwarded {
         document: "doc".to_owned(),
+        node: "node-two".to_owned(),
         submission: Submission {
             client: ClientId(4),
             seq: 9,
