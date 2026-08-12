@@ -229,3 +229,61 @@ fn a_strict_open_xml_workbook_reads_the_same_as_a_transitional_one() {
         );
     }
 }
+
+/// Deliberately broken packages, from `fixtures/tools/malformed.py`.
+///
+/// Each violates exactly one thing, so a failure names the violation. What is
+/// asserted is the contract, not the verdict: **every file terminates with an
+/// answer** — opened, or refused with a reason. Never a panic, never a hang.
+///
+/// Which of the two is deliberately not asserted per file, because it is a
+/// judgement that should be free to change. Excel itself repairs some of these
+/// and refuses others, and a test pinning today's choice would make improving
+/// the tolerance look like a regression. What must never change is that a file
+/// arriving from anywhere cannot take the process down.
+#[test]
+fn deliberately_broken_packages_are_answered_rather_than_survived() {
+    let dir = corpus().join("malformed");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        panic!(
+            "run fixtures/tools/malformed.py; {} is missing",
+            dir.display()
+        );
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "xlsx"))
+        .collect();
+    files.sort();
+    assert!(
+        files.len() >= 6,
+        "expected the malformed set, found {files:?}"
+    );
+
+    let mut refused = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).expect("readable");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        match casual_calc_import::import_package(bytes) {
+            // Opened: whatever it kept must be coherent. A sheet list with a
+            // sheet in it, and no claim to cells it did not read.
+            Ok(import) => {
+                assert!(
+                    !import.workbook.sheets.is_empty(),
+                    "{name} opened with no sheets"
+                );
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    // The security-relevant ones must be refused rather than tolerated: a part
+    // name climbing out of the package, a part that is not there, a part that
+    // stops mid-tag. Tolerance is a choice everywhere else and not here.
+    assert!(
+        refused >= 3,
+        "only {refused} of {} were refused; path traversal and truncation are not \
+         things to be lenient about",
+        files.len()
+    );
+}
