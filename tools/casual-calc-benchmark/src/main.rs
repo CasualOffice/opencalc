@@ -210,29 +210,25 @@ struct ScalingReport {
     within_budget: bool,
 }
 
-/// Measure one operation at two input sizes and compare how it grew.
-fn measure_scaling(iterations: u32) -> ScalingReport {
-    // Ten times the input. Far enough apart that the difference between linear
-    // and quadratic is an order of magnitude, close enough that the small case
-    // is still large enough to time above the clock's noise.
-    let small = build_workbook(1_000);
-    let large = build_workbook(10_000);
-    let roundtrip = |workbook: &Workbook| {
-        let bytes = workbook.to_snapshot().unwrap();
-        fnv1a(
-            &Workbook::from_snapshot(&bytes)
-                .unwrap()
-                .to_snapshot()
-                .unwrap(),
-        )
-    };
+/// Twenty-five times, for ten times the work.
+///
+/// Linear is ten, and the slack absorbs a runner that decided to schedule
+/// something else halfway through. Quadratic is a hundred, and cannot fit under
+/// it. Anything between is a case worth looking at rather than a number worth
+/// tuning.
+const SCALING_BUDGET_CENTI: u64 = 2_500;
 
-    let time = |workbook: &Workbook| {
+/// Measure `work` at two input sizes an order of magnitude apart.
+///
+/// Ten times the input: far enough that linear and quadratic differ by an order
+/// of magnitude, close enough that the small case still times above the clock's
+/// own noise.
+fn measure_scaling(id: &str, iterations: u32, work: impl Fn(u32) -> u64) -> ScalingReport {
+    let time = |cells: u32| {
         let mut samples: Vec<u128> = (0..iterations)
             .map(|_| {
                 let started = std::time::Instant::now();
-                let checksum = roundtrip(workbook);
-                std::hint::black_box(checksum);
+                std::hint::black_box(work(cells));
                 started.elapsed().as_nanos()
             })
             .collect();
@@ -240,21 +236,45 @@ fn measure_scaling(iterations: u32) -> ScalingReport {
         percentile(&samples, 0.5)
     };
 
-    let small_ns = time(&small).max(1);
-    let large_ns = time(&large);
+    let small_ns = time(1_000).max(1);
+    let large_ns = time(10_000);
     let ratio_centi = large_ns * 100 / small_ns;
-    // Twenty-five times for ten times the work. Linear is ten, and the slack
-    // absorbs a runner that decided to schedule something else halfway through;
-    // quadratic is a hundred, and cannot fit under it.
-    let budget_centi = 2_500;
     ScalingReport {
-        id: "model-snapshot-roundtrip-scaling".to_owned(),
+        id: id.to_owned(),
         small_ns,
         large_ns,
         ratio_centi,
-        budget_centi,
-        within_budget: ratio_centi <= budget_centi,
+        budget_centi: SCALING_BUDGET_CENTI,
+        within_budget: ratio_centi <= SCALING_BUDGET_CENTI,
     }
+}
+
+/// Every case whose growth is gated.
+///
+/// Two subsystems rather than one, because a scaling gate covering a single path
+/// says nothing about the others — and the cell store is the one the
+/// million-cell target is actually about, where the snapshot round trip is what
+/// opening and saving a document goes through.
+fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
+    vec![
+        measure_scaling("model-snapshot-roundtrip-scaling", iterations, |cells| {
+            let workbook = build_workbook(cells);
+            let bytes = workbook.to_snapshot().unwrap();
+            fnv1a(
+                &Workbook::from_snapshot(&bytes)
+                    .unwrap()
+                    .to_snapshot()
+                    .unwrap(),
+            )
+        }),
+        // Populating the store, which is what a million-cell document does on
+        // its way in. A per-cell cost creeping from constant to linear is
+        // invisible at ten thousand cells and fatal at a million.
+        measure_scaling("model-cell-store-fill-scaling", iterations, |cells| {
+            let workbook = build_workbook(cells);
+            workbook.sheets[0].cells.iter().count() as u64
+        }),
+    ]
 }
 
 fn main() {
@@ -273,7 +293,7 @@ fn main() {
         environment,
         smoke,
         cases,
-        scaling: vec![measure_scaling(if smoke { 3 } else { 20 })],
+        scaling: measure_all_scaling(if smoke { 3 } else { 20 }),
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
