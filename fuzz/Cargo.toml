@@ -14,6 +14,10 @@ cargo-fuzz = true
 casual-calc-formula = { path = "../crates/casual-calc-formula" }
 libfuzzer-sys = "0.4"
 casual-calc-package = { path = "../crates/casual-calc-package" }
+casual-calc-layout = { path = "../crates/casual-calc-layout" }
+casual-calc-model = { path = "../crates/casual-calc-model" }
+casual-calc-transaction = { path = "../crates/casual-calc-transaction" }
+serde_json = "1"
 
 [[bin]]
 name = "bounded_package"
@@ -28,6 +32,20 @@ bench = false
 [[bin]]
 name = "formula_parse"
 path = "fuzz_targets/formula_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "number_format"
+path = "fuzz_targets/number_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_operation"
+path = "fuzz_targets/wire_operation.rs"
 test = false
 doc = false
 bench = false

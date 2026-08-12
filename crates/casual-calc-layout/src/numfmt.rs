@@ -779,6 +779,22 @@ fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
     } else {
         value
     };
+    // A value outside the range Excel calls a date is not formatted as one.
+    //
+    // `value` is an arbitrary `f64` — a cell can hold any number, and a format
+    // code saying "date" does not make it one. Beyond this range the serial
+    // arithmetic below overflows (`-1e300 as i64` saturates to `i64::MIN`, and
+    // the epoch shift then subtracts past it), which a fuzzer found in under a
+    // minute. Excel itself shows `######` for a date it cannot render; falling
+    // back to the general numeric form says the same thing without pretending
+    // the column is merely too narrow.
+    //
+    // The bounds are Excel's own: serial 0 is 1900-01-00 and 2_958_465 is
+    // 9999-12-31. A day either side is allowed for the rounding below, which can
+    // carry into the next day.
+    if !value.is_finite() || !(-1.0..=2_958_466.0).contains(&value) {
+        return format_general(value);
+    }
     let tokens = parse_date_tokens(section);
     let has_ampm = tokens.iter().any(|t| matches!(t, DateToken::AmPm { .. }));
 
@@ -1130,6 +1146,43 @@ fn adjust_section_decimals(section: &str, delta: i32) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A number far outside any calendar, formatted as a date.
+    ///
+    /// Found by fuzzing in under a minute, and it is not an exotic input: a cell
+    /// holds an arbitrary `f64`, and a format code saying "date" does not make
+    /// it one. `-1e300 as i64` saturates to `i64::MIN`, and the epoch shift then
+    /// subtracts past it — a panic in a debug build, a wrong date in release,
+    /// and reachable by anybody who can put a number and a format in a file.
+    #[test]
+    fn a_value_no_calendar_can_hold_is_not_rendered_as_a_date() {
+        for value in [
+            -1e300,
+            1e300,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -1.0e18,
+        ] {
+            // The assertion is that it returns at all; what it returns is a
+            // fidelity question and belongs with the oracle.
+            let _ = super::format_number(value, "yyyy-mm-dd");
+            let _ = super::format_number(value, "[$-409]d/m/yy h:mm AM/PM");
+            let _ = super::format_number_1904(value, "yyyy-mm-dd hh:mm:ss");
+        }
+    }
+
+    /// The boundaries themselves, which is where an off-by-one would sit.
+    #[test]
+    fn the_dates_excel_can_hold_are_still_rendered_as_dates() {
+        assert_eq!(super::format_number(1.0, "yyyy-mm-dd"), "1900-01-01");
+        assert_eq!(
+            super::format_number(2_958_465.0, "yyyy-mm-dd"),
+            "9999-12-31"
+        );
+    }
     use super::{
         adjust_format_decimals, format_number, format_number_colored, format_text, split_sections,
     };
