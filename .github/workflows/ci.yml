@@ -206,6 +206,26 @@ jobs:
         run: |
           cargo +nightly-2026-07-20 fuzz build
           git diff --exit-code Cargo.lock
+      # Built is not run. A target that compiles proves the harness exists; only
+      # running it searches, and a fuzzer that never runs finds nothing — which
+      # is a gate that reports on its own existence.
+      #
+      # Short on purpose: a minute each is not a fuzzing campaign, it is a
+      # regression check that the corpus already found. The long runs belong
+      # somewhere without a per-job time limit; what this catches is a change
+      # that breaks an input the corpus has already reduced.
+      - name: Run each fuzz target briefly
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify; do
+            seeds="seeds/$target"
+            echo "::group::$target"
+            cargo +nightly-2026-07-20 fuzz run "$target" \
+              $([ -d "$seeds" ] && echo "corpus/$target $seeds" || true) \
+              -- -max_total_time=60 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
 
   dependency-policy:
     runs-on: ubuntu-latest
