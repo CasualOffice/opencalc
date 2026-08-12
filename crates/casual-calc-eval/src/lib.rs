@@ -298,13 +298,27 @@ impl Recalculator {
 
     /// Recalculate the cells that `changed` affects.
     ///
-    /// Identical to [`recalculate_incremental`] today, and the seam where step
-    /// three stops rebuilding.
+    /// The graph is built on the first call and **kept** after it. Each changed
+    /// cell is repointed — a value edit re-derives the same edges, a formula
+    /// edit replaces them, a cleared cell loses them — and propagation then runs
+    /// against a graph nobody rebuilt.
+    ///
+    /// The caller's obligation is [`invalidate`](Self::invalidate), and it is
+    /// the whole safety argument: this sees the cells it is told about and
+    /// nothing else, so an edit that moves references without being reported
+    /// leaves a graph describing a document that no longer exists. A stale graph
+    /// does not produce an error, it produces a cell that stopped being
+    /// recalculated.
     pub fn recalculate(&mut self, workbook: &mut Workbook, changed: &[(usize, CellRef)]) {
-        // Dropped rather than reused: keeping it is step three, and keeping it
-        // *before* invalidation is written is how a graph goes stale.
-        self.graph = None;
-        recalculate_incremental(workbook, changed);
+        let keys: Vec<graph::CellKey> = changed.iter().map(|(s, c)| (*s, c.row, c.col)).collect();
+        let graph = self
+            .graph
+            .get_or_insert_with(|| graph::Precedents::build(workbook));
+        for &key in &keys {
+            graph.repoint(workbook, key);
+        }
+        let dirty = graph::dirty_from(graph, workbook, &keys);
+        apply_dirty(workbook, &dirty);
     }
 
     /// Forget the graph, because the document moved under it.
@@ -319,15 +333,24 @@ impl Recalculator {
 pub fn recalculate_incremental(workbook: &mut Workbook, changed: &[(usize, CellRef)]) {
     let keys: Vec<(usize, u32, u32)> = changed.iter().map(|(s, c)| (*s, c.row, c.col)).collect();
     let dirty = graph::dirty_set(workbook, &keys);
+    apply_dirty(workbook, &dirty);
+}
+
+/// Evaluate a dirty set and write the results back.
+///
+/// Shared by the rebuild-every-pass path and the kept-graph one, so the only
+/// thing that can differ between them is *which cells are dirty* — which is the
+/// one thing keeping a graph is allowed to change.
+fn apply_dirty(workbook: &mut Workbook, dirty: &std::collections::HashSet<(usize, u32, u32)>) {
     if dirty.is_empty() {
         return;
     }
 
     // Phase 1: evaluate the dirty formula cells (clean precedents read cache).
     let updates = {
-        let mut evaluator = Evaluator::with_dirty(workbook, &dirty);
+        let mut evaluator = Evaluator::with_dirty(workbook, dirty);
         let mut updates: Vec<(usize, CellRef, Value)> = Vec::new();
-        for &(sheet_index, row, col) in &dirty {
+        for &(sheet_index, row, col) in dirty {
             let at = CellRef::new(row, col);
             let is_formula = workbook
                 .sheets

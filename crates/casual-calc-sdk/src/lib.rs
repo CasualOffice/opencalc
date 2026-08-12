@@ -568,6 +568,9 @@ impl WorkbookSession {
         if self.config.read_only {
             return Err(SdkError::ReadOnly);
         }
+        // The op is applied without classification, so it may have been a
+        // structural one. Same reasoning as `workbook_mut` below.
+        self.recalc.invalidate();
         Ok(apply(&mut self.workbook, op)?)
     }
 
@@ -579,6 +582,10 @@ impl WorkbookSession {
         // Conservative on purpose: giving back a stale package is silent data
         // loss, and re-serializing an unchanged workbook costs only time.
         self.source = None;
+        // And for exactly that reason the kept precedent graph ends here too: a
+        // caller may rewrite every formula in the book through this reference
+        // and nothing would observe it.
+        self.recalc.invalidate();
         &mut self.workbook
     }
 

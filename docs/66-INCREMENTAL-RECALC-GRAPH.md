@@ -109,6 +109,130 @@ Steps 1 and 2 are safe by construction — they add a second implementation and
 compare it. Step 3 is where the risk is, and where the graph-equality property
 earns its keep.
 
+## Step three, worked out before writing it
+
+Steps 1 and 2 held because they compared a new implementation against the old
+one on every call. Step 3 removes the comparison: the graph outlives the edit,
+and from here a wrong graph is not a wrong answer immediately — it is a cell that
+stops being recalculated, and a stale number sitting somewhere nobody is looking.
+So the two questions worth settling on paper are *what can move a node* and *what
+can move the graph without telling it*.
+
+### Removing one node has to be cheap, or nothing is gained
+
+Patching a node means removing the edges it registered and re-deriving them. The
+graph as built is precedent-to-dependents — the wrong direction for that: finding
+a dependent's own edges means scanning every edge, which is the O(formulas) walk
+this change exists to remove. Patching in the fast direction needs the slow one
+recorded.
+
+So each formula cell keeps what it registered: which keys in `direct` it appears
+under, which slots in `ranges` are its, and whether it used a name. Removal then
+touches only that cell's edges.
+
+`ranges` is a `Vec` and removal is a swap, which moves an unrelated edge and
+invalidates the slot somebody else recorded. The mitigation is to fix up the
+element that moved, and to remove a node's slots **highest first** — then the
+element swapped into place always comes from above every slot still to be
+visited, so it can never belong to the node being removed, which is the one node
+whose bookkeeping has already been discarded.
+
+### The graph is built the same way it is patched
+
+`build` is a loop calling the same attach used to patch one node, rather than a
+second copy of the same walk. A from-scratch graph and a patched one cannot
+disagree about what attaching means, because there is only one meaning. That
+removes the entire class of bug where the two drift and the property test below
+is the only thing standing between that and a wrong number.
+
+### What can move the document without the graph hearing
+
+This is the part that decides whether step 3 is safe, and it is a question about
+the SDK rather than about the graph:
+
+- **`RecalcPlan::Cells`** names exactly the cell each of `SetCell`, `SetValue`
+  and `ClearCell` writes — the only operations that produce it. So the reported
+  set is exactly the set whose outgoing edges can have changed.
+- **`RecalcPlan::Skip`** is styles, widths, sheet metadata, tab order and colour.
+  None changes a formula.
+- **`RecalcPlan::Full`** is the reference-shifting and name-resolution edits, and
+  drops the graph.
+- **Undo and redo** replay any of the three and do not say which, so they drop it.
+- **`apply_raw` and `workbook_mut`** are the escape hatches, and `workbook_mut`
+  already documents the exact reasoning this needs: *"this cannot see what
+  happens next"*. It ends the untouched guarantee for that reason, and it ends
+  the graph's validity for the same one. Both drop it.
+- **Spilling** falls back to a full recalculation, which writes values into cells
+  the dirty set never knew about — values, not formulas. The graph survives it.
+
+A `Recalculator` also has no way to know it has been handed a *different*
+workbook, so a host reusing one across documents would get a graph describing the
+previous file. Sessions own one each, which makes it structurally impossible
+rather than a rule to remember.
+
+### What is asserted
+
+The property the design named: **after any sequence of edits, the graph equals
+one rebuilt from scratch** — compared as sets, because a patched graph and a
+built one differ in the order edges happen to sit in and that difference means
+nothing. Order-sensitive comparison here would fail for a reason unrelated to
+correctness, which is worse than not comparing at all: it trains you to ignore
+it.
+
+The reverse index is compared too, not just the edges. A leaked slot or a
+forgotten `direct` key is invisible in the answer today and is exactly what makes
+the *next* patch wrong.
+
+## Step five: what it actually cost, measured
+
+Recorded next to the old number rather than replacing it, because they are
+answers to different questions and both are still true.
+
+| per edit, 10x the sheet | 1,000 | 10,000 | ratio |
+| --- | --- | --- | --- |
+| rebuilt every pass (unchanged) | ~2.4 ms | ~24 ms | ~9x |
+| kept graph, cell references | 125 ns | ~210 ns | ~1.5x |
+| kept graph, range formulas | 2.4 µs | 12.4 µs | ~4.8x |
+
+And a decade further up, because this note warned against extrapolating from ten
+thousand and doing it anyway would have been the same mistake in a nicer font:
+
+| per edit, 10,000 → 100,000 | 10,000 | 100,000 | ratio |
+| --- | --- | --- | --- |
+| kept graph, cell references | 375 ns | 375 ns | **1.00x** |
+| kept graph, range formulas | 11.1 µs | 99.6 µs | **8.98x** |
+
+**A cell-reference edit is flat**, and the 830 ms extrapolation that made this
+required is now a few hundred nanoseconds that does not move when the sheet grows
+by a factor of ten. That was the goal and it is met.
+
+### The measurement had to be fixed before it could say that
+
+The first kept-graph number came out at 19x and looked like a failure. It was
+not: the timed closure ended in `workbook.sheets[0].cells.iter().count()`, which
+walks every cell. A probe timing *only* that count reproduced the whole
+measurement to within noise — the benchmark was timing its own return value.
+
+That mattered here and not before because it is proportional: the same walk was
+about 3% of a 2.4 ms rebuild and around 100% of a 2 µs kept-graph edit. An
+optimisation that succeeds enough makes the harness around it the thing being
+measured, and the first result after a big win is worth distrusting for exactly
+that reason.
+
+### So is step four required?
+
+**No — and it is not dismissed either.** Range edges are scanned linearly and the
+8.98x above shows it plainly, but 100 µs at a hundred thousand puts a million at
+roughly a millisecond against a 50 ms budget. On this evidence buckets buy
+headroom rather than viability.
+
+The evidence has a limit worth stating, because it is the reason the row stays
+open. The scan runs **once per cell popped off the propagation queue**, so the
+real cost is `O(|dirty| x |range edges|)`, and this fixture holds `|dirty|` at
+about one. A workbook of range formulas with a deep dependency chain multiplies
+both, and nothing measured here would have seen it. Step four is queued on the
+shape of that product, not on the number in the table.
+
 ## What this does not address
 
 The 50 ms target is for a million cells, and the extrapolation from ten thousand

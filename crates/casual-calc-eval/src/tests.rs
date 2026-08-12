@@ -3,7 +3,7 @@
 use casual_calc_formula::parse;
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
-use crate::recalculate;
+use crate::{Recalculator, recalculate};
 
 struct Builder {
     wb: Workbook,
@@ -730,6 +730,121 @@ fn incremental_matches_full_under_random_edits() {
         recalculate(&mut full);
         assert_same_values(&incr, &full);
     }
+}
+
+/// Replace a cell's formula, returning the key the recalculator is told about.
+fn set_formula(wb: &mut Workbook, row: u32, col: u32, formula: &str) -> (usize, CellRef) {
+    let at = CellRef::new(row, col);
+    let handle = wb.store_formula(parse(formula).unwrap());
+    let mut cell = wb.sheets[0]
+        .cells
+        .get(at)
+        .cloned()
+        .unwrap_or(Cell::value(CellValue::Empty));
+    cell.formula = Some(handle);
+    wb.sheets[0].cells.set(at, cell);
+    (0, at)
+}
+
+/// **A graph kept across edits must still answer like a full recalculation.**
+///
+/// The existing differential tests drive `recalculate_incremental`, which
+/// rebuilds the graph every pass and therefore cannot go stale — so none of them
+/// exercise the thing step three of `docs/66` actually changed. This one holds a
+/// single [`Recalculator`] across the whole sequence, so every edit after the
+/// first is answered by a graph that was *patched* rather than built.
+///
+/// The edits deliberately include formula rewrites, not only value changes. A
+/// value edit re-derives identical edges and would pass against a graph that
+/// never patched anything at all; rewriting a formula is what moves edges, and a
+/// failure to move them is invisible until some later edit reads the stale one.
+#[test]
+fn a_kept_graph_matches_full_recalc_under_random_edits() {
+    let build = || {
+        let mut b = Builder::new();
+        b.number((0, 0), 1.0)
+            .number((0, 1), 2.0)
+            .number((0, 2), 3.0);
+        for r in 1..8u32 {
+            b.formula((r, 0), &format!("A{r}+B{r}"));
+            b.formula((r, 1), &format!("B{r}+C{r}"));
+            b.formula((r, 2), &format!("SUM(A{}:C{})", r, r));
+        }
+        let mut wb = b.build();
+        recalculate(&mut wb);
+        wb
+    };
+
+    let mut kept = build();
+    let mut full = build();
+    let mut recalc = Recalculator::new();
+    let mut state: u64 = 0x9e37_79b9;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as u32
+    };
+
+    for _ in 0..80 {
+        let row = 1 + next() % 7;
+        let col = next() % 3;
+        // Roughly a third of the edits rewrite a formula; the rest are values,
+        // which is the ratio that matters — the kept graph has to survive being
+        // mostly untouched and occasionally rearranged.
+        let changed = match next() % 3 {
+            0 => {
+                let src = 1 + next() % 7;
+                let f = match next() % 3 {
+                    0 => format!("A{src}*2"),
+                    1 => format!("SUM(A{src}:C{src})"),
+                    _ => format!("B{src}+C{src}+1"),
+                };
+                let k = set_formula(&mut kept, row, col, &f);
+                set_formula(&mut full, row, col, &f);
+                k
+            }
+            _ => {
+                let n = f64::from(next() % 20) - 5.0;
+                let k = set_number(&mut kept, 0, col, n);
+                set_number(&mut full, 0, col, n);
+                k
+            }
+        };
+        recalc.recalculate(&mut kept, &[changed]);
+        recalculate(&mut full);
+        assert_same_values(&kept, &full);
+    }
+}
+
+/// A structural edit under a kept graph is only safe because the caller drops
+/// it, so assert what happens when they do — and that the recalculator is
+/// usable again afterwards rather than permanently degraded.
+#[test]
+fn a_recalculator_recovers_after_invalidation() {
+    let mut b = Builder::new();
+    b.number((0, 0), 2.0);
+    b.formula((1, 0), "A1*10");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let mut recalc = Recalculator::new();
+    let changed = set_number(&mut wb, 0, 0, 3.0);
+    recalc.recalculate(&mut wb, &[changed]);
+    assert_eq!(
+        wb.sheets[0].cells.get(CellRef::new(1, 0)).unwrap().value,
+        CellValue::Number(30.0)
+    );
+
+    // The document moves under the graph; the caller says so.
+    recalc.invalidate();
+    let changed = set_number(&mut wb, 0, 0, 4.0);
+    recalc.recalculate(&mut wb, &[changed]);
+    assert_eq!(
+        wb.sheets[0].cells.get(CellRef::new(1, 0)).unwrap().value,
+        CellValue::Number(40.0),
+        "a rebuilt graph answers as well as the one it replaced"
+    );
 }
 
 /// Cross-sheet reference with a differently-cased qualifier must be tracked by

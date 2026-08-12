@@ -143,6 +143,30 @@ test.describe("structural edits", () => {
     await expect(cell(page, 5, 3), "the total is unchanged").toHaveText("43.48");
   });
 
+  test("editing a cell that a row insertion moved still recomputes", async ({ page }) => {
+    // The test above proves the *insertion* rewrote the references. This proves
+    // the engine still knows about them afterwards, which is a different claim
+    // and the one a kept precedent graph can quietly break: the graph is held
+    // across edits and dropped on a structural one, so a graph that survived an
+    // insertion would describe the row numbers as they used to be. Nothing
+    // errors when that happens — the dependent simply stops being recalculated
+    // and keeps displaying its previous answer, which is why this asserts the
+    // number changes rather than that the document still loads.
+    await boot(page);
+    await goTo(page, "A2");
+    await shortcut(page, "ControlOrMeta+Shift+=");
+
+    // Widget's quantity, now a row further down. 10 * 4.50 = 45.
+    await goTo(page, "B3");
+    await type(page, "10");
+
+    await expect(cell(page, 2, 3), "the row total follows its precedent").toHaveText("45");
+    await expect(
+      cell(page, 5, 3),
+      "and so does the sum below it",
+    ).toHaveText("74.98");
+  });
+
   test("deleting a referenced row leaves #REF! rather than a wrong answer", async ({
     page,
   }) => {

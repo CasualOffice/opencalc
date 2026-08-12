@@ -3,10 +3,17 @@
 //!
 //! This is what makes [`crate::recalculate_incremental`] touch only a changed
 //! cell's transitive dependents instead of the whole workbook. The graph is
-//! rebuilt per incremental pass (one scan of all formulas) rather than
-//! maintained across edits — a deliberately simple, obviously-correct first
-//! step; a persistent graph is a later optimization. Correctness is pinned by a
-//! differential test that asserts an incremental pass equals a full recalc.
+//! The graph is **kept across edits** by [`crate::Recalculator`] — step three of
+//! [66](../../../docs/66-INCREMENTAL-RECALC-GRAPH.md). A value edit leaves it
+//! alone, a formula edit repoints one node, and the reference-shifting edits
+//! drop it. Callers without a `Recalculator` still get a per-pass rebuild, which
+//! is slower and cannot go stale.
+//!
+//! Correctness is pinned from both ends: a differential test asserting an
+//! incremental pass equals a full recalculation, and — because a kept graph
+//! fails by *omission*, producing no error and one cell that quietly stopped
+//! being recalculated — a property test asserting a patched graph equals one
+//! rebuilt from scratch.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +25,7 @@ pub(crate) type CellKey = (usize, u32, u32);
 
 /// A rectangular precedent range on one sheet (inclusive), plus the formula
 /// cell that reads it.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
 struct RangeEdge {
     sheet: usize,
     r0: u32,
@@ -61,6 +68,26 @@ pub(crate) struct Precedents {
     /// so resolving it precisely is a second dependency problem for a small
     /// population.
     name_users: Vec<CellKey>,
+    /// What each formula cell registered, so that one node can be removed
+    /// without scanning every edge.
+    ///
+    /// The graph above runs precedent-to-dependents, which is the direction
+    /// propagation needs and the wrong one for patching: finding a dependent's
+    /// own edges means scanning all of them, which is the O(formulas) walk this
+    /// whole exercise exists to remove. Patching in the fast direction requires
+    /// recording the slow one.
+    outgoing: HashMap<CellKey, Node>,
+}
+
+/// One formula cell's edges, by where they were put rather than by what they
+/// mean — this exists to be undone.
+#[derive(Debug, Default)]
+struct Node {
+    /// Keys in `direct` under which this cell appears.
+    reads: Vec<CellKey>,
+    /// Slots in `ranges` belonging to this cell.
+    spans: Vec<usize>,
+    uses_name: bool,
 }
 
 impl Precedents {
@@ -70,53 +97,150 @@ impl Precedents {
             direct: HashMap::new(),
             ranges: Vec::new(),
             name_users: Vec::new(),
+            outgoing: HashMap::new(),
         };
-        this.fill_from(workbook);
+        for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
+            for (at, _) in sheet.cells.iter() {
+                this.attach(workbook, (sheet_index, at.row, at.col));
+            }
+        }
         this
     }
 
-    fn fill_from(&mut self, workbook: &Workbook) {
-        let (direct, ranges, name_users) =
-            (&mut self.direct, &mut self.ranges, &mut self.name_users);
-        for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
-            for (at, cell) in sheet.cells.iter() {
-                let Some(handle) = cell.formula else { continue };
-                let Some(expr) = workbook.formula(handle) else {
-                    continue;
-                };
-                let dependent = (sheet_index, at.row, at.col);
-                let mut uses_name = false;
-                collect_precedents(
-                    expr,
-                    sheet_index,
-                    workbook,
-                    &mut |p| direct.entry(p).or_default().push(dependent),
-                    &mut |sheet, r0, c0, r1, c1| {
-                        ranges.push(RangeEdge {
-                            sheet,
-                            r0,
-                            c0,
-                            r1,
-                            c1,
-                            dependent,
-                        })
-                    },
-                    &mut uses_name,
-                );
-                if uses_name {
-                    name_users.push(dependent);
+    /// Bring one cell's edges up to date with what the workbook now says.
+    ///
+    /// The whole of step three, in one method: a value edit finds the same
+    /// formula and re-derives the same edges, a formula edit replaces them, and
+    /// clearing a cell removes them. The caller does not have to know which of
+    /// those it did, which matters because the operation log does not say.
+    pub(crate) fn repoint(&mut self, workbook: &Workbook, cell: CellKey) {
+        self.detach(cell);
+        self.attach(workbook, cell);
+    }
+
+    /// Record what one cell reads. Not an edit — the cell is assumed absent
+    /// from the graph, which is what `build` and `repoint` both guarantee.
+    fn attach(&mut self, workbook: &Workbook, cell: CellKey) {
+        let (sheet_index, row, col) = cell;
+        let Some(expr) = workbook
+            .sheets
+            .get(sheet_index)
+            .and_then(|s| s.cells.get(CellRef::new(row, col)))
+            .and_then(|c| c.formula)
+            .and_then(|handle| workbook.formula(handle))
+        else {
+            return;
+        };
+
+        // Destructured so the two callbacks below borrow disjoint fields; the
+        // walker takes both at once.
+        let (direct, ranges) = (&mut self.direct, &mut self.ranges);
+        let (mut reads, mut spans) = (Vec::new(), Vec::new());
+        let mut uses_name = false;
+        collect_precedents(
+            expr,
+            sheet_index,
+            workbook,
+            &mut |p| {
+                direct.entry(p).or_default().push(cell);
+                reads.push(p);
+            },
+            &mut |sheet, r0, c0, r1, c1| {
+                spans.push(ranges.len());
+                ranges.push(RangeEdge {
+                    sheet,
+                    r0,
+                    c0,
+                    r1,
+                    c1,
+                    dependent: cell,
+                });
+            },
+            &mut uses_name,
+        );
+        if uses_name {
+            self.name_users.push(cell);
+        }
+        if !reads.is_empty() || !spans.is_empty() || uses_name {
+            self.outgoing.insert(
+                cell,
+                Node {
+                    reads,
+                    spans,
+                    uses_name,
+                },
+            );
+        }
+    }
+
+    /// Remove every edge one cell registered, and nothing else.
+    fn detach(&mut self, cell: CellKey) {
+        let Some(node) = self.outgoing.remove(&cell) else {
+            return;
+        };
+
+        for p in node.reads {
+            if let Some(dependents) = self.direct.get_mut(&p) {
+                if let Some(i) = dependents.iter().position(|&d| d == cell) {
+                    dependents.swap_remove(i);
+                }
+                // An empty vector left behind is a key a rebuilt graph would not
+                // have, which the equality property would report as a
+                // difference — correctly, since it is one.
+                if dependents.is_empty() {
+                    self.direct.remove(&p);
                 }
             }
+        }
+
+        // Highest slot first. `swap_remove` moves the last edge into the hole,
+        // so whoever owned it needs its recorded slot corrected — and going
+        // downwards guarantees the edge that moves always comes from above every
+        // slot still to be visited, so it can never belong to `cell`, whose
+        // bookkeeping has already been taken out of `outgoing` and could not be
+        // corrected.
+        let mut spans = node.spans;
+        spans.sort_unstable_by(|a, b| b.cmp(a));
+        for slot in spans {
+            let vacated = self.ranges.len() - 1;
+            self.ranges.swap_remove(slot);
+            if vacated != slot {
+                let owner = self.ranges[slot].dependent;
+                debug_assert_ne!(owner, cell, "a detached cell cannot own a moved edge");
+                if let Some(s) = self
+                    .outgoing
+                    .get_mut(&owner)
+                    .and_then(|n| n.spans.iter_mut().find(|s| **s == vacated))
+                {
+                    *s = slot;
+                }
+            }
+        }
+
+        if node.uses_name
+            && let Some(i) = self.name_users.iter().position(|&d| d == cell)
+        {
+            self.name_users.swap_remove(i);
         }
     }
 }
 
 pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<CellKey> {
+    dirty_from(&Precedents::build(workbook), workbook, changed)
+}
+
+/// Propagate through a graph somebody else is keeping.
+pub(crate) fn dirty_from(
+    graph: &Precedents,
+    workbook: &Workbook,
+    changed: &[CellKey],
+) -> HashSet<CellKey> {
     let Precedents {
         direct,
         ranges,
         name_users,
-    } = Precedents::build(workbook);
+        ..
+    } = graph;
 
     let is_formula = |k: CellKey| {
         workbook
@@ -136,7 +260,7 @@ pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<Cel
             dirty.insert(c);
         }
     }
-    for &n in &name_users {
+    for &n in name_users {
         if dirty.insert(n) {
             work.push(n);
         }
@@ -150,7 +274,7 @@ pub(crate) fn dirty_set(workbook: &Workbook, changed: &[CellKey]) -> HashSet<Cel
                 }
             }
         }
-        for e in &ranges {
+        for e in ranges {
             if e.sheet == x.0
                 && x.1 >= e.r0
                 && x.1 <= e.r1
@@ -353,6 +477,8 @@ fn resolve_sheet(r: &CellReference, ctx_sheet: usize, workbook: &Workbook) -> Op
 
 #[cfg(test)]
 mod precedents_tests {
+    use std::collections::BTreeMap;
+
     use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
     use super::*;
@@ -410,16 +536,168 @@ mod precedents_tests {
     }
 
     /// Rebuilt from the same document, the graph is the same graph.
-    ///
-    /// Trivial today — nothing keeps one yet — and the property step three has
-    /// to preserve, so it is written now while it is obviously true rather than
-    /// after it stops being.
     #[test]
     fn building_twice_gives_the_same_graph() {
         let wb = workbook();
-        let (a, b) = (Precedents::build(&wb), Precedents::build(&wb));
-        assert_eq!(a.direct, b.direct);
-        assert_eq!(a.name_users, b.name_users);
-        assert_eq!(a.ranges.len(), b.ranges.len());
+        assert_eq!(
+            canonical(&Precedents::build(&wb)),
+            canonical(&Precedents::build(&wb))
+        );
+    }
+
+    /// Edges, then bookkeeping: `direct`, `ranges`, `name_users`, and each
+    /// cell's own record of what it registered.
+    type Canonical = (
+        BTreeMap<CellKey, Vec<CellKey>>,
+        Vec<RangeEdge>,
+        Vec<CellKey>,
+        BTreeMap<CellKey, (Vec<CellKey>, Vec<RangeEdge>, bool)>,
+    );
+
+    /// Every edge and every piece of bookkeeping, in an order-independent form.
+    ///
+    /// Compared as sets because a patched graph and a built one differ in the
+    /// order edges happen to sit in, and that difference means nothing. An
+    /// order-sensitive comparison here would fail for a reason unrelated to
+    /// correctness, which is worse than not comparing at all — it teaches you to
+    /// ignore the one test standing between a stale graph and a wrong number.
+    ///
+    /// The reverse index is included deliberately. A leaked range slot or a
+    /// `direct` key left behind changes no answer *today*; it makes the *next*
+    /// patch remove the wrong edge.
+    fn canonical(g: &Precedents) -> Canonical {
+        let direct: BTreeMap<_, _> = g
+            .direct
+            .iter()
+            .map(|(k, v)| {
+                let mut v = v.clone();
+                v.sort_unstable();
+                (*k, v)
+            })
+            .collect();
+        let mut ranges = g.ranges.clone();
+        ranges.sort_unstable();
+        let mut names = g.name_users.clone();
+        names.sort_unstable();
+        // Slots are positions in a vector that swaps on removal, so they are not
+        // comparable between two graphs and the *edges they point at* are.
+        let outgoing = g
+            .outgoing
+            .iter()
+            .map(|(k, n)| {
+                let mut reads = n.reads.clone();
+                reads.sort_unstable();
+                let mut spans: Vec<RangeEdge> =
+                    n.spans.iter().map(|&i| g.ranges[i].clone()).collect();
+                spans.sort_unstable();
+                (*k, (reads, spans, n.uses_name))
+            })
+            .collect();
+        (direct, ranges, names, outgoing)
+    }
+
+    fn put(wb: &mut Workbook, at: CellRef, formula: &str) {
+        let handle = wb.store_formula(casual_calc_formula::parse(formula).unwrap());
+        let mut cell = Cell::value(CellValue::Number(0.0));
+        cell.formula = Some(handle);
+        wb.sheets[0].cells.set(at, cell);
+    }
+
+    /// **The property step three rests on**: after any sequence of edits, a
+    /// patched graph equals one rebuilt from scratch.
+    ///
+    /// The edits below are chosen to be the ones that move bookkeeping rather
+    /// than the ones that look interesting: a formula replaced by another
+    /// formula, a formula replaced by a plain value, a value becoming a formula,
+    /// a cell cleared outright, and a range formula removed from the middle of
+    /// `ranges` so the swap-on-removal has to correct somebody else's slot.
+    #[test]
+    fn a_patched_graph_equals_a_rebuilt_one() {
+        let mut wb = workbook();
+        put(&mut wb, CellRef::new(2, 1), "SUM(A1:A2)");
+        put(&mut wb, CellRef::new(3, 1), "SUM(A2:A4)");
+        let mut graph = Precedents::build(&wb);
+
+        let edits: Vec<(CellRef, Option<&str>)> = vec![
+            (CellRef::new(0, 1), Some("A2*3")),       // repoint a direct edge
+            (CellRef::new(1, 1), Some("A1+A4")),      // a range becomes direct
+            (CellRef::new(2, 1), None),               // a range formula, cleared
+            (CellRef::new(0, 2), Some("SUM(A1:A4)")), // a new range, on a new cell
+            (CellRef::new(3, 1), Some("7")),          // formula becomes a value
+            (CellRef::new(0, 1), None),               // and cleared entirely
+        ];
+
+        for (at, formula) in edits {
+            match formula {
+                Some(f) => put(&mut wb, at, f),
+                None => {
+                    wb.sheets[0]
+                        .cells
+                        .set(at, Cell::value(CellValue::Number(1.0)));
+                }
+            }
+            graph.repoint(&wb, (0, at.row, at.col));
+            assert_eq!(
+                canonical(&graph),
+                canonical(&Precedents::build(&wb)),
+                "graph diverged from a rebuild after editing {at:?}"
+            );
+        }
+    }
+
+    /// Removing a range edge must not corrupt the slot of the one that moves
+    /// into its place.
+    ///
+    /// Called out separately because the property test above would catch it and
+    /// would not say why: `swap_remove` is the one piece of this that is wrong
+    /// by default, and a failure here names it.
+    #[test]
+    fn removing_a_range_edge_repairs_the_edge_that_moved() {
+        let mut wb = workbook();
+        put(&mut wb, CellRef::new(2, 1), "SUM(A1:A3)");
+        let mut graph = Precedents::build(&wb);
+        assert_eq!(graph.ranges.len(), 2);
+
+        // Remove the *first* range edge, forcing the second to be swapped down.
+        wb.sheets[0]
+            .cells
+            .set(CellRef::new(1, 1), Cell::value(CellValue::Number(0.0)));
+        graph.repoint(&wb, (0, 1, 1));
+
+        let survivor = (0usize, 2u32, 1u32);
+        assert_eq!(graph.ranges.len(), 1);
+        assert_eq!(graph.ranges[0].dependent, survivor);
+        assert_eq!(
+            graph.outgoing[&survivor].spans,
+            vec![0],
+            "the surviving edge's recorded slot follows it"
+        );
+
+        // And the repaired slot is usable: removing the survivor must empty the
+        // vector rather than panic or take the wrong edge.
+        wb.sheets[0]
+            .cells
+            .set(CellRef::new(2, 1), Cell::value(CellValue::Number(0.0)));
+        graph.repoint(&wb, (0, 2, 1));
+        assert!(graph.ranges.is_empty());
+        assert_eq!(canonical(&graph), canonical(&Precedents::build(&wb)));
+    }
+
+    /// A cell with no formula leaves nothing behind.
+    #[test]
+    fn a_value_cell_holds_no_bookkeeping() {
+        let mut wb = workbook();
+        let graph = Precedents::build(&wb);
+        assert!(!graph.outgoing.contains_key(&(0, 0, 0)), "A1 reads nothing");
+
+        // And repointing a value cell repeatedly is a no-op, which is the common
+        // case: every ordinary typed number takes this path.
+        let mut graph = graph;
+        let before = canonical(&graph);
+        for _ in 0..3 {
+            graph.repoint(&wb, (0, 0, 0));
+        }
+        assert_eq!(canonical(&graph), before);
+        let _ = &mut wb;
     }
 }

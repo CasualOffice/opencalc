@@ -548,3 +548,97 @@ mod untouched_saves {
         assert_eq!(session.save().unwrap(), original);
     }
 }
+
+/// **The invalidation discipline that makes a kept precedent graph safe.**
+///
+/// Step three of `docs/66` keeps the graph across edits, which is only correct
+/// because the reference-shifting operations drop it. Nothing in the eval crate
+/// can test that: the obligation lives here, in the session that decides which
+/// edits are structural, so this is where a future change that forgets it has to
+/// be caught.
+///
+/// Inserting a row moves `A1` to `A2` and rewrites the formula that reads it. A
+/// graph that survived the insertion still believes the old row numbers, so the
+/// next value edit dirties nothing — no error, no panic, just a formula sitting
+/// at its previous answer. That is the whole failure mode, and it is the reason
+/// this asserts a recomputed *number* rather than that some method was called.
+#[test]
+fn a_structural_edit_does_not_leave_a_stale_precedent_graph() {
+    let mut session = session_with_formula();
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+
+    // A value edit first, so a graph exists to go stale.
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(5.0),
+        })
+        .unwrap();
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(10.0));
+
+    // Everything shifts down one: A1 -> A2, and the formula moves to A3 with its
+    // reference rewritten to A2.
+    session
+        .edit(EditOperation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        })
+        .unwrap();
+    assert_eq!(value(&session, CellRef::new(2, 0)), CellValue::Number(10.0));
+
+    // The edit that exposes a graph describing the document as it was.
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(1, 0),
+            value: CellValue::Number(7.0),
+        })
+        .unwrap();
+    assert_eq!(
+        value(&session, CellRef::new(2, 0)),
+        CellValue::Number(14.0),
+        "the formula must follow its precedent to the row it moved to"
+    );
+}
+
+/// Undo replays whichever kind of edit it reverses and does not say which, so
+/// it drops the graph too — asserted by undoing a structural edit and then
+/// editing a cell whose address the undo moved.
+#[test]
+fn undoing_a_structural_edit_does_not_leave_a_stale_precedent_graph() {
+    let mut session = session_with_formula();
+    session
+        .edit(EditOperation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        })
+        .unwrap();
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(1, 0),
+            value: CellValue::Number(3.0),
+        })
+        .unwrap();
+    assert_eq!(value(&session, CellRef::new(2, 0)), CellValue::Number(6.0));
+
+    // Undo the value edit, then the insertion: A1 is A1 again.
+    session.undo().unwrap();
+    session.undo().unwrap();
+
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(9.0),
+        })
+        .unwrap();
+    assert_eq!(
+        value(&session, CellRef::new(1, 0)),
+        CellValue::Number(18.0),
+        "after undo the graph describes the document undo produced"
+    );
+}

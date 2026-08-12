@@ -419,10 +419,114 @@ fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
                     .cells
                     .set(at, Cell::value(CellValue::Number(1.0)));
                 casual_calc_eval::recalculate_incremental(workbook, &[(0, at)]);
-                workbook.sheets[0].cells.iter().count() as u64
+                // Deliberately *not* a cell count. Counting walks every cell,
+                // which is O(sheet) inside the clock — it swamped the kept-graph
+                // measurement below entirely (a probe timing the count alone
+                // reproduced that measurement to within noise) and inflated this
+                // one. What is being measured has to cost less than the way it
+                // is reported.
+                cheap_witness(workbook, at)
+            },
+        ),
+        // The same edit, against a session that has already made one.
+        //
+        // Kept next to the measurement above rather than replacing it, because
+        // they answer different questions and both are real: the first edit
+        // after a document opens still pays for the whole walk, and every edit
+        // after it should not. This is the second kind, which is the kind a
+        // person typing produces all but once.
+        //
+        // The warm-up edit is in the setup, outside the clock, and is what makes
+        // this measure the graph being *used* rather than the graph being built.
+        measure_scaling_with_setup(
+            "eval-kept-graph-edit-scaling",
+            iterations,
+            |cells| {
+                let mut workbook = build_formula_workbook(cells);
+                let mut recalc = casual_calc_eval::Recalculator::new();
+                let at = CellRef::new(0, 1);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(1.0)));
+                recalc.recalculate(&mut workbook, &[(0, at)]);
+                (workbook, recalc)
+            },
+            |(workbook, recalc)| {
+                let at = CellRef::new(0, 1);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(2.0)));
+                recalc.recalculate(workbook, &[(0, at)]);
+                cheap_witness(workbook, at)
+            },
+        ),
+        // Whether the linear range scan is the next thing that matters.
+        //
+        // A kept graph makes a cell-reference edit flat; a range edge is still
+        // scanned linearly, once per cell popped off the propagation queue. If
+        // this scales with the sheet, step four of docs/66 (row-band buckets) is
+        // required rather than an optimisation — and if it does not, it is not,
+        // and the number says which rather than the design note guessing.
+        measure_scaling_with_setup(
+            "eval-kept-graph-range-edit-scaling",
+            iterations,
+            |cells| {
+                let mut workbook = build_range_workbook(cells);
+                let mut recalc = casual_calc_eval::Recalculator::new();
+                let at = CellRef::new(0, 0);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(1.0)));
+                recalc.recalculate(&mut workbook, &[(0, at)]);
+                (workbook, recalc)
+            },
+            |(workbook, recalc)| {
+                let at = CellRef::new(0, 0);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(2.0)));
+                recalc.recalculate(workbook, &[(0, at)]);
+                cheap_witness(workbook, at)
             },
         ),
     ]
+}
+
+/// A sheet where every formula reads a *range*, which the kept graph stores as
+/// one edge scanned linearly rather than as an edge per cell.
+///
+/// The other fixture has no ranges at all, so it exercises the `direct` hash
+/// lookup and never the scan — and a measurement that cannot see the thing step
+/// four proposes to fix is not evidence about whether step four is needed.
+fn build_range_workbook(cells: u32) -> Workbook {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Calc");
+    for row in 0..cells {
+        sheet.cells.set(
+            CellRef::new(row, 0),
+            Cell::value(CellValue::Number(f64::from(row))),
+        );
+        // Each formula sums a ten-row window of column A, so the ranges overlap
+        // and no single edit dirties more than a handful of them.
+        let first = row + 1;
+        let mut formula = Cell::value(CellValue::Number(0.0));
+        formula.formula = Some(workbook.store_formula(
+            casual_calc_formula::parse(&format!("SUM(A{}:A{})", first, first + 9)).expect("parses"),
+        ));
+        sheet.cells.set(CellRef::new(row, 2), formula);
+    }
+    workbook.sheets.push(sheet);
+    workbook
+}
+
+/// An O(1) value depending on the edit, to keep `black_box` honest without
+/// timing a walk of the sheet.
+fn cheap_witness(workbook: &Workbook, at: CellRef) -> u64 {
+    match workbook.sheets[0].cells.get(at).map(|c| &c.value) {
+        Some(CellValue::Number(n)) => n.to_bits(),
+        Some(_) => 1,
+        None => 0,
+    }
 }
 
 /// A sheet of independent formulas, so an edit's dirty set is one cell however
