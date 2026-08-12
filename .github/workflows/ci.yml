@@ -81,6 +81,16 @@ jobs:
                  and (.cases | length) >= 1
                  and (all(.cases[]; has("id") and has("medianNs") and .deterministic == true))' \
              report.json
+      # The part that is a gate rather than a shape check. It asserts how the
+      # work *scales*, not how long it took: a shared runner varies by several
+      # times between runs, so an absolute threshold either catches nothing or
+      # fails on a noisy neighbour — and a gate that cries wolf gets turned off.
+      # A ratio divides the hardware out, and what actually goes wrong is
+      # somebody making a linear pass quadratic.
+      - name: Assert the engine still scales linearly
+        run: |
+          jq -e '(.scaling | length) >= 1 and all(.scaling[]; .withinBudget)' report.json \
+            || { jq '.scaling' report.json; echo "::error::a case grew faster than its budget allows"; exit 1; }
 
   repository-policy:
     runs-on: ubuntu-latest
