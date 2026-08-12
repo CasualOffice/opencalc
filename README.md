@@ -43,6 +43,27 @@ engine for Casual Sheets and an SDK others can embed.
 > [docs/33-FIDELITY-LEDGER.md](docs/33-FIDELITY-LEDGER.md), and — for the editor —
 > [docs/45-EDITOR-PARITY-TRACKER.md](docs/45-EDITOR-PARITY-TRACKER.md).
 
+## Run it
+
+Two containers, one command, and you are co-editing a spreadsheet with somebody
+over a link.
+
+```sh
+cp .env.example .env       # then change OPENCALC_SHARED_SECRET
+docker compose up --build
+open http://localhost:8080
+```
+
+New spreadsheet → **Share** → send the link. Both of you edit the same sheet;
+either downloads the `.xlsx` afterwards. A cluster — two nodes behind nginx,
+coordinating through Redis — is `docker compose -f docker-compose.cluster.yml up`.
+
+The two containers are the integration boundary, not a demo artefact: the
+**collaboration server** is what OpenCalc supplies, the **host** is what your
+product supplies. `server/casual-calc-host` is the worked example of the latter,
+in four endpoints and a signature. See
+[docs/65-RUNNING-IT.md](docs/65-RUNNING-IT.md).
+
 ## What works today
 
 - **Round-trip `.xlsx`** — import → edit → write is a *semantic fixed point* (gated
