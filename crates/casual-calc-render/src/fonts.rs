@@ -99,9 +99,28 @@ pub const LIBERATION_MONO: BundledFamily = BundledFamily {
 };
 
 /// The default family / ultimate fallback.
+#[cfg(feature = "all-fonts")]
 pub const DEFAULT_FAMILY: &BundledFamily = &ROBOTO;
 
+/// The default when only one family is embedded.
+///
+/// It must be the family that *is* embedded, or every fallback reaches for
+/// bytes the build dropped — and because the constant is what keeps a blob
+/// alive, naming an absent family would quietly pull it back in and undo the
+/// saving. That is exactly what happened first time round: gating `FAMILIES`
+/// alone left Roboto referenced here, so 2 MB stayed in the bundle and every
+/// substitution still landed on it.
+#[cfg(not(feature = "all-fonts"))]
+const DEFAULT_FAMILY: &BundledFamily = &CARLITO;
+
 /// Every bundled family — the coverage fallback chain.
+/// Every bundled family, for a build that embeds them all.
+///
+/// Native: the server, the CLI and the fidelity tools render PNGs where the
+/// point *is* fidelity, and a document asking for Times should not be drawn in
+/// Roboto because the metric-compatible face was left out to save a few
+/// megabytes on a machine with a disk.
+#[cfg(feature = "all-fonts")]
 pub const FAMILIES: [&BundledFamily; 6] = [
     &ROBOTO,
     &CALADEA,
@@ -110,6 +129,25 @@ pub const FAMILIES: [&BundledFamily; 6] = [
     &LIBERATION_SERIF,
     &LIBERATION_MONO,
 ];
+
+/// One family, for WebAssembly.
+///
+/// The bundled faces were **9.1 MB of a 12.9 MB WebAssembly bundle** — 72% of
+/// what every visitor downloads to open the editor — and the editor does not use
+/// a single byte of them. It draws text with `ctx.fillText`, so the browser's
+/// own fonts are what a user sees; these are only reached by `render_sheet_png`,
+/// which produces a thumbnail.
+///
+/// So the browser gets Carlito alone: metric-compatible with Calibri, which is
+/// what an `.xlsx` asks for more often than everything else combined, and enough
+/// that a thumbnail has text in it rather than nothing. Anything else falls back
+/// to it — visibly the wrong face, which is the honest failure for a preview and
+/// far better than a blank one or a nine-megabyte download.
+///
+/// A build wanting full fidelity in the browser can turn `all-fonts` back on and
+/// pay for it deliberately.
+#[cfg(not(feature = "all-fonts"))]
+pub const FAMILIES: [&BundledFamily; 1] = [&CARLITO];
 
 /// Map a bundled family name (from the substitution table) to its `BundledFamily`.
 fn family_by_name(name: &str) -> &'static BundledFamily {
@@ -171,6 +209,14 @@ mod tests {
         }
     }
 
+    /// Metric-compatible substitution, which needs the families to substitute.
+    ///
+    /// Gated, because the WebAssembly build embeds Carlito alone — the faces
+    /// were 72% of that bundle and the editor never touches them. Without the
+    /// gate this asserted the multi-family behaviour against a single-family
+    /// build and failed for the right reason, which is worth keeping as two
+    /// tests rather than weakening into one that passes either way.
+    #[cfg(feature = "all-fonts")]
     #[test]
     fn resolves_requested_family_via_substitution() {
         assert_eq!(
@@ -191,6 +237,33 @@ mod tests {
         );
     }
 
+    /// What the single-family build must still do: put text on the page.
+    ///
+    /// A thumbnail in visibly the wrong face is an honest failure; a blank one
+    /// is a bug report, and a nine-megabyte download to avoid it is a worse
+    /// trade for every visitor who never renders a PNG.
+    #[cfg(not(feature = "all-fonts"))]
+    #[test]
+    fn a_single_family_build_still_answers_for_every_request() {
+        for family in [
+            Some("Calibri"),
+            Some("Arial"),
+            Some("Times New Roman"),
+            None,
+        ] {
+            assert_eq!(
+                face_bytes_for(family, false, false),
+                CARLITO.face_bytes(false, false),
+                "{family:?} falls back to the one bundled family"
+            );
+        }
+        assert!(
+            coverage_face_bytes('A', false, false).is_some(),
+            "and Latin is still covered, so a thumbnail has text in it"
+        );
+    }
+
+    #[cfg(feature = "all-fonts")]
     #[test]
     fn coverage_returns_first_family_for_common_latin() {
         // A common Latin char is covered by the first family (Roboto), so the

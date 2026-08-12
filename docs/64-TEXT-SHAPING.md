@@ -92,11 +92,28 @@ That distinction is recorded as a test rather than a sentence, so that adding a
 font becomes a deliberate act with a size cost attached rather than something
 discovered from a screenshot.
 
-## What this does not settle
+## The bundle, since it was noted here
 
-The 12.9 MB bundle is not addressed here and is a separate question worth
-asking. It is noted because it is what made the naive answer expensive, and
-because a project targeting a browser should know that number.
+This decision recorded 12.9 MB as a separate question worth asking. Asking it
+found the answer in the same place: **9.1 MB of that bundle was embedded fonts**
+— 72% of what every visitor downloads to open the editor — and the editor never
+reads a byte of them, because it draws text with `ctx.fillText` and the browser
+supplies the faces. They exist for the headless PNG backend.
+
+So the same split applies: all six families for native, Carlito alone for
+WebAssembly. Carlito is metric-compatible with Calibri, which is what an `.xlsx`
+asks for more often than everything else combined, and enough that a thumbnail
+has text in it. Anything else falls back to it — visibly the wrong face, which
+is an honest failure for a preview and a better trade than a nine-megabyte
+download for every visitor who never renders one.
+
+**12.92 MB to 6.53 MB.** Half of it, and the editor is unchanged: the browser
+was always drawing its own text.
+
+Doing it also showed why gating the list was not enough. `DEFAULT_FAMILY` still
+named Roboto, and a constant naming a blob is what keeps the blob alive — so 2 MB
+came back and every substitution still landed on a family the build had
+supposedly dropped. It is gated too.
 
 ## How it is verified
 

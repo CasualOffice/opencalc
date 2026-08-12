@@ -21,8 +21,12 @@ rustybuzz = { version = "0.20", optional = true }
 # On by default: a native build should be correct for every script. The
 # WebAssembly build turns it off, because the browser already shapes the text a
 # user actually looks at and this crate is in a bundle nobody wants larger.
-default = ["shaping"]
+default = ["shaping", "all-fonts"]
 shaping = ["dep:rustybuzz"]
+# Every bundled family. On for native, off for WebAssembly, where the faces were
+# 72% of the bundle and the editor never touches them — it draws with
+# `ctx.fillText` and the browser supplies the fonts.
+all-fonts = []
 
 [dev-dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
