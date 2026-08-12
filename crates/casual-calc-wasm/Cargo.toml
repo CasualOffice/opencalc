@@ -22,8 +22,10 @@ casual-calc-import = { path = "../casual-calc-import" }
 casual-calc-io = { path = "../casual-calc-io" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
-casual-calc-render = { path = "../casual-calc-render" }
-casual-calc-sdk = { path = "../casual-calc-sdk" }
+# Shaping off (ADR-018): the browser already shapes the text a user looks at
+# — the editor draws with `ctx.fillText` — and this crate ships to every tab.
+casual-calc-render = { path = "../casual-calc-render", default-features = false }
+casual-calc-sdk = { path = "../casual-calc-sdk", default-features = false }
 casual-calc-transaction = { path = "../casual-calc-transaction" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -70,17 +70,54 @@ a server than in a tab, and the headless backend would stop being headless.
 which is trying to be an alternative to Excel. A thumbnail that mangles Arabic
 is not a missing feature; it is a wrong picture of somebody's document.
 
+## Shaping is necessary and not sufficient
+
+Building it surfaced something the plan did not account for: **the bundled fonts
+cover Latin and Hebrew, and not Arabic, Devanagari, Thai or CJK.** Caladea,
+Carlito, Liberation and Roboto are what ship, and a shaper cannot draw glyphs a
+font does not have.
+
+So the scope of this change is narrower and more honest than "complex scripts
+now work":
+
+- **Hebrew is fixed.** It is covered and right-to-left, so the per-`char` path
+  renders it backwards today. Shaping returns visual order and it comes out
+  right. That is a real defect, fixed.
+- **Arabic, Devanagari, Thai and CJK are unchanged**, and were already `.notdef`
+  boxes rather than mis-shaped text. They need a *font* decision, which is a
+  separate and much larger one — Noto's coverage is measured in megabytes, and
+  this crate is already in a 12.9 MB bundle.
+
+That distinction is recorded as a test rather than a sentence, so that adding a
+font becomes a deliberate act with a size cost attached rather than something
+discovered from a screenshot.
+
 ## What this does not settle
 
 The 12.9 MB bundle is not addressed here and is a separate question worth
 asking. It is noted because it is what made the naive answer expensive, and
 because a project targeting a browser should know that number.
 
-## How it will be verified
+## How it is verified
 
-Rendering a cell of Arabic and one of Devanagari through the native backend and
-asserting the glyph run is reordered and joined rather than one glyph per
-`char` — which is exactly what the current path produces, so the test fails
-before the change and passes after. Plus the existing PNG fidelity tests, which
-must not move: shaping Latin must produce what it produces today, or every
-existing reference image is wrong.
+Not with Arabic, which an earlier draft of this section proposed: there is no
+bundled font covering it, so such a test would have asserted the shaping of
+`.notdef` boxes and passed for the wrong reason.
+
+**Hebrew**, which *is* covered and *is* right-to-left. The test shapes a
+three-letter run and asserts the glyph ids come back as exactly the naive
+per-character mapping **reversed** — visual order rather than memory order,
+which is the thing the old path cannot produce. Asserted as a relationship
+rather than as fixed ids, because the ids belong to whichever face is bundled.
+
+**Coverage itself** is a test: Latin and Hebrew covered, Arabic, Devanagari,
+Thai and CJK not. It fails if that changes, so adding a font is a deliberate act
+with a size cost rather than something noticed in a screenshot.
+
+**The existing PNG fidelity tests**, unchanged and now running with shaping on.
+Latin must render exactly as it did or every reference image is wrong; it does.
+
+**The dependency graph**, checked with `cargo tree`: `rustybuzz` is present for
+native builds and absent from the WebAssembly one. That is the decision above,
+and it is the kind that quietly stops being true — a crate added later with
+default features would undo it without a word.

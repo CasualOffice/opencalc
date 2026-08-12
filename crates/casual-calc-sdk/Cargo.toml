@@ -7,6 +7,13 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+# Forwarded rather than fixed (ADR-018). A native host embedding the SDK should
+# shape text; the WebAssembly build turns this off, because the browser already
+# shapes what a user looks at and a shaper in that bundle is pure weight.
+[features]
+default = ["shaping"]
+shaping = ["casual-calc-render/shaping"]
+
 [dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
 casual-calc-export = { path = "../casual-calc-export" }
@@ -14,7 +21,7 @@ casual-calc-import = { path = "../casual-calc-import" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }
-casual-calc-render = { path = "../casual-calc-render" }
+casual-calc-render = { path = "../casual-calc-render", default-features = false }
 casual-calc-transaction = { path = "../casual-calc-transaction" }
 
 [dev-dependencies]

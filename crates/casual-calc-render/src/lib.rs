@@ -11,6 +11,8 @@
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 mod fonts;
+#[cfg(feature = "shaping")]
+mod shape;
 
 use casual_calc_layout::visible_range;
 use casual_calc_layout::{
@@ -259,6 +261,37 @@ fn draw_glyphs(
     let baseline_y = y0 + ((h - text_h) / 2.0).max(0.0) + metrics.ascent;
 
     let mut builder = PathBuilder::new();
+
+    // Shaped path first, when the build has a shaper and one face covers the
+    // whole run. A run spanning two faces falls through to the per-`char` loop
+    // below: shaping is defined against a single face, and shaping each part
+    // separately would place them by two different sets of rules.
+    #[cfg(feature = "shaping")]
+    if let Some(face_bytes) = single_face_for(content, font_name, bold, italic)
+        && let Some(shaped) = shape::run(face_bytes, content, size_px)
+        && let Ok(shaped_font) = FontRef::new(face_bytes)
+    {
+        let shaped_outlines = shaped_font.outline_glyphs();
+        let total_shaped: f32 = shaped.iter().map(|g| g.advance).sum();
+        let mut x = match align {
+            Align::Left => x0 + pad,
+            Align::Right => x0 + w - pad - total_shaped,
+        };
+        for glyph in &shaped {
+            if let Some(outline) = shaped_outlines.get(skrifa::GlyphId::from(glyph.id)) {
+                let mut pen = GlyphPen {
+                    builder: &mut builder,
+                    origin_x: x + glyph.x_offset,
+                    baseline_y: baseline_y - glyph.y_offset,
+                };
+                let _ = outline.draw(DrawSettings::unhinted(size, loc), &mut pen);
+            }
+            x += glyph.advance;
+        }
+        finish_text(pixmap, builder, color);
+        return;
+    }
+
     for ch in content.chars() {
         if let Some(gid) = charmap.map(ch) {
             // Primary face covers this char: outline from it.
@@ -293,6 +326,47 @@ fn draw_glyphs(
         }
         pen_x += advance(ch);
     }
+    finish_text(pixmap, builder, color);
+}
+
+/// The one face that covers every character of `content`, if there is one.
+///
+/// Shaping is defined against a single face. A run spanning two of them — a
+/// Latin word beside a Hebrew one, where the bundled families split the
+/// coverage — has no single set of rules to shape by, so the caller keeps the
+/// per-`char` path for it. That path is already correct for exactly the case it
+/// is kept for: unshaped, left to right, one glyph per character.
+#[cfg(feature = "shaping")]
+fn single_face_for(
+    content: &str,
+    font_name: Option<&str>,
+    bold: bool,
+    italic: bool,
+) -> Option<&'static [u8]> {
+    let primary = fonts::face_bytes_for(font_name, bold, italic);
+    if let Ok(font) = FontRef::new(primary) {
+        let charmap = font.charmap();
+        if content.chars().all(|ch| charmap.map(ch).is_some()) {
+            return Some(primary);
+        }
+    }
+    // Otherwise the first fallback that covers the whole run, which is what a
+    // single-script cell in a script the primary lacks looks like.
+    let first = content.chars().next()?;
+    let candidate = fonts::coverage_face_bytes(first, bold, italic)?;
+    let font = FontRef::new(candidate).ok()?;
+    let charmap = font.charmap();
+    content
+        .chars()
+        .all(|ch| charmap.map(ch).is_some())
+        .then_some(candidate)
+}
+
+/// Fill an accumulated glyph path.
+///
+/// Extracted so the shaped and per-`char` paths end the same way rather than
+/// each growing their own copy of it.
+fn finish_text(pixmap: &mut Pixmap, builder: PathBuilder, color: Color) {
     let Some(path) = builder.finish() else {
         return;
     };
