@@ -15,6 +15,7 @@ casual-calc-formula = { path = "../crates/casual-calc-formula" }
 libfuzzer-sys = "0.4"
 casual-calc-package = { path = "../crates/casual-calc-package" }
 casual-calc-layout = { path = "../crates/casual-calc-layout" }
+casual-calc-ooxml = { path = "../crates/casual-calc-ooxml" }
 casual-calc-model = { path = "../crates/casual-calc-model" }
 casual-calc-transaction = { path = "../crates/casual-calc-transaction" }
 serde_json = "1"
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "wire_operation"
 path = "fuzz_targets/wire_operation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ooxml_xml"
+path = "fuzz_targets/ooxml_xml.rs"
 test = false
 doc = false
 bench = false
