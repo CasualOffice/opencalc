@@ -7245,16 +7245,151 @@ function doPasteMode(mode) {
     status.textContent = `pasted ${mode}`;
   } catch { status.textContent = "paste blocked"; }
 }
-async function doPaste() {
+/// Parse clipboard `text/html` into the cells the engine applies.
+///
+/// See `docs/68-CLIPBOARD-HTML-PASTE.md`. The short version: `DOMParser` gives a
+/// document with **no browsing context**, so nothing in it executes and nothing
+/// in it fetches; the nodes are never inserted anywhere; and only `textContent`
+/// and a fixed list of attributes are read, so `href`, `src` and every `on*`
+/// handler are not consulted at all. A value that is never read cannot leak.
+///
+/// Returns `null` when the HTML holds no table, which is how a paste of ordinary
+/// rich text falls through to the plain-text path.
+function cellsFromClipboardHtml(html) {
+  let doc;
   try {
-    let osText = "";
-    try { osText = await navigator.clipboard.readText(); } catch {}
+    doc = new DOMParser().parseFromString(html, "text/html");
+  } catch {
+    return null;
+  }
+  const table = doc.querySelector("table");
+  if (!table) return null;
+
+  const hex = (value) => {
+    if (!value) return null;
+    const text = String(value).trim().toLowerCase();
+    let m = /^#?([0-9a-f]{6})$/.exec(text);
+    if (m) return m[1].toUpperCase();
+    m = /^#?([0-9a-f]{3})$/.exec(text);
+    if (m) return m[1].split("").map((c) => c + c).join("").toUpperCase();
+    m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(text);
+    if (m) {
+      return [1, 2, 3]
+        .map((i) => Math.min(255, Number(m[i])).toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
+    // Named and functional colours are dropped rather than guessed: a wrong
+    // fill is louder than a missing one.
+    return null;
+  };
+
+  // `style` is read as text and split on `;`. Deliberately not via
+  // `getComputedStyle`, which would need the node in a live document — the one
+  // thing this must never do.
+  const declarations = (el) => {
+    const out = {};
+    for (const part of (el.getAttribute("style") ?? "").split(";")) {
+      const at = part.indexOf(":");
+      if (at < 0) continue;
+      out[part.slice(0, at).trim().toLowerCase()] = part.slice(at + 1).trim();
+    }
+    return out;
+  };
+
+  const cells = [];
+  const rows = [...table.querySelectorAll("tr")];
+  // Rows and columns are counted, because a cell that spans rows pushes the
+  // cells below it sideways. Without this a merged header silently shifts every
+  // row under it one column left.
+  const taken = new Map();
+  rows.forEach((tr, r) => {
+    let c = 0;
+    for (const td of tr.children) {
+      if (!/^(td|th)$/i.test(td.tagName)) continue;
+      while (taken.get(`${r},${c}`)) c += 1;
+      const style = { ...declarations(td.closest("tr") ?? td), ...declarations(td) };
+      // Producers still wrap runs in <font>/<b>/<i> inside the cell; those carry
+      // formatting for the whole cell in practice.
+      const inner = td.querySelector("font, span, b, i, u, s, strike");
+      const innerStyle = inner ? declarations(inner) : {};
+      const merged = { ...style, ...innerStyle };
+      const weight = merged["font-weight"] ?? "";
+      const decoration = `${merged["text-decoration"] ?? ""} ${merged["text-decoration-line"] ?? ""}`;
+      const align = (merged["text-align"] ?? td.getAttribute("align") ?? "").toLowerCase();
+      const valign = (merged["vertical-align"] ?? td.getAttribute("valign") ?? "").toLowerCase();
+      const wrap = (merged["white-space"] ?? "").toLowerCase();
+      const size = /^(\d+(?:\.\d+)?)pt/.exec(merged["font-size"] ?? "");
+      const rs = Math.max(1, Number(td.getAttribute("rowspan") ?? 1) || 1);
+      const cs = Math.max(1, Number(td.getAttribute("colspan") ?? 1) || 1);
+
+      cells.push({
+        dr: r,
+        dc: c,
+        rs,
+        cs,
+        text: (td.textContent ?? "").replace(/ /g, " ").trim(),
+        bold:
+          !!td.querySelector("b, strong") ||
+          weight === "bold" ||
+          (Number(weight) >= 600),
+        italic: !!td.querySelector("i, em") || (merged["font-style"] ?? "").includes("italic"),
+        underline: !!td.querySelector("u") || decoration.includes("underline"),
+        strike: !!td.querySelector("s, strike, del") || decoration.includes("line-through"),
+        wrap: wrap === "normal" || wrap === "pre-wrap",
+        color: hex(merged.color),
+        fill: hex(merged["background-color"] ?? merged.background ?? td.getAttribute("bgcolor")),
+        font: (merged["font-family"] ?? "").split(",")[0].replace(/["']/g, "").trim() || null,
+        sizeHp: size ? Math.round(Number(size[1]) * 2) : null,
+        align: ["left", "center", "right", "justify"].includes(align) ? align : null,
+        valign: ["top", "middle", "bottom"].includes(valign) ? valign : null,
+        // Excel and LibreOffice each carry the number format in their own
+        // non-standard property. Neither is guessed at from the text.
+        numberFormat:
+          merged["mso-number-format"]?.replace(/\\/g, "").replace(/^"|"$/g, "") ??
+          td.getAttribute("sdnum")?.split(";").pop() ??
+          null,
+      });
+
+      for (let dr = 0; dr < rs; dr += 1) {
+        for (let dc = 0; dc < cs; dc += 1) taken.set(`${r + dr},${c + dc}`, true);
+      }
+      c += cs;
+    }
+  });
+  return cells.length ? cells : null;
+}
+
+/// Read the clipboard's HTML flavour, if the browser will give it to us.
+async function clipboardHtml(event) {
+  const fromEvent = event?.clipboardData?.getData("text/html");
+  if (fromEvent) return fromEvent;
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      if (item.types.includes("text/html")) return await (await item.getType("text/html")).text();
+    }
+  } catch {}
+  return "";
+}
+
+async function doPaste(event) {
+  try {
+    let osText = event?.clipboardData?.getData("text/plain") ?? "";
+    if (!osText) { try { osText = await navigator.clipboard.readText(); } catch {} }
     // Internal rich paste when the OS clipboard is unchanged from our copy (or
     // unreadable but we hold a snapshot); else paste the external text.
     if (wasm.session_clip_has() && (osText === lastClipTsv || osText === "")) {
       wasm.session_clip_paste(state.sheet, state.sel.row, state.sel.col);
     } else {
-      wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, osText);
+      // From another application. Prefer the HTML flavour, which is the only
+      // one carrying formatting — the plain text is the same grid with every
+      // style thrown away, which is what this used to be able to do.
+      const cells = cellsFromClipboardHtml(await clipboardHtml(event));
+      if (cells) {
+        wasm.session_paste_html(state.sheet, state.sel.row, state.sel.col, JSON.stringify(cells));
+      } else {
+        wasm.session_paste_tsv(state.sheet, state.sel.row, state.sel.col, osText);
+      }
     }
     if (!wasm.session_clip_has()) stopMarch(); // a cut was consumed
     draw();
@@ -9264,6 +9399,22 @@ function updateResize(px, py) {
 }
 
 function wireEvents() {
+  // The real paste event, which is the only place `clipboardData` exists.
+  //
+  // Reading the clipboard through `navigator.clipboard.read()` needs a
+  // permission prompt and returns nothing in Firefox; the event carries every
+  // flavour the source application offered, for free, because the user just
+  // asked for it. That is what makes formatting recoverable at all.
+  document.addEventListener("paste", (e) => {
+    // Not while a cell editor or a dialog input has focus — there the browser's
+    // own text paste is exactly right.
+    const target = e.target;
+    if (target && /^(input|textarea)$/i.test(target.tagName ?? "")) return;
+    if (target?.isContentEditable) return;
+    e.preventDefault();
+    void doPaste(e);
+  });
+
   // Autofilter header buttons open on click, not mousedown — see the note in
   // the mousedown handler. stopPropagation keeps any already-armed
   // dismiss-on-next-click from closing the menu we are about to open.
@@ -9872,7 +10023,11 @@ function wireEvents() {
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
       if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }
-      if (k === "v") { await doPaste(); e.preventDefault(); return; }
+      // Ctrl+V is *not* handled here. Letting the browser raise its own
+      // `paste` event is what puts `clipboardData` in our hands, and that is
+      // the only way to read the `text/html` flavour without asking for
+      // clipboard-read permission. The listener below does the work.
+      if (k === "v") { return; }
       // Ctrl+Shift+"+" inserts rows/columns, Ctrl+"-" deletes them (Excel).
       // "+" arrives as key "+" or as "=" with Shift depending on the layout.
       if ((e.key === "+" || (k === "=" && e.shiftKey))) { insertLines(); e.preventDefault(); return; }

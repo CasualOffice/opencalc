@@ -1,0 +1,19 @@
+<!-- Not a capture: this is what a hostile page can put on the clipboard. It
+     must paste its text and do nothing else — no script, no fetch, no
+     navigation. Every URL below points at a port nothing is listening on, so a
+     request would be observable as a failed request rather than silently
+     succeeding. -->
+<table>
+ <tr>
+  <td onmouseover="window.__pwned = 1" onclick="window.__pwned = 1">hover me</td>
+  <td><script>window.__pwned = 1;</script>plain</td>
+ </tr>
+ <tr>
+  <td><img src="http://127.0.0.1:9/pwned.png" onerror="window.__pwned = 1">image</td>
+  <td style="background-image:url('http://127.0.0.1:9/bg.png')">styled</td>
+ </tr>
+ <tr>
+  <td><iframe src="http://127.0.0.1:9/frame"></iframe>frame</td>
+  <td><a href="javascript:window.__pwned=1">link</a></td>
+ </tr>
+</table>

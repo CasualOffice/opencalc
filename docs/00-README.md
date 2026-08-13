@@ -100,6 +100,7 @@ the other way around. This index is the map.
 | 65 | [Running OpenCalc](65-RUNNING-IT.md) | Standalone, Docker and clustered operation |
 | 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
 | 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
+| 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | Pasting from Excel, LibreOffice and Sheets: who parses the markup, why it is safe, and what is deliberately not mapped |
 
 ### Measured gap trackers (50–53)
 

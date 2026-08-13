@@ -3235,6 +3235,25 @@ pub fn session_merge_cells_discarding(
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        merge_discarding(session, sheet, r0, c0, r1, c1)
+    })
+}
+
+/// The body of [`session_merge_cells_discarding`], against a session the caller
+/// already holds.
+///
+/// Extracted so a paste carrying `rowspan`/`colspan` merges exactly the way the
+/// menu command does — two implementations of "merge, keeping the block's
+/// styling" would be two chances to disagree about what a merge clears.
+fn merge_discarding(
+    session: &mut WorkbookSession,
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<(), JsError> {
+    {
         let Some(mut merge_op) = current_sheet_metadata(session, sheet) else {
             return Ok(());
         };
@@ -3278,7 +3297,7 @@ pub fn session_merge_cells_discarding(
             }
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
-    })
+    }
 }
 
 /// Remove any merges intersecting a range.
@@ -8279,6 +8298,178 @@ pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<
             return Ok(());
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// One cell of a parsed clipboard table.
+///
+/// The wire between the browser's HTML parser and the engine
+/// ([68](../../../docs/68-CLIPBOARD-HTML-PASTE.md)). Deliberately named
+/// properties rather than markup or CSS text: nothing that crosses this boundary
+/// can carry a script, a URL or a selector, so there is no sanitising to get
+/// wrong on this side.
+#[derive(serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PastedCell {
+    /// Row offset from the paste anchor.
+    dr: u32,
+    /// Column offset from the paste anchor.
+    dc: u32,
+    /// Rows this cell spans (`rowspan`), 1 when it spans only itself.
+    rs: u32,
+    /// Columns this cell spans (`colspan`).
+    cs: u32,
+    /// The cell's displayed text, already unescaped by the HTML parser.
+    text: String,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    wrap: bool,
+    /// Six hex digits, no `#`. Anything the parser could not normalise is absent
+    /// rather than guessed.
+    color: Option<String>,
+    fill: Option<String>,
+    font: Option<String>,
+    /// Font size in half-points, as the model stores it.
+    size_hp: Option<u32>,
+    /// `left` | `center` | `right` | `justify`.
+    align: Option<String>,
+    /// `top` | `middle` | `bottom`.
+    valign: Option<String>,
+    /// A number-format code, from Excel's `mso-number-format` or LibreOffice's
+    /// `sdnum`. Absent for producers that emit neither.
+    number_format: Option<String>,
+}
+
+/// Paste a parsed clipboard table: values, spans and the styles that survive
+/// the clipboard, as **one** transaction.
+///
+/// One `Batch` because a paste is one thing a person did: one undo takes all of
+/// it back, and a collaborator receives it as a unit rather than watching a
+/// grid fill in cell by cell.
+///
+/// The markup itself never reaches here — see
+/// [68](../../../docs/68-CLIPBOARD-HTML-PASTE.md) for why the browser parses it
+/// and what that costs.
+#[wasm_bindgen]
+pub fn session_paste_html(sheet: usize, row: u32, col: u32, cells: &str) -> Result<(), JsError> {
+    let parsed: Vec<PastedCell> =
+        serde_json::from_str(cells).map_err(|why| JsError::new(&format!("bad paste: {why}")))?;
+    if parsed.is_empty() {
+        return Ok(());
+    }
+    guard_protected(sheet, row, col, row, col)?;
+
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let mut ops = Vec::new();
+        let mut merges: Vec<(u32, u32, u32, u32)> = Vec::new();
+
+        for c in &parsed {
+            let at = CellRef::new(row.saturating_add(c.dr), col.saturating_add(c.dc));
+            ops.push(build_set_op(session, sheet, at, &c.text));
+
+            // Styles are applied over whatever the target cell already had, the
+            // same way `session_set_style` does: a paste carrying no opinion
+            // about italics must not silently clear the italics already there.
+            let mut style = session
+                .workbook()
+                .sheets
+                .get(sheet)
+                .and_then(|s| s.cells.get(at))
+                .and_then(|cell| cell.style)
+                .and_then(|id| session.workbook().styles.get(id))
+                .cloned()
+                .unwrap_or_default();
+            let mut touched = false;
+            if c.bold {
+                style.bold = true;
+                touched = true;
+            }
+            if c.italic {
+                style.italic = true;
+                touched = true;
+            }
+            if c.underline {
+                style.underline = Some(casual_calc_model::Underline::Single);
+                touched = true;
+            }
+            if c.strike {
+                style.strike = true;
+                touched = true;
+            }
+            if c.wrap {
+                style.wrap = true;
+                touched = true;
+            }
+            if let Some(hex) = c.color.as_ref() {
+                style.font_color = Some(hex.clone());
+                touched = true;
+            }
+            if let Some(hex) = c.fill.as_ref() {
+                style.fill_color = Some(hex.clone());
+                touched = true;
+            }
+            if let Some(name) = c.font.as_ref() {
+                style.font_name = Some(name.clone());
+                touched = true;
+            }
+            if let Some(hp) = c.size_hp {
+                style.font_size_hp = Some(hp);
+                touched = true;
+            }
+            if let Some(a) = c.align.as_deref() {
+                style.align = match a {
+                    "left" => Some(casual_calc_model::HAlign::Left),
+                    "center" => Some(casual_calc_model::HAlign::Center),
+                    "right" => Some(casual_calc_model::HAlign::Right),
+                    "justify" => Some(casual_calc_model::HAlign::Justify),
+                    _ => style.align,
+                };
+                touched = true;
+            }
+            if let Some(a) = c.valign.as_deref() {
+                style.valign = match a {
+                    "top" => Some(casual_calc_model::VAlign::Top),
+                    "middle" => Some(casual_calc_model::VAlign::Middle),
+                    "bottom" => Some(casual_calc_model::VAlign::Bottom),
+                    _ => style.valign,
+                };
+                touched = true;
+            }
+            if let Some(code) = c.number_format.as_ref() {
+                style.number_format = Some(code.clone());
+                touched = true;
+            }
+            if touched {
+                let id = session.workbook_mut().intern_style(style);
+                ops.push(EditOperation::SetStyle {
+                    sheet,
+                    at,
+                    style: Some(id),
+                });
+            }
+
+            if c.rs > 1 || c.cs > 1 {
+                merges.push((
+                    at.row,
+                    at.col,
+                    at.row + c.rs.max(1) - 1,
+                    at.col + c.cs.max(1) - 1,
+                ));
+            }
+        }
+
+        session.edit(EditOperation::Batch(ops)).map_err(js)?;
+        // Merges are sheet metadata rather than cell operations, so they cannot
+        // ride in the same batch. Applied after, so the values are already in
+        // place and a merge never covers a cell this paste has yet to write.
+        for (r0, c0, r1, c1) in merges {
+            merge_discarding(session, sheet, r0, c0, r1, c1)?;
+        }
+        Ok(())
     })
 }
 
