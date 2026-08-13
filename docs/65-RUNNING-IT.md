@@ -102,6 +102,76 @@ ignoring it. A new secret invalidates every token in flight; a new bind address
 is a different server; a node changing identity mid-lease is the zombie the
 epoch fence exists to stop.
 
+## Fonts, and why a sheet might be a row of boxes
+
+The editor draws every cell **the browser's way**, with the browser's own fonts,
+so what a person types is drawn correctly in any script whether or not this is
+configured. What is affected is the **headless renderer** — thumbnails, previews,
+server-side PNG export.
+
+That renderer carries **Latin only**, deliberately. Bundling coverage for every
+script would put megabytes into every browser that opens the editor, for
+languages most deployments never see, and it would make this project the arbiter
+of which languages are worth carrying ([ADR-018](64-TEXT-SHAPING.md)). A
+deployment knows which scripts its documents are in; this does not.
+
+**Drop `.ttf`, `.otf` or `.ttc` files into the font directory.** The demo host
+lists them at `/api/fonts` and its document page registers them, so for the
+compose stacks that is the whole procedure:
+
+```sh
+mkdir -p ./fonts && cp NotoSansArabic-Regular.ttf ./fonts/
+docker compose restart host
+```
+
+Integrating rather than running the demo? The editor **never probes for a font
+service** — a host that does not run one would get a 404 in the console of every
+session — so opt in by naming yours:
+
+```
+/editor/editor.html?fonts=/api/fonts
+```
+
+Bare `?fonts` means `/api/fonts`. Answer it with the URLs to fetch, which can
+point anywhere — a CDN, a versioned path, another origin:
+
+```json
+{ "fonts": ["/fonts/NotoSansArabic-Regular.ttf"] }
+```
+
+Which face for which script — any face covering the script works, and the Noto
+families are the usual answer because they are SIL Open Font Licence and cover
+nearly everything:
+
+| script | a face that covers it |
+| --- | --- |
+| Latin, Greek, Cyrillic, Hebrew | **already bundled** — nothing to do |
+| Arabic, Persian, Urdu | Noto Sans Arabic |
+| Devanagari (Hindi, Marathi) | Noto Sans Devanagari |
+| Bengali, Gujarati, Tamil, Telugu, Malayalam | Noto Sans *(that script)* |
+| Thai, Burmese | Noto Sans Thai / Myanmar |
+| Chinese, Japanese, Korean | Noto Sans CJK *(pick the regional variant)* |
+| emoji | Noto Color Emoji |
+
+Faces are searched **before** the bundled ones and in filename order, so a
+deployment that supplies a face gets it rather than a bundled near-match — and
+the same document renders in the same face on every boot.
+
+None is shipped here. A CJK face alone is tens of megabytes, and which one is a
+regional decision this project should not be making for anybody.
+
+### Finding out before a user does
+
+A box is indistinguishable from a rendering bug, so ask instead of waiting:
+
+- `/admin` lists the font directory and every face found in it.
+- The SDK's `missing_font_coverage()` answers for a document — `[]` for almost
+  all of them, and `[{ script: "Thai", sample: "ไ" }]` when there is a gap.
+- In the browser, `missing_font_scripts(text)` answers the same question.
+
+Each names the script and one character from it, which is the sentence worth
+showing a user: *this sheet contains Thai and no face covering it is installed*.
+
 ## Security, honestly
 
 The demo defaults are demo defaults, and the ones that matter are:

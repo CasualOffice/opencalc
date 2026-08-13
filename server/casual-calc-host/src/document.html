@@ -59,7 +59,11 @@
   // The editor is loaded in an iframe so this page can keep its own chrome
   // without forking the editor's HTML — the same way a host embeds it.
   const frame = document.getElementById("frame");
-  frame.src = "/editor/editor.html";
+  // `?fonts` opts this deployment into the font service below. The editor
+  // never probes for one — a host that does not run one would get a 404 in
+  // its console on every boot — so saying so is the host's job, and this host
+  // does run one.
+  frame.src = "/editor/editor.html?fonts=/api/fonts";
   frame.addEventListener("load", async () => {
     const win = frame.contentWindow;
     // Wait for the engine, which the editor signals by writing its version into

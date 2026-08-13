@@ -50,6 +50,9 @@ services:
       OPENCALC_HOST_INTERNAL: http://host:8080
     volumes:
       - documents:/data
+      # `:ro` because the renderer only ever reads these, and read-only is the
+      # honest declaration of that.
+      - ./fonts:/fonts:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/casual-calc-host", "--healthcheck"]
       interval: 10s

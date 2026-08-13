@@ -11319,6 +11319,55 @@ function announceCollabSelection() {
 /// varies. See `docs/55` §4b for what that costs.
 let instanceKey = "";
 
+/// Fetch and register the faces a host offers, when it says it offers some.
+///
+/// **Opt-in, and it has to be.** The obvious version probes `/api/fonts` on
+/// every boot and treats a 404 as "no font service" — which works, and logs
+/// `Failed to load resource: 404` to the console of every deployment that does
+/// not run one, which is most of them. A `fetch` rejection can be caught; the
+/// browser logging a failed request cannot. A diagnostic that cries wolf on
+/// every boot is worse than no diagnostic, so nothing is fetched unless asked.
+///
+/// Ask with `?fonts` on the editor URL — bare for the conventional
+/// `/api/fonts`, or `?fonts=/some/other/path` for anything else.
+///
+/// Failures past that point are logged and never fatal: having been told the
+/// service is there, a face that will not load is worth a line, because the
+/// realistic cause is a fetch that returned an error page and the symptom
+/// otherwise shows up much later looking like a renderer bug.
+async function registerSuppliedFonts() {
+  const asked = new URL(location.href).searchParams.get("fonts");
+  if (asked === null) return;
+  const service = asked === "" ? "/api/fonts" : asked;
+  try {
+    const response = await fetch(service, { headers: { accept: "application/json" } });
+    if (!response.ok) {
+      console.warn(`[opencalc] font service ${service} answered ${response.status}`);
+      return;
+    }
+    // URLs, taken as given and resolved against this page. The service decides
+    // where its faces live; this only fetches them.
+    const { fonts = [] } = await response.json();
+    for (const url of fonts) {
+      try {
+        const face = await fetch(new URL(url, location.href));
+        if (!face.ok) {
+          console.warn(`[opencalc] ${url} answered ${face.status}; not registered`);
+          continue;
+        }
+        const bytes = new Uint8Array(await face.arrayBuffer());
+        if (!wasm.register_font(bytes)) {
+          console.warn(`[opencalc] ${url} is not a readable font face; ignored`);
+        }
+      } catch (why) {
+        console.warn(`[opencalc] could not register ${url}:`, why);
+      }
+    }
+  } catch (why) {
+    console.warn(`[opencalc] font service ${service} unreachable:`, why);
+  }
+}
+
 async function main() {
   bindElements();
   const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}${instanceKey}`);
@@ -11340,6 +11389,13 @@ async function main() {
   if (typeof window !== "undefined") {
     try { window.opencalcEditor = await import(import.meta.url); } catch {}
   }
+
+  // Faces the deployment supplies, registered before anything can be rendered
+  // to a PNG. Best-effort on purpose: a host that offers no `/api/fonts` is the
+  // normal case, and the editor itself never needs them — the browser draws
+  // every cell a user looks at with its own faces. This is for `render_png`,
+  // where a missing face is a picture full of boxes.
+  await registerSuppliedFonts();
 
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();

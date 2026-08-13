@@ -12,7 +12,7 @@
 
 mod fonts;
 
-pub use fonts::{register_face, registered_count};
+pub use fonts::{MissingScript, missing_scripts, register_face, registered_count};
 #[cfg(feature = "shaping")]
 mod shape;
 

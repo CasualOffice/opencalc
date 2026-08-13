@@ -199,3 +199,31 @@ test("a formula comes back written the way it was typed", async ({ page }) => {
   await goTo(page, "F2");
   await expect(page.locator("#formula-input")).toHaveValue("=(1+2)*3");
 });
+
+/// A document in a script with no registered face can say so.
+///
+/// Fonts are supplied by the deployment rather than bundled, which is the right
+/// trade and leaves one sharp edge: the headless PNG renderer draws boxes for a
+/// script nobody installed, and a box looks like a rendering bug. This is the
+/// question a host asks instead of waiting for the ticket.
+///
+/// The harness serves no `/api/fonts`, so nothing is registered here — which is
+/// also worth asserting: a host with no font service must boot cleanly, and the
+/// editor itself is unaffected either way because the browser draws its cells.
+test("the engine names the scripts it has no face for", async ({ page }) => {
+  const problems = await boot(page);
+
+  const report = await page.evaluate(() => {
+    const wasm = window.opencalcEditor.wasmApi();
+    return {
+      latin: JSON.parse(wasm.missing_font_scripts("Total 1,234.56")),
+      thai: JSON.parse(wasm.missing_font_scripts("ไทย")),
+    };
+  });
+
+  expect(report.latin, "Latin is bundled, so an ordinary sheet reports nothing").toEqual([]);
+  expect(report.thai, "and a script with no face is named, with a sample").toEqual([
+    { script: "Thai", sample: "ไ" },
+  ]);
+  expect(problems, "a host offering no fonts is the normal case, not an error").toEqual([]);
+});

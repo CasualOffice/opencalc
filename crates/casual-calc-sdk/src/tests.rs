@@ -642,3 +642,42 @@ fn undoing_a_structural_edit_does_not_leave_a_stale_precedent_graph() {
         "after undo the graph describes the document undo produced"
     );
 }
+
+/// A document in a script with no registered face must be able to *say so*.
+///
+/// The renderer's behaviour is unchanged and correct — it draws what it has.
+/// What was missing is the sentence: fonts are supplied by the host, so a sheet
+/// of Arabic renders as boxes, and a box is indistinguishable from a rendering
+/// bug unless something names the cause.
+#[test]
+fn a_document_reports_the_scripts_it_cannot_be_drawn_in() {
+    let mut session = WorkbookSession::blank();
+    let wb = session.workbook_mut();
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 2)), "Sheet1");
+    let latin = wb.intern_string("Total");
+    sheet.cells.set(
+        CellRef::new(0, 0),
+        casual_calc_model::Cell::value(CellValue::InlineString(latin)),
+    );
+    wb.sheets.push(sheet);
+
+    assert!(
+        session.missing_font_coverage().is_empty(),
+        "Latin is bundled, so an ordinary document reports nothing"
+    );
+
+    // U+0E44 THAI CHARACTER SARA AI MAIMALAI — no bundled family covers Thai.
+    let thai = session.workbook_mut().intern_string("ไทย");
+    session.workbook_mut().sheets[0].cells.set(
+        CellRef::new(1, 0),
+        casual_calc_model::Cell::value(CellValue::InlineString(thai)),
+    );
+
+    let missing = session.missing_font_coverage();
+    assert_eq!(
+        missing.len(),
+        1,
+        "one script, named once, not one entry per character: {missing:?}"
+    );
+    assert_eq!(missing[0].script, "Thai");
+}

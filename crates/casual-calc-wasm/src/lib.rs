@@ -8769,6 +8769,26 @@ pub fn registered_font_count() -> usize {
     casual_calc_render::registered_count()
 }
 
+/// Which scripts in `text` no available face can draw, as JSON:
+/// `[{"script":"Thai","sample":"ไ"}]`, empty for the ordinary document.
+///
+/// The counterpart to [`register_font`]. Registering is how a host fixes the
+/// gap; this is how it finds out there is one, before a user sees a picture of
+/// boxes and files a rendering bug.
+///
+/// Answers for whatever is registered at the moment of the call, so ask after
+/// registering. Only the headless PNG path needs it — the editor draws through
+/// the browser, which brings its own faces.
+#[wasm_bindgen]
+#[must_use]
+pub fn missing_font_scripts(text: &str) -> String {
+    let missing: Vec<serde_json::Value> = casual_calc_render::missing_scripts(text)
+        .into_iter()
+        .map(|m| serde_json::json!({ "script": m.script, "sample": m.sample.to_string() }))
+        .collect();
+    serde_json::to_string(&missing).unwrap_or_else(|_| "[]".to_owned())
+}
+
 /// The protocol version this engine speaks.
 ///
 /// Checked by the server on the first message, so a mismatched pair stops at

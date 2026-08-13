@@ -30,8 +30,15 @@ services:
       # Unset by default, which switches the admin page off entirely. A demo
       # shipping with a known password is a demo somebody exposes once.
       OPENCALC_ADMIN_TOKEN: ${OPENCALC_ADMIN_TOKEN:-}
+      # Latin renders with no configuration. For any other script, drop a
+      # .ttf/.otf/.ttc into ./fonts and it is registered at boot — see
+      # docs/65-RUNNING-IT.md. An absent directory is fine and is the default.
+      OPENCALC_FONT_DIR: /fonts
     volumes:
       - documents:/data
+      # `:ro` because the renderer only ever reads these, and read-only is the
+      # honest declaration of that.
+      - ./fonts:/fonts:ro
     ports:
       - "${OPENCALC_HOST_PORT:-8080}:8080"
     healthcheck:

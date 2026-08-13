@@ -589,6 +589,37 @@ impl WorkbookSession {
         &mut self.workbook
     }
 
+    /// Which scripts this document contains that the renderer cannot draw.
+    ///
+    /// Ask before shipping a PNG. Fonts are supplied by the host rather than
+    /// bundled ([ADR-018](../../../docs/64-TEXT-SHAPING.md)), which is the right
+    /// trade and leaves one sharp edge: a sheet in a script nobody registered
+    /// renders as a row of boxes, and a box looks like a bug in the renderer
+    /// rather than a font that was never installed. This is the difference
+    /// between a support ticket and a sentence naming what to install.
+    ///
+    /// Empty is the answer for the overwhelming majority of documents, and an
+    /// empty vector costs one pass over the string table to obtain.
+    ///
+    /// Only the **editor** is exempt from caring: it draws through the browser,
+    /// which supplies its own faces. This is about the headless renderer —
+    /// thumbnails, previews, server-side exports.
+    #[must_use]
+    pub fn missing_font_coverage(&self) -> Vec<casual_calc_render::MissingScript> {
+        // The string table holds every piece of text in the document exactly
+        // once, which is both cheaper than walking cells and more complete:
+        // a string is there whether or not any cell currently shows it.
+        let mut text = String::new();
+        for s in self.workbook.strings.iter() {
+            text.push_str(s);
+        }
+        // Sheet names are drawn by the editor's tab strip rather than by this
+        // renderer, so they are deliberately not included: reporting a script
+        // that no PNG will ever contain is a false alarm, and a false alarm in
+        // a diagnostic is worse than no diagnostic.
+        casual_calc_render::missing_scripts(&text)
+    }
+
     /// The grid geometry (column widths / row heights) of a sheet.
     fn geometry(&self, sheet_index: usize) -> GridGeometry {
         self.workbook

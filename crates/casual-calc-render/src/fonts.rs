@@ -254,6 +254,89 @@ pub fn registered_count() -> usize {
     REGISTERED.read().map_or(0, |g| g.len())
 }
 
+/// A script this build cannot draw, and one character from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingScript {
+    /// A name for the block, for saying out loud. `"Arabic"`, `"CJK"`.
+    pub script: &'static str,
+    /// The first character seen from it, so a caller can show what it means.
+    pub sample: char,
+}
+
+/// Name the Unicode block a character belongs to, for the scripts a
+/// spreadsheet is realistically written in.
+///
+/// Deliberately coarse. This exists to turn "boxes" into a sentence naming what
+/// to install, and "Devanagari" is that sentence; the precise block name is not.
+/// Anything unrecognised is reported under its code point instead of being
+/// dropped, because a character nobody anticipated is exactly the one worth
+/// mentioning.
+fn block_of(ch: char) -> &'static str {
+    match u32::from(ch) {
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => "Hebrew",
+        0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => "Arabic",
+        0x0900..=0x097F => "Devanagari",
+        0x0980..=0x09FF => "Bengali",
+        0x0A80..=0x0AFF => "Gujarati",
+        0x0B80..=0x0BFF => "Tamil",
+        0x0C00..=0x0C7F => "Telugu",
+        0x0D00..=0x0D7F => "Malayalam",
+        0x0E00..=0x0E7F => "Thai",
+        0x1000..=0x109F => "Burmese",
+        0x10A0..=0x10FF => "Georgian",
+        0x0530..=0x058F => "Armenian",
+        0x1100..=0x11FF | 0xAC00..=0xD7AF => "Korean",
+        0x3040..=0x30FF => "Japanese kana",
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => "CJK",
+        0x0400..=0x04FF => "Cyrillic",
+        0x0370..=0x03FF => "Greek",
+        0x1F300..=0x1FAFF | 0x2600..=0x27BF => "emoji and symbols",
+        _ => "other",
+    }
+}
+
+/// Which scripts appear in `text` that no available face can draw.
+///
+/// The gap this closes is not that coverage is missing — that is a deliberate
+/// decision, recorded in [ADR-018](../../../docs/64-TEXT-SHAPING.md), and a host
+/// supplies what it needs with [`register_face`]. The gap is that a document in
+/// an unsupplied script renders as a row of boxes **with nothing anywhere saying
+/// why**, which reads as a rendering bug rather than as a missing font.
+///
+/// Answers for the faces registered *now*, so a caller should ask after
+/// registering rather than before. Reported in order of first appearance, once
+/// per script, with one sample character — enough to write "this sheet contains
+/// Arabic and no face covering it is installed" and nothing more, because a list
+/// of every uncoverable code point is not a thing anybody acts on.
+///
+/// Characters with no visible glyph of their own — spaces, newlines, control
+/// codes — are skipped: a face is not required to cover them and reporting them
+/// would bury the one line that matters.
+#[must_use]
+pub fn missing_scripts(text: &str) -> Vec<MissingScript> {
+    let mut found: Vec<MissingScript> = Vec::new();
+    let mut asked: std::collections::HashSet<char> = std::collections::HashSet::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch.is_control() {
+            continue;
+        }
+        if !asked.insert(ch) {
+            continue;
+        }
+        // Weight is not part of the question: a deployment missing Arabic is
+        // missing it in every weight, and asking four times would report the
+        // same script four times.
+        if coverage_face_bytes(ch, false, false).is_some() {
+            continue;
+        }
+        let script = block_of(ch);
+        if !found.iter().any(|m| m.script == script) {
+            found.push(MissingScript { script, sample: ch });
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +487,89 @@ mod ingest_tests {
             b"<!doctype html><title>404</title>".to_vec()
         ));
         assert!(!register_face(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod coverage_report_tests {
+    use super::*;
+
+    /// Latin is always drawable, with no configuration and no registered face —
+    /// that is the one promise the bundle makes, so it must never be reported.
+    #[test]
+    fn latin_is_never_missing() {
+        assert_eq!(missing_scripts("Total 1,234.56 (café)"), Vec::new());
+    }
+
+    /// And a script with no bundled face is named rather than silently drawn as
+    /// boxes. Asserted through `coverage_face_bytes` rather than against a fixed
+    /// list, so this follows the build it is compiled into: the `all-fonts`
+    /// build covers more, and the test says the same thing about both.
+    #[test]
+    fn an_uncovered_script_is_named_once_with_a_sample() {
+        // U+0915 DEVANAGARI LETTER KA, thrice, so the "once per script" part is
+        // actually exercised rather than assumed.
+        let text = "क क क";
+        if coverage_face_bytes('क', false, false).is_some() {
+            assert_eq!(
+                missing_scripts(text),
+                Vec::new(),
+                "this build covers Devanagari, so it must not be reported"
+            );
+            return;
+        }
+        assert_eq!(
+            missing_scripts(text),
+            vec![MissingScript {
+                script: "Devanagari",
+                sample: 'क',
+            }]
+        );
+    }
+
+    /// Two scripts, both missing, both named — and Latin in the same string is
+    /// not, because the report is about what to install and Latin is installed.
+    #[test]
+    fn several_scripts_are_reported_separately_and_latin_is_not() {
+        let text = "Total: العربية / ไทย";
+        let missing = missing_scripts(text);
+        assert!(
+            !missing.iter().any(|m| m.script == "other"),
+            "these are known blocks, not unrecognised ones: {missing:?}"
+        );
+        for name in ["Arabic", "Thai"] {
+            if coverage_face_bytes(if name == "Arabic" { 'ا' } else { 'ไ' }, false, false).is_none()
+            {
+                assert!(
+                    missing.iter().any(|m| m.script == name),
+                    "{name} is uncovered and must be named: {missing:?}"
+                );
+            }
+        }
+    }
+
+    /// The report and the renderer must never disagree: a character is reported
+    /// missing exactly when the renderer has no face for it.
+    ///
+    /// This is what makes the report right *after* a host registers a face,
+    /// without this test registering one — `register_face` writes to process-wide
+    /// state, and a test that mutates it races the one that counts it. Asserting
+    /// the shared path instead gets the property and no flake.
+    #[test]
+    fn the_report_agrees_with_what_the_renderer_can_draw() {
+        for ch in ['A', 'é', 'א', 'ا', 'क', 'ไ', '中', '€', 'Я'] {
+            let drawable = coverage_face_bytes(ch, false, false).is_some();
+            let reported = missing_scripts(&ch.to_string()).is_empty();
+            assert_eq!(
+                drawable, reported,
+                "{ch:?}: renderer can draw it = {drawable}, report says fine = {reported}"
+            );
+        }
+    }
+
+    /// Whitespace has no glyph to miss.
+    #[test]
+    fn blanks_and_control_characters_are_not_reported() {
+        assert_eq!(missing_scripts(" \t\n\u{7}"), Vec::new());
     }
 }

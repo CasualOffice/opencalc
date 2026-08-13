@@ -36,3 +36,9 @@ node_modules/
 /tests/browser/test-results/
 /tests/browser/playwright-report/
 /tests/browser/blob-report/
+
+# Faces an operator drops in for the headless renderer. The directory and its
+# README are tracked; the fonts themselves are a deployment's choice and are
+# often large and separately licensed.
+/fonts/*
+!/fonts/README.md

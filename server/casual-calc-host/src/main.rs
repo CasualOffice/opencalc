@@ -468,10 +468,57 @@ async fn admin_state(
             "store": config.store.to_string_lossy(),
             "host_internal": config.internal_base,
             "secret_set": !config.secret.is_empty(),
+            // Named on the admin page because "why is this document boxes?"
+            // is otherwise unanswerable from inside the product.
+            "font_dir": font_dir().to_string_lossy(),
+            "fonts": faces_in(&font_dir()),
         },
         "documents": documents,
     }))
     .into_response()
+}
+
+/// Where a deployment drops the faces it needs.
+fn font_dir() -> std::path::PathBuf {
+    std::env::var("OPENCALC_FONT_DIR")
+        .unwrap_or_else(|_| "/fonts".to_owned())
+        .into()
+}
+
+/// The face files in `dir`, sorted so the editor registers them in the same
+/// order on every boot — coverage is decided by *first* match, so an unstable
+/// order would mean the same document rendering in different faces.
+fn faces_in(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| {
+            let lower = n.to_ascii_lowercase();
+            [".ttf", ".otf", ".ttc"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// What the editor asks for at boot, so it can register each one.
+///
+/// **URLs, not names.** The editor fetching what it is told to fetch is the
+/// difference between a host being free to serve faces from anywhere — a CDN, a
+/// versioned path, another origin — and every client having to reconstruct a
+/// convention that only this host happens to follow.
+async fn font_list() -> impl IntoResponse {
+    let urls: Vec<String> = faces_in(&font_dir())
+        .into_iter()
+        .map(|name| format!("/fonts/{name}"))
+        .collect();
+    Json(serde_json::json!({ "fonts": urls }))
 }
 
 /// Change what can be changed.
@@ -554,6 +601,18 @@ async fn main() {
     }
 
     let editor = std::env::var("OPENCALC_EDITOR_DIR").unwrap_or_else(|_| "/editor".to_owned());
+    // Fonts the deployment supplies. Empty is the normal case and stays silent;
+    // this exists so that supplying one is dropping a file into a directory
+    // rather than a code change, which is the whole premise of ADR-018's
+    // "a host knows which scripts its documents are in".
+    let fonts = font_dir();
+    match faces_in(&fonts) {
+        faces if faces.is_empty() => tracing::info!(
+            dir = ?fonts,
+            "no fonts supplied; Latin renders, other scripts will not (see docs/65)"
+        ),
+        faces => tracing::info!(dir = ?fonts, count = faces.len(), "fonts supplied"),
+    }
     let app = Router::new()
         .route("/", get(index))
         .route("/d/{id}", get(open_doc))
@@ -569,7 +628,11 @@ async fn main() {
         .route("/api/admin/settings", post(admin_update))
         // The editor itself, served from the same origin as the API so a share
         // link is one host and there is no CORS to explain to anybody.
+        .route("/api/fonts", get(font_list))
         .nest_service("/editor", tower_http::services::ServeDir::new(editor))
+        // Served rather than embedded, and from the same origin as everything
+        // else so registering one needs no CORS.
+        .nest_service("/fonts", tower_http::services::ServeDir::new(fonts))
         .with_state(Arc::clone(&config));
 
     let bind = std::env::var("OPENCALC_HOST_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
