@@ -30,6 +30,10 @@ services:
       # Unset by default, which switches the admin page off entirely. A demo
       # shipping with a known password is a demo somebody exposes once.
       OPENCALC_ADMIN_TOKEN: ${OPENCALC_ADMIN_TOKEN:-}
+      # The largest workbook the host will accept. Set explicitly because the
+      # framework default is 2 MB, which is under the size of an ordinary
+      # spreadsheet and rejected real files.
+      OPENCALC_MAX_UPLOAD_BYTES: ${OPENCALC_MAX_UPLOAD_BYTES:-67108864}
       # Latin renders with no configuration. For any other script, drop a
       # .ttf/.otf/.ttc into ./fonts and it is registered at boot — see
       # docs/65-RUNNING-IT.md. An absent directory is fine and is the default.

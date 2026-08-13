@@ -52,6 +52,13 @@ struct Config {
     /// Getting these two confused is the classic first failure: the server
     /// fetches `localhost` and finds itself.
     internal_base: String,
+    /// The largest upload accepted, in bytes.
+    ///
+    /// Axum's default body limit is **2 MB**, which is under the size of an
+    /// ordinary spreadsheet and was rejecting real files. Named here rather than
+    /// left to a framework default, because the number a deployment wants
+    /// depends on its documents and its disk, and neither is knowable from here.
+    max_upload: usize,
     /// The WebSocket endpoint a **browser** should connect to.
     collab_ws: String,
     /// The audience the collaboration server is configured to require.
@@ -284,19 +291,68 @@ async fn create(State(config): State<Arc<Config>>, Json(body): Json<NewDoc>) -> 
 
 /// Upload an existing workbook.
 async fn upload(State(config): State<Arc<Config>>, mut form: Multipart) -> impl IntoResponse {
+    // The admin page offers this switch, so it has to mean something. A setting
+    // that is accepted and ignored is the failure `/admin` documents itself as
+    // refusing to commit.
+    if !Settings::load(&config).allow_uploads {
+        return (StatusCode::FORBIDDEN, "uploads are turned off").into_response();
+    }
+
     let mut title = "Uploaded.xlsx".to_owned();
     let mut bytes = Vec::new();
-    while let Ok(Some(field)) = form.next_field().await {
-        if let Some(name) = field.file_name() {
-            title = name.to_owned();
-        }
-        if let Ok(data) = field.bytes().await {
-            bytes = data.to_vec();
+    loop {
+        match form.next_field().await {
+            Ok(Some(field)) => {
+                if let Some(name) = field.file_name() {
+                    title = name.to_owned();
+                }
+                match field.bytes().await {
+                    Ok(data) => bytes = data.to_vec(),
+                    // Distinguished rather than swallowed. Every failure here
+                    // used to leave `bytes` empty and answer "no file", so a
+                    // spreadsheet one byte over the limit was reported as no
+                    // spreadsheet at all — which sends somebody looking at their
+                    // file picker instead of at the limit.
+                    Err(why) => {
+                        tracing::warn!(%title, ?why, "upload body rejected");
+                        return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            format!(
+                                "could not read the upload (limit is {} MB)",
+                                config.max_upload / (1024 * 1024)
+                            ),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(why) => {
+                tracing::warn!(?why, "malformed upload");
+                return (StatusCode::BAD_REQUEST, "malformed upload").into_response();
+            }
         }
     }
     if bytes.is_empty() {
         return (StatusCode::BAD_REQUEST, "no file").into_response();
     }
+
+    // Admitted before it is stored, not after.
+    //
+    // Storing first and discovering on open produces a document that exists,
+    // has a share link, and cannot be opened by anybody it was shared with —
+    // and the person who uploaded it finds out one navigation later, with no
+    // way to tell a corrupt file from a broken server. The importer is the only
+    // thing that actually knows, so it is what decides.
+    if let Err(why) = casual_calc_import::import_package(bytes.clone()) {
+        tracing::info!(%title, ?why, "upload refused");
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("this file could not be opened as a spreadsheet: {why}"),
+        )
+            .into_response();
+    }
+
     let id = uuid()[..16].to_owned();
     let meta = DocumentMeta {
         id: id.clone(),
@@ -305,8 +361,29 @@ async fn upload(State(config): State<Arc<Config>>, mut form: Multipart) -> impl 
     let (Some(doc), Some(metap)) = (doc_path(&config, &id), meta_path(&config, &id)) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "bad id").into_response();
     };
-    let _ = tokio::fs::write(&doc, bytes).await;
-    let _ = tokio::fs::write(&metap, serde_json::to_vec(&meta).unwrap_or_default()).await;
+    // Both writes checked, and the document written first. A metadata file with
+    // no document behind it is a listing entry that opens to nothing; ignoring
+    // either error produced exactly that, silently, on a full disk.
+    if let Err(why) = tokio::fs::write(&doc, bytes).await {
+        tracing::error!(?why, ?doc, "cannot store the uploaded document");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store the file",
+        )
+            .into_response();
+    }
+    if let Err(why) = tokio::fs::write(&metap, serde_json::to_vec(&meta).unwrap_or_default()).await
+    {
+        tracing::error!(?why, ?metap, "cannot store the document metadata");
+        // The orphan is removed rather than left behind, so a retry is a clean
+        // upload instead of a second copy beside an unreachable first.
+        let _ = tokio::fs::remove_file(&doc).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store the file",
+        )
+            .into_response();
+    }
     Redirect::to(&format!("/d/{id}")).into_response()
 }
 
@@ -588,6 +665,10 @@ async fn main() {
             .unwrap_or_else(|_| "dev-secret-change-me".to_owned()),
         internal_base: std::env::var("OPENCALC_HOST_INTERNAL")
             .unwrap_or_else(|_| "http://host:8080".to_owned()),
+        max_upload: std::env::var("OPENCALC_MAX_UPLOAD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64 * 1024 * 1024),
         collab_ws: std::env::var("OPENCALC_COLLAB_WS")
             .unwrap_or_else(|_| "ws://127.0.0.1:8443/collab".to_owned()),
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_else(|_| "opencalc-demo".to_owned()),
@@ -617,7 +698,10 @@ async fn main() {
         .route("/", get(index))
         .route("/d/{id}", get(open_doc))
         .route("/api/documents", post(create))
-        .route("/api/upload", post(upload))
+        .route(
+            "/api/upload",
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(config.max_upload)),
+        )
         .route("/api/documents/{id}/content", get(content))
         .route("/api/documents/{id}/callback", post(callback))
         .route("/api/documents/{id}/download", get(download))

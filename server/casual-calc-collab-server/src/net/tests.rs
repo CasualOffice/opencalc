@@ -193,7 +193,40 @@ async fn hear(socket: &mut Socket) -> Option<ServerMessage> {
             .expect("the server answered within five seconds")?;
         match frame.ok()? {
             tokio_tungstenite::tungstenite::Message::Text(text) => {
-                return serde_json::from_str(&text).ok();
+                // Presence is unsolicited: a joiner is told who is already in
+                // the document, and anybody may move at any moment. A test
+                // asking for "the reply to what I just did" wants the reply to
+                // what it just did, so these are skipped rather than counted.
+                // The tests that are *about* presence use `hear_presence`.
+                match serde_json::from_str(&text).ok()? {
+                    ServerMessage::Presence { .. } | ServerMessage::Departed { .. } => continue,
+                    other => return Some(other),
+                }
+            }
+            tokio_tungstenite::tungstenite::Message::Close(_) => return None,
+            _ => continue,
+        }
+    }
+}
+
+/// The next presence-family message, for the tests that are about presence.
+///
+/// The counterpart to `hear` skipping them: something has to be able to read
+/// them, and a test about presence should say so at its call site rather than
+/// relying on presence happening to be next in the queue.
+async fn hear_presence(socket: &mut Socket) -> Option<ServerMessage> {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("the server answered within five seconds")?;
+        match frame.ok()? {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                match serde_json::from_str(&text).ok()? {
+                    message @ (ServerMessage::Presence { .. } | ServerMessage::Departed { .. }) => {
+                        return Some(message);
+                    }
+                    _ => continue,
+                }
             }
             tokio_tungstenite::tungstenite::Message::Close(_) => return None,
             _ => continue,
@@ -574,6 +607,51 @@ async fn a_commenter_may_comment_and_may_not_edit() {
 
 // --- Presence --------------------------------------------------------------
 
+/// **Somebody who joins is told who is already in the document.**
+///
+/// Presence is broadcast only when a participant *moves*, so without this a
+/// joiner sees an empty room until one of the people already in it happens to
+/// click something. Two people reading the same document saw no evidence of one
+/// another at all — and the roster already knew, it was simply never asked on
+/// the way in.
+#[tokio::test]
+async fn a_joiner_is_told_who_is_already_here() {
+    let addr = start(Arc::new(Canned(package()))).await;
+
+    let mut ada = connect(addr).await;
+    join(&mut ada, &claims("Ada", Access::Edit)).await.unwrap();
+    say(
+        &mut ada,
+        &ClientMessage::Presence {
+            sheet: 2,
+            selection: [4, 5, 6, 7],
+        },
+    )
+    .await;
+
+    // Grace arrives to a document where Ada is sitting still.
+    let mut grace = connect(addr).await;
+    join(&mut grace, &claims("Grace", Access::Edit))
+        .await
+        .unwrap();
+
+    let heard = hear_presence(&mut grace).await;
+    let Some(ServerMessage::Presence {
+        name,
+        sheet,
+        selection,
+        ..
+    }) = heard
+    else {
+        panic!("the joiner was told about nobody, got {heard:?}");
+    };
+    assert_eq!(name, "Ada");
+    // Where Ada actually is, not where she was when she joined — the roster's
+    // current entry, so a replay cannot show a stale cursor.
+    assert_eq!(sheet, 2);
+    assert_eq!(selection, [4, 5, 6, 7]);
+}
+
 #[tokio::test]
 async fn presence_carries_the_name_from_the_token_and_not_from_the_client() {
     // The client cannot state a name — `ClientMessage::Presence` has no field
@@ -596,7 +674,7 @@ async fn presence_carries_the_name_from_the_token_and_not_from_the_client() {
     )
     .await;
 
-    let heard = hear(&mut ada).await;
+    let heard = hear_presence(&mut ada).await;
     let Some(ServerMessage::Presence {
         name,
         selection,

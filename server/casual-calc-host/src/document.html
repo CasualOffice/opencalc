@@ -16,6 +16,8 @@
   button.primary { background: #4472c4; color: #fff; border-color: transparent; }
   #status { opacity: .7; font-size: .85rem; }
   #who { display: flex; gap: .3rem; }
+  #me input { font: inherit; padding: .25rem .4rem; border: 1px solid #8884;
+              border-radius: .3rem; background: transparent; color: inherit; width: 8.5rem; }
   .dot { width: .95rem; height: .95rem; border-radius: 50%; font-size: .6rem; color: #fff;
          display: grid; place-items: center; }
   #frame { flex: 1; border: 0; width: 100%; }
@@ -27,6 +29,12 @@
 <header>
   <span class="title" id="title">…</span>
   <span id="status">connecting…</span>
+  <!-- Who you are, editable, because the alternative is inventing it. A demo
+       that calls everybody "Guest 47" makes presence useless exactly when two
+       people are in a document together and need to tell each other apart. -->
+  <label id="me" title="The name other participants see">
+    <input id="myname" size="12" placeholder="Your name" autocomplete="name">
+  </label>
   <span id="who"></span>
   <button id="share" class="primary">Share</button>
   <button id="download">Download</button>
@@ -47,13 +55,49 @@
   const status = document.getElementById("status");
 
   // A name per tab, so two windows of the same browser are two participants
-  // with two cursors rather than one that teleports.
+  // with two cursors rather than one that teleports. A name the person actually
+  // chose is remembered across documents; the invented one never is, so it stays
+  // a placeholder rather than hardening into an identity.
+  const chosen = localStorage.getItem("oc-name");
   const name =
+    chosen ||
     sessionStorage.getItem("oc-name") ||
     (sessionStorage.setItem("oc-name", "Guest " + Math.floor(Math.random() * 90 + 10)),
      sessionStorage.getItem("oc-name"));
 
-  const session = await (await fetch(`/api/documents/${id}/session?name=${encodeURIComponent(name)}`)).json();
+  const nameBox = document.getElementById("myname");
+  nameBox.value = chosen ?? "";
+  nameBox.placeholder = name;
+  // Applied on the next join rather than mid-session: the name is in the signed
+  // token, so changing it means a new token, and silently reconnecting somebody
+  // mid-edit to rename them is a worse trade than telling them.
+  nameBox.addEventListener("change", () => {
+    const next = nameBox.value.trim();
+    if (next) localStorage.setItem("oc-name", next);
+    else localStorage.removeItem("oc-name");
+    status.textContent = "name applies when you reload";
+  });
+
+  // Guarded, because everything below assumes a document. An unguarded `.json()`
+  // on a failed response throws at module top level, and the page then sits at
+  // "connecting…" forever with the real reason only in devtools.
+  let session;
+  try {
+    const response = await fetch(`/api/documents/${id}/session?name=${encodeURIComponent(name)}`);
+    if (!response.ok) {
+      status.textContent =
+        response.status === 404
+          ? "this document does not exist"
+          : `could not open this document (${response.status})`;
+      throw new Error(`session ${response.status}`);
+    }
+    session = await response.json();
+  } catch (why) {
+    if (status.textContent === "connecting…") status.textContent = "could not reach the server";
+    document.getElementById("title").textContent = "Unavailable";
+    for (const id of ["share", "download"]) document.getElementById(id).disabled = true;
+    throw why;
+  }
   document.getElementById("title").textContent = session.title;
 
   // The editor is loaded in an iframe so this page can keep its own chrome

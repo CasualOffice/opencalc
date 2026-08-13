@@ -151,6 +151,13 @@ function speakDirectly(key, user, access, act, replies = 1) {
       // Not the answer to anything; just an acknowledgement that the wait about
       // to happen is a wait rather than a hang.
       if (message.type === "opening") return;
+      // Presence is unsolicited and says nothing about what this client asked
+      // for: a joiner is told who is already in the document, and anybody may
+      // move at any moment. Skipped rather than counted, so a test asking for
+      // "the reply to my submission" gets the reply to its submission — these
+      // assertions are about refusals and acknowledgements, and were reading
+      // whichever message happened to arrive first.
+      if (message.type === "presence" || message.type === "departed") return;
       if (message.type === "welcome") {
         acted = true;
         act((m) => socket.send(JSON.stringify(m)), message.client, message.revision);
@@ -526,5 +533,134 @@ test.describe("collaboration", () => {
     await expect.poll(() => cellIn(watcher, 41, 0)).toBe("second");
 
     await watcher.close();
+  });
+});
+
+test.describe("seeing each other", () => {
+  /// **A participant who joins second must be able to see who was already there.**
+  ///
+  /// Presence is only broadcast when somebody *moves*, so a joiner used to see
+  /// an empty roster until one of the others happened to click. Two people
+  /// reading the same document saw no evidence of one another at all.
+  test("a joiner is told who is already in the document", async ({ browser }) => {
+    const key = freshDocument();
+    const first = await browser.newPage();
+    await boot(first);
+    await join(first, { document: key, user: { id: "u-ada", name: "Ada" } });
+
+    // Ada announces where she is looking, and then stops doing anything at all.
+    await first.evaluate(() => window.__session.present(0, [2, 1, 2, 1]));
+
+    const second = await browser.newPage();
+    await boot(second);
+    await join(second, { document: key, user: { id: "u-grace", name: "Grace" } });
+
+    await expect
+      .poll(
+        () =>
+          second.evaluate(() =>
+            window.__editor.collaborators().map((c) => ({ name: c.name, sel: c.selection })),
+          ),
+        { message: "the second participant never learned about the first" },
+      )
+      .toEqual([{ name: "Ada", sel: [2, 1, 2, 1] }]);
+  });
+
+  /// And the cursor is actually *drawn*, in that participant's own colour.
+  ///
+  /// The roster was already being kept before this and nothing painted it, so
+  /// co-editing looked exactly like editing alone. Asserted against the canvas
+  /// rather than the roster, because "the data is there" is precisely the state
+  /// that shipped.
+  test("another participant's selection is painted on the grid", async ({ browser }) => {
+    const key = freshDocument();
+    const mine = await browser.newPage();
+    await boot(mine);
+    await join(mine, { document: key, user: { id: "u-ada", name: "Ada" } });
+
+    const theirs = await browser.newPage();
+    await boot(theirs);
+    await join(theirs, { document: key, user: { id: "u-grace", name: "Grace" } });
+
+    // Somewhere unambiguous, and nowhere near Ada's own selection at A1.
+    await theirs.evaluate(() => window.__session.present(0, [7, 3, 7, 3]));
+
+    await expect
+      .poll(
+        async () => {
+          // Their colour is assigned by the server, so it is read rather than
+          // assumed — a hard-coded palette entry would pass or fail depending
+          // on which client id this run happened to allocate.
+          const colour = await mine.evaluate(
+            () => window.__editor.collaborators()[0]?.color ?? null,
+          );
+          if (!colour) return "no roster entry yet";
+          return mine.evaluate((hex) => {
+            const want = [0, 2, 4].map((i) => parseInt(hex.replace("#", "").slice(i, i + 2), 16));
+            const canvas = document.querySelector("#grid");
+            const { data } = canvas
+              .getContext("2d")
+              .getImageData(0, 0, canvas.width, canvas.height);
+            for (let i = 0; i < data.length; i += 4) {
+              if (
+                Math.abs(data[i] - want[0]) < 8 &&
+                Math.abs(data[i + 1] - want[1]) < 8 &&
+                Math.abs(data[i + 2] - want[2]) < 8
+              ) {
+                return "painted";
+              }
+            }
+            return "nothing in their colour";
+          }, colour);
+        },
+        { message: "the other participant's cursor was never drawn" },
+      )
+      .toBe("painted");
+
+    // It follows them. A cursor drawn once at join and never again looks
+    // identical in a screenshot and is useless in practice.
+    const paintedAt = async (row) => {
+      const colour = await mine.evaluate(() => window.__editor.collaborators()[0]?.color ?? null);
+      if (!colour) return "no roster entry";
+      return mine.evaluate(
+        ([hex, row]) => {
+          const want = [0, 2, 4].map((i) => parseInt(hex.replace("#", "").slice(i, i + 2), 16));
+          const canvas = document.querySelector("#grid");
+          const g = canvas.getContext("2d");
+          const { data, width } = g.getImageData(0, 0, canvas.width, canvas.height);
+          let top = null;
+          for (let i = 0; i < data.length; i += 4) {
+            if (
+              Math.abs(data[i] - want[0]) < 8 &&
+              Math.abs(data[i + 1] - want[1]) < 8 &&
+              Math.abs(data[i + 2] - want[2]) < 8
+            ) {
+              top = Math.floor(i / 4 / width);
+              break;
+            }
+          }
+          return top === null ? "absent" : top;
+        },
+        [colour, row],
+      );
+    };
+
+    const wasAt = await paintedAt(7);
+    await theirs.evaluate(() => window.__session.present(0, [20, 3, 20, 3]));
+    await expect
+      .poll(async () => {
+        const now = await paintedAt(20);
+        return typeof now === "number" && typeof wasAt === "number" && now > wasAt
+          ? "moved down"
+          : `still ${now}`;
+      }, { message: "the cursor did not follow them down the sheet" })
+      .toBe("moved down");
+
+    // And it goes when they do, rather than leaving a ghost at the last place
+    // anybody saw them.
+    await theirs.close();
+    await expect
+      .poll(() => paintedAt(20), { message: "the cursor outlived the participant" })
+      .toBe("no roster entry");
   });
 });

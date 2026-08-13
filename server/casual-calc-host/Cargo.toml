@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 casual-calc-export = { path = "../../crates/casual-calc-export" }
+casual-calc-import = { path = "../../crates/casual-calc-import" }
 casual-calc-model = { path = "../../crates/casual-calc-model" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }

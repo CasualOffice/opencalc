@@ -2164,6 +2164,11 @@ function draw() {
     ctx.setLineDash([]);
   }
 
+  // Other participants, drawn after the local selection so a cursor landing on
+  // the same cell is still visible, and before the overlays below so it never
+  // hides a control the user can click.
+  drawCollaborators(v, perQuad);
+
   // Fill handle at the selection's bottom-right corner (cell selections only).
   fillHandleRect = null;
   if (state.selKind === "cells" && !state.fill) {
@@ -11294,6 +11299,88 @@ function adoptCollabDocument(event) {
   invalidateGrowth();
   renderTabs();
   draw();
+}
+
+/// Paint the other participants' selections, each in its own colour with a name.
+///
+/// The roster was already being kept — presence arrives, `collabRoster` is
+/// updated and `draw()` is called — and then nothing read it. Co-editing worked
+/// and looked exactly like editing alone, which is the failure this fixes: the
+/// point of seeing somebody else's cursor is knowing not to type there.
+///
+/// Colour and name both come from the server, which takes them from the token.
+/// A client naming itself is the one place a claimed identity would be believed.
+/// A participant's colour as canvas will actually accept it.
+///
+/// The server's palette is bare hex — `0891B2`, no `#` — and an invalid
+/// `strokeStyle` is **silently ignored** by canvas rather than throwing, so
+/// every cursor would have quietly inherited whatever colour was set last. Every
+/// participant in the accent colour looks like a working feature, which is the
+/// kind of wrong that never gets reported.
+function participantColor(raw) {
+  if (typeof raw !== "string" || !raw) return colors.accent;
+  const hex = raw.trim();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex)) return hex;
+  if (/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex)) return `#${hex}`;
+  // Anything else — a named colour, an rgb() — is passed through only if the
+  // browser agrees it is a colour, so a malformed token cannot blank a cursor.
+  const probe = new Option().style;
+  probe.color = hex;
+  return probe.color ? hex : colors.accent;
+}
+
+function drawCollaborators(v, perQuad) {
+  if (!collabRoster.size) return;
+  for (const who of collabRoster.values()) {
+    // Only this sheet. A cursor on another tab is real and is not here.
+    if (who.sheet !== state.sheet) continue;
+    const sel = who.selection;
+    if (!Array.isArray(sel) || sel.length !== 4) continue;
+    const [r0, c0, r1, c1] = sel;
+    const sx = spanX(Math.min(c0, c1), Math.max(c0, c1), v);
+    const sy = spanY(Math.min(r0, r1), Math.max(r0, r1), v);
+    // Scrolled out of view, or collapsed to nothing by the pane clamp.
+    if (sx.w <= 0 || sy.h <= 0) continue;
+    const color = participantColor(who.color);
+
+    perQuad(() => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx.x + 1, sy.y + 1, Math.max(1, sx.w - 1), Math.max(1, sy.h - 1));
+      // A wash, so a range reads as theirs without hiding the values in it.
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = color;
+      ctx.fillRect(sx.x + 1, sy.y + 1, Math.max(1, sx.w - 1), Math.max(1, sy.h - 1));
+      ctx.restore();
+    });
+
+    const name = typeof who.name === "string" && who.name ? who.name : "someone";
+    perQuad(() => {
+      ctx.save();
+      // Both of these leak from cell drawing, which sets them per cell. The
+      // label came out centred on its own left edge — "Guest 21" rendered as
+      // "st 21", the rest of it painted white-on-white outside the tag — and
+      // nothing about the code said so. Only the screenshot did.
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = "11px system-ui, sans-serif";
+      const tw = Math.ceil(ctx.measureText(name).width);
+      const tagW = tw + 8;
+      const tagH = 15;
+      // Above the range, and below it when that would leave the grid — a label
+      // clipped off the top of the canvas names nobody.
+      const above = sy.y - tagH >= HH;
+      const ty = above ? sy.y - tagH : sy.y + sy.h;
+      // Clamped so a range running off the right edge keeps its label on screen.
+      const tx = Math.max(HW, Math.min(sx.x, v.w - tagW));
+      ctx.fillStyle = color;
+      ctx.fillRect(tx, ty, tagW, tagH);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(name, tx + 4, ty + tagH / 2 + 0.5);
+      ctx.restore();
+    });
+  }
 }
 
 /// Tell the others where this participant is looking, when it has moved.

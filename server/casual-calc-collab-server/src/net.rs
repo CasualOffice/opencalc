@@ -1115,6 +1115,36 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
         }
     }
 
+    // Who is already here.
+    //
+    // Presence is only broadcast when somebody *moves*, so without this a
+    // participant who joins a room where everyone is reading rather than typing
+    // sees an empty document with nobody in it — and stays that way until one of
+    // them happens to click. The roster already knows; it was simply never
+    // asked on the way in.
+    //
+    // Sent after the snapshot deliberately: a cursor is meaningless until there
+    // is a document under it, and this way a client that fails at the snapshot
+    // never had to skip past a burst of presence to notice.
+    {
+        let others: Vec<ServerMessage> = lock(&live.roster)
+            .everyone()
+            .filter(|(who, _)| *who != client)
+            .map(|(who, seen)| ServerMessage::Presence {
+                client: who,
+                name: seen.name.clone(),
+                color: seen.color.clone(),
+                sheet: seen.sheet,
+                selection: seen.selection,
+            })
+            .collect();
+        for message in others {
+            if send(&mut socket, &message).await.is_err() {
+                return;
+            }
+        }
+    }
+
     // A quiet connection is pinged, and one that has not answered anything for
     // long enough is closed. Without this a client that vanished — a closed
     // laptop, a dropped network — leaves a socket that looks open forever,

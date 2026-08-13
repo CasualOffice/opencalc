@@ -89,8 +89,17 @@ the other way around. This index is the map.
 | 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
 | 55 | [SDK Embedding & Integration](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) | The embeddable element: isolation, theming, commands, events, access, i18n |
 | 56 | [Collaboration Concurrency](56-COLLABORATION-CONCURRENCY-DESIGN.md) | OT vs CRDT for Phase 5, and why the per-cell byte ceiling decides it (ADR-011) |
-| 58 | [Interned Id Width](58-INTERNED-ID-WIDTH.md) | Why a style id is four bytes and not sixteen, and what that is worth (ADR-013) |
 | 57 | [Collaboration Server Boundary](57-COLLABORATION-SERVER-BOUNDARY.md) | What the server owns and must not own; webhook callbacks not a file store, a cluster with a leader per document and no sticky sessions, and the token as the whole integration contract (ADR-012) |
+| 58 | [Interned Id Width](58-INTERNED-ID-WIDTH.md) | Why a style id is four bytes and not sixteen, and what that is worth (ADR-013) |
+| 59 | [Collaboration Service Stack](59-COLLABORATION-SERVICE-STACK.md) | Transport, identity, coordination and durability for the server deployment |
+| 60 | [Production Readiness Audit](60-PRODUCTION-READINESS-AUDIT.md) | Historical production-gap audit; live remediation is tracked in 67 |
+| 61 | [Collaboration Resume](61-COLLABORATION-RESUME.md) | ADR-015: reconnect without silently losing or duplicating unacknowledged edits |
+| 62 | [Collaboration Pipelining](62-COLLABORATION-PIPELINING.md) | ADR-016: chained submissions and cumulative acknowledgement |
+| 63 | [Collaboration Relay](63-COLLABORATION-RELAY.md) | ADR-017: serving a document through a node that does not lead it |
+| 64 | [Text Shaping](64-TEXT-SHAPING.md) | ADR-018: engine/host ownership of fonts and shaping |
+| 65 | [Running OpenCalc](65-RUNNING-IT.md) | Standalone, Docker and clustered operation |
+| 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
+| 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
 
 ### Measured gap trackers (50–53)
 
