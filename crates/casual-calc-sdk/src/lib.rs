@@ -405,16 +405,26 @@ impl WorkbookSession {
             return Err(SdkError::ReadOnly);
         }
         let plan = recalc_plan(&op);
-        // Narrowed before it is applied and before it is recorded: afterwards
-        // the state it was written against is gone, and an operation still
-        // claiming to change everything contends with every concurrent edit.
-        if self.applied.is_some() {
-            let narrowed = op.clone().narrowed(&self.workbook);
-            if let Some(log) = self.applied.as_mut() {
-                log.push(narrowed);
-            }
-        }
+        // Narrowed **before** the edit is applied, because afterwards the state
+        // it was written against is gone and an operation still claiming to
+        // change everything contends with every concurrent edit.
+        //
+        // Recorded **after** it succeeds, which is a different question and used
+        // to have the same answer. A refused edit was already in the outgoing
+        // log by the time `apply` said no, so this client would send the server
+        // — and through it every peer — an operation it had itself rejected.
+        // Nothing downstream can detect that: the operation is well formed, it
+        // is simply not what happened here.
+        let candidate = self
+            .applied
+            .is_some()
+            .then(|| op.clone().narrowed(&self.workbook));
         self.history.apply(&mut self.workbook, op)?;
+        if let Some(narrowed) = candidate
+            && let Some(log) = self.applied.as_mut()
+        {
+            log.push(narrowed);
+        }
         self.source = None;
         // Manual mode still applies the edit — it is calculation that is
         // deferred, not editing — and records that something is outstanding so
@@ -564,10 +574,14 @@ impl WorkbookSession {
     /// when it wants to bypass undo, and a read-only mode with a documented
     /// bypass is not one.
     pub fn apply_raw(&mut self, op: Operation) -> Result<Operation, SdkError> {
-        self.source = None;
+        // Refusal first. Clearing `source` before deciding whether to refuse
+        // threw away the untouched-original guarantee on behalf of an edit that
+        // never happened — the same "a refused edit must leave no trace" rule
+        // the outgoing log above now keeps.
         if self.config.read_only {
             return Err(SdkError::ReadOnly);
         }
+        self.source = None;
         // The op is applied without classification, so it may have been a
         // structural one. Same reasoning as `workbook_mut` below.
         self.recalc.invalidate();

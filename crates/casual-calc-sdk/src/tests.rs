@@ -681,3 +681,141 @@ fn a_document_reports_the_scripts_it_cannot_be_drawn_in() {
     );
     assert_eq!(missing[0].script, "Thai");
 }
+
+/// **A refused edit must leave no trace — including in what peers are told.**
+///
+/// `edit` narrows an operation against the pre-edit workbook, which it has to:
+/// afterwards the state it was written against is gone. It then used to *record*
+/// it in the same breath, before `History::apply` had said whether the edit was
+/// possible. A refused operation was therefore already in the outgoing log, and
+/// the next flush sent the server — and through it every peer — an edit this
+/// client had rejected.
+///
+/// Nothing downstream can catch that. The operation is well formed and applies
+/// cleanly everywhere else; it simply is not what happened here. So the
+/// assertion is local: after a refusal, every observable is untouched.
+#[test]
+fn a_refused_edit_is_not_queued_for_collaborators() {
+    // One operation per class that reaches a different arm of `apply`, each
+    // naming a sheet that does not exist so it fails for the same honest reason.
+    let refusals: Vec<(&str, EditOperation)> = vec![
+        (
+            "a value",
+            EditOperation::SetValue {
+                sheet: 99,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(1.0),
+            },
+        ),
+        (
+            "a style",
+            EditOperation::SetStyle {
+                sheet: 99,
+                at: CellRef::new(0, 0),
+                style: None,
+            },
+        ),
+        (
+            "a column width",
+            EditOperation::SetColumnWidth {
+                sheet: 99,
+                col: 0,
+                width: Some(120),
+            },
+        ),
+        (
+            "a structural edit",
+            EditOperation::InsertRows {
+                sheet: 99,
+                at: 0,
+                count: 1,
+            },
+        ),
+        (
+            "a batch",
+            EditOperation::Batch(vec![EditOperation::ClearCell {
+                sheet: 99,
+                at: CellRef::new(0, 0),
+            }]),
+        ),
+    ];
+
+    for (what, op) in refusals {
+        let mut session = session_with_formula();
+        session.record_applied();
+        // A real edit first, so the log and the history are non-empty and a
+        // leaked entry has to be distinguished from an empty one.
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(4.0),
+            })
+            .expect("the honest edit lands");
+        let before_save = session.save().expect("saves");
+        let before_value = value(&session, CellRef::new(1, 0));
+
+        assert!(session.edit(op).is_err(), "{what}: should be refused");
+
+        let queued = session.take_applied();
+        assert_eq!(
+            queued.len(),
+            1,
+            "{what}: only the edit that actually applied may be sent, got {queued:?}"
+        );
+        assert_eq!(
+            value(&session, CellRef::new(1, 0)),
+            before_value,
+            "{what}: the workbook is unchanged"
+        );
+        assert!(
+            session.can_undo(),
+            "{what}: the successful edit is still undoable"
+        );
+        session.undo().expect("undo");
+        assert!(
+            !session.can_undo(),
+            "{what}: the refusal did not add a history step"
+        );
+        session.redo().expect("redo");
+        assert_eq!(
+            session.save().expect("saves"),
+            before_save,
+            "{what}: the saved bytes are unchanged"
+        );
+    }
+}
+
+/// A read-only session refuses `apply_raw` **before** spending the untouched
+/// source, rather than after.
+///
+/// Asserted against a **LibreOffice-written** file, not one this crate produced.
+/// Re-serialising our own output can come out byte-identical, so a session that
+/// had thrown the original away would still have passed — the first version of
+/// this test did exactly that, and only failed to fail.
+#[test]
+fn a_read_only_raw_apply_keeps_the_untouched_original() {
+    let original = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/corpus/libreoffice-formulas.xlsx"),
+    )
+    .expect("the LibreOffice fixture is present");
+    let mut session =
+        WorkbookSession::open_with(original.clone(), SessionConfig::new().read_only()).unwrap();
+
+    assert!(
+        session
+            .apply_raw(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(1.0),
+            })
+            .is_err(),
+        "a read-only session refuses"
+    );
+    assert_eq!(
+        session.save().expect("saves"),
+        original,
+        "and the file it refused to change is still byte-identical"
+    );
+}
