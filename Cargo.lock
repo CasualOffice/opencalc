@@ -316,6 +316,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-eval",
  "casual-calc-formula",
+ "casual-calc-layout",
  "casual-calc-model",
  "casual-calc-ooxml",
  "quick-xml",

@@ -755,6 +755,35 @@ fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
     Ok(())
 }
 
+/// Where a `<c>` sits, for the cells that do not say.
+///
+/// `r` is **optional** in ECMA-376: a cell without one sits at the ordinal
+/// position it occupies within its row, and its row is the enclosing `<row>`.
+/// Excel writes it for everything, which is why treating it as required survives
+/// a long time — and then a real file arrives with `<c t="inlineStr">` and no
+/// `r`, and every cell in it is dropped on the floor.
+///
+/// `col` is the running position within the current row and is advanced here.
+/// A cell that *does* carry `r` resets it, so a row mixing the two forms — legal,
+/// and the reason this cannot simply count — stays aligned to what the file says.
+fn cell_reference(e: &BytesStart<'_>, row: u32, col: &mut u32) -> Result<String, ImportError> {
+    if let Some(reference) = read_attr(e, b"r")?
+        && !reference.is_empty()
+    {
+        if let Some(at) = crate::a1::parse_a1(&reference) {
+            *col = at.col.saturating_add(1);
+        }
+        return Ok(reference);
+    }
+    let here = *col;
+    *col = col.saturating_add(1);
+    Ok(format!(
+        "{}{}",
+        casual_calc_formula::column_to_letters(here),
+        row.max(1)
+    ))
+}
+
 /// Record a `<row r ht hidden>` element's custom height into the height
 /// overrides and its hidden flag into the hidden-row set.
 fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
@@ -822,6 +851,10 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
     let mut cur_cf: Option<RawCf> = None;
     let mut cur_fc: Option<RawFilterColumn> = None;
     let mut in_cf_formula = false;
+    // Where the reader is, for cells and rows that decline to say. Both
+    // attributes are optional; a file using neither is a plain sequence.
+    let mut row_now: u32 = 0;
+    let mut col_next: u32 = 0;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -830,7 +863,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                 match e.local_name().as_ref() {
                     b"c" => {
                         current = Some(RawCell {
-                            reference: read_attr(&e, b"r")?.unwrap_or_default(),
+                            reference: cell_reference(&e, row_now, &mut col_next)?,
                             cell_type: read_attr(&e, b"t")?,
                             style_index: read_attr(&e, b"s")?.and_then(|s| s.parse().ok()),
                             ..RawCell::default()
@@ -926,7 +959,13 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     }
                     b"pane" => read_pane(&e, &mut result)?,
                     b"sheetView" => read_sheet_view(&e, &mut result)?,
-                    b"row" => read_row(&e, &mut result)?,
+                    b"row" => {
+                        row_now = read_attr(&e, b"r")?
+                            .and_then(|r| r.parse::<u32>().ok())
+                            .unwrap_or_else(|| row_now.saturating_add(1));
+                        col_next = 0;
+                        read_row(&e, &mut result)?;
+                    }
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,
@@ -983,7 +1022,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                 match e.local_name().as_ref() {
                     b"c" => {
                         result.cells.push(RawCell {
-                            reference: read_attr(&e, b"r")?.unwrap_or_default(),
+                            reference: cell_reference(&e, row_now, &mut col_next)?,
                             cell_type: read_attr(&e, b"t")?,
                             style_index: read_attr(&e, b"s")?.and_then(|s| s.parse().ok()),
                             ..RawCell::default()
@@ -1064,7 +1103,13 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     }
                     b"pane" => read_pane(&e, &mut result)?,
                     b"sheetView" => read_sheet_view(&e, &mut result)?,
-                    b"row" => read_row(&e, &mut result)?,
+                    b"row" => {
+                        row_now = read_attr(&e, b"r")?
+                            .and_then(|r| r.parse::<u32>().ok())
+                            .unwrap_or_else(|| row_now.saturating_add(1));
+                        col_next = 0;
+                        read_row(&e, &mut result)?;
+                    }
                     b"col" => read_col(&e, &mut result)?,
                     b"sheetFormatPr" => read_sheet_format(&e, &mut result)?,
                     b"outlinePr" => read_outline_pr(&e, &mut result)?,

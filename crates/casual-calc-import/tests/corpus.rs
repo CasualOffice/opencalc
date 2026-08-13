@@ -425,3 +425,181 @@ fn producers_that_cache_nothing_or_cache_zero_still_import_to_the_right_values()
         }
     }
 }
+
+/// **Shared formulas, checked against Excel's own answers.**
+///
+/// `45540_classic_Header.xlsx` is an Excel-written file in which one formula —
+/// `C10/543` at B10, `ref="B10:B31"` — stands for twenty-two cells, twenty-one
+/// of which are the empty `<f t="shared" si="0"/>` that carries no formula text
+/// at all. Expanding those is guesswork verified by nothing *inside* this
+/// repository, which is exactly the circularity FID-12 names.
+///
+/// Excel cached its own result in every one of them. So the file states both the
+/// question and the answer, and an expansion off by a row disagrees immediately
+/// rather than looking plausible.
+#[test]
+fn shared_formulas_expand_the_way_excel_says_they_do() {
+    let bytes = std::fs::read(corpus().join("45540_classic_Header.xlsx")).expect("present");
+    let import = casual_calc_import::import_package(bytes).expect("opens");
+
+    let cached: Vec<(usize, casual_calc_model::CellRef, f64)> = import
+        .workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .flat_map(|(s, sheet)| {
+            sheet
+                .cells
+                .iter()
+                .filter(|(_, cell)| cell.formula.is_some())
+                .filter_map(move |(at, cell)| match cell.value {
+                    casual_calc_model::CellValue::Number(n) => Some((s, at, n)),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert!(
+        cached.len() >= 60,
+        "this file's whole value is its many cached formula results; found {}",
+        cached.len()
+    );
+
+    let mut workbook = import.workbook.clone();
+    casual_calc_eval::recalculate(&mut workbook);
+    for (sheet, at, theirs) in cached {
+        let ours = match workbook.sheets[sheet]
+            .cells
+            .get(at)
+            .map(|c| c.value.clone())
+        {
+            Some(casual_calc_model::CellValue::Number(n)) => n,
+            other => panic!("sheet {sheet} {at:?}: we produced {other:?}, Excel had {theirs}"),
+        };
+        assert!(
+            (ours - theirs).abs() <= 1e-9 * theirs.abs().max(1.0),
+            "sheet {sheet} {at:?}: we say {ours}, Excel said {theirs}"
+        );
+    }
+}
+
+/// **A real file that names none of its positions.**
+///
+/// `56278.xlsx` is Excel-written and uses `<c t="inlineStr">` with no `r`, inside
+/// `<row>` with no `r`, in a sheet with no `<dimension>`. All three are legal —
+/// `r` is optional in ECMA-376 and position is implied by ordinal — and all three
+/// are unusual enough that treating them as required survives a long time.
+///
+/// It did survive: before this, the file imported as **ten sheets and zero
+/// cells**. It opened, so the open-rate guard passed; the corpus-wide cell count
+/// passed because other files have cells. Nothing was left to notice that an
+/// entire real document had been silently dropped.
+#[test]
+fn cells_without_an_r_attribute_land_where_their_position_says() {
+    let bytes = std::fs::read(corpus().join("56278.xlsx")).expect("present");
+    let import = casual_calc_import::import_package(bytes).expect("opens");
+
+    let total: usize = import
+        .workbook
+        .sheets
+        .iter()
+        .map(|s| s.cells.iter().count())
+        .sum();
+    assert!(
+        total > 500,
+        "every cell in this file is positioned by ordinal; found {total}"
+    );
+
+    // Not merely present — in the right place. The first sheet reads:
+    //
+    //     A1  Market Rates
+    //     A3  Description     B3  Rate
+    //     A4  Prime           B4  0.032500
+    //
+    // A reader that counted wrong would still produce cells, just shifted, so
+    // the addresses are the assertion and the count above is only the alarm.
+    let text = |row: u32, col: u32| -> String {
+        match import.workbook.sheets[0]
+            .cells
+            .get(casual_calc_model::CellRef::new(row, col))
+            .map(|c| c.value.clone())
+        {
+            Some(
+                casual_calc_model::CellValue::InlineString(id)
+                | casual_calc_model::CellValue::SharedString(id),
+            ) => import
+                .workbook
+                .strings
+                .get(id)
+                .unwrap_or_default()
+                .to_owned(),
+            other => panic!("({row},{col}) is {other:?}, not text"),
+        }
+    };
+    assert_eq!(text(0, 0), "Market Rates");
+    assert_eq!(text(2, 0), "Description");
+    assert_eq!(text(2, 1), "Rate");
+    assert_eq!(text(3, 0), "Prime");
+}
+
+/// **The 1904 epoch, from a producer that actually writes it.**
+///
+/// Every previous 1904 assertion in this repository was made against a file this
+/// repository wrote, which proves the reader agrees with the writer and nothing
+/// else. XlsxWriter writes `date1904="1"` and stores the serial its own way.
+///
+/// 2020-02-29 is serial 42428 under the 1904 system and 43890 under 1900. A
+/// reader that ignores the flag is out by 1462 days — four years and a day,
+/// which renders as a perfectly plausible date in 2016.
+#[test]
+fn the_1904_epoch_is_read_from_the_file_rather_than_assumed() {
+    let bytes = std::fs::read(corpus().join("xlsxwriter-1904.xlsx")).expect("present");
+    let import = casual_calc_import::import_package(bytes).expect("opens");
+    assert!(import.workbook.date1904, "the file says so");
+
+    let cell = import.workbook.sheets[0]
+        .cells
+        .get(casual_calc_model::CellRef::new(0, 1))
+        .expect("B1 holds the date");
+    assert_eq!(
+        cell.value,
+        casual_calc_model::CellValue::Number(42428.0),
+        "the serial is the file's, unconverted"
+    );
+
+    // The serial alone proves nothing; what matters is the date a person sees.
+    assert_eq!(
+        casual_calc_layout::display_text(&import.workbook, cell),
+        "2020-02-29",
+        "under the 1900 epoch this same serial reads 2016-02-28"
+    );
+}
+
+/// **An array formula from a producer that writes `t="array"`.**
+///
+/// `{=SUM(A1:A3*B1:B3)}` in one cell: the element-wise product of two ranges,
+/// summed, which is only correct if the multiplication is evaluated as arrays
+/// rather than coerced to scalars. 1x10 + 2x20 + 3x30 = 140.
+///
+/// XlsxWriter caches zero for it, as it does for every formula, so the answer
+/// here has to be computed rather than believed.
+#[test]
+fn an_array_formula_written_by_another_tool_evaluates_element_wise() {
+    let bytes = std::fs::read(corpus().join("xlsxwriter-array.xlsx")).expect("present");
+    let import = casual_calc_import::import_package(bytes).expect("opens");
+    let at = casual_calc_model::CellRef::new(0, 3);
+    assert!(
+        import.workbook.sheets[0]
+            .cells
+            .get(at)
+            .is_some_and(|c| c.formula.is_some()),
+        "D1 carries the array formula"
+    );
+
+    let mut workbook = import.workbook.clone();
+    casual_calc_eval::recalculate(&mut workbook);
+    assert_eq!(
+        workbook.sheets[0].cells.get(at).map(|c| c.value.clone()),
+        Some(casual_calc_model::CellValue::Number(140.0)),
+        "scalar coercion would give 10 here, not 140"
+    );
+}

@@ -80,12 +80,45 @@ def write_openpyxl(path):
     book.save(str(path))
 
 
+# A date the two epochs cannot agree about, chosen for exactly that: under the
+# 1900 system 2020-02-29 is serial 43890, under 1904 it is 42428. A reader that
+# ignores `date1904` is wrong by 1462 days — four years and a day, which is close
+# enough to look plausible on screen and far too large to be a rounding error.
+def write_xlsxwriter_1904(path):
+    import datetime
+
+    import xlsxwriter
+
+    book = xlsxwriter.Workbook(str(path), {"date_1904": True})
+    sheet = book.add_worksheet("Sheet1")
+    fmt = book.add_format({"num_format": "yyyy-mm-dd"})
+    sheet.write(0, 0, "when")
+    sheet.write_datetime(0, 1, datetime.datetime(2020, 2, 29), fmt)
+    book.close()
+
+
+def write_xlsxwriter_array(path):
+    import xlsxwriter
+
+    book = xlsxwriter.Workbook(str(path))
+    sheet = book.add_worksheet("Sheet1")
+    for row, (a, b) in enumerate([(1, 10), (2, 20), (3, 30)]):
+        sheet.write(row, 0, a)
+        sheet.write(row, 1, b)
+    # `<f t="array" ref="D1">` — the single-cell array form, which is SUMPRODUCT
+    # without SUMPRODUCT: 1*10 + 2*20 + 3*30 = 140.
+    sheet.write_array_formula("D1:D1", "{=SUM(A1:A3*B1:B3)}")
+    book.close()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     written = []
     for name, write in (
         ("xlsxwriter-formulas.xlsx", write_xlsxwriter),
         ("openpyxl-formulas.xlsx", write_openpyxl),
+        ("xlsxwriter-1904.xlsx", write_xlsxwriter_1904),
+        ("xlsxwriter-array.xlsx", write_xlsxwriter_array),
     ):
         path = OUT / name
         write(path)
@@ -100,6 +133,8 @@ def main():
     import zipfile
 
     for path in written:
+        if not path.name.endswith("-formulas.xlsx"):
+            continue
         with zipfile.ZipFile(path) as z:
             name = next(n for n in z.namelist() if n.endswith("sheet1.xml"))
             xml = z.read(name).decode("utf-8")
@@ -112,6 +147,21 @@ def main():
         if "xlsxwriter" in path.name and not any("<v>0</v>" in f for f in cached):
             sys.exit(f"{path}: expected a cached zero, found {cached}")
         print(f"  {path.name}: {len(formulas)} formula cells, {len(cached)} cached")
+
+    # And each trait fixture carries the trait it is named for.
+    for path, needle, what in (
+        (OUT / "xlsxwriter-1904.xlsx", 'date1904="1"', "the 1904 epoch"),
+        (OUT / "xlsxwriter-array.xlsx", 't="array"', "an array formula"),
+    ):
+        with zipfile.ZipFile(path) as z:
+            blob = b"".join(
+                z.read(n)
+                for n in z.namelist()
+                if n.endswith("workbook.xml") or "worksheets/sheet" in n
+            ).decode("utf-8", "replace")
+        if needle not in blob:
+            sys.exit(f"{path}: expected {what} ({needle}) and it is not there")
+        print(f"  {path.name}: carries {what}")
 
 
 if __name__ == "__main__":
