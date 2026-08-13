@@ -117,6 +117,39 @@ jobs:
             exit 1
           fi
           echo "engine/server boundary intact"
+      # SEC-001. A workbook is untrusted input, so any path turning its text
+      # into markup runs somebody else's script in the editor's origin — where
+      # the document, the session token and the collaboration socket live. The
+      # Name Manager did exactly that, and opening a file was enough.
+      #
+      # Sinks are not banned outright: a few build fixed markup (an SVG icon,
+      # a menu scaffold) and rewriting those as DOM calls buys nothing. They
+      # carry an `oc-safe-html:` marker naming *why* they are safe, so a new one
+      # has to be argued for rather than merely typed.
+      - name: Dynamic HTML sinks must be marked as audited
+        run: |
+          unmarked=0
+          while IFS= read -r hit; do
+            file=${hit%%:*}
+            rest=${hit#*:}
+            line=${rest%%:*}
+            # The line immediately above, and nothing wider: a three-line
+            # window let an unrelated marker nearby exempt a brand-new sink,
+            # which is how this check first passed against a planted one.
+            prev=$(( line > 1 ? line - 1 : 1 ))
+            if sed -n "${prev}p" "$file" | grep -q 'oc-safe-html:'; then
+              continue
+            fi
+            echo "::error file=$file,line=$line::unmarked dynamic HTML sink (SEC-001). Build DOM with textContent, or add an 'oc-safe-html:' comment saying why this markup is static."
+            unmarked=$((unmarked + 1))
+          done < <(git grep -nE '\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write\(' \
+                     -- 'webapp/*.js' 'webapp/*.html' 'server/casual-calc-host/src/*.html' \
+                   | grep -v 'oc-safe-html:')
+          if [ "$unmarked" -gt 0 ]; then
+            echo "$unmarked unmarked sink(s)" >&2
+            exit 1
+          fi
+          echo "every dynamic HTML sink is marked audited"
 
   # The only gate that runs the editor as a user does. Every other job proves
   # the engine is right; none of them would notice the WebAssembly glue failing

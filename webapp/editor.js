@@ -2458,6 +2458,9 @@ function updateStats() {
     if (numeric !== count) parts.push(`Numbers: <b>${numeric}</b>`);
   }
   parts.push(`Count: <b>${count}</b>`);
+  // oc-safe-html: every part is a number this function computed, joined
+  // with non-breaking spaces. No workbook text reaches here.
+  // oc-safe-html: see the note above.
   selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
 }
 
@@ -3669,6 +3672,9 @@ function buildColorMenu(menu, onPick, noneLabel) {
   // colour and stays put forever.
   const pick = (hex, link) => { pushRecent(hex); onPick(hex, link || null); menu.hidden = true; canvas.focus(); };
   const none = el("button", "cm-none");
+  // oc-safe-html: a literal SVG icon plus `noneLabel`, which is a UI string
+  // from this module or the host's i18n table — never workbook text.
+  // oc-safe-html: see the note above.
   none.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="icon-sm"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>' +
     `<span>${noneLabel}</span>`;
@@ -6064,6 +6070,10 @@ function printSheet() {
   if (!html) { status.textContent = "nothing to print"; return; }
   const w = window.open("", "_blank");
   if (!w) { statusError("the browser blocked the print window"); return; }
+  // oc-safe-html: `session_print_html` builds the page in Rust and escapes
+  // every workbook string through `push_html_escaped`. The markup is the
+  // engine's, not the file's.
+  // oc-safe-html: see the note above.
   w.document.write(html);
   w.document.close();
   // Printing before the document has laid out gives a blank first page.
@@ -7017,6 +7027,7 @@ function buildBorderMenu() {
     const b = el("button", "bd-cell");
     b.title = BD_TITLES[kind];
     b.setAttribute("aria-label", BD_TITLES[kind]);
+    // oc-safe-html: `bdIcon` returns one of a fixed set of literal SVGs.
     b.innerHTML = bdIcon(kind);
     b.addEventListener("click", (e) => { e.stopPropagation(); setBorder(kind); menu.hidden = true; canvas.focus(); });
     grid.appendChild(b);
@@ -8103,7 +8114,14 @@ function reportImportIssues() {
   try { summary = wasm.session_import_summary(); } catch {}
   if (!summary) return;
   const bar = byId("tb-status");
-  bar.innerHTML = `${bar.textContent} — <span class="warn">${summary}</span>`;
+  // The summary names parts of the file that did not survive import, so it
+  // quotes the workbook — sheet names, defined names, function names. Re-parsing
+  // `bar.textContent` as markup made that a second injection point on top of
+  // the first.
+  const warn = document.createElement("span");
+  warn.className = "warn";
+  warn.textContent = summary;
+  bar.replaceChildren(document.createTextNode(`${bar.textContent} — `), warn);
 }
 
 // Fill the selection from its own first row or column, in an explicit mode.
@@ -8481,7 +8499,15 @@ function openNameManager(x, y) {
     row.className = "nm-row";
     const go = document.createElement("button");
     go.className = "nm-go";
-    go.innerHTML = `<b>${n.name}</b><span>${n.refersTo}</span>`;
+    // Built, not interpolated. Both of these are workbook text: a `refersTo`
+    // reading `<img src=x onerror=...>` used to become a real element here, and
+    // opening the Name Manager on a file somebody sent you ran their script in
+    // this origin. Elements and `textContent` cannot do that.
+    const label = document.createElement("b");
+    label.textContent = n.name;
+    const target = document.createElement("span");
+    target.textContent = n.refersTo;
+    go.replaceChildren(label, target);
     go.addEventListener("click", () => { closeSheetMenu(); gotoName(n.name); });
     const del = document.createElement("button");
     del.className = "nm-del";
@@ -8543,6 +8569,9 @@ function renderAutocomplete() {
   acState.matches.forEach((f, i) => {
     const row = document.createElement("div");
     row.className = "ac-item" + (i === acState.idx ? " active" : "");
+    // oc-safe-html: built-in function names and signatures from the engine's
+    // own catalogue, not from any document.
+    // oc-safe-html: see the note above.
     row.innerHTML = `<span class="ac-name">${f.n}</span><span class="ac-sig">${f.sig.replace(/^[A-Z0-9]+/, "")}</span>`;
     row.addEventListener("mousedown", (e) => { e.preventDefault(); acState.idx = i; acceptAutocomplete(); });
     acEl.appendChild(row);
@@ -8801,6 +8830,7 @@ function renderTabs() {
   add.className = "sheet-add";
   add.title = "Add sheet";
   add.setAttribute("aria-label", "Add sheet");
+  // oc-safe-html: a literal SVG icon.
   add.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   add.addEventListener("click", () => {
@@ -8819,6 +8849,7 @@ function renderTabs() {
   all.className = "sheet-add sheet-all";
   all.title = "All sheets";
   all.setAttribute("aria-label", "All sheets");
+  // oc-safe-html: a literal SVG icon.
   all.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="icon-sm"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>';
   all.addEventListener("click", (e) => {
@@ -10702,6 +10733,10 @@ function wireEvents() {
 
     const showModal = (title, html) => {
       byId("oc-modal-title").textContent = title;
+      // oc-safe-html: both callers pass literal markup built in this file
+      // (the shortcut table and the About text). It must stay that way —
+      // this helper is not for anything a document can influence.
+      // oc-safe-html: see the note above.
       byId("oc-modal-body").innerHTML = html;
       byId("oc-modal").hidden = false;
     };
@@ -10986,6 +11021,7 @@ function wireEvents() {
         }
         if (it.sub) {
           const b = document.createElement("button");
+          // oc-safe-html: empty scaffolding; the label is set with textContent below.
           b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span><span class="mi-caret">&#9656;</span>`;
           b.dataset.ocLabel = it.sub;
           b.querySelector(".mi-label").textContent =
@@ -11002,6 +11038,9 @@ function wireEvents() {
         }
         const [label, action, key, check] = it;
         const b = document.createElement("button");
+        // oc-safe-html: scaffolding plus a shortcut label from the static
+        // command table; the menu label itself is set with textContent.
+        // oc-safe-html: see the note above.
         b.innerHTML = `<span class="mi-check"></span><span class="mi-label"></span>${key ? `<span class="mi-key">${key}</span>` : ""}`;
         b.dataset.ocCommand = commandId(path, label);
         b.dataset.ocLabel = label;

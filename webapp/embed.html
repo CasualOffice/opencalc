@@ -398,6 +398,7 @@
         if (state.access !== "edit") {
           lines.push("", `await sheet.configure({ access: "${state.access}" });`);
         }
+        // oc-safe-html: highlights this page's own literal sample source.
         document.getElementById("code").innerHTML = hl(lines.join("\n"));
       }
 

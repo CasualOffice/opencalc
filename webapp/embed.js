@@ -221,6 +221,7 @@ class OpenCalcSheet extends HTMLElement {
 
     const shell = document.createElement("div");
     shell.className = "editor-body";
+    // oc-safe-html: `markup` is this module's own literal shell template.
     shell.innerHTML = markup;
     root.append(shell);
     this.#shell = shell;

@@ -59,13 +59,46 @@
     $("collab_ws").value = s.runtime.collab_ws;
     $("banner").value = s.runtime.banner;
     $("allow_uploads").checked = s.runtime.allow_uploads;
-    $("fixed").innerHTML = Object.entries(s.fixed)
-      .map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
-    $("docs").querySelector("tbody").innerHTML = s.documents
-      .map((d) => `<tr><td>${d.title}</td><td><code>${d.id}</code></td>` +
-                  `<td>${(d.bytes / 1024).toFixed(1)} kB</td>` +
-                  `<td><a href="/d/${d.id}">open</a> · <a href="/api/documents/${d.id}/download">download</a></td></tr>`)
-      .join("") || "<tr><td colspan=4>none yet</td></tr>";
+    // Built as elements rather than interpolated, because a document's title
+    // is its **uploaded filename** — attacker-chosen, and shown here to whoever
+    // holds the admin token. Uploading `<img src=x onerror=...>.xlsx` used to
+    // run that script on this page. The font directory below is operator-owned
+    // and gets the same treatment, because the difference is not worth
+    // remembering per field.
+    const cell = (tag, text) => { const el = document.createElement(tag); el.textContent = text; return el; };
+    const link = (href, text) => { const a = document.createElement("a"); a.href = href; a.textContent = text; return a; };
+
+    $("fixed").replaceChildren(...Object.entries(s.fixed).map(([k, v]) => {
+      const tr = document.createElement("tr");
+      tr.append(cell("th", k), cell("td", Array.isArray(v) ? v.join(", ") : String(v)));
+      return tr;
+    }));
+
+    const body = $("docs").querySelector("tbody");
+    if (!s.documents.length) {
+      const tr = document.createElement("tr");
+      const td = cell("td", "none yet");
+      td.colSpan = 4;
+      tr.append(td);
+      body.replaceChildren(tr);
+    } else {
+      body.replaceChildren(...s.documents.map((d) => {
+        const tr = document.createElement("tr");
+        const id = cell("td", "");
+        id.append(cell("code", d.id));
+        const actions = document.createElement("td");
+        // `encodeURIComponent` on the id as well: it reaches these URLs, and a
+        // link is the one place a value still becomes something the browser
+        // acts on rather than merely displays.
+        actions.append(
+          link(`/d/${encodeURIComponent(d.id)}`, "open"),
+          document.createTextNode(" · "),
+          link(`/api/documents/${encodeURIComponent(d.id)}/download`, "download"),
+        );
+        tr.append(cell("td", d.title), id, cell("td", `${(d.bytes / 1024).toFixed(1)} kB`), actions);
+        return tr;
+      }));
+    }
   });
 
   $("save").addEventListener("click", async () => {

@@ -138,6 +138,7 @@
       onPresence: () => {
         const seen = new Map();
         for (const p of editor.collaborators()) seen.set(p.client, p);
+        // oc-safe-html: clears the element; no markup is parsed.
         document.getElementById("who").innerHTML = "";
         for (const p of seen.values()) {
           const d = document.createElement("span");
