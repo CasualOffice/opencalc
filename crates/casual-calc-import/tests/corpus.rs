@@ -338,3 +338,90 @@ fn our_evaluator_agrees_with_libreoffice_about_libreoffices_own_formulas() {
         );
     }
 }
+
+/// The producers that write a formula's cached value **wrong**, or not at all.
+///
+/// [`our_evaluator_agrees_with_libreoffice_about_libreoffices_own_formulas`]
+/// uses a file whose cached values are correct, which is the easy case and the
+/// one Excel and LibreOffice both give us. These two are the other case, and
+/// between them they cover what the rest of the ecosystem actually emits:
+///
+/// * **openpyxl** writes `<f>` with no `<v>`. Every file it has ever written
+///   looks like this.
+/// * **XlsxWriter** writes `<f>` with `<v>0</v>` — present, well-formed, wrong.
+///
+/// The three files are the same spreadsheet, so LibreOffice's computed values
+/// are the oracle for all of them: one implementation's answers, three ways of
+/// writing the question down. An importer that trusted the cache would show a
+/// column of zeros for one and blanks for the other, and neither would look
+/// like a bug from inside this repository — which is the circularity a corpus
+/// exists to break.
+#[test]
+fn producers_that_cache_nothing_or_cache_zero_still_import_to_the_right_values() {
+    let load = |name: &str| {
+        let bytes = std::fs::read(corpus().join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        casual_calc_import::import_package(bytes)
+            .unwrap_or_else(|e| panic!("{name} should open: {e:?}"))
+            .workbook
+    };
+
+    let truth = load("libreoffice-formulas.xlsx");
+    let expected: Vec<(casual_calc_model::CellRef, f64)> = truth.sheets[0]
+        .cells
+        .iter()
+        .filter(|(_, cell)| cell.formula.is_some())
+        .filter_map(|(at, cell)| match cell.value {
+            casual_calc_model::CellValue::Number(n) => Some((at, n)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(expected.len(), 4, "the oracle carries four answers");
+
+    for (name, stored) in [
+        // What each file says *before* we recalculate. Asserted so that a
+        // library changing its default leaves a failing test rather than a
+        // fixture that still opens, still passes, and no longer tests anything.
+        (
+            "xlsxwriter-formulas.xlsx",
+            casual_calc_model::CellValue::Number(0.0),
+        ),
+        (
+            "openpyxl-formulas.xlsx",
+            casual_calc_model::CellValue::Empty,
+        ),
+    ] {
+        let workbook = load(name);
+        let cells: Vec<_> = workbook.sheets[0]
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.formula.is_some())
+            .collect();
+        assert_eq!(cells.len(), 4, "{name}: four formula cells");
+        for (at, cell) in &cells {
+            assert_eq!(
+                cell.value, stored,
+                "{name} at {at:?}: this fixture exists because its producer stores {stored:?} \
+                 here; it no longer does, so it is testing something else now"
+            );
+        }
+
+        let mut recalculated = workbook.clone();
+        casual_calc_eval::recalculate(&mut recalculated);
+        for &(at, theirs) in &expected {
+            let ours = match recalculated.sheets[0]
+                .cells
+                .get(at)
+                .map(|c| c.value.clone())
+            {
+                Some(casual_calc_model::CellValue::Number(n)) => n,
+                other => {
+                    panic!("{name} at {at:?}: we produced {other:?}, LibreOffice had {theirs}")
+                }
+            };
+            assert!(
+                (ours - theirs).abs() < 1e-9,
+                "{name} at {at:?}: we say {ours}, LibreOffice said {theirs}"
+            );
+        }
+    }
+}
