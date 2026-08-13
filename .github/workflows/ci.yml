@@ -221,8 +221,15 @@ jobs:
           for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify; do
             seeds="seeds/$target"
             echo "::group::$target"
+            # Created, not assumed. `fuzz/corpus/` is gitignored, so on a fresh
+            # checkout it does not exist — and libFuzzer treats a named corpus
+            # directory that is missing as an error rather than as empty. It
+            # only bit the targets that *have* seeds, because those were the
+            # only ones naming a corpus directory at all, and it never bit a
+            # working tree where earlier runs had already created one.
+            mkdir -p "corpus/$target"
             cargo +nightly-2026-07-20 fuzz run "$target" \
-              $([ -d "$seeds" ] && echo "corpus/$target $seeds" || true) \
+              "corpus/$target" $([ -d "$seeds" ] && echo "$seeds" || true) \
               -- -max_total_time=60 -rss_limit_mb=4096
             echo "::endgroup::"
           done
