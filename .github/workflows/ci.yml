@@ -21,13 +21,13 @@ jobs:
   format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: cargo fmt --all -- --check
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
@@ -46,7 +46,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: cargo test --workspace --all-features --locked
         env:
           OPENCALC_TEST_REDIS: redis://127.0.0.1:6379
@@ -56,13 +56,13 @@ jobs:
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: cargo doc --workspace --all-features --no-deps
 
   wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup target add wasm32-unknown-unknown
       # The **engine** must stay WASM-clean, which is `crates/`. The
       # collaboration server is a host (ADR-012) and was never meant to run in a
@@ -73,7 +73,7 @@ jobs:
   benchmark-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run benchmark smoke and validate report shape
         run: |
           cargo run -q -p casual-calc-benchmark -- --smoke --env ci > report.json
@@ -95,7 +95,7 @@ jobs:
   repository-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Verify fixture checksums against manifest
         run: |
           jq -r '.fixtures[] | "\(.sha256)  fixtures/\(.path)"' fixtures/manifest.json \
@@ -104,6 +104,16 @@ jobs:
         run: |
           if git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!*.yml' ; then
             echo "merge-conflict markers found" >&2
+            exit 1
+          fi
+      # A floating `@v4` resolves to whatever that tag points at today, so a
+      # compromised or retagged action runs with this workflow's permissions
+      # and nothing in the repository changed. docs/15 has claimed SHA pinning
+      # for some time; until now every `uses:` was a floating major tag.
+      - name: Actions must be pinned to a commit SHA
+        run: |
+          if grep -rnE '^\s*(- )?uses: [^ ]+@(v[0-9]|main|master)' .github/workflows/ ; then
+            echo "::error::pin the action above to a full commit SHA (keep the tag as a comment)" >&2
             exit 1
           fi
       # An id is only useful if it names one thing. Two trackers ran independent
@@ -179,8 +189,8 @@ jobs:
   browser-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install wasm-pack
@@ -206,7 +216,7 @@ jobs:
       - name: Run the smoke suite
         working-directory: tests/browser
         run: npm test
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: browser-smoke-failure
@@ -222,7 +232,7 @@ jobs:
   oracle-diff:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the oracle
         run: |
           sudo apt-get update
@@ -236,7 +246,7 @@ jobs:
       # mistakes an "it opened" check cannot.
       - name: Validate the package LibreOffice gets
         run: cargo run -q -p casual-calc-fidelity -- --validate-package --json package-report.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: oracle-report
@@ -248,7 +258,7 @@ jobs:
   fuzz-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install pinned nightly + cargo-fuzz
         run: |
           rustup toolchain install nightly-2026-07-20 --profile minimal
@@ -289,9 +299,16 @@ jobs:
   dependency-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: cargo install cargo-deny --locked
       - run: cargo deny check bans licenses sources
+      # `advisories` was the one `cargo deny` check left out, so the RUSTSEC
+      # database — the entire point of a supply-chain gate — was never
+      # consulted, while docs/07 and docs/15 both stated it was. A gate a
+      # document claims and CI does not run is worse than no gate: it is a
+      # gate somebody is relying on.
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings
 
   platform:
     strategy:
@@ -306,7 +323,7 @@ jobs:
             toolchain: "1.88.0"   # MSRV check (ADR-pending)
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
       - run: rustup override set ${{ matrix.toolchain }}
       - run: cargo test --workspace --all-features --locked

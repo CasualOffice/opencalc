@@ -280,7 +280,11 @@ fn attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<String>, ImportError>
     for a in e.attributes() {
         let a = a.map_err(|err| xml_err(err.into()))?;
         if a.key.local_name().as_ref() == local {
-            return Ok(Some(a.unescape_value().map_err(xml_err)?.into_owned()));
+            return Ok(Some(
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(xml_err)?
+                    .into_owned(),
+            ));
         }
     }
     Ok(None)

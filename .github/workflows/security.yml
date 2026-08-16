@@ -1,0 +1,73 @@
+# The scheduled half of the supply-chain gate.
+#
+# `docs/15` has described this workflow for some time and it did not exist: no
+# workflow in this repository carried a `schedule:` trigger at all. That gap is
+# the one a per-PR gate cannot cover, because the risk it answers to is not a
+# change in this repository — an advisory published on a Tuesday makes a
+# dependency vulnerable without anybody touching the code, and a gate that only
+# runs on pull requests will not notice until somebody happens to open one.
+#
+# Deliberately separate from `ci.yml`: this may fail because the world changed
+# rather than because a change is wrong, and a red run here should not read as
+# "the pull request broke something".
+name: security
+
+on:
+  schedule:
+    # Mondays, early UTC. A weekday so a failure is seen the same day rather
+    # than aging over a weekend.
+    - cron: "17 6 * * 1"
+  # So it can be run on demand when an advisory lands, without waiting a week.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo install cargo-audit --locked
+      # The whole dependency tree, including the fuzz workspace — which is a
+      # *separate* cargo workspace, so `--workspace` in the main tree has never
+      # covered it. That is the same blind spot that let a fuzz target stop
+      # compiling without any local gate noticing.
+      - name: Audit the workspace
+        run: cargo audit --deny warnings
+      - name: Audit the fuzz workspace
+        working-directory: fuzz
+        run: cargo audit --deny warnings
+
+  fuzz-campaign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the nightly toolchain cargo-fuzz needs
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+      # Longer than the per-PR run, which is a regression check rather than a
+      # campaign: that one gives each target a minute, which finds what the
+      # corpus already knows and nothing new. This is bounded too — an
+      # unbounded campaign in scheduled CI is a bill, not a gate — but long
+      # enough to reach inputs the corpus has not seen.
+      - name: Fuzz the untrusted parsers
+        run: |
+          set -euo pipefail
+          for target in bounded_package ooxml_xml formula_parse number_format; do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=420 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
+      # A crash is only useful if the input survives the runner.
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          retention-days: 30

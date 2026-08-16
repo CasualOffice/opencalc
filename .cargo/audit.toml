@@ -1,0 +1,31 @@
+# Advisories this workspace has looked at and decided about.
+#
+# The list is deliberately explicit rather than a blanket `--ignore warnings`:
+# an entry here is a decision with a reason and a date, and anything *not*
+# listed still fails the build. Blanket-allowing the category would mean the
+# next unmaintained crate — possibly one in the untrusted-input path — arrives
+# silently, which is the failure this gate exists to prevent.
+#
+# `unmaintained` is not `vulnerable`. None of these has a known exploit; each is
+# a crate whose author has stepped back, which raises the cost of a *future*
+# fix rather than presenting a problem today. Vulnerabilities are never listed
+# here — the two high-severity `quick-xml` advisories that this gate first
+# surfaced (RUSTSEC-2026-0194/0195, memory and CPU exhaustion reachable from
+# any uploaded `.xlsx`) were fixed by upgrading, not by an entry.
+
+[advisories]
+ignore = [
+    # rustls-pemfile: unmaintained upstream, superseded by rustls-pki-types'
+    # own PEM parsing. Reached only through `reqwest`/`rustls` in the
+    # collaboration server, never from workbook bytes. Removing it means moving
+    # the whole TLS stack forward, which is its own change.
+    "RUSTSEC-2025-0134",
+    # rustybuzz: unmaintained, and the shaper the renderer depends on for
+    # correct complex-script layout (docs/64). There is no drop-in replacement
+    # in Rust; the alternative is HarfBuzz over FFI, which would put C in a
+    # workspace that currently has none.
+    "RUSTSEC-2026-0206",
+    # ttf-parser: unmaintained, and rustybuzz's own dependency — so it cannot
+    # be dropped separately from the entry above.
+    "RUSTSEC-2026-0192",
+]

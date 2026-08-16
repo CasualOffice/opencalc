@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 casual-calc-package = { path = "../casual-calc-package" }
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }

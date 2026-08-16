@@ -11,7 +11,7 @@ publish = false
 casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }

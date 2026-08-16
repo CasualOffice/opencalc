@@ -93,7 +93,7 @@ pub(crate) fn attr_value(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<Stri
         let attr = attr.map_err(|err| OoxmlError::MalformedXml(err.to_string()))?;
         if attr.key.local_name().as_ref() == local {
             let value = attr
-                .unescape_value()
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map_err(|err| OoxmlError::MalformedXml(err.to_string()))?;
             return Ok(Some(value.into_owned()));
         }

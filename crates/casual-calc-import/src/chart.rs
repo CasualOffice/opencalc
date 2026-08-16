@@ -14,7 +14,8 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::error::ImportError;
-use crate::read::{read_attr, xml_err};
+use crate::read::text_of;
+use crate::read::{read_attr, ref_of, xml_err};
 
 /// A `<xdr:*Anchor>`: the cells it covers and the relationship id of whatever
 /// it frames.
@@ -104,7 +105,12 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
             },
             Event::Text(ref e) => {
                 if field.is_some() {
-                    text.push_str(&e.unescape().map_err(xml_err)?);
+                    text.push_str(&text_of(e)?);
+                }
+            }
+            Event::GeneralRef(ref e) => {
+                if field.is_some() {
+                    text.push_str(&ref_of(e)?);
                 }
             }
             Event::End(ref e) => match e.local_name().as_ref() {
@@ -272,7 +278,12 @@ pub fn parse_chart(xml: &[u8]) -> Result<ChartSpec, ImportError> {
             }
             Event::Text(ref e) => {
                 if in_formula || in_value {
-                    text.push_str(&e.unescape().map_err(xml_err)?);
+                    text.push_str(&text_of(e)?);
+                }
+            }
+            Event::GeneralRef(ref e) => {
+                if in_formula || in_value {
+                    text.push_str(&ref_of(e)?);
                 }
             }
             Event::End(ref e) => match e.local_name().as_ref() {

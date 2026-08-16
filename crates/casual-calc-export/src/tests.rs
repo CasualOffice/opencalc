@@ -1774,6 +1774,76 @@ fn assert_ids_are_unique(rels: &str) {
     }
 }
 
+/// Entity references survive the reader.
+///
+/// quick-xml 0.41 stopped inlining entity references in `Event::Text` and began
+/// emitting each as its own `Event::GeneralRef`. Nothing failed to compile: the
+/// `Text`-only arms kept working and simply **dropped** every `&amp;`, `&lt;`
+/// and `&#65;` in the document. The upgrade was taken for two high-severity
+/// advisories in the parser (RUSTSEC-2026-0194/0195), so the risk of *not*
+/// upgrading was real — and the cost of upgrading carelessly was every
+/// ampersand in every workbook, silently.
+///
+/// Both spellings, because a producer may write either, and in three places
+/// that read text through different code paths.
+#[test]
+fn entity_references_in_text_survive_the_reader() {
+    use casual_calc_model::CellRef;
+
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/sharedStrings.xml",
+            br#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Tom &amp; Jerry &lt;b&gt; &#65;&#x42;</t></si></sst>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1">
+                <c r="A1" t="s"><v>0</v></c>
+                <c r="B1" t="inlineStr"><is><t>inline &amp; &lt;here&gt;</t></is></c>
+                <c r="C1"><f>IF(A1&lt;&gt;"","yes &amp; no","")</f></c>
+              </row>
+            </sheetData></worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+
+    let shared = wb.sheets[0].cells.get(CellRef::new(0, 0)).unwrap();
+    let text = match &shared.value {
+        casual_calc_model::CellValue::SharedString(id) => wb.strings.get(*id).unwrap_or_default(),
+        other => panic!("A1 should be a shared string, got {other:?}"),
+    };
+    assert_eq!(
+        text, "Tom & Jerry <b> AB",
+        "named and numeric entities both resolve in a shared string"
+    );
+    let sheet = &wb.sheets[0];
+    // Inline text is read by a different arm from a shared string, so one
+    // passing says nothing about the other.
+    let inline = sheet.cells.get(CellRef::new(0, 1)).unwrap();
+    let inline_text = match &inline.value {
+        casual_calc_model::CellValue::InlineString(id) => wb.strings.get(*id).unwrap_or_default(),
+        other => panic!("B1 should be inline text, got {other:?}"),
+    };
+    assert_eq!(
+        inline_text, "inline & <here>",
+        "entities resolve in inline text too, which a different arm reads"
+    );
+    // A formula's `<>` operator is written `&lt;&gt;` in the file. Losing it
+    // turns an inequality into something else entirely — the quietest possible
+    // way for a spreadsheet to start giving different answers.
+    let formula = sheet.cells.get(CellRef::new(0, 2)).unwrap();
+    let expr = wb.formula(formula.formula.unwrap()).unwrap().to_string();
+    assert!(
+        expr.contains("<>") && expr.contains('&'),
+        "the formula kept its operator and its ampersand: {expr:?}"
+    );
+}
+
 /// FID-21 — a relationship id this writer mints must step aside for a retained
 /// one, rather than being emitted twice.
 ///
