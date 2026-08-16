@@ -664,3 +664,458 @@ test.describe("seeing each other", () => {
       .toBe("no roster entry");
   });
 });
+
+test.describe("seeing each other type", () => {
+  /// **The gap COL-35 names, in the words it was reported in: "i can only see
+  /// the edit when it's done, not while typing".**
+  ///
+  /// Until this, a participant's work appeared only when they pressed Enter and
+  /// the cell editor closed. Two people could be filling the same cell and
+  /// neither knew until one of them lost.
+  ///
+  /// Driven through the real keyboard on the real grid, because the interesting
+  /// part is the whole path and most of it is not in any one place: a keystroke
+  /// opens the in-cell editor, the editor announces a draft on the presence
+  /// channel, the server relays it to the others without echoing it back, and
+  /// the peer's roster carries it into the paint. Calling `present()` directly
+  /// would skip the half of that which lives in the editor.
+  ///
+  /// **Nothing is committed.** That is the other half of the claim, and it is
+  /// asserted rather than described: the observer's *document* must stay empty
+  /// while the text is on their screen, because a draft is presence and never
+  /// an operation (ADR-011).
+  test("a peer sees a cell being typed into before it is committed, and sees it go on Escape", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const typist = await browser.newPage();
+    const watcher = await browser.newPage();
+    await boot(typist);
+    await boot(watcher);
+    await join(typist, { document: key, user: { id: "u-ada", name: "Ada" } });
+    await join(watcher, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    // What the watcher can see of the typist, as the grid reads it when it
+    // paints: the roster entry, which is the only input to the draft it draws.
+    const draftSeenBy = (page) =>
+      page.evaluate(() => window.__editor.collaborators()[0]?.editing ?? null);
+
+    await typist.locator("#grid").focus();
+    // A plain character on the grid opens the in-cell editor with that
+    // character in it — the ordinary way anybody starts typing in a cell.
+    await typist.keyboard.type("hello");
+
+    await expect
+      .poll(() => draftSeenBy(watcher), {
+        message: "typing was invisible to the other participant (COL-35)",
+      })
+      .toMatchObject({ at: [0, 0], text: "hello" });
+
+    // And it is genuinely uncommitted: the observer's own engine holds nothing,
+    // so nothing entered the document, the history or the applied log on either
+    // side of the wire.
+    expect(await cellIn(watcher, 0, 0)).toBe("");
+    expect(await cellIn(typist, 0, 0)).toBe("");
+
+    // It keeps up as she types, rather than showing the first burst and
+    // stopping — the throttle drops nothing, it only delays.
+    await typist.keyboard.type(" there");
+    await expect
+      .poll(() => draftSeenBy(watcher), { message: "the draft stopped following the typing" })
+      .toMatchObject({ text: "hello there" });
+
+    // Abandoned. The draft must go from every other screen, rather than leaving
+    // a cell that looks permanently occupied by somebody who walked away.
+    //
+    // Asserted together with "she is still here", because the two failures are
+    // otherwise indistinguishable: a participant dropped from the roster —
+    // expired, disconnected — also has no draft, and would pass a test that
+    // only asked about the draft.
+    await typist.keyboard.press("Escape");
+    await expect
+      .poll(
+        () =>
+          watcher.evaluate(() => {
+            const who = window.__editor.collaborators()[0];
+            return { stillHere: !!who, editing: who?.editing ?? null };
+          }),
+        { message: "an abandoned edit left a ghost behind" },
+      )
+      .toEqual({ stillHere: true, editing: null });
+    expect(await cellIn(watcher, 0, 0)).toBe("");
+
+    await typist.close();
+    await watcher.close();
+  });
+
+  /// And committing does what it always did: the value arrives as an operation,
+  /// and the draft that previewed it goes.
+  ///
+  /// Worth its own test because the two are easy to get wrong together — a
+  /// draft that is never cleared looks identical to a working one until
+  /// somebody presses Enter.
+  test("committing turns the draft into a value and clears it", async ({ browser }) => {
+    const key = freshDocument();
+    const typist = await browser.newPage();
+    const watcher = await browser.newPage();
+    await boot(typist);
+    await boot(watcher);
+    await join(typist, { document: key, user: { id: "u-ada", name: "Ada" } });
+    await join(watcher, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    await typist.locator("#grid").focus();
+    await typist.keyboard.type("committed");
+    await expect
+      .poll(() => watcher.evaluate(() => window.__editor.collaborators()[0]?.editing?.text ?? null))
+      .toBe("committed");
+
+    await typist.keyboard.press("Enter");
+    await expect
+      .poll(() => cellIn(watcher, 0, 0), { message: "the committed value never arrived" })
+      .toBe("committed");
+    await expect
+      .poll(
+        () =>
+          watcher.evaluate(() => {
+            const who = window.__editor.collaborators()[0];
+            return { stillHere: !!who, editing: who?.editing ?? null };
+          }),
+        { message: "the draft outlived the edit it was previewing" },
+      )
+      .toEqual({ stillHere: true, editing: null });
+
+    await typist.close();
+    await watcher.close();
+  });
+
+  /// A participant who vanishes mid-word takes the word with them.
+  ///
+  /// The disconnect case, which no amount of message-sending can cover: there
+  /// is nothing to send. It works because the draft is carried *by* the presence
+  /// entry, so removing the participant removes it — which is the reason for
+  /// putting it there and not in a channel of its own.
+  test("a participant who disconnects mid-word leaves no draft behind", async ({ browser }) => {
+    const key = freshDocument();
+    const typist = await browser.newPage();
+    const watcher = await browser.newPage();
+    await boot(typist);
+    await boot(watcher);
+    await join(typist, { document: key, user: { id: "u-ada", name: "Ada" } });
+    await join(watcher, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    await typist.locator("#grid").focus();
+    await typist.keyboard.type("half-typ");
+    await expect
+      .poll(() => watcher.evaluate(() => window.__editor.collaborators()[0]?.editing?.text ?? null))
+      .toBe("half-typ");
+
+    await typist.close();
+    await expect
+      .poll(() => watcher.evaluate(() => window.__editor.collaborators().length), {
+        message: "the draft of somebody who left was still on the grid",
+      })
+      .toBe(0);
+    expect(await cellIn(watcher, 0, 0)).toBe("");
+
+    await watcher.close();
+  });
+});
+
+test.describe("the participant roster", () => {
+  // **COL-33, in the words it was reported in against the running demo: "i
+  // can't see here which profiles are collaborating... i see the name".**
+  //
+  // The cursors were already painted, and that was the whole of it: the only
+  // evidence anybody else existed was a coloured label beside their cell, which
+  // you can only read if you happen to be looking at that cell. A participant
+  // four hundred rows down, or on another sheet, was drawn nowhere at all.
+  //
+  // Everything below asserts on what a user can see — the text of the chip, the
+  // rows of the list, the pixels on the canvas, which tab is active — and not
+  // on `collaborators()`. The roster data was already correct before this
+  // control existed; "the data is there" is precisely the state that shipped.
+
+  const label = (page) => page.locator("#presence-label");
+  const rows = (page) => page.locator("#presence-menu .presence-item");
+
+  /// Open the roster the way a person does, and wait for it to say it is open.
+  async function openRoster(page) {
+    await page.locator("#presence-btn").click();
+    await expect(page.locator("#presence-btn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#presence-menu")).toBeVisible();
+  }
+
+  /// Whether anything on this page's canvas is painted in the other
+  /// participant's colour.
+  ///
+  /// Their colour is assigned by the server and read back rather than assumed:
+  /// a hard-coded palette entry would pass or fail depending on which client id
+  /// the run happened to allocate.
+  async function paintedInTheirColour(page) {
+    const colour = await page.evaluate(() => window.__editor.collaborators()[0]?.color ?? null);
+    if (!colour) return "no roster entry";
+    return page.evaluate((hex) => {
+      const bare = hex.replace("#", "");
+      const want = [0, 2, 4].map((i) => parseInt(bare.slice(i, i + 2), 16));
+      const canvas = document.querySelector("#grid");
+      const { data } = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < data.length; i += 4) {
+        if (
+          Math.abs(data[i] - want[0]) < 8 &&
+          Math.abs(data[i + 1] - want[1]) < 8 &&
+          Math.abs(data[i + 2] - want[2]) < 8
+        ) {
+          return "painted";
+        }
+      }
+      return "not painted";
+    }, colour);
+  }
+
+  test("the roster names who is here, says what they are doing, and clears them when they leave", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const mine = await browser.newPage();
+    await boot(mine);
+
+    // No session, no control. The editor is single-player most of the time and
+    // a permanent "only you" chip is noise, not information.
+    await expect(mine.locator("#presence")).toBeHidden();
+
+    await join(mine, { document: key, user: { id: "u-ada", name: "Ada Lovelace" } });
+
+    // In a session and on her own — which is an answer to "who is
+    // collaborating", and an absent control is not.
+    await expect(mine.locator("#presence")).toBeVisible();
+    await expect(label(mine)).toHaveText("Only you");
+    await openRoster(mine);
+    await expect(mine.locator("#presence-menu .presence-empty")).toBeVisible();
+    await expect(rows(mine)).toHaveCount(0);
+
+    const theirs = await browser.newPage();
+    await boot(theirs);
+    await join(theirs, { document: key, user: { id: "u-grace", name: "Grace Hopper" } });
+    await theirs.evaluate(() => window.__session.present(0, [7, 3, 7, 3]));
+
+    // Someone arrived **while the list was open**, which is the case a control
+    // rebuilt on every presence message has to survive.
+    await expect(label(mine)).toHaveText("1 other");
+    await expect(rows(mine)).toHaveCount(1);
+    await expect(rows(mine).locator(".presence-name")).toHaveText("Grace Hopper");
+    // Where, in the terms a spreadsheet user thinks in: sheet and cell.
+    await expect(rows(mine).locator(".presence-where")).toContainText("!D8");
+    // And legible to a screen reader without opening anything.
+    await expect(mine.locator("#presence-btn")).toHaveAttribute("aria-label", /Grace Hopper/);
+
+    // It follows her. A roster filled in once at join reads identically in a
+    // screenshot and is useless in practice.
+    await theirs.evaluate(() => window.__session.present(0, [20, 3, 20, 3]));
+    await expect(rows(mine).locator(".presence-where")).toContainText("!D21");
+
+    // Typing is called typing, in words — not only in a colour or a pulse,
+    // which is nothing at all to a reader who cannot see either.
+    await theirs.locator("#grid").focus();
+    await theirs.keyboard.type("half-typ");
+    await expect(rows(mine).locator(".presence-typing")).toHaveText("typing");
+    // And the roster follows the draft rather than the selection: the cell she
+    // is typing in is where she is.
+    await expect(rows(mine).locator(".presence-where")).toContainText("!A1");
+
+    // Abandoned: she is still here, and no longer typing.
+    await theirs.keyboard.press("Escape");
+    await expect(rows(mine).locator(".presence-typing")).toHaveCount(0);
+    await expect(rows(mine)).toHaveCount(1);
+
+    // Gone. A roster that keeps someone who left is worse than no roster: it
+    // says the cell they were in is still somebody's.
+    await theirs.close();
+    await expect(rows(mine)).toHaveCount(0);
+    await expect(mine.locator("#presence-menu .presence-empty")).toBeVisible();
+    await expect(label(mine)).toHaveText("Only you");
+
+    await mine.close();
+  });
+
+  test("clicking a participant takes you to where they are", async ({ browser }) => {
+    const key = freshDocument();
+    const mine = await browser.newPage();
+    const theirs = await browser.newPage();
+    await boot(mine);
+    await boot(theirs);
+    await join(mine, { document: key, user: { id: "u-ada", name: "Ada Lovelace" } });
+    await join(theirs, { document: key, user: { id: "u-grace", name: "Grace Hopper" } });
+
+    // Four hundred rows down: far below the fold, which is the case the cursor
+    // alone cannot help with. Being told somebody is in D401 and having to go
+    // and find D401 is half a feature.
+    await theirs.evaluate(() => window.__session.present(0, [400, 3, 400, 3]));
+
+    await openRoster(mine);
+    await expect(rows(mine).locator(".presence-where")).toContainText("!D401");
+    // Nothing of hers is on screen yet — asserted, so that the assertion after
+    // the click is about the click.
+    expect(await paintedInTheirColour(mine)).toBe("not painted");
+
+    await rows(mine).first().click();
+
+    await expect
+      .poll(() => paintedInTheirColour(mine), {
+        message: "clicking a participant did not bring their cursor into view",
+      })
+      .toBe("painted");
+    // The list closes behind it, like every other menu here.
+    await expect(mine.locator("#presence-menu")).toBeHidden();
+    // And it moved the **view**, not the selection: the active cell is where
+    // the next keystroke lands, and a control that quietly moved it would be a
+    // control that quietly types your work somewhere else.
+    await expect(mine.locator("#cell-ref")).toHaveValue("A1");
+
+    await mine.close();
+    await theirs.close();
+  });
+
+  test("a participant on another sheet is marked as elsewhere, and going to them switches sheets", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const mine = await browser.newPage();
+    const theirs = await browser.newPage();
+    await boot(mine);
+    await boot(theirs);
+    await join(mine, { document: key, user: { id: "u-ada", name: "Ada Lovelace" } });
+    await join(theirs, { document: key, user: { id: "u-grace", name: "Grace Hopper" } });
+
+    // A second sheet, added through the control a person clicks, which also
+    // moves this browser onto it.
+    await mine.locator('[aria-label="Add sheet"]').click();
+    await expect(mine.locator(".sheet-tab")).toHaveCount(2);
+    await expect(mine.locator(".sheet-tab").nth(1)).toHaveClass(/active/);
+
+    // She stays on the first sheet, where her cursor is drawn on no tab this
+    // browser is looking at.
+    await theirs.evaluate(() => window.__session.present(0, [2, 1, 2, 1]));
+
+    await openRoster(mine);
+    await expect(rows(mine)).toHaveCount(1);
+    await expect(rows(mine).first()).toHaveClass(/elsewhere/);
+    await expect(rows(mine).locator(".presence-where")).toContainText("!B3");
+
+    await rows(mine).first().click();
+    await expect(mine.locator(".sheet-tab").nth(0)).toHaveClass(/active/);
+
+    await mine.close();
+    await theirs.close();
+  });
+});
+
+test.describe("undo between participants", () => {
+  /// **Pressing Ctrl+Z must reach the other participant.**
+  ///
+  /// Undo used to change the author's document and stop there: history and the
+  /// workbook moved, nothing entered the outgoing log, and the peer kept the
+  /// edit. Nothing later contradicts that, so the two documents simply differ
+  /// from then on — the worst shape a collaboration bug can take.
+  ///
+  /// The real keyboard shortcut on the real grid, in a real second browser,
+  /// because the interesting part is the whole path: history → outgoing log →
+  /// flush → server → peer.
+  test("an undo in one browser reaches the other", async ({ browser }) => {
+    const key = freshDocument();
+    const author = await browser.newPage();
+    await boot(author);
+    await join(author, { document: key, user: { id: "u-a", name: "Ada" } });
+
+    const peer = await browser.newPage();
+    await boot(peer);
+    await join(peer, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    await setCellIn(author, 3, 0, "before-undo");
+    await expect
+      .poll(() => cellIn(peer, 3, 0), { message: "the peer never saw the edit" })
+      .toBe("before-undo");
+
+    // The control a person actually presses.
+    await author.locator("#grid").focus();
+    await author.keyboard.press("ControlOrMeta+z");
+
+    await expect
+      .poll(() => cellIn(author, 3, 0), { message: "the author's own undo did not apply" })
+      .toBe("");
+    await expect
+      .poll(() => cellIn(peer, 3, 0), { message: "the undo never reached the peer" })
+      .toBe("");
+  });
+
+  /// And redo, which is a fresh intention rather than the cancellation of one.
+  test("a redo in one browser reaches the other", async ({ browser }) => {
+    const key = freshDocument();
+    const author = await browser.newPage();
+    await boot(author);
+    await join(author, { document: key, user: { id: "u-a", name: "Ada" } });
+
+    const peer = await browser.newPage();
+    await boot(peer);
+    await join(peer, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    await setCellIn(author, 4, 0, "restored");
+    await expect.poll(() => cellIn(peer, 4, 0)).toBe("restored");
+
+    await author.locator("#grid").focus();
+    await author.keyboard.press("ControlOrMeta+z");
+    await expect.poll(() => cellIn(peer, 4, 0)).toBe("");
+
+    await author.keyboard.press("ControlOrMeta+Shift+z");
+    await expect
+      .poll(() => cellIn(peer, 4, 0), { message: "the redo never reached the peer" })
+      .toBe("restored");
+  });
+});
+
+/// **A refused session must not lock the editor out of trying again.**
+///
+/// `stopped` is terminal: the transport has closed the socket and will not
+/// reconnect, because reconnecting would be refused for the same reason. But
+/// only an explicit `stopCollaborating()` cleared the editor's `collabSession`,
+/// so after any refusal the editor went on believing it was in a session that
+/// no longer existed, and the next `collaborate()` threw "already in a
+/// collaborative session".
+///
+/// The user-visible consequence: a token that expires — or any other refusal —
+/// could only be recovered from by reloading the page, which throws away
+/// whatever they had locally. Found by driving the real editor against the real
+/// server, not by reading.
+test("a refused session can be rejoined without reloading the page", async ({ browser }) => {
+  const key = freshDocument();
+  const page = await browser.newPage();
+  await boot(page);
+
+  // A token the server cannot read at all, which ends in `stopped`.
+  const refused = await page.evaluate(
+    async ({ url, key }) => {
+      const editor = await import(window.__editorModule);
+      window.__editor = editor;
+      const seen = [];
+      await editor.collaborate({
+        url,
+        token: "not-a-token",
+        document: key,
+        onStatus: (s) => seen.push(s.state),
+      });
+      // Give the refusal time to arrive and the transport to close.
+      await new Promise((r) => setTimeout(r, 2000));
+      return seen;
+    },
+    { url: COLLAB_URL, key },
+  );
+  expect(refused).toContain("stopped");
+
+  // And now a *valid* join on the same page must work. Before the fix this
+  // threw, and the only way out was a reload.
+  await join(page, { document: key, user: { id: "u-ada", name: "Ada", color: "0891B2" } });
+
+  await setCellIn(page, 0, 0, "rejoined");
+  expect(await cellIn(page, 0, 0)).toBe("rejoined");
+
+  await page.close();
+});

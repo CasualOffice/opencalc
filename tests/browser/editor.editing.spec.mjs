@@ -409,3 +409,84 @@ test("a title merged across columns does not decide any one column's width", asy
   // magnitude, not a pixel count that would break when a font is swapped.
   expect(width, `column A came out ${width}px wide`).toBeLessThan(120);
 });
+
+/// **Typing a reference must not make the grid scroll itself.**
+///
+/// The grid scrolls *virtually*: the canvas is one screen tall and draws
+/// whatever `state.scrollY` says, which is the "no DOM as source of truth" rule
+/// applied to scrolling. So a native scroll of `#grid-wrap` is not a second
+/// opinion, it is corruption — the canvas keeps drawing from the engine while
+/// the element it lives in has moved underneath it.
+///
+/// It happened for a reason worth pinning: the in-cell editor is a real
+/// `<textarea>`, and the rule that tints reference tokens set `position:
+/// relative` on it. `relative` leaves an element **in flow**, so the textarea
+/// went back to being laid out after the full-height canvas with its `top` only
+/// shifting it visually — the wrapper's scroll box grew by the offset, and the
+/// browser scrolled that hidden-overflow container to reveal the focused
+/// editor. Column headers left the screen, one band of rows drew, and the
+/// editor floated near the bottom of the window.
+///
+/// The class is added the moment a reference is recognised, so it read as
+/// "typing =2*A2 broke the grid" and nothing about it pointed at CSS.
+///
+/// Asserted on the *invariant* — the wrapper never scrolls and its scroll box
+/// never exceeds its client box — rather than on the one selector, so any
+/// future element that escapes containment fails this too.
+test("typing a reference leaves the grid wrapper unscrolled", async ({ page }) => {
+  await boot(page);
+
+  const measure = () =>
+    page.evaluate(() => {
+      const wrap = document.getElementById("grid-wrap");
+      const editor = wrap.querySelector(".inline-edit");
+      return {
+        scrollTop: wrap.scrollTop,
+        scrollLeft: wrap.scrollLeft,
+        scrollHeight: wrap.scrollHeight,
+        clientHeight: wrap.clientHeight,
+        editorPosition: editor ? getComputedStyle(editor).position : null,
+      };
+    });
+
+  // Well down the sheet, so a native scroll has somewhere to go. Through the
+  // name box, which is how the rest of this file moves — and then focus is put
+  // back on the grid, because the bug is in the **in-cell** editor. Typing with
+  // the name box still focused would land the keystrokes there and the test
+  // would pass without ever opening the editor it is about.
+  await goTo(page, "F13");
+  await page.locator("#grid").focus();
+
+  // The first keystroke goes to the grid, which is what opens the in-cell
+  // editor; the rest go to the keyboard, which delivers to whatever now has
+  // focus. Pressing on `#grid` throughout would re-focus the canvas on every
+  // character and take the keystrokes away from the editor under test.
+  //
+  // One character at a time, because the tint arrives only when the reference
+  // resolves — a single `type()` would hide which keystroke did it.
+  await page.locator("#grid").press("=");
+  for (const ch of ["2", "*", "A", "2"]) {
+    await page.keyboard.type(ch);
+    const m = await measure();
+    expect(m.scrollTop, `wrapper scrolled natively after typing ${ch}`).toBe(0);
+    expect(m.scrollLeft, `wrapper scrolled natively after typing ${ch}`).toBe(0);
+    expect(
+      m.scrollHeight,
+      `the wrapper's scroll box grew past its client box after typing ${ch}`,
+    ).toBe(m.clientHeight);
+  }
+
+  // And the editor is still taken out of flow, which is what keeps it there.
+  expect((await measure()).editorPosition).toBe("absolute");
+
+  // The headers are still drawn — the visible symptom, checked rather than
+  // inferred from the numbers above.
+  const headerVisible = await page.evaluate(() => {
+    const c = document.querySelector("canvas");
+    const ctx = c.getContext("2d");
+    // A few pixels inside the column-header band: it is never empty when drawn.
+    const band = ctx.getImageData(0, 0, Math.min(400, c.width), 8).data;
+    return band.some((v, i) => i % 4 !== 3 && v !== 0);
+  });
+  expect(headerVisible, "the column header band went blank").toBe(true);
+});

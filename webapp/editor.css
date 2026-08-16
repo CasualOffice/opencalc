@@ -302,6 +302,102 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .menu-collapse .mc-caret { transition: none; }
 }
+
+/* ---- Who else is in this document (COL-33) ----
+   A face stack in the menu bar that opens the roster: who is here, which cell
+   they are in, whether they are typing, and one click to go to them. The menu
+   bar rather than the app header, because the header folds away and the people
+   you are working with should not fold away with it. */
+.presence { position: relative; display: inline-flex; align-items: center; margin-left: auto; }
+/* `hidden` alone loses to the rule above: an author `display` beats the UA's
+   `[hidden]` regardless of specificity — the same trap `.app-header` fell into
+   and the reason its collapse is a class. */
+.presence[hidden] { display: none; }
+/* Exactly one element in the bar may claim the slack. With `margin-left:auto`
+   on both this and the caret the free space is split between them and the
+   roster strands itself mid-bar; when the roster is absent the caret takes the
+   space back, which is why this is conditioned on `:not([hidden])`. */
+.presence:not([hidden]) ~ .menu-collapse { margin-left: 4px; }
+.presence-btn {
+  display: inline-flex; align-items: center; gap: 7px; align-self: center;
+  height: 22px; padding: 0 8px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--oc-muted-text-color);
+  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.presence-btn:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+.presence-btn:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+/* A name is somebody else's text of any length; the chip is clamped so a long
+   one cannot push the collapse caret off the bar. */
+.presence-label { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.presence-faces { display: inline-flex; align-items: center; }
+.presence-faces:empty { display: none; }
+.presence-face {
+  box-sizing: border-box; flex: 0 0 auto;
+  width: 18px; height: 18px; border-radius: 50%; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; line-height: 1;
+  /* Overlapped, so a crowd stays the width of a control rather than the width
+     of the bar; the ring is the bar behind it, which is what separates two
+     adjacent faces. */
+  border: 1.5px solid var(--oc-background-color); margin-left: -5px;
+}
+.presence-faces .presence-face:first-child { margin-left: 0; }
+.presence-face.presence-more { background: var(--oc-surface-color); color: var(--oc-muted-text-color); }
+/* Somebody mid-word. Colour is never the only signal — the row in the list
+   says "typing" in words. */
+.presence-face.typing { box-shadow: 0 0 0 2px var(--oc-accent-color); }
+
+/* The roster itself. Absolutely positioned, unlike every other `.popmenu`,
+   which is `position: fixed` and placed by JS: those open from a toolbar that
+   scrolls sideways, so their anchor moves. This one hangs off a button in a bar
+   that never moves, and an anchored panel cannot drift away from its trigger.
+
+   Written as `.popmenu.presence-menu` — two classes — because `.popmenu`'s own
+   `position: fixed` is declared further down this file and a single class would
+   lose to it on order alone. It did: the list rendered `position: fixed` with
+   `top: calc(100% + 4px)` resolved against the *viewport*, which put it 424px
+   down the page, nowhere near the button that opened it. Nothing about the rule
+   said so; only opening it in a browser did. */
+.popmenu.presence-menu {
+  position: absolute; right: 0; left: auto; top: calc(100% + 4px);
+  min-width: 236px; max-width: 320px;
+  /* A busy document must not produce a list taller than the window. */
+  max-height: min(52vh, 320px);
+}
+.presence-item {
+  box-sizing: border-box; display: flex; align-items: center; gap: 9px;
+  padding: 7px 9px;
+}
+.presence-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -1px; }
+/* In the list a face sits on the popover, not on the bar, so it needs no ring
+   and has room to be legible. */
+.presence-item .presence-face {
+  width: 22px; height: 22px; font-size: 10px; margin-left: 0; border: 0;
+}
+.presence-who { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.presence-name {
+  font-size: 13px; font-weight: 600; color: var(--oc-text-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.presence-where {
+  font-family: var(--oc-mono-font-family); font-size: 11px; color: var(--oc-muted-text-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Somebody on another sheet. The address already names their sheet; the arrow
+   says at a glance that reaching them means leaving this one. */
+.presence-item.elsewhere .presence-where::after { content: " \2197"; color: var(--oc-faint-text-color); }
+.presence-typing {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600; color: var(--oc-accent-color); white-space: nowrap;
+}
+.presence-typing::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  animation: oc-presence-pulse 1.4s ease-in-out infinite;
+}
+@keyframes oc-presence-pulse { 0%, 100% { opacity: .3 } 50% { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .presence-typing::before { animation: none; } }
+.presence-empty { padding: 8px 10px; font-size: 12.5px; color: var(--oc-muted-text-color); }
+
 .menu-top {
   border: 0; background: transparent; color: var(--oc-text-color);
   font: inherit; font-size: 13px; padding: 0 10px; border-radius: 6px;
@@ -1004,11 +1100,28 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 /* Specificity has to clear `.formula-bar input#formula-input`, which is where
    the bar's own colour comes from — a plain `#formula-input.tinted` loses. */
 .formula-bar input#formula-input.tinted, textarea.inline-edit.tinted {
-  position: relative; z-index: 1; background: transparent;
+  z-index: 1; background: transparent;
   /* Transparent glyphs, visible caret — `caret-color` is what keeps the caret
      from disappearing along with the text. */
   color: transparent; caret-color: var(--oc-text-color);
 }
+/* The z-index above needs a positioned box. The formula bar's input is static,
+   so it is given one here; the in-cell editor is **already** `position:
+   absolute` and must keep it.
+   
+   This rule used to set `position: relative` for both, and on the in-cell
+   editor that was a real defect rather than a redundancy. `relative` leaves the
+   element *in flow*: the textarea went back to being laid out after the
+   full-height canvas, with its `top` merely shifting it visually, so the
+   wrapper's scroll box grew by the height of the offset. The browser then
+   scrolled that hidden-overflow container to reveal the focused editor, and
+   since the canvas draws from `state.scrollY` rather than from the DOM, the two
+   came apart — column headers off screen, a band of rows drawn, the editor
+   floating near the bottom of the window.
+   
+   It only appeared once `.tinted` was added, which happens the moment a
+   reference is recognised — so it read as "typing =2*A2 broke the grid". */
+.formula-bar input#formula-input.tinted { position: relative; }
 .formula-bar input#formula-input.tinted::selection,
 textarea.inline-edit.tinted::selection {
   /* Selection has to stay visible even though the glyphs are transparent. */

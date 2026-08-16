@@ -290,18 +290,43 @@ fn ci_replace(haystack: &str, needle: &str, repl: &str) -> String {
     if needle.is_empty() {
         return haystack.to_owned();
     }
-    let (hay_l, needle_l) = (haystack.to_lowercase(), needle.to_lowercase());
+    let needle_l = needle.to_lowercase();
     let mut out = String::with_capacity(haystack.len());
-    let mut i = 0;
-    while i < haystack.len() {
-        if hay_l[i..].starts_with(&needle_l) {
+    let mut rest = haystack;
+    while !rest.is_empty() {
+        // **Lowercased per position, from the original.** The previous version
+        // lowercased the whole haystack once and then indexed it with offsets
+        // taken from the *original* — which is only sound if lowercasing
+        // preserves byte length, and it does not. `İ` (U+0130) lowercases to
+        // two characters and `K` (U+212A, the Kelvin sign) lowercases to one
+        // byte, so the two strings drift apart and `hay_l[i..]` slices out of
+        // bounds or into the middle of a character.
+        //
+        // Either one panics, and a panic here is not an error the caller can
+        // handle: on wasm32 it is a trap that aborts the module, leaves the
+        // `RefCell` borrow held across it permanently locked, and takes the
+        // open workbook with it. An ordinary Turkish column heading was enough,
+        // through the default Find bar path — "match case" is off by default.
+        // Lowercase forward from this position one character at a time until
+        // enough bytes have been produced to decide, tracking how much of the
+        // *original* was consumed as we go. No index ever crosses between the
+        // two encodings, so no length change can put one out of step.
+        let mut consumed = 0usize;
+        let mut lowered = String::new();
+        for ch in rest.chars() {
+            consumed += ch.len_utf8();
+            lowered.extend(ch.to_lowercase());
+            if lowered.len() >= needle_l.len() {
+                break;
+            }
+        }
+        if lowered == needle_l {
             out.push_str(repl);
-            i += needle.len();
+            rest = &rest[consumed..];
         } else {
-            // advance one char (UTF-8 safe)
-            let ch = haystack[i..].chars().next().unwrap();
+            let ch = rest.chars().next().expect("rest is not empty");
             out.push(ch);
-            i += ch.len_utf8();
+            rest = &rest[ch.len_utf8()..];
         }
     }
     out
@@ -8240,10 +8265,29 @@ fn html_cell_css(style: &Style) -> String {
     if !deco.is_empty() {
         css.push_str(&format!("text-decoration:{deco};"));
     }
-    if let Some(c) = &style.font_color {
+    // **Validated, not escaped.** A colour comes out of the file's `styles.xml`
+    // verbatim — the importer preserves whatever the attribute said, as it must
+    // (docs/34) — and this string is dropped into a `style="…"` attribute that
+    // `session_print_html` hands to `document.write` in a window inheriting the
+    // editor's origin. A workbook whose `<color rgb>` closed the attribute and
+    // opened an `<img onerror=…>` therefore ran script with a live
+    // `window.opener`, next to the session token and the collaboration socket.
+    //
+    // Escaping would work and is the wrong tool: there is no legitimate colour
+    // that needs escaping. A colour is hex or it is not a colour, and one that
+    // is not is dropped — the cell renders in the default colour rather than
+    // carrying an attacker's string into a document. Doing it here rather than
+    // at import also covers every emitter that formats a colour, and the CI
+    // SEC-001 sink check cannot see this file at all: it greps `webapp/*.js`
+    // and the host's HTML, so markup assembled in Rust was outside it.
+    let hex = |c: &String| -> Option<String> {
+        let ok = matches!(c.len(), 3 | 6 | 8) && c.chars().all(|ch| ch.is_ascii_hexdigit());
+        ok.then(|| c.clone())
+    };
+    if let Some(c) = style.font_color.as_ref().and_then(hex) {
         css.push_str(&format!("color:#{c};"));
     }
-    if let Some(c) = &style.fill_color {
+    if let Some(c) = style.fill_color.as_ref().and_then(hex) {
         css.push_str(&format!("background-color:#{c};"));
     }
     if let Some(a) = style.align {
@@ -9104,6 +9148,51 @@ pub fn collab_unacknowledged() -> bool {
     in_flight || with_session(WorkbookSession::has_applied).unwrap_or(false)
 }
 
+/// Where this participant is looking, and what they are typing, as a JSON
+/// `ClientMessage`.
+///
+/// A whole message rather than a shape for the host to assemble, for the same
+/// reason [`collab_flush`] returns one: the host carries the string to a socket
+/// and no further, and a host that had to build the message would be
+/// reimplementing the protocol in whatever language it happens to be written
+/// in. That is not a hypothetical — the first version of `collab_flush` handed
+/// out a bare `Submission` and the server could not parse a single edit any
+/// browser ever made.
+///
+/// `draft_text` is what is in the cell editor *right now*, or `None` when
+/// nothing is being edited — which is how an abandoned edit is cleared
+/// everywhere, since each participant owns one presence entry that is
+/// overwritten whole. `draft_row`/`draft_col` name the cell the edit belongs
+/// to, which is not always the selection: a formula being written wanders off
+/// to pick references.
+///
+/// The text is bounded here rather than left to the caller, because "the caller
+/// remembers to truncate" is a rule with one keystroke between it and a
+/// megabyte on the wire.
+///
+/// **This does not touch the document.** No operation is recorded, nothing
+/// enters the undo history, and nothing becomes outstanding work — a draft is
+/// presence (ADR-011), and the whole point is that losing it costs nothing.
+#[wasm_bindgen]
+pub fn collab_presence(
+    sheet: usize,
+    selection: &[u32],
+    draft_row: u32,
+    draft_col: u32,
+    draft_text: Option<String>,
+) -> String {
+    // Padded rather than refused: a malformed selection from a host is worth a
+    // cursor in the wrong place, not a dropped presence channel.
+    let at = |i: usize| selection.get(i).copied().unwrap_or(0);
+    let message = ClientMessage::Presence {
+        sheet,
+        selection: [at(0), at(1), at(2), at(3)],
+        editing: draft_text
+            .map(|text| casual_calc_transaction::protocol::Draft::new(draft_row, draft_col, text)),
+    };
+    serde_json::to_string(&message).unwrap_or_default()
+}
+
 /// Leave the session. Local edits stop being tracked for submission.
 #[wasm_bindgen]
 pub fn collab_end() {
@@ -9517,7 +9606,7 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{html_cell_css, push_html_escaped};
+    use super::{ci_replace, html_cell_css, push_html_escaped};
     use casual_calc_model::{HAlign, Style};
 
     #[test]
@@ -9545,6 +9634,74 @@ mod tests {
         assert!(css.contains("color:#FF0000;"));
         assert!(css.contains("background-color:#FFFF00;"));
         assert!(css.contains("text-align:center;"));
+    }
+
+    /// **A colour is hex, or it is not emitted.**
+    ///
+    /// `style.font_color` is whatever the file's `styles.xml` said — preserved
+    /// verbatim on import, as docs/34 requires — and this string is dropped
+    /// into a `style="…"` attribute that `session_print_html` hands to
+    /// `document.write` in a window inheriting the editor's origin. A workbook
+    /// that closed the attribute and opened an `<img onerror=…>` ran script
+    /// next to the session token and the collaboration socket, with a live
+    /// `window.opener`.
+    ///
+    /// The CI SEC-001 sink check could not see this: it greps `webapp/*.js` and
+    /// the host's HTML, and this markup is assembled in Rust.
+    #[test]
+    fn a_workbook_colour_cannot_escape_the_style_attribute() {
+        let hostile = Style {
+            font_color: Some("a\"><img src=x onerror=alert(1)>".to_owned()),
+            fill_color: Some("</style><script>alert(1)</script>".to_owned()),
+            ..Style::default()
+        };
+        let css = html_cell_css(&hostile);
+        assert!(
+            !css.contains('<') && !css.contains('"') && !css.contains('>'),
+            "workbook text reached a style attribute: {css:?}"
+        );
+        assert_eq!(css, "", "a colour that is not a colour is simply dropped");
+
+        // The shapes a real file uses still come through.
+        for good in ["FF0000", "F00", "FFFF0000"] {
+            let style = Style {
+                font_color: Some(good.to_owned()),
+                ..Style::default()
+            };
+            assert_eq!(html_cell_css(&style), format!("color:#{good};"));
+        }
+    }
+
+    /// **Case-insensitive replace must survive text that changes length when
+    /// lowercased.**
+    ///
+    /// The old implementation lowercased the haystack once and then indexed it
+    /// with byte offsets taken from the original, which only works if
+    /// lowercasing preserves length. `İ` grows to two characters and the Kelvin
+    /// sign `K` shrinks to one byte, so the two drifted apart and the slice
+    /// landed out of bounds or inside a character.
+    ///
+    /// A panic here is not a caught error: on wasm32 it traps, aborts the
+    /// module, leaves the `RefCell` borrow held across it locked forever, and
+    /// takes the open workbook with it. An ordinary Turkish column heading was
+    /// enough, through the default Find bar path — "match case" is off by
+    /// default.
+    #[test]
+    fn case_insensitive_replace_handles_text_that_changes_length_when_lowercased() {
+        // U+0130, which lowercases to two characters.
+        assert_eq!(ci_replace("Ürün İsmi", "smi", "X"), "Ürün İX");
+        // U+212A KELVIN SIGN, which lowercases to a shorter byte sequence.
+        assert_eq!(
+            ci_replace("300\u{212A} sample", "sample", "X"),
+            "300\u{212A} X"
+        );
+        // The ordinary cases, unchanged.
+        assert_eq!(ci_replace("Hello World", "world", "there"), "Hello there");
+        assert_eq!(ci_replace("aAaA", "a", "-"), "----");
+        assert_eq!(ci_replace("nothing", "", "X"), "nothing");
+        assert_eq!(ci_replace("no match here", "zzz", "X"), "no match here");
+        // Matching across a case fold that changes length.
+        assert_eq!(ci_replace("İstanbul", "i\u{307}stanbul", "X"), "X");
     }
 
     #[test]
@@ -10191,6 +10348,89 @@ mod collab_tests {
             "the two participants converged on different orders of the same edits"
         );
         assert!(a_final.contains("mine") && a_final.contains("theirs"));
+    }
+
+    /// **A draft is presence, and typing must leave no trace of itself in the
+    /// document, the undo history or the applied log.**
+    ///
+    /// The line ADR-011 draws, asserted at the seam where it would be crossed.
+    /// The tempting implementation of "show me what they are typing" is to
+    /// write the cell on every keystroke and let the transform sort it out —
+    /// which converges, and is also wrong in every other way: it fills the undo
+    /// stack with half-words, sends an operation per keypress for everybody
+    /// else to transform and apply, and commits text the author may be about to
+    /// abandon. Every one of those is caught by `collab_flush()` staying empty.
+    ///
+    /// Checked after **each** keystroke rather than at the end, because a
+    /// version that submitted the draft and cleared it again would pass a
+    /// single check at the end.
+    #[test]
+    fn a_draft_is_presence_and_never_reaches_the_document_the_history_or_the_log() {
+        fresh(1, 0);
+        for typed in ["=", "=S", "=SU", "=SUM(A1:A9"] {
+            let message = collab_presence(0, &[3, 1, 3, 1], 3, 1, Some(typed.to_owned()));
+            let parsed: ClientMessage =
+                serde_json::from_str(&message).expect("a presence message: {message}");
+            let ClientMessage::Presence { editing, .. } = parsed else {
+                panic!("a draft must travel as presence, got {message}");
+            };
+            assert_eq!(
+                editing.as_ref().map(|d| d.text.as_str()),
+                Some(typed),
+                "the draft carries the text, which is what was asked for"
+            );
+            assert_eq!(
+                collab_flush(),
+                "",
+                "typing produced an operation to submit: {typed}"
+            );
+        }
+
+        // Nothing in the document...
+        assert_eq!(session_cell_input(0, 3, 1), "", "the cell is still empty");
+        // ...nothing to undo, so the author's own history is untouched...
+        assert!(!session_can_undo(), "a draft entered the undo history");
+        // ...and nothing owed to the server.
+        assert!(!collab_unacknowledged(), "a draft is outstanding work");
+
+        // And committing *does* produce a chunk — so the assertions above are
+        // about drafts being ephemeral, not about the session being inert.
+        session_set_cell(0, 3, 1, "=SUM(A1:A9)").unwrap();
+        assert!(
+            collab_flush().contains("\"seq\""),
+            "the committed value is what travels as an operation"
+        );
+    }
+
+    /// A draft from a hostile or merely careless client is cut back before it
+    /// is put into a message.
+    #[test]
+    fn a_draft_is_bounded_before_it_leaves_this_engine() {
+        fresh(1, 0);
+        let typed = "x".repeat(50_000);
+        let message = collab_presence(0, &[0, 0, 0, 0], 0, 0, Some(typed));
+        let ClientMessage::Presence {
+            editing: Some(draft),
+            ..
+        } = serde_json::from_str(&message).expect("a presence message")
+        else {
+            panic!("expected a draft");
+        };
+        assert_eq!(
+            draft.text.chars().count(),
+            casual_calc_transaction::protocol::Draft::MAX_TEXT
+        );
+    }
+
+    /// Not typing is the absent field, which is how Escape reaches everybody.
+    #[test]
+    fn a_participant_who_stopped_typing_says_so_by_carrying_no_draft() {
+        fresh(1, 0);
+        let message = collab_presence(0, &[3, 1, 3, 1], 3, 1, None);
+        assert!(
+            !message.contains("editing"),
+            "an abandoned edit must leave nothing behind: {message}"
+        );
     }
 
     #[test]

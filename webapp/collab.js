@@ -73,6 +73,16 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
   // sent: the engine's session does not exist and a submission would be against
   // a revision nobody agreed on.
   let joined = false;
+  /// Whether this transport has ever completed a join.
+  ///
+  /// The difference between a first join and a reconnect, which is the
+  /// difference between "there is nothing to lose" and "something was lost".
+  /// `joined` is cleared on every disconnect and so cannot answer it.
+  let everJoined = false;
+  /// Whether a reconnect discarded unsent work and the user has not yet had an
+  /// edit acknowledged since. Holds back "live" for exactly that long, so the
+  /// notice is not erased by a socket that came back before the user looked.
+  let lostUnsent = false;
 
   // This editor's claim to be the participant it was, for reconnecting.
   //
@@ -178,6 +188,33 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
           close();
           break;
         }
+        // **Asked before the snapshot lands, because afterwards there is
+        // nothing left to ask about.** A welcome that follows a previous join
+        // is a reconnect the server did not resume — the resume key was not
+        // recognised, because the reconnect was balanced to another node, or
+        // the node restarted, or the document was evicted, or the key aged out
+        // of a bounded map. Whatever the reason, the snapshot below replaces
+        // the whole workbook and the collaborative session with it, discarding
+        // the applied-op log, the history, and every chunk still unacknowledged.
+        //
+        // docs/61 says that loss is "lost loudly". It was not: nothing here
+        // consulted `collab_unacknowledged`, which exists to answer exactly
+        // this question, and the server's `TooFarBehind` refusal is only sent
+        // when it *recognises* the key — an unrecognised one produces no
+        // refusal at all. So a user typing through a rolling deploy watched
+        // their cells disappear under a status line reading "collaborating".
+        //
+        // Nothing here can save the work: those operations were written
+        // against a revision this client no longer holds, and re-applying them
+        // untransformed is the divergence the whole transform exists to
+        // prevent. Announcing it is the honest remedy, and it has to happen
+        // first.
+        const losing = everJoined && wasm.collab_unacknowledged();
+        if (losing) {
+          lostUnsent = true;
+          status("lost", "unsentEdits");
+          onDocument({ reason: "lost", revision: message.revision });
+        }
         // The snapshot is the document as everyone else has it *at this
         // revision*. Loading the file instead would start this participant at
         // revision zero while the session was at five hundred.
@@ -188,11 +225,16 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         wasm.session_load_snapshot(new Uint8Array(message.snapshot));
         wasm.collab_begin(message.client, message.revision);
         joined = true;
+        everJoined = true;
         revision = message.revision;
         mustResend = false;
         retryMs = RETRY_FLOOR_MS;
         onDocument({ reason: "joined", revision: message.revision, editable: message.editable });
-        status("live");
+        // Not overwritten by "live" when something was lost. A data-loss notice
+        // that the next status line erases three microseconds later is a notice
+        // nobody sees, which is how the `refused` state was already going
+        // unnoticed on this same socket.
+        if (!losing) status("live");
         startTimers();
         break;
       }
@@ -232,6 +274,13 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         // next, rather than leaving a chunk outstanding with nothing to say so.
         wasm.collab_acknowledge(message.through, message.revision);
         revision = message.revision;
+        // Work made *since* the loss has now landed on the server, which is the
+        // first moment "collaborating" is true again rather than merely
+        // connected. Until here the status line keeps saying what was lost.
+        if (lostUnsent) {
+          lostUnsent = false;
+          status("live");
+        }
         break;
       case "apply":
         for (const op of message.ops) {
@@ -340,11 +389,30 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
 
-  /// Send local presence. Carries no identity — the server takes that from the
-  /// token, because presence is the one surface where a claimed name would be
-  /// believed.
-  function present(sheet, selection) {
-    send({ type: "presence", sheet, selection });
+  /// Send local presence: where this participant is looking, and what they are
+  /// part-way through typing.
+  ///
+  /// Carries no identity — the server takes that from the token, because
+  /// presence is the one surface where a claimed name would be believed.
+  ///
+  /// `editing` is `{ at: [row, col], text }` while a cell editor is open and
+  /// null the rest of the time, and passing null is how an **abandoned** edit is
+  /// cleared everywhere: a participant owns exactly one presence entry and
+  /// replaces it wholesale, so there is no separate "stop editing" message for a
+  /// dropped socket to lose. A disconnect clears it the same way, by the entry
+  /// going with its author.
+  ///
+  /// The message is built by the engine rather than here. It is the protocol,
+  /// and the last time this file assembled one of its messages by hand the
+  /// server could not parse a single edit any browser made — so the shape, and
+  /// the bound on how much text a draft carries, live in one place that both
+  /// ends compile from.
+  function present(sheet, selection, editing = null) {
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const at = editing?.at ?? [0, 0];
+    socket.send(
+      wasm.collab_presence(sheet, Uint32Array.from(selection), at[0], at[1], editing?.text ?? undefined),
+    );
   }
 
   /// The name of a refusal.

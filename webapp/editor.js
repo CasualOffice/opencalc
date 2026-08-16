@@ -2781,7 +2781,7 @@ function commit(value, advance, source = "user") {
     source,
   })) {
     statusError("that change was refused by the application");
-    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus({ preventScroll: true }); }
     return false;
   }
   // A cross-sheet pick leaves the view on another sheet; go back before writing,
@@ -2809,7 +2809,7 @@ function commit(value, advance, source = "user") {
       // and blocking all three leaves no way past an advisory rule.
       if (alert.style === "stop") {
         statusError(`Not allowed here — ${label}`);
-        if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+        if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus({ preventScroll: true }); }
         return false;
       }
       // `warning` and `information` both let the value through. Excel asks
@@ -2833,7 +2833,7 @@ function commit(value, advance, source = "user") {
       // red outline and the refocus land on whichever surface was being typed
       // in, so the formula bar reports its own errors like the cell does.
       statusError(`Formula error: ${friendlyFormulaError(err)}`);
-      if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+      if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus({ preventScroll: true }); }
       return false;
     }
   }
@@ -2858,7 +2858,7 @@ function commit(value, advance, source = "user") {
     // message pointing at a cell the user is no longer looking at — which is
     // how a protected sheet appeared to accept the value.
     statusError(errText(e));
-    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus(); }
+    if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus({ preventScroll: true }); }
     return false;
   }
   emit("cellsChanged", {
@@ -5604,6 +5604,10 @@ function relabelMenubar() {
 /// pass over the DOM rather than a teardown.
 function relabel() {
   relabelMenubar();
+  // The roster's own strings come from the catalogue too, and it is built in
+  // JS rather than carried in the markup, so a language change has to rebuild
+  // it. A no-op outside a session.
+  renderPresence();
   for (const node of qsa("[data-oc-label]")) {
     if (node.classList.contains("menu-top")) continue; // handled above
     const id = node.dataset.ocCommand;
@@ -7495,7 +7499,21 @@ function beginEdit(surface, initial, caretAtEnd = false) {
   }
   if (initial !== undefined) surface.value = initial;
   else surface.value = editOriginal;
-  surface.focus();
+  // **`preventScroll`, and it is not a nicety.**
+  //
+  // The grid scrolls *virtually*: the canvas is one screen tall and draws
+  // whatever `state.scrollX/scrollY` say. The inline editor, though, is a real
+  // `<textarea>` inside `.grid-wrap` — and `overflow: hidden` stops a *user*
+  // scrolling that container, not the browser. Focusing a descendant it
+  // considers out of view makes it scroll the container to reveal it, and that
+  // native `scrollTop` is pure corruption: the canvas keeps drawing from
+  // `state.scrollY` while the element it lives in has moved underneath it.
+  //
+  // The symptom was reported as "typing =2*A2 scrolled the canvas somewhere
+  // weird". It is worse than a scroll — the column headers leave the screen,
+  // only a band of rows draws, and the editor box detaches and floats near the
+  // bottom of the window, because everything is offset twice.
+  surface.focus({ preventScroll: true });
   // Typing a character starts a fresh value; opening the editor selects what is
   // already there so the next keystroke replaces it — except under F2, which
   // exists precisely to *amend* the value, so it puts the caret at the end.
@@ -7507,6 +7525,11 @@ function beginEdit(surface, initial, caretAtEnd = false) {
   // rather than waiting for the first keystroke.
   updateRefSpans();
   updateCellMode();
+  // The others learn about this edit at its first character rather than at its
+  // first *change*: typing a letter on the grid sets the value programmatically,
+  // which fires no `input` event, so the opening keystroke would otherwise be
+  // the one nobody else ever saw.
+  announceCollabSelection();
 }
 
 function startInline(initial, caretAtEnd = false) {
@@ -7538,6 +7561,11 @@ function endEdit(refocus = true) {
   fInput.classList.remove("invalid");
   if (refocus && was) canvas.focus();
   updateCellMode();
+  // However the edit ended — committed, escaped, or handed to another cell —
+  // this participant is no longer typing, and the others are told so by a
+  // presence entry with no draft in it. There is no separate "stopped" message
+  // to lose, which is what makes an abandoned edit cost nothing to clean up.
+  announceCollabSelection();
   if (hadSpans) draw();
 }
 // Kept as the name the rest of the editor already calls.
@@ -7807,6 +7835,12 @@ function mirrorEdit() {
   if (!editSurface) return;
   if (editSurface === inline) fInput.value = inline.value;
   else inline.value = fInput.value;
+  // Every path that changes the text of an open edit passes through here — the
+  // keystroke handler, reference insertion, autocomplete, the anchor cycle — so
+  // this is where the others find out what is being typed. Hooking the `input`
+  // event instead would miss every programmatic change, which is most of the
+  // interesting ones in a formula.
+  announceCollabSelection();
 }
 
 // Abandon the edit and put the cell's own text back on both surfaces.
@@ -8772,6 +8806,9 @@ function switchSheet(i, keepEdit = false) {
     resetView(); // first visit to this sheet starts at A1
   }
   renderTabs();
+  // Which participants are "elsewhere" is relative to the sheet on screen, so
+  // the roster is re-read whenever that changes.
+  renderPresence();
 }
 
 // (Re)build the bottom sheet-tab bar from the engine's sheet list.
@@ -11179,6 +11216,7 @@ function wireEvents() {
   });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); draw(); });
 
+  wirePresence();
   wireSettings();
 }
 
@@ -11412,11 +11450,39 @@ let collabSession = null;
 /// reads to render a participant list.
 const collabRoster = new Map();
 
-/// The selection last announced, so presence is sent when it moves and not on
-/// every frame. `draw()` polls this the way `emitStateEvents` does, for the
-/// same reason: there are dozens of places the selection changes and one of
-/// them will always be forgotten.
+/// What was last announced — sheet, selection and draft — so presence is sent
+/// when it changes and not on every frame. `draw()` polls this the way
+/// `emitStateEvents` does, for the same reason: there are dozens of places the
+/// selection changes and one of them will always be forgotten.
 let collabAnnounced = "";
+
+/// The floor between two presence messages, and the trailing timer that makes
+/// the floor safe.
+///
+/// A draft changes on every keystroke, and a message per keystroke is a message
+/// per keystroke for every other participant to receive, parse and repaint. A
+/// touch-typist runs at about eight a second, so this collapses a burst into
+/// roughly six a second while leaving the *first* keystroke immediate — a
+/// leading edge, because the interesting moment for everyone else is the one
+/// where somebody starts typing in a cell.
+///
+/// The trailing timer is not optional. Throttling by dropping would drop the
+/// **last** keystroke of a burst, which is the one that stays on screen: peers
+/// would sit looking at "=SUM(A1:A9" for as long as the author admired their
+/// finished formula.
+const PRESENCE_THROTTLE_MS = 150;
+let collabAnnounceTimer = null;
+let collabAnnouncedAt = 0;
+
+/// Whether a reconnect discarded work this client had not sent yet.
+///
+/// Sticky on purpose. Every other collaboration status describes a condition
+/// that will pass; this one describes cells that are gone, and the "live" the
+/// reconnect would otherwise emit a moment later erases the only notice the
+/// user ever gets. The transport withholds "live" until an edit made *after*
+/// the loss has been acknowledged, so this clears when editing demonstrably
+/// works again rather than when the socket merely reopens.
+let collabLostUnsent = false;
 
 /// Join a collaborative session.
 ///
@@ -11436,10 +11502,48 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
       // The status line is the only place the editor says this out loud, and
       // "reconnecting" is the one a user needs to see before they wonder why
       // their typing stopped mattering.
-      if (event.state === "live") status.textContent = "collaborating";
-      else if (event.state === "reconnecting") status.textContent = "reconnecting…";
+      //
+      // `lost` outranks the rest and **sticks**: it is the one state that
+      // reports work already gone rather than a condition that will pass, so
+      // letting the next "collaborating" overwrite it turns a data-loss notice
+      // into a flicker. It clears when the user next edits successfully, which
+      // is the point at which they have demonstrably read the grid.
+      if (event.state === "lost") {
+        collabLostUnsent = true;
+        status.textContent =
+          "reconnected to a different server — edits you made while disconnected were not saved";
+      } else if (event.state === "live") {
+        collabLostUnsent = false;
+        status.textContent = "collaborating";
+      } else if (collabLostUnsent) {
+        // Held. Anything else this transport wants to say can wait: the
+        // transport does not send "live" again until an edit made *after* the
+        // loss has been acknowledged, so this clears when editing demonstrably
+        // works, not merely when the socket comes back.
+      } else if (event.state === "reconnecting") status.textContent = "reconnecting…";
       else if (event.state === "refused") status.textContent = `not saved: ${event.detail}`;
       else if (event.state === "stopped") status.textContent = `disconnected: ${event.detail}`;
+
+      // **A session the transport has finished with is finished here too.**
+      //
+      // `stopped` is terminal — the transport has closed the socket and will
+      // not reconnect, because reconnecting would be refused for the same
+      // reason. But only an explicit `stopCollaborating()` used to clear
+      // `collabSession`, so the editor went on believing it was in a session
+      // that no longer existed, and the next `collaborate()` threw "already in
+      // a collaborative session".
+      //
+      // The result: a token that expired, or any other refusal, could only be
+      // recovered from by reloading the page — which throws away whatever the
+      // user had locally. Observed live: a refused join left the editor unable
+      // to rejoin the same document with a valid token seconds later.
+      if (event.state === "stopped") {
+        collabSession = null;
+        collabRoster.clear();
+        forgetCollabAnnouncement();
+        renderPresence();
+        draw();
+      }
       onStatus?.(event);
     },
     onDocument: (event) => {
@@ -11449,10 +11553,14 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
     onPresence: (event) => {
       if (event.kind === "gone") collabRoster.delete(event.client);
       else collabRoster.set(event.client, event);
+      renderPresence();
       draw();
       onPresence?.(event);
     },
   });
+  // Shown as soon as there is a session, before anybody else has moved: "only
+  // you" is an answer to "who is collaborating", and an absent control is not.
+  renderPresence();
   return collabSession;
 }
 
@@ -11461,12 +11569,418 @@ export function stopCollaborating() {
   collabSession?.close();
   collabSession = null;
   collabRoster.clear();
+  forgetCollabAnnouncement();
+  renderPresence();
+}
+
+/// Forget what was last announced, and cancel anything queued to announce.
+///
+/// Both halves matter when a session ends. The key has to go or the *next*
+/// session's first selection looks unchanged and is never sent; the timer has
+/// to go or it fires into a closed session, and — worse — a draft queued from
+/// the old session would be the first thing the new one said.
+function forgetCollabAnnouncement() {
   collabAnnounced = "";
+  collabAnnouncedAt = 0;
+  clearTimeout(collabAnnounceTimer);
+  collabAnnounceTimer = null;
 }
 
 /// The other participants, as a host would show them.
 export function collaborators() {
   return [...collabRoster.values()];
+}
+
+// --- The participant roster (COL-33) ----------------------------------------
+//
+// `drawCollaborators` puts a cursor where somebody is standing, which answers
+// "who is in this cell" and nothing else. It cannot answer "who is in this
+// document" — a cursor two thousand rows down or on another sheet is drawn
+// nowhere — and that is what was reported against the running demo: *"i can't
+// see here which profiles are collaborating... i see the name"*. The name was
+// the only evidence anybody else existed, and only if you happened to be
+// looking at their cell.
+//
+// So: a face stack in the menu bar that opens a roster of who is here, what
+// they are doing, and a click that takes you to them.
+//
+// **Every string in here is somebody else's text.** A name arrives in the
+// token, which an integrator minted from whatever their user typed; a sheet
+// name comes out of a workbook, which is a file somebody uploaded. SEC-001 is
+// the rule that neither may build DOM in this origin, so this constructs nodes
+// and assigns `textContent`. There is no markup in this section, and there is
+// no interpolation into a selector either — a client id with a quote in it
+// would otherwise throw out of `querySelector` and take the roster with it.
+//
+// Nothing below touches the document, the history or the outgoing log.
+
+/// How many faces the stack shows before the rest become "+n".
+///
+/// Three, because the stack shares a 30px bar with eight menus and the collapse
+/// caret, and every extra face is 13px taken from them. Everybody is in the
+/// list; the stack is a summary of it, not the roster.
+const PRESENCE_FACES = 3;
+
+/// Whether the roster popup is open.
+let presenceOpen = false;
+
+/// A participant's display name, never empty.
+///
+/// `someone` matches what the cursor tag draws for a nameless participant, so
+/// the list and the grid agree about who that is.
+function participantName(who) {
+  const name = typeof who?.name === "string" ? who.name.trim() : "";
+  return name || t("presence.someone", "someone");
+}
+
+/// One or two letters for a face, from a name that may be anything at all.
+///
+/// `Array.from` rather than `name[0]`: a name starting with an emoji or any
+/// astral-plane character has a first *code unit* that is half a surrogate
+/// pair, and half a pair renders as a replacement box.
+function participantInitials(name) {
+  const words = String(name ?? "").trim().split(/\s+/).filter(Boolean);
+  const first = (w) => Array.from(w)[0] ?? "";
+  const out = words.length > 1 ? first(words[0]) + first(words[1]) : first(words[0] ?? "");
+  return (out || "?").toUpperCase();
+}
+
+/// The r/g/b of a colour `participantColor` has already vouched for, or null.
+function participantChannels(color) {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color);
+  if (hex) {
+    const h = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join("") : hex[1];
+    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  }
+  // A named colour or an `rgb()`, which `participantColor` passes through when
+  // the browser agrees it is a colour. Ask the browser what it resolved to.
+  const probe = new Option().style;
+  probe.color = color;
+  const m = /^rgba?\(([^)]+)\)$/.exec(probe.color);
+  if (!m) return null;
+  const parts = m[1].split(/[,\s/]+/).filter(Boolean).map(Number).slice(0, 3);
+  return parts.length === 3 && parts.every(Number.isFinite) ? parts : null;
+}
+
+/// Black or white on a participant's colour, whichever can be read.
+///
+/// Computed rather than assumed, because the palette is the server's and a
+/// deployment may replace it: white initials on `#FDD835` are invisible, and an
+/// unreadable name is the exact failure this control exists to fix.
+function participantInk(color) {
+  const rgb = participantChannels(color);
+  if (!rgb) return "#ffffff";
+  // Rec. 709 luma — green carries most of the perceived brightness, which a
+  // plain average of the channels gets wrong for yellows and blues.
+  const luma = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  return luma > 0.6 ? "#0b0d12" : "#ffffff";
+}
+
+/// A coloured initial for the stack and for each row of the list.
+function participantFace(who) {
+  const color = participantColor(who.color);
+  const face = el("span", "presence-face", participantInitials(who.name));
+  // Assigned through CSSOM, which parses a *value* and drops what it cannot
+  // parse. It cannot become markup, and `participantColor` has already refused
+  // anything the browser does not read as a colour.
+  face.style.background = color;
+  face.style.color = participantInk(color);
+  if (who.editing) face.classList.add("typing");
+  return face;
+}
+
+/// A cell reference from a presence entry, or null.
+///
+/// Every field is validated rather than trusted. Presence comes from another
+/// client by way of the server, which bounds it but does not promise it is
+/// sensible, and `A1(undefined, undefined)` is a label reading "undefined".
+function presenceCell(who) {
+  const ok = (n) => Number.isInteger(n) && n >= 0;
+  const draft = who?.editing;
+  // A draft wins over the selection: while a formula is being written the
+  // selection walks off to pick references (see `collabDraft`), so the cell
+  // they are *in* is the one they are typing into, not the one highlighted.
+  if (draft && Array.isArray(draft.at) && draft.at.length === 2 && draft.at.every(ok)) {
+    return { r0: draft.at[0], c0: draft.at[1], r1: draft.at[0], c1: draft.at[1] };
+  }
+  const sel = who?.selection;
+  if (!Array.isArray(sel) || sel.length !== 4 || !sel.every(ok)) return null;
+  return {
+    r0: Math.min(sel[0], sel[2]),
+    c0: Math.min(sel[1], sel[3]),
+    r1: Math.max(sel[0], sel[2]),
+    c1: Math.max(sel[1], sel[3]),
+  };
+}
+
+/// Where a participant is, as a person would say it: `Budget!D8`.
+function presenceWhere(who) {
+  const sheet = Number.isInteger(who?.sheet) ? who.sheet : -1;
+  const named = sheet >= 0 ? sheetNameAt(sheet) : null;
+  // A sheet index this client cannot name is still worth reporting: it means
+  // they are on a sheet that was added or removed under us, and "Sheet 3" is
+  // more use than an empty line.
+  const where = typeof named === "string" && named ? named : `${t("presence.sheet", "Sheet")} ${sheet + 1}`;
+  const at = presenceCell(who);
+  const a = at ? A1(at.r0, at.c0) : "";
+  const b = at ? A1(at.r1, at.c1) : "";
+  const ref = !at ? "" : a === b ? a : `${a}:${b}`;
+  return {
+    text: ref ? `${where}!${ref}` : where,
+    // Their sheet is not the one on screen, so going to them means leaving it.
+    elsewhere: sheet >= 0 && sheet !== state.sheet,
+  };
+}
+
+/// One row of the roster: who, where, and whether they are mid-word.
+function presenceRow(who) {
+  const name = participantName(who);
+  const where = presenceWhere(who);
+  const row = el("button", "presence-item");
+  row.type = "button";
+  row.setAttribute("role", "menuitem");
+  // Read back after a rebuild to restore focus; never interpolated into a
+  // selector, because a client id is not this editor's string to trust.
+  row.dataset.client = String(who.client ?? "");
+  if (where.elsewhere) row.classList.add("elsewhere");
+  row.appendChild(participantFace(who));
+  const who2 = el("span", "presence-who");
+  who2.appendChild(el("span", "presence-name", name));
+  who2.appendChild(el("span", "presence-where", where.text));
+  row.appendChild(who2);
+  const typing = who.editing ? t("presence.typing", "typing") : "";
+  if (typing) row.appendChild(el("span", "presence-typing", typing));
+  // The visible text plus what the row does, because "Grace Hopper Budget!D8"
+  // read aloud does not say that activating it goes there.
+  row.setAttribute(
+    "aria-label",
+    `${t("presence.goto", "Go to")} ${name}, ${where.text}${typing ? `, ${typing}` : ""}`,
+  );
+  row.addEventListener("click", () => {
+    closePresence();
+    jumpToParticipant(who);
+  });
+  return row;
+}
+
+/// Rebuild the face stack and the roster from the live roster map.
+///
+/// Called on every presence message, which during a burst of typing is roughly
+/// six a second. That is why the open list restores focus and scroll position
+/// afterwards: somebody arrow-keying down the roster while a peer types would
+/// otherwise have the focus thrown back to the page under them, and a list that
+/// jumps to the top every time somebody presses a key cannot be read.
+function renderPresence() {
+  const box = byId("presence");
+  const btn = byId("presence-btn");
+  const faces = byId("presence-faces");
+  const label = byId("presence-label");
+  const menu = byId("presence-menu");
+  // A host that removed this chrome, or a call before the mount is bound.
+  if (!box || !btn || !faces || !label || !menu) return;
+
+  // No session, nothing to say. The editor is single-player most of the time
+  // and a permanent "only you" chip is noise in a bar that carries none.
+  if (!collabSession) {
+    box.hidden = true;
+    if (presenceOpen) closePresence();
+    return;
+  }
+  box.hidden = false;
+
+  // Sorted by name, not by arrival: the list is read to *find* somebody, and
+  // an order that changes as people move is an order nobody can search.
+  const others = collaborators().slice().sort((a, b) => {
+    const byName = participantName(a).localeCompare(participantName(b));
+    return byName || String(a.client ?? "").localeCompare(String(b.client ?? ""));
+  });
+
+  faces.textContent = "";
+  for (const who of others.slice(0, PRESENCE_FACES)) faces.appendChild(participantFace(who));
+  if (others.length > PRESENCE_FACES) {
+    faces.appendChild(
+      el("span", "presence-face presence-more", `+${others.length - PRESENCE_FACES}`),
+    );
+  }
+
+  const count = others.length;
+  label.textContent =
+    count === 0
+      ? t("presence.alone", "Only you")
+      : count === 1
+        ? t("presence.one", "1 other")
+        : t("presence.many", "%n others").replace("%n", String(count));
+  // `setTip` writes the tooltip *and* the accessible name, through whichever
+  // surface this control ended up using. The names are in it because a screen
+  // reader user should not have to open a menu to learn whether they are alone.
+  setTip(
+    btn,
+    count === 0
+      ? t("presence.tip-alone", "Collaborators — you are the only one here")
+      : `${t("presence.tip", "Collaborators")} — ${label.textContent}: ${others
+          .map(participantName)
+          .join(", ")}`,
+  );
+
+  // The list itself is only built while it is on screen. Presence arrives about
+  // six times a second per person who is typing, and rebuilding twenty rows
+  // nobody is looking at, sixscore times a second, is work the grid wants for
+  // drawing. `openPresence` builds it on the way open.
+  if (!presenceOpen) {
+    menu.textContent = "";
+    return;
+  }
+
+  // What had focus, so a rebuild under an open menu does not steal it.
+  const focused = presenceItems().includes(activeEl()) ? activeEl().dataset.client : null;
+  const scrolled = menu.scrollTop;
+  menu.textContent = "";
+  if (!others.length) {
+    // A disabled item rather than a bare line of text: a `role="menu"` with no
+    // `menuitem` in it is a menu a screen reader reads as empty, which is not
+    // the same thing as being told you are on your own.
+    const empty = el("div", "presence-empty", t("presence.empty", "You are the only one here."));
+    empty.setAttribute("role", "menuitem");
+    empty.setAttribute("aria-disabled", "true");
+    menu.appendChild(empty);
+  } else {
+    for (const who of others) menu.appendChild(presenceRow(who));
+  }
+  menu.scrollTop = scrolled;
+  if (focused !== null) {
+    for (const item of presenceItems()) {
+      if (item.dataset.client === focused) { item.focus(); break; }
+    }
+  }
+}
+
+/// The focusable rows of the open roster, in the order they are shown.
+function presenceItems() {
+  const menu = byId("presence-menu");
+  return menu ? [...menu.querySelectorAll(".presence-item")] : [];
+}
+
+function openPresence() {
+  const menu = byId("presence-menu");
+  const btn = byId("presence-btn");
+  if (!menu || !btn || !collabSession) return;
+  presenceOpen = true;
+  renderPresence(); // current as of the moment it opens, not of the last event
+  menu.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+}
+
+/// Close the roster. `refocus` returns focus to the button, which is what
+/// Escape must do — closing a menu that had focus and dropping focus on the
+/// floor strands a keyboard user at the top of the document.
+function closePresence(refocus = false) {
+  const menu = byId("presence-menu");
+  const btn = byId("presence-btn");
+  presenceOpen = false;
+  if (menu) menu.hidden = true;
+  if (btn) {
+    btn.setAttribute("aria-expanded", "false");
+    if (refocus) btn.focus();
+  }
+}
+
+/// Take this user to what a participant has selected.
+///
+/// Being told somebody is in P47 and having to go and find P47 is half a
+/// feature, and it is the half the roster would otherwise be.
+///
+/// It moves the **view**, never this user's selection. Your active cell is
+/// where your next keystroke lands, and a control that quietly moved it would
+/// be a control that quietly types your work somewhere else. Their cursor is
+/// already painted by `drawCollaborators`, so arriving is enough to see them.
+///
+/// Nothing here writes to the document, the history or the outgoing log.
+/// Switching sheets does announce *this* client's own presence — the same
+/// message `switchSheet` already sends when a tab is clicked, from the same
+/// code, because this client really did move.
+function jumpToParticipant(who) {
+  const sheet = Number.isInteger(who?.sheet) ? who.sheet : -1;
+  if (sheet >= 0 && sheet !== state.sheet) {
+    let count = 0;
+    try { count = JSON.parse(wasm.session_sheet_names()).length; } catch {}
+    // A sheet this client does not have is one that was deleted under it (or
+    // added and not yet applied): there is nowhere to go, so the jump keeps the
+    // view it has rather than switching to an index that does not exist.
+    if (sheet < count) switchSheet(sheet);
+  }
+  const at = presenceCell(who);
+  if (at) {
+    // `ensureVisible` twice rather than fresh geometry: it is the same scroll
+    // every other jump in this editor performs, so it cannot disagree with
+    // them, and it moves the minimum — a participant already on screen does not
+    // throw the view around. Far corner first so the near one wins when their
+    // range is bigger than the viewport; the top-left of a block is the part
+    // you want to be looking at.
+    ensureVisible(at.r1, at.c1);
+    ensureVisible(at.r0, at.c0);
+  }
+  draw();
+  canvas?.focus();
+  // Said out loud, because for a screen-reader user the whole effect of this
+  // click is a canvas that scrolled.
+  if (liveEl) liveEl.textContent = `${participantName(who)} — ${presenceWhere(who).text}`;
+}
+
+/// Wire the roster control. Called once, from `wireEvents`.
+function wirePresence() {
+  const box = byId("presence");
+  const btn = byId("presence-btn");
+  const menu = byId("presence-menu");
+  if (!box || !btn || !menu) return;
+
+  // Put back where it belongs: `buildMenuBar()` appends File…Help *after*
+  // whatever the markup held, and `hdr-collapse` re-appends itself last, so
+  // relying on markup order would leave the roster to the left of the File
+  // menu. Right-most but one, beside the collapse caret.
+  const bar = byId("menubar");
+  if (bar) bar.insertBefore(box, byId("hdr-collapse") ?? null);
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (presenceOpen) closePresence(); else openPresence();
+  });
+  btn.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      openPresence();
+      const items = presenceItems();
+      (e.key === "ArrowDown" ? items[0] : items[items.length - 1])?.focus();
+      e.preventDefault();
+    } else if (e.key === "Escape" && presenceOpen) {
+      closePresence();
+      e.preventDefault();
+    }
+  });
+
+  // Outside-click closes, like every other popover here. `composedPath` rather
+  // than `contains(e.target)`: inside a shadow root a click is retargeted to
+  // the host element, so `contains` answers "no" for clicks that were in fact
+  // ours — the path is the one view of the click that crosses the boundary.
+  document.addEventListener("click", (e) => {
+    if (!presenceOpen) return;
+    const path = e.composedPath ? e.composedPath() : [e.target];
+    if (!path.includes(box)) closePresence();
+  });
+
+  menu.addEventListener("keydown", (e) => {
+    const items = presenceItems();
+    const at = items.indexOf(activeEl());
+    const step = (i) => { items[((i % items.length) + items.length) % items.length]?.focus(); };
+    if (e.key === "ArrowDown") { step(at + 1); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { step(at - 1); e.preventDefault(); }
+    else if (e.key === "Home") { step(0); e.preventDefault(); }
+    else if (e.key === "End") { step(items.length - 1); e.preventDefault(); }
+    else if (e.key === "Escape") { closePresence(true); e.preventDefault(); }
+    // Tab out of a menu closes it. Not prevented: the focus is going somewhere
+    // sensible on its own, and trapping it here would trap it for good.
+    else if (e.key === "Tab") closePresence();
+  });
+
+  renderPresence();
 }
 
 /// Take on what the transport just did to the model.
@@ -11495,7 +12009,8 @@ function adoptCollabDocument(event) {
   draw();
 }
 
-/// Paint the other participants' selections, each in its own colour with a name.
+/// Paint the other participants — their selection, what they are typing, and a
+/// name tag — each in their own colour.
 ///
 /// The roster was already being kept — presence arrives, `collabRoster` is
 /// updated and `draw()` is called — and then nothing read it. Co-editing worked
@@ -11528,6 +12043,13 @@ function drawCollaborators(v, perQuad) {
   for (const who of collabRoster.values()) {
     // Only this sheet. A cursor on another tab is real and is not here.
     if (who.sheet !== state.sheet) continue;
+    const color = participantColor(who.color);
+    // Before the selection, and not inside its visibility test: while a formula
+    // is being written the selection walks off to pick references, so the cell
+    // being typed into can be on screen when the cursor is not. The draft is the
+    // part somebody needs to see.
+    drawCollaboratorDraft(who, color, v, perQuad);
+
     const sel = who.selection;
     if (!Array.isArray(sel) || sel.length !== 4) continue;
     const [r0, c0, r1, c1] = sel;
@@ -11535,7 +12057,6 @@ function drawCollaborators(v, perQuad) {
     const sy = spanY(Math.min(r0, r1), Math.max(r0, r1), v);
     // Scrolled out of view, or collapsed to nothing by the pane clamp.
     if (sx.w <= 0 || sy.h <= 0) continue;
-    const color = participantColor(who.color);
 
     perQuad(() => {
       ctx.save();
@@ -11577,18 +12098,115 @@ function drawCollaborators(v, perQuad) {
   }
 }
 
-/// Tell the others where this participant is looking, when it has moved.
+/// Paint what a participant is typing, in the cell they are typing it into.
 ///
-/// Called from `draw()`. Presence is ephemeral and never transformed, so
-/// sending it late costs nothing and sending it per frame would cost everyone
-/// else a message per frame.
+/// The point of COL-35, in one function: until this existed, somebody else's
+/// work appeared only when they pressed Enter, so two people could fill the same
+/// cell and neither found out until one of them lost.
+///
+/// Drawn as their in-cell editor would look on their screen — an opaque box in
+/// their colour over whatever the cell currently holds — because that is what it
+/// is. A wash over the old value would leave two overlapping strings and read as
+/// a rendering fault.
+///
+/// **The text is untrusted.** It came from another participant, through the
+/// server, which bounds its length and does not otherwise vouch for it. It goes
+/// to `fillText` on the canvas and never near markup: SEC-001 is the rule, and
+/// this is the newest path in the editor that carries somebody else's text.
+function drawCollaboratorDraft(who, color, v, perQuad) {
+  const draft = who.editing;
+  if (!draft || !Array.isArray(draft.at) || draft.at.length !== 2) return;
+  const [row, col] = draft.at;
+  const dx = spanX(col, col, v);
+  const dy = spanY(row, row, v);
+  // Scrolled out of view, or hidden, or clamped away by a frozen pane.
+  if (dx.w <= 0 || dy.h <= 0) return;
+  const text = typeof draft.text === "string" ? draft.text : "";
+
+  perQuad(() => {
+    ctx.save();
+    // Opaque, so the committed value underneath does not show through and
+    // double up with the draft over it.
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(dx.x, dy.y, dx.w, dy.h);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dx.x + 1, dy.y + 1, Math.max(1, dx.w - 2), Math.max(1, dy.h - 2));
+
+    // Clipped to the cell. A long formula must not spill across the neighbours
+    // the way a committed overflowing value may — those cells belong to other
+    // people's values, and this text is not committed to anything.
+    ctx.beginPath();
+    ctx.rect(dx.x + 2, dy.y + 2, Math.max(0, dx.w - 4), Math.max(0, dy.h - 4));
+    ctx.clip();
+    ctx.fillStyle = colors.fg;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.font = "12px system-ui, sans-serif";
+    // The first line only. A draft with a hard line break in it is legitimate
+    // (Alt+Enter) and a preview an inch tall is not.
+    const line = text.split("\n")[0];
+    ctx.fillText(line, dx.x + 4, dy.y + dy.h / 2);
+    // A caret at the end of it, so an empty draft still reads as "somebody is
+    // in here typing" rather than as a blank cell with a border.
+    const caret = Math.min(dx.x + 4 + Math.ceil(ctx.measureText(line).width) + 1, dx.x + dx.w - 3);
+    ctx.fillStyle = color;
+    ctx.fillRect(caret, dy.y + 3, 1.5, Math.max(2, dy.h - 6));
+    ctx.restore();
+  });
+}
+
+/// What this participant is part-way through typing, for the others to watch.
+///
+/// Null unless a cell editor is open on *this* sheet. The draft belongs to
+/// `editHome` rather than to the selection, because writing a formula walks the
+/// selection off to pick references — and a peer would otherwise watch the text
+/// hop around the grid with it.
+///
+/// The cross-sheet case reports nothing rather than guessing: a presence message
+/// names one sheet, and a draft on the sheet you are not looking at is not
+/// something a grid can draw. It comes back the moment the author does.
+function collabDraft() {
+  if (!editSurface || !editHome) return null;
+  if (editHome.sheet !== state.sheet) return null;
+  return { at: [editHome.row, editHome.col], text: editSurface.value };
+}
+
+/// Tell the others where this participant is looking and what they are typing,
+/// when either has changed.
+///
+/// Called from `draw()` — which covers every way a selection can move — and
+/// directly from the editing path, which `draw()` does not cover: a keystroke
+/// changes the text without changing anything the grid repaints.
+///
+/// Presence is ephemeral and never transformed (ADR-011), so sending it late
+/// costs nothing and losing one costs nothing either. That is what lets this be
+/// throttled at all.
 function announceCollabSelection() {
   if (!collabSession) return;
   const r = selRect();
-  const key = `${state.sheet}:${r.r0},${r.c0},${r.r1},${r.c1}`;
+  const draft = collabDraft();
+  const key = `${state.sheet}:${r.r0},${r.c0},${r.r1},${r.c1}|${
+    draft ? `${draft.at[0]},${draft.at[1]}:${draft.text}` : ""
+  }`;
   if (key === collabAnnounced) return;
+
+  const since = Date.now() - collabAnnouncedAt;
+  if (since < PRESENCE_THROTTLE_MS) {
+    // Too soon. Come back at the end of the window and read the state *then*,
+    // rather than sending this one late — by then the user will have typed
+    // more, and what everybody wants to see is where they got to.
+    if (!collabAnnounceTimer) {
+      collabAnnounceTimer = setTimeout(() => {
+        collabAnnounceTimer = null;
+        announceCollabSelection();
+      }, PRESENCE_THROTTLE_MS - since);
+    }
+    return;
+  }
   collabAnnounced = key;
-  collabSession.present(state.sheet, [r.r0, r.c0, r.r1, r.c1]);
+  collabAnnouncedAt = Date.now();
+  collabSession.present(state.sheet, [r.r0, r.c0, r.r1, r.c1], draft);
 }
 
 /// Distinguishes this module instance's engine from any other on the page.
