@@ -610,6 +610,8 @@ fn imported() -> Workbook {
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}"
         ),
         target: target.to_owned(),
+        // A pivot cache lives in the package; nothing here points outside it.
+        external: false,
     };
     wb.retained_rels.push(rel(
         "xl/worksheets/sheet2.xml",
@@ -703,6 +705,7 @@ fn a_shared_cache_survives_until_the_last_pivot_using_it_is_refreshed() {
         id: "rId1".to_owned(),
         rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition".to_owned(),
         target: "../pivotCache/pivotCacheDefinition1.xml".to_owned(),
+        external: false,
     });
 
     pivot::refresh(&mut wb, 1, 0).expect("refresh the first");

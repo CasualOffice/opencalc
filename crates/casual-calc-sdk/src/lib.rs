@@ -13,7 +13,7 @@ use casual_calc_import::{CompatibilityReport, ImportError, import_package_with};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
 use casual_calc_render::{PanePaint, RenderError, render_panes_png};
-use casual_calc_transaction::{History, Operation, TxnError, apply};
+use casual_calc_transaction::{History, Operation, SheetFields, TxnError, apply};
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
 pub use casual_calc_layout::Viewport as GridViewport;
@@ -426,6 +426,16 @@ impl WorkbookSession {
             log.push(narrowed);
         }
         self.source = None;
+        // Dropped **before** the manual-mode return, not inside the match
+        // below. Whether a recalculation is wanted right now and whether the
+        // graph still describes this document are different questions, and
+        // answering only the first left manual mode holding a graph about a
+        // document that had moved under it — the deferred recalculation then
+        // ran against it and was wrong in exactly the way deferring was
+        // supposed to be safe.
+        if matches!(plan, RecalcPlan::Full) {
+            self.recalc.invalidate();
+        }
         // Manual mode still applies the edit — it is calculation that is
         // deferred, not editing — and records that something is outstanding so
         // the host can say so.
@@ -436,14 +446,10 @@ impl WorkbookSession {
         match plan {
             RecalcPlan::Skip => {}
             RecalcPlan::Cells(cells) => self.recalc.recalculate(&mut self.workbook, &cells),
-            RecalcPlan::Full => {
-                // A full recalculation follows a structural edit, which shifts
-                // every reference past its insertion point — so whatever the
-                // graph said about this document is about a document that no
-                // longer exists. Says so now, before step three makes it matter.
-                self.recalc.invalidate();
-                recalculate(&mut self.workbook);
-            }
+            // The graph was already dropped above; a structural edit shifts
+            // every reference past its insertion point, so whatever it said
+            // was about a document that no longer exists.
+            RecalcPlan::Full => recalculate(&mut self.workbook),
         }
         Ok(())
     }
@@ -469,8 +475,20 @@ impl WorkbookSession {
     }
 
     /// Undo the last edit, then recalculate.
+    ///
+    /// **An undo is an edit**, and travels like one. It changes the document, so
+    /// a collaborating host has to send it; until it did, one participant
+    /// reverted while the server and every peer kept the change — a divergence
+    /// nothing later disagrees loudly enough to reveal, and one that no amount
+    /// of subsequent editing repairs.
+    ///
+    /// It rides the same outgoing log as [`edit`](Self::edit) rather than a
+    /// second channel: the server transforms whatever arrives against everything
+    /// committed since the sender's revision, which is exactly the treatment an
+    /// inverse needs and already exists.
     pub fn undo(&mut self) -> Result<(), SdkError> {
-        self.history.undo(&mut self.workbook)?;
+        let applied = self.history.undo(&mut self.workbook)?;
+        self.record_for_peers(applied);
         self.source = None;
         // Undo replays whatever it reverses, which may have been structural.
         // The history does not say which, and guessing to keep a graph is
@@ -482,12 +500,36 @@ impl WorkbookSession {
     }
 
     /// Redo the last undone edit, then recalculate.
+    ///
+    /// A redo is a fresh intention rather than the cancellation of one, and is
+    /// transmitted for the same reason as [`undo`](Self::undo).
     pub fn redo(&mut self) -> Result<(), SdkError> {
-        self.history.redo(&mut self.workbook)?;
+        let applied = self.history.redo(&mut self.workbook)?;
+        self.record_for_peers(applied);
         self.source = None;
         self.recalc.invalidate();
         self.recalculate_if_automatic();
         Ok(())
+    }
+
+    /// Queue an already-applied operation for collaborators.
+    ///
+    /// Narrowed against the workbook **after** the operation ran, unlike
+    /// [`edit`](Self::edit), which must narrow before. The difference is which
+    /// state the operation describes: an edit is written against the document
+    /// the user was looking at, while an undo's inverse has just been executed
+    /// and is described by the document it produced.
+    ///
+    /// Nothing to do when the stack was empty — pressing undo with nothing to
+    /// undo is not an event anybody needs to hear about.
+    fn record_for_peers(&mut self, applied: Option<Operation>) {
+        let (Some(op), Some(_)) = (applied, self.applied.as_ref()) else {
+            return;
+        };
+        let narrowed = op.narrowed(&self.workbook);
+        if let Some(log) = self.applied.as_mut() {
+            log.push(narrowed);
+        }
     }
 
     /// Start recording what this session applies, for a host that has to send
@@ -775,13 +817,33 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         Operation::SetStyle { .. }
         | Operation::SetColumnWidth { .. }
         | Operation::SetRowHeight { .. }
-        // Swaps sheet metadata (merges / sizes / hidden / freeze) — no cell
-        // value changes, so nothing to recompute.
-        | Operation::SetSheetMetadata { .. }
-        // Reordering tabs and recoloring one don't change any value or which
-        // sheet name a reference resolves to.
-        | Operation::MoveSheet { .. }
         | Operation::SetTabColor { .. } => RecalcPlan::Skip,
+        // Most of this bundle is presentation, but two of its fields are read
+        // by the evaluator: `SUBTOTAL`'s 101–111 codes and `AGGREGATE` skip
+        // hidden rows, and `Sheet::is_row_hidden` is the union of the
+        // hand-hidden set and the set the autofilter hides. So applying,
+        // changing or clearing a filter changes what a subtotal *is* — while
+        // changing nothing the dependency graph can see, since no cell was
+        // written. Nothing localizes it either: the graph records which cells a
+        // formula reads, and "the visibility of the rows under it" is not a
+        // cell. Hence full, and only for the two fields that can do it.
+        Operation::SetSheetMetadata { changed, .. } => {
+            if changed.intersects(SheetFields::HIDDEN_ROWS.union(SheetFields::FILTER_HIDDEN)) {
+                RecalcPlan::Full
+            } else {
+                RecalcPlan::Skip
+            }
+        }
+        // Reordering tabs changes values, which is not the obvious part. It
+        // was classified `Skip` on the grounds that no reference resolves
+        // differently — true, and not the whole question. `SHEET()` returns a
+        // sheet's *position*, so a tab drag changes its result; and the kept
+        // precedent graph is keyed by sheet **index**, which `MoveSheet`
+        // renumbers wholesale by removing and re-inserting. Left as `Skip`,
+        // the graph went on describing the old numbering and every later edit
+        // to the moved sheet stopped propagating — silently, permanently, and
+        // into the saved file.
+        Operation::MoveSheet { .. } => RecalcPlan::Full,
         Operation::InsertRows { .. }
         | Operation::DeleteRows { .. }
         | Operation::InsertColumns { .. }

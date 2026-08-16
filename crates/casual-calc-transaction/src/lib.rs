@@ -91,8 +91,10 @@ pub struct SheetMetadata {
     /// rules and the rows they hid together.
     pub filter_hidden: BTreeSet<u32>,
     /// Outline nesting level per row.
+    #[serde(deserialize_with = "casual_calc_model::int_keys::deserialize")]
     pub row_outline_levels: BTreeMap<u32, u8>,
     /// Outline nesting level per column.
+    #[serde(deserialize_with = "casual_calc_model::int_keys::deserialize")]
     pub col_outline_levels: BTreeMap<u32, u8>,
     /// Rows whose outline group is collapsed.
     pub collapsed_rows: BTreeSet<u32>,
@@ -990,22 +992,40 @@ impl History {
         self.redo.last().map(describe_op)
     }
 
-    /// Undo the most recent operation.
-    pub fn undo(&mut self, workbook: &mut Workbook) -> Result<(), TxnError> {
-        if let Some(op) = self.undo.pop() {
-            let inverse = apply(workbook, op)?;
-            self.redo.push(inverse);
-        }
-        Ok(())
+    /// Undo the most recent operation, returning **what it actually applied**.
+    ///
+    /// The return value is the point, and it used to be `()`. An undo changes
+    /// the document exactly as an edit does, so a collaborating host has to send
+    /// it; with nothing returned there was nothing to send, and undo was
+    /// local-only. One participant reverted while the server and every peer kept
+    /// the edit — a divergence that never heals, because nothing afterwards
+    /// disagrees loudly enough to notice.
+    ///
+    /// `None` when there was nothing to undo, which is not an error.
+    pub fn undo(&mut self, workbook: &mut Workbook) -> Result<Option<Operation>, TxnError> {
+        let Some(op) = self.undo.pop() else {
+            return Ok(None);
+        };
+        // Cloned because `apply` consumes it and gives back the *inverse*; what
+        // a host must transmit is the operation that ran.
+        let applied = op.clone();
+        let inverse = apply(workbook, op)?;
+        self.redo.push(inverse);
+        Ok(Some(applied))
     }
 
-    /// Redo the most recently undone operation.
-    pub fn redo(&mut self, workbook: &mut Workbook) -> Result<(), TxnError> {
-        if let Some(op) = self.redo.pop() {
-            let inverse = apply(workbook, op)?;
-            self.undo.push(inverse);
-        }
-        Ok(())
+    /// Redo the most recently undone operation, returning what it applied.
+    ///
+    /// A redo is a fresh intention rather than the cancellation of one, and it
+    /// travels the same way for the same reason.
+    pub fn redo(&mut self, workbook: &mut Workbook) -> Result<Option<Operation>, TxnError> {
+        let Some(op) = self.redo.pop() else {
+            return Ok(None);
+        };
+        let applied = op.clone();
+        let inverse = apply(workbook, op)?;
+        self.undo.push(inverse);
+        Ok(Some(applied))
     }
 }
 

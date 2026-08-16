@@ -46,14 +46,14 @@ fn parse_formula(text: &str) -> Result<Expr, FormulaError> {
     Ok(expr)
 }
 use casual_calc_model::{
-    AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, CfRule, CommentReply,
-    ConditionalFormat, CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue,
-    FilterOp, FilterRule, Id, IdGenerator, RetainedPart, RetainedRel, Sheet, SheetId,
-    SheetVisibility, StringId, Workbook,
+    AutoFilter, Cell, CellComment, CellRef, CellValue, CfRule, CommentReply, ConditionalFormat,
+    CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue, FilterOp,
+    FilterRule, Id, IdGenerator, RetainedPart, RetainedRel, Sheet, SheetId, SheetVisibility,
+    StringId, Workbook,
 };
 use casual_calc_ooxml::{OoxmlLimits, SpreadsheetPackage};
 
-use a1::{parse_a1, parse_range};
+use a1::{Parsed, parse_a1, parse_a1_classified, parse_range_classified};
 use read::{
     RawCell, RawThreadedComment, parse_comments, parse_date1904, parse_defined_names,
     parse_persons, parse_retained_refs, parse_shared_strings, parse_table, parse_table_parts,
@@ -86,6 +86,76 @@ const PERSONS_REL_SUFFIX: &str = "/person";
 /// entry (a validation copies its whole value list), so an adversarial part
 /// with a huge area list must not become unbounded allocation.
 const MAX_SQREF_AREAS: usize = 1024;
+/// Most parts named individually in the compatibility report before the rest
+/// are folded into one `(overflow)` bucket. The names come from the file, so an
+/// adversarial package with a relationship per part must not be able to grow the
+/// report without bound; the host still gets a count of what it did not get.
+const MAX_REPORT_PART_FEATURES: usize = 256;
+
+/// Note in the report that the grid bound refused a reference (FID-18).
+///
+/// Only the out-of-grid case is recorded here. A *malformed* reference is a
+/// failure every one of these call sites has had an answer for since Phase 1A —
+/// some report it, some skip it as noise — and rerouting that through here would
+/// have changed behaviour nothing asked to change. What is new is the address
+/// that is perfectly well-formed and simply does not exist, and docs/34 is
+/// explicit that this is the one thing that may not happen quietly: `Omitted` +
+/// `NotRetained`, counted, named, per construct.
+fn note_out_of_grid<T>(report: &mut CompatibilityReport, feature: &str, parsed: &Parsed<T>) {
+    if parsed.is_out_of_grid() {
+        report.record(
+            feature,
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    }
+}
+
+/// Whether every reference in `expr` is inside the addressable grid.
+///
+/// A formula is a reference too, and one that says `SUM(A1:ZZZZ4294967295)` is
+/// written back into `<f>` exactly as it arrived — the same corrupt package by a
+/// different route. The AST is checked rather than the text because by the time
+/// this is asked the text has already been through `_xlfn.` stripping and,
+/// for a shared-formula follower, a row/column shift that can push an in-range
+/// master out of the grid on its own.
+fn expr_within_grid(expr: &Expr) -> bool {
+    let within = |r: &casual_calc_formula::CellReference| {
+        r.row <= casual_calc_model::GRID_MAX_ROW && r.col <= casual_calc_model::GRID_MAX_COL
+    };
+    match expr {
+        Expr::Reference(r) => within(r),
+        Expr::Range(a, b) => within(a) && within(b),
+        Expr::Unary { operand, .. } => expr_within_grid(operand),
+        Expr::Binary { left, right, .. } => expr_within_grid(left) && expr_within_grid(right),
+        Expr::Function { args, .. } => args.iter().all(expr_within_grid),
+        Expr::Call { callee, args } => {
+            expr_within_grid(callee) && args.iter().all(expr_within_grid)
+        }
+        // No address of its own: a literal, a name, a structured reference (the
+        // evaluator resolves that against a table, and a table's range came
+        // through `parse_range` above), or text this parser never read.
+        _ => true,
+    }
+}
+
+/// Whether every address in a verbatim element's attributes is inside the grid.
+///
+/// Four attribute names hold one: `ref` and `sqref` (a space-separated list of
+/// areas), and `activeCell` / `topLeftCell`, which are single cells. Anything
+/// that is not an address is left alone — `<protectedRange name="…">` is a name,
+/// not a reference, and this is not the place to judge it.
+fn carried_within_grid(attrs: &BTreeMap<String, String>) -> bool {
+    attrs.iter().all(|(key, value)| {
+        match key.as_str() {
+            "ref" | "sqref" | "activeCell" | "topLeftCell" => value
+                .split_whitespace()
+                .all(|area| !parse_range_classified(area).is_out_of_grid()),
+            // Not an address; nothing here to bound.
+            _ => true,
+        }
+    })
+}
 
 /// The result of importing a package: the model plus its compatibility report.
 #[derive(Debug)]
@@ -98,36 +168,76 @@ pub struct Import {
 
 /// Copy the parts nothing above modelled into the workbook's retention set.
 ///
-/// A part is retained when it is reachable from `workbook.xml` by a relationship
-/// whose type we do not handle. The reference element inside `workbook.xml`
-/// (`<externalReference r:id=…>`) travels too: a retained part nothing points at
-/// is invisible to Excel, which is indistinguishable from having dropped it.
+/// A part is retained when it is reachable from the package root, `workbook.xml`
+/// or a sheet by a relationship whose type we do not handle. The reference
+/// element inside `workbook.xml` (`<externalReference r:id=…>`) travels too: a
+/// retained part nothing points at is invisible to Excel, which is
+/// indistinguishable from having dropped it.
 fn retain_unmodelled(
     package: &mut SpreadsheetPackage,
     workbook: &mut Workbook,
     sheet_parts: &[String],
+    report: &mut CompatibilityReport,
 ) -> Result<(), ImportError> {
     let limits = *package.limits();
-    let content_types = package.content_type_overrides()?;
+    // Both halves of `[Content_Types].xml`, not just the `<Override>`s. A real
+    // file declares its repeated binary parts by extension — every
+    // `printerSettings*.bin`, `image1.emf`, `image1.jpeg` in the corpus — and
+    // reading only the overrides recorded `None` for all of them. The part was
+    // then written back with no content type at all, which is a package Excel
+    // refuses or offers to repair, and repairing it discards them (FID-17).
+    let content_types = package.content_types()?;
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // Everything already generated by the writer, which must not be retained as
     // well — a stale copy would be written beside the fresh one.
     let generated: BTreeSet<String> = sheet_parts.iter().cloned().collect();
 
-    // Breadth-first from the parts we do parse. A drawing reaches its charts and
-    // images through its *own* relationships, so retention has to follow them:
-    // keeping `drawing1.xml` while dropping the chart it references leaves a
-    // reference to nothing, which Excel reports as a repair.
-    let mut queue: Vec<String> = std::iter::once(package.workbook_part().to_owned())
+    // Breadth-first from the parts we do parse, **and from the package root**. A
+    // drawing reaches its charts and images through its *own* relationships, so
+    // retention has to follow them: keeping `drawing1.xml` while dropping the
+    // chart it references leaves a reference to nothing, which Excel reports as
+    // a repair.
+    //
+    // The root (`""`, whose relationships live in `_rels/.rels`) was missing
+    // from this list, and it is where Excel hangs four relationships on every
+    // file it writes: the workbook, `docProps/core.xml`, `docProps/app.xml` and
+    // `customXml`. None of them is reachable from `workbook.xml`, so opening any
+    // ordinary workbook and saving it silently dropped its author, its title,
+    // its company — and every custom XML payload a host was round-tripping —
+    // with an empty report to say so.
+    let mut queue: Vec<String> = std::iter::once(String::new())
+        .chain(std::iter::once(package.workbook_part().to_owned()))
         .chain(sheet_parts.iter().cloned())
         .collect();
     while let Some(source) = queue.pop() {
         for rel in package.relationships_of(&source, &limits)? {
-            if rel.external
-                || MODELLED_REL_SUFFIXES
-                    .iter()
-                    .any(|s| rel.rel_type.ends_with(s))
+            if MODELLED_REL_SUFFIXES
+                .iter()
+                .any(|s| rel.rel_type.ends_with(s))
             {
+                continue;
+            }
+            // `TargetMode="External"` names something outside the package — the
+            // `externalLink` to another workbook, which is data the author put
+            // there and which nothing here models. It is retained like any other
+            // unmodelled relationship, but the retention stops at the
+            // relationship: a URI is not a path, so nothing below may resolve it
+            // against the source part or ask the package whether it holds it.
+            // `file:///other.xlsx` under `xl/workbook.xml` would "resolve" to
+            // `xl/file:/other.xlsx`, and the package saying it has no such part
+            // is the report of a loss that never happened (FID-19).
+            //
+            // Nothing is lost either way, so nothing is reported: the
+            // relationship is Preserved, and the `<externalReference r:id>` that
+            // names it travels with it.
+            if rel.external {
+                workbook.retained_rels.push(RetainedRel {
+                    source: source.clone(),
+                    id: rel.id,
+                    rel_type: rel.rel_type,
+                    target: rel.target,
+                    external: true,
+                });
                 continue;
             }
             let target = resolve_part(&source, &rel.target);
@@ -136,16 +246,39 @@ fn retain_unmodelled(
                 id: rel.id,
                 rel_type: rel.rel_type,
                 target: rel.target,
+                external: false,
             });
             if generated.contains(&target) || !seen.insert(target.clone()) {
                 continue;
             }
             if !package.contains(&target) {
+                // A part the file names but does not carry: there are no bytes
+                // to retain, and `Omitted` + `NotRetained` is the one way data
+                // leaves the system, so it is counted rather than skipped in
+                // silence (docs/34). Keyed by path, capped, because the count of
+                // distinct names here comes from the file.
+                if seen.len() <= MAX_REPORT_PART_FEATURES {
+                    report.record(
+                        &target,
+                        ModelOutcome::Omitted,
+                        RetentionOutcome::NotRetained,
+                    );
+                } else {
+                    report.record(
+                        "(overflow)",
+                        ModelOutcome::Omitted,
+                        RetentionOutcome::NotRetained,
+                    );
+                }
                 continue;
             }
             let bytes = package.read_part(&target)?;
             workbook.retained_parts.push(RetainedPart {
-                content_type: content_types.get(&format!("/{target}")).cloned(),
+                // Carried from the file, never inferred from the extension:
+                // `.bin` is printer settings in one workbook and an OLE object
+                // or a pivot record stream in the next, and a guess would make
+                // the saved file assert something the source never said.
+                content_type: content_types.resolve(&target).map(str::to_owned),
                 path: target.clone(),
                 bytes,
             });
@@ -269,6 +402,11 @@ fn resolve_pivot_source(
 
 /// Relationship types `import_package` already turns into model state.
 const MODELLED_REL_SUFFIXES: &[&str] = &[
+    // The root's link to `workbook.xml`. The workbook is read and regenerated,
+    // and the writer emits this relationship itself: retaining it would put a
+    // stale copy of the workbook beside the fresh one and a second `rId1` in
+    // `_rels/.rels`, and the older of the two would win on the next read.
+    "/officeDocument",
     "/worksheet",
     "/sharedStrings",
     "/styles",
@@ -566,7 +704,30 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         sheet.visibility = SheetVisibility::from_ooxml(&state);
         sheet.print = worksheet.print.clone();
         sheet.sort_state = worksheet.sort_state.clone();
-        sheet.carried = worksheet.carried.clone();
+        // Verbatim elements travel with their attributes, and several of them
+        // carry an address: `<dimension ref>`, `<selection sqref activeCell>`,
+        // `<ignoredError sqref>`, `<protectedRange sqref>`. The writer re-emits
+        // them unchanged, so `<dimension ref="A1:ZZZZ4294967295"/>` walks past
+        // every parsed path above and straight out into the saved file.
+        // "Carried verbatim" cannot mean "exempt from the grid" when verbatim is
+        // what gets written — an element addressing a cell that does not exist
+        // is dropped and named, like every other route out (FID-18).
+        sheet.carried = worksheet
+            .carried
+            .iter()
+            .filter(|(name, attrs)| {
+                let ok = carried_within_grid(attrs);
+                if !ok {
+                    report.record(
+                        &format!("{name}/outOfGrid"),
+                        ModelOutcome::Omitted,
+                        RetentionOutcome::NotRetained,
+                    );
+                }
+                ok
+            })
+            .cloned()
+            .collect();
         sheet.format_pr = worksheet.format_pr.clone();
         sheet.view.right_to_left = worksheet.right_to_left;
         sheet.view.show_formulas = worksheet.show_formulas;
@@ -600,9 +761,19 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         }
 
         for raw in worksheet.cells {
-            let Some(cell_ref) = parse_a1(&raw.reference) else {
+            let parsed = parse_a1_classified(&raw.reference);
+            let Some(cell_ref) = parsed.ok() else {
+                // Two distinct features, because they are two distinct events: a
+                // reference this parser could not read, and a reference naming a
+                // cell that does not exist. The second one used to be admitted
+                // and written back, which is how a `<v>7</v>` at row
+                // 4,294,967,295 became a package Excel refuses to open.
                 report.record(
-                    "cellRef",
+                    if parsed.is_out_of_grid() {
+                        "cellRef/outOfGrid"
+                    } else {
+                        "cellRef"
+                    },
                     ModelOutcome::Omitted,
                     RetentionOutcome::NotRetained,
                 );
@@ -617,6 +788,18 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
             }
             match raw.formula.as_deref() {
                 Some(text) if !text.trim().is_empty() => match parse_formula(text) {
+                    // A formula addressing a cell that does not exist keeps its
+                    // cached value and loses the expression — the same trade the
+                    // unparseable-formula arm below makes, for the same reason:
+                    // what the file last computed is real, and re-emitting the
+                    // reference is what corrupts the package.
+                    Ok(expr) if !expr_within_grid(&expr) => {
+                        report.record(
+                            "f/outOfGrid",
+                            ModelOutcome::Omitted,
+                            RetentionOutcome::NotRetained,
+                        );
+                    }
                     Ok(expr) => {
                         cell.formula = Some(workbook.store_formula(expr));
                         report.record("f", ModelOutcome::Mapped, RetentionOutcome::NotApplicable);
@@ -639,7 +822,12 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
                             )
                         },
                     );
-                    match rebuilt {
+                    // The shift is where a follower can leave the grid on its
+                    // own: the master's references are in range and the delta
+                    // carries them out, so the check belongs after the rebuild,
+                    // not on the master. Either way the follower keeps its
+                    // cached value and is reported `Degraded` below.
+                    match rebuilt.filter(expr_within_grid) {
                         Some(expr) => {
                             cell.formula = Some(workbook.store_formula(expr));
                             report.record(
@@ -665,14 +853,40 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         }
 
         for reference in &worksheet.merges {
-            match parse_range(reference) {
-                Some(range) => sheet.merges.push(range),
-                None => report.record(
+            // A merge is refused whole when either corner is out of the grid.
+            // `A1:ZZZZ4294967295` is 475,254 columns by 4 billion rows: the
+            // layout walked it, and the writer emitted it verbatim.
+            match parse_range_classified(reference) {
+                Parsed::Ok(range) => sheet.merges.push(range),
+                Parsed::OutOfGrid => report.record(
+                    "mergeCell/outOfGrid",
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::NotRetained,
+                ),
+                Parsed::Malformed => report.record(
                     "mergeCell",
                     ModelOutcome::Omitted,
                     RetentionOutcome::NotRetained,
                 ),
             }
+        }
+        // Row and column spans the reader clipped or dropped at the grid edge
+        // (`read_col` / `read_row`). They are counted there and named here,
+        // because the reader has no report to write to — but an axis that
+        // silently stopped existing is exactly the silence docs/34 forbids.
+        for _ in 0..worksheet.out_of_grid_cols {
+            report.record(
+                "col/outOfGrid",
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
+        }
+        for _ in 0..worksheet.out_of_grid_rows {
+            report.record(
+                "row/outOfGrid",
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
         }
         if let Some((frozen_rows, frozen_cols)) = worksheet.frozen {
             sheet.view.frozen_rows = frozen_rows;
@@ -702,10 +916,14 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         // OOXML has no separate marker — so they land in `hidden_rows` here and
         // the session re-derives `filter_hidden` from the rules once formatting
         // is available (display text is what a checklist matches on).
-        sheet.auto_filter = worksheet
-            .auto_filter
-            .as_deref()
-            .and_then(|r| build_auto_filter(r, worksheet.filter_columns));
+        if let Some(reference) = worksheet.auto_filter.as_deref() {
+            note_out_of_grid(
+                &mut report,
+                "autoFilter/outOfGrid",
+                &parse_range_classified(reference),
+            );
+            sheet.auto_filter = build_auto_filter(reference, worksheet.filter_columns);
+        }
 
         // Data validations, every kind. Only a `list` rule's inline quoted CSV is
         // expanded into values; the other kinds keep their operands as the raw
@@ -738,9 +956,9 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
             // sqref with tens of thousands of areas would otherwise turn a small
             // part into millions of heap strings.
             for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
-                let range =
-                    parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)));
-                if let Some(range) = range {
+                let parsed = parse_range_classified(area);
+                note_out_of_grid(&mut report, "dataValidation/outOfGrid", &parsed);
+                if let Some(range) = parsed.ok() {
                     sheet.validations.push(DataValidation {
                         values: values.clone(),
                         kind,
@@ -820,9 +1038,9 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
                 // One rule per area of the sqref — a cfRule covering "A1:A9 C1:C9"
                 // used to apply to the first area only. Bounded as above.
                 for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
-                    let Some(range) =
-                        parse_range(area).or_else(|| parse_a1(area).map(|c| CellRange::new(c, c)))
-                    else {
+                    let parsed = parse_range_classified(area);
+                    note_out_of_grid(&mut report, "conditionalFormatting/outOfGrid", &parsed);
+                    let Some(range) = parsed.ok() else {
                         continue;
                     };
                     sheet.conditional_formats.push(ConditionalFormat {
@@ -851,9 +1069,12 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         if let Some(comments_part) = comments_part {
             let cxml = package.read_part(&comments_part)?;
             for (reference, author, text) in parse_comments(&cxml)? {
-                if !text.is_empty()
-                    && let Some(at) = parse_a1(&reference)
-                {
+                if text.is_empty() {
+                    continue;
+                }
+                let parsed = parse_a1_classified(&reference);
+                note_out_of_grid(&mut report, "comment/outOfGrid", &parsed);
+                if let Some(at) = parsed.ok() {
                     sheet.comments.push(CellComment::note(at, text, author));
                 }
             }
@@ -867,7 +1088,9 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         if !worksheet.hyperlinks.is_empty() {
             let rels = package.relationships_of(&part, &limits)?;
             for raw in &worksheet.hyperlinks {
-                let Some(range) = parse_range(&raw.reference) else {
+                let parsed = parse_range_classified(&raw.reference);
+                note_out_of_grid(&mut report, "hyperlink/outOfGrid", &parsed);
+                let Some(range) = parsed.ok() else {
                     continue;
                 };
                 let target = raw.rel_id.as_ref().and_then(|id| {
@@ -913,7 +1136,12 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
                 let Some(raw) = parse_table(&txml)? else {
                     continue;
                 };
-                let Some(range) = raw.attrs.get("ref").and_then(|r| parse_range(r)) else {
+                let parsed = raw
+                    .attrs
+                    .get("ref")
+                    .map_or(Parsed::Malformed, |r| parse_range_classified(r));
+                note_out_of_grid(&mut report, "table/outOfGrid", &parsed);
+                let Some(range) = parsed.ok() else {
                     continue;
                 };
                 let attr_u32 = |k: &str, default: u32| {
@@ -994,7 +1222,7 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
     // people already have work in must survive a save even where we understand
     // nothing about the feature.
     let sheet_parts: Vec<String> = package.sheets().iter().map(|s| s.part.clone()).collect();
-    retain_unmodelled(&mut package, &mut workbook, &sheet_parts)?;
+    retain_unmodelled(&mut package, &mut workbook, &sheet_parts, &mut report)?;
 
     // Defined names, resolved against the sheet ids assigned above.
     let workbook_part = package.workbook_part().to_owned();
@@ -1011,6 +1239,19 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
         // reference (`Sheet1!$1:$2`) that the parser does not support — so
         // every workbook with repeating print titles lost them on save.
         let (formula, outcome) = match parse_formula(&refers_to) {
+            // A name whose target is outside the grid is dropped rather than
+            // kept verbatim. `Expr::Raw` is the right answer for a target this
+            // parser cannot *read* — it prints back unchanged and the file
+            // survives — and the wrong one here, because printing it back
+            // unchanged is precisely what writes the unopenable package.
+            Ok(formula) if !expr_within_grid(&formula) => {
+                report.record(
+                    "definedName/outOfGrid",
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::NotRetained,
+                );
+                continue;
+            }
             Ok(formula) => (
                 formula,
                 (ModelOutcome::Mapped, RetentionOutcome::NotApplicable),

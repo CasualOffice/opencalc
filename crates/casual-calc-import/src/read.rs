@@ -461,6 +461,12 @@ pub struct Worksheet {
     pub collapsed_rows: BTreeSet<u32>,
     /// Columns with a collapsed outline group (`<col collapsed="1">`).
     pub collapsed_cols: BTreeSet<u32>,
+    /// How many `<col>` spans named columns past the end of the grid, wholly or
+    /// in part. Counted rather than reported here because this reader has no
+    /// compatibility report; `import_package` names them (FID-18).
+    pub out_of_grid_cols: u32,
+    /// How many `<row>` elements named a row past the end of the grid.
+    pub out_of_grid_rows: u32,
     /// Outline summary-position flags from `<sheetPr><outlinePr/>`, if present.
     pub outline: Option<OutlinePr>,
     /// View zoom percentage from `<sheetView zoomScale>`, if set and non-default.
@@ -590,16 +596,55 @@ pub struct RawCf {
 /// overrides; a wider custom span is treated as the sheet's default width.
 const MAX_COL_SPAN: u32 = 4096;
 
+/// Ceiling on an imported column width, in twips: Excel refuses a column wider
+/// than 255 characters, which is `255 * 7 + 5 = 1790` px, or 26_850 twips.
+const MAX_COL_TWIPS: i64 = 26_850;
+
+/// Ceiling on an imported row height, in twips: Excel refuses a row taller than
+/// 409.5 points, or 8_190 twips.
+const MAX_ROW_TWIPS: i64 = 8_190;
+
 /// Convert an Excel column width (character units) to twips, matching the
 /// pixel rounding Excel uses so the value survives a write→read round-trip.
+///
+/// `chars` is an arbitrary `xsd:double` off the wire — `<col width>` and
+/// `<sheetFormatPr defaultColWidth>` are attacker-controlled — and nothing used
+/// to bound it. `width="1e300"` saturated the float→int cast to `i64::MAX` and
+/// the `* 15` panicked with "attempt to multiply with overflow" under the dev
+/// profile, so a crafted `<cols>` aborted the host process instead of returning
+/// `Err`; the shipped release profile wrapped instead, and `width="-1e300"`
+/// handed layout a *negative* column width. Clamp before the multiply, not
+/// after — after is already too late.
 pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
     let px = (chars * 7.0 + 5.0).round();
+    // Two layers, and they answer different questions. `read_f64_attr` refuses
+    // a non-finite attribute at the boundary, so nothing from a file arrives
+    // here as `NaN`; this function takes a plain `f64` from anywhere in the
+    // crate, so it still declines to trust one. `NaN` is named rather than left
+    // to fall through a comparison it silently fails — it is neither `<` nor
+    // `>`, so relying on that would send it to the ceiling below.
+    if !px.is_finite() || px <= 0.0 {
+        return 0;
+    }
+    let max_px = (MAX_COL_TWIPS / 15) as f64;
+    if px > max_px {
+        return MAX_COL_TWIPS;
+    }
     (px as i64) * 15
 }
 
-/// Convert an Excel row height (points) to twips.
+/// Convert an Excel row height (points) to twips. Bounded for the same reason
+/// as [`col_width_to_twips`]: `ht="1e308"` saturated the cast and yielded
+/// `i64::MAX` twips of row.
 fn row_height_to_twips(points: f64) -> i64 {
-    (points * 20.0).round() as i64
+    let twips = (points * 20.0).round();
+    if !twips.is_finite() || twips <= 0.0 {
+        return 0;
+    }
+    if twips > MAX_ROW_TWIPS as f64 {
+        return MAX_ROW_TWIPS;
+    }
+    twips as i64
 }
 
 /// Build a [`RawCf`] from a `<cfRule>` element. Shared by the Start and Empty
@@ -695,17 +740,50 @@ fn parse_u32_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<u32, ImportError> 
         .unwrap_or(0))
 }
 
+/// A numeric attribute, or `None` when it is absent or not a usable number.
+///
+/// **Non-finite is not a measurement.** `xsd:double` admits `NaN`, `INF` and
+/// `-INF`, and Rust's parser accepts all of their spellings, so before this
+/// filter every numeric attribute in the format could arrive as a value no
+/// arithmetic downstream is prepared for. That is not a column-width problem:
+/// thirteen call sites read one of these — widths, heights, zoom, pane splits,
+/// tint, chart geometry — and each would have needed its own guard.
+///
+/// Refused once, at the boundary where the untrusted text becomes a number,
+/// because a rule applied at call sites is a rule the fourteenth call site does
+/// not get. Absent and unusable collapse to the same `None` the callers already
+/// handle, so each falls back to its documented default rather than to a
+/// value that will surprise it later.
 fn read_f64_attr(e: &BytesStart<'_>, local: &[u8]) -> Result<Option<f64>, ImportError> {
-    Ok(read_attr(e, local)?.and_then(|s| s.parse().ok()))
+    Ok(read_attr(e, local)?
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|value| value.is_finite()))
 }
 
 /// Record a `<col min max width customWidth hidden>` element into the width
 /// overrides and the hidden-column set.
 fn read_col(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportError> {
     let min = parse_u32_attr(e, b"min")?; // 1-based
-    let max = parse_u32_attr(e, b"max")?;
+    let mut max = parse_u32_attr(e, b"max")?;
     if min == 0 || max < min {
         return Ok(());
+    }
+    // The grid ends at column 16,384 (`docs/21-PARSER-LIMITS.md`). A span that
+    // starts past it describes nothing, and one that merely *ends* past it is
+    // clipped to the part that exists — clipping the tail off a span is not the
+    // clamping this fix refuses, because no value moves: `<col>` states a width
+    // for a range of columns, and the columns beyond the grid are not columns.
+    // Left unbounded, `<col min="20000" max="20005" width="30"/>` became six
+    // per-column widths the writer re-emitted as a `<col min="20000">` Excel
+    // will not open (FID-18).
+    let last = casual_calc_model::GRID_MAX_COL + 1; // one-based
+    if min > last {
+        result.out_of_grid_cols = result.out_of_grid_cols.saturating_add(1);
+        return Ok(());
+    }
+    if max > last {
+        result.out_of_grid_cols = result.out_of_grid_cols.saturating_add(1);
+        max = last;
     }
     // A hidden span is recorded per zero-based column regardless of width. The
     // same span rules apply to the outline level and collapsed flag, which — like
@@ -791,6 +869,14 @@ fn read_row(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), ImportErro
         return Ok(());
     };
     if r < 1 {
+        return Ok(());
+    }
+    // The grid ends at row 1,048,576. A `<row r="4294967295">` is not a tall row
+    // or a hidden row, it is an address that does not exist, and every one of
+    // the maps below is keyed by row index and re-emitted by the writer as
+    // `<row r="…">` (FID-18).
+    if r > casual_calc_model::GRID_MAX_ROW + 1 {
+        result.out_of_grid_rows = result.out_of_grid_rows.saturating_add(1);
         return Ok(());
     }
     if let Some(ht) = read_f64_attr(e, b"ht")? {

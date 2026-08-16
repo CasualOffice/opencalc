@@ -1669,8 +1669,9 @@ fn flatten_numbers(
                 for col in range.start.col..=range.end.col {
                     match ev.eval_cell(target, CellRef::new(row, col)) {
                         Value::Number(n) => out.push(n),
-                        Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
                         Value::Error(e) => return Err(e),
+                        // Text and logicals both skipped — see the range branch
+                        // below for why they belong on the same side of this.
                         _ => {}
                     }
                 }
@@ -1688,8 +1689,25 @@ fn flatten_numbers(
                 for col in c0..=c1 {
                     match ev.eval_cell(target, CellRef::new(row, col)) {
                         Value::Number(n) => out.push(n),
-                        Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
                         Value::Error(e) => return Err(e),
+                        // A logical **held in a cell** is ignored, exactly as
+                        // text is. Excel's rule is not about the value, it is
+                        // about how the value arrived: `=SUM(TRUE,1)` is 2
+                        // because the logical was written as an argument, while
+                        // `=SUM(A1:A2)` over `TRUE` and `1` is 1 because a
+                        // reference contributes only numbers. The direct-argument
+                        // branch below still coerces, which is what keeps the two
+                        // halves of the rule apart.
+                        //
+                        // Coercing here made a column of flags corrupt every
+                        // total over it, and `AVERAGE` doubly so — the boolean
+                        // inflated the sum *and* the divisor. Text was already
+                        // skipped by this arm, so the two were inconsistent in
+                        // the same match.
+                        //
+                        // The `A`-suffixed functions (`AVERAGEA`, `MAXA`, …) are
+                        // the ones that do count logicals in references, and they
+                        // do not come through here — they have `stat_over_a`.
                         _ => {}
                     }
                 }
@@ -2286,13 +2304,54 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// The serial Excel gives to a day that never happened.
+///
+/// Lotus 1-2-3 treated 1900 as a leap year. Excel reproduced the bug on purpose
+/// to keep those files' arithmetic working, and every spreadsheet since has
+/// reproduced Excel. So serial 60 is **1900-02-29**, a date the Gregorian
+/// calendar does not have, and every serial below it is one less than a
+/// straight day count would give.
+///
+/// This engine computed a proleptic Gregorian offset and skipped all of it, so
+/// `DATE(1900,1,1)` was 2 where Excel says 1 and `DAY(59)` was 27 where Excel
+/// says 28. Wrong only for serials 1–60 — but a workbook holding one of those
+/// dates reported the wrong day, and a `DATE()` result written back was off by
+/// one against every other spreadsheet.
+const PHANTOM_LEAP_DAY: i64 = 60;
+
 /// Convert a civil date to an Excel (1900-system) serial day number.
+///
+/// The correction lives here and in [`serial_to_ymd`], and deliberately nowhere
+/// else: anything derived by subtracting two serials — [`days_in_month`],
+/// date differences, the coupon schedules — then inherits Excel's quirk for
+/// free and in the same direction. That is why `days_in_month(1900, 2)` reports
+/// 29, which is wrong about history and right about Excel.
 fn ymd_to_serial(y: i64, m: i64, d: i64) -> i64 {
-    days_from_civil(y, m, d) + 25_569
+    // The phantom day itself has no civil date to convert, so it is named
+    // rather than computed. `days_from_civil` would roll it to 1900-03-01.
+    if (y, m, d) == (1900, 2, 29) {
+        return PHANTOM_LEAP_DAY;
+    }
+    let serial = days_from_civil(y, m, d) + 25_569;
+    if serial > PHANTOM_LEAP_DAY {
+        serial
+    } else {
+        serial - 1
+    }
 }
 
 /// Convert an Excel serial day number to `(year, month, day)`.
 fn serial_to_ymd(serial_days: i64) -> (i64, i64, i64) {
+    if serial_days == PHANTOM_LEAP_DAY {
+        return (1900, 2, 29);
+    }
+    // Below the phantom day, undo the shift applied on the way in; above it,
+    // the two systems already agree.
+    let serial_days = if serial_days < PHANTOM_LEAP_DAY {
+        serial_days + 1
+    } else {
+        serial_days
+    };
     let mut z = serial_days - 25_569 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     z -= era * 146_097;

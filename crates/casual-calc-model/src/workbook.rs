@@ -58,6 +58,22 @@ pub struct RetainedRel {
     pub rel_type: String,
     /// The target, relative to the source part.
     pub target: String,
+    /// `TargetMode="External"`: the target is a URI to something outside the
+    /// package — another workbook, a web address — not a path to a part.
+    ///
+    /// Two things depend on knowing the difference. The writer has to re-emit
+    /// the attribute, because a target written without it is read back as a
+    /// path inside the zip and the reference is destroyed. And nothing may
+    /// resolve this target against the source part or look it up in the
+    /// package: `file:///other.xlsx` under `xl/workbook.xml` "resolves" to
+    /// `xl/file:/other.xlsx`, a part no package has ever contained.
+    ///
+    /// Additive by ADR-010: defaulted on the way in so a snapshot written
+    /// before this field existed still reads, and skipped on the way out when
+    /// false so a workbook with no external relationship serializes to the same
+    /// bytes it always did. `SCHEMA_VERSION` therefore does not move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
 }
 
 /// Workbook-level settings carried through verbatim.

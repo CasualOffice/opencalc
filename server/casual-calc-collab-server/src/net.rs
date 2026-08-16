@@ -35,7 +35,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use casual_calc_transaction::protocol::{
-    ClientMessage, PROTOCOL_VERSION, Refusal, Resume, ServerMessage,
+    ClientMessage, Draft, PROTOCOL_VERSION, Refusal, Resume, ServerMessage,
 };
 use casual_calc_transaction::session::ClientId;
 use tokio::sync::broadcast;
@@ -44,7 +44,7 @@ use crate::cluster::Coordinator;
 use crate::document::DocumentSession;
 use crate::lifecycle::{Action, CallbackOutcome, SavePolicy};
 use crate::presence::Roster;
-use crate::token::{Callback, Claims};
+use crate::token::{Access, Callback, Claims};
 use crate::verify::Verifier;
 use casual_calc_transaction::session::SnapshotPolicy;
 
@@ -136,6 +136,25 @@ pub struct Limits {
     /// answers pings is alive even if nobody is typing, and closing a
     /// connection because its user went to lunch is worse than holding it.
     pub client_idle_ms: u64,
+    /// How many connections may be waiting to authenticate at once.
+    ///
+    /// Separate from [`max_participants`](Self::max_participants), which counts
+    /// people in a document. A socket that has not presented a token belongs to
+    /// no document yet, so nothing else can bound it — see `connection`.
+    pub max_pending_connections: usize,
+    /// How long a connection may take to send its `Join` before it is dropped.
+    ///
+    /// Generous: this covers a browser on a bad link, not a fast client. What
+    /// it stops is the connection that never speaks at all.
+    pub join_timeout_ms: u64,
+    /// How often the signing keys are re-read from the integrator's JWKS.
+    ///
+    /// Only the *removal* of a key needs this: a newly published one is picked
+    /// up within seconds by the on-demand refresh in `authenticate`, because
+    /// somebody presenting a token signed with it is the prompt. Nothing
+    /// presents a token for a key that has just been revoked, so a clock is the
+    /// only thing that can notice.
+    pub jwks_refresh_ms: u64,
     /// How long the final save at shutdown may take before the node exits
     /// anyway.
     ///
@@ -158,6 +177,12 @@ impl Default for Limits {
             presence_ttl_ms: crate::presence::DEFAULT_TTL_MS,
             client_ping_ms: 15_000,
             client_idle_ms: 90_000,
+            max_pending_connections: 256,
+            join_timeout_ms: 15_000,
+            // Five minutes. Only a *removed* key needs a clock — a new one is
+            // picked up on demand — and polling somebody else's endpoint
+            // harder than this buys nothing.
+            jwks_refresh_ms: 300_000,
             drain_timeout_ms: 10_000,
         }
     }
@@ -430,6 +455,11 @@ impl Service {
 struct Service {
     config: ServiceConfig,
     registry: Registry,
+    /// Permits for connections that have not authenticated yet.
+    ///
+    /// An `Arc` so a permit can outlive the borrow that took it — the guard is
+    /// held across the join and dropped the moment it succeeds.
+    pending: Arc<tokio::sync::Semaphore>,
 }
 
 /// A way to ask the service to stop, and to know when it has.
@@ -603,9 +633,12 @@ pub async fn serve_on_with_shutdown(
     config: ServiceConfig,
     shutdown: Shutdown,
 ) -> std::io::Result<()> {
+    // Read before `config` is moved into the struct.
+    let pending = config.limits.max_pending_connections.max(1);
     let state = Arc::new(Service {
         config,
         registry: Registry::default(),
+        pending: Arc::new(tokio::sync::Semaphore::new(pending)),
     });
     // The sweeper is what makes this a service rather than a relay. Without it
     // the save lifecycle — quiesce timer, ceiling, revision cadence, callback
@@ -617,6 +650,13 @@ pub async fn serve_on_with_shutdown(
     // knowable from this side of the service being built.
     if state.config.membership.is_some() {
         tokio::spawn(announce(Arc::clone(&state)));
+    }
+    // Keys are re-read while the process runs, because an integrator rotates
+    // them while the process runs. Without this a scheduled rotation locks
+    // every user out of every document until an operator restarts every node,
+    // and revoking a compromised key has no effect at all — see `JwksSource`.
+    if state.config.verifier.jwks().is_some() {
+        tokio::spawn(refresh_keys(Arc::clone(&state), shutdown.clone()));
     }
 
     let signalled = shutdown.clone();
@@ -708,6 +748,53 @@ async fn drain(state: &Arc<Service>) {
 /// One task for all documents rather than one per document. A thousand idle
 /// timers is a thousand things to cancel correctly on eviction, and the work
 /// per tick is proportional to the documents that actually need something.
+/// Re-read the signing keys, for as long as the server runs.
+///
+/// Slow on purpose. The on-demand path in `authenticate` is what makes a
+/// *newly published* key usable within seconds; this exists so a key **removed**
+/// from the set stops being accepted without anybody presenting a token that
+/// prompts a look. Nothing asks for a key that is being revoked, so nothing but
+/// a clock will notice it is gone.
+///
+/// A failed fetch leaves the previous keys in place and says so once. docs/59:
+/// *"a cached key set keeps working, since an integrator's key server going
+/// down should not evict everybody"* — the failure mode of refreshing too
+/// eagerly is locking out every user because somebody else's endpoint blinked.
+async fn refresh_keys(state: Arc<Service>, shutdown: Shutdown) {
+    let interval_ms = state.config.limits.jwks_refresh_ms.max(1_000);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick fires immediately and the keys were just loaded.
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            () = shutdown.wait() => return,
+        }
+        let Some(source) = state.config.verifier.jwks() else {
+            return;
+        };
+        match crate::verify::fetch_keys(&source.url, &source.accepted).await {
+            Ok(keys) => {
+                let before = state.config.verifier.key_count();
+                let after = keys.len();
+                state.config.verifier.install(keys);
+                if before != after {
+                    tracing::info!(
+                        url = %source.url,
+                        before,
+                        after,
+                        "the signing key set changed"
+                    );
+                }
+            }
+            Err(why) => {
+                tracing::warn!(%why, "could not refresh the signing keys; keeping the ones held")
+            }
+        }
+    }
+}
+
 async fn sweep(state: Arc<Service>, shutdown: Shutdown) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
         state.config.limits.tick_ms.max(1),
@@ -931,9 +1018,42 @@ fn now_ms() -> u64 {
 }
 
 async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSocket) {
-    let Some((claims, resume)) = authorise(&state, &document_key, &mut socket).await else {
+    // **A connection that has not authenticated is bounded twice: in number and
+    // in time.**
+    //
+    // Neither bound existed. The upgrade needs no token — it cannot, the token
+    // arrives in the first frame — so anyone who can reach the port could open
+    // sockets and simply never speak. Each one completed the upgrade, spawned a
+    // task, and parked in `authorise`'s `recv().await` forever: the heartbeat
+    // and idle timers are only started *after* a successful join, and every
+    // limit in `Limits` is per-document or per-message, so an unauthenticated
+    // connection was attributed to nothing and counted against nothing. They
+    // accumulate to the process's descriptor limit, at which point real joins
+    // fail at accept — while `/healthz` goes on answering "ok", so the load
+    // balancer keeps sending traffic to a node that can no longer take it.
+    //
+    // The permit is released the moment the join succeeds, because from then on
+    // the connection is a *participant* and `max_participants` is what bounds
+    // it. Holding it for the life of the session would make this a second,
+    // quieter connection cap that nobody configured.
+    let Ok(_pending) = state.pending.clone().try_acquire_owned() else {
+        tracing::warn!(
+            limit = state.config.limits.max_pending_connections,
+            "refusing a connection: too many are waiting to authenticate"
+        );
         return;
     };
+    let joining = tokio::time::timeout(
+        std::time::Duration::from_millis(state.config.limits.join_timeout_ms.max(1)),
+        authorise(&state, &document_key, &mut socket),
+    );
+    let Ok(Some((claims, resume))) = joining.await else {
+        // Either it refused, or it never said anything. Both end here, and a
+        // client that is merely slow reconnects — which is a far better failure
+        // than a node that cannot accept anybody.
+        return;
+    };
+    drop(_pending);
 
     // One span per connection, carrying the fields every event under it should
     // be filterable by. The document *key* is deliberately absent: it names a
@@ -1136,6 +1256,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                 color: seen.color.clone(),
                 sheet: seen.sheet,
                 selection: seen.selection,
+                // Including what they are mid-way through typing. A joiner who
+                // was told only where everybody's cursor was would sit watching
+                // an empty cell somebody is actively filling, until the next
+                // keystroke happened to arrive — and if they had stopped to
+                // think, that could be a minute.
+                editing: seen.editing.clone(),
             })
             .collect();
         for message in others {
@@ -1284,7 +1410,37 @@ async fn authorise(
     }
 
     let now_secs = now_ms() / 1_000;
-    match state.config.verifier.verify(&token, document_key, now_secs) {
+    let mut outcome = state.config.verifier.verify(&token, document_key, now_secs);
+    // **An unknown `kid` is the one refusal worth asking again about.**
+    //
+    // It means the token was signed with a key this server has not read yet,
+    // which is exactly what an integrator publishing a new key looks like from
+    // here. Every other refusal is about the token and re-reading the key set
+    // cannot change it.
+    //
+    // Throttled, because the trigger is attacker-reachable: a token naming a
+    // `kid` nobody has would otherwise turn every connection attempt into a
+    // request to somebody else's key endpoint. `may_attempt` records the try,
+    // so a burst of them costs one fetch.
+    //
+    // Retried once. If the freshly-read set still has no such key, the answer
+    // was already correct.
+    if matches!(outcome, Err(crate::verify::VerifyError::UnknownKey))
+        && let Some(source) = state.config.verifier.jwks()
+        && source.may_attempt(now_ms())
+    {
+        match crate::verify::fetch_keys(&source.url, &source.accepted).await {
+            Ok(keys) => {
+                tracing::info!(url = %source.url, keys = keys.len(), "re-read the signing keys for an unknown kid");
+                state.config.verifier.install(keys);
+                outcome = state.config.verifier.verify(&token, document_key, now_secs);
+            }
+            Err(why) => {
+                tracing::warn!(%why, "could not re-read the signing keys; keeping the ones held")
+            }
+        }
+    }
+    match outcome {
         Ok(claims) => Some((claims, resume)),
         Err(refusal) => {
             // The client is told one thing; the operator's log gets the detail.
@@ -1433,8 +1589,34 @@ async fn handle(
             // the answer unmatchable, which is the entire point of having it.
             send(socket, &ServerMessage::Pong { nonce }).await.is_ok()
         }
-        ClientMessage::Presence { sheet, selection } => {
-            lock(&live.roster).moved(client, sheet, selection, now_ms());
+        ClientMessage::Presence {
+            sheet,
+            selection,
+            editing,
+        } => {
+            // **The trust boundary for a draft is here**, and it is worth being
+            // exact about what is and is not done to it.
+            //
+            // *Bounded*, because this arrives once per keystroke from a party
+            // with no obligation to behave, is held for the presence TTL, and
+            // is drawn into a cell on everybody else's grid. Once, into a local,
+            // so the roster and the relay cannot disagree about what was said.
+            //
+            // *Refused from anyone who may not edit.* A draft is the preview of
+            // an edit and a viewer has no edit to preview — their submissions
+            // are refused at the operation (COL-17), so this would be the one
+            // channel by which a read-only participant put text of their
+            // choosing into everybody's grid. Their cursor still travels:
+            // being present is not editing.
+            //
+            // *Not sanitised*, deliberately. It is a person's half-typed cell
+            // and mangling it would be a worse lie than showing it; what makes
+            // that safe is where it lands, and SEC-001 is the rule that keeps
+            // it out of any markup sink on the way.
+            let editing = editing
+                .filter(|_| claims.permissions.access == Access::Edit)
+                .map(Draft::bounded);
+            lock(&live.roster).moved(client, sheet, selection, editing.clone(), now_ms());
             let _ = live.fan_out.send((
                 Audience::OthersThan(client),
                 ServerMessage::Presence {
@@ -1449,6 +1631,7 @@ async fn handle(
                         .unwrap_or_else(|| crate::presence::colour_for(client)),
                     sheet,
                     selection,
+                    editing,
                 },
             ));
             true
@@ -1536,12 +1719,35 @@ async fn handle(
                 return true;
             }
 
+            // **Ordered from commit through broadcast**, which the cluster path
+            // does deliberately (`order()`, below) and this one did not.
+            //
+            // Two things went wrong without it. The broadcast used to happen
+            // *after* `await`ing the sender's acknowledgement, and that await is
+            // a suspension point: with two connections committing concurrently
+            // on a multi-thread runtime, the one whose acknowledgement returned
+            // first broadcast first, regardless of which revision it was
+            // assigned. A third participant then applied revision 2 before
+            // revision 1 — the second already rebased past the first — and set
+            // its own revision *backwards*. Nothing detects that: the client
+            // applies whatever arrives and assigns the revision it is given.
+            //
+            // And more certainly: a failed acknowledgement returned early, so an
+            // operation committed into the server's own document was never sent
+            // to anybody. One slow socket silently cost every other participant
+            // the edit.
+            //
+            // `fan_out.send` is synchronous, so holding the ordering lock across
+            // commit and broadcast adds no await between assigning a revision
+            // and announcing it. The acknowledgement is sent afterwards, outside
+            // the lock, because it is the one part that may block on a socket.
             let outcome = {
-                let mut session = lock(&live.session);
-                session.commit(&submission, now_ms())
-            };
-            match outcome {
-                Ok(commit) => {
+                let _ordering = live.writing.lock().await;
+                let committed = {
+                    let mut session = lock(&live.session);
+                    session.commit(&submission, now_ms())
+                };
+                committed.map(|commit| {
                     let (revision, ops) = match commit {
                         casual_calc_transaction::session::Commit::Applied { ops, revision } => {
                             (revision, ops)
@@ -1553,6 +1759,20 @@ async fn handle(
                             (revision, Vec::new())
                         }
                     };
+                    // Everyone else sees what landed. The sender does not need
+                    // it — its own ops are already applied locally, and the ack
+                    // is what tells it they are ordered.
+                    if !ops.is_empty() {
+                        let _ = live.fan_out.send((
+                            Audience::OthersThan(client),
+                            ServerMessage::Apply { revision, ops },
+                        ));
+                    }
+                    revision
+                })
+            };
+            match outcome {
+                Ok(revision) => {
                     if send(
                         socket,
                         &ServerMessage::Ack {
@@ -1564,15 +1784,6 @@ async fn handle(
                     .is_err()
                     {
                         return false;
-                    }
-                    // Everyone else sees what landed. The sender does not need
-                    // it — its own ops are already applied locally, and the ack
-                    // is what tells it they are ordered.
-                    if !ops.is_empty() {
-                        let _ = live.fan_out.send((
-                            Audience::OthersThan(client),
-                            ServerMessage::Apply { revision, ops },
-                        ));
                     }
                     true
                 }
@@ -1895,12 +2106,18 @@ async fn order(
     // heard about is caught by the next gap, where one announced and not
     // recorded is lost the moment this node stops.
     let epoch = lock(&live.leader).as_ref().map_or(0, |lease| lease.epoch);
+    // Both ends, because a revision counts operations and this batch may carry
+    // several. `revision - 1` was right only for a one-operation chunk, and the
+    // editor batches everything typed inside a flush window into one — so the
+    // ordinary case was the broken one.
+    let before = revision - batch.ops.len() as u64;
     match membership
         .store
         .append(
             key.to_owned(),
             epoch,
-            revision - 1,
+            before,
+            revision,
             payload.clone(),
             now_ms(),
         )

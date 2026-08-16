@@ -149,3 +149,56 @@ fn malformed_xml_is_reported() {
     assert!(matches!(err, OoxmlError::MalformedXml(_)));
     assert_eq!(err.code(), "OC-XML-0004");
 }
+
+/// Both halves of `[Content_Types].xml`, and the precedence between them.
+///
+/// The reader used to return the `<Override>` map alone and call that the
+/// content types of the package. It reads as complete right up until the file
+/// declares something by extension, which every real one does: printer
+/// settings, images, embedded objects. Everything downstream then saw `None`
+/// for a part whose type the file states plainly (FID-17).
+#[test]
+fn a_content_type_declared_by_extension_resolves_like_one_declared_by_part() {
+    const TYPES: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"/>
+  <Default Extension="EMF" ContentType="image/x-emf"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/EMBEDDINGS/oleObject1.bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>
+</Types>"#;
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", WORKSHEET),
+        ("xl/worksheets/sheet2.xml", WORKSHEET),
+    ]);
+    let mut pkg = SpreadsheetPackage::open(bytes, OoxmlLimits::default()).unwrap();
+    let types = pkg.content_types().unwrap();
+
+    // By extension — the half that was missing.
+    assert_eq!(
+        types.resolve("xl/printerSettings/printerSettings1.bin"),
+        Some("application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings")
+    );
+    // The override wins over the default for the same extension, which is the
+    // reason a `<Default Extension="bin">` cannot be assumed to describe every
+    // `.bin` in the package.
+    assert_eq!(
+        types.resolve("xl/embeddings/oleObject1.bin"),
+        Some("application/vnd.openxmlformats-officedocument.oleObject")
+    );
+    // Case folds on both sides: OPC compares part names and extensions
+    // case-insensitively, and a file that mixes them is well-formed.
+    assert_eq!(types.resolve("xl/media/image1.emf"), Some("image/x-emf"));
+    assert_eq!(
+        types.resolve("/xl/workbook.xml").unwrap(),
+        types.resolve("xl/WORKBOOK.xml").unwrap()
+    );
+    // No extension, and no override: undeclared, and said so rather than
+    // guessed at.
+    assert_eq!(types.resolve("xl/media/stream"), None);
+}

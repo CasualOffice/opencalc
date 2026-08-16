@@ -26,6 +26,7 @@
 //! until one works" is how a key retired for being compromised keeps working.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, RwLock};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
@@ -168,13 +169,139 @@ impl KeySet {
     }
 }
 
+/// Where the keys came from, so they can be read again.
+///
+/// A key set that is fetched once and held for the life of the process is a
+/// key set that cannot be rotated. [ADR-014](../../../docs/59-COLLABORATION-SERVICE-STACK.md)
+/// states the opposite as a decided property — *"they publish a new key, the
+/// server picks it up at the next fetch, and no coordinated restart is
+/// needed"* — and the code did the first fetch and no others.
+///
+/// What that cost: an integrator rotating on schedule publishes `k2` beside
+/// `k1` and starts signing with `k2`. Every node still holds only `k1`, and
+/// `select` refuses an unknown `kid` outright rather than falling back — which
+/// is right, and is what makes the missing refresh fatal instead of merely
+/// stale. Nobody can join any document, including people rejoining one they
+/// were in a minute ago, until an operator restarts every node. The client sees
+/// the same `NotAuthorised` a bad token gets, so the cause is invisible from
+/// outside. Revocation is the mirror image: pulling a compromised key has no
+/// effect on a running node at all.
+#[derive(Debug)]
+pub struct JwksSource {
+    /// The integrator's `jwks_uri`.
+    pub url: String,
+    /// The algorithms this server will accept a key for.
+    pub accepted: Vec<Signing>,
+    /// Unix ms of the last attempt, so an unknown `kid` cannot be used to make
+    /// this server hammer somebody else's key endpoint.
+    last_attempt_ms: Mutex<u64>,
+    /// The shortest gap between two on-demand attempts.
+    min_interval_ms: u64,
+}
+
+impl JwksSource {
+    /// Whether an on-demand refresh may run now, recording it if so.
+    ///
+    /// Deliberately takes the clock as an argument, like everything else in
+    /// this crate: a throttle is a timing rule, and timing rules are only
+    /// testable when time is passed in.
+    pub fn may_attempt(&self, now_ms: u64) -> bool {
+        let mut last = self
+            .last_attempt_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if now_ms.saturating_sub(*last) < self.min_interval_ms {
+            return false;
+        }
+        *last = now_ms;
+        true
+    }
+}
+
 /// Checks a token against a key set and a policy.
+///
+/// The key set is behind a lock because it is **replaceable**: see
+/// [`JwksSource`].
 #[derive(Debug)]
 pub struct Verifier {
     /// What this server accepts about the claims themselves.
     pub policy: TokenPolicy,
     /// The keys, and the algorithms they may be used with.
-    pub keys: KeySet,
+    keys: RwLock<KeySet>,
+    /// Where to read them again, when they are fetched rather than configured.
+    jwks: Option<JwksSource>,
+}
+
+impl Verifier {
+    /// A verifier over a fixed key set — a shared secret, or a test.
+    #[must_use]
+    pub fn fixed(policy: TokenPolicy, keys: KeySet) -> Self {
+        Self {
+            policy,
+            keys: RwLock::new(keys),
+            jwks: None,
+        }
+    }
+
+    /// A verifier whose keys are re-read from `url`.
+    #[must_use]
+    pub fn refreshing(
+        policy: TokenPolicy,
+        keys: KeySet,
+        url: String,
+        accepted: Vec<Signing>,
+        min_interval_ms: u64,
+    ) -> Self {
+        Self {
+            policy,
+            keys: RwLock::new(keys),
+            jwks: Some(JwksSource {
+                url,
+                accepted,
+                last_attempt_ms: Mutex::new(0),
+                min_interval_ms,
+            }),
+        }
+    }
+
+    /// Where the keys are re-read from, if anywhere.
+    #[must_use]
+    pub fn jwks(&self) -> Option<&JwksSource> {
+        self.jwks.as_ref()
+    }
+
+    /// Replace the key set.
+    ///
+    /// Only ever called with a set that parsed. A fetch that failed leaves the
+    /// old keys in place on purpose: docs/59 says *"a cached key set keeps
+    /// working, since an integrator's key server going down should not evict
+    /// everybody"*, and evicting everybody is precisely what installing an
+    /// empty set would do.
+    pub fn install(&self, keys: KeySet) {
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = keys;
+    }
+
+    /// How many named keys are currently held.
+    #[must_use]
+    pub fn key_count(&self) -> usize {
+        self.keys.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// Read a JWKS document and parse it into a key set.
+///
+/// # Errors
+///
+/// A description of what went wrong, for a log. Callers keep their existing
+/// keys on an error rather than acting on it.
+pub async fn fetch_keys(url: &str, accepted: &[Signing]) -> Result<KeySet, String> {
+    let body = reqwest::get(url)
+        .await
+        .map_err(|e| format!("could not fetch {url}: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("could not read {url}: {e}"))?;
+    KeySet::from_jwks(&body, accepted).map_err(|e| format!("{url}: {e}"))
 }
 
 /// Why a token was rejected before its claims were even considered.
@@ -235,19 +362,19 @@ impl Verifier {
     ) -> Result<Claims, VerifyError> {
         let header = jsonwebtoken::decode_header(token).map_err(|_| VerifyError::Malformed)?;
 
+        let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
+
         // The header is checked against configuration and never consulted to
         // decide what to do. This is the whole defence against algorithm
         // confusion, including `alg: none`.
-        let signing = self
-            .keys
+        let signing = keys
             .accepted
             .iter()
             .copied()
             .find(|s| s.algorithm() == header.alg)
             .ok_or(VerifyError::UnacceptableAlgorithm)?;
 
-        let key = self
-            .keys
+        let key = keys
             .select(header.kid.as_deref())
             .ok_or(VerifyError::UnknownKey)?;
 

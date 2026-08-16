@@ -21,8 +21,12 @@
 
 use std::collections::BTreeMap;
 
-use casual_calc_model::{ChartKind, ChartView, RetainedRel, Sheet, Workbook};
+use casual_calc_model::{ChartKind, ChartView, Sheet, Workbook};
 
+// Shared with the other `.rels` this crate writes, so that the one rule about
+// `TargetMode` holds everywhere: a drawing hangs external relationships too —
+// the web address behind a clickable picture.
+use crate::retained_rel_xml as rel_xml;
 use crate::xml::{escape_attr, escape_text};
 
 const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
@@ -83,11 +87,15 @@ pub fn authored(sheet: &Sheet) -> Vec<&ChartView> {
 }
 
 /// The drawing part a sheet already points at, if any.
+///
+/// An external one is not a candidate: `resolve_rel_target` would turn its URI
+/// into a path, and the splice below would then look for bytes under a part
+/// name no package contains.
 fn retained_drawing(workbook: &Workbook, sheet_part: &str) -> Option<(String, String)> {
     workbook
         .retained_rels
         .iter()
-        .find(|r| r.source == sheet_part && r.rel_type.ends_with("/drawing"))
+        .find(|r| r.source == sheet_part && !r.external && r.rel_type.ends_with("/drawing"))
         .map(|r| (resolve_rel_target(&r.source, &r.target), r.id.clone()))
 }
 
@@ -229,15 +237,6 @@ pub fn build(
 /// land on one of theirs.
 pub fn drawing_rel_id(sheet: &Sheet) -> String {
     format!("rIdDrawing{}", sheet.tables.len())
-}
-
-fn rel_xml(rel: &RetainedRel) -> String {
-    format!(
-        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-        escape_attr(&rel.id),
-        escape_attr(&rel.rel_type),
-        escape_attr(&rel.target)
-    )
 }
 
 fn retained_bytes(workbook: &Workbook, path: &str) -> Option<String> {

@@ -244,7 +244,25 @@ pub trait Coordinator: Send + Sync {
     ) -> Answer<'_, Result<Lease, Unavailable>>;
 
     /// Append to a document's log, fenced by `epoch` and conditional on
-    /// `after`.
+    /// `after`, carrying the document to `revision`.
+    ///
+    /// **`revision` is not derivable from the log's length**, which is the
+    /// mistake this signature exists to prevent. A revision counts
+    /// *operations* — `ServerSession::commit` advances it once per op — while
+    /// the log holds one entry per *append*, because an append is the unit that
+    /// gets published and adopted. The two agree only while every chunk carries
+    /// exactly one operation, which is true of nothing except a test: the
+    /// editor batches everything typed inside a flush window into one chunk.
+    ///
+    /// When the length was the revision, a two-operation chunk asked an empty
+    /// log to accept `after = 1`, was told `Stale`, and the caller returned —
+    /// after `commit` had already applied both operations to the leader's own
+    /// copy. That node was then diverged from the log permanently: its client
+    /// was never acknowledged, no peer ever saw the edit, and every later
+    /// append from it failed for the same reason.
+    ///
+    /// So the caller passes both ends: `after` is where it believed the
+    /// document was, and `revision` is where these operations leave it.
     ///
     /// # Errors
     ///
@@ -255,6 +273,7 @@ pub trait Coordinator: Send + Sync {
         document: String,
         epoch: u64,
         after: u64,
+        revision: u64,
         payload: Vec<u8>,
         now_ms: u64,
     ) -> Answer<'_, Result<u64, AppendError>>;
@@ -287,7 +306,10 @@ pub struct Memory {
 struct State {
     peers: BTreeMap<String, Peer>,
     leases: BTreeMap<String, Lease>,
-    logs: BTreeMap<String, Vec<Vec<u8>>>,
+    /// Each entry is `(revision it carried the document to, payload)`. The
+    /// revision is stored rather than derived from the position, because one
+    /// entry can hold several operations — see [`Coordinator::append`].
+    logs: BTreeMap<String, Vec<(u64, Vec<u8>)>>,
 }
 
 impl Coordinator for Memory {
@@ -364,6 +386,7 @@ impl Coordinator for Memory {
         document: String,
         epoch: u64,
         after: u64,
+        revision: u64,
         payload: Vec<u8>,
         now_ms: u64,
     ) -> Answer<'_, Result<u64, AppendError>> {
@@ -381,12 +404,13 @@ impl Coordinator for Memory {
             return Box::pin(async move { Err(AppendError::Fenced { current }) });
         }
         let log = state.logs.entry(document.to_owned()).or_default();
-        let current = log.len() as u64;
+        // The last entry's revision, not the entry count. See the trait.
+        let current = log.last().map_or(0, |(at, _)| *at);
         if after != current {
             return Box::pin(async move { Err(AppendError::Stale { current }) });
         }
-        log.push(payload);
-        Box::pin(async move { Ok(current + 1) })
+        log.push((revision, payload));
+        Box::pin(async move { Ok(revision) })
     }
 
     fn since(
@@ -399,10 +423,12 @@ impl Coordinator for Memory {
             .logs
             .get(document.as_str())
             .map(|log| {
+                // Filtered by the revision each entry recorded, rather than
+                // skipping that many entries: one entry can carry several
+                // operations, so its position says nothing about its revision.
                 log.iter()
-                    .enumerate()
-                    .skip(revision as usize)
-                    .map(|(i, payload)| (i as u64 + 1, payload.clone()))
+                    .filter(|(at, _)| *at > revision)
+                    .map(|(at, payload)| (*at, payload.clone()))
                     .collect()
             })
             .unwrap_or_default();

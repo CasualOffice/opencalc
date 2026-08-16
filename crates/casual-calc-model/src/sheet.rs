@@ -20,6 +20,7 @@ pub struct AxisSizing {
     pub default: Option<i64>,
     /// Explicit per-line sizes (twips), keyed by zero-based index.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::int_keys::deserialize")]
     pub sizes: BTreeMap<u32, i64>,
 }
 
@@ -166,10 +167,12 @@ pub struct Sheet {
     /// Outline (grouping) nesting level per row, by zero-based index. Sparse:
     /// only rows with a non-zero level appear.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::int_keys::deserialize")]
     pub row_outline_levels: BTreeMap<u32, u8>,
     /// Outline (grouping) nesting level per column, by zero-based index. Sparse:
     /// only columns with a non-zero level appear.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::int_keys::deserialize")]
     pub col_outline_levels: BTreeMap<u32, u8>,
     /// Rows whose outline group is collapsed, by zero-based index.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -360,6 +363,7 @@ pub struct AutoFilter {
     /// `colId` basis OOXML uses, so the mapping survives a round-trip
     /// unchanged. Columns absent from the map are unfiltered.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::int_keys::deserialize")]
     pub rules: BTreeMap<u32, FilterRule>,
 }
 

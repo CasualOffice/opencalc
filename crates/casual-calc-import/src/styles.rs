@@ -154,6 +154,38 @@ fn micro_attr(e: &BytesStart<'_>, name: &[u8]) -> Result<i32, ImportError> {
         .unwrap_or(0))
 }
 
+/// The largest font Excel will accept, in half-points: 409 points.
+const MAX_FONT_HALF_POINTS: u32 = 818;
+
+/// A `<sz val>` as half-points, or `None` when it is not a usable size.
+///
+/// `val` is an arbitrary `xsd:double` off the wire, and `(v * 2.0).round() as u32`
+/// took it at its word: `as` **saturates** rather than wrapping or failing, so
+/// `<sz val="1e300"/>` produced `u32::MAX` half-points — about two billion
+/// points of font — and `NaN` produced 0. Neither is a size, and both travel: a
+/// font size reaches row autofit, the layout's text measurement and the
+/// rasteriser, none of which are prepared to be asked for a glyph two billion
+/// points tall.
+///
+/// Bounded here rather than at each of those, and to Excel's own ceiling rather
+/// than to whatever the arithmetic happens to survive, so the value the model
+/// holds is one a real producer could have written. A size outside the range is
+/// dropped rather than clamped: `None` means "this font states no size", which
+/// every caller already handles by falling back to the workbook default — and a
+/// silently *resized* font is a worse answer than an unstyled one.
+fn font_size_half_points(points: f64) -> Option<u32> {
+    if !points.is_finite() || points <= 0.0 {
+        return None;
+    }
+    let half = (points * 2.0).round();
+    if half < 1.0 || half > f64::from(MAX_FONT_HALF_POINTS) {
+        return None;
+    }
+    // Finite, positive and inside the ceiling, so the cast cannot saturate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(half as u32)
+}
+
 /// Resolve an OOXML color element to `RRGGBB`, whichever of the three forms it
 /// uses: a literal `rgb` (`FFRRGGBB` or `RRGGBB`), a `theme` slot with an
 /// optional `tint`, or a legacy `indexed` palette entry. Reading only `rgb` —
@@ -171,7 +203,24 @@ fn color_ref(
     theme: &ThemePalette,
 ) -> Result<Option<(String, Option<ThemeTint>)>, ImportError> {
     if let Some(s) = attr(e, b"rgb")? {
-        let rgb = if s.len() == 8 { s[2..].to_owned() } else { s };
+        // `AARRGGBB` drops the alpha pair. Counted in **characters**, and only
+        // when they are all hex, because `s` is whatever the file said and
+        // `s[2..]` on eight arbitrary *bytes* panics the moment one of them is
+        // the middle of a multi-byte character — `<color rgb="aé12345"/>` is
+        // eight bytes with `é` spanning 1..3. That is not a caught error: a
+        // panic in this crate reaches the browser as a WebAssembly trap, which
+        // aborts the module and takes any workbook already open with it, while
+        // the editor's `catch` prints a friendly "could not open".
+        //
+        // A value that is not hex at all is kept verbatim rather than rejected
+        // — docs/34 says preserve what we do not model — and every consumer
+        // that turns a colour into output validates it there.
+        let hex = s.len() == s.chars().count() && s.chars().all(|c| c.is_ascii_hexdigit());
+        let rgb = if hex && s.len() == 8 {
+            s[2..].to_owned()
+        } else {
+            s
+        };
         return Ok(Some((rgb, None)));
     }
     if let Some(slot) = attr_u32(e, b"theme")? {
@@ -387,7 +436,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                             fonts.last_mut(),
                             attr(e, b"val")?.and_then(|s| s.parse::<f64>().ok()),
                         ) {
-                            f.size_hp = Some((v * 2.0).round() as u32);
+                            f.size_hp = font_size_half_points(v);
                         }
                     }
                     b"fill" if in_fills => fills.push(FillInfo::default()),
@@ -721,6 +770,104 @@ mod builtin_fmt_tests {
         let ss = parse_styles(xml, &ThemePalette::default()).expect("parse");
         assert_eq!(ss.default_font_name.as_deref(), Some("Aptos"));
         assert_eq!(ss.default_font_size_hp, Some(24)); // 12pt = 24 half-points
+    }
+
+    /// **A colour attribute is eight arbitrary bytes, not eight characters.**
+    ///
+    /// The `AARRGGBB` form is turned into `RRGGBB` by dropping the first two,
+    /// and that was written as `s[2..]` guarded by `s.len() == 8` — a byte
+    /// length. `<color rgb="aé12345"/>` is eight bytes with `é` spanning 1..3,
+    /// so the slice landed inside a character and panicked.
+    ///
+    /// This is not an error the caller can handle. Compiled to WebAssembly the
+    /// panic is a trap: the module aborts, and any workbook already open in
+    /// that tab goes with it while the editor's `catch` prints a friendly
+    /// "could not open". On the server it takes the request thread.
+    /// **A font size arrives as an arbitrary `xsd:double` and reaches the
+    /// rasteriser.**
+    ///
+    /// `(v * 2.0).round() as u32` took the file at its word, and `as` in Rust
+    /// **saturates**: `<sz val="1e300"/>` became `u32::MAX` half-points, about
+    /// two billion points of font, and `NaN` became 0. A size travels — row
+    /// autofit, text measurement, glyph rasterisation — and none of those is
+    /// prepared to be asked for a glyph that tall.
+    ///
+    /// Out of range is dropped rather than clamped: `None` means the font
+    /// states no size, which every caller already handles by falling back to
+    /// the workbook default. A silently *resized* font would be a worse answer
+    /// than an unstyled one.
+    #[test]
+    fn an_absurd_font_size_is_refused_rather_than_saturating() {
+        let with = |val: &str| {
+            let xml = format!(
+                r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                    <fonts count="1"><font><sz val="{val}"/></font></fonts>
+                    <cellXfs count="1"><xf numFmtId="0" fontId="0" applyFont="1"/></cellXfs>
+                </styleSheet>"#
+            );
+            parse_styles(xml.as_bytes(), &ThemePalette::default())
+                .unwrap_or_else(|e| {
+                    panic!("sz={val:?} must parse or be refused, never panic: {e:?}")
+                })
+                .xf_styles[0]
+                .font_size_hp
+        };
+
+        for absurd in [
+            "1e300", "1e308", "-1e300", "NaN", "INF", "-INF", "0", "-12", "1e9",
+        ] {
+            assert_eq!(
+                with(absurd),
+                None,
+                "sz={absurd:?} is not a font size and must not reach the model"
+            );
+        }
+
+        // Everything a real producer writes still lands, including the halves
+        // that are the reason this is stored in half-points at all.
+        assert_eq!(with("11"), Some(22));
+        assert_eq!(with("10.5"), Some(21));
+        assert_eq!(with("409"), Some(818), "Excel's ceiling is admitted");
+        assert_eq!(with("409.5"), None, "and just past it is not");
+    }
+
+    #[test]
+    fn a_colour_that_is_not_hex_does_not_panic_the_parser() {
+        for rgb in [
+            "aé12345",  // eight bytes, é spanning 1..3 — the reported case
+            "ééé",      // six bytes, three characters
+            "日本語",   // nine bytes
+            "",         // empty
+            "FF0000",   // ordinary RRGGBB, must be untouched
+            "FFFF0000", // ordinary AARRGGBB, must lose the alpha pair
+            "notahex!", // eight ASCII bytes that are not hex
+        ] {
+            let xml = format!(
+                r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                    <fonts count="1"><font><color rgb="{rgb}"/></font></fonts>
+                    <cellXfs count="1"><xf numFmtId="0" fontId="0" applyFont="1"/></cellXfs>
+                </styleSheet>"#
+            );
+            let parsed = parse_styles(xml.as_bytes(), &ThemePalette::default());
+            assert!(
+                parsed.is_ok(),
+                "rgb={rgb:?} must parse or be refused, never panic"
+            );
+        }
+
+        // And the two well-formed shapes still mean what they meant.
+        let with = |rgb: &str| {
+            let xml = format!(
+                r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                    <fonts count="1"><font><color rgb="{rgb}"/></font></fonts>
+                    <cellXfs count="1"><xf numFmtId="0" fontId="0" applyFont="1"/></cellXfs>
+                </styleSheet>"#
+            );
+            let ss = parse_styles(xml.as_bytes(), &ThemePalette::default()).expect("parse");
+            ss.xf_styles[0].font_color.clone()
+        };
+        assert_eq!(with("FFFF0000").as_deref(), Some("FF0000"), "alpha dropped");
+        assert_eq!(with("FF0000").as_deref(), Some("FF0000"), "left alone");
     }
 
     #[test]

@@ -38,15 +38,15 @@ fuzz_target!(|data: &[u8]| {
     let Ok(token) = core::str::from_utf8(data) else {
         return;
     };
-    let verifier = Verifier {
-        policy: TokenPolicy {
+    let verifier = Verifier::fixed(
+        TokenPolicy {
             audience: "opencalc-collab".into(),
             leeway_secs: 60,
             allowed_hosts: Default::default(),
             require_https: true,
         },
-        keys: KeySet::shared_secret(SECRET),
-    };
+        KeySet::shared_secret(SECRET),
+    );
 
     // A fixed clock: expiry is checked against a supplied time, and letting the
     // real one in would make a finding unreproducible tomorrow.

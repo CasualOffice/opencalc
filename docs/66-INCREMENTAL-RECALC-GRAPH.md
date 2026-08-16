@@ -153,10 +153,36 @@ the SDK rather than about the graph:
 - **`RecalcPlan::Cells`** names exactly the cell each of `SetCell`, `SetValue`
   and `ClearCell` writes — the only operations that produce it. So the reported
   set is exactly the set whose outgoing edges can have changed.
-- **`RecalcPlan::Skip`** is styles, widths, sheet metadata, tab order and colour.
-  None changes a formula.
-- **`RecalcPlan::Full`** is the reference-shifting and name-resolution edits, and
-  drops the graph.
+- **`RecalcPlan::Skip`** is styles, widths and tab colour. None changes a
+  formula, a value, or the numbering the graph is keyed by.
+
+  Two entries were on this list and should not have been, and the reason both
+  slipped is that the list was checked against the wrong question. "Does it
+  change a formula?" is not sufficient — the graph is also keyed by sheet
+  index, and the evaluator reads more of the document than the cells:
+
+  - **Tab order** (`MoveSheet`) renumbers every sheet by removing and
+    re-inserting, so a graph keyed by index describes the old order. It also
+    changes values outright, because `SHEET()` returns a sheet's position. It
+    is `Full`.
+  - **Sheet metadata** (`SetSheetMetadata`) is presentation in twenty-one of
+    its twenty-three fields. The other two are `hidden_rows` and
+    `filter_hidden`: `SUBTOTAL`'s 101–111 codes and `AGGREGATE` skip hidden
+    rows, and `Sheet::is_row_hidden` is the union of the two sets. So applying
+    a filter changes what a subtotal *is* while writing no cell, which no
+    dependency graph can see. It is `Full` when either bit is set, and `Skip`
+    otherwise.
+
+  The general rule this list now encodes: an operation is `Skip` only if it
+  changes no value **and** leaves every key the graph uses meaning what it
+  meant. Anything the evaluator reads that is not a cell — sheet position, row
+  visibility — belongs in the second half of that test.
+- **`RecalcPlan::Full`** is the reference-shifting and name-resolution edits, the
+  two above, and drops the graph. It drops it **before** the manual-calculation
+  return, not as part of recalculating: whether a recalculation is wanted now
+  and whether the graph still describes this document are different questions,
+  and answering only the first left manual mode computing against a stale graph
+  later.
 - **Undo and redo** replay any of the three and do not say which, so they drop it.
 - **`apply_raw` and `workbook_mut`** are the escape hatches, and `workbook_mut`
   already documents the exact reasoning this needs: *"this cannot see what

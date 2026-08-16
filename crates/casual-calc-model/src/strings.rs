@@ -36,6 +36,7 @@ pub struct StringTableRepr {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     entries: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::int_keys::deserialize")]
     runs: BTreeMap<u32, Vec<TextRun>>,
 }
 

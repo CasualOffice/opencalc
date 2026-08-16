@@ -326,13 +326,33 @@ fn map_sheet_index(index: usize, against: &Operation) -> Option<usize> {
 /// A position and an element shift differently at the boundary: inserting at
 /// the same index as another insert still means "before whatever is there now",
 /// so it shifts; an element at that index is the thing being pushed along.
-fn map_sheet_position(position: usize, against: &Operation) -> Option<usize> {
+///
+/// **The tie needs `side`, and that is the whole subtlety.** For rows and
+/// columns it does not: inserted lines are empty and interchangeable, so which
+/// of two concurrent inserts at the same index ends up first is not an
+/// observable fact. A sheet carries identity and content, so it is. While both
+/// sides shifted on `position >= at`, two clients each adding a sheet at tab 1
+/// each put their own sheet *after* the other's — one replica held `[S, X, Y]`
+/// and the other `[S, Y, X]`, TP1 broken, and every later `sheet:`-indexed
+/// operation then addressed a different sheet on each. Nothing errored, and
+/// nothing later disagreed loudly enough to reveal it.
+///
+/// So the tie is broken by the order the server imposed: the operation ordered
+/// **later** yields and shifts right, the **earlier** one keeps the position it
+/// asked for. Both replicas compute the same answer because both are told the
+/// same order, which is exactly what a server-mediated transform is for
+/// (ADR-011).
+fn map_sheet_position(position: usize, against: &Operation, side: Side) -> Option<usize> {
     match *against {
-        Operation::InsertSheet { index: at, .. } => Some(if position >= at {
-            position + 1
-        } else {
-            position
-        }),
+        Operation::InsertSheet { index: at, .. } => {
+            let shifts = match position.cmp(&at) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                // The tie. Later yields, earlier holds.
+                std::cmp::Ordering::Equal => side == Side::Later,
+            };
+            Some(if shifts { position + 1 } else { position })
+        }
         Operation::RemoveSheet { index: at } => Some(if position > at {
             position - 1
         } else {
@@ -363,7 +383,7 @@ fn rebase_across_sheets(
     let mut rebased = subject.clone();
     match &mut rebased {
         // An insertion position, not a sheet.
-        Operation::InsertSheet { index, .. } => match map_sheet_position(*index, against) {
+        Operation::InsertSheet { index, .. } => match map_sheet_position(*index, against, side) {
             Some(mapped) => *index = mapped,
             None => return Err(unsupported(subject, against)),
         },

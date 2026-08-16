@@ -32,7 +32,99 @@ use crate::wire::WireOperation;
 /// [`ServerMessage::Opening`]. 5 made [`ServerMessage::Ack`] cumulative and
 /// `Submission`'s base a [`Base`](crate::session::Base)
 /// ([ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md)).
+///
+/// **[`Draft`] did not move it, and that is a claim rather than an oversight.**
+/// The rule in [62](../../../docs/62-COLLABORATION-PIPELINING.md) is to bump
+/// when an old and a new peer would interpret the same message *differently*.
+/// `editing` is an optional field on a message neither side reads with
+/// `deny_unknown_fields`: an old peer skips it and reads the rest exactly as
+/// before, and a new peer reading a message without it concludes "not typing",
+/// which is what the sender means. Nobody is misled, so nobody is refused —
+/// which matters, because a bump costs every unupgraded tab its session, and
+/// spending that to add a cursor decoration would be the wrong trade. Verified,
+/// both directions, by `a_peer_that_has_never_heard_of_drafts_still_reads_a_message_carrying_one`.
 pub const PROTOCOL_VERSION: u32 = 5;
+
+/// What somebody is typing, before they have decided to keep it.
+///
+/// **Presence, not an operation** — the line ADR-011 draws, and the reason this
+/// type is here rather than in the op set. A half-typed cell has no inverse,
+/// nothing depends on its history, and losing it costs nothing; putting it on
+/// the operation wire would mean transforming it, ordering it, keeping it in
+/// the applied log and offering to undo it, all for a string that will be
+/// replaced by the next keystroke.
+///
+/// # Why the text travels, and not merely the cell
+///
+/// The cheaper design broadcasts only *where* somebody is editing, and peers
+/// show "Ada is in B4". It is a real feature and it answers "am I about to
+/// collide with somebody" — but it does not answer what was actually asked for,
+/// which was to see the value appear while it is being typed. Watching a
+/// colleague fill a column is the thing people mean by co-editing a
+/// spreadsheet; being told they are busy in a cell is a lock indicator.
+///
+/// It costs a throttled message per keystroke instead of one per cell, which is
+/// the same order as the selection presence already being sent while somebody
+/// drags. And it means half-typed, possibly-abandoned text is visible to
+/// others, which is a *product* decision made deliberately: it is what every
+/// spreadsheet a user has met does, and a draft that vanishes on Escape is
+/// exactly as ephemeral as the presence entry carrying it.
+///
+/// Two consequences fall out and are handled where they arise: the text is
+/// bounded here, and it is untrusted everywhere it is displayed (SEC-001 — the
+/// editor draws it onto the canvas and never into markup).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Draft {
+    /// The cell being typed into, as `[row, col]`, on the sheet the presence
+    /// message names.
+    ///
+    /// Carried rather than inferred from the selection: while a formula is
+    /// being written the selection wanders off to pick references, and the
+    /// draft belongs to the cell the edit started in.
+    pub at: [u32; 2],
+    /// What has been typed so far, bounded by [`Self::MAX_TEXT`].
+    pub text: String,
+}
+
+impl Draft {
+    /// The most text a draft carries, in characters.
+    ///
+    /// A cell holds far more than this — the point is that a *preview* does
+    /// not need to. Past a couple of hundred characters nothing is legible in a
+    /// peer's cell anyway, while the message is sent again on every keystroke
+    /// by a party nobody is obliged to trust.
+    pub const MAX_TEXT: usize = 256;
+
+    /// A draft of `text` at `row`, `col`, bounded.
+    ///
+    /// The only constructor, so there is no way to build one that is too long
+    /// and then forget to check it.
+    #[must_use]
+    pub fn new(row: u32, col: u32, text: impl Into<String>) -> Self {
+        Self {
+            at: [row, col],
+            text: text.into(),
+        }
+        .bounded()
+    }
+
+    /// The same draft, with over-long text cut back to [`Self::MAX_TEXT`].
+    ///
+    /// Applied again wherever one arrives from the network: a peer that does
+    /// not bound its own is not a peer that gets to decide how much memory the
+    /// roster spends, or how much text everybody else's grid has to draw.
+    ///
+    /// Cut on a **character** boundary. `String::truncate` panics mid-codepoint,
+    /// so a byte-counted bound is a crash triggerable by typing an accent.
+    #[must_use]
+    pub fn bounded(mut self) -> Self {
+        if let Some((end, _)) = self.text.char_indices().nth(Self::MAX_TEXT) {
+            self.text.truncate(end);
+        }
+        self
+    }
+}
 
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +238,16 @@ pub enum ClientMessage {
         sheet: usize,
         /// The selected range, as `[r0, c0, r1, c1]`.
         selection: [u32; 4],
+        /// What this participant is typing, if anything.
+        ///
+        /// Optional in the wire sense and in the human one. Absent means "not
+        /// editing", which is also what a client too old to know about drafts
+        /// says by omission — and it is how an **abandoned** edit is cleared:
+        /// each participant owns exactly one presence entry that is overwritten
+        /// wholesale, so a message with no draft in it leaves no ghost behind
+        /// for anybody to have to remember to remove.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        editing: Option<Draft>,
     },
     /// Leaving deliberately, rather than by disconnecting.
     Leave,
@@ -278,6 +380,14 @@ pub enum ServerMessage {
         sheet: usize,
         /// The selection, as `[r0, c0, r1, c1]`.
         selection: [u32; 4],
+        /// What they are typing, if anything — bounded by the server before it
+        /// is relayed, and **untrusted text** wherever it is shown.
+        ///
+        /// Absent when they are not editing, which is what makes an abandoned
+        /// edit clear itself: the entry is replaced whole, so the draft goes
+        /// with it. A departure clears it the same way, by removing the entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        editing: Option<Draft>,
     },
     /// Someone left, or went silent long enough to be presumed gone.
     Departed {
@@ -430,6 +540,12 @@ mod tests {
             ClientMessage::Presence {
                 sheet: 0,
                 selection: [1, 2, 3, 4],
+                editing: None,
+            },
+            ClientMessage::Presence {
+                sheet: 0,
+                selection: [1, 2, 3, 4],
+                editing: Some(Draft::new(1, 2, "half a formu")),
             },
             ClientMessage::Leave,
         ];
@@ -513,6 +629,121 @@ mod tests {
         );
     }
 
+    /// **Every operation that carries an integer-keyed map, through text.**
+    ///
+    /// The sibling test below closed this gap for `StyleId`/`StringId`, which
+    /// wrap a `NonZeroU32`. It did not close it for the plain `u32`-keyed maps,
+    /// and those failed for a different reason that the fix for newtype keys
+    /// does not touch.
+    ///
+    /// [`ClientMessage`] is `#[serde(tag = "type")]`. Serde reads an
+    /// internally-tagged enum by buffering the value into its private `Content`
+    /// type, reading the tag, then re-deserializing the variant *from the
+    /// buffer* — a second pass that never reaches `serde_json`, and so has none
+    /// of its string-key-to-integer parsing. Every such field came back
+    /// `invalid type: string "0", expected u32`, and the entire message was
+    /// unreadable.
+    ///
+    /// What that meant in a real session: **autofilter rules, every column
+    /// width, every row height and every outline level were undeliverable.**
+    /// The sender applied the change locally and believed it had sent it; the
+    /// server could not parse the message and answered `CannotMerge`, naming
+    /// the transform — the one part that was working. Found by driving two
+    /// browsers against the real server, because every test on both sides
+    /// constructed the message rather than parsing one.
+    ///
+    /// So this test round-trips through a **string**, and asserts each map
+    /// still has its contents. Constructing the struct and comparing would
+    /// pass against the bug.
+    #[test]
+    fn a_submission_carrying_integer_keyed_maps_survives_json_in_both_directions() {
+        use casual_calc_model::{AutoFilter, CellRange, FilterRule};
+
+        let wb = workbook();
+        let mut data = crate::SheetMetadata {
+            // A filter with a rule — keyed by column offset.
+            auto_filter: Some(AutoFilter {
+                range: CellRange {
+                    start: CellRef::new(0, 0),
+                    end: CellRef::new(3, 0),
+                },
+                rules: [(0u32, FilterRule::Values(vec!["1".to_owned()]))]
+                    .into_iter()
+                    .collect(),
+            }),
+            ..crate::SheetMetadata::default()
+        };
+        // A column width and a row height — `AxisSizing::sizes`.
+        data.columns.sizes.insert(1, 2800);
+        data.rows.sizes.insert(4, 400);
+        // Outline levels, on both axes.
+        data.row_outline_levels.insert(6, 2);
+        data.col_outline_levels.insert(3, 1);
+
+        let message = ClientMessage::Submit(Submission {
+            client: ClientId(1),
+            seq: 1,
+            base: Base::Revision(0),
+            ops: vec![WireOperation::of(
+                Operation::SetSheetMetadata {
+                    sheet: 0,
+                    data: Box::new(data.clone()),
+                    changed: crate::SheetFields::ALL,
+                },
+                &wb,
+            )],
+        });
+
+        let json = serde_json::to_string(&message).expect("serializes");
+        // The shape that broke it, asserted so a later change to how keys are
+        // written does not silently make this test about something else.
+        assert!(
+            json.contains(r#""rules":{"0":"#),
+            "keys are JSON strings: {json}"
+        );
+
+        let back: ClientMessage = serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!("a message carrying an integer-keyed map must be readable: {e}\n{json}")
+        });
+        assert_eq!(back, message, "and it must mean the same thing");
+
+        // Named individually, so a partial fix cannot pass.
+        let ClientMessage::Submit(back) = back else {
+            panic!("still a submission")
+        };
+        let mut receiver = workbook();
+        let Operation::SetSheetMetadata { data: got, .. } =
+            back.ops[0].clone().localise(&mut receiver)
+        else {
+            panic!("still a metadata edit")
+        };
+        assert_eq!(
+            got.auto_filter.as_ref().map(|f| f.rules.len()),
+            Some(1),
+            "the filter rule survived"
+        );
+        assert_eq!(
+            got.columns.sizes.get(&1),
+            Some(&2800),
+            "the column width survived"
+        );
+        assert_eq!(
+            got.rows.sizes.get(&4),
+            Some(&400),
+            "the row height survived"
+        );
+        assert_eq!(
+            got.row_outline_levels.get(&6),
+            Some(&2),
+            "the row outline survived"
+        );
+        assert_eq!(
+            got.col_outline_levels.get(&3),
+            Some(&1),
+            "the column outline survived"
+        );
+    }
+
     /// A submission carrying every interned table, through JSON, both ways.
     ///
     /// The gap this closes: the round-trip tests above went through JSON with
@@ -591,6 +822,152 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains("\"type\":\"ack\""), "{json}");
+    }
+
+    /// **A draft travels on presence and nowhere else.**
+    ///
+    /// The shape, asserted at the level a peer sees it: a `presence` message
+    /// with an `editing` object inside it. Nothing here may look like an
+    /// operation, because a draft that could be mistaken for one is a draft
+    /// that could end up in somebody's document.
+    #[test]
+    fn a_draft_rides_the_presence_message_and_is_shaped_like_presence() {
+        let message = ClientMessage::Presence {
+            sheet: 0,
+            selection: [3, 1, 3, 1],
+            editing: Some(Draft::new(3, 1, "=SUM(A1:A")),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("\"type\":\"presence\""), "{json}");
+        assert!(json.contains("\"editing\""), "{json}");
+        assert!(!json.contains("\"op\""), "not an operation: {json}");
+        assert_eq!(round_trip(&message), message);
+
+        let reply = ServerMessage::Presence {
+            client: ClientId(4),
+            name: "Ada".into(),
+            color: "0891B2".into(),
+            sheet: 0,
+            selection: [3, 1, 3, 1],
+            editing: Some(Draft::new(3, 1, "=SUM(A1:A")),
+        };
+        assert_eq!(round_trip(&reply), reply);
+    }
+
+    /// **Not editing is the absent field, not an empty one.**
+    ///
+    /// Which is what makes an abandoned edit clearable: a participant who
+    /// pressed Escape sends the same message with no draft in it, and each
+    /// participant owns exactly one presence entry that is overwritten
+    /// wholesale — so the ghost goes without anything having to remember it was
+    /// there.
+    #[test]
+    fn a_participant_who_is_not_typing_carries_no_draft_at_all() {
+        let json = serde_json::to_string(&ClientMessage::Presence {
+            sheet: 0,
+            selection: [0, 0, 0, 0],
+            editing: None,
+        })
+        .unwrap();
+        assert!(!json.contains("editing"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::Presence {
+                sheet: 0,
+                selection: [0, 0, 0, 0],
+                editing: None,
+            }
+        );
+    }
+
+    /// **The length is bounded where the text is built, not where it is drawn.**
+    ///
+    /// A draft arrives once per keystroke from a party the server does not
+    /// trust, and a cell holds tens of thousands of characters. Truncated on a
+    /// character boundary, because slicing a `String` by bytes panics in the
+    /// middle of anything that is not ASCII — which is to say, in front of the
+    /// users least likely to be in the test suite.
+    #[test]
+    fn a_draft_is_bounded_and_truncates_on_a_character_and_not_a_byte() {
+        let long = "é".repeat(Draft::MAX_TEXT * 3);
+        let draft = Draft::new(0, 0, &long);
+        assert_eq!(draft.text.chars().count(), Draft::MAX_TEXT);
+        assert!(long.starts_with(&draft.text), "a prefix of what was typed");
+
+        // And a short one is left exactly as it was typed.
+        let short = Draft::new(0, 0, "hello");
+        assert_eq!(short.text, "hello");
+    }
+
+    /// **An old peer must be able to read a message carrying a draft.**
+    ///
+    /// The question `PROTOCOL_VERSION` turns on, per
+    /// [ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md): bump when an
+    /// old and a new client would interpret the same message *differently*.
+    ///
+    /// Verified rather than assumed, in both directions and against the shape
+    /// an old peer actually has — a struct with no `editing` field. Neither
+    /// `Presence` variant carries `deny_unknown_fields`, so the extra key is
+    /// skipped; and the field defaults, so a message from an old peer reads as
+    /// "not typing", which is exactly what an old peer means by it. Nothing is
+    /// read as something else, so the version does not move.
+    #[test]
+    fn a_peer_that_has_never_heard_of_drafts_still_reads_a_message_carrying_one() {
+        /// `ServerMessage::Presence` as it stood at `PROTOCOL_VERSION` 5.
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldPresence {
+            client: ClientId,
+            name: String,
+            sheet: usize,
+            selection: [u32; 4],
+        }
+
+        // New → old. The draft is skipped and everything else means what it
+        // always did.
+        let json = serde_json::to_string(&ServerMessage::Presence {
+            client: ClientId(2),
+            name: "Ada".into(),
+            color: "0891B2".into(),
+            sheet: 1,
+            selection: [5, 6, 7, 8],
+            editing: Some(Draft::new(5, 6, "half typ")),
+        })
+        .unwrap();
+        let old: OldPresence = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("an old client could not read a new presence: {e}\n{json}"));
+        assert_eq!(old.client, ClientId(2), "and it still knows whose cursor");
+        assert_eq!(old.name, "Ada");
+        assert_eq!(old.selection, [5, 6, 7, 8]);
+        assert_eq!(old.sheet, 1);
+
+        // Old → new. A message written before drafts existed reads as somebody
+        // who is not typing, rather than failing to read at all.
+        let was = r#"{"type":"presence","client":2,"name":"Ada","color":"0891B2","sheet":1,"selection":[5,6,7,8]}"#;
+        let now: ServerMessage = serde_json::from_str(was)
+            .unwrap_or_else(|e| panic!("a new client could not read an old presence: {e}"));
+        assert_eq!(
+            now,
+            ServerMessage::Presence {
+                client: ClientId(2),
+                name: "Ada".into(),
+                color: "0891B2".into(),
+                sheet: 1,
+                selection: [5, 6, 7, 8],
+                editing: None,
+            }
+        );
+
+        // The same, client to server.
+        let was = r#"{"type":"presence","sheet":0,"selection":[1,2,3,4]}"#;
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(was).expect("an old client's presence"),
+            ClientMessage::Presence {
+                sheet: 0,
+                selection: [1, 2, 3, 4],
+                editing: None,
+            }
+        );
     }
 
     #[test]

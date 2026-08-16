@@ -144,14 +144,25 @@ fn format_sections(value: f64, code: &str, date1904: bool) -> (String, Option<&'
     if section.is_empty() || section.eq_ignore_ascii_case("General") {
         return (format_general(value), color);
     }
+    // **Date and time first.** This used to ask about digit placeholders first,
+    // which is right for `0.00` and wrong for every time code carrying
+    // fractional seconds: `mmss.0` and `h:mm:ss.00` contain a real `0`
+    // placeholder, so they were routed down the numeric path, where
+    // `split_literal_runs` turns the field letters into a literal prefix and
+    // prints the raw serial. The result was not a wrong time — it was the
+    // format code echoed into the cell, so `numFmtId="47"` on 0.00358 rendered
+    // `mmss0.0` instead of `05:09.1`.
+    //
+    // A section cannot be both: `is_date_or_time` recognises the field letters,
+    // and a numeric code has none of them.
+    if is_date_or_time(section) {
+        return (format_date_time(value, section, date1904), color);
+    }
     if has_digit_placeholder(section) {
         return (
             format_numeric_section(value, section, is_custom_negative),
             color,
         );
-    }
-    if is_date_or_time(section) {
-        return (format_date_time(value, section, date1904), color);
     }
 
     // Literal-only section (e.g. `"-"` or `"Zero"`)
@@ -278,10 +289,91 @@ fn has_digit_placeholder(section: &str) -> bool {
     false
 }
 
+/// Whether a section is a date or time code, skipping anything quoted, escaped
+/// or inside a bracket token.
+///
+/// The plain `chars().any(…)` this replaces read a field letter anywhere at
+/// all — including the `d` in `[Red]`, the `m` in `"Amount"`, and the `h` in an
+/// escaped `\h`. That was survivable only because the caller asked about digit
+/// placeholders *first*, so almost nothing reached it; asking about dates first
+/// — which is required, since a time code with fractional seconds has a real
+/// `0` placeholder — makes the looseness matter immediately.
+///
+/// `[h]`, `[m]` and `[s]` are the elapsed-time forms and *are* field letters
+/// despite being bracketed, so the bracket skip lets those through.
 fn is_date_or_time(section: &str) -> bool {
-    section
-        .chars()
-        .any(|c| matches!(c.to_ascii_lowercase(), 'y' | 'm' | 'd' | 'h' | 's'))
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let mut in_quotes = false;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => in_quotes = !in_quotes,
+            '\\' if !in_quotes => i += 1, // the escaped character is a literal
+            '[' if !in_quotes => {
+                // `[h]`, `[hh]`, `[m]`, `[mm]`, `[s]`, `[ss]` are elapsed-time
+                // fields. Anything else in brackets is a colour, a condition or
+                // a locale id, and is skipped.
+                let start = i + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end] != ']' {
+                    end += 1;
+                }
+                let token: String = chars[start..end.min(chars.len())]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if !token.is_empty()
+                    && token.chars().all(|c| matches!(c, 'h' | 'm' | 's'))
+                    && token
+                        .chars()
+                        .all(|c| c == token.chars().next().unwrap_or(' '))
+                {
+                    return true;
+                }
+                i = end;
+            }
+            c if !in_quotes && matches!(c.to_ascii_lowercase(), 'y' | 'm' | 'd' | 'h' | 's') => {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether the section carries the percent **operator** — an unquoted `%`.
+///
+/// A quoted `"%"` or escaped `\%` is text and scales nothing.
+fn has_percent_operator(section: &str) -> bool {
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let mut in_quotes = false;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => in_quotes = !in_quotes,
+            '\\' if !in_quotes => i += 1,
+            '[' if !in_quotes => {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+            }
+            '%' if !in_quotes => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// How many digits the integer part is padded to — the count of `0`
+/// placeholders left of the decimal point.
+///
+/// `#` does not pad, which is the whole distinction between `#####` and
+/// `00000`: the first shows 42 as `42`, the second as `00042`.
+fn integer_placeholders(pattern: &str) -> usize {
+    let integer_part = pattern.split('.').next().unwrap_or(pattern);
+    integer_part.chars().filter(|c| *c == '0').count()
 }
 
 fn decimal_places(section: &str) -> usize {
@@ -386,7 +478,14 @@ fn format_numeric_section(value: f64, section: &str, is_custom_negative: bool) -
     if let Some((mantissa, exp_digits, plus)) = scientific_spec(section) {
         return format_scientific(value, &mantissa, exp_digits, plus, is_custom_negative);
     }
-    let percent = section.contains('%');
+    // Only an **unquoted** `%` scales. `"%"` and `\%` are literal text, and the
+    // raw `section.contains('%')` this replaces could not tell the difference —
+    // so `0.00" %"`, the European convention for a value already in percent
+    // units with a decorative sign, displayed 0.5 as `50.00 %`. Every scanner
+    // around it already skips quotes, escapes and bracket tokens; this one did
+    // not, and the cell, the PNG render and the autofit width were all computed
+    // from a number a hundred times too large.
+    let percent = has_percent_operator(section);
     let target_val = if is_custom_negative {
         value.abs()
     } else {
@@ -400,7 +499,34 @@ fn format_numeric_section(value: f64, section: &str, is_custom_negative: bool) -
 
     let (prefix, pattern, suffix) = split_literal_runs(section);
     let decimals = decimal_places(&pattern);
-    let mut digits = format!("{:.*}", decimals, scaled.abs());
+    // **Half away from zero, which is what a spreadsheet does.**
+    //
+    // Rust's `{:.*}` rounds half to *even* — the statistically unbiased choice,
+    // and not the one Excel, LibreOffice or anyone reading a column of money
+    // expects: 12.5 became 12, so `0%` on 0.125 displayed 12% where every other
+    // spreadsheet says 13%. Values landing exactly on a half at the rounding
+    // position are not exotic; they are what prices and percentages are made
+    // of. `f64::round` is half-away-from-zero, so rounding to the target
+    // precision first makes the subsequent format a no-op.
+    let magnitude = scaled.abs();
+    let factor = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
+    let rounded = if factor.is_finite() && factor > 0.0 && (magnitude * factor).is_finite() {
+        (magnitude * factor).round() / factor
+    } else {
+        magnitude
+    };
+    let mut digits = format!("{:.*}", decimals, rounded);
+    // Leading zeros. `format!("{:.*}")` gives the fractional width and nothing
+    // about the integer side, so every `0`-padded code degraded to plain
+    // integer rendering: a ZIP code stored as a number with the standard
+    // `00000` format showed `42` instead of `00042`.
+    let want = integer_placeholders(&pattern);
+    if want > 0 {
+        let int_len = digits.split('.').next().unwrap_or(&digits).len();
+        if int_len < want {
+            digits.insert_str(0, &"0".repeat(want - int_len));
+        }
+    }
     if pattern.contains(',') {
         digits = group_thousands(&digits);
     }
@@ -762,6 +888,57 @@ const WEEKDAYS: [&str; 7] = [
 /// calc engine (serial `25569` == 1970-01-01). The integer part selects the civil
 /// date; the fractional part is the time of day. Rendering never consults a locale
 /// or the wall clock, so it is fully deterministic.
+/// Take the fractional-seconds group out of a time pattern, reporting its width.
+///
+/// `h:mm:ss.00` → (`h:mm:ss`, 2). Only a `.` **immediately following a seconds
+/// field** and followed by `0`s counts, so the separators in `dd.mm.yyyy` and
+/// the decimal in a numeric code are both left alone.
+fn split_fractional_seconds(section: &str) -> (String, usize) {
+    let chars: Vec<char> = section.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut in_quotes = false;
+    let mut last_was_seconds = false;
+    let mut digits = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                last_was_seconds = false;
+                out.push(ch);
+            }
+            '\\' if !in_quotes => {
+                out.push(ch);
+                i += 1;
+                if i < chars.len() {
+                    out.push(chars[i]);
+                }
+                last_was_seconds = false;
+            }
+            '.' if !in_quotes && last_was_seconds && digits == 0 => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] == '0' {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    digits = j - i - 1;
+                    i = j - 1; // the whole run is dropped
+                } else {
+                    out.push(ch);
+                }
+                last_was_seconds = false;
+            }
+            _ => {
+                last_was_seconds = matches!(ch.to_ascii_lowercase(), 's') && !in_quotes;
+                out.push(ch);
+            }
+        }
+        i += 1;
+    }
+    (out, digits)
+}
+
 fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
     // The names the format's own `[$-lcid]` selects, English otherwise.
     let names = section_language(section).and_then(names_for);
@@ -795,22 +972,34 @@ fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
     if !value.is_finite() || !(-1.0..=2_958_466.0).contains(&value) {
         return format_general(value);
     }
+    // The fractional-seconds group is taken out of the pattern before it is
+    // tokenized, and its width remembered. Left in, its `.` and `0`s tokenize
+    // as literals and print themselves — which is how `mmss.0` used to render
+    // a literal `.0` beside a second already rounded to the whole.
+    let (section_owned, frac_digits) = split_fractional_seconds(section);
+    let section = section_owned.as_str();
     let tokens = parse_date_tokens(section);
     let has_ampm = tokens.iter().any(|t| matches!(t, DateToken::AmPm { .. }));
 
-    // Split the serial into whole days and a rounded whole-second time of day.
-    // Rounding seconds can carry into the next day (e.g. 23:59:59.7 → 00:00:00),
-    // so fold any overflow back into the day count before deriving the date.
+    // Split the serial into whole days and a time of day, rounded to whatever
+    // precision the pattern asks for. Rounding can carry into the next day
+    // (23:59:59.7 → 00:00:00), so fold any overflow back into the day count
+    // before deriving the date.
+    let ticks_per_second: i64 = 10i64.pow(u32::try_from(frac_digits).unwrap_or(0).min(9));
+    let ticks_per_day = 86_400 * ticks_per_second;
     let mut serial_days = value.trunc() as i64;
     let fraction = value - value.trunc();
-    let mut total_seconds = (fraction * 86_400.0).round() as i64;
-    if total_seconds >= 86_400 {
+    #[allow(clippy::cast_possible_truncation)]
+    let mut total_ticks = (fraction * ticks_per_day as f64).round() as i64;
+    if total_ticks >= ticks_per_day {
         serial_days += 1;
-        total_seconds -= 86_400;
-    } else if total_seconds < 0 {
+        total_ticks -= ticks_per_day;
+    } else if total_ticks < 0 {
         serial_days -= 1;
-        total_seconds += 86_400;
+        total_ticks += ticks_per_day;
     }
+    let sub_second = total_ticks % ticks_per_second;
+    let total_seconds = total_ticks / ticks_per_second;
     let hour24 = total_seconds / 3600;
     let minute = (total_seconds / 60) % 60;
     let second = total_seconds % 60;
@@ -870,6 +1059,12 @@ fn format_date_time(value: f64, section: &str, date1904: bool) -> String {
                         out.push_str(&format!("{second:02}"));
                     } else {
                         out.push_str(&second.to_string());
+                    }
+                    // The group taken out of the pattern above is put back
+                    // here, where it belongs — attached to the seconds rather
+                    // than printed wherever it happened to sit.
+                    if frac_digits > 0 {
+                        out.push_str(&format!(".{sub_second:0frac_digits$}"));
                     }
                 }
                 'm' => {
@@ -1401,5 +1596,104 @@ mod tests {
             format_number(45000.0, "yyyy\" year \"mm\" month\""),
             "2023 year 03 month"
         );
+    }
+}
+
+#[cfg(test)]
+mod format_defect_tests {
+    use super::format_number;
+
+    /// **A time code with fractional seconds is a time, not a number.**
+    ///
+    /// `format_sections` asked about digit placeholders before dates, and
+    /// `mmss.0` has a real `0`, so every such code went down the numeric path
+    /// where `split_literal_runs` turns the field letters into a literal
+    /// prefix. The output was not a wrong time — it was the format code echoed
+    /// into the cell. `numFmtId="47"` is one of Excel's *built-ins*, so this
+    /// needed no unusual workbook to hit.
+    #[test]
+    fn fractional_second_time_codes_render_as_times() {
+        // numFmtId 47, which the importer maps to `mmss.0`.
+        // 0.00358 days is 309.312 s = 5 min 9.3 s. `mmss` has no separator in
+        // the pattern, so none appears in the output.
+        assert_eq!(format_number(0.00358, "mmss.0"), "0509.3");
+        assert_eq!(format_number(0.00358, "mm:ss.0"), "05:09.3");
+        assert_eq!(format_number(0.5, "h:mm:ss.00"), "12:00:00.00");
+        // The fraction rounds, and the carry reaches the seconds.
+        assert_eq!(
+            format_number(0.5 - 0.04 / 86_400.0, "h:mm:ss.0"),
+            "12:00:00.0"
+        );
+        // And the plain forms still work, so the reorder did not simply move
+        // the problem to the other path.
+        assert_eq!(format_number(0.5, "h:mm"), "12:00");
+        assert_eq!(format_number(0.0, "0.00"), "0.00");
+    }
+
+    /// Tightening `is_date_or_time` matters because it now runs first: it used
+    /// to match a field letter *anywhere*, including inside a colour token.
+    #[test]
+    fn a_field_letter_inside_a_bracket_or_a_quote_is_not_a_date() {
+        // The `d` in `[Red]` must not make this a date.
+        assert_eq!(format_number(-5.0, "[Red]0.00"), "-5.00");
+        // The `m` in "Amount" must not either.
+        assert_eq!(format_number(3.0, "0\" Amount\""), "3 Amount");
+        // An escaped field letter is a literal.
+        assert_eq!(format_number(7.0, "0\\h"), "7h");
+        // But the elapsed-time forms are genuinely fields.
+        assert!(!format_number(1.5, "[h]:mm").contains('['));
+    }
+
+    /// **Only an unquoted `%` scales.**
+    ///
+    /// `section.contains('%')` could not tell the operator from a decorative
+    /// sign, so the European convention `0.00" %"` — a value already in percent
+    /// units — displayed 0.5 as `50.00 %`. The grid, the PNG render and the
+    /// autofit width were all computed from a number a hundred times too big.
+    #[test]
+    fn a_quoted_percent_sign_is_text_and_does_not_scale() {
+        assert_eq!(format_number(0.5, "0.00\" %\""), "0.50 %");
+        assert_eq!(format_number(0.5, "0.00\"%\""), "0.50%");
+        assert_eq!(format_number(0.5, "0.00\\%"), "0.50%");
+        // The operator still works.
+        assert_eq!(format_number(0.5, "0.00%"), "50.00%");
+        assert_eq!(format_number(0.125, "0%"), "13%");
+    }
+
+    /// **A spreadsheet rounds half away from zero.**
+    ///
+    /// Rust's `{:.*}` rounds half to *even* — statistically unbiased, and not
+    /// what Excel, LibreOffice or anyone reading a column of money does. Values
+    /// landing exactly on a half at the rounding position are not exotic; they
+    /// are what prices and percentages are made of, so this was visible on
+    /// ordinary data.
+    #[test]
+    fn rounding_is_half_away_from_zero_as_every_spreadsheet_does_it() {
+        // Half to even would give 12%.
+        assert_eq!(format_number(0.125, "0%"), "13%");
+        // Half to even would give 2 and 2; away from zero gives 3 and 2.
+        assert_eq!(format_number(2.5, "0"), "3");
+        assert_eq!(format_number(1.5, "0"), "2");
+        // Money, where this is noticed.
+        assert_eq!(format_number(0.005, "0.00"), "0.01");
+        assert_eq!(format_number(2.675, "0.00"), "2.68");
+        // Negatives round away from zero too, not toward it.
+        assert_eq!(format_number(-2.5, "0"), "-3");
+    }
+
+    /// **`0` pads, `#` does not** — which is the entire difference between
+    /// `#####` and `00000`, and the reason a ZIP code stored as a number has a
+    /// custom format at all.
+    #[test]
+    fn leading_zero_placeholders_pad_the_integer_part() {
+        assert_eq!(format_number(42.0, "00000"), "00042");
+        assert_eq!(format_number(5.0, "000"), "005");
+        assert_eq!(format_number(42.0, "#####"), "42", "`#` must not pad");
+        // Padding and decimals together.
+        assert_eq!(format_number(4.2, "000.00"), "004.20");
+        // Already wide enough: nothing is added.
+        assert_eq!(format_number(123456.0, "000"), "123456");
+        // And a negative keeps its sign outside the padding.
+        assert_eq!(format_number(-42.0, "00000"), "-00042");
     }
 }

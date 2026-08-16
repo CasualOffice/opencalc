@@ -728,16 +728,89 @@ fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
     Value::Number(result)
 }
 
-fn comparison(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
-    let ordering = match (lv.as_number(), rv.as_number()) {
-        (Ok(a), Ok(b)) => a.partial_cmp(&b),
-        _ => {
-            let a = lv.as_text().unwrap_or_default();
-            let b = rv.as_text().unwrap_or_default();
-            Some(a.cmp(&b))
+/// Where a value sits in Excel's cross-type order: `number < text < logical`.
+///
+/// Only meaningful once `Empty` has been resolved against the other operand —
+/// see [`compare_values`] — because empty has no fixed position: it behaves as
+/// `0` beside a number and as `""` beside text, and no single rank delivers
+/// both.
+fn type_rank(v: &Value) -> u8 {
+    match v {
+        Value::Number(_) => 0,
+        Value::Text(_) => 1,
+        Value::Bool(_) => 2,
+        // Resolved before ranking; reachable only if a new variant is added
+        // without deciding where it belongs, and 3 sorts it after everything
+        // rather than silently equal to something.
+        _ => 3,
+    }
+}
+
+/// Compare two values by Excel's rules. `None` when they are not comparable.
+///
+/// The rules, and why each is here, are in `docs/70-COMPARISON-SEMANTICS.md`.
+/// In short: type before value, text case-insensitively, and no coercion
+/// across types — a number and a piece of text that looks like one are
+/// different values.
+fn compare_values(lv: &Value, rv: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+
+    // An array in a scalar position is its first cell, which is what the
+    // previous implementation did by way of `as_number`/`as_text`.
+    let first = |v: &Value| -> Value {
+        match v {
+            Value::Array { cells, .. } => cells.first().cloned().unwrap_or(Value::Empty),
+            other => other.clone(),
         }
     };
-    let Some(ordering) = ordering else {
+    let (l, r) = (first(lv), first(rv));
+
+    // Empty takes the shape of whatever it is compared against, before ranking.
+    // `=A1=0` and `=A1=""` are both TRUE for an empty A1, which is not a thing
+    // any single position in a total order can express.
+    let resolve = |a: &Value, other: &Value| -> Value {
+        match (a, other) {
+            (Value::Empty, Value::Number(_)) => Value::Number(0.0),
+            (Value::Empty, Value::Text(_)) => Value::Text(String::new()),
+            (Value::Empty, Value::Bool(_)) => Value::Bool(false),
+            (Value::Empty, _) => Value::Empty,
+            (other_val, _) => other_val.clone(),
+        }
+    };
+    let l = resolve(&l, &r);
+    let r = resolve(&r, &l);
+
+    if matches!((&l, &r), (Value::Empty, Value::Empty)) {
+        return Some(Ordering::Equal);
+    }
+
+    match type_rank(&l).cmp(&type_rank(&r)) {
+        Ordering::Equal => match (&l, &r) {
+            (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+            // Case-insensitive, which is Excel's rule and already what
+            // `loose_cmp` and the criteria matcher do. ASCII folding, not
+            // locale collation — named as a limit in docs/70 rather than left
+            // to be discovered.
+            (Value::Text(a), Value::Text(b)) => Some(a.to_uppercase().cmp(&b.to_uppercase())),
+            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+            _ => Some(Ordering::Equal),
+        },
+        other => Some(other),
+    }
+}
+
+fn comparison(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
+    // Before anything else: comparing against an error is not a question with
+    // an answer, and the previous implementation reached `as_text` on one,
+    // which turned `#REF!` into a string that could compare *equal* to another
+    // error's string.
+    if let Value::Error(e) = lv {
+        return Value::Error(*e);
+    }
+    if let Value::Error(e) = rv {
+        return Value::Error(*e);
+    }
+    let Some(ordering) = compare_values(lv, rv) else {
         return Value::Error(ErrorValue::Value);
     };
     use std::cmp::Ordering;
