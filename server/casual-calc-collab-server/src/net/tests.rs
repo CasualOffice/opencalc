@@ -2064,6 +2064,94 @@ async fn a_document_is_fetched_once_however_many_arrive_at_the_same_moment() {
     );
 }
 
+/// `/metrics` reports what happened, not a set of zeros.
+///
+/// Every number it carries was already being computed and thrown into a log
+/// line; `/stats` returned two integers, so "are saves failing?" could only be
+/// answered by tailing logs — which no alert can do (DEP-06). The assertion
+/// that matters is therefore not that the endpoint parses, but that a save
+/// actually moves a counter.
+#[tokio::test]
+async fn metrics_count_a_save_that_really_happened() {
+    let seen = Collected::default();
+    let addr = start_saving(Arc::new(seen.clone())).await;
+
+    let mut socket = connect(addr).await;
+    let claims = saving_claims("Ada");
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join(&mut socket, &claims).await
+    else {
+        panic!("joined")
+    };
+
+    // The delta is the claim, not the absolute value: this node saves on its
+    // own cadence, so a fixed "before" number would be a race. A counter stuck
+    // at any constant fails an increase assertion; one that never moves fails
+    // it too.
+    let before = counter(&scrape(addr).await, "opencalc_saves_accepted_total");
+
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(7.0)],
+        }),
+    )
+    .await;
+    let _ = hear(&mut socket).await;
+
+    // The save is driven by the sweeper on its own clock, so wait for the
+    // delivery rather than for a duration.
+    for _ in 0..80 {
+        if !seen.0.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(!seen.0.lock().unwrap().is_empty(), "the document was saved");
+
+    let body = scrape(addr).await;
+    let after = counter(&body, "opencalc_saves_accepted_total");
+    assert!(
+        after > before,
+        "the save moved the counter ({before} -> {after}): {body}"
+    );
+    assert_eq!(
+        counter(&body, "opencalc_saves_failed_total"),
+        0,
+        "and was not counted as a failure: {body}"
+    );
+    // The gauges are read from the registry, so their *value* depends on
+    // whether this document has been evicted yet — which this test does not
+    // control and is not about. That they are exposed and parseable is the
+    // claim; `evict_if_idle` has its own tests.
+    let _ = counter(&body, "opencalc_documents");
+    let _ = counter(&body, "opencalc_participants");
+    // Prometheus needs the type lines, not only the numbers: a body without
+    // them scrapes as nothing at all.
+    assert!(body.contains("# TYPE opencalc_saves_accepted_total counter"));
+    assert!(body.contains("# TYPE opencalc_documents gauge"));
+}
+
+/// One counter's value out of a Prometheus exposition.
+fn counter(body: &str, name: &str) -> u64 {
+    body.lines()
+        .find_map(|l| l.strip_prefix(name)?.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{name} is not in:\n{body}"))
+}
+
+async fn scrape(addr: SocketAddr) -> String {
+    reqwest::get(format!("http://{addr}/metrics"))
+        .await
+        .expect("metrics answered")
+        .text()
+        .await
+        .expect("a body")
+}
+
 // --- Two nodes, one document (ADR-017) --------------------------------------
 //
 // The only arrangement in which a relay exists at all. Everything below this

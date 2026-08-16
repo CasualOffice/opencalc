@@ -23,7 +23,7 @@ const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
 /// about, and a gate that makes twenty unrelated tests flaky to make one
 /// possible is a bad trade.
 const EVICT_PORT = Number(process.env.OPENCALC_EVICT_PORT ?? 8126);
-const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-tests-shared-secret";
+const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-smoke-only-not-a-deployment-secret";
 
 export default defineConfig({
   testDir: ".",

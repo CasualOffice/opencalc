@@ -42,3 +42,11 @@ node_modules/
 # often large and separately licensed.
 /fonts/*
 !/fonts/README.md
+
+# The README says `cp .env.example .env`, so this file exists on every machine
+# that has run the demo and holds the token-signing secret. Ignoring the
+# example would be wrong — it is the documentation — but the filled-in copy is
+# a credential.
+.env
+.env.*
+!.env.example

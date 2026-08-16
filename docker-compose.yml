@@ -20,10 +20,14 @@ services:
     environment:
       OPENCALC_HOST_BIND: 0.0.0.0:8080
       OPENCALC_STORE: /data
-      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:?set it in .env — see .env.example}
       OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
-      # What the *browser* uses. Behind a proxy, your public wss:// URL.
-      OPENCALC_COLLAB_WS: ${OPENCALC_COLLAB_WS:-ws://127.0.0.1:8443/collab}
+      # Left empty on purpose: the host derives the socket address from the
+      # request the browser just made, so a share link works wherever it is
+      # opened. Set this only when collaboration lives on its own hostname —
+      # the old default was the *browser's* loopback and worked for exactly one
+      # machine (PROD-12).
+      OPENCALC_COLLAB_WS: ${OPENCALC_COLLAB_WS:-}
       # What the *collaboration server* calls this host. A service name, not
       # localhost — localhost inside that container is that container.
       OPENCALC_HOST_INTERNAL: http://host:8080
@@ -43,8 +47,8 @@ services:
       # `:ro` because the renderer only ever reads these, and read-only is the
       # honest declaration of that.
       - ./fonts:/fonts:ro
-    ports:
-      - "${OPENCALC_HOST_PORT:-8080}:8080"
+    expose:
+      - "8080"
     healthcheck:
       test: ["CMD", "/usr/local/bin/casual-calc-host", "--healthcheck"]
       interval: 10s
@@ -58,7 +62,7 @@ services:
       dockerfile: server/casual-calc-collab-server/Dockerfile
     environment:
       OPENCALC_BIND: 0.0.0.0:8443
-      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:?set it in .env — see .env.example}
       OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
       # The demo talks plain HTTP on a private network. Both of these are the
       # "local development only" cases the server documents, and neither is on
@@ -68,8 +72,8 @@ services:
       OPENCALC_MAX_DOCUMENTS: ${OPENCALC_MAX_DOCUMENTS:-1000}
       OPENCALC_MAX_PARTICIPANTS: ${OPENCALC_MAX_PARTICIPANTS:-200}
       RUST_LOG: ${RUST_LOG:-info}
-    ports:
-      - "${OPENCALC_COLLAB_PORT:-8443}:8443"
+    expose:
+      - "8443"
     depends_on:
       host:
         condition: service_healthy
@@ -79,6 +83,26 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # One origin for the editor, the API and the WebSocket. Without it the page
+  # and the socket are on different ports, which is why the browser had to be
+  # told an address rather than being able to use the one it already had.
+  proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx.demo.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${OPENCALC_HOST_PORT:-8080}:80"
+    depends_on:
+      host:
+        condition: service_healthy
+      collab:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   documents:

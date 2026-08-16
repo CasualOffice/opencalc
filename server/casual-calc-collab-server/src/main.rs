@@ -316,6 +316,23 @@ fn read_proxy_trust() -> Result<ProxyTrust, String> {
     Ok(ProxyTrust::behind(proxies))
 }
 
+/// Secrets that appear in this repository, and so are not secrets.
+///
+/// A list rather than one string: the value somebody copies is whichever
+/// placeholder they happened to read, so every one that has ever shipped in an
+/// example belongs here.
+const PLACEHOLDER_SECRETS: &[&str] = &[
+    "dev-secret-change-me",
+    "change-me",
+    "changeme",
+    // What `.env.example` ships, so `cp .env.example .env` leaves a key that
+    // does not work rather than one that works and is public.
+    "change-me-before-anyone-else-can-reach-this",
+    // No longer used by the suite, and kept because it is published: somebody
+    // who copied it once would otherwise keep a working weak key.
+    "browser-tests-shared-secret",
+];
+
 async fn read_verifier() -> Result<Verifier, String> {
     let policy = TokenPolicy {
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_default(),
@@ -348,6 +365,27 @@ async fn read_verifier() -> Result<Verifier, String> {
     }
 
     if let Ok(secret) = std::env::var("OPENCALC_SHARED_SECRET") {
+        // Refused rather than warned about. With a shared secret the holder can
+        // *mint* tokens, not merely check them — so a placeholder that appears
+        // in a public compose file is a key to every document of every
+        // deployment that forgot to change it. A default that works is a
+        // default that ships, and the failure of shipping it is silent
+        // (SEC-003).
+        if PLACEHOLDER_SECRETS.contains(&secret.as_str()) {
+            return Err(format!(
+                "OPENCALC_SHARED_SECRET is still {secret:?}, which is published in this \
+                 repository. Anybody holding it can mint a token for any document. \
+                 Set a real one, or use OPENCALC_JWKS_URL."
+            ));
+        }
+        // Length is not strength, but a two-character secret is not a mistake
+        // anybody makes deliberately.
+        if secret.len() < 16 {
+            return Err(format!(
+                "OPENCALC_SHARED_SECRET is {} bytes; at least 16 are needed for a signing key",
+                secret.len()
+            ));
+        }
         tracing::warn!(
             "using a shared secret: this process can mint tokens as well as check them, \
              which is what OPENCALC_JWKS_URL avoids"
@@ -406,4 +444,50 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::PLACEHOLDER_SECRETS;
+
+    /// Every placeholder this repository has ever shipped must be refused.
+    ///
+    /// A shared secret lets its holder **mint** tokens, not merely check them,
+    /// so a value printed in a public compose file is a key to every document
+    /// of every deployment that did not change it. It used to be the compose
+    /// default, which meant `docker compose up` produced a working deployment
+    /// secured by a string in this repository — and nothing said so, because a
+    /// default that works is a default nobody revisits (SEC-003).
+    #[test]
+    fn the_values_this_repository_publishes_are_all_listed() {
+        // Read out of the files rather than typed here: a new placeholder added
+        // to an example is exactly the case this must not miss.
+        let sources = [
+            include_str!("../../../.env.example"),
+            include_str!("../../../docker-compose.yml"),
+            include_str!("../../../docker-compose.cluster.yml"),
+        ];
+        for text in sources {
+            for line in text.lines() {
+                let Some((_, rest)) = line.split_once("OPENCALC_SHARED_SECRET") else {
+                    continue;
+                };
+                let value = rest
+                    .trim_start_matches(['=', ':', ' '])
+                    .split(['#', '}'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                // Compose reads it from the environment; only a literal is a
+                // published value.
+                if value.is_empty() || value.starts_with('$') {
+                    continue;
+                }
+                assert!(
+                    PLACEHOLDER_SECRETS.contains(&value),
+                    "{value:?} is published here and would be accepted as a signing key"
+                );
+            }
+        }
+    }
 }

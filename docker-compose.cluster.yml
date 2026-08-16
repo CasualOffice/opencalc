@@ -37,7 +37,7 @@ services:
     environment:
       OPENCALC_HOST_BIND: 0.0.0.0:8080
       OPENCALC_STORE: /data
-      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:?set it in .env — see .env.example}
       OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
       # Through the proxy, which is what makes the two nodes invisible.
       #
@@ -66,7 +66,7 @@ services:
       dockerfile: server/casual-calc-collab-server/Dockerfile
     environment: &collab-env
       OPENCALC_BIND: 0.0.0.0:8443
-      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:-dev-secret-change-me}
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:?set it in .env — see .env.example}
       OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
       OPENCALC_ALLOW_PLAIN_CALLBACKS: "1"
       OPENCALC_ALLOWED_HOSTS: ${OPENCALC_ALLOWED_HOSTS:-host,127.0.0.1,localhost}
