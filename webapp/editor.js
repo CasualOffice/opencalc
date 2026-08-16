@@ -2668,9 +2668,20 @@ function ensureVisible(row = state.sel.row, col = state.sel.col) {
   if (!wasm) return;
   const rect = wrap.getBoundingClientRect();
   const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
-  // The scrolling viewport is what remains right of / below the frozen bands.
-  const viewW = rect.width - f.bodyX0;
-  const viewH = rect.height - f.bodyY0;
+  // The scrolling viewport is what remains right of / below the frozen bands —
+  // **in grid units**, which is why the rect is divided by the zoom first.
+  //
+  // `getBoundingClientRect` is CSS pixels; `bodyX0`, the column offsets and
+  // `state.scrollX` are all grid units, and the canvas is what applies the
+  // magnification between them. Subtracting one from the other without
+  // converting made the viewport look `zoom` times larger than it is, so at
+  // 200% every scroll-into-view believed it had twice the room and overshot —
+  // the cell arrived on screen, which is why this went unnoticed, but at the
+  // wrong end of a jump that moved further than it needed to. Every pointer
+  // path in this file already divides; this one did not.
+  const z = state.zoom || 1;
+  const viewW = rect.width / z - f.bodyX0;
+  const viewH = rect.height / z - f.bodyY0;
   const frozenW = fzOffset(col, true, f.fc);
   const frozenH = fzOffset(row, false, f.fr);
   // Frozen cells are always visible; only scroll for cells in the body region.
