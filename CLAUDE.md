@@ -29,12 +29,19 @@ full contract. This file only restates the essentials.
 - **Production-grade baseline.** Correctness, determinism, security bounds, and
   fidelity come before performance, and performance is a designed-in target
   (1M cells / 60 fps / <50 ms recalc), not an afterthought.
-- **No silent data loss**; the calc engine is held back but fully designed.
+- **No silent data loss** — anything the model cannot keep is counted and
+  named in a compatibility report, never dropped quietly.
 
-Current state: **alpha — engine, editor and embeddable SDK are live.** Phases
-0–1E done, Phase 2 (calc) substantially done, Phase 3 shipped; the SDK is built
-but unpublished, and the collaboration concurrency model is still undecided.
-See AGENTS.md §"Current state".
+Current state: **alpha — engine, editor, SDK and collaboration are live.**
+Phases 0–1E done, Phase 2 (calc) substantially done, Phase 3 shipped. The
+collaboration model is **decided and built** (ADR-011/012/014/017 all Accepted;
+a clustered OT server with resume, presence and relay, exercised by two real
+browsers in CI). The SDK is published at `0.0.0` and ships no type
+declarations (`SDK-009`).
+
+What is open is operational rather than architectural — no metrics, no
+published image, no Helm chart — plus the P0 rows in
+[docs/14](docs/14-EXECUTION-TRACKER.md). See AGENTS.md §"Current state".
 
 ## Focus mode
 
@@ -75,6 +82,26 @@ skip:
   round; strays have happened.
 - A verification pass that refutes nothing has not been done. If every finding
   survives, distrust the verifier before trusting the findings.
+
+**Four things that have gone wrong here, each more than once.**
+
+- **Read the id space before adding a tracker row.** Five rows have been added
+  with an id already in use, and `FID-13` named two unrelated changes for weeks.
+  `tools/check-tracker-ids.py` is a pre-commit hook and a CI gate; run it before
+  `git commit`, not after.
+- **Do not retry a flaky local harness.** The browser suite failed for
+  environmental reasons and was re-run eight times; that exhausted the machine's
+  ephemeral port range and took its network down for an hour. CI runs
+  `browser-smoke` on every push in a clean environment — after the second
+  unexplained failure, push and let CI answer.
+- **A document stating a contract the code does not keep is a row, not a doc
+  edit.** Correcting the prose is how a security bound disappears without
+  anybody deciding to drop it. Fix the code, or track it; never quietly lower
+  the promise.
+- **Check a worker's `file:line` before doubting it.** A report was called wrong
+  on the strength of a grep that was itself wrong (`leads()` with parens, where
+  the call has arguments). The claim was correct. Verify the citation, not the
+  memory of it.
 
 **Spend tokens where they change the answer.** Effort `high` for work that is
 genuinely open-ended (a design, an audit, a defect whose mechanism is unknown);

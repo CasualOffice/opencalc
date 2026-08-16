@@ -31,12 +31,17 @@ slot in without rework. The order of *construction* is phased (see
   DAG, and the seams between layers are designed in
   [docs/19-WORKSPACE-SCAFFOLD-DESIGN.md](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)
   and must not require a do-over when the calc engine or collaboration land.
-- **The calc engine is held back, not un-designed.** Formulas are parsed and
-  preserved from Phase 1A; the model reserves every seam the dependency graph
-  and recalculation need (see
-  [docs/22-NORMALIZED-SCHEMA.md](docs/22-NORMALIZED-SCHEMA.md) §"Reserved calc
-  seams" and [docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md](docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)).
-  "Held back" means *built later*, never *decided later*.
+- **The calc engine is built.** 364 functions dispatch, dynamic arrays spill
+  and refuse rather than overwrite, `LET` and `LAMBDA` carry first-class
+  function values, and recalculation is incremental over a precedent graph kept
+  across edits — a cell-reference edit is flat from ten thousand cells to a
+  hundred thousand. Automatic or manual mode comes from the file's own
+  `<calcPr>`. See
+  [docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md](docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)
+  and [docs/66-INCREMENTAL-RECALC-GRAPH.md](docs/66-INCREMENTAL-RECALC-GRAPH.md).
+  What remains is budget rather than capability: the <50 ms target is asserted
+  for warm incremental recalc only (`PERF-07`), and range precedents are still
+  scanned linearly (`PERF-06`).
 - **Virtualization is a first-class design axis**, not a late optimization. The
   1M-cell / 60 fps / <50 ms-recalc targets shape the model, the layout engine,
   and the render seam from the start
@@ -118,14 +123,21 @@ What is still open, and therefore where the work is:
 - **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
   by an `sdk-v*` tag); what remains is a *stable* API, since `0.0.x` is a
   preview.
-- **Phase 5** — the **engine side is built**: `casual-calc-transaction`
-  carries `transform` (TP1 as a property), the client/server session protocol,
-  snapshots and idempotent submissions. The **server is designed and unbuilt**
-  (ADR-011, ADR-012, [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md),
-  [57](docs/57-COLLABORATION-SERVER-BOUNDARY.md)): a cluster with a leader per
-  document, replicas, epoch fencing, webhook callbacks, and a standalone mode
-  needing no external services. It belongs under `server/`, and **nothing in
-  `crates/` may depend on it**.
+- **Phase 5** — **built and running, both halves.** `casual-calc-transaction`
+  carries `transform` (TP1 as a property), the session protocol
+  (`PROTOCOL_VERSION` 5), snapshots and idempotent submissions;
+  `server/casual-calc-collab-server` is a workspace member serving `/collab`,
+  with a leader per document, epoch-fenced appends, relay from any node,
+  resume, presence and host callbacks, plus a standalone mode needing no
+  external services. Two browsers drive the real binary in CI.
+  ADR-011, ADR-012, ADR-014 and ADR-017 are all **Accepted** — the concurrency
+  model is decided, not open. See [56](docs/56-COLLABORATION-CONCURRENCY-DESIGN.md),
+  [57](docs/57-COLLABORATION-SERVER-BOUNDARY.md),
+  [59](docs/59-COLLABORATION-SERVICE-STACK.md).
+  The boundary still holds and is checked by CI: **nothing in `crates/` may
+  depend on the server**.
+  What is *not* done is operational — no metrics, no published image, no chart
+  ([14](docs/14-EXECUTION-TRACKER.md), `DEP-06..08`).
 
 The design-first rule has not relaxed now that code exists: a substantial
 design is discussed and written down before it is implemented, not alongside.
