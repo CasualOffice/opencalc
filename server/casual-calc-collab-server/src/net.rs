@@ -163,6 +163,17 @@ pub struct Limits {
     /// moment, and a node that refuses to exit is a worse failure than one that
     /// exits having tried. What it must not do is exit *without* trying.
     pub drain_timeout_ms: u64,
+    /// The budget for the **whole** drain, not one document.
+    ///
+    /// Must fit inside whatever stop grace the orchestrator gives: Docker
+    /// defaults to 10s and Kubernetes to 30s, and anything still running when
+    /// that expires is killed rather than finished.
+    pub drain_deadline_ms: u64,
+    /// How many final saves run at once.
+    ///
+    /// More than one because they are network calls; bounded because the host
+    /// they call is very likely restarting at the same moment.
+    pub drain_concurrency: usize,
 }
 
 impl Default for Limits {
@@ -185,6 +196,10 @@ impl Default for Limits {
             // harder than this buys nothing.
             jwks_refresh_ms: 300_000,
             drain_timeout_ms: 10_000,
+            // Comfortably inside Kubernetes' 30s default and, with the
+            // `stop_grace_period` the compose files now set, inside Docker's.
+            drain_deadline_ms: 25_000,
+            drain_concurrency: 8,
         }
     }
 }
@@ -770,6 +785,23 @@ async fn drain(state: &Arc<Service>) {
     );
 
     let now = now_ms();
+    // **A deadline for the whole drain, not one per document.** Sequentially,
+    // each document got its own `drain_timeout_ms`, so thirty documents needed
+    // up to five minutes — against Docker's default ten-second stop grace and
+    // Kubernetes' thirty. Whatever did not finish was SIGKILLed mid-drain,
+    // which is precisely the loss the drain exists to prevent (DEP-05).
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(state.config.limits.drain_deadline_ms);
+
+    // Saves run concurrently, because they are network calls to the host and
+    // the slow one is not made faster by the others waiting for it. Bounded,
+    // because a node holding a thousand documents must not open a thousand
+    // connections to an integrator that is very likely restarting too.
+    let permits = Arc::new(tokio::sync::Semaphore::new(
+        state.config.limits.drain_concurrency.max(1),
+    ));
+    let mut running = tokio::task::JoinSet::new();
+
     for live in documents {
         if !may_save(state, &live) || !lock(&live.session).has_unsaved() {
             continue;
@@ -779,28 +811,57 @@ async fn drain(state: &Arc<Service>) {
         };
         let assembled = { lock(&live.session).assemble() };
         let Ok(bytes) = assembled else { continue };
-        // Tell everyone still connected that this is the last word, whichever
-        // way it goes.
-        let outcome = match tokio::time::timeout(
-            std::time::Duration::from_millis(state.config.limits.drain_timeout_ms),
-            state
-                .config
-                .deliver
-                .put(destination, live.title.clone(), bytes),
-        )
-        .await
-        {
-            Ok(Ok(())) => CallbackOutcome::Accepted(lock(&live.session).revision()),
-            Ok(Err(why)) => {
-                tracing::error!(document = %live.title, error = %why, "the final save failed");
-                CallbackOutcome::Failed
-            }
-            Err(_) => {
-                tracing::error!(document = %live.title, "the final save timed out");
-                CallbackOutcome::Failed
-            }
-        };
-        let _ = lock(&live.session).callback(outcome, now);
+        let state = Arc::clone(state);
+        let permits = Arc::clone(&permits);
+        running.spawn(async move {
+            let _permit = permits.acquire_owned().await;
+            // Tell everyone still connected that this is the last word, whichever
+            // way it goes.
+            // **Both bounds, not one.** The per-document timeout stops a single
+            // unresponsive callback consuming the whole budget; the deadline
+            // stops the sum of them outliving the grace period. Whichever comes
+            // first wins, so a hanging host costs one `drain_timeout_ms` rather
+            // than everything that was left.
+            let per_document =
+                std::time::Duration::from_millis(state.config.limits.drain_timeout_ms);
+            let until = deadline.min(tokio::time::Instant::now() + per_document);
+            let outcome = match tokio::time::timeout_at(
+                until,
+                state
+                    .config
+                    .deliver
+                    .put(destination, live.title.clone(), bytes),
+            )
+            .await
+            {
+                Ok(Ok(())) => CallbackOutcome::Accepted(lock(&live.session).revision()),
+                Ok(Err(why)) => {
+                    tracing::error!(document = %live.title, error = %why, "the final save failed");
+                    CallbackOutcome::Failed
+                }
+                Err(_) => {
+                    tracing::error!(document = %live.title, "the final save timed out");
+                    CallbackOutcome::Failed
+                }
+            };
+            let _ = lock(&live.session).callback(outcome, now);
+        });
+    }
+
+    // One wait for all of them, against the same deadline. A task still running
+    // when it passes is abandoned rather than waited on: the process is going
+    // either way, and holding it open past the grace period turns a clean stop
+    // into a kill.
+    if tokio::time::timeout_at(deadline, async {
+        while running.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            remaining = running.len(),
+            "the drain deadline passed with saves still running; their work is not saved"
+        );
     }
 }
 
@@ -2278,6 +2339,24 @@ fn deliver(live: &Arc<Live>, batch: &crate::relay::Committed, revision: u64, min
     {
         let mut session = lock(&live.session);
         if session.adopt(&batch.ops, revision, now_ms()).is_err() {
+            // A batch that does not follow directly from where this session is.
+            // Dropping it silently — which is what this did — leaves the node
+            // permanently behind while it goes on serving a document it believes
+            // is current, and every client on it sees a stale sheet with nothing
+            // to indicate why. It is the failure mode that makes trimming the
+            // log dangerous, so it must be visible before the log is bounded.
+            //
+            // Not fatal on its own: the next reconciliation re-reads the log and
+            // usually closes the gap. It is only unrecoverable when the entries
+            // are gone, which the window is sized to prevent.
+            let at = session.revision();
+            tracing::error!(
+                document = %live.title,
+                applied = at,
+                arriving = revision,
+                carried = batch.ops.len(),
+                "a batch did not follow: this node is behind and cannot close the gap from it"
+            );
             return;
         }
         // So a client that reconnects to *this* node is still protected from

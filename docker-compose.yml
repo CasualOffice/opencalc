@@ -77,6 +77,11 @@ services:
     depends_on:
       host:
         condition: service_healthy
+    # Longer than OPENCALC_DRAIN_DEADLINE_MS (25s), so the final saves the
+    # drain performs are allowed to finish. Docker's default is 10s, which
+    # SIGKILLed a node mid-drain — losing exactly the work the drain exists
+    # to save (DEP-05).
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "/usr/local/bin/casual-calc-collab-server", "--healthcheck"]
       interval: 10s

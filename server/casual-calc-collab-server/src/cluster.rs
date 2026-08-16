@@ -410,6 +410,15 @@ impl Coordinator for Memory {
             return Box::pin(async move { Err(AppendError::Stale { current }) });
         }
         log.push((revision, payload));
+        // The same window Redis trims to, so the two coordinators answer the
+        // same question the same way. They are held to that by `contract!`, and
+        // this is what it caught: bounding one of them left the in-memory
+        // implementation growing without limit, which is the behaviour every
+        // test that does not set OPENCALC_TEST_REDIS would have measured.
+        let max = crate::cluster::redis::LOG_MAX_ENTRIES as usize;
+        if log.len() > max {
+            log.drain(..log.len() - max);
+        }
         Box::pin(async move { Ok(revision) })
     }
 
