@@ -26,6 +26,54 @@ pub struct SheetEntry {
     pub state: String,
 }
 
+/// What `[Content_Types].xml` says about the parts of a package.
+///
+/// OPC declares a part's type in one of two ways and a reader has to honour
+/// both: an `<Override>` naming the part, or a `<Default>` claiming every part
+/// with a given extension. There is no third state — a part matching neither is
+/// not a part with an unknown type, it is a package that does not open.
+#[derive(Debug, Clone, Default)]
+pub struct ContentTypes {
+    /// `<Override>` by part path, normalized to have no leading `/` and
+    /// lower-cased for lookup.
+    overrides: BTreeMap<String, String>,
+    /// `<Default>` by lower-cased extension.
+    defaults: BTreeMap<String, String>,
+}
+
+impl ContentTypes {
+    /// The content type this package declares for `part`, by the OPC rules: the
+    /// `<Override>` naming it wins, else the `<Default>` for its extension.
+    ///
+    /// `part` may be given with or without a leading `/`. Matching ignores case
+    /// on both, because OPC part names and extensions compare case-insensitively
+    /// — a file whose rels say `xl/media/image1.emf` while its content types say
+    /// `/xl/media/Image1.EMF` is well-formed, and an exact-match lookup would
+    /// call it undeclared and drop the declaration on write.
+    pub fn resolve(&self, part: &str) -> Option<&str> {
+        if let Some(ct) = self.overrides.get(&normalize_part_name(part)) {
+            return Some(ct.as_str());
+        }
+        self.defaults.get(&extension_of(part)?).map(String::as_str)
+    }
+}
+
+/// The lower-cased extension of a part name, or `None` when it has none.
+///
+/// Taken from the last *segment*: a `<Default>` claims parts by the dot in
+/// their file name, and `xl/media.v2/stream` has no extension however many dots
+/// its directories contain.
+fn extension_of(part: &str) -> Option<String> {
+    let last = part.rsplit('/').next()?;
+    let (_, ext) = last.rsplit_once('.')?;
+    Some(ext.to_ascii_lowercase())
+}
+
+/// A part name as a lookup key: no leading `/`, lower-cased.
+fn normalize_part_name(name: &str) -> String {
+    name.trim_start_matches('/').to_ascii_lowercase()
+}
+
 /// An admitted SpreadsheetML package with its workbook and sheet parts
 /// resolved. Reads happen on demand through the bounded underlying [`Package`].
 #[derive(Debug)]
@@ -162,12 +210,21 @@ impl SpreadsheetPackage {
         parse_relationships(&xml, limits)
     }
 
-    /// The `[Content_Types].xml` `<Override>` map, part path to content type.
+    /// The package's `[Content_Types].xml`, both halves of it.
     ///
-    /// A retained part must be re-declared here or the package is invalid, and
-    /// Excel refuses to open it rather than ignoring the undeclared part.
-    pub fn content_type_overrides(&mut self) -> Result<BTreeMap<String, String>, OoxmlError> {
-        let mut out = BTreeMap::new();
+    /// A retained part must be re-declared on write or the package is invalid,
+    /// and Excel refuses to open it rather than ignoring the undeclared part —
+    /// so whatever a caller retains, it has to be able to look the type up.
+    ///
+    /// This used to return the `<Override>` map alone, which answered the
+    /// question for every part *we* had thought about and silently returned
+    /// `None` for the ones a real file declares by extension. `.bin` printer
+    /// settings, `.emf` and `.jpeg` images, embedded objects: their type is in
+    /// the file, in a `<Default>`, and a caller that cannot see the `<Default>`
+    /// map cannot tell "this file declares no type for that part" from "this
+    /// reader does not look where the type is" (FID-17).
+    pub fn content_types(&mut self) -> Result<ContentTypes, OoxmlError> {
+        let mut out = ContentTypes::default();
         if !self.package.contains("[Content_Types].xml") {
             return Ok(out);
         }
@@ -183,7 +240,17 @@ impl SpreadsheetPackage {
                     let name = attr_value(e, b"PartName")?;
                     let ct = attr_value(e, b"ContentType")?;
                     if let (Some(name), Some(ct)) = (name, ct) {
-                        out.insert(name, ct);
+                        out.overrides.insert(normalize_part_name(&name), ct);
+                    }
+                }
+                Ok(quick_xml::events::Event::Start(ref e))
+                | Ok(quick_xml::events::Event::Empty(ref e))
+                    if e.local_name().as_ref() == b"Default" =>
+                {
+                    let ext = attr_value(e, b"Extension")?;
+                    let ct = attr_value(e, b"ContentType")?;
+                    if let (Some(ext), Some(ct)) = (ext, ct) {
+                        out.defaults.insert(ext.to_ascii_lowercase(), ct);
                     }
                 }
                 Ok(quick_xml::events::Event::Eof) | Err(_) => break,

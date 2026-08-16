@@ -2778,6 +2778,153 @@ fn deleting_an_imported_chart_takes_its_anchor_with_it() {
     assert!(back.sheets[0].charts.is_empty());
 }
 
+/// An ordinary Excel package: the four relationships Excel always writes at the
+/// package root, and the parts they reach.
+fn package_with_root_parts() -> Vec<u8> {
+    const CONTENT_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+      <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+      <Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>
+    </Types>"#;
+    const ROOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+      <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+      <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="customXml/item1.xml"/>
+    </Relationships>"#;
+    const CORE: &[u8] = br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Ada Lovelace</dc:creator><dc:title>Q3 Ledger</dc:title></cp:coreProperties>"#;
+    const APP: &[u8] = br#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Company>Analytical Engines</Company></Properties>"#;
+    const ITEM: &[u8] = br#"<invoice xmlns="urn:example:invoice"><number>4711</number></invoice>"#;
+    const ITEM_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>"#;
+    const ITEM_PROPS: &[u8] = br#"<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml" ds:itemID="{DEADBEEF}"/>"#;
+
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("docProps/core.xml", CORE),
+        ("docProps/app.xml", APP),
+        ("customXml/item1.xml", ITEM),
+        ("customXml/_rels/item1.xml.rels", ITEM_RELS),
+        ("customXml/itemProps1.xml", ITEM_PROPS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+    ])
+}
+
+/// Every path in a written package, in archive order.
+fn entry_names(package: &[u8]) -> Vec<String> {
+    zip::ZipArchive::new(Cursor::new(package))
+        .unwrap()
+        .file_names()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn parts_attached_at_the_package_root_survive_a_save() {
+    let wb = import_package(package_with_root_parts()).unwrap().workbook;
+    let written = write_workbook(&wb).unwrap();
+
+    // The author and title, the company, and a whole custom payload — none of
+    // which is reachable from `workbook.xml`, all of which the file carries.
+    assert!(xml_of(&written, "docProps/core.xml").contains("<dc:title>Q3 Ledger</dc:title>"));
+    assert!(xml_of(&written, "docProps/app.xml").contains("<Company>Analytical Engines</Company>"));
+    assert!(xml_of(&written, "customXml/item1.xml").contains("<number>4711</number>"));
+    assert!(xml_of(&written, "customXml/itemProps1.xml").contains("DEADBEEF"));
+    // The item's own rels reach its properties; without them Excel reports the
+    // package as needing repair.
+    assert!(xml_of(&written, "customXml/_rels/item1.xml.rels").contains("itemProps1.xml"));
+
+    // The relationships that reach them are re-emitted at the root, keeping
+    // their ids, and beside — not instead of — the workbook relationship.
+    let root = xml_of(&written, "_rels/.rels");
+    assert!(
+        root.contains("Id=\"rId1\"") && root.contains("xl/workbook.xml"),
+        "{root}"
+    );
+    assert!(
+        root.contains("Id=\"rId4\"") && root.contains("customXml/item1.xml"),
+        "{root}"
+    );
+    assert_eq!(
+        root.matches("relationships/officeDocument\"").count(),
+        1,
+        "one officeDocument relationship, not two: {root}"
+    );
+    // One `_rels/.rels` in the archive. A second entry at the same path is a
+    // package readers disagree about — most take the first, which would be the
+    // one without the root parts.
+    assert_eq!(
+        entry_names(&written)
+            .iter()
+            .filter(|p| p.as_str() == "_rels/.rels")
+            .count(),
+        1
+    );
+    // And not smuggled into the workbook's rels, where `docProps/core.xml`
+    // resolves to `xl/docProps/core.xml` and reaches nothing.
+    let wb_rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert!(!wb_rels.contains("docProps"), "{wb_rels}");
+
+    // The content types are re-declared, without which Excel refuses the
+    // package rather than ignoring the undeclared part.
+    let types = xml_of(&written, "[Content_Types].xml");
+    assert!(types.contains("/docProps/core.xml"), "{types}");
+    assert!(types.contains("/customXml/itemProps1.xml"), "{types}");
+
+    // Reopening is the real check: the second import must find exactly what the
+    // first one did, or a save loses the parts one generation later.
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_parts, wb.retained_parts);
+    assert_eq!(back.retained_rels, wb.retained_rels);
+}
+
+#[test]
+fn a_root_part_that_claims_rid1_does_not_collide_with_the_workbook() {
+    // Nothing numbers the root relationships: `rId1` is this writer's habit, not
+    // a rule, and a producer is free to have given it to `docProps/core.xml`. Two
+    // `Id="rId1"` in one `.rels` is not a package with a duplicate — `Id` is an
+    // xsd:ID, so it is a package Excel repairs, and the loser is whichever
+    // relationship the reader drops.
+    const ROOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+    </Relationships>"#;
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "docProps/core.xml",
+            br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"/>"#,
+        ),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    let written = write_workbook(&wb).unwrap();
+    let root = xml_of(&written, "_rels/.rels");
+
+    let ids: Vec<&str> = root
+        .split("Id=\"")
+        .skip(1)
+        .map(|c| c.split('"').next().unwrap())
+        .collect();
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(ids.len(), unique.len(), "ids must be distinct: {root}");
+    assert_eq!(ids.len(), 2, "{root}");
+    // The retained id is the one that must not move: it is the file's, and the
+    // workbook's own is named by nothing but its type.
+    assert!(root.contains("Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\""), "{root}");
+    assert!(xml_of(&written, "docProps/core.xml").contains("coreProperties"));
+}
+
 /// SpreadsheetML's `_xlfn.` prefix, which the writer must add and the reader
 /// must take off again.
 ///

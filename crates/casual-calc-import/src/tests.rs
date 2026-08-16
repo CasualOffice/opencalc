@@ -721,3 +721,238 @@ fn the_pivot_cache_declaration_survives_the_round_trip() {
         "{refs:?}"
     );
 }
+
+#[test]
+fn absurd_axis_sizes_are_clamped_instead_of_overflowing() {
+    // `width` and `ht` are plain `xsd:double`s off the wire, and nothing between
+    // the attribute and `(px as i64) * 15` bounded them. `width="1e300"`
+    // saturated the float→int cast to `i64::MAX` and the multiply panicked with
+    // "attempt to multiply with overflow" under the dev profile — a crafted
+    // `<col>` aborted the host process instead of failing the import — while the
+    // release profile wrapped it, so `width="-1e300"` handed layout a *negative*
+    // column width. NaN and INF are legal `xsd:double` spellings and arrive here
+    // too.
+    for value in ["1e300", "-1e300", "1e308", "-1e308", "NaN", "INF", "-INF"] {
+        let sheet_xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <sheetFormatPr defaultColWidth="{value}" defaultRowHeight="{value}"/>
+            <cols><col min="1" max="1" width="{value}" customWidth="1"/></cols>
+            <sheetData><row r="1" ht="{value}" customHeight="1"><c r="A1"><v>1</v></c></row></sheetData>
+        </worksheet>"#
+        )
+        .into_bytes();
+        let import = import_package(package_with_sheet(sheet_xml, None))
+            .unwrap_or_else(|e| panic!("{value} should import, not fail: {e:?}"));
+        let sheet = &import.workbook.sheets[0];
+
+        // Excel itself refuses a column past 255 characters (26_850 twips) or a
+        // row past 409.5 points (8_190 twips); anything beyond is a crafted or
+        // corrupt file, not a width.
+        let sizes = |axis: &casual_calc_model::AxisSizing, ceiling: i64| {
+            for &size in axis.default.iter().chain(axis.sizes.values()) {
+                assert!(
+                    (0..=ceiling).contains(&size),
+                    "{value}: {size} twips is outside 0..={ceiling}"
+                );
+            }
+        };
+        sizes(&sheet.columns, 26_850);
+        sizes(&sheet.rows, 8_190);
+    }
+}
+
+/// An ordinary Excel package: the four relationships Excel always writes at the
+/// package root, and the parts they reach.
+///
+/// Hand-built rather than a fixture because the point is *where* the
+/// relationships hang — everything here is attached to the package root, not to
+/// `workbook.xml`, and a fixture hides exactly that distinction.
+fn package_with_root_parts() -> Vec<u8> {
+    const CONTENT_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+      <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+      <Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>
+    </Types>"#;
+    const ROOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+      <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+      <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="customXml/item1.xml"/>
+    </Relationships>"#;
+    const CORE: &[u8] = br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Ada Lovelace</dc:creator><dc:title>Q3 Ledger</dc:title></cp:coreProperties>"#;
+    const APP: &[u8] = br#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Company>Analytical Engines</Company></Properties>"#;
+    const ITEM: &[u8] = br#"<invoice xmlns="urn:example:invoice"><number>4711</number></invoice>"#;
+    const ITEM_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>"#;
+    const ITEM_PROPS: &[u8] = br#"<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml" ds:itemID="{DEADBEEF}"/>"#;
+
+    let sheet = sheet_with(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#);
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("docProps/core.xml", CORE),
+        ("docProps/app.xml", APP),
+        ("customXml/item1.xml", ITEM),
+        ("customXml/_rels/item1.xml.rels", ITEM_RELS),
+        ("customXml/itemProps1.xml", ITEM_PROPS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet),
+    ])
+}
+
+#[test]
+fn parts_attached_at_the_package_root_are_retained() {
+    let import = import_package(package_with_root_parts()).unwrap();
+    let wb = &import.workbook;
+    let paths: Vec<&str> = wb.retained_parts.iter().map(|p| p.path.as_str()).collect();
+
+    // The author, the title and the company live in these two parts and nowhere
+    // else in the file: dropping them loses the document's own metadata.
+    assert!(paths.contains(&"docProps/core.xml"), "{paths:?}");
+    assert!(paths.contains(&"docProps/app.xml"), "{paths:?}");
+    // A customXml item is a whole payload the host may be round-tripping for a
+    // system that reads nothing else in the file.
+    assert!(paths.contains(&"customXml/item1.xml"), "{paths:?}");
+    // Retention is transitive from the root as well: the item's properties are
+    // reached through the item's own rels, and an item without them is one Excel
+    // reports as needing repair.
+    assert!(paths.contains(&"customXml/itemProps1.xml"), "{paths:?}");
+
+    // The content-type override travels with the part, without which the
+    // package is invalid and Excel refuses to open it.
+    let core = wb
+        .retained_parts
+        .iter()
+        .find(|p| p.path == "docProps/core.xml")
+        .unwrap();
+    assert_eq!(
+        core.content_type.as_deref(),
+        Some("application/vnd.openxmlformats-package.core-properties+xml")
+    );
+    assert!(String::from_utf8_lossy(&core.bytes).contains("Ada Lovelace"));
+
+    // The workbook is reached from the root too, and the writer regenerates it:
+    // retaining it would write a stale copy beside the fresh one, and re-emit a
+    // second `rId1` into `_rels/.rels`.
+    assert!(!paths.contains(&"xl/workbook.xml"), "{paths:?}");
+
+    let root: Vec<_> = wb
+        .retained_rels
+        .iter()
+        .filter(|r| r.source.is_empty())
+        .collect();
+    assert_eq!(root.len(), 3, "{:?}", wb.retained_rels);
+    assert!(
+        root.iter()
+            .all(|r| !r.rel_type.ends_with("/officeDocument")),
+        "{root:?}"
+    );
+    // Ids travel verbatim, as everywhere else: `_rels/.rels` is regenerated and
+    // a re-minted id would point at nothing.
+    assert!(
+        root.iter()
+            .any(|r| r.id == "rId4" && r.target == "customXml/item1.xml")
+    );
+}
+
+#[test]
+fn a_root_relationship_to_a_missing_part_is_counted_rather_than_dropped_silently() {
+    // Nothing can be retained for a part the package does not carry, and
+    // `Omitted` + `NotRetained` is the one way data leaves the system — so it is
+    // counted and reported. See docs/34.
+    const ROOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+    </Relationships>"#;
+    let sheet = sheet_with(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#);
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet),
+    ]);
+    let import = import_package(bytes).unwrap();
+    let entry = import
+        .report
+        .entries()
+        .into_iter()
+        .find(|e| e.feature == "docProps/core.xml")
+        .expect("the part the file names but does not carry is reported");
+    assert_eq!(entry.model, ModelOutcome::Omitted);
+    assert_eq!(entry.retention, crate::RetentionOutcome::NotRetained);
+    assert_eq!(entry.count, 1);
+}
+
+/// A retained part whose type the file states with a `<Default Extension>`.
+///
+/// This is FID-17 at the seam it was lost at. The importer read the
+/// `<Override>` list and nothing else, so `printerSettings1.bin` — whose type
+/// the file declares perfectly clearly, by extension, the way every real
+/// producer declares a repeated binary part — arrived with
+/// `content_type: None`. The writer then had nothing to declare it with, and
+/// wrote it into the saved package undeclared: a package Excel refuses, or
+/// offers to repair by discarding what it cannot account for.
+///
+/// Both halves are asserted, because a `<Default>` is a claim about an
+/// extension and not about a part: the `.bin` with its own `<Override>` must
+/// keep the type the override gives it, or the saved file would call an OLE
+/// object a set of printer settings.
+#[test]
+fn a_retained_part_typed_by_a_default_extension_keeps_its_content_type() {
+    const CONTENT_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"/>
+      <Default Extension="jpeg" ContentType="image/jpeg"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/embeddings/oleObject1.bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>
+    </Types>"#;
+    const SHEET_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings1.bin"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.jpeg"/>
+      <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../embeddings/oleObject1.bin"/>
+    </Relationships>"#;
+
+    let sheet = sheet_with(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#);
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet),
+        ("xl/worksheets/_rels/sheet1.xml.rels", SHEET_RELS),
+        ("xl/printerSettings/printerSettings1.bin", b"\x00PRN"),
+        ("xl/media/image1.jpeg", b"\xff\xd8\xff\xe0JFIF"),
+        ("xl/embeddings/oleObject1.bin", b"\xd0\xcf\x11\xe0OLE"),
+    ]);
+
+    let import = import_package(bytes).unwrap();
+    let type_of = |path: &str| -> Option<String> {
+        import
+            .workbook
+            .retained_parts
+            .iter()
+            .find(|p| p.path == path)
+            .unwrap_or_else(|| panic!("{path} was not retained"))
+            .content_type
+            .clone()
+    };
+
+    assert_eq!(
+        type_of("xl/printerSettings/printerSettings1.bin").as_deref(),
+        Some("application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings")
+    );
+    assert_eq!(
+        type_of("xl/media/image1.jpeg").as_deref(),
+        Some("image/jpeg")
+    );
+    assert_eq!(
+        type_of("xl/embeddings/oleObject1.bin").as_deref(),
+        Some("application/vnd.openxmlformats-officedocument.oleObject"),
+        "an override names one part and outranks the default for its extension"
+    );
+}

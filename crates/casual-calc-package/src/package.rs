@@ -29,6 +29,17 @@ pub struct EntryInfo {
 pub struct Package {
     archive: ZipArchive<Cursor<Vec<u8>>>,
     limits: PackageLimits,
+    /// Bytes actually handed out by [`Package::read_part`] so far.
+    ///
+    /// The whole-package ceiling is checked at admission against the sizes the
+    /// central directory *declares*, which is the only information available
+    /// before decompressing anything. That check is worth nothing on its own:
+    /// the declaration is attacker-controlled, and a part that says 1,000 and
+    /// produces 600 MiB was admitted and then expanded. So the same ceiling is
+    /// charged again here, against bytes that actually exist — five parts of
+    /// 200 MiB each cannot each pass a 4 GiB test individually and add up to a
+    /// gigabyte of retained memory.
+    consumed: u64,
 }
 
 impl fmt::Debug for Package {
@@ -104,7 +115,11 @@ impl Package {
             });
         }
 
-        Ok(Package { archive, limits })
+        Ok(Package {
+            archive,
+            limits,
+            consumed: 0,
+        })
     }
 
     /// The number of entries in the package.
@@ -145,12 +160,26 @@ impl Package {
         self.archive.file_names().any(|n| n == name)
     }
 
-    /// Read a part's decompressed bytes, bounded by `max_total_uncompressed`.
+    /// Read a part's decompressed bytes, bounded by what it declared and by
+    /// what the package as a whole has already produced.
     ///
-    /// Decompression is capped: a part whose actual output exceeds the ceiling
-    /// (a lying local header) is rejected rather than expanded without bound.
+    /// **The declared size is the bound, not a hint.** [`Package::open`] adds
+    /// up `entry.size()` across the archive and refuses a package whose total
+    /// or expansion ratio is too high — but every one of those numbers comes
+    /// from the central directory, which is part of the attacker's input.
+    /// Patching one four-byte field turned a 1 MB file that was correctly
+    /// rejected as a 1028:1 bomb into one that was admitted and then handed
+    /// back 600 MiB. The admission check is only meaningful if the bytes are
+    /// held to the declaration it was computed from, so a part that produces
+    /// more than it said is refused here.
+    ///
+    /// The whole-package ceiling is charged a second time, cumulatively, for
+    /// the same reason: each part staying under a 4 GiB cap says nothing about
+    /// five of them together, and unmodelled parts are *retained* in the model,
+    /// so the bytes stay resident.
     pub fn read_part(&mut self, name: &str) -> Result<Vec<u8>, PackageError> {
-        let cap = self.limits.max_total_uncompressed;
+        let total_cap = self.limits.max_total_uncompressed;
+        let remaining = total_cap.saturating_sub(self.consumed);
         let mut entry = self
             .archive
             .by_name(name)
@@ -158,21 +187,29 @@ impl Package {
                 name: name.to_owned(),
             })?;
 
-        let hint = entry.size().min(cap) as usize;
+        // Whichever is tighter: what this entry claims it will produce, or what
+        // the package has left in its budget.
+        let declared = entry.size();
+        let cap = declared.min(remaining);
+        let hint = usize::try_from(cap).unwrap_or(usize::MAX);
         let mut buf = Vec::with_capacity(hint);
-        // Read one byte past the cap so an over-cap part is detectable.
+        // One byte past the cap, so exceeding it is detectable rather than
+        // silently truncated — a truncated part is a corrupt document that
+        // reports success.
         entry
             .by_ref()
             .take(cap.saturating_add(1))
             .read_to_end(&mut buf)
             .map_err(|_| PackageError::NotAPackage)?;
 
-        if buf.len() as u64 > cap {
+        let produced = buf.len() as u64;
+        if produced > cap {
             return Err(PackageError::ExpansionTooLarge {
-                total: buf.len() as u64,
-                limit: cap,
+                total: self.consumed.saturating_add(produced),
+                limit: total_cap,
             });
         }
+        self.consumed = self.consumed.saturating_add(produced);
         Ok(buf)
     }
 }

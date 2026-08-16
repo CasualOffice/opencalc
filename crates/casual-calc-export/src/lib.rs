@@ -90,7 +90,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 &chart_builds,
             ),
         ),
-        ("_rels/.rels".to_owned(), root_rels()),
+        ("_rels/.rels".to_owned(), root_rels(workbook)),
         ("xl/workbook.xml".to_owned(), workbook_xml(workbook)),
         (
             "xl/_rels/workbook.xml.rels".to_owned(),
@@ -201,8 +201,8 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         by_source.entry(rel.source.as_str()).or_default().push(rel);
     }
     for (source, rels) in by_source {
-        if source.ends_with("workbook.xml") || source.contains("/worksheets/") {
-            continue; // written by workbook_rels / sheet_rels
+        if source.is_empty() || is_workbook(source) || source.contains("/worksheets/") {
+            continue; // written by root_rels / workbook_rels / sheet_rels
         }
         // A drawing that took an authored chart already had its rels written,
         // with the retained entries folded in. Writing them again here would
@@ -341,7 +341,28 @@ fn content_types(
             escape_attr(&path)
         ));
     }
+    // Retained parts, each with its own `<Override>` — deliberately, and not
+    // because it is the shorter code.
+    //
+    // A real producer writes `<Default Extension="bin" …/>` for a workbook full
+    // of `printerSettings*.bin`, and re-emitting these as Defaults would look
+    // more like the file we read. It is also ambiguous in a way an Override
+    // never is: one extension carries one type per package, and `.bin` is
+    // printer settings here, an OLE object there, and a pivot cache record
+    // stream in the file after that. Grouping by extension would make the
+    // writer pick a winner among types that disagree, and the part that lost
+    // would be declared as something it is not — worse than the undeclared part
+    // this fixes, because the package would open and misread it. Per part costs
+    // a line of XML each and cannot collide.
+    //
+    // An Override also outranks whatever `<Default>` this writer emitted above,
+    // so a retained `.vml` or `.xml` part with a specific type keeps it rather
+    // than being flattened to `application/xml`.
     for retained in &workbook.retained_parts {
+        // `None` only when the source package declared no type for the part
+        // either — it arrived undeclared and there is nothing to carry. It is
+        // not the writer's place to invent one from the extension: the file
+        // that comes out would claim something no file ever said.
         if let Some(ct) = &retained.content_type {
             s.push_str(&format!(
                 "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
@@ -705,6 +726,17 @@ fn workbook_rels_for<'a>(rels: &'a [RetainedRel], source: &str) -> Vec<&'a Retai
     rels.iter().filter(|r| r.source == source).collect()
 }
 
+/// Whether a retained relationship's source is the workbook part.
+///
+/// Matched by suffix rather than by equality because the source path comes from
+/// the file that was imported, which is free to keep its workbook somewhere
+/// other than `xl/workbook.xml`, while this writer always emits it there. The
+/// three places that split retained relationships by source have to agree on
+/// this test, or a relationship is written twice or not at all.
+fn is_workbook(source: &str) -> bool {
+    source.ends_with("workbook.xml")
+}
+
 /// Whether any sheet holds a thread that needs the 2018 parts.
 fn any_threaded(workbook: &Workbook) -> bool {
     workbook
@@ -713,10 +745,43 @@ fn any_threaded(workbook: &Workbook) -> bool {
         .any(|s| s.comments.iter().any(|c| c.is_threaded()))
 }
 
-fn root_rels() -> String {
-    format!(
-        "{DECL}<Relationships xmlns=\"{NS_REL}\"><Relationship Id=\"rId1\" Type=\"{NS_R}/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"
-    )
+/// The `_rels/.rels` part: the workbook, plus everything else the package hangs
+/// off its root.
+///
+/// `docProps/core.xml`, `docProps/app.xml` and `customXml` are attached here and
+/// nowhere else, so a root `.rels` holding only the workbook relationship leaves
+/// their parts in the zip with nothing pointing at them — which Excel reports as
+/// a package needing repair, and which loses the author, the title and the
+/// company on the read after that.
+fn root_rels(workbook: &Workbook) -> String {
+    let retained = workbook_rels_for(&workbook.retained_rels, "");
+    // Nothing numbers the root relationships, so a producer is free to have
+    // given `rId1` to `docProps/core.xml`. Two `Id="rId1"` in one `.rels` is a
+    // package Excel repairs — `Id` is an xsd:ID — and the retained one is the id
+    // that must not move, because it came from the file. The workbook's own is
+    // named by nothing but its type, so it is the one that steps aside.
+    let mut workbook_id = String::from("rId1");
+    let mut n = 1u32;
+    while retained.iter().any(|r| r.id == workbook_id) {
+        n += 1;
+        workbook_id = format!("rId{n}");
+    }
+    let mut s = format!(
+        "{DECL}<Relationships xmlns=\"{NS_REL}\"><Relationship Id=\"{workbook_id}\" Type=\"{NS_R}/officeDocument\" Target=\"xl/workbook.xml\"/>"
+    );
+    // Ids travel verbatim for the same reason they do everywhere else: the
+    // relationship is re-emitted, not re-minted, so anything naming it still
+    // names the same part.
+    for rel in retained {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            escape_attr(&rel.id),
+            escape_attr(&rel.rel_type),
+            escape_attr(&rel.target)
+        ));
+    }
+    s.push_str("</Relationships>");
+    s
 }
 
 fn workbook_xml(workbook: &Workbook) -> String {
@@ -860,7 +925,16 @@ fn workbook_rels(
     // Retained relationships keep their original ids: the element that names
     // one — `<externalReference r:id="rId4"/>` — travels verbatim too, and a
     // re-minted id would point at nothing.
-    for rel in &workbook.retained_rels {
+    //
+    // Only the ones the workbook part itself declared. A target is relative to
+    // the part that declares it, so a root relationship copied in here would
+    // resolve `docProps/core.xml` against `xl/` and reach nothing, and a sheet's
+    // would be written twice — once correctly, once dangling.
+    for rel in workbook
+        .retained_rels
+        .iter()
+        .filter(|r| is_workbook(&r.source))
+    {
         s.push_str(&format!(
             "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
             escape_attr(&rel.id),
