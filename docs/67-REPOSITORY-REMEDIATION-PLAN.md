@@ -44,16 +44,16 @@ displace an unresolved correctness item.
 
 | Order | Wave | ID | Priority | Status | Result required |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | A | SEC-001 | P0 | Open | Workbook-controlled text cannot create or execute DOM. |
-| 2 | A | COL-29 | P0 | Open | Only successfully applied operations enter the collaboration queue. |
-| 3 | A | COL-28 | P0 | Open | Undo and redo are transported, transformed and convergent. |
+| 1 | A | SEC-001 | P0 | Done | Workbook-controlled text cannot create or execute DOM. |
+| 2 | A | COL-29 | P0 | Done | Only successfully applied operations enter the collaboration queue. |
+| 3 | A | COL-28 | P0 | In progress | Undo and redo are transported, transformed and convergent. Transport is done and gated; the policy for undoing an edit a peer has since changed is designed in [69](69-COLLABORATIVE-UNDO-POLICY.md) and not implemented. |
 | 4 | A | COL-30 | P0 | Open | Every user mutation, including retained-part changes, is an invertible wire operation. |
 | 5 | A | SEC-002 | P0 | Open | One non-bypassable admission budget reaches every parser and model allocation. |
 | 6 | A | SEC-003 | P0 | Open | Docker build/runtime defaults do not ingest or silently rely on deployable secrets. |
 | 7 | B | PROD-12 | P0 | Open | A shared Docker link reaches collaboration from another machine and under HTTPS. |
 | 8 | B | PROD-13 | P0 | In progress | Uploading a real workbook lands in a durable editable shared session. |
 | 9 | B | COL-27 | P1 | In progress | Remote selections and real participant names are visible and gated. |
-| 10 | C | UX-CLIP-01 | P1 | Open | Supported Excel/LibreOffice/Sheets clipboard formatting pastes safely. |
+| 10 | C | UX-CLIP-01 | P1 | In progress | Supported Excel/LibreOffice/Sheets clipboard formatting pastes safely. Values, fonts, colours, fills, alignment, number formats and merges land and are gated; borders are deliberately deferred. |
 | 11 | C | SDK-008 | P1 | Open | Live session configuration and mutation cannot bypass required invariants. |
 | 12 | C | SDK-009 | P1 | Open | All published packages expose typed, versioned, testable contracts. |
 | 13 | D | PERF-07 | P1 | Open | First-edit and adversarial incremental recalc satisfy the published 50 ms target. |
@@ -61,8 +61,8 @@ displace an unresolved correctness item.
 | 15 | D | CI-005 | P1 | Open | Supply-chain and workflow provenance claims are enforced by CI. |
 | 16 | D | DOC-025 | P1 | Open | Contracts, roadmap, support matrix and audits describe the current code. |
 | 17 | E | MNT-001 | P2 | Open | Browser failures are observable; blanket exception swallowing is eliminated. |
-| 18 | E | MNT-002 | P2 | Integration monoliths are split behind tests without changing behavior. |
-| 19 | E | PERF-06 | P2 | Range-edge propagation is bounded for a large dirty set, if measurement still requires it. |
+| 18 | E | MNT-002 | P2 | Open | Integration monoliths are split behind tests without changing behavior. |
+| 19 | E | PERF-06 | P2 | Open | Range-edge propagation is bounded for a large dirty set, if measurement still requires it. |
 
 Items inside a wave may proceed in parallel only when they do not touch the same
 invariant. In particular, COL-28 and COL-30 must not be implemented as competing
@@ -429,6 +429,21 @@ For Docker/product rows, Rust unit tests alone are never sufficient. For browser
 security and clipboard rows, a mocked WASM call alone is never sufficient.
 
 ## Release checkpoints
+
+### Progress against this plan
+
+Six of Wave A's items are the gate on every production claim, and the plan's own
+status column had drifted from the code — rows 18 and 19 had lost their status
+cell altogether, so the column stopped being readable at 17. Corrected above.
+
+The work since has also found defects **this plan does not list**, because they
+were found by running the engine rather than by reading it: the wire could not
+carry an integer-keyed map at all (so filters, column widths and row heights
+never reached a peer), a tab drag froze the recalculation graph, incremental
+recalculation was not deterministic, and every part attached at the package root
+was dropped on open→save. Those live in
+[14](14-EXECUTION-TRACKER.md) with their own rows; this document stays the
+*ordering* of the audit's findings rather than a second list of everything.
 
 ### Checkpoint A — correctness containment
 

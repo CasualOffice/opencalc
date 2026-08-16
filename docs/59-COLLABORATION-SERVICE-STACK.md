@@ -61,6 +61,25 @@ consequences, in the order they matter:
 - **Rotation is the integrator's business alone.** They publish a new key,
   the server picks it up at the next fetch, and no coordinated restart is
   needed.
+
+  "The next fetch" is two fetches, and it needs to be, because rotation has two
+  halves that fail differently. A key being **added** announces itself: a token
+  arrives naming a `kid` this server does not hold, so the join path re-reads
+  the key set once and retries — throttled by `OPENCALC_JWKS_MIN_REFRESH_MS`,
+  since the trigger is anything that can invent a `kid` and would otherwise make
+  this server hammer somebody else's endpoint on demand. A key being
+  **withdrawn** announces nothing at all — nobody presents a token for a key
+  that is being revoked — so a timer re-reads every
+  `OPENCALC_JWKS_REFRESH_MS`, and that interval is the bound on how long a
+  revoked key keeps working.
+
+  This paragraph exists because the property above was stated here and was not
+  true of the code: `read_verifier` fetched once at startup and moved the key
+  set into the configuration for the life of the process. A scheduled rotation
+  therefore locked **every** user out of **every** document until an operator
+  restarted every node — reported to the client as the same `NotAuthorised` a
+  bad token gets — and revoking a compromised key had no effect on a running
+  node at all.
 - **`kid` selects the key**, so old and new coexist during a rotation instead of
   there being a moment when both halves must change at once.
 

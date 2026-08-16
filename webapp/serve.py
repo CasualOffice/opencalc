@@ -65,4 +65,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     os.chdir(ROOT)
     print(f"OpenCalc demo → http://localhost:{PORT}/")
-    http.server.HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    # Threading, not the plain HTTPServer this used to be.
+    #
+    # `HTTPServer` handles one connection at a time, and a browser holds its
+    # connections open with keep-alive. So the *second* editor tab could not
+    # load its modules while the first still had a socket open: its dynamic
+    # `import("./collab.js")` simply never resolved, with no error anywhere —
+    # the tab sat there looking like a collaboration bug.
+    #
+    # Two editors at once is the entire point of the collaboration demo, and of
+    # the browser gate that drives two pages through this same server, so
+    # serving them one at a time was never going to be enough.
+    http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
