@@ -7287,6 +7287,12 @@ function startMarch(s, cut) {
 }
 function stopMarch() {
   if (!clipMarch) return;
+  // Tell the *engine*, not just the animation. Clearing the marquee alone left
+  // a pending cut armed, so Esc — then a click elsewhere, then Ctrl+V — still
+  // moved the data and emptied the source the user believed they had spared.
+  // The visible signal said cancelled and the state said otherwise, which is
+  // the worst possible pairing for an action that deletes.
+  try { wasm.session_clip_clear(); } catch {}
   clipMarch = null;
   if (marchRaf) { cancelAnimationFrame(marchRaf); marchRaf = 0; }
   draw();

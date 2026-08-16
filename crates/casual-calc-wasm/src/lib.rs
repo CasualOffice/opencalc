@@ -8591,6 +8591,18 @@ pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: 
 }
 
 /// Whether the internal clipboard currently holds a snapshot.
+/// Forget what is on the clipboard.
+///
+/// Esc after a cut has to reach the engine, not merely stop the marching ants.
+/// Cancelling the animation alone left the pending cut armed, so Esc, a click
+/// elsewhere, and Ctrl+V still **moved** the data and emptied the source the
+/// user believed they had spared — the visible signal said cancelled and the
+/// state said otherwise.
+#[wasm_bindgen]
+pub fn session_clip_clear() {
+    CLIP.with(|cl| *cl.borrow_mut() = None);
+}
+
 #[wasm_bindgen]
 pub fn session_clip_has() -> bool {
     CLIP.with(|cl| cl.borrow().is_some())
@@ -8730,10 +8742,17 @@ pub fn session_clip_paste_mode(
                     }
                     _ => {
                         let mut out = cc.cell.clone();
-                        if let Some(expr) = &cc.formula {
-                            // Each cell moved from (sr,sc) to `at`; shift its
-                            // references by that per-cell delta (uniform when
-                            // nothing was compressed away).
+                        // A **copy** shifts references by the per-cell delta —
+                        // that is what makes `=A1+1` become `=B1+1` a column
+                        // over. A **cut moves the cell**, so its formula travels
+                        // verbatim: `=A1+1` cut from B1 to D5 is still `=A1+1`
+                        // in Excel, because the cell did not change what it
+                        // means, only where it lives. Shifting on a cut rewrote
+                        // the formula to point somewhere it never referred to —
+                        // silent corruption on an everyday action.
+                        if let Some(expr) = &cc.formula
+                            && !cut
+                        {
                             let dr = at.row as i64 - cc.sr as i64;
                             let dc = at.col as i64 - cc.sc as i64;
                             let shifted = shift_references(expr, dr, dc);
@@ -9826,6 +9845,76 @@ mod tests {
         session_set_cell(0, 4, 0, "2024-03-05").unwrap();
         assert!(session_cell_format(0, 4, 0).contains("\"nf\":\"dd/mm/yyyy\""));
         assert_eq!(session_cell_input(0, 4, 0), "05/03/2024");
+    }
+
+    /// A cut **moves** a cell, so its formula travels verbatim; a copy shifts.
+    ///
+    /// The paste path shifted references by the per-cell delta whichever it
+    /// was, so cutting `=A1+1` from B1 to D5 rewrote it to `=C5+1` — a formula
+    /// pointing somewhere it had never referred to, produced by an everyday
+    /// action, with nothing to show it had happened.
+    #[test]
+    fn a_cut_moves_a_formula_verbatim_where_a_copy_shifts_it() {
+        use super::{
+            session_cell_input, session_clip_copy, session_clip_paste_mode, session_new,
+            session_set_cell,
+        };
+
+        // Copy first, to pin the behaviour that must *not* change.
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap(); // A1
+        session_set_cell(0, 1, 1, "=A1+1").unwrap(); // B2
+        session_clip_copy(0, 1, 1, 1, 1, false); // copy B2
+        session_clip_paste_mode(0, 4, 3, "all").unwrap(); // to D5 (dr=+3, dc=+2)
+        assert_eq!(
+            session_cell_input(0, 4, 3),
+            "=C4+1",
+            "a copy shifts by the delta"
+        );
+
+        // The same move as a cut: the formula is unchanged, and the source is
+        // emptied because the cell went there rather than being duplicated.
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap(); // A1
+        session_set_cell(0, 1, 1, "=A1+1").unwrap(); // B2
+        session_clip_copy(0, 1, 1, 1, 1, true); // cut B2
+        session_clip_paste_mode(0, 4, 3, "all").unwrap(); // to D5
+        assert_eq!(
+            session_cell_input(0, 4, 3),
+            "=A1+1",
+            "a cut moves the cell, so the formula still means what it meant"
+        );
+        assert_eq!(session_cell_input(0, 1, 1), "", "and the source is emptied");
+    }
+
+    /// Esc after a cut has to reach the engine.
+    ///
+    /// Clearing the marquee alone left the pending cut armed, so the next paste
+    /// still moved the data and emptied the source the user believed they had
+    /// spared. The visible signal said cancelled and the state said otherwise.
+    #[test]
+    fn clearing_the_clipboard_cancels_a_pending_cut() {
+        use super::{
+            session_cell_input, session_clip_clear, session_clip_copy, session_clip_has,
+            session_clip_paste_mode, session_new, session_set_cell,
+        };
+
+        session_new();
+        session_set_cell(0, 0, 0, "keep me").unwrap(); // A1
+        session_clip_copy(0, 0, 0, 0, 0, true); // cut A1
+        assert!(session_clip_has(), "the cut is armed");
+
+        session_clip_clear();
+        assert!(!session_clip_has(), "and Esc disarms it");
+
+        // A paste now does nothing, and — the point — the source survives.
+        let _ = session_clip_paste_mode(0, 4, 0, "all");
+        assert_eq!(
+            session_cell_input(0, 0, 0),
+            "keep me",
+            "the cancelled cut must not still move the data"
+        );
+        assert_eq!(session_cell_input(0, 4, 0), "", "and nothing was pasted");
     }
 
     // Drives the real session_* functions (thread-local SESSION/CLIP) natively
