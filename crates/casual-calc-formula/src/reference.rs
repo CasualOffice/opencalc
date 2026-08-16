@@ -172,14 +172,80 @@ pub fn parse_a1_axis(text: &str, at_end: bool) -> Option<CellReference> {
     None
 }
 
+/// Whether a sheet name has to be written in single quotes to be read back.
+///
+/// The old rule was "quote unless every character is alphanumeric or `_`",
+/// which asks the wrong question. A sheet called `2024` clears that test and is
+/// emitted bare as `2024!A1` — text that neither this engine's parser nor
+/// Excel's will read as a reference, which is exactly why Excel always writes
+/// `'2024'!A1`. Round-tripping such a workbook dropped the formula: the
+/// re-import failed to parse it, kept the stale cached value, and left a
+/// hard-coded constant that never recalculates again.
+///
+/// The right question is whether the name is a plain identifier that cannot be
+/// mistaken for something else. Three ways it can fail:
+///
+/// - it contains something outside `[A-Za-z0-9_]`, or is empty;
+/// - it starts with a digit, so `2024!A1` reads as a number followed by junk;
+/// - it *is* a cell reference — a sheet named `A1` written bare gives `A1!B2`,
+///   and a sheet named `R1C1` collides with the other reference style.
+///
+/// Quoting more often than strictly required is free: a quoted name is always
+/// valid. Quoting less often is silent data loss, so this errs toward quoting.
+fn sheet_name_needs_quoting(sheet: &str) -> bool {
+    let mut chars = sheet.chars();
+    let Some(first) = chars.next() else {
+        return true; // Empty. Not a name, and certainly not a bare one.
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return true;
+    }
+    if !sheet.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return true;
+    }
+    looks_like_a_reference(sheet)
+}
+
+/// Whether `name` would parse as a cell reference in either notation.
+///
+/// `A1` style is one to three letters then one to seven digits. `R1C1` style is
+/// `R`/`C` with optional digits — including the bare `R` and `C` Excel reserves
+/// for it.
+fn looks_like_a_reference(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let letters = upper.chars().take_while(char::is_ascii_alphabetic).count();
+    let digits = upper.len() - letters;
+    if (1..=3).contains(&letters) && (1..=7).contains(&digits) {
+        // The tail after the letters must be all digits for this to be a
+        // reference rather than a name that merely starts like one.
+        if upper[letters..].chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if upper == "R" || upper == "C" {
+        return true;
+    }
+    // R1C1: `R`, digits, `C`, digits — any of the digit runs may be empty.
+    if let Some(rest) = upper.strip_prefix('R') {
+        let after_row = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(cols) = after_row.strip_prefix('C') {
+            let row_digits = rest.len() - after_row.len();
+            if cols.chars().all(|c| c.is_ascii_digit()) && (row_digits > 0 || !cols.is_empty()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl fmt::Display for CellReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(sheet) = &self.sheet {
-            if sheet.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                write!(f, "{sheet}!")?;
-            } else {
+            if sheet_name_needs_quoting(sheet) {
                 let escaped = sheet.replace('\'', "''");
                 write!(f, "'{escaped}'!")?;
+            } else {
+                write!(f, "{sheet}!")?;
             }
         }
         // A component the source did not name is not printed, or `A:A` would

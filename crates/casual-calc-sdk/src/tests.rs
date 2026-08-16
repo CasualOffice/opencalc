@@ -819,3 +819,375 @@ fn a_read_only_raw_apply_keeps_the_untouched_original() {
         "and the file it refused to change is still byte-identical"
     );
 }
+
+/// **An undo is an edit, and collaborators have to be told.**
+///
+/// Undo mutated history and the workbook and stopped there: nothing entered the
+/// outgoing log, so the author reverted while the server and every peer kept the
+/// change. That divergence never heals — no later operation contradicts it, so
+/// nothing ever notices, and the two documents are simply different from then
+/// on.
+///
+/// Asserted as convergence rather than as "a message was sent": the second
+/// session replays what the first emitted and must end up holding the same
+/// values, which is the property that actually matters.
+#[test]
+fn an_undo_reaches_the_other_participant_and_both_converge() {
+    let mut author = session_with_formula();
+    author.record_applied();
+
+    // A peer opening the same document.
+    let mut peer = WorkbookSession::from_workbook(author.workbook().clone());
+
+    let replay = |peer: &mut WorkbookSession, ops: Vec<EditOperation>| {
+        for op in ops {
+            peer.edit(op).expect("a peer applies what it is told");
+        }
+    };
+
+    author
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(41.0),
+        })
+        .expect("edits");
+    replay(&mut peer, author.take_applied());
+    assert_eq!(value(&peer, CellRef::new(0, 0)), CellValue::Number(41.0));
+    assert_eq!(
+        value(&peer, CellRef::new(1, 0)),
+        CellValue::Number(82.0),
+        "the peer recalculated the dependent formula too"
+    );
+
+    author.undo().expect("undo");
+    let after_undo = author.take_applied();
+    assert!(
+        !after_undo.is_empty(),
+        "the undo must be sent; peers cannot infer it"
+    );
+    replay(&mut peer, after_undo);
+
+    assert_eq!(
+        value(&peer, CellRef::new(0, 0)),
+        value(&author, CellRef::new(0, 0)),
+        "author and peer agree about the undone cell"
+    );
+    assert_eq!(
+        value(&peer, CellRef::new(1, 0)),
+        value(&author, CellRef::new(1, 0)),
+        "and about what depended on it"
+    );
+
+    // Redo is a fresh intention and travels the same way.
+    author.redo().expect("redo");
+    let after_redo = author.take_applied();
+    assert!(!after_redo.is_empty(), "the redo must be sent too");
+    replay(&mut peer, after_redo);
+    assert_eq!(value(&peer, CellRef::new(0, 0)), CellValue::Number(41.0));
+    assert_eq!(value(&author, CellRef::new(0, 0)), CellValue::Number(41.0));
+}
+
+/// Undoing a *structural* edit has to travel as well — it is the case where a
+/// silent divergence is worst, because every later address on one side means
+/// something different from the same address on the other.
+#[test]
+fn undoing_a_structural_edit_reaches_the_other_participant() {
+    let mut author = session_with_formula();
+    author.record_applied();
+    let mut peer = WorkbookSession::from_workbook(author.workbook().clone());
+
+    author
+        .edit(EditOperation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        })
+        .expect("inserts");
+    for op in author.take_applied() {
+        peer.edit(op).expect("peer inserts");
+    }
+    assert_eq!(value(&peer, CellRef::new(1, 0)), CellValue::Number(10.0));
+
+    author.undo().expect("undo");
+    let sent = author.take_applied();
+    assert!(!sent.is_empty(), "undoing an insertion must be sent");
+    for op in sent {
+        peer.edit(op).expect("peer removes the row again");
+    }
+
+    assert_eq!(
+        value(&peer, CellRef::new(0, 0)),
+        value(&author, CellRef::new(0, 0)),
+        "the row came back out on both sides"
+    );
+    assert_eq!(value(&peer, CellRef::new(0, 0)), CellValue::Number(10.0));
+}
+
+/// Pressing undo with nothing to undo is not an event, and must not be sent.
+#[test]
+fn an_undo_that_does_nothing_is_not_broadcast() {
+    let mut session = session_with_formula();
+    session.record_applied();
+    session
+        .undo()
+        .expect("undo with an empty stack is not an error");
+    assert!(
+        session.take_applied().is_empty(),
+        "nothing happened, so there is nothing to tell anybody"
+    );
+}
+
+/// **A tab drag renumbers every sheet, and the kept graph is keyed by number.**
+///
+/// `MoveSheet` was classified `RecalcPlan::Skip` on the grounds that reordering
+/// tabs changes no value and no name resolution. Both readings were too narrow:
+/// the precedent graph is keyed by sheet *index*, and `MoveSheet` removes and
+/// re-inserts, renumbering the lot. The graph then described the old numbering,
+/// so every later edit to the moved sheet found no dependents and propagated to
+/// nothing — silently, and into the saved file.
+///
+/// Asserted against a full recalculation rather than a literal, because the
+/// property that matters is that keeping a graph never changes the answer.
+#[test]
+fn moving_a_sheet_does_not_leave_a_graph_keyed_to_the_old_order() {
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut first = Sheet::new(SheetId(Id::from_parts(9, 1)), "First");
+        first.cells.set(
+            CellRef::new(0, 0),
+            casual_calc_model::Cell::value(CellValue::Number(1.0)),
+        );
+        let handle = wb.store_formula(casual_calc_formula::parse("A1*2").unwrap());
+        let mut b1 = casual_calc_model::Cell::value(CellValue::Empty);
+        b1.formula = Some(handle);
+        first.cells.set(CellRef::new(0, 1), b1);
+        wb.sheets.push(first);
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 2)), "Second"));
+    }
+    session.recalculate();
+
+    // An ordinary edit, which is what builds and keeps the graph.
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(2.0),
+        })
+        .expect("edit");
+
+    session
+        .edit(EditOperation::MoveSheet { from: 0, to: 1 })
+        .expect("drag the tab");
+    assert_eq!(
+        session.workbook().sheets[1].name,
+        "First",
+        "the move happened"
+    );
+
+    // Edit the same cell at the sheet's new index.
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 1,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(100.0),
+        })
+        .expect("edit after the move");
+
+    let kept = session.workbook().sheets[1]
+        .cells
+        .get(CellRef::new(0, 1))
+        .map(|c| c.value.clone())
+        .unwrap_or(CellValue::Empty);
+
+    let mut truth = session.workbook().clone();
+    casual_calc_eval::recalculate(&mut truth);
+    let full = truth.sheets[1]
+        .cells
+        .get(CellRef::new(0, 1))
+        .map(|c| c.value.clone())
+        .unwrap_or(CellValue::Empty);
+
+    assert_eq!(
+        kept, full,
+        "the kept graph disagrees with a full recalculation after a tab drag"
+    );
+    assert_eq!(
+        kept,
+        CellValue::Number(200.0),
+        "and the answer is the right one"
+    );
+}
+
+/// **`SHEET()` reports a sheet's position, so a tab drag changes its value.**
+///
+/// The other half of why `MoveSheet` cannot be `Skip`, and the one that holds
+/// even for a session that never built a graph at all.
+#[test]
+fn moving_a_sheet_recomputes_a_formula_that_reads_its_position() {
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut first = Sheet::new(SheetId(Id::from_parts(9, 1)), "First");
+        let handle = wb.store_formula(casual_calc_formula::parse("SHEET()").unwrap());
+        let mut a1 = casual_calc_model::Cell::value(CellValue::Empty);
+        a1.formula = Some(handle);
+        first.cells.set(CellRef::new(0, 0), a1);
+        wb.sheets.push(first);
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 2)), "Second"));
+    }
+    session.recalculate();
+    assert_eq!(
+        session.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(0, 0))
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number(1.0)),
+        "First is the first sheet"
+    );
+
+    session
+        .edit(EditOperation::MoveSheet { from: 0, to: 1 })
+        .expect("drag the tab");
+
+    assert_eq!(
+        session.workbook().sheets[1]
+            .cells
+            .get(CellRef::new(0, 0))
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number(2.0)),
+        "SHEET() must report the new position, not the old one"
+    );
+}
+
+/// **Hiding a row changes what a subtotal is.**
+///
+/// `SetSheetMetadata` was classified `Skip` as a presentation-only bundle, but
+/// two of its twenty-three fields are read by the evaluator: `SUBTOTAL`'s
+/// 101–111 codes and `AGGREGATE` skip hidden rows, and `Sheet::is_row_hidden`
+/// is the union of the hand-hidden set and the set an autofilter hides. So
+/// applying a filter changed the sheet without recomputing the one function
+/// whose answer depends on it — and since no *cell* was written, nothing in the
+/// dependency graph could have noticed either.
+///
+/// This is the engine half of a filter that co-editors see differently: the
+/// operation relays, and the subtotal underneath it did not move.
+#[test]
+fn hiding_a_row_recomputes_a_subtotal_that_ignores_hidden_rows() {
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        for (row, n) in [(0u32, 1.0), (1, 2.0), (2, 3.0)] {
+            sheet.cells.set(
+                CellRef::new(row, 0),
+                casual_calc_model::Cell::value(CellValue::Number(n)),
+            );
+        }
+        // 109 is SUM ignoring hidden rows.
+        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let mut total = casual_calc_model::Cell::value(CellValue::Empty);
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(3, 0), total);
+        wb.sheets.push(sheet);
+    }
+    session.recalculate();
+    assert_eq!(
+        session.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(3, 0))
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number(6.0)),
+        "nothing hidden yet"
+    );
+
+    // Hide the middle row the way a filter does.
+    let mut data = crate::SheetMetadata::capture(&session.workbook().sheets[0]);
+    data.filter_hidden.insert(1);
+    session
+        .edit(EditOperation::SetSheetMetadata {
+            sheet: 0,
+            data: Box::new(data),
+            changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+        })
+        .expect("apply the filter");
+
+    assert_eq!(
+        session.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(3, 0))
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number(4.0)),
+        "SUBTOTAL(109) must drop the row the filter hid"
+    );
+}
+
+/// **Does a filter reach the other participant at all?**
+///
+/// Reported as "the filter does not relay". At the engine level it does: the
+/// editor's filter commands go through `commit_filter`, which builds a
+/// `SetSheetMetadata` and applies it with `session.edit`, so it enters the
+/// outgoing log like any edit and transforms like one. This pins that, so a
+/// later change cannot quietly move filtering off the operation path — and so
+/// the remaining half of the report is known to be the editor's redraw rather
+/// than the engine's transport.
+#[test]
+fn applying_a_filter_reaches_the_other_participant() {
+    let mut author = WorkbookSession::blank();
+    {
+        let wb = author.workbook_mut();
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        for (row, n) in [(0u32, 1.0), (1, 2.0), (2, 3.0)] {
+            sheet.cells.set(
+                CellRef::new(row, 0),
+                casual_calc_model::Cell::value(CellValue::Number(n)),
+            );
+        }
+        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let mut total = casual_calc_model::Cell::value(CellValue::Empty);
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(3, 0), total);
+        wb.sheets.push(sheet);
+    }
+    author.recalculate();
+    author.record_applied();
+
+    let mut peer = WorkbookSession::from_workbook(author.workbook().clone());
+
+    let mut data = crate::SheetMetadata::capture(&author.workbook().sheets[0]);
+    data.filter_hidden.insert(1);
+    author
+        .edit(EditOperation::SetSheetMetadata {
+            sheet: 0,
+            data: Box::new(data),
+            changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+        })
+        .expect("apply the filter");
+
+    let sent = author.take_applied();
+    assert!(
+        !sent.is_empty(),
+        "a filter is a document change and has to be sent"
+    );
+    for op in sent {
+        peer.edit(op).expect("the peer applies it");
+    }
+
+    assert!(
+        peer.workbook().sheets[0].is_row_hidden(1),
+        "the peer hides the row the filter hid"
+    );
+    // And the value underneath agrees on both sides, which is the half that
+    // was broken independently of transport.
+    let total = |s: &WorkbookSession| {
+        s.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(3, 0))
+            .map(|c| c.value.clone())
+    };
+    assert_eq!(total(&peer), total(&author));
+    assert_eq!(total(&peer), Some(CellValue::Number(4.0)));
+}

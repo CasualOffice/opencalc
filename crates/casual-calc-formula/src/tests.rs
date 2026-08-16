@@ -431,3 +431,80 @@ mod depth_bounds {
         ));
     }
 }
+
+/// **A sheet name that is not an identifier has to be quoted, or the formula
+/// does not survive being written down.**
+///
+/// The rule was "quote unless every character is alphanumeric or `_`", which a
+/// sheet called `2024` passes — so it was written bare as `2024!A1`, text that
+/// neither this parser nor Excel reads as a reference. On re-import the parse
+/// failed, the stale cached value was kept and the formula dropped: the cell
+/// became a constant that never recalculates.
+///
+/// Asserted as a round trip rather than against a literal string, because what
+/// matters is that what we write, we can read — the exact quoting is an
+/// implementation detail and the fixed point is the contract (docs/36).
+#[test]
+fn a_sheet_name_survives_being_printed_and_read_back() {
+    for name in [
+        "2024",       // starts with a digit
+        "1",          // is a number
+        "2025Q1",     // starts with a digit
+        "A1",         // is itself a cell reference
+        "XFD1048576", // the last cell, still a reference
+        "R",          // reserved by R1C1
+        "C",          //
+        "R1C1",       // an R1C1 reference
+        "My Sheet",   // a space
+        "Q1'24",      // an apostrophe, which must be doubled
+        "Sheet1",     // ordinary, and must stay unquoted
+        "_hidden",    //
+        "Data2024",   // digits, but not leading
+    ] {
+        let reference = crate::CellReference {
+            sheet: Some(name.to_owned()),
+            col: 0,
+            row: 0,
+            col_absolute: false,
+            row_absolute: false,
+            row_implicit: false,
+            col_implicit: false,
+        };
+        let printed = format!("{reference}");
+        let expression = format!("{printed}*2");
+        let parsed = parse(&expression).unwrap_or_else(|e| {
+            panic!("sheet {name:?} printed as {printed:?} and would not parse back: {e}")
+        });
+        // And it names the same sheet it started as.
+        let found = format!("{parsed:?}");
+        assert!(
+            found.contains(name),
+            "sheet {name:?} printed as {printed:?} and parsed back as something else: {found}"
+        );
+    }
+}
+
+/// The ordinary names stay bare, so this did not fix a round trip by quoting
+/// everything and making every formula in every file noisier.
+#[test]
+fn an_ordinary_sheet_name_is_still_written_without_quotes() {
+    let bare = |name: &str| {
+        format!(
+            "{}",
+            crate::CellReference {
+                sheet: Some(name.to_owned()),
+                col: 0,
+                row: 0,
+                col_absolute: false,
+                row_absolute: false,
+                row_implicit: false,
+                col_implicit: false,
+            }
+        )
+    };
+    assert_eq!(bare("Sheet1"), "Sheet1!A1");
+    assert_eq!(bare("_x"), "_x!A1");
+    assert_eq!(bare("Data2024"), "Data2024!A1");
+    assert_eq!(bare("2024"), "'2024'!A1");
+    assert_eq!(bare("A1"), "'A1'!A1");
+}

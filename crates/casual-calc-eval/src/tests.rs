@@ -25,6 +25,13 @@ impl Builder {
         self
     }
 
+    fn boolean(&mut self, at: (u32, u32), b: bool) -> &mut Self {
+        self.sheet
+            .cells
+            .set(CellRef::new(at.0, at.1), Cell::value(CellValue::Bool(b)));
+        self
+    }
+
     fn text(&mut self, at: (u32, u32), s: &str) -> &mut Self {
         let id = self.wb.intern_string(s);
         self.sheet.cells.set(
@@ -4012,5 +4019,271 @@ mod iterative {
             wb.sheets[0].cells.get(CellRef::new(1, 0)).unwrap().value,
             CellValue::Number(8.0)
         );
+    }
+}
+
+/// **Which cell gets which `RAND()` draw must not depend on hash order.**
+///
+/// `apply_dirty` walked the dirty set straight out of a `HashSet`, whose
+/// iteration order is seeded per process. `Evaluator::next_random` draws from a
+/// counter incremented per draw, so the walk order decided the assignment:
+/// identical input produced a different workbook — and different saved bytes —
+/// on every run. Priority 2 in AGENTS.md, and the one property a spreadsheet
+/// engine cannot negotiate.
+///
+/// A single-process test cannot observe the seed varying, so this asserts the
+/// stronger property instead: the incremental path assigns draws exactly as the
+/// full path does. The full path walks sheets and cells in order and has always
+/// been deterministic, so pinning the two together pins the incremental one to a
+/// fixed order without asserting *which* order in a way that a later change to
+/// `next_random` would have to come and edit.
+///
+/// Thirty volatile cells, so an unsorted walk that happened to match sorted
+/// order is not a thing that can occur.
+#[test]
+fn incremental_assigns_volatile_draws_in_the_same_order_as_a_full_recalc() {
+    let build = || {
+        let mut b = Builder::new();
+        b.number((0, 0), 1.0);
+        for row in 0..30u32 {
+            b.formula((row, 1), "RAND()");
+        }
+        let mut wb = b.build();
+        wb.volatile_seed = 12345;
+        recalculate(&mut wb);
+        wb
+    };
+
+    let mut incr = build();
+    let changed = set_number(&mut incr, 0, 0, 2.0);
+    recalculate_incremental(&mut incr, &[changed]);
+
+    let mut full = build();
+    set_number(&mut full, 0, 0, 2.0);
+    recalculate(&mut full);
+
+    let draws = |wb: &Workbook| -> Vec<CellValue> { (0..30).map(|r| value_at(wb, r, 1)).collect() };
+    assert_eq!(
+        draws(&incr),
+        draws(&full),
+        "the incremental path assigned the volatile draws to different cells \
+         than a full recalculation did"
+    );
+}
+
+/// **A logical held in a cell is not a number, and Excel does not count it.**
+///
+/// `flatten_numbers` coerced `Value::Bool` to 1/0 in its two *reference*
+/// branches, so a column with a `TRUE` in it corrupted every aggregate over it —
+/// and `AVERAGE` twice over, because the boolean inflated the sum and the
+/// divisor together. Text was already skipped by the very next arm of the same
+/// match, so the two were treated inconsistently in one expression.
+///
+/// Excel's rule is about how the value arrived, not what it is: written as an
+/// argument a logical counts, read out of a reference it does not. Both halves
+/// are asserted here, because a fix that skipped logicals everywhere would pass
+/// the first half of this test and break `=SUM(TRUE,1)`.
+#[test]
+fn aggregates_ignore_logicals_held_in_a_range_but_not_ones_written_as_arguments() {
+    let mut b = Builder::new();
+    b.boolean((0, 0), true) // A1 = TRUE
+        .number((1, 0), 10.0) // A2 = 10
+        .formula((0, 2), "SUM(A1:A2)")
+        .formula((1, 2), "AVERAGE(A1:A2)")
+        .formula((2, 2), "COUNT(A1:A2)")
+        .formula((3, 2), "MIN(A1:A2)")
+        .formula((4, 2), "MAX(A1:A2)")
+        // Written as arguments, logicals still count — the other half of the rule.
+        .formula((5, 2), "SUM(TRUE,1)")
+        .formula((6, 2), "COUNT(TRUE,1)")
+        // The A-variants are the ones that do count a logical in a reference.
+        .formula((7, 2), "AVERAGEA(A1:A2)");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(
+        value_at(&wb, 0, 2),
+        CellValue::Number(10.0),
+        "SUM ignores TRUE in a range"
+    );
+    assert_eq!(
+        value_at(&wb, 1, 2),
+        CellValue::Number(10.0),
+        "AVERAGE must not count TRUE in either the total or the divisor"
+    );
+    assert_eq!(
+        value_at(&wb, 2, 2),
+        CellValue::Number(1.0),
+        "COUNT counts numbers only"
+    );
+    assert_eq!(
+        value_at(&wb, 3, 2),
+        CellValue::Number(10.0),
+        "MIN skips the TRUE"
+    );
+    assert_eq!(
+        value_at(&wb, 4, 2),
+        CellValue::Number(10.0),
+        "MAX skips the TRUE"
+    );
+    assert_eq!(
+        value_at(&wb, 5, 2),
+        CellValue::Number(2.0),
+        "SUM(TRUE,1) is still 2"
+    );
+    assert_eq!(
+        value_at(&wb, 6, 2),
+        CellValue::Number(2.0),
+        "COUNT(TRUE,1) is still 2"
+    );
+    assert_eq!(
+        value_at(&wb, 7, 2),
+        CellValue::Number(5.5),
+        "AVERAGEA is the function that does count a logical in a reference"
+    );
+}
+
+/// **Excel's comparison rules, as a matrix.**
+///
+/// `comparison()` tried `as_number()` on both operands first, and `as_number`
+/// parses text — so `="1"=1` was TRUE and `=TRUE=1` was TRUE, neither of which
+/// Excel agrees with. The text fallback compared raw UTF-8 bytes, so comparison
+/// was case-sensitive and code-point-ordered.
+///
+/// Asserted as the whole matrix in one place because the rules are a system:
+/// fixing the coercion without fixing the ordering, or either without the
+/// contextual empty, produces a comparator that is differently wrong. See
+/// docs/70-COMPARISON-SEMANTICS.md.
+#[test]
+fn comparison_follows_excel_type_ordering() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0) // A1 = 1
+        .text((1, 0), "Yes") // A2 = "Yes"
+        .boolean((2, 0), true) // A3 = TRUE
+        // (A4 deliberately left empty)
+        // No coercion across types.
+        .formula((0, 2), "IF(\"1\"=1,1,0)") // Excel: 0
+        .formula((1, 2), "IF(TRUE=1,1,0)") // Excel: 0
+        // number < text < logical
+        .formula((2, 2), "IF(1<\"a\",1,0)") // Excel: 1
+        .formula((3, 2), "IF(\"a\"<TRUE,1,0)") // Excel: 1
+        // Text compares case-insensitively.
+        .formula((4, 2), "IF(A2=\"YES\",1,0)") // Excel: 1
+        .formula((5, 2), "IF(\"apple\"<\"Banana\",1,0)") // Excel: 1
+        // An empty cell takes the shape of the other operand.
+        .formula((6, 2), "IF(A4=0,1,0)") // Excel: 1
+        .formula((7, 2), "IF(A4=\"\",1,0)") // Excel: 1
+        // FALSE < TRUE.
+        .formula((8, 2), "IF(FALSE()<TRUE(),1,0)") // Excel: 1
+        // Errors propagate rather than comparing as text.
+        .formula((9, 2), "ISERROR(1=(1/0))"); // Excel: TRUE
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    let cases = [
+        (0, "\"1\"=1 must be FALSE — text is not a number", 0.0),
+        (1, "TRUE=1 must be FALSE — a logical is not a number", 0.0),
+        (2, "every number sorts before every text", 1.0),
+        (3, "every text sorts before every logical", 1.0),
+        (4, "text comparison is case-insensitive", 1.0),
+        (5, "and ordered case-insensitively, not by code point", 1.0),
+        (6, "an empty cell equals 0 beside a number", 1.0),
+        (7, "and equals \"\" beside text", 1.0),
+        (8, "FALSE sorts before TRUE", 1.0),
+    ];
+    for (row, why, expect) in cases {
+        assert_eq!(value_at(&wb, row, 2), CellValue::Number(expect), "{why}");
+    }
+    assert_eq!(
+        value_at(&wb, 9, 2),
+        CellValue::Bool(true),
+        "an error on either side of a comparison is the result"
+    );
+}
+
+/// **The two halves of the engine must agree about what matches.**
+///
+/// This is the defect that made the comparison rules worth fixing rather than
+/// merely wrong. `COUNTIF` went through `criterion_matches`, which upper-cases;
+/// `SUM(IF(range="yes",…))` went through `comparison`, which did not. The same
+/// data gave two different answers depending on which function the user reached
+/// for — reported as "the numbers don't add up" and reproducible by nobody.
+#[test]
+fn countif_and_a_comparison_agree() {
+    let mut b = Builder::new();
+    b.text((0, 0), "yes")
+        .text((1, 0), "YES")
+        .text((2, 0), "Yes")
+        .text((3, 0), "no")
+        .formula((0, 2), "COUNTIF(A1:A4,\"yes\")")
+        // Written cell by cell rather than as `A1:A4="yes"`, which would also
+        // be asking whether a range broadcasts against a scalar — a separate
+        // question, and one this test would then answer confusingly.
+        .formula(
+            (1, 2),
+            "IF(A1=\"yes\",1,0)+IF(A2=\"yes\",1,0)+IF(A3=\"yes\",1,0)+IF(A4=\"yes\",1,0)",
+        );
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    assert_eq!(
+        value_at(&wb, 0, 2),
+        value_at(&wb, 1, 2),
+        "COUNTIF and an `=` comparison disagree about the same four cells"
+    );
+    assert_eq!(
+        value_at(&wb, 0, 2),
+        CellValue::Number(3.0),
+        "and both find three"
+    );
+}
+
+/// **Serial 60 is 1900-02-29, a day that never happened.**
+///
+/// Lotus 1-2-3 treated 1900 as a leap year; Excel reproduced the bug on purpose
+/// so those files' arithmetic kept working, and every spreadsheet since has
+/// reproduced Excel. This engine computed a straight proleptic Gregorian offset
+/// and skipped all of it, so every serial from 1 to 60 was one too high on the
+/// way in and one too low on the way out.
+///
+/// Both directions and both sides of the boundary are asserted, because a fix
+/// applied to only one conversion is worse than the bug: `DATE()` and `DAY()`
+/// would stop being inverses of each other.
+#[test]
+fn the_1900_leap_year_bug_is_reproduced_as_excel_has_it() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "DATE(1900,1,1)") // 1
+        .formula((1, 0), "DATE(1900,2,28)") // 59
+        .formula((2, 0), "DATE(1900,2,29)") // 60 — the phantom day
+        .formula((3, 0), "DATE(1900,3,1)") // 61
+        .formula((4, 0), "DAY(59)") // 28
+        .formula((5, 0), "DAY(60)") // 29
+        .formula((6, 0), "DAY(61)") // 1
+        .formula((7, 0), "MONTH(60)") // 2
+        // Unaffected either side of the boundary — the correction must not
+        // leak into ordinary dates.
+        .formula((8, 0), "DATE(2020,1,1)") // 43831
+        .formula((9, 0), "DATE(2024,2,29)") // 45351, a real leap day
+        // Round-trip: the two conversions stay inverses across the boundary.
+        .formula((10, 0), "DAY(DATE(1900,1,15))") // 15
+        .formula((11, 0), "YEAR(DATE(1900,2,28))"); // 1900
+    let mut wb = b.build();
+    recalculate(&mut wb);
+
+    for (row, expect, why) in [
+        (0u32, 1.0, "1900-01-01 is serial 1, not 2"),
+        (1, 59.0, "1900-02-28 is serial 59"),
+        (2, 60.0, "the phantom 1900-02-29 is serial 60"),
+        (3, 61.0, "1900-03-01 is serial 61, where both systems agree"),
+        (4, 28.0, "serial 59 is the 28th"),
+        (5, 29.0, "serial 60 is the phantom 29th"),
+        (6, 1.0, "serial 61 is the 1st"),
+        (7, 2.0, "and the phantom day is in February"),
+        (8, 43831.0, "an ordinary modern date is untouched"),
+        (9, 45351.0, "and so is a real leap day"),
+        (10, 15.0, "DATE and DAY are inverses below the boundary"),
+        (11, 1900.0, "and DATE and YEAR are too"),
+    ] {
+        assert_eq!(value_at(&wb, row, 0), CellValue::Number(expect), "{why}");
     }
 }

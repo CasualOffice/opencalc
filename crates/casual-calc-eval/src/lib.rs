@@ -346,11 +346,27 @@ fn apply_dirty(workbook: &mut Workbook, dirty: &std::collections::HashSet<(usize
         return;
     }
 
+    // Evaluated in a fixed order, which is correctness rather than tidiness.
+    //
+    // `HashSet` iteration order depends on `RandomState`, which is seeded per
+    // process — and evaluation order is *observable*. `Evaluator::next_random`
+    // draws from a counter incremented per draw, so the order these cells are
+    // visited in decides which cell receives which `RAND()` value; the same
+    // order also arbitrates which of two colliding spills reaches its target
+    // first. Identical input therefore produced a different workbook, and
+    // different saved bytes, on every run — priority 2 in AGENTS.md, and the
+    // one property a spreadsheet engine cannot negotiate.
+    //
+    // Sheet, then row, then column: the order `recalculate_once` already walks,
+    // so the incremental and full paths cannot disagree about it either.
+    let mut order: Vec<(usize, u32, u32)> = dirty.iter().copied().collect();
+    order.sort_unstable();
+
     // Phase 1: evaluate the dirty formula cells (clean precedents read cache).
     let updates = {
         let mut evaluator = Evaluator::with_dirty(workbook, dirty);
         let mut updates: Vec<(usize, CellRef, Value)> = Vec::new();
-        for &(sheet_index, row, col) in dirty {
+        for (sheet_index, row, col) in order {
             let at = CellRef::new(row, col);
             let is_formula = workbook
                 .sheets
