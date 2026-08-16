@@ -251,6 +251,22 @@ pub struct ServiceConfig {
     /// running against a coordinator that happens to be local, which would make
     /// the common deployment pay for the uncommon one.
     pub membership: Option<Membership>,
+    /// TLS for this listener, or plain when absent.
+    ///
+    /// Absent is a legitimate production choice **behind a proxy that
+    /// terminates TLS** and a bad one anywhere else, which is why
+    /// `Exposure::warnings` says so at startup.
+    ///
+    /// This field exists because for a long time the choice was expressed only
+    /// in configuration: `tls_config` built a complete rustls configuration,
+    /// nothing called it outside tests, and `serve` bound a plain socket. An
+    /// operator who supplied a certificate got plaintext WebSockets carrying
+    /// document contents and bearer tokens (DEP-01). Carrying the *built*
+    /// configuration rather than the file paths is deliberate — it means the
+    /// certificate is read, parsed and accepted before the listener opens, so a
+    /// bad certificate refuses to start rather than failing per-connection
+    /// later.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl core::fmt::Debug for ServiceConfig {
@@ -260,6 +276,10 @@ impl core::fmt::Debug for ServiceConfig {
             .field("save", &self.save)
             .field("snapshots", &self.snapshots)
             .field("limits", &self.limits)
+            // Whether, not what: a certificate chain in a log line is noise, and
+            // "is this listener actually encrypted" is the question DEP-01 was
+            // about.
+            .field("tls", &self.tls.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -660,9 +680,41 @@ pub async fn serve_on_with_shutdown(
     }
 
     let signalled = shutdown.clone();
-    axum::serve(listener, router(Arc::clone(&state)))
-        .with_graceful_shutdown(async move { signalled.wait().await })
-        .await?;
+    let app = router(Arc::clone(&state));
+    match state.config.tls.clone() {
+        // Plain, which behind a TLS-terminating proxy is the right answer and
+        // everywhere else is the one `Exposure::warnings` complains about.
+        None => {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { signalled.wait().await })
+                .await?;
+        }
+        // TLS, served by `axum-server` because `axum::serve` has no TLS of its
+        // own. Its graceful shutdown is a `Handle` rather than a future, so the
+        // signal is bridged to it here; the budget is the same `drain_timeout_ms`
+        // the rest of shutdown uses, so a deploy cannot be held open by one
+        // connection that will not close.
+        Some(tls) => {
+            let handle = axum_server::Handle::new();
+            let closing = handle.clone();
+            let budget = std::time::Duration::from_millis(state.config.limits.drain_timeout_ms);
+            tokio::spawn(async move {
+                signalled.wait().await;
+                closing.graceful_shutdown(Some(budget));
+            });
+            // `into_std` rather than a fresh bind: the port is already open, and
+            // rebinding it would lose every connection accepted in between and
+            // race anything else that grabbed the port.
+            let std_listener = listener.into_std()?;
+            axum_server::from_tcp_rustls(
+                std_listener,
+                axum_server::tls_rustls::RustlsConfig::from_config(tls),
+            )
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+        }
+    }
 
     // Wait for the sweeper to actually stop, rather than sleeping long enough
     // that it probably has. The first version slept twice the tick interval,

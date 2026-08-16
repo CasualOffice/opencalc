@@ -63,12 +63,20 @@ async fn main() -> std::process::ExitCode {
 /// Reads the same `OPENCALC_BIND` the server did, so the check cannot drift from
 /// the thing it checks by being told a port twice.
 ///
-/// Over plain HTTP it fetches `/healthz`, which proves the whole request path
-/// works and not merely that something is holding the port. With TLS configured
-/// it settles for a TCP connection: verifying the certificate would need the
-/// hostname an operator's clients use rather than the loopback address this
-/// connects on, and disabling verification to get around that would make the
-/// check pass against anything at all.
+/// Fetches `/healthz` over whichever scheme the listener is configured for,
+/// which proves the whole request path works rather than that something is
+/// holding the port.
+///
+/// **The TLS leg does not verify the certificate, and that is deliberate.** A
+/// certificate is issued for the hostname an operator's clients use; this
+/// connects to loopback inside the container, so verification could only ever
+/// fail. What it still establishes is the part that matters here: that a TLS
+/// handshake completes and the request path answers. It was previously a bare
+/// TCP connect for this case, which established neither — so a listener serving
+/// *plaintext* while configured for TLS passed its own health check, and that
+/// is exactly the state DEP-01 left every deployment in. A liveness probe is not
+/// trying to authenticate the thing it is probing; it is asking whether this
+/// process is serving what it claims to serve.
 async fn healthy() -> Result<(), String> {
     let bind = std::env::var("OPENCALC_BIND").unwrap_or_else(|_| "0.0.0.0:8443".to_owned());
     let addr: SocketAddr = bind
@@ -84,19 +92,19 @@ async fn healthy() -> Result<(), String> {
         addr
     };
 
-    if std::env::var("OPENCALC_TLS_CERT").is_ok() {
-        return tokio::net::TcpStream::connect(target)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("nothing is listening on {target}: {e}"));
-    }
+    let secure = std::env::var("OPENCALC_TLS_CERT").is_ok();
+    let scheme = if secure { "https" } else { "http" };
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(secure)
+        .build()
+        .map_err(|e| format!("could not build a client: {e}"))?;
 
-    let response = reqwest::Client::new()
-        .get(format!("http://{target}/healthz"))
+    let response = client
+        .get(format!("{scheme}://{target}/healthz"))
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
-        .map_err(|e| format!("could not reach {target}: {e}"))?;
+        .map_err(|e| format!("could not reach {target} over {scheme}: {e}"))?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -147,8 +155,19 @@ async fn start() -> Result<(), String> {
         .map_err(|e| format!("could not build the HTTP client: {e}"))?,
     );
 
+    // Built before the listener opens, so a certificate that cannot be read or
+    // parsed refuses to start the process. The alternative — discovering it on
+    // the first connection — is a node that is up, healthy and unusable.
+    let tls = match exposure.public.tls.as_ref() {
+        None => None,
+        Some(_) => Some(std::sync::Arc::new(
+            casual_calc_collab_server::net::tls_config(&exposure.public)?,
+        )),
+    };
+
     let config = ServiceConfig {
         bind: exposure.public.bind,
+        tls,
         verifier: read_verifier().await?,
         save: SavePolicy::default(),
         snapshots: SnapshotPolicy::default(),
@@ -160,7 +179,11 @@ async fn start() -> Result<(), String> {
 
     tracing::info!(
         bind = %config.bind,
-        tls = exposure.public.is_tls(),
+        // What was **built**, not what was configured. These were the same
+        // expression before DEP-01 and did not mean the same thing: the socket
+        // was plain while this line said `tls = true`, so the one place an
+        // operator looks to check agreed with the mistake.
+        tls = config.tls.is_some(),
         node = exposure.node.as_ref().map_or("standalone", |n| n.id.as_str()),
         "starting"
     );
