@@ -106,6 +106,14 @@ jobs:
             echo "merge-conflict markers found" >&2
             exit 1
           fi
+      # An id is only useful if it names one thing. Two trackers ran independent
+      # FID-01..FID-25 series for different work, and rows were appended without
+      # checking the ids already in the file — so `git log --grep FID-13`
+      # returned two unrelated changes. Review cannot catch this: the diff shows
+      # the row being added, not the row three hundred lines up that already has
+      # that id.
+      - name: Tracker ids must be unique
+        run: python3 tools/check-tracker-ids.py
       # Cargo defaults `overflow-checks` off in release, so arithmetic that
       # panics in a debug test wraps silently in the shipped binary — the tests
       # then prove a property the artefact does not have. This engine's
