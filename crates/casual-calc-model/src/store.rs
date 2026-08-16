@@ -24,10 +24,34 @@ pub struct CellRef {
     pub col: u32,
 }
 
+/// The last addressable row, zero-based: 2^20 rows.
+///
+/// `docs/21-PARSER-LIMITS.md` has listed "Max rows / columns — 2^20 rows x 2^14
+/// cols" as a non-bypassable admission limit since Phase 0, and until FID-18
+/// **no constant anywhere in `crates/` said so**. A worksheet naming
+/// `<row r="4294967295">` imported unbounded, was written straight back, and
+/// produced a package Excel and LibreOffice refuse to open. A documented limit
+/// nothing in the code enforces is not a limit, so the number lives here, beside
+/// the type it bounds, and every layer that has to decide whether an address is
+/// real asks [`CellRef::in_grid`] rather than carrying its own copy.
+pub const GRID_MAX_ROW: u32 = (1 << 20) - 1;
+/// The last addressable column, zero-based: 2^14 columns. See [`GRID_MAX_ROW`].
+pub const GRID_MAX_COL: u32 = (1 << 14) - 1;
+
 impl CellRef {
     /// A reference to `(row, col)`.
     pub fn new(row: u32, col: u32) -> Self {
         Self { row, col }
+    }
+
+    /// Whether this address exists in an ECMA-376 grid.
+    ///
+    /// `CellRef` is two `u32`s because the grid is 2^20 x 2^14 and packing it
+    /// tighter buys nothing; that width is a representation detail, not a
+    /// licence to address 4 billion rows.
+    #[must_use]
+    pub fn in_grid(&self) -> bool {
+        self.row <= GRID_MAX_ROW && self.col <= GRID_MAX_COL
     }
 }
 
@@ -48,6 +72,16 @@ impl CellRange {
             start: CellRef::new(a.row.min(b.row), a.col.min(b.col)),
             end: CellRef::new(a.row.max(b.row), a.col.max(b.col)),
         }
+    }
+
+    /// Whether the whole rectangle exists in an ECMA-376 grid.
+    ///
+    /// Only `end` can fail once the range is normalized, but both corners are
+    /// checked: a caller that built a `CellRange` by hand rather than through
+    /// [`Self::new`] would otherwise slip past.
+    #[must_use]
+    pub fn in_grid(&self) -> bool {
+        self.start.in_grid() && self.end.in_grid()
     }
 }
 

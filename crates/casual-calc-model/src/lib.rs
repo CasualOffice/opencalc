@@ -17,6 +17,7 @@ mod chart;
 mod defined_name;
 mod error;
 mod ids;
+pub mod int_keys;
 mod pivot;
 mod sheet;
 mod store;
@@ -41,7 +42,7 @@ pub use sheet::{
     Sheet, SheetProtection, SheetView, SheetVisibility, SortState, Table, TableColumn,
     wildcard_match,
 };
-pub use store::{CellRange, CellRef, CellStore};
+pub use store::{CellRange, CellRef, CellStore, GRID_MAX_COL, GRID_MAX_ROW};
 pub use strings::StringTable;
 pub use style::{
     BorderEdge, Borders, GradientFill, GradientStop, HAlign, RunFont, Style, StyleTable, TextRun,

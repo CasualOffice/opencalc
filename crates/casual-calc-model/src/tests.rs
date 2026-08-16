@@ -536,3 +536,35 @@ fn retained_bytes_cost_about_four_times_their_size_in_a_snapshot() {
         "expected roughly 4x for 1 KiB of retained bytes, measured {overhead}"
     );
 }
+
+/// The grid bound is one number with two names, and the two must agree.
+///
+/// `casual-calc-formula` has carried `MAX_ROW`/`MAX_COL` since whole-column
+/// references landed — but as an *evaluator* bound, the extent `A:A` spans, and
+/// nothing on the admission side ever consulted it. FID-18 is what that gap
+/// costs: a file naming row 4,294,967,295 imported unbounded because the only
+/// copy of the limit lived in a crate the importer's address parser did not ask.
+/// Now the model states it, so if either copy is ever "fixed" alone this fails
+/// rather than letting the two drift into disagreeing about what a sheet is.
+#[test]
+fn the_grid_bound_agrees_with_the_formula_crate() {
+    assert_eq!(crate::GRID_MAX_ROW, casual_calc_formula::MAX_ROW);
+    assert_eq!(crate::GRID_MAX_COL, casual_calc_formula::MAX_COL);
+    // And it is the limit docs/21 publishes: 2^20 rows x 2^14 columns.
+    assert_eq!(u64::from(crate::GRID_MAX_ROW) + 1, 1 << 20);
+    assert_eq!(u64::from(crate::GRID_MAX_COL) + 1, 1 << 14);
+}
+
+#[test]
+fn an_address_past_the_grid_is_not_in_it() {
+    assert!(CellRef::new(0, 0).in_grid());
+    assert!(CellRef::new(crate::GRID_MAX_ROW, crate::GRID_MAX_COL).in_grid());
+    assert!(!CellRef::new(crate::GRID_MAX_ROW + 1, 0).in_grid());
+    assert!(!CellRef::new(0, crate::GRID_MAX_COL + 1).in_grid());
+    // The shape FID-18 arrived in: `ZZZZ4294967295`.
+    assert!(!CellRef::new(4_294_967_294, 475_253).in_grid());
+    assert!(
+        !CellRange::new(CellRef::new(0, 0), CellRef::new(4_294_967_294, 475_253)).in_grid(),
+        "one corner outside is a rectangle outside"
+    );
+}

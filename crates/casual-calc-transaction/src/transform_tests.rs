@@ -139,14 +139,23 @@ fn candidates() -> Vec<Operation> {
     ops.push(Operation::set_sheet_metadata(0, outlined));
 
     // Sheet-level operations, and edits on the second sheet for them to move.
+    //
+    // **Two distinct sheets per index**, which is what makes a *tie* possible.
+    // With one insertion per index no pair in this set ever contests the same
+    // position, so the one case where sheet insertion needs a tie-break — two
+    // clients adding a sheet at the same tab — could not be generated, and the
+    // property test reported TP1 holding over a set that excluded the only pair
+    // that broke it.
     for index in [0usize, 1, 2] {
-        ops.push(Operation::InsertSheet {
-            index,
-            sheet: Box::new(Sheet::new(
-                SheetId(Id::from_parts(2, 9)),
-                format!("added{index}"),
-            )),
-        });
+        for (tag, id) in [("added", 9u64), ("other", 10)] {
+            ops.push(Operation::InsertSheet {
+                index,
+                sheet: Box::new(Sheet::new(
+                    SheetId(Id::from_parts(2, id)),
+                    format!("{tag}{index}"),
+                )),
+            });
+        }
     }
     for index in [0usize, 1] {
         ops.push(Operation::RemoveSheet { index });
@@ -196,7 +205,7 @@ fn observe(workbook: &Workbook) -> String {
     // Every sheet, by name rather than by index: renumbering is exactly what is
     // being tested, so comparing position by position would call two different
     // orderings equal.
-    let mut sheets: Vec<String> = workbook
+    let sheets: Vec<String> = workbook
         .sheets
         .iter()
         .map(|sheet| {
@@ -222,7 +231,16 @@ fn observe(workbook: &Workbook) -> String {
             )
         })
         .collect();
-    sheets.sort();
+    // **Order preserved, deliberately.** This used to `sheets.sort()`, on the
+    // reasoning that comparing position by position would call two different
+    // orderings equal — which is backwards: sorting is what calls two different
+    // orderings *equal*, and sheet order is observable state. Every operation
+    // on the wire addresses a sheet by index, so two replicas holding the same
+    // sheets in different orders is not a cosmetic difference, it is the two of
+    // them meaning different things by `sheet: 1` from then on.
+    //
+    // The name is already in each entry, so a genuine renumbering still shows
+    // up as the same names in a different order rather than as a false match.
     sheets.join(" | ")
 }
 
