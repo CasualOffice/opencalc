@@ -20,6 +20,55 @@ pub(crate) fn xml_err(err: quick_xml::Error) -> ImportError {
     ImportError::Ooxml(OoxmlError::MalformedXml(err.to_string()))
 }
 
+/// What `BytesText::unescape()` did before quick-xml 0.41 split it in two.
+///
+/// 0.41 separated decoding-and-EOL-normalisation (`xml_content`) from entity
+/// resolution (`escape::unescape`). Keeping both steps matters: dropping the
+/// second would leave `&amp;` in every cell that contains an ampersand, which
+/// is the sort of regression a version bump hides because nothing fails to
+/// compile.
+/// The text a `GeneralRef` event stands for.
+///
+/// quick-xml 0.41 stopped inlining entity references in `Event::Text` and began
+/// emitting each one as its own `Event::GeneralRef`. Code that matched only
+/// `Text` therefore kept compiling and started **dropping** every `&amp;`,
+/// `&lt;` and `&#65;` in the document — a silent content change that no type
+/// error could catch, and which the round-trip tests caught as
+/// `"Needs <review> & sign-off"` arriving as `"Needs  sign-off"`.
+///
+/// Numeric references are resolved here too, since a producer is free to write
+/// `&#38;` where another writes `&amp;`.
+pub(crate) fn ref_of(r: &quick_xml::events::BytesRef<'_>) -> Result<String, ImportError> {
+    let name = r
+        .decode()
+        .map_err(|err| ImportError::Ooxml(OoxmlError::MalformedXml(err.to_string())))?;
+    if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&name) {
+        return Ok(resolved.to_owned());
+    }
+    if let Some(digits) = name.strip_prefix('#') {
+        let code = if let Some(hex) = digits.strip_prefix(['x', 'X']) {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            digits.parse::<u32>().ok()
+        };
+        if let Some(ch) = code.and_then(char::from_u32) {
+            return Ok(ch.to_string());
+        }
+    }
+    // An entity this document never declared. Refusing would reject files that
+    // open elsewhere, so it is carried through as written.
+    Ok(format!("&{name};"))
+}
+
+pub(crate) fn text_of(e: &quick_xml::events::BytesText<'_>) -> Result<String, ImportError> {
+    let decoded = e
+        .xml_content(quick_xml::XmlVersion::Implicit1_0)
+        .map_err(|err| ImportError::Ooxml(OoxmlError::MalformedXml(err.to_string())))?;
+    Ok(quick_xml::escape::unescape(&decoded)
+        .map_err(|err| ImportError::Ooxml(OoxmlError::MalformedXml(err.to_string())))?
+        .into_owned())
+}
+
 /// A raw worksheet cell, before mapping to the model.
 #[derive(Debug, Default)]
 pub struct RawCell {
@@ -48,7 +97,9 @@ pub(crate) fn read_attr(
     for attr in e.attributes() {
         let attr = attr.map_err(|err| xml_err(err.into()))?;
         if attr.key.local_name().as_ref() == local {
-            let value = attr.unescape_value().map_err(xml_err)?;
+            let value = attr
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(xml_err)?;
             return Ok(Some(value.into_owned()));
         }
     }
@@ -147,7 +198,12 @@ pub fn parse_shared_strings(xml: &[u8]) -> Result<Vec<Vec<TextRun>>, ImportError
             }
             Event::Text(e) => {
                 if in_text {
-                    text.push_str(&e.unescape().map_err(xml_err)?);
+                    text.push_str(&text_of(&e)?);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if in_text {
+                    text.push_str(&ref_of(&e)?);
                 }
             }
             Event::End(e) => {
@@ -275,9 +331,16 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
             }
             Event::Text(e) => {
                 if in_author {
-                    cur_author.push_str(&e.unescape().map_err(xml_err)?);
+                    cur_author.push_str(&text_of(&e)?);
                 } else if in_t {
-                    cur_text.push_str(&e.unescape().map_err(xml_err)?);
+                    cur_text.push_str(&text_of(&e)?);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if in_author {
+                    cur_author.push_str(&ref_of(&e)?);
+                } else if in_t {
+                    cur_text.push_str(&ref_of(&e)?);
                 }
             }
             Event::End(e) => {
@@ -392,7 +455,12 @@ pub fn parse_threaded_comments(xml: &[u8]) -> Result<Vec<RawThreadedComment>, Im
             }
             Event::Text(e) => {
                 if in_text && let Some(c) = current.as_mut() {
-                    c.text.push_str(&e.unescape().map_err(xml_err)?);
+                    c.text.push_str(&text_of(&e)?);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if in_text && let Some(c) = current.as_mut() {
+                    c.text.push_str(&ref_of(&e)?);
                 }
             }
             Event::End(e) => {
@@ -1218,10 +1286,20 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     _ => {}
                 }
             }
-            Event::Text(e) => {
+            // `Text` and `GeneralRef` share this body rather than duplicating it.
+            // quick-xml 0.41 emits every entity reference as its own event, so a
+            // `Text`-only arm silently dropped `&amp;`, `&lt;` and `&#65;`; routing
+            // both through one resolved string keeps the seven destinations below
+            // from drifting apart.
+            ev @ (Event::Text(_) | Event::GeneralRef(_)) => {
+                let piece = match &ev {
+                    Event::Text(e) => text_of(e)?,
+                    Event::GeneralRef(e) => ref_of(e)?,
+                    _ => unreachable!(),
+                };
                 // Header and footer strings are element text, not attributes.
                 if let Some(tag) = header_footer_tag.clone() {
-                    let text = e.unescape().map_err(xml_err)?.into_owned();
+                    let text = piece.clone();
                     result
                         .print
                         .header_footer_text
@@ -1230,27 +1308,23 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                         .or_insert(text);
                 }
                 if in_dv_formula1 && let Some(raw) = dv.as_mut() {
-                    raw.formula1.push_str(&e.unescape().map_err(xml_err)?);
+                    raw.formula1.push_str(&piece);
                 } else if in_dv_formula2 && let Some(raw) = dv.as_mut() {
-                    raw.formula2.push_str(&e.unescape().map_err(xml_err)?);
+                    raw.formula2.push_str(&piece);
                 } else if in_cf_formula
                     && let Some(cf) = cur_cf.as_mut()
                     && let Some(last) = cf.formulas.last_mut()
                 {
-                    last.push_str(&e.unescape().map_err(xml_err)?);
+                    last.push_str(&piece);
                 } else if let Some(cell) = current.as_mut() {
                     if in_value {
-                        cell.value
-                            .get_or_insert_with(String::new)
-                            .push_str(&e.unescape().map_err(xml_err)?);
+                        cell.value.get_or_insert_with(String::new).push_str(&piece);
                     } else if in_formula {
                         cell.formula
                             .get_or_insert_with(String::new)
-                            .push_str(&e.unescape().map_err(xml_err)?);
+                            .push_str(&piece);
                     } else if in_inline_text {
-                        cell.inline
-                            .get_or_insert_with(String::new)
-                            .push_str(&e.unescape().map_err(xml_err)?);
+                        cell.inline.get_or_insert_with(String::new).push_str(&piece);
                     }
                 }
             }
@@ -1418,7 +1492,10 @@ fn read_attrs(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportErro
             continue;
         }
         let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
-        let value = a.unescape_value().map_err(xml_err)?.into_owned();
+        let value = a
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .map_err(xml_err)?
+            .into_owned();
         attrs.insert(key, value);
     }
     Ok(attrs)
@@ -1536,7 +1613,12 @@ pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, Strin
             }
             Event::Text(e) => {
                 if let Some((_, _, text)) = current.as_mut() {
-                    text.push_str(&e.unescape().map_err(xml_err)?);
+                    text.push_str(&text_of(&e)?);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if let Some((_, _, text)) = current.as_mut() {
+                    text.push_str(&ref_of(&e)?);
                 }
             }
             Event::End(e) => {
@@ -1627,7 +1709,15 @@ pub fn parse_table(xml: &[u8]) -> Result<Option<RawTable>, ImportError> {
             }
             Event::Text(ref e) => {
                 if in_text.is_some() {
-                    text.push_str(&e.unescape().map_err(xml_err)?);
+                    text.push_str(&text_of(e)?);
+                }
+            }
+            // These are table column *formulas*, where `&lt;&gt;` is an
+            // inequality operator — dropping it does not mangle a label, it
+            // changes what the column computes.
+            Event::GeneralRef(ref e) => {
+                if in_text.is_some() {
+                    text.push_str(&ref_of(e)?);
                 }
             }
             Event::End(ref e) => {
