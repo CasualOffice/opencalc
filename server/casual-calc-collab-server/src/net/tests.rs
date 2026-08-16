@@ -2072,6 +2072,32 @@ async fn a_document_is_fetched_once_however_many_arrive_at_the_same_moment() {
 
 /// Start a node that is part of a cluster, and return where to reach it.
 async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
+    start_clustered_watching(node, namespace, SavePolicy::default())
+        .await
+        .map(|(addr, _)| addr)
+}
+
+/// The same, keeping hold of what this node delivered to the host.
+///
+/// `start_clustered` builds its `Collected` and drops it, so a test can see
+/// where a node's edits went but not whether that node *saved* — which is the
+/// only way to observe DEP-02.
+async fn start_clustered_watching(
+    node: &str,
+    namespace: &str,
+    save: SavePolicy,
+) -> Option<(SocketAddr, Collected)> {
+    let delivered = Collected::default();
+    let addr = start_clustered_with(node, namespace, save, delivered.clone()).await?;
+    Some((addr, delivered))
+}
+
+async fn start_clustered_with(
+    node: &str,
+    namespace: &str,
+    save: SavePolicy,
+    delivered: Collected,
+) -> Option<SocketAddr> {
     let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
     let store = crate::cluster::redis::Redis::connect_within(&url, namespace)
         .await
@@ -2089,10 +2115,10 @@ async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
             },
             KeySet::shared_secret(SECRET),
         ),
-        save: SavePolicy::default(),
+        save,
         snapshots: SnapshotPolicy::default(),
         fetch: Arc::new(Canned(package())),
-        deliver: Arc::new(Collected::default()),
+        deliver: Arc::new(delivered),
         limits: Limits::default(),
         membership: Some(Membership {
             node: node.to_owned(),
@@ -2198,6 +2224,95 @@ async fn an_edit_on_a_relay_is_ordered_by_the_leader_and_reaches_both() {
         panic!("the edit reached a client on the other node; got {arrived:?}")
     };
     assert_eq!(ops.len(), 1, "and it is the edit that was made");
+}
+
+/// DEP-02. Exactly one node returns the document to the host — the one that
+/// leads it.
+///
+/// `leads` had two callers, the submit path and the inbox, so **ordering** was
+/// leadership-gated and **saving** was not. Every node holding the document ran
+/// the same save cadence, so each assembled the whole workbook and POSTed it.
+/// The cost is N times the CPU and N times the callback traffic; the danger is
+/// that a node momentarily behind delivers an older package *after* the leader
+/// delivered a newer one, and a host that writes what arrives keeps the older.
+///
+/// A short quiesce so the save fires while the test is watching, and both nodes
+/// get the same policy — a replica held back by a longer timer would pass this
+/// for the wrong reason.
+///
+/// Which node leads is not knowable from here and must not matter: the
+/// assertion is **exactly one**, never "node-one".
+#[tokio::test]
+async fn only_the_leader_returns_the_document_to_the_host() {
+    let space = namespace("leader-saves");
+    let brisk = SavePolicy {
+        quiesce_ms: 300,
+        ..SavePolicy::default()
+    };
+    let (Some((one, saved_by_one)), Some((two, saved_by_two))) = (
+        start_clustered_watching("node-one", &space, brisk).await,
+        start_clustered_watching("node-two", &space, brisk).await,
+    ) else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+
+    // Tokens that carry a callback, or the lifecycle records the save as
+    // accepted without delivering anything and the assertion below could never
+    // distinguish one saver from two.
+    let ada = saving_claims("Ada");
+    let bob = saving_claims("Bob");
+    let mut hers = connect_to(one).await;
+    let mut his = connect_to(two).await;
+    let Some(ServerMessage::Welcome {
+        client: ada_is,
+        revision,
+        ..
+    }) = join(&mut hers, &ada).await
+    else {
+        panic!("joined")
+    };
+    let Some(ServerMessage::Welcome { .. }) = join(&mut his, &bob).await else {
+        panic!("joined")
+    };
+
+    say(
+        &mut hers,
+        &ClientMessage::Submit(Submission {
+            client: ada_is,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(64.0)],
+        }),
+    )
+    .await;
+
+    // Both nodes have the edit before either could have saved it: the relaying
+    // node adopts it, which is the state that used to start its own save.
+    let acknowledged = hear_edit(&mut hers, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(acknowledged, Some(ServerMessage::Ack { through: 1, .. })),
+        "the edit was ordered; got {acknowledged:?}"
+    );
+    let arrived = hear_edit(&mut his, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(arrived, Some(ServerMessage::Apply { .. })),
+        "and reached the other node; got {arrived:?}"
+    );
+
+    // Long enough for the quiesce timer and several sweeper ticks on both nodes.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let from_one = saved_by_one.0.lock().unwrap().len();
+    let from_two = saved_by_two.0.lock().unwrap().len();
+    assert!(
+        from_one + from_two > 0,
+        "nobody saved the document at all, so this proves nothing about who did"
+    );
+    assert!(
+        from_one == 0 || from_two == 0,
+        "both nodes returned the document to the host: {from_one} and {from_two}"
+    );
 }
 
 #[tokio::test]

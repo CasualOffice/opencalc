@@ -747,9 +747,15 @@ async fn drain(state: &Arc<Service>) {
         .values()
         .map(Arc::clone)
         .collect();
+    // Counted the way it is drained, so the log line is not a different claim
+    // from the work: in a cluster a replica has "unsaved" work in the only sense
+    // available to it — it has not saved it — while the leader holds the same
+    // revisions and is the one that will. A replica saving here is the same
+    // lost-update hazard as a replica saving on a tick (DEP-02), and shutdown is
+    // exactly when a stale copy is most likely to arrive last.
     let outstanding = documents
         .iter()
-        .filter(|live| lock(&live.session).has_unsaved())
+        .filter(|live| may_save(state, live) && lock(&live.session).has_unsaved())
         .count();
     if outstanding == 0 {
         return;
@@ -761,7 +767,7 @@ async fn drain(state: &Arc<Service>) {
 
     let now = now_ms();
     for live in documents {
-        if !lock(&live.session).has_unsaved() {
+        if !may_save(state, &live) || !lock(&live.session).has_unsaved() {
             continue;
         }
         let Some(destination) = live.callback.clone() else {
@@ -872,8 +878,18 @@ async fn sweep(state: Arc<Service>, shutdown: Shutdown) {
             .collect();
 
         for (key, live) in documents {
+            // Presence and eviction are this node's own business: it holds the
+            // sockets, so it expires its own participants and lets go of its own
+            // copy whether or not it leads.
             expire_presence(&live, now);
-            service_lifecycle(&state, &live, now).await;
+            // Saving is not. The whole lifecycle is skipped rather than the
+            // delivery alone, because `tick` is not a query — it sets
+            // `in_flight` when it hands out a `Save`, so taking the action and
+            // dropping it would leave a replica's lifecycle believing a save was
+            // running and never asking again.
+            if may_save(&state, &live) {
+                service_lifecycle(&state, &live, now).await;
+            }
             evict_if_idle(&state, &key, &live, now);
         }
     }
@@ -1732,7 +1748,7 @@ async fn handle(
                     *lock(&live.leader) = Some(lease);
                 }
 
-                if leads(live, membership) {
+                if leads(live, &membership.node) {
                     order(
                         state,
                         &claims.document.key,
@@ -1983,7 +1999,7 @@ async fn attend(state: Arc<Service>, key: String, live: Arc<Live>, channels: Sub
             }
             forwarded = inbox.recv() => {
                 let Some(payload) = forwarded else { break };
-                if !leads(&live, &membership) {
+                if !leads(&live, &membership.node) {
                     // Somebody else's to order. Every node subscribes to the
                     // inbox so that a leadership change needs no re-subscribe,
                     // and the check is what keeps two nodes from both ordering
@@ -2001,10 +2017,35 @@ async fn attend(state: Arc<Service>, key: String, live: Arc<Live>, channels: Sub
 }
 
 /// Whether this node currently holds the document's lease.
-fn leads(live: &Arc<Live>, membership: &Membership) -> bool {
+fn leads(live: &Arc<Live>, node: &str) -> bool {
     lock(&live.leader)
         .as_ref()
-        .is_some_and(|lease| lease.node == membership.node && lease.expires_ms > now_ms())
+        .is_some_and(|lease| lease.node == node && lease.expires_ms > now_ms())
+}
+
+/// Whether this node is the one responsible for **saving** `live` to the host.
+///
+/// Standalone is `true` by definition: one process leads every document, and
+/// making it consult a lease it never takes would make the common deployment
+/// pay for the uncommon one (ADR-012).
+///
+/// In a cluster this was never asked. `leads` had exactly two callers — the
+/// submit path and the inbox — so ordering was leadership-gated and **saving was
+/// not**: every replica holding the document assembled the whole workbook and
+/// POSTed it on its own sweeper tick (DEP-02). That is N times the CPU and N
+/// times the callback traffic, and worse than either, it is a lost-update path —
+/// a node momentarily behind can deliver an older package *after* the leader has
+/// delivered a newer one, and a host that simply writes what arrives keeps the
+/// older.
+///
+/// Taking the node id rather than the `Membership` is deliberate: the decision
+/// depends on the lease and a name, not on the store, and a predicate that
+/// needs a live Redis connection cannot be tested without one.
+fn may_save(state: &Arc<Service>, live: &Arc<Live>) -> bool {
+    match &state.config.membership {
+        None => true,
+        Some(membership) => leads(live, &membership.node),
+    }
 }
 
 /// Apply a batch another node ordered, and tell this node's clients.
@@ -2068,7 +2109,7 @@ async fn catch_up(
 fn deliver(live: &Arc<Live>, batch: &crate::relay::Committed, revision: u64, mine: &str) {
     {
         let mut session = lock(&live.session);
-        if session.adopt(&batch.ops, revision).is_err() {
+        if session.adopt(&batch.ops, revision, now_ms()).is_err() {
             return;
         }
         // So a client that reconnects to *this* node is still protected from
