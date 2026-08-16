@@ -1958,6 +1958,103 @@ fn a_note_and_a_retained_sheet_relationship_do_not_both_claim_rid1() {
     );
 }
 
+/// FID-20 — a `/hyperlink` is modelled only when a *worksheet* declares it.
+///
+/// `Sheet::hyperlinks` carries the links on cells, resolved from the worksheet's
+/// own `.rels` and re-minted on write, so retaining those too would write each
+/// one twice. But the same relationship type also hangs off a **drawing** — the
+/// web address behind a clickable picture — and nothing in the model carries
+/// that one. Skipping on relationship type alone dropped it with the others.
+///
+/// The drawing's bytes are retained, so `<a:hlinkClick r:id="rId3"/>` inside it
+/// survives the save while the relationship it names does not: a dangling `r:id`
+/// in a part this writer emits verbatim, and a picture that has quietly stopped
+/// being a link. Neither `Omitted` nor counted, which is the one shape
+/// [34](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md) forbids.
+#[test]
+fn a_hyperlink_on_a_drawing_is_not_modelled_and_so_is_retained() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/drawings/drawing1.xml",
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="1" name="Picture 1"><a:hlinkClick r:id="rId3"/></xdr:cNvPr><xdr:cNvPicPr/></xdr:nvPicPr></xdr:pic></xdr:twoCellAnchor></xdr:wsDr>"#,
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/report" TargetMode="External"/>
+            </Relationships>"#,
+        ),
+    ]);
+    let imported = import_package(source).unwrap();
+    let wb = imported.workbook;
+
+    // The model carries no hyperlink, because the link is not on a cell.
+    assert!(
+        wb.sheets[0].hyperlinks.is_empty(),
+        "{:?}",
+        wb.sheets[0].hyperlinks
+    );
+    let link = wb
+        .retained_rels
+        .iter()
+        .find(|r| r.rel_type.ends_with("/hyperlink"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the drawing's hyperlink was dropped: {:?}",
+                wb.retained_rels
+            )
+        });
+    assert_eq!(link.source, "xl/drawings/drawing1.xml");
+    assert_eq!(link.id, "rId3");
+    assert_eq!(link.target, "https://example.com/report");
+    assert!(
+        link.external,
+        "a web address is a URI, not a path in the zip"
+    );
+    // Nothing left the system, so nothing is reported as having left it. Stated
+    // as the `Omitted` + `NotRetained` pair rather than an empty report, because
+    // the fixture's `definedName` is reported as `Mapped` and that is not a loss.
+    use casual_calc_import::{ModelOutcome, RetentionOutcome};
+    assert!(
+        !imported
+            .report
+            .entries()
+            .iter()
+            .any(|e| e.model == ModelOutcome::Omitted
+                && e.retention == RetentionOutcome::NotRetained),
+        "{:?}",
+        imported.report.entries()
+    );
+
+    // And it is still there on the way out: the `<a:hlinkClick r:id="rId3"/>`
+    // inside the retained drawing must not be left naming nothing.
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/drawings/_rels/drawing1.xml.rels");
+    assert_ids_are_unique(&rels);
+    assert_eq!(rel_id_of_type(&rels, "/hyperlink"), "rId3", "{rels}");
+    assert!(
+        rels.contains(r#"Target="https://example.com/report" TargetMode="External"/>"#),
+        "{rels}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_rels, wb.retained_rels);
+}
+
 /// The other half of the same rule: a hyperlink is *modelled*, so it must not
 /// also be retained.
 ///

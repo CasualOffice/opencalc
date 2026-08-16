@@ -205,16 +205,15 @@ fn retain_unmodelled(
     // ordinary workbook and saving it silently dropped its author, its title,
     // its company — and every custom XML payload a host was round-tripping —
     // with an empty report to say so.
+    let workbook_part = package.workbook_part().to_owned();
     let mut queue: Vec<String> = std::iter::once(String::new())
-        .chain(std::iter::once(package.workbook_part().to_owned()))
+        .chain(std::iter::once(workbook_part.clone()))
         .chain(sheet_parts.iter().cloned())
         .collect();
     while let Some(source) = queue.pop() {
+        let kind = PartKind::of(&source, &workbook_part, sheet_parts);
         for rel in package.relationships_of(&source, &limits)? {
-            if MODELLED_REL_SUFFIXES
-                .iter()
-                .any(|s| rel.rel_type.ends_with(s))
-            {
+            if is_modelled(kind, &rel.rel_type) {
                 continue;
             }
             // `TargetMode="External"` names something outside the package — the
@@ -400,25 +399,81 @@ fn resolve_pivot_source(
     Some((sheet.id, range))
 }
 
-/// Relationship types `import_package` already turns into model state.
-const MODELLED_REL_SUFFIXES: &[&str] = &[
-    // The root's link to `workbook.xml`. The workbook is read and regenerated,
-    // and the writer emits this relationship itself: retaining it would put a
-    // stale copy of the workbook beside the fresh one and a second `rId1` in
-    // `_rels/.rels`, and the older of the two would win on the next read.
-    "/officeDocument",
-    "/worksheet",
-    "/sharedStrings",
-    "/styles",
-    "/theme",
-    "/calcChain",
-    "/vmlDrawing",
-    "/hyperlink",
-    "/table",
-    COMMENTS_REL_SUFFIX,
-    THREADED_COMMENTS_REL_SUFFIX,
-    PERSONS_REL_SUFFIX,
-];
+/// Which part declared a relationship, as far as retention is concerned.
+///
+/// Retention needs this because a relationship *type* alone does not say
+/// whether the model already carries it — the part it hangs off decides.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PartKind {
+    /// The package root, whose relationships live in `_rels/.rels`.
+    Root,
+    /// `xl/workbook.xml`, wherever this particular file keeps it.
+    Workbook,
+    /// One of the worksheets listed in the workbook.
+    Worksheet,
+    /// Everything reached by following the two above: drawings, charts,
+    /// images, custom XML. Nothing declared here is modelled.
+    Other,
+}
+
+impl PartKind {
+    fn of(source: &str, workbook_part: &str, sheet_parts: &[String]) -> Self {
+        if source.is_empty() {
+            Self::Root
+        } else if source == workbook_part {
+            Self::Workbook
+        } else if sheet_parts.iter().any(|p| p == source) {
+            Self::Worksheet
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Whether `import_package` already turns this relationship into model state,
+/// and so must not also retain it.
+///
+/// **Paired with the part that declares it, not matched on type alone.** The
+/// same type means different things depending on where it hangs: `/hyperlink`
+/// from a worksheet is `Sheet::hyperlinks`, read into the model and re-minted on
+/// write, so retaining it as well would write every cell link twice. `/hyperlink`
+/// from a **drawing** — the address behind a clickable picture — is modelled
+/// nowhere, and matching on the type alone dropped it along with the other
+/// (FID-20). The drawing's bytes are retained either way, so the loss showed up
+/// as an `<a:hlinkClick r:id>` naming a relationship that no longer existed:
+/// data gone from a package that still claimed to reference it, and no entry in
+/// the report to say so.
+///
+/// Anything not listed is retained, which is the safe direction: a relationship
+/// kept twice is a bug that is visible in the file, and one dropped is a bug
+/// that is visible only to whoever opens it next.
+fn is_modelled(kind: PartKind, rel_type: &str) -> bool {
+    let modelled: &[&str] = match kind {
+        // The root's link to `workbook.xml`. The workbook is read and
+        // regenerated, and the writer emits this relationship itself: retaining
+        // it would put a stale copy of the workbook beside the fresh one and a
+        // second `rId1` in `_rels/.rels`, and the older of the two would win on
+        // the next read.
+        PartKind::Root => &["/officeDocument"],
+        PartKind::Workbook => &[
+            "/worksheet",
+            "/sharedStrings",
+            "/styles",
+            "/theme",
+            "/calcChain",
+            PERSONS_REL_SUFFIX,
+        ],
+        PartKind::Worksheet => &[
+            "/vmlDrawing",
+            "/hyperlink",
+            "/table",
+            COMMENTS_REL_SUFFIX,
+            THREADED_COMMENTS_REL_SUFFIX,
+        ],
+        PartKind::Other => &[],
+    };
+    modelled.iter().any(|s| rel_type.ends_with(s))
+}
 
 /// Resolve a relationship target against the part that declared it.
 /// The charts and pictures anchored on a sheet, resolved through its drawing.
