@@ -325,18 +325,22 @@ jobs:
             sleep 2
           done
           [ "${ready:-0}" = "1" ] || { docker compose logs; exit 1; }
-          # The socket has to be reachable on the *same* origin as the page.
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-                   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-                   -H 'Sec-WebSocket-Version: 13' \
-                   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-                   'http://127.0.0.1:8080/collab?doc=ci')
-          # 101 is a completed upgrade; 400/401 means the collaboration server
-          # answered and refused, which still proves the route reaches it. A
-          # 404 is the proxy not routing, which is the failure this catches.
+          # The socket has to be reachable on the *same* origin as the page,
+          # which is the whole of PROD-12. What is checked is the **routing**,
+          # not the handshake: a completed 101 leaves the connection open and
+          # curl reports an empty reply, so probing with an upgrade tests curl
+          # rather than nginx. A plain GET is enough — the collaboration server
+          # answers it (refusing, since it is not an upgrade), and the proxy
+          # failing to route answers 404 from the host or 502 from nowhere.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                   'http://127.0.0.1:8080/collab?doc=ci' || echo 000)
           case "$code" in
-            101|400|401|426) echo "collab reachable on the page's origin ($code)" ;;
-            *) echo "::error::/collab answered $code through the proxy"; docker compose logs; exit 1 ;;
+            404|502|000)
+              echo "::error::/collab answered $code through the proxy: not routed"
+              docker compose logs
+              exit 1
+              ;;
+            *) echo "collab is reachable on the page's own origin ($code)" ;;
           esac
           curl -fsS http://127.0.0.1:8080/healthz >/dev/null && echo "host reachable"
       - if: always()
