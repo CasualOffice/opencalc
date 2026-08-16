@@ -35,7 +35,7 @@ separately:
 | Diagnostic | Is the compatibility report accurate and complete? | Phase 1A |
 
 Per-construct status across these dimensions is tracked in the living
-[33-FIDELITY-LEDGER](33-FIDELITY-LEDGER.md), updated in the same PR that advances
+[52](52-FIDELITY-TRACKER.md), updated in the same PR that advances
 a construct.
 
 ## Security

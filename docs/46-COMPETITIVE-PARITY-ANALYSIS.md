@@ -6,9 +6,9 @@ OnlyOffice, and Univer. Its purpose is to stop the team re-deriving "what's
 missing": every gap between what a real spreadsheet does and what OpenCalc does
 today is catalogued once here, with a stable ID, the fidelity dimension(s) it
 touches, an effort and priority, and the concrete model/API change it needs. It
-complements [45-EDITOR-PARITY-TRACKER.md](45-EDITOR-PARITY-TRACKER.md) (the
+complements [18-SUPPORT-MATRIX.md](18-SUPPORT-MATRIX.md) (the
 session-level task board — statuses there are the live truth) and
-[33-FIDELITY-LEDGER.md](33-FIDELITY-LEDGER.md) (per-construct fidelity matrix).
+[52-FIDELITY-TRACKER.md](52-FIDELITY-TRACKER.md) (per-construct fidelity matrix).
 This doc is the *complete competitive surface*; 45 is the *working subset*.
 
 ## How to read this
@@ -21,7 +21,7 @@ This doc is the *complete competitive surface*; 45 is the *working subset*.
   - **Partial** — some layers present (e.g. modelled + round-trips) but not
     usable/visible in the editor, or a narrow subset only.
   - **Todo** — not present in any usable form.
-- **Fidelity dims** use the [33](33-FIDELITY-LEDGER.md) vocabulary:
+- **Fidelity dims** use the [33](52-FIDELITY-TRACKER.md) vocabulary:
   **Model** / **Round-trip** / **Edit** / **Render** / **Calc**. A cell in the
   editor is *usable* only when Edit **and** Render are green; a file *survives*
   only when Model **and** Round-trip are green.
@@ -321,5 +321,5 @@ collaboration, byte-identical retention.
 
 This is the *complete* competitive surface; keep IDs stable and never delete a
 row (mark superseded items). When an item ships, flip its status here and update
-the matching row in [45](45-EDITOR-PARITY-TRACKER.md) and the construct's row in
-[33-FIDELITY-LEDGER.md](33-FIDELITY-LEDGER.md); the three must not drift.
+the matching row in [45](18-SUPPORT-MATRIX.md) and the construct's row in
+[52-FIDELITY-TRACKER.md](52-FIDELITY-TRACKER.md); the three must not drift.

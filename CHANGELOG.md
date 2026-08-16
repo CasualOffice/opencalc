@@ -278,7 +278,7 @@ A sustained parity pass driven by three generated trackers — the measured
 SpreadsheetML fidelity register ([docs/51](docs/51-FIDELITY-GAP-AUDIT.md)),
 the fidelity execution tracker ([docs/52](docs/52-FIDELITY-TRACKER.md)) and the
 feature-correctness tracker ([docs/53](docs/53-FEATURE-CORRECTNESS-TRACKER.md)) —
-plus the UX completeness tracker ([docs/50](docs/50-UX-COMPLETENESS-TRACKER.md)),
+plus the UX completeness tracker ([docs/50](docs/73-EXCEL-UX-PARITY-AUDIT.md)),
 which closed at all 63 rows.
 
 **Added**

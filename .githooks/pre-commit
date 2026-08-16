@@ -1,0 +1,8 @@
+#!/bin/sh
+# Tracker ids must be unique. Five times a row has been appended without
+# reading the id space above it; twice the CI gate caught it after the commit
+# was already made and pushed. Checking here makes the answer arrive while the
+# change is still in your hands.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+exec python3 tools/check-tracker-ids.py

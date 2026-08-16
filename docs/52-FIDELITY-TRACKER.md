@@ -4,7 +4,7 @@ _The durable backlog for closing the gaps measured in
 [51 — Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md). Rows are created from
 measurements, not recollection, and are worked **one at a time to completion**
 (implement → verify → commit) as the UX tracker
-([50](50-UX-COMPLETENESS-TRACKER.md)) was._
+([50](73-EXCEL-UX-PARITY-AUDIT.md)) was._
 
 Status: 🔴 Todo · 🟡 Partial-in-progress · ✅ Done.
 
