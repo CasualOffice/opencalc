@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -475,6 +476,8 @@ impl Service {
 struct Service {
     config: ServiceConfig,
     registry: Registry,
+    /// What an operator can scrape. See [`Metrics`].
+    metrics: Metrics,
     /// Permits for connections that have not authenticated yet.
     ///
     /// An `Arc` so a permit can outlive the borrow that took it — the guard is
@@ -658,6 +661,7 @@ pub async fn serve_on_with_shutdown(
     let state = Arc::new(Service {
         config,
         registry: Registry::default(),
+        metrics: Metrics::default(),
         pending: Arc::new(tokio::sync::Semaphore::new(pending)),
     });
     // The sweeper is what makes this a service rather than a relay. Without it
@@ -930,6 +934,7 @@ async fn service_lifecycle(state: &Arc<Service>, live: &Arc<Live>, now: u64) {
             // Assembled under the lock, delivered outside it: a slow or
             // unreachable integrator must not stop everyone editing.
             let assembled = { lock(&live.session).assemble() };
+            let began = std::time::Instant::now();
             let outcome = match assembled {
                 Ok(bytes) => {
                     match state
@@ -950,6 +955,23 @@ async fn service_lifecycle(state: &Arc<Service>, live: &Arc<Live>, now: u64) {
                     CallbackOutcome::Failed
                 }
             };
+            // Timed around the delivery, which is the part that reaches the
+            // network and the part an operator asks about.
+            state.metrics.save_millis.fetch_add(
+                began.elapsed().as_millis() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if matches!(outcome, CallbackOutcome::Accepted(_)) {
+                state
+                    .metrics
+                    .saves_accepted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                state
+                    .metrics
+                    .saves_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if matches!(outcome, CallbackOutcome::Accepted(_)) {
                 tracing::info!(document = %live.title, revision, "saved");
             }
@@ -1030,7 +1052,126 @@ fn router(state: Arc<Service>) -> Router {
         // and the only window onto state that is otherwise private. Counts
         // rather than identities: a document key names a customer's file.
         .route("/stats", get(stats))
+        // The same numbers a scraper can read on a schedule, which is what an
+        // alert needs. `/stats` answers "is it working now" for a person;
+        // this answers "has it been working" for a machine.
+        .route("/metrics", get(metrics))
         .with_state(state)
+}
+
+/// Counters an operator can alert on.
+///
+/// Every number here was already being computed and then thrown away into a log
+/// line. `/stats` returned two integers, so the only way to answer "are saves
+/// failing?" was to tail logs and count — which nobody does at three in the
+/// morning, and which no alert can do at all (DEP-06).
+///
+/// Plain atomics and a hand-written exposition rather than a metrics crate. The
+/// Prometheus text format is a dozen lines to emit, and a dependency in a
+/// server that reads untrusted files is a supply-chain cost that has to earn
+/// itself. The two high-severity advisories this project shipped with for
+/// months arrived through a dependency nobody was scanning.
+#[derive(Debug, Default)]
+pub struct Metrics {
+    /// Saves the host accepted.
+    pub saves_accepted: AtomicU64,
+    /// Saves the host refused, or that could not be assembled.
+    pub saves_failed: AtomicU64,
+    /// Total time spent in the callback, in milliseconds. With the counts
+    /// above this gives an average without keeping a histogram.
+    pub save_millis: AtomicU64,
+    /// Documents fetched from the host.
+    pub fetches_ok: AtomicU64,
+    /// Fetches that failed, so joins were refused.
+    pub fetches_failed: AtomicU64,
+    /// Operations ordered into the log.
+    pub revisions: AtomicU64,
+    /// Connections turned away before authenticating, because the pending
+    /// slots were full.
+    pub refused_pending: AtomicU64,
+    /// Joins refused because a cap was reached.
+    pub refused_capacity: AtomicU64,
+    /// Clients dropped for falling too far behind the broadcast. Survivable —
+    /// Resume exists — but silent, which is why it is counted.
+    pub slow_consumers: AtomicU64,
+    /// Appends the coordinator refused, i.e. a fenced or stale leader.
+    pub appends_refused: AtomicU64,
+}
+
+impl Metrics {
+    /// The Prometheus text exposition for these counters.
+    ///
+    /// Gauges are passed in rather than stored, because they are derived from
+    /// the registry and a stored copy would be a second source of truth for
+    /// something already known exactly.
+    fn expose(&self, documents: usize, participants: usize) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut out = String::new();
+        let mut counter = |name: &str, help: &str, value: u64| {
+            out.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
+            ));
+        };
+        counter(
+            "opencalc_saves_accepted_total",
+            "Documents returned to the host and accepted.",
+            self.saves_accepted.load(Relaxed),
+        );
+        counter(
+            "opencalc_saves_failed_total",
+            "Saves the host refused, or documents that could not be assembled.",
+            self.saves_failed.load(Relaxed),
+        );
+        counter(
+            "opencalc_save_duration_milliseconds_total",
+            "Time spent in the host callback. Divide by saves to get an average.",
+            self.save_millis.load(Relaxed),
+        );
+        counter(
+            "opencalc_fetches_ok_total",
+            "Documents fetched from the host.",
+            self.fetches_ok.load(Relaxed),
+        );
+        counter(
+            "opencalc_fetches_failed_total",
+            "Fetches that failed, so a join was refused.",
+            self.fetches_failed.load(Relaxed),
+        );
+        counter(
+            "opencalc_revisions_total",
+            "Operations ordered into the log.",
+            self.revisions.load(Relaxed),
+        );
+        counter(
+            "opencalc_connections_refused_pending_total",
+            "Connections turned away before authenticating, pending slots full.",
+            self.refused_pending.load(Relaxed),
+        );
+        counter(
+            "opencalc_joins_refused_capacity_total",
+            "Joins refused because a document or node cap was reached.",
+            self.refused_capacity.load(Relaxed),
+        );
+        counter(
+            "opencalc_slow_consumers_total",
+            "Clients dropped for falling behind the broadcast.",
+            self.slow_consumers.load(Relaxed),
+        );
+        counter(
+            "opencalc_appends_refused_total",
+            "Log appends the coordinator refused: a fenced or stale leader.",
+            self.appends_refused.load(Relaxed),
+        );
+        out.push_str(&format!(
+            "# HELP opencalc_documents Documents held on this node.\n\
+             # TYPE opencalc_documents gauge\n\
+             opencalc_documents {documents}\n\
+             # HELP opencalc_participants Participants across those documents.\n\
+             # TYPE opencalc_participants gauge\n\
+             opencalc_participants {participants}\n"
+        ));
+        out
+    }
 }
 
 /// A node's current load, as counts.
@@ -1051,6 +1192,21 @@ async fn stats(State(state): State<Arc<Service>>) -> axum::Json<Stats> {
         documents: live.len(),
         participants: live.iter().map(|l| lock(&l.roster).len()).sum(),
     })
+}
+
+async fn metrics(State(state): State<Arc<Service>>) -> impl axum::response::IntoResponse {
+    let live: Vec<Arc<Live>> = lock(&state.registry.live)
+        .values()
+        .map(Arc::clone)
+        .collect();
+    let participants = live.iter().map(|l| lock(&l.roster).len()).sum();
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.expose(live.len(), participants),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -1105,6 +1261,13 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     // it. Holding it for the life of the session would make this a second,
     // quieter connection cap that nobody configured.
     let Ok(_pending) = state.pending.clone().try_acquire_owned() else {
+        // The one refusal `/healthz` cannot show: the node is up and answering
+        // while turning connections away, which is precisely when an operator
+        // needs to know without being told by a user.
+        state
+            .metrics
+            .refused_pending
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
             limit = state.config.limits.max_pending_connections,
             "refusing a connection: too many are waiting to authenticate"
@@ -1385,7 +1548,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                     // the client reconnects and resumes from its last
                     // acknowledged revision, which is cheaper and more certain
                     // than trying to work out what it missed.
-                    Err(broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Survivable, because Resume exists — but silent, and a
+                        // silent disconnect is one nobody investigates.
+                        state.metrics.slow_consumers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -2221,6 +2389,10 @@ async fn order(
             // Refused: this node's copy has moved somewhere the log has not, so
             // it is no longer a leader in any useful sense. Said plainly; the
             // recovery is a resync, which is not built.
+            state
+                .metrics
+                .appends_refused
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::error!(document = %key, ?why, "the log refused this leader's append");
             return;
         }

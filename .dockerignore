@@ -11,3 +11,7 @@ sdk/*/node_modules/
 .git/
 docs/
 *.png
+# Never: this holds the signing secret, and anything in the context can end up
+# in a layer. The compose file passes it as an environment variable instead.
+.env
+.env.*

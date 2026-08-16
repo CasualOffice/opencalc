@@ -467,11 +467,53 @@ struct Joining {
     view: Option<String>,
 }
 
+/// Where the *browser* should open its collaboration socket.
+///
+/// An explicit `OPENCALC_COLLAB_WS` always wins: a deployment that puts the
+/// collaboration server on its own hostname has to be able to say so.
+///
+/// Unset, it is **derived from the request the browser just made**, which is
+/// the only address known to be reachable from where the browser is. The
+/// previous default was `ws://127.0.0.1:8443/collab` — the *browser's* own
+/// loopback, not the server's. That works only when the browser runs on the
+/// Docker host: a second participant on another machine dialled themselves and
+/// reconnected forever, and an HTTPS page could not open `ws://` at all
+/// (PROD-12). It made the demo unusable for its entire purpose, which is
+/// sending somebody a link.
+///
+/// Echoing `Host` back is not an escalation: the browser reached this handler
+/// through that name, so it is a name the browser can resolve. `X-Forwarded-Proto`
+/// decides `ws` against `wss`, and a spoofed one costs a failed connection
+/// rather than a leak — the alternative, guessing the scheme, breaks every TLS
+/// deployment.
+fn collab_endpoint(config: &Config, headers: &axum::http::HeaderMap) -> String {
+    let configured = Settings::load(config).collab_ws;
+    if !configured.is_empty() {
+        return configured;
+    }
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|proto| proto.split(',').next().unwrap_or("").trim() == "https");
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.split(',').next().unwrap_or(h).trim())
+        .filter(|h| !h.is_empty())
+        // No Host header at all is HTTP/1.0 or a hand-written request; the
+        // browser will not be one, so this is a floor rather than a case.
+        .unwrap_or("127.0.0.1:8080");
+    let scheme = if secure { "wss" } else { "ws" };
+    format!("{scheme}://{host}/collab")
+}
+
 /// What the editor page asks for: a token and where to use it.
 async fn session(
     State(config): State<Arc<Config>>,
     Path(id): Path<String>,
     Query(joining): Query<Joining>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let Some(meta) = load_meta(&config, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
@@ -486,7 +528,7 @@ async fn session(
         "token": mint(&config, &meta, &name, access),
         "document": meta.id,
         "title": meta.title,
-        "collab": Settings::load(&config).collab_ws,
+        "collab": collab_endpoint(&config, &headers),
         "editable": access == "edit",
     }))
     .into_response()
@@ -669,8 +711,10 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(64 * 1024 * 1024),
-        collab_ws: std::env::var("OPENCALC_COLLAB_WS")
-            .unwrap_or_else(|_| "ws://127.0.0.1:8443/collab".to_owned()),
+        // Empty means "derive it from the request" — see `collab_endpoint`.
+        // A default of `ws://127.0.0.1:8443/collab` looked like a working
+        // configuration and was one only for a browser on the Docker host.
+        collab_ws: std::env::var("OPENCALC_COLLAB_WS").unwrap_or_default(),
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_else(|_| "opencalc-demo".to_owned()),
         admin_token: std::env::var("OPENCALC_ADMIN_TOKEN")
             .ok()
@@ -729,4 +773,87 @@ async fn main() {
     };
     tracing::info!(%bind, store = ?config.store, "opencalc host");
     let _ = axum::serve(listener, app).await;
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn config(collab_ws: &str) -> Config {
+        Config {
+            store: PathBuf::from("/tmp/opencalc-test-store"),
+            secret: "s".into(),
+            internal_base: "http://host:8080".into(),
+            max_upload: 1024,
+            collab_ws: collab_ws.to_owned(),
+            audience: "a".into(),
+            admin_token: None,
+        }
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    /// PROD-12. The address handed to the browser must be one the *browser*
+    /// can reach.
+    ///
+    /// It used to be `ws://127.0.0.1:8443/collab` — loopback, and a different
+    /// port from the page. That is reachable only from the Docker host, so the
+    /// second participant a share link exists for dialled themselves and
+    /// reconnected forever. The address the browser already used to get here is
+    /// the one address known to work.
+    #[test]
+    fn the_endpoint_follows_the_host_the_browser_actually_used() {
+        let at = collab_endpoint(&config(""), &headers(&[("host", "sheets.example.com")]));
+        assert_eq!(at, "ws://sheets.example.com/collab");
+    }
+
+    /// An HTTPS page cannot open `ws://` at all, so guessing the scheme breaks
+    /// every TLS deployment rather than merely inconveniencing it.
+    #[test]
+    fn tls_termination_upstream_produces_a_wss_endpoint() {
+        let at = collab_endpoint(
+            &config(""),
+            &headers(&[
+                ("host", "sheets.example.com"),
+                ("x-forwarded-proto", "https"),
+            ]),
+        );
+        assert_eq!(at, "wss://sheets.example.com/collab");
+    }
+
+    /// A chain of proxies appends rather than replaces, and the first entry is
+    /// the one the browser spoke to.
+    #[test]
+    fn only_the_first_hop_of_a_forwarded_chain_is_used() {
+        let at = collab_endpoint(
+            &config(""),
+            &headers(&[
+                ("host", "internal:8080"),
+                ("x-forwarded-host", "sheets.example.com, internal:8080"),
+                ("x-forwarded-proto", "https, http"),
+            ]),
+        );
+        assert_eq!(at, "wss://sheets.example.com/collab");
+    }
+
+    /// A deployment that puts collaboration on its own hostname has to be able
+    /// to say so, and saying so must beat any derivation.
+    #[test]
+    fn an_explicit_endpoint_always_wins() {
+        let at = collab_endpoint(
+            &config("wss://collab.example.com/collab"),
+            &headers(&[("host", "sheets.example.com")]),
+        );
+        assert_eq!(at, "wss://collab.example.com/collab");
+    }
 }

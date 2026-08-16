@@ -296,6 +296,52 @@ jobs:
             echo "::endgroup::"
           done
 
+  # Nothing built the images, so nothing tested that the Dockerfiles still
+  # compile — the one artefact an integrator actually runs was the only thing
+  # with no gate at all (DEP-07). Build only: publishing is a release concern
+  # and needs a registry decision, but a Dockerfile that stopped building would
+  # otherwise be found by whoever tried to deploy.
+  #
+  # Also asserts the standalone stack comes up and answers through its proxy,
+  # which is what PROD-12 was about: the page and the socket on one origin.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build both images
+        run: |
+          docker build -f server/casual-calc-host/Dockerfile -t opencalc-host .
+          docker build -f server/casual-calc-collab-server/Dockerfile -t opencalc-collab .
+      - name: The standalone stack answers on one origin
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i 's/^OPENCALC_SHARED_SECRET=.*/OPENCALC_SHARED_SECRET=ci-not-a-real-secret/' .env
+          docker compose up -d --no-build
+          # Wait for the proxy rather than a fixed sleep: the collab server
+          # waits on the host's healthcheck, so readiness is a chain.
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          [ "${ready:-0}" = "1" ] || { docker compose logs; exit 1; }
+          # The socket has to be reachable on the *same* origin as the page.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                   -H 'Sec-WebSocket-Version: 13' \
+                   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                   'http://127.0.0.1:8080/collab?doc=ci')
+          # 101 is a completed upgrade; 400/401 means the collaboration server
+          # answered and refused, which still proves the route reaches it. A
+          # 404 is the proxy not routing, which is the failure this catches.
+          case "$code" in
+            101|400|401|426) echo "collab reachable on the page's origin ($code)" ;;
+            *) echo "::error::/collab answered $code through the proxy"; docker compose logs; exit 1 ;;
+          esac
+          curl -fsS http://127.0.0.1:8080/healthz >/dev/null && echo "host reachable"
+      - if: always()
+        run: docker compose down -v || true
+
   dependency-policy:
     runs-on: ubuntu-latest
     steps:

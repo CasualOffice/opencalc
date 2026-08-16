@@ -26,7 +26,7 @@ import { expect, test } from "@playwright/test";
 
 import { mint, tokenFor } from "./token.mjs";
 
-const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-tests-shared-secret";
+const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-smoke-only-not-a-deployment-secret";
 const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
 const ORIGIN_PORT = Number(process.env.OPENCALC_ORIGIN_PORT ?? 8124);
 const COLLAB_URL = `ws://127.0.0.1:${COLLAB_PORT}/collab`;

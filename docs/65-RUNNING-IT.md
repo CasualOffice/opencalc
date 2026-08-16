@@ -55,13 +55,22 @@ GET  /api/documents/{id}/download    what a user takes away
 This is the most common first failure, and it produces an editor that says
 "connecting" forever with nothing in any log.
 
-- **`OPENCALC_COLLAB_WS`** — what a **browser** dials. Behind a proxy this is
-  your public URL with `wss://`.
+- **`OPENCALC_COLLAB_WS`** — what a **browser** dials. **Usually leave it
+  unset.** The host derives it from the request the browser just made, which is
+  the one address known to reach it: same origin, `/collab`, and `wss://` when
+  `X-Forwarded-Proto` says the page arrived over TLS. Set it only when
+  collaboration lives on a hostname of its own.
 - **`OPENCALC_HOST_INTERNAL`** — what the **collaboration server** calls your
   host. On a compose network that is a service name. Point it at `localhost` and
   the server fetches itself.
 
 They look interchangeable and are on different networks.
+
+This used to default to `ws://127.0.0.1:8443/collab`, which reads like a working
+setting and is the *browser's* own loopback. It worked for exactly one machine:
+anybody opening a share link elsewhere dialled themselves and reconnected
+forever, and an HTTPS page could not open `ws://` at all. Deriving it means the
+demo does the thing it exists to demonstrate without being configured first.
 
 ## Behind a reverse proxy
 
@@ -76,7 +85,31 @@ not obvious and both are marked in the files:
    is gone; the proxy deciding for it looks like a network fault to everybody.
 
 Serve everything from one origin — editor, API and WebSocket. A share link is
-then a single URL, with no CORS to configure and no second certificate.
+then a single URL, with no CORS to configure and no second certificate. The
+standalone stack does this itself: `docker compose up` starts an nginx in front
+of both services ([`deploy/nginx.demo.conf`](../deploy/nginx.demo.conf)), so the
+page and the socket share a hostname and the endpoint above needs no setting.
+
+## Watching it
+
+`GET /metrics` on the collaboration server, in Prometheus text format:
+
+| Metric | Answers |
+| --- | --- |
+| `opencalc_saves_accepted_total` / `_failed_total` | Are documents getting back to the host? |
+| `opencalc_save_duration_milliseconds_total` | Divided by the counts, how slow is your callback? |
+| `opencalc_fetches_ok_total` / `_failed_total` | Can the server reach your host at all? |
+| `opencalc_connections_refused_pending_total` | Is the node full while still answering `/healthz`? |
+| `opencalc_slow_consumers_total` | Are clients being dropped for lagging? Survivable, but silent. |
+| `opencalc_appends_refused_total` | Cluster: is a fenced or stale leader still trying to write? |
+| `opencalc_documents` / `opencalc_participants` | Current load, as gauges. |
+
+The one to alert on first is `saves_failed_total` increasing: it is the only
+counter that means work is at risk rather than merely that something is busy.
+
+`GET /stats` remains, returning the two gauges as JSON — it answers "is it
+working *now*" for a person, where `/metrics` answers "has it been working" for
+a machine.
 
 ## Configuration
 
