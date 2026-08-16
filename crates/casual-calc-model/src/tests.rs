@@ -485,6 +485,46 @@ fn a_snapshot_without_chart_ids_round_trips_byte_identically() {
     );
 }
 
+/// ADR-010 for `RetainedRel::external`, in both directions.
+///
+/// `RetainedRel` is `deny_unknown_fields`, so the compatibility question is not
+/// whether an old reader tolerates the new field — it will not, and that is what
+/// `SCHEMA_VERSION` is for — but whether the *new* reader still accepts a
+/// snapshot written without it, and whether a workbook that has no external
+/// relationship still serializes to the bytes it always did. `#[serde(default)]`
+/// answers the first and `skip_serializing_if` the second, which is what keeps
+/// `SCHEMA_VERSION` at 1.
+#[test]
+fn a_snapshot_without_the_external_flag_round_trips_byte_identically() {
+    let json = r#"{"source":"xl/workbook.xml","id":"rId9","relType":"…/externalLink","target":"externalLinks/externalLink1.xml"}"#;
+    let rel: crate::RetainedRel = serde_json::from_str(json).expect("older snapshot still loads");
+
+    assert!(
+        !rel.external,
+        "absent means a part path, which is the default"
+    );
+    assert_eq!(
+        serde_json::to_string(&rel).unwrap(),
+        json,
+        "and writing it back produces the same bytes"
+    );
+
+    // The flag is only written when it is true, and then it survives — an
+    // external target that came back as a part path would be resolved against
+    // the source part on the next save and reach nothing.
+    let external = crate::RetainedRel {
+        external: true,
+        target: "file:///other.xlsx".into(),
+        ..rel
+    };
+    let bytes = serde_json::to_string(&external).unwrap();
+    assert!(bytes.contains(r#""external":true"#), "{bytes}");
+    assert_eq!(
+        serde_json::from_str::<crate::RetainedRel>(&bytes).unwrap(),
+        external
+    );
+}
+
 /// Retained parts survive a model snapshot, bytes intact.
 ///
 /// Worth pinning because a design document asserted the opposite — that a

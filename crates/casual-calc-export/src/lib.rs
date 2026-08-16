@@ -215,12 +215,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         }
         let mut xml = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
         for rel in rels {
-            xml.push_str(&format!(
-                "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-                escape_attr(&rel.id),
-                escape_attr(&rel.rel_type),
-                escape_attr(&rel.target)
-            ));
+            xml.push_str(&retained_rel_xml(rel));
         }
         xml.push_str("</Relationships>");
         parts.push((rels_path_for(source), xml));
@@ -573,12 +568,7 @@ fn sheet_rels(
     // above names them.
     let sheet_part = format!("xl/worksheets/sheet{n}.xml");
     for rel in workbook_rels_for(retained, &sheet_part) {
-        s.push_str(&format!(
-            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-            escape_attr(&rel.id),
-            escape_attr(&rel.rel_type),
-            escape_attr(&rel.target)
-        ));
+        s.push_str(&retained_rel_xml(rel));
     }
     // The drawing holding this sheet's authored charts, when the sheet did not
     // already point at one. A sheet that did keeps its original relationship
@@ -726,6 +716,27 @@ fn workbook_rels_for<'a>(rels: &'a [RetainedRel], source: &str) -> Vec<&'a Retai
     rels.iter().filter(|r| r.source == source).collect()
 }
 
+/// One retained `<Relationship>`, re-emitted rather than re-minted.
+///
+/// Every `.rels` this writer produces goes through here, because the one
+/// attribute easiest to forget is the one that changes what the target *means*:
+/// without `TargetMode="External"` the `file:///other.xlsx` of an external link
+/// is read back as a part path, and the reference to the other workbook is
+/// destroyed on the very save that was meant to preserve it.
+pub(crate) fn retained_rel_xml(rel: &RetainedRel) -> String {
+    let mode = if rel.external {
+        " TargetMode=\"External\""
+    } else {
+        ""
+    };
+    format!(
+        "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{mode}/>",
+        escape_attr(&rel.id),
+        escape_attr(&rel.rel_type),
+        escape_attr(&rel.target)
+    )
+}
+
 /// Whether a retained relationship's source is the workbook part.
 ///
 /// Matched by suffix rather than by equality because the source path comes from
@@ -773,12 +784,7 @@ fn root_rels(workbook: &Workbook) -> String {
     // relationship is re-emitted, not re-minted, so anything naming it still
     // names the same part.
     for rel in retained {
-        s.push_str(&format!(
-            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-            escape_attr(&rel.id),
-            escape_attr(&rel.rel_type),
-            escape_attr(&rel.target)
-        ));
+        s.push_str(&retained_rel_xml(rel));
     }
     s.push_str("</Relationships>");
     s
@@ -935,12 +941,7 @@ fn workbook_rels(
         .iter()
         .filter(|r| is_workbook(&r.source))
     {
-        s.push_str(&format!(
-            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-            escape_attr(&rel.id),
-            escape_attr(&rel.rel_type),
-            escape_attr(&rel.target)
-        ));
+        s.push_str(&retained_rel_xml(rel));
     }
     s.push_str("</Relationships>");
     s

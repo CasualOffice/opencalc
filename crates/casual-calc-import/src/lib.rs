@@ -211,11 +211,33 @@ fn retain_unmodelled(
         .collect();
     while let Some(source) = queue.pop() {
         for rel in package.relationships_of(&source, &limits)? {
-            if rel.external
-                || MODELLED_REL_SUFFIXES
-                    .iter()
-                    .any(|s| rel.rel_type.ends_with(s))
+            if MODELLED_REL_SUFFIXES
+                .iter()
+                .any(|s| rel.rel_type.ends_with(s))
             {
+                continue;
+            }
+            // `TargetMode="External"` names something outside the package — the
+            // `externalLink` to another workbook, which is data the author put
+            // there and which nothing here models. It is retained like any other
+            // unmodelled relationship, but the retention stops at the
+            // relationship: a URI is not a path, so nothing below may resolve it
+            // against the source part or ask the package whether it holds it.
+            // `file:///other.xlsx` under `xl/workbook.xml` would "resolve" to
+            // `xl/file:/other.xlsx`, and the package saying it has no such part
+            // is the report of a loss that never happened (FID-19).
+            //
+            // Nothing is lost either way, so nothing is reported: the
+            // relationship is Preserved, and the `<externalReference r:id>` that
+            // names it travels with it.
+            if rel.external {
+                workbook.retained_rels.push(RetainedRel {
+                    source: source.clone(),
+                    id: rel.id,
+                    rel_type: rel.rel_type,
+                    target: rel.target,
+                    external: true,
+                });
                 continue;
             }
             let target = resolve_part(&source, &rel.target);
@@ -224,6 +246,7 @@ fn retain_unmodelled(
                 id: rel.id,
                 rel_type: rel.rel_type,
                 target: rel.target,
+                external: false,
             });
             if generated.contains(&target) || !seen.insert(target.clone()) {
                 continue;

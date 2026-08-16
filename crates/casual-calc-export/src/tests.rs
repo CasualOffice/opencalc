@@ -1627,6 +1627,150 @@ fn external_references_and_unmodelled_parts_are_retained() {
     assert_eq!(back.retained_refs, wb.retained_refs);
 }
 
+/// An `externalLink` whose target is another *file* rather than a part.
+///
+/// The workbook on the other end of `TargetMode="External"` is real data the
+/// author put there, and nothing in the model represents it — so retention is
+/// the only thing standing between a save and a formula that used to read
+/// `[1]Sheet1!A1` and now reads nothing. It is not a part: there is no content
+/// type, no bytes, and `file:///other.xlsx` resolved against `xl/workbook.xml`
+/// is the path `xl/file:/other.xlsx`, which names nothing in any package.
+#[test]
+fn an_external_relationship_survives_with_its_target_mode() {
+    let source = zip_parts(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+            </Types>"#,
+        ),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+              <externalReferences><externalReference r:id="rId9"/></externalReferences>
+            </workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+              <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="file:///other.xlsx" TargetMode="External"/>
+            </Relationships>"#,
+        ),
+        // Deliberately plain, so the only thing the report could possibly hold
+        // is the external relationship.
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+        ),
+        // A sheet hangs external relationships too — a linked OLE object — and
+        // a worksheet's `.rels` is written by a different function from the
+        // workbook's, so one of them getting the mode right proves nothing
+        // about the other.
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="http://example.com/book.xlsx" TargetMode="External"/>
+            </Relationships>"#,
+        ),
+    ]);
+    let imported = import_package(source).unwrap();
+    let wb = imported.workbook;
+
+    // Retained, with its mode — and *not* as a part, because there are no bytes
+    // in the package to keep.
+    assert!(wb.retained_parts.is_empty(), "{:?}", wb.retained_parts);
+    assert_eq!(wb.retained_rels.len(), 2, "{:?}", wb.retained_rels);
+    let rel = wb
+        .retained_rels
+        .iter()
+        .find(|r| r.id == "rId9")
+        .expect("the external link");
+    assert_eq!(rel.source, "xl/workbook.xml");
+    assert!(rel.rel_type.ends_with("/externalLink"), "{}", rel.rel_type);
+    assert_eq!(rel.target, "file:///other.xlsx");
+    assert!(rel.external, "the target is a URI, not a path in the zip");
+    // Nothing left the system, so nothing is reported as having left it — the
+    // Omitted + NotRetained pair docs/34 says is the only silent-loss shape.
+    assert!(
+        imported.report.entries().is_empty(),
+        "{:?}",
+        imported.report.entries()
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    // The id, because `<externalReference r:id="rId9"/>` names it; the mode,
+    // because without it the URI is read back as a path inside the package and
+    // the reference is destroyed.
+    assert!(
+        rels.contains(
+            r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="file:///other.xlsx" TargetMode="External"/>"#
+        ),
+        "{rels}"
+    );
+    assert!(xml_of(&written, "xl/workbook.xml").contains("<externalReference r:id=\"rId9\"/>"));
+    let sheet_rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(
+        sheet_rels.contains(r#"Target="http://example.com/book.xlsx" TargetMode="External"/>"#),
+        "{sheet_rels}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.retained_rels, wb.retained_rels);
+    assert_eq!(back.retained_refs, wb.retained_refs);
+}
+
+/// The other half of the same rule: a hyperlink is *modelled*, so it must not
+/// also be retained.
+///
+/// Without this a fix that simply keeps every external relationship passes the
+/// test above and writes the link twice — once from `sheet.hyperlinks` with a
+/// freshly minted id, once verbatim — which is two `<Relationship>` entries
+/// pointing at one URL and, when the ids collide, a package Excel repairs.
+#[test]
+fn a_hyperlink_is_modelled_and_so_is_not_retained() {
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+              <hyperlinks><hyperlink ref="A1" r:id="rId1"/></hyperlinks>
+            </worksheet>"#,
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/>
+            </Relationships>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    assert_eq!(
+        wb.sheets[0].hyperlinks[0].target.as_deref(),
+        Some("https://example.com/")
+    );
+    assert!(wb.retained_rels.is_empty(), "{:?}", wb.retained_rels);
+
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert_eq!(
+        rels.matches("https://example.com/").count(),
+        1,
+        "the link is written once, from the model: {rels}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert!(back.retained_rels.is_empty(), "{:?}", back.retained_rels);
+    assert_eq!(back.sheets[0].hyperlinks, wb.sheets[0].hyperlinks);
+}
+
 #[test]
 fn a_chart_survives_a_save_even_though_nothing_models_it() {
     let source = zip_parts(&[
