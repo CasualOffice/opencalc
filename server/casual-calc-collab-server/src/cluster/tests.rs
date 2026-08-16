@@ -66,15 +66,32 @@ macro_rules! contract {
 async fn redis_store(name: &str) -> Option<crate::cluster::redis::Redis> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    // Unset means a developer without a server, and skipping is the whole
+    // reason the suite is runnable at all.
     let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
     let namespace = format!(
         "opencalc-test:{}:{}:{name}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
-    crate::cluster::redis::Redis::connect_within(&url, &namespace)
-        .await
-        .ok()
+    // **Set and unreachable is a failure, not a skip.** It used to be `.ok()`,
+    // which meant CI — where the variable is always set, pointing at the
+    // service container — reported a green Redis half whenever the container
+    // was missing, misconfigured or not yet accepting connections. That is
+    // precisely the "a suite that always skips half of itself reports on half
+    // of itself while looking green" failure the service block in ci.yml was
+    // added to prevent, reintroduced one `.ok()` below it.
+    Some(
+        crate::cluster::redis::Redis::connect_within(&url, &namespace)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "OPENCALC_TEST_REDIS is set to {url:?} and could not be reached: {e:?}. \
+                     Unset it to skip the Redis half; leaving it set and broken silently \
+                     halves this suite."
+                )
+            }),
+    )
 }
 
 /// Shorthands, so a rule reads as the rule rather than as plumbing.
@@ -92,8 +109,39 @@ async fn append(
     payload: &[u8],
     now: u64,
 ) -> Result<u64, AppendError> {
-    c.append(document.to_owned(), epoch, after, payload.to_vec(), now)
-        .await
+    // One operation per append, which is what these fencing and staleness
+    // tests are about — the multi-operation case has its own test below,
+    // because assuming it away here is exactly how it went unnoticed.
+    c.append(
+        document.to_owned(),
+        epoch,
+        after,
+        after + 1,
+        payload.to_vec(),
+        now,
+    )
+    .await
+}
+
+/// Append `ops` operations at once, the way a real chunk does.
+async fn append_ops(
+    c: &dyn Coordinator,
+    document: &str,
+    epoch: u64,
+    after: u64,
+    ops: u64,
+    payload: &[u8],
+    now: u64,
+) -> Result<u64, AppendError> {
+    c.append(
+        document.to_owned(),
+        epoch,
+        after,
+        after + ops,
+        payload.to_vec(),
+        now,
+    )
+    .await
 }
 
 async fn since(c: &dyn Coordinator, document: &str, revision: u64) -> Vec<Logged> {
@@ -242,6 +290,55 @@ contract!(the_log_reads_back_in_order_from_any_point, |c| {
     assert!(since(c, "doc", 3).await.is_empty());
     assert!(since(c, "unknown", 0).await.is_empty());
 });
+
+contract!(
+    a_chunk_carrying_several_operations_is_accepted_and_continues,
+    |c| {
+        // **The bug this exists for.** A revision counts *operations*; the log
+        // holds one entry per *append*. While the gate compared the entry count,
+        // the two agreed only for a chunk of exactly one operation — and every
+        // test here, and every test in `net/tests.rs`, submitted exactly one. Two
+        // keystrokes inside the editor's flush window produce two, so the ordinary
+        // case was the broken one: the append was refused `Stale`, the leader had
+        // already applied both operations to its own copy, and it stayed diverged
+        // from the log for the rest of the session — no acknowledgement to its
+        // client, nothing published to any peer, and every later append refused
+        // for the same reason.
+        let lease = claim(c, "doc", "node-a", 0).await;
+
+        // Three operations in one chunk: 0 -> 3.
+        assert_eq!(
+            append_ops(c, "doc", lease.epoch, 0, 3, b"three", 0).await,
+            Ok(3),
+            "a multi-operation chunk must be accepted"
+        );
+        // Then two more: 3 -> 5. This is the append that also failed once the
+        // first had been refused, which is what made the divergence permanent.
+        assert_eq!(
+            append_ops(c, "doc", lease.epoch, 3, 2, b"two", 0).await,
+            Ok(5),
+            "and the next chunk must follow it"
+        );
+
+        // Revisions come back as the document's revisions, not as positions.
+        assert_eq!(
+            since(c, "doc", 0).await,
+            vec![(3, b"three".to_vec()), (5, b"two".to_vec())],
+            "two entries carrying five operations between them"
+        );
+        // A client that has seen revision 3 has seen the first chunk entire, and
+        // must be sent the second and only the second.
+        assert_eq!(since(c, "doc", 3).await, vec![(5, b"two".to_vec())]);
+        assert!(since(c, "doc", 5).await.is_empty());
+
+        // And the gate still bites: a stale `after` is refused, and the refusal
+        // reports the real revision rather than an entry count.
+        assert_eq!(
+            append_ops(c, "doc", lease.epoch, 4, 1, b"stale", 0).await,
+            Err(AppendError::Stale { current: 5 })
+        );
+    }
+);
 
 contract!(a_failover_loses_nothing_that_was_acknowledged, |c| {
     // The promise ADR-014 makes by appending before acknowledging: whatever the

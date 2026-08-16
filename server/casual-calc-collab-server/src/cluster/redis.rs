@@ -102,16 +102,23 @@ return {node, tostring(epoch), tostring(expires)}
 /// The fence is checked **before** the length, deliberately. A zombie whose
 /// revision happens to line up must still be refused, and telling it "stale"
 /// would send it to re-read the log and try again, forever.
+/// The length was the revision, and it is not: `LLEN` counts *appends* while a
+/// revision counts *operations*, so a chunk carrying two edits — which is what
+/// typing produces — was refused forever. Each entry now records the revision it
+/// carried the document to, as a decimal prefix ahead of a newline, and the gate
+/// reads the last one. See [`Coordinator::append`](crate::cluster::Coordinator::append).
 const APPEND: &str = r"
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'unled', '0'} end
 local held = cjson.decode(raw)
-local epoch, after = tonumber(ARGV[1]), tonumber(ARGV[2])
+local epoch, after, revision = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
 if epoch < held.epoch then return {'fenced', tostring(held.epoch)} end
-local current = redis.call('LLEN', KEYS[2])
+local last = redis.call('LINDEX', KEYS[2], -1)
+local current = 0
+if last then current = tonumber(string.match(last, '^(%d+)')) end
 if after ~= current then return {'stale', tostring(current)} end
-redis.call('RPUSH', KEYS[2], ARGV[3])
-return {'ok', tostring(current + 1)}
+redis.call('RPUSH', KEYS[2], revision .. '\n' .. ARGV[4])
+return {'ok', tostring(revision)}
 ";
 
 /// A cluster's shared state, in Redis.
@@ -375,6 +382,7 @@ impl Coordinator for Redis {
         document: String,
         epoch: u64,
         after: u64,
+        revision: u64,
         payload: Vec<u8>,
         now_ms: u64,
     ) -> Answer<'_, Result<u64, AppendError>> {
@@ -386,6 +394,7 @@ impl Coordinator for Redis {
                 .key(self.log_key(&document))
                 .arg(epoch)
                 .arg(after)
+                .arg(revision)
                 .arg(payload)
                 .arg(now_ms)
                 .invoke_async(&mut c)
@@ -414,15 +423,23 @@ impl Coordinator for Redis {
     ) -> Answer<'_, Result<Vec<Logged>, Unavailable>> {
         Box::pin(async move {
             let mut c = self.connection().await;
-            let from = isize::try_from(revision).unwrap_or(isize::MAX);
+            // The whole log, then filtered on each entry's own revision.
+            // Slicing by index is what this used to do and it was only ever
+            // right while a revision and an entry were the same thing; an entry
+            // carrying three operations advances the revision by three, so its
+            // position stops predicting its revision at the first real chunk.
+            // The log is compacted, which is what keeps this bounded.
             let entries: Vec<Vec<u8>> = c
-                .lrange(self.log_key(&document), from, -1)
+                .lrange(self.log_key(&document), 0, -1)
                 .await
                 .map_err(|e| Unavailable(e.to_string()))?;
             Ok(entries
                 .into_iter()
-                .enumerate()
-                .map(|(i, payload)| (revision + i as u64 + 1, payload))
+                .filter_map(|entry| {
+                    let cut = entry.iter().position(|b| *b == b'\n')?;
+                    let at: u64 = std::str::from_utf8(&entry[..cut]).ok()?.parse().ok()?;
+                    (at > revision).then(|| (at, entry[cut + 1..].to_vec()))
+                })
                 .collect())
         })
     }

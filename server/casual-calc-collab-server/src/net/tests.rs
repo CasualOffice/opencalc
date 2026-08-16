@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
-use casual_calc_transaction::protocol::{ClientMessage, PROTOCOL_VERSION, Refusal, ServerMessage};
+use casual_calc_transaction::protocol::{
+    ClientMessage, Draft, PROTOCOL_VERSION, Refusal, ServerMessage,
+};
 use casual_calc_transaction::session::{Base, SnapshotPolicy, Submission};
 use casual_calc_transaction::wire::WireOperation;
 use casual_calc_transaction::{Operation, SheetFields, SheetMetadata};
@@ -145,15 +147,15 @@ async fn start_with(
     let addr = listener.local_addr().unwrap();
     let config = ServiceConfig {
         bind: addr,
-        verifier: Verifier {
-            policy: TokenPolicy {
+        verifier: Verifier::fixed(
+            TokenPolicy {
                 audience: "opencalc-collab".into(),
                 leeway_secs: 60,
                 allowed_hosts: BTreeSet::new(),
                 require_https: true,
             },
-            keys: KeySet::shared_secret(SECRET),
-        },
+            KeySet::shared_secret(SECRET),
+        ),
         save: SavePolicy::default(),
         snapshots: SnapshotPolicy::default(),
         fetch,
@@ -625,6 +627,7 @@ async fn a_joiner_is_told_who_is_already_here() {
         &ClientMessage::Presence {
             sheet: 2,
             selection: [4, 5, 6, 7],
+            editing: None,
         },
     )
     .await;
@@ -670,6 +673,7 @@ async fn presence_carries_the_name_from_the_token_and_not_from_the_client() {
         &ClientMessage::Presence {
             sheet: 0,
             selection: [1, 2, 3, 4],
+            editing: None,
         },
     )
     .await;
@@ -687,6 +691,263 @@ async fn presence_carries_the_name_from_the_token_and_not_from_the_client() {
     assert_eq!(name, "Grace", "from the token");
     assert_eq!(selection, [1, 2, 3, 4]);
     assert!(!color.is_empty(), "and a colour to draw the cursor with");
+}
+
+// --- Drafts (COL-35) --------------------------------------------------------
+
+/// The next presence-family message, or `None` if none arrives in `within`.
+///
+/// For the half of a relay claim that is about something *not* happening. The
+/// blocking `hear_presence` cannot express "and nobody else was told", because
+/// waiting for a message that must never come is a five-second timeout followed
+/// by a panic.
+async fn hear_presence_within(
+    socket: &mut Socket,
+    within: std::time::Duration,
+) -> Option<ServerMessage> {
+    tokio::time::timeout(within, hear_presence(socket))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// **What somebody is typing reaches the others, and does not come back to
+/// them.**
+///
+/// The gap COL-35 names: a participant saw another's work only once it was
+/// committed, so two people could fill the same cell and neither knew until one
+/// of them lost. The draft rides presence (ADR-011) and so is relayed, not
+/// transformed.
+///
+/// The no-echo half is not a nicety. An author whose own draft came back would
+/// paint a second cursor on their own cell, one keystroke behind the one they
+/// are actually typing into.
+#[tokio::test]
+async fn a_draft_reaches_the_others_and_is_not_echoed_to_whoever_typed_it() {
+    let addr = start(Arc::new(Canned(package()))).await;
+
+    let mut grace = connect(addr).await;
+    join(&mut grace, &claims("Grace", Access::Edit))
+        .await
+        .unwrap();
+
+    let mut ada = connect(addr).await;
+    let welcome = join(&mut ada, &claims("Ada", Access::Edit)).await.unwrap();
+    let ServerMessage::Welcome { client: ada_id, .. } = welcome else {
+        panic!("expected a welcome, got {welcome:?}");
+    };
+
+    say(
+        &mut ada,
+        &ClientMessage::Presence {
+            sheet: 0,
+            selection: [3, 1, 3, 1],
+            editing: Some(Draft::new(3, 1, "=SUM(A1:A")),
+        },
+    )
+    .await;
+
+    let heard = hear_presence(&mut grace).await;
+    let Some(ServerMessage::Presence {
+        client,
+        name,
+        editing,
+        ..
+    }) = heard
+    else {
+        panic!("the other participant was never told, got {heard:?}");
+    };
+    assert_eq!(client, ada_id);
+    assert_eq!(name, "Ada", "still the name from the token");
+    let draft = editing.expect("the draft itself, not merely that she is busy");
+    assert_eq!(
+        draft.text, "=SUM(A1:A",
+        "the text is what was asked for: peers watch the value appear"
+    );
+    assert_eq!(draft.at, [3, 1]);
+
+    // And Ada is told nothing about herself. Whatever she may still have queued
+    // from joining — she was told who was already here — none of it is a draft.
+    while let Some(message) =
+        hear_presence_within(&mut ada, std::time::Duration::from_millis(400)).await
+    {
+        if let ServerMessage::Presence {
+            client, editing, ..
+        } = message
+        {
+            assert_ne!(
+                client, ada_id,
+                "a participant was sent their own draft back"
+            );
+            assert!(editing.is_none(), "and it was a draft at that");
+        }
+    }
+}
+
+/// **A draft is bounded by the server, whatever the client says.**
+///
+/// It arrives once per keystroke from a party the server has no reason to
+/// trust, is held in memory for the presence TTL, and is drawn into a cell on
+/// everybody else's grid. A client is asked to bound it; the server is what
+/// makes the bound true.
+#[tokio::test]
+async fn a_draft_longer_than_the_bound_is_cut_back_before_anybody_sees_it() {
+    let addr = start(Arc::new(Canned(package()))).await;
+
+    let mut watcher = connect(addr).await;
+    join(&mut watcher, &claims("Watcher", Access::Edit))
+        .await
+        .unwrap();
+    let mut shouty = connect(addr).await;
+    join(&mut shouty, &claims("Shouty", Access::Edit))
+        .await
+        .unwrap();
+
+    // Constructed past the bound deliberately: `Draft::new` truncates, so the
+    // message is built by hand the way another implementation would send it.
+    let huge = serde_json::json!({
+        "type": "presence",
+        "sheet": 0,
+        "selection": [0, 0, 0, 0],
+        "editing": { "at": [0, 0], "text": "x".repeat(100_000) },
+    });
+    shouty
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            huge.to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let heard = hear_presence(&mut watcher).await;
+    let Some(ServerMessage::Presence {
+        editing: Some(draft),
+        ..
+    }) = heard
+    else {
+        panic!("expected a draft, got {heard:?}");
+    };
+    assert_eq!(
+        draft.text.chars().count(),
+        Draft::MAX_TEXT,
+        "the server relayed as much text as it was handed"
+    );
+}
+
+/// **A participant who leaves takes their draft with them.**
+///
+/// An abandoned edit must cost nothing to clean up. The strong form of that is
+/// not "the others were told" — they are, by `Departed` — but that the server
+/// no longer holds it: somebody arriving afterwards must not be told about a
+/// half-typed cell belonging to a person who is not here.
+#[tokio::test]
+async fn a_participant_who_leaves_takes_their_draft_out_of_the_roster() {
+    let addr = start(Arc::new(Canned(package()))).await;
+
+    let mut ada = connect(addr).await;
+    let welcome = join(&mut ada, &claims("Ada", Access::Edit)).await.unwrap();
+    let ServerMessage::Welcome { client: ada_id, .. } = welcome else {
+        panic!("expected a welcome, got {welcome:?}");
+    };
+    say(
+        &mut ada,
+        &ClientMessage::Presence {
+            sheet: 0,
+            selection: [3, 1, 3, 1],
+            editing: Some(Draft::new(3, 1, "abandoned")),
+        },
+    )
+    .await;
+
+    // Somebody arriving while she is typing is told about it — which is what
+    // makes the assertion after her departure mean something.
+    let mut grace = connect(addr).await;
+    join(&mut grace, &claims("Grace", Access::Edit))
+        .await
+        .unwrap();
+    let heard = hear_presence(&mut grace).await;
+    let Some(ServerMessage::Presence {
+        editing: Some(draft),
+        ..
+    }) = heard
+    else {
+        panic!("a joiner was not told what was being typed, got {heard:?}");
+    };
+    assert_eq!(draft.text, "abandoned");
+
+    say(&mut ada, &ClientMessage::Leave).await;
+    let heard = hear_presence(&mut grace).await;
+    assert!(
+        matches!(heard, Some(ServerMessage::Departed { client }) if client == ada_id),
+        "her departure was never announced, got {heard:?}"
+    );
+
+    // And the roster no longer holds it: the next arrival is told about Grace,
+    // who is not typing, and about nobody else.
+    let mut cleo = connect(addr).await;
+    join(&mut cleo, &claims("Cleo", Access::Edit))
+        .await
+        .unwrap();
+    while let Some(message) =
+        hear_presence_within(&mut cleo, std::time::Duration::from_millis(400)).await
+    {
+        if let ServerMessage::Presence {
+            client, editing, ..
+        } = message
+        {
+            assert_ne!(
+                client, ada_id,
+                "a departed participant was still in the roster"
+            );
+            assert!(editing.is_none(), "a ghost draft outlived its author");
+        }
+    }
+}
+
+/// **A participant who cannot edit cannot broadcast one.**
+///
+/// A draft is the preview of an edit, and a viewer has no edit to preview: the
+/// server refuses their submissions at the operation (COL-17), so a draft from
+/// one could never become anything. Relaying it would make presence the one
+/// channel by which a read-only participant puts arbitrary text of their
+/// choosing into everybody else's grid — which is a worse thing to have built
+/// than the feature is to have.
+///
+/// Their cursor still travels. Being present is not editing.
+#[tokio::test]
+async fn a_viewer_may_be_seen_but_may_not_put_text_in_anybody_else_s_grid() {
+    let addr = start(Arc::new(Canned(package()))).await;
+
+    let mut editor = connect(addr).await;
+    join(&mut editor, &claims("Editor", Access::Edit))
+        .await
+        .unwrap();
+    let mut viewer = connect(addr).await;
+    join(&mut viewer, &claims("Viewer", Access::View))
+        .await
+        .unwrap();
+
+    say(
+        &mut viewer,
+        &ClientMessage::Presence {
+            sheet: 0,
+            selection: [9, 9, 9, 9],
+            editing: Some(Draft::new(9, 9, "not mine to type")),
+        },
+    )
+    .await;
+
+    let heard = hear_presence(&mut editor).await;
+    let Some(ServerMessage::Presence {
+        selection, editing, ..
+    }) = heard
+    else {
+        panic!("expected presence, got {heard:?}");
+    };
+    assert_eq!(selection, [9, 9, 9, 9], "a viewer is still visible");
+    assert!(
+        editing.is_none(),
+        "a participant who may not edit had their text relayed anyway"
+    );
 }
 
 // --- Failure -----------------------------------------------------------------
@@ -760,15 +1021,15 @@ async fn start_saving(deliver: Arc<dyn Deliver>) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let config = ServiceConfig {
         bind: addr,
-        verifier: Verifier {
-            policy: TokenPolicy {
+        verifier: Verifier::fixed(
+            TokenPolicy {
                 audience: "opencalc-collab".into(),
                 leeway_secs: 60,
                 allowed_hosts: BTreeSet::new(),
                 require_https: true,
             },
-            keys: KeySet::shared_secret(SECRET),
-        },
+            KeySet::shared_secret(SECRET),
+        ),
         save: prompt_saves(),
         snapshots: SnapshotPolicy::default(),
         fetch: Arc::new(Canned(package())),
@@ -1048,15 +1309,15 @@ async fn start_stoppable_with(
     let shutdown = Shutdown::new();
     let config = ServiceConfig {
         bind: addr,
-        verifier: Verifier {
-            policy: TokenPolicy {
+        verifier: Verifier::fixed(
+            TokenPolicy {
                 audience: "opencalc-collab".into(),
                 leeway_secs: 60,
                 allowed_hosts: BTreeSet::new(),
                 require_https: true,
             },
-            keys: KeySet::shared_secret(SECRET),
-        },
+            KeySet::shared_secret(SECRET),
+        ),
         // A long quiesce, so nothing saves on the ordinary cadence and the only
         // save that can happen is the one shutdown forces.
         save: SavePolicy {
@@ -1739,15 +2000,15 @@ async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
     let addr = listener.local_addr().unwrap();
     let config = ServiceConfig {
         bind: addr,
-        verifier: Verifier {
-            policy: TokenPolicy {
+        verifier: Verifier::fixed(
+            TokenPolicy {
                 audience: "opencalc-collab".into(),
                 leeway_secs: 60,
                 allowed_hosts: BTreeSet::new(),
                 require_https: true,
             },
-            keys: KeySet::shared_secret(SECRET),
-        },
+            KeySet::shared_secret(SECRET),
+        ),
         save: SavePolicy::default(),
         snapshots: SnapshotPolicy::default(),
         fetch: Arc::new(Canned(package())),
@@ -2016,6 +2277,7 @@ async fn a_node_that_missed_a_publication_catches_up_without_being_prompted() {
             DOC.to_owned(),
             epoch,
             0,
+            1,
             serde_json::to_vec(&batch).unwrap(),
             now_ms(),
         )
@@ -2079,5 +2341,94 @@ async fn a_node_announces_itself_and_says_how_loaded_it_is() {
         found.advertise.contains("10.0.0.1"),
         "peers are told the internal address, not the public one: {}",
         found.advertise
+    );
+}
+
+/// **A connection that never authenticates is dropped, and is bounded.**
+///
+/// The upgrade cannot require a token — the token arrives in the first frame —
+/// so anyone who can reach the port could open sockets and simply never speak.
+/// Each one completed the upgrade, spawned a task, and parked in `authorise`'s
+/// `recv().await` with no deadline: the heartbeat and idle timers only start
+/// *after* a successful join, and every limit in `Limits` is per-document or
+/// per-message, so an unauthenticated connection was attributed to nothing and
+/// counted against nothing. They accumulate to the process's descriptor limit,
+/// at which point real joins fail at accept — while `/healthz` goes on
+/// answering "ok" and the load balancer keeps sending traffic to a node that
+/// can no longer take any.
+#[tokio::test]
+async fn a_connection_that_never_authenticates_is_dropped() {
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            join_timeout_ms: 150,
+            ..Limits::default()
+        },
+    )
+    .await;
+
+    let mut silent = connect(addr).await;
+    // Say nothing at all. Before the deadline this waited forever.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut silent),
+    )
+    .await
+    .expect("the server must close a socket that never joins");
+    assert!(
+        outcome.is_none()
+            || outcome.is_some_and(|m| m.is_err()
+                || matches!(m, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))),
+        "the connection should be closed, not held"
+    );
+
+    // And the node is still able to take a real participant afterwards, which
+    // is the property that actually matters.
+    let mut good = connect(addr).await;
+    let first = join(&mut good, &claims("ada", Access::Edit)).await;
+    assert!(
+        matches!(
+            first,
+            Some(ServerMessage::Opening { .. } | ServerMessage::Welcome { .. })
+        ),
+        "a legitimate join still works, got {first:?}"
+    );
+}
+
+/// The pending-connection cap is separate from `max_participants`, because a
+/// socket that has not presented a token belongs to no document yet.
+#[tokio::test]
+async fn connections_waiting_to_authenticate_are_capped() {
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            max_pending_connections: 1,
+            // Long enough that the first socket is still parked when the
+            // second arrives, so the cap is what refuses it rather than a
+            // timeout racing the test.
+            join_timeout_ms: 5_000,
+            ..Limits::default()
+        },
+    )
+    .await;
+
+    let _first = connect(addr).await;
+    // Give the first connection time to take the only permit.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let mut second = connect(addr).await;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        futures_util::StreamExt::next(&mut second),
+    )
+    .await
+    .expect("the second connection must be refused rather than parked");
+    assert!(
+        outcome.is_none()
+            || outcome.is_some_and(|m| m.is_err()
+                || matches!(m, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))),
+        "over the cap, a connection is closed rather than held"
     );
 }

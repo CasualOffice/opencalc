@@ -310,16 +310,18 @@ async fn read_verifier() -> Result<Verifier, String> {
     // Asymmetric first, because it is the one to use: this server can then
     // verify a token and cannot mint one.
     if let Ok(url) = std::env::var("OPENCALC_JWKS_URL") {
-        let body = reqwest::get(&url)
-            .await
-            .map_err(|e| format!("could not fetch {url}: {e}"))?
-            .bytes()
-            .await
-            .map_err(|e| format!("could not read {url}: {e}"))?;
-        let keys = KeySet::from_jwks(&body, &[Signing::Rs256, Signing::Es256])
-            .map_err(|e| format!("{url}: {e}"))?;
+        let accepted = vec![Signing::Rs256, Signing::Es256];
+        let keys = casual_calc_collab_server::verify::fetch_keys(&url, &accepted).await?;
         tracing::info!(keys = keys.len(), %url, "loaded signing keys");
-        return Ok(Verifier { policy, keys });
+        // Refreshing, not fixed. The first fetch is a starting point, not the
+        // answer for the life of the process — see `JwksSource`.
+        return Ok(Verifier::refreshing(
+            policy,
+            keys,
+            url,
+            accepted,
+            env_u64("OPENCALC_JWKS_MIN_REFRESH_MS", 10_000),
+        ));
     }
 
     if let Ok(secret) = std::env::var("OPENCALC_SHARED_SECRET") {
@@ -327,10 +329,10 @@ async fn read_verifier() -> Result<Verifier, String> {
             "using a shared secret: this process can mint tokens as well as check them, \
              which is what OPENCALC_JWKS_URL avoids"
         );
-        return Ok(Verifier {
+        return Ok(Verifier::fixed(
             policy,
-            keys: KeySet::shared_secret(secret.as_bytes()),
-        });
+            KeySet::shared_secret(secret.as_bytes()),
+        ));
     }
 
     Err(
@@ -352,6 +354,12 @@ fn read_limits() -> Limits {
         presence_ttl_ms: env_u64("OPENCALC_PRESENCE_TTL_MS", d.presence_ttl_ms),
         client_ping_ms: env_u64("OPENCALC_CLIENT_PING_MS", d.client_ping_ms),
         client_idle_ms: env_u64("OPENCALC_CLIENT_IDLE_MS", d.client_idle_ms),
+        jwks_refresh_ms: env_u64("OPENCALC_JWKS_REFRESH_MS", d.jwks_refresh_ms),
+        max_pending_connections: env_u64(
+            "OPENCALC_MAX_PENDING_CONNECTIONS",
+            d.max_pending_connections as u64,
+        ) as usize,
+        join_timeout_ms: env_u64("OPENCALC_JOIN_TIMEOUT_MS", d.join_timeout_ms),
         drain_timeout_ms: env_u64("OPENCALC_DRAIN_TIMEOUT_MS", d.drain_timeout_ms),
     }
 }

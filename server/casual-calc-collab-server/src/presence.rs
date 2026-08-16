@@ -13,14 +13,25 @@
 //! # Identity comes from the token
 //!
 //! A participant's name and colour are recorded when it joins, from the
-//! host-signed token, and a presence update carries only *where* it is looking.
-//! Presence is the one surface where a claimed identity would be believed
-//! without question, so the client is never asked for one — and
+//! host-signed token, and a presence update carries only *where* it is looking
+//! and *what it is typing there*. Presence is the one surface where a claimed
+//! identity would be believed without question, so the client is never asked
+//! for one — and
 //! [`ClientMessage::Presence`](casual_calc_transaction::protocol::ClientMessage)
 //! has no field it could put one in.
+//!
+//! # A draft is presence too
+//!
+//! What somebody is part-way through typing has every property that earns a
+//! place here and none that would earn a place in the document: no inverse,
+//! nothing depending on its history, and no cost to losing it. So it rides the
+//! entry, expires with it, and departs with its author — see
+//! [`casual_calc_transaction::protocol::Draft`] for why the *text*
+//! travels rather than only the cell.
 
 use std::collections::BTreeMap;
 
+use casual_calc_transaction::protocol::Draft;
 use casual_calc_transaction::session::ClientId;
 
 /// How long a participant may go unheard before it is presumed gone.
@@ -42,6 +53,13 @@ pub struct Presence {
     pub sheet: usize,
     /// The selection, as `[r0, c0, r1, c1]`.
     pub selection: [u32; 4],
+    /// What they are typing, if anything (COL-35).
+    ///
+    /// Held here and nowhere else, which is the whole reason a draft is cheap:
+    /// it expires with the entry, it goes when its author does, and no part of
+    /// the document has ever heard of it. Bounded before it gets this far — see
+    /// [`Draft::bounded`] and the call in `net.rs`.
+    pub editing: Option<Draft>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,20 +112,35 @@ impl Roster {
                     color: color.unwrap_or_else(|| colour_for(client)),
                     sheet: 0,
                     selection: [0, 0, 0, 0],
+                    editing: None,
                 },
                 seen_ms: now_ms,
             },
         );
     }
 
-    /// Record where a participant is looking.
+    /// Record where a participant is looking, and what they are typing.
     ///
     /// Takes no identity: that was fixed at join, from the token. An update for
     /// somebody who never joined is ignored rather than inventing them.
-    pub fn moved(&mut self, client: ClientId, sheet: usize, selection: [u32; 4], now_ms: u64) {
+    ///
+    /// `editing` is overwritten every time, `None` included — a participant
+    /// owns exactly one entry and replaces it wholesale, so "I pressed Escape"
+    /// needs no message of its own and there is no state left for a lost one to
+    /// strand. `None` is also what a client too old to know about drafts says,
+    /// and it means the same thing coming from either.
+    pub fn moved(
+        &mut self,
+        client: ClientId,
+        sheet: usize,
+        selection: [u32; 4],
+        editing: Option<Draft>,
+        now_ms: u64,
+    ) {
         if let Some(entry) = self.entries.get_mut(&client) {
             entry.presence.sheet = sheet;
             entry.presence.selection = selection;
+            entry.presence.editing = editing;
             entry.seen_ms = now_ms;
         }
     }
@@ -198,11 +231,11 @@ mod tests {
         // The rule that matters: presence is where a claimed identity would be
         // believed, so an update for somebody who never joined is ignored.
         let mut roster = roster();
-        roster.moved(ClientId(9), 0, [1, 1, 2, 2], 100);
+        roster.moved(ClientId(9), 0, [1, 1, 2, 2], None, 100);
         assert!(roster.is_empty(), "no phantom participant");
 
         roster.joined(ClientId(9), "Grace", None, 0);
-        roster.moved(ClientId(9), 2, [3, 4, 5, 6], 100);
+        roster.moved(ClientId(9), 2, [3, 4, 5, 6], None, 100);
         let (_, presence) = roster.everyone().next().unwrap();
         assert_eq!(presence.name, "Grace", "still the name from the token");
         assert_eq!(presence.sheet, 2);
@@ -230,11 +263,78 @@ mod tests {
     fn moving_counts_as_being_alive() {
         let mut roster = roster();
         roster.joined(ClientId(1), "Ada", None, 0);
-        roster.moved(ClientId(1), 0, [1, 1, 1, 1], 20_000);
+        roster.moved(ClientId(1), 0, [1, 1, 1, 1], None, 20_000);
         assert!(
             roster.expire(40_000).is_empty(),
             "a participant that is editing is not silent"
         );
+    }
+
+    /// **A draft lives and dies with the entry that carries it.**
+    ///
+    /// The property that makes an abandoned edit cost nothing to clean up:
+    /// there is no separate "stop editing" to lose, because a participant
+    /// overwrites its whole entry every time it says anything, and a message
+    /// with no draft in it is the same shape as one with.
+    #[test]
+    fn a_draft_is_carried_by_the_entry_and_replaced_wholesale_with_it() {
+        let mut roster = roster();
+        roster.joined(ClientId(1), "Ada", None, 0);
+        assert!(
+            roster.everyone().next().unwrap().1.editing.is_none(),
+            "somebody who has just arrived is not typing"
+        );
+
+        roster.moved(
+            ClientId(1),
+            0,
+            [3, 1, 3, 1],
+            Some(Draft::new(3, 1, "=SUM(A")),
+            10,
+        );
+        let (_, presence) = roster.everyone().next().unwrap();
+        assert_eq!(
+            presence.editing.as_ref().map(|d| d.text.as_str()),
+            Some("=SUM(A")
+        );
+        assert_eq!(presence.editing.as_ref().map(|d| d.at), Some([3, 1]));
+
+        // Escape. The same message, with nothing in it.
+        roster.moved(ClientId(1), 0, [3, 1, 3, 1], None, 20);
+        assert!(
+            roster.everyone().next().unwrap().1.editing.is_none(),
+            "an abandoned edit left a ghost behind"
+        );
+    }
+
+    /// And a participant who goes takes their draft with them, whether they
+    /// said goodbye or merely stopped talking.
+    #[test]
+    fn a_departing_participant_leaves_no_draft_behind() {
+        let mut roster = roster();
+        roster.joined(ClientId(1), "Ada", None, 0);
+        roster.moved(
+            ClientId(1),
+            0,
+            [3, 1, 3, 1],
+            Some(Draft::new(3, 1, "half")),
+            0,
+        );
+        roster.left(ClientId(1));
+        assert!(roster.is_empty());
+        assert_eq!(roster.everyone().count(), 0, "and nothing to tell a joiner");
+
+        // The other way to leave: silence.
+        roster.joined(ClientId(2), "Grace", None, 0);
+        roster.moved(
+            ClientId(2),
+            0,
+            [1, 1, 1, 1],
+            Some(Draft::new(1, 1, "typ")),
+            0,
+        );
+        assert_eq!(roster.expire(31_000), vec![ClientId(2)]);
+        assert!(roster.is_empty(), "a ghost draft outlived its author");
     }
 
     #[test]
@@ -286,7 +386,7 @@ mod tests {
         // which is what makes this need no merge and therefore no transform.
         let mut roster = roster();
         roster.joined(ClientId(1), "Ada", None, 0);
-        roster.moved(ClientId(1), 3, [9, 9, 9, 9], 10);
+        roster.moved(ClientId(1), 3, [9, 9, 9, 9], None, 10);
         roster.joined(ClientId(1), "Ada", None, 20);
 
         assert_eq!(roster.len(), 1);

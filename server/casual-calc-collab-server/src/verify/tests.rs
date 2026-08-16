@@ -52,10 +52,7 @@ fn policy() -> TokenPolicy {
 }
 
 fn verifier() -> Verifier {
-    Verifier {
-        policy: policy(),
-        keys: KeySet::shared_secret(SECRET),
-    }
+    Verifier::fixed(policy(), KeySet::shared_secret(SECRET))
 }
 
 /// Sign with the shared secret, as a well-behaved host would.
@@ -116,14 +113,14 @@ fn an_unsigned_token_is_refused_however_confidently_it_asks() {
     // signed with an algorithm the server does not accept is refused for that
     // reason and not by accident.
     assert_eq!(
-        Verifier {
-            policy: policy(),
-            keys: KeySet {
+        Verifier::fixed(
+            policy(),
+            KeySet {
                 keys: std::collections::BTreeMap::new(),
                 solitary: Some(DecodingKey::from_secret(SECRET)),
                 accepted: vec![],
-            },
-        }
+            }
+        )
         .verify(&signed(&claims("doc-1")), "doc-1", 1_500),
         Err(VerifyError::UnacceptableAlgorithm)
     );
@@ -134,14 +131,14 @@ fn a_token_naming_an_algorithm_the_server_does_not_accept_is_refused() {
     // The other half of algorithm confusion: a verifier configured for RS256
     // must not accept an HS256 token, or the *public* key — which is published
     // — becomes usable as an HMAC secret by anyone who has it.
-    let rs_only = Verifier {
-        policy: policy(),
-        keys: KeySet {
+    let rs_only = Verifier::fixed(
+        policy(),
+        KeySet {
             keys: std::collections::BTreeMap::new(),
             solitary: Some(DecodingKey::from_secret(SECRET)),
             accepted: vec![Signing::Rs256],
         },
-    };
+    );
     let token = signed(&claims("doc-1"));
     assert_eq!(
         rs_only.verify(&token, "doc-1", 1_500),
@@ -160,10 +157,7 @@ fn an_unknown_kid_is_refused_rather_than_falling_back_to_another_key() {
         solitary: None,
         accepted: vec![Signing::Hs256],
     };
-    let verifier = Verifier {
-        policy: policy(),
-        keys,
-    };
+    let verifier = Verifier::fixed(policy(), keys);
 
     let mut header = Header::new(Algorithm::HS256);
     header.kid = Some("retired".into());
@@ -304,4 +298,115 @@ fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// **A key set can be replaced while the server runs, because keys rotate.**
+///
+/// `read_verifier` fetched the JWKS once and moved it into the config for the
+/// life of the process, while ADR-014 and docs/59 state the opposite as a
+/// decided property: *"they publish a new key, the server picks it up at the
+/// next fetch, and no coordinated restart is needed."*
+///
+/// The consequence was total rather than partial. `select` refuses an unknown
+/// `kid` outright rather than falling back — which is correct, and is what
+/// makes a stale set fatal: an integrator rotating on schedule locks **every**
+/// user out of **every** document until an operator restarts every node, and
+/// the client sees the same `NotAuthorised` a bad token gets.
+#[test]
+fn installing_a_new_key_set_lets_a_rotated_key_in() {
+    const NEXT: &[u8] = b"the key published in this morning's rotation";
+
+    let only_current = KeySet {
+        keys: [("k1".to_owned(), DecodingKey::from_secret(SECRET))]
+            .into_iter()
+            .collect(),
+        solitary: None,
+        accepted: vec![Signing::Hs256],
+    };
+    let verifier = Verifier::fixed(policy(), only_current);
+
+    let signed_with_next = |kid: &str| {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_owned());
+        jsonwebtoken::encode(&header, &claims("doc-1"), &EncodingKey::from_secret(NEXT)).unwrap()
+    };
+    let token = signed_with_next("k2");
+
+    assert_eq!(
+        verifier.verify(&token, "doc-1", 1_500),
+        Err(VerifyError::UnknownKey),
+        "the new key is not held yet, so this is refused — correctly"
+    );
+
+    // The integrator publishes k2 beside k1; the server re-reads.
+    verifier.install(KeySet {
+        keys: [
+            ("k1".to_owned(), DecodingKey::from_secret(SECRET)),
+            ("k2".to_owned(), DecodingKey::from_secret(NEXT)),
+        ]
+        .into_iter()
+        .collect(),
+        solitary: None,
+        accepted: vec![Signing::Hs256],
+    });
+
+    assert!(
+        verifier.verify(&token, "doc-1", 1_500).is_ok(),
+        "after the refresh the rotated key must be accepted"
+    );
+    assert_eq!(verifier.key_count(), 2);
+
+    // Revocation is the mirror image, and is why a clock is needed as well as
+    // the on-demand path: nothing presents a token for a key being withdrawn.
+    verifier.install(KeySet {
+        keys: [("k2".to_owned(), DecodingKey::from_secret(NEXT))]
+            .into_iter()
+            .collect(),
+        solitary: None,
+        accepted: vec![Signing::Hs256],
+    });
+    let old = {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("k1".to_owned());
+        jsonwebtoken::encode(&header, &claims("doc-1"), &EncodingKey::from_secret(SECRET)).unwrap()
+    };
+    assert_eq!(
+        verifier.verify(&old, "doc-1", 1_500),
+        Err(VerifyError::UnknownKey),
+        "a withdrawn key stops working without a restart"
+    );
+}
+
+/// **The on-demand refresh is throttled, because its trigger is attacker-reachable.**
+///
+/// An unknown `kid` is what a newly published key looks like — and also what
+/// anyone can produce by inventing one. Without a throttle, every connection
+/// attempt becomes a request to the integrator's key endpoint, and this server
+/// becomes the thing hammering it.
+#[test]
+fn an_unknown_kid_cannot_be_used_to_hammer_the_key_endpoint() {
+    let verifier = Verifier::refreshing(
+        policy(),
+        KeySet::shared_secret(SECRET),
+        "https://example.invalid/jwks.json".to_owned(),
+        vec![Signing::Rs256],
+        10_000,
+    );
+    let source = verifier.jwks().expect("this one refreshes");
+
+    assert!(source.may_attempt(50_000), "the first attempt runs");
+    assert!(!source.may_attempt(50_001), "an immediate second does not");
+    assert!(
+        !source.may_attempt(59_999),
+        "nor does one just inside the interval"
+    );
+    assert!(source.may_attempt(60_000), "and one after it does");
+
+    // A verifier over a fixed key set has nothing to re-read, and must not
+    // pretend otherwise.
+    assert!(
+        Verifier::fixed(policy(), KeySet::shared_secret(SECRET))
+            .jwks()
+            .is_none()
+    );
 }
