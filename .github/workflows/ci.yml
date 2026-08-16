@@ -106,6 +106,17 @@ jobs:
             echo "merge-conflict markers found" >&2
             exit 1
           fi
+      # Cargo defaults `overflow-checks` off in release, so arithmetic that
+      # panics in a debug test wraps silently in the shipped binary — the tests
+      # then prove a property the artefact does not have. This engine's
+      # arithmetic runs on indices and lengths taken from untrusted files, so
+      # the setting is deliberate and must stay deliberate.
+      - name: Release builds must keep overflow checks
+        run: |
+          if ! grep -qE '^overflow-checks *= *true' Cargo.toml ; then
+            echo "::error::[profile.release] must set overflow-checks = true" >&2
+            exit 1
+          fi
       # ADR-012: the collaboration server is a *host*, not an engine layer. It
       # may depend on the crates; nothing under `crates/` may depend on it, or
       # an async runtime and an HTTP stack arrive in a library that has neither.

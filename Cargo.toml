@@ -49,3 +49,15 @@ unimplemented = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+# On, against Cargo's default of off for release.
+#
+# This engine's arithmetic runs on numbers taken from an untrusted file: row and
+# column indices, run lengths, part sizes, serial dates. With overflow checks off
+# in release, an expression that panics loudly in a debug test wraps silently in
+# the binary people actually run — so the tests prove a property the shipped
+# artefact does not have, which is worse than not testing it.
+#
+# AGENTS.md orders correctness and security bounds above performance, and this is
+# that ordering applied: a wrapped index is a wrong cell or an out-of-bounds
+# read, and neither is worth the few percent.
+overflow-checks = true
