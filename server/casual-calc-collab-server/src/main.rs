@@ -422,6 +422,12 @@ fn read_limits() -> Limits {
         ) as usize,
         join_timeout_ms: env_u64("OPENCALC_JOIN_TIMEOUT_MS", d.join_timeout_ms),
         drain_timeout_ms: env_u64("OPENCALC_DRAIN_TIMEOUT_MS", d.drain_timeout_ms),
+        // Must fit the orchestrator's stop grace. Named so an operator who
+        // raises `stop_grace_period` can raise this to match, and so one who
+        // lowers it finds the knob rather than a hardcoded number.
+        drain_deadline_ms: env_u64("OPENCALC_DRAIN_DEADLINE_MS", d.drain_deadline_ms),
+        drain_concurrency: env_u64("OPENCALC_DRAIN_CONCURRENCY", d.drain_concurrency as u64)
+            as usize,
     }
 }
 

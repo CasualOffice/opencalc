@@ -118,8 +118,39 @@ local current = 0
 if last then current = tonumber(string.match(last, '^(%d+)')) end
 if after ~= current then return {'stale', tostring(current)} end
 redis.call('RPUSH', KEYS[2], revision .. '\n' .. ARGV[4])
+-- Bounded here rather than by a sweeper, because this is the only moment the
+-- log is known to be consistent and already locked by the script. A comment in
+-- `since` claimed for a long time that 'the log is compacted, which is what
+-- keeps this bounded'; nothing compacted it, so a document edited for an
+-- afternoon accumulated every batch and re-read all of them every few seconds
+-- on every node holding it (DEP-03).
+redis.call('LTRIM', KEYS[2], -tonumber(ARGV[6]), -1)
+-- And a document nobody comes back to must not leave its log behind forever.
+-- Refreshed on every append, so an actively edited document never expires; the
+-- window is far longer than idle eviction, so by the time it fires no node
+-- holds the document and the next open fetches it from the host.
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[7]))
 return {'ok', tostring(revision)}
 ";
+
+/// How many batches one document's log keeps.
+///
+/// The log exists so a node that missed a publication can catch up. A node that
+/// cannot be caught up from it is already handled — `adopt` refuses a batch that
+/// does not follow, and that refusal is now reported rather than swallowed — so
+/// the window only has to be longer than any real gap between a publication
+/// being missed and the next reconciliation, which runs every lease tick.
+///
+/// Ten thousand batches is minutes of continuous typing by a room full of
+/// people, against a reconciliation that runs every few seconds.
+pub(crate) const LOG_MAX_ENTRIES: u64 = 10_000;
+
+/// How long an untouched log survives.
+///
+/// Refreshed on every append, so a document being edited never expires. An hour
+/// is two orders of magnitude beyond idle eviction (30s by default), so when it
+/// fires no node holds the document and the next open fetches it from the host.
+pub(crate) const LOG_TTL_MS: u64 = 60 * 60 * 1000;
 
 /// A cluster's shared state, in Redis.
 pub struct Redis {
@@ -143,6 +174,22 @@ impl core::fmt::Debug for Redis {
 }
 
 impl Redis {
+    /// The remaining lifetime of a document's log, in milliseconds.
+    ///
+    /// Test-facing: the expiry is set inside the append script, so the only way
+    /// to assert it was set is to ask Redis. `-1` means no expiry and `-2` means
+    /// no key, and both are failures the test names rather than numbers it
+    /// silently compares.
+    #[cfg(test)]
+    pub(crate) async fn log_ttl_ms(&self, document: &str) -> i64 {
+        let mut c = self.connection().await;
+        redis::cmd("PTTL")
+            .arg(self.log_key(document))
+            .query_async(&mut c)
+            .await
+            .unwrap_or(-2)
+    }
+
     /// Connect to `url`.
     ///
     /// # Errors
@@ -397,6 +444,8 @@ impl Coordinator for Redis {
                 .arg(revision)
                 .arg(payload)
                 .arg(now_ms)
+                .arg(LOG_MAX_ENTRIES)
+                .arg(LOG_TTL_MS)
                 .invoke_async(&mut c)
                 .await
                 .map_err(|e| AppendError::Unavailable(e.to_string()))?;

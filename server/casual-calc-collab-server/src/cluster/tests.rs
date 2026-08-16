@@ -275,6 +275,79 @@ contract!(
     }
 );
 
+contract!(the_log_is_bounded_rather_than_growing_forever, |c| {
+    // DEP-03. `since` carried a comment saying "the log is compacted, which is
+    // what keeps this bounded" — and nothing compacted it. `RPUSH` with no
+    // `LTRIM`, no `EXPIRE`, no `DEL`, read back with `LRANGE 0 -1` on every
+    // lease tick per document per node. A document edited for an afternoon
+    // accumulated every batch and re-read all of them every few seconds, and
+    // the compose Redis has no `maxmemory`, so the end of it is an OOM.
+    //
+    // Deliberately more entries than the window, so the assertion is about the
+    // bound rather than about a number that happens to fit.
+    let lease = claim(c, "bounded", "node-a", 0).await;
+    let over = crate::cluster::redis::LOG_MAX_ENTRIES + 250;
+    for i in 0..over {
+        append(c, "bounded", lease.epoch, i, format!("op{i}").as_bytes(), 0)
+            .await
+            .unwrap();
+    }
+
+    let kept = since(c, "bounded", 0).await;
+    assert!(
+        kept.len() as u64 <= crate::cluster::redis::LOG_MAX_ENTRIES,
+        "the log kept {} entries against a window of {}",
+        kept.len(),
+        crate::cluster::redis::LOG_MAX_ENTRIES
+    );
+    // The *newest* entries are the ones a node catching up needs; trimming from
+    // the wrong end would keep history nobody can use and drop the batch that
+    // was just published.
+    let (last_revision, last_payload) = kept.last().expect("the log is not empty");
+    assert_eq!(*last_revision, over);
+    assert_eq!(last_payload, format!("op{}", over - 1).as_bytes());
+});
+
+/// The other half of DEP-03: a bounded window still leaves one log per document
+/// that was ever opened, forever.
+///
+/// Redis-only, because a TTL is a Redis fact — the in-memory coordinator has no
+/// key to expire, and asserting one there would test the test. The expiry is
+/// refreshed on every append, so this asserts the key carries one at all rather
+/// than waiting an hour for it, and checks it against the constant so changing
+/// the constant changes this test.
+#[tokio::test]
+async fn a_log_nobody_returns_to_does_not_live_forever() {
+    let Some(store) = redis_store("log-ttl").await else {
+        return;
+    };
+    let lease = store
+        .claim("expiring".to_owned(), "node-a".to_owned(), 5_000, 0)
+        .await
+        .expect("claimed");
+    store
+        .append(
+            "expiring".to_owned(),
+            lease.epoch,
+            0,
+            1,
+            b"only".to_vec(),
+            0,
+        )
+        .await
+        .expect("appended");
+
+    let ttl = store.log_ttl_ms("expiring").await;
+    assert!(
+        ttl > 0,
+        "the log key has no expiry ({ttl}), so an abandoned document leaks it"
+    );
+    assert!(
+        ttl <= crate::cluster::redis::LOG_TTL_MS as i64,
+        "an expiry of {ttl}ms is longer than the window it was set from"
+    );
+}
+
 contract!(the_log_reads_back_in_order_from_any_point, |c| {
     let lease = claim(c, "doc", "node-a", 0).await;
     for (i, payload) in [b"a", b"b", b"c"].into_iter().enumerate() {

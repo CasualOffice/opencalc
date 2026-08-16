@@ -67,6 +67,28 @@ impl Deliver for Collected {
 }
 
 /// A host that refuses everything, for the not-saving path.
+/// A host that never answers, so the drain has to give up on its own.
+#[derive(Clone, Default)]
+struct Hanging(Arc<Mutex<usize>>);
+
+impl Deliver for Hanging {
+    fn put(
+        &self,
+        _destination: Callback,
+        _title: String,
+        _bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        *self.0.lock().unwrap() += 1;
+        // Longer than any deadline a test will set. An integrator restarting at
+        // the same moment as this node is exactly this: connections that open
+        // and then say nothing.
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            Ok(())
+        })
+    }
+}
+
 struct Refusing;
 
 impl Deliver for Refusing {
@@ -186,6 +208,16 @@ async fn start_with(
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Connect for a named document rather than the shared default.
+///
+/// The drain is about *several* documents, and `connect` pins one key — with it
+/// they would all be the same session and the test would measure one save.
+async fn connect_to_document(addr: SocketAddr, doc: &str) -> Socket {
+    let url = format!("ws://{addr}/collab?doc={doc}");
+    let (socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    socket
+}
 
 async fn connect(addr: SocketAddr) -> Socket {
     let url = format!("ws://{addr}/collab?doc={DOC}");
@@ -1362,6 +1394,85 @@ async fn finished(serving: Serving) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(5), serving)
         .await
         .is_ok()
+}
+
+/// DEP-05. The drain has to fit the grace period it is given.
+///
+/// It used to be sequential, each document getting its own `drain_timeout_ms`,
+/// so thirty documents with unsaved work needed up to five minutes against
+/// Docker's ten-second default stop grace and Kubernetes' thirty. Whatever had
+/// not finished was SIGKILLed mid-drain — losing exactly the work the drain
+/// exists to save.
+///
+/// Several documents against a host that never answers, which is what an
+/// integrator restarting alongside this node looks like. The claim is that the
+/// process still stops, and stops inside its budget, rather than being held open
+/// by a callback that will never return.
+#[tokio::test]
+async fn the_drain_stops_inside_its_deadline_when_the_host_hangs() {
+    let hanging = Hanging::default();
+    let (addr, shutdown, serving) = start_stoppable_with(
+        Arc::new(hanging.clone()),
+        Limits {
+            tick_ms: 10,
+            // Short, so the test measures the mechanism rather than waiting on
+            // production numbers. Sequentially this would still be six seconds
+            // for six documents; the deadline is for all of them together.
+            drain_deadline_ms: 1_000,
+            drain_timeout_ms: 1_000,
+            ..Limits::default()
+        },
+    )
+    .await;
+
+    // Six documents, each with an edit nobody has saved.
+    let mut sockets = Vec::new();
+    for n in 0..6u32 {
+        let mut socket = connect_to_document(addr, &format!("drain-{n}")).await;
+        let mut claims = saving_claims("Ada");
+        claims.document.key = format!("drain-{n}");
+        let Some(ServerMessage::Welcome {
+            client, revision, ..
+        }) = join(&mut socket, &claims).await
+        else {
+            panic!("joined drain-{n}")
+        };
+        say(
+            &mut socket,
+            &ClientMessage::Submit(Submission {
+                client,
+                seq: 1,
+                base: Base::Revision(revision),
+                ops: vec![cell_edit(n as f64)],
+            }),
+        )
+        .await;
+        let _ = hear(&mut socket).await;
+        sockets.push(socket);
+    }
+
+    let began = std::time::Instant::now();
+    shutdown.begin();
+    assert!(
+        finished(serving).await,
+        "the process never stopped: a hanging host held the drain open"
+    );
+    let took = began.elapsed();
+
+    // Generous against the 1s deadline — a loaded runner is slow — and far
+    // under the six seconds a sequential drain would need, which is the
+    // difference the change makes.
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "the drain took {took:?}, which is the sequential shape rather than the deadline"
+    );
+    // And it genuinely tried, rather than passing by doing nothing: every
+    // document was handed to the host before the deadline cut them off.
+    let attempted = *hanging.0.lock().unwrap();
+    assert!(
+        attempted >= 2,
+        "only {attempted} saves were attempted, so the deadline was not what stopped it"
+    );
 }
 
 #[tokio::test]

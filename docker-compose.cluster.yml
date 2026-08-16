@@ -87,6 +87,11 @@ services:
         condition: service_healthy
       host:
         condition: service_healthy
+    # Longer than OPENCALC_DRAIN_DEADLINE_MS (25s), so a node stopping is
+    # allowed to finish returning documents to the host. Docker's default is
+    # 10s, which SIGKILLed a node mid-drain and lost exactly the work the drain
+    # exists to save (DEP-05). Inherited by collab-b through the anchor above.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "/usr/local/bin/casual-calc-collab-server", "--healthcheck"]
       interval: 10s
