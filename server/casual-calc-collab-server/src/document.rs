@@ -239,13 +239,26 @@ impl DocumentSession {
     /// [`ServerError::Session`] when the batch does not follow directly from
     /// where this session is, in which case nothing is applied and the caller
     /// must read the log.
-    pub fn adopt(&mut self, ops: &[WireOperation], revision: u64) -> Result<(), ServerError> {
+    pub fn adopt(
+        &mut self,
+        ops: &[WireOperation],
+        revision: u64,
+        now_ms: u64,
+    ) -> Result<(), ServerError> {
         self.server.adopt(&mut self.workbook, ops, revision)?;
         // Values are left stale deliberately, as they are after a commit:
         // recalculation happens where the document is read, not on every
         // arriving edit, because edits arrive at typing speed.
         self.stale = true;
-        self.life.committed(revision, 0);
+        // The real clock, not `0`. A literal zero here said "the last edit
+        // happened at the epoch", so the lifecycle's quiesce test —
+        // `now - last_edit >= quiesce_ms` — was true on the very next tick, and
+        // a replica that adopted a remote batch believed the document had been
+        // sitting idle for fifty-six years. Leadership now decides whether a
+        // save happens at all (DEP-02), but a wrong timestamp is the kind of
+        // thing that produces the *next* defect: a replica promoted to leader
+        // would inherit it and save immediately, on a cadence nobody chose.
+        self.life.committed(revision, now_ms);
         Ok(())
     }
 
