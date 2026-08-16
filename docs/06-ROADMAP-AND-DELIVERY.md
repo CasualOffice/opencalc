@@ -32,8 +32,10 @@ pillars (layer division, virtualization) plus the finalized calc-engine design.
 consistent; the layer division and virtualization designs are finalized (ADRs
 Accepted); no open ADR trigger for the model or calc seams.
 
-**Status: PASSED** (2026-08-04) — see [31-PHASE-D-EXIT-REPORT](31-PHASE-D-EXIT-REPORT.md).
-The Phase 0 plan and scaffold specs are in [29-PHASE-0-PLAN](29-PHASE-0-PLAN.md).
+**Status: PASSED** (2026-08-04). The exit report is in the history; the gates
+it checked are the ones below.
+Phase 0 is closed; its scaffold specs describe files that now exist, so the
+files are the record.
 
 ---
 
@@ -60,7 +62,7 @@ snapshot round-trips byte-stably. All Phase 0 items F-001–F-012 are `Done`
 **Plan:** the ordered `F-###` work items and the ready-to-instantiate build
 scaffolding (workspace `Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, CI
 workflow, fixtures/benchmark layout) are specified in
-[29-PHASE-0-PLAN](29-PHASE-0-PLAN.md).
+this document.
 
 ---
 

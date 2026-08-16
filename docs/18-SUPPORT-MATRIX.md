@@ -86,7 +86,7 @@ The measured per-construct register is [51](51-FIDELITY-GAP-AUDIT.md).
 
 | Feature | Status |
 | --- | --- |
-| Canvas grid: selection, editing, formatting, structural ops, undo/redo | ● [45](45-EDITOR-PARITY-TRACKER.md), [50](50-UX-COMPLETENESS-TRACKER.md) (closed at 63 rows) |
+| Canvas grid: selection, editing, formatting, structural ops, undo/redo | ● [45](18-SUPPORT-MATRIX.md), [50](73-EXCEL-UX-PARITY-AUDIT.md) (closed at 63 rows) |
 | Accessibility tree mirroring the visible grid | ● UX-A03 |
 | Shadow-DOM isolation, typed theme tokens, chrome & command control | ● [55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) |
 | `edit` / `view` / `preview` access, enforced in the engine | ● |

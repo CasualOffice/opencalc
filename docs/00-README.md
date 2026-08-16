@@ -62,9 +62,9 @@ the other way around. This index is the map.
 | 23 | [Cell-Store Representation](23-CELL-STORE-REPRESENTATION.md) | The sparse grid internals (drives T1/T2) |
 | 24 | [Transaction & Edit Semantics](24-TRANSACTION-AND-EDIT-SEMANTICS.md) | Op set, inverses, reference rewriting, collab seam |
 | 28 | [XLSX Package Reader](28-XLSX-PACKAGE-READER.md) | SpreadsheetML OPC admission |
-| 33 | [Fidelity Ledger](33-FIDELITY-LEDGER.md) | Per-construct status across model/round-trip/edit/render/calc |
-| 29 | [Phase 0 Plan & Scaffold Specs](29-PHASE-0-PLAN.md) | Ordered F-### items + ready-to-instantiate build config |
-| 31 | [Phase D Exit Report](31-PHASE-D-EXIT-REPORT.md) | Documentation phase closure |
+| 33 | [Fidelity Ledger](52-FIDELITY-TRACKER.md) | Per-construct status across model/round-trip/edit/render/calc |
+| 29 | [Phase 0 Plan & Scaffold Specs](06-ROADMAP-AND-DELIVERY.md) | Ordered F-### items + ready-to-instantiate build config |
+| 31 | [Phase D Exit Report](06-ROADMAP-AND-DELIVERY.md) | Documentation phase closure |
 
 ### Architecture pillars (30, 34, 36, 40, 42, 44)
 
@@ -81,7 +81,7 @@ the other way around. This index is the map.
 
 | # | Title | Purpose |
 | --- | --- | --- |
-| 45 | [Editor Parity Tracker](45-EDITOR-PARITY-TRACKER.md) | The browser editor measured against Excel and Sheets |
+| 45 | [Editor Parity Tracker](18-SUPPORT-MATRIX.md) | The browser editor measured against Excel and Sheets |
 | 46 | [Competitive Parity Analysis](46-COMPETITIVE-PARITY-ANALYSIS.md) | Where we stand feature-for-feature, and what that costs |
 | 47 | [UX & Feature Map](47-UX-AND-FEATURE-MAP.md) | Every surface the editor exposes, and where it lives |
 | 48 | [Feature Pipeline](48-FEATURE-PIPELINE.md) | What is queued, in what order, and why |
@@ -92,7 +92,7 @@ the other way around. This index is the map.
 | 57 | [Collaboration Server Boundary](57-COLLABORATION-SERVER-BOUNDARY.md) | What the server owns and must not own; webhook callbacks not a file store, a cluster with a leader per document and no sticky sessions, and the token as the whole integration contract (ADR-012) |
 | 58 | [Interned Id Width](58-INTERNED-ID-WIDTH.md) | Why a style id is four bytes and not sixteen, and what that is worth (ADR-013) |
 | 59 | [Collaboration Service Stack](59-COLLABORATION-SERVICE-STACK.md) | Transport, identity, coordination and durability for the server deployment |
-| 60 | [Production Readiness Audit](60-PRODUCTION-READINESS-AUDIT.md) | Historical production-gap audit; live remediation is tracked in 67 |
+| 60 | [Production Readiness Audit](14-EXECUTION-TRACKER.md) | Historical production-gap audit; live remediation is tracked in 67 |
 | 61 | [Collaboration Resume](61-COLLABORATION-RESUME.md) | ADR-015: reconnect without silently losing or duplicating unacknowledged edits |
 | 62 | [Collaboration Pipelining](62-COLLABORATION-PIPELINING.md) | ADR-016: chained submissions and cumulative acknowledgement |
 | 63 | [Collaboration Relay](63-COLLABORATION-RELAY.md) | ADR-017: serving a document through a node that does not lead it |
@@ -109,7 +109,7 @@ cannot quietly disagree with what shipped.
 
 | # | Title | Purpose |
 | --- | --- | --- |
-| 50 | [UX Completeness Tracker](50-UX-COMPLETENESS-TRACKER.md) | Editor gaps with severity — closed at all 63 rows |
+| 50 | [UX Completeness Tracker](73-EXCEL-UX-PARITY-AUDIT.md) | Editor gaps with severity — closed at all 63 rows |
 | 51 | [Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md) | The measured SpreadsheetML construct register |
 | 52 | [Fidelity Tracker](52-FIDELITY-TRACKER.md) | FID-### / FN-### execution against that register |
 | 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach |
