@@ -574,3 +574,110 @@ test("scrolling a distant cell into view leaves no partial column or row at the 
 
   expect(problems).toEqual([]);
 });
+
+// A merge is one cell, not a wall.
+//
+// `select` snaps any coordinate inside a merge back to the merge's top-left
+// anchor — right for a click, wrong for a step. Arrowing right out of B2:D2
+// computed (1,2), `select` snapped it back to (1,1), and the selection never
+// moved. Left and up worked, because the anchor *is* the top-left, so the
+// failure was asymmetric and read as a frozen keyboard rather than a merge rule.
+//
+// Asserted through the editor's own `select` and its real keydown handler, so
+// what is tested is what a key press does — and in both directions, because a
+// step that always jumped clear of a merge would break ordinary movement.
+test("arrowing out of a merged cell lands past it, in every direction", async ({ page }) => {
+  const problems = await boot(page);
+  await page.evaluate(async () => {
+    window.__ed = await import(
+      document.querySelector('script[type="module"][src*="editor.js"]').src
+    );
+    // B2:D2 across, and F4:F6 down, so both axes are covered.
+    window.__ed.wasmApi().session_merge_cells(0, 1, 1, 1, 3);
+    window.__ed.wasmApi().session_merge_cells(0, 3, 5, 5, 5);
+    window.__ed.relayout();
+  });
+
+  const step = (row, col, key) =>
+    page.evaluate(
+      ([row, col, key]) => {
+        window.__ed.selectForTest(row, col);
+        const canvas = document.getElementById("grid");
+        canvas.focus();
+        canvas.dispatchEvent(
+          new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        );
+        const at = window.__ed.scrollStateForTest();
+        return { row: at.row, col: at.col };
+      },
+      [row, col, key],
+    );
+
+  // Out of the horizontal merge B2:D2 (row 1, cols 1..3).
+  expect(await step(1, 1, "ArrowRight"), "right, out of a merge").toEqual({ row: 1, col: 4 });
+  expect(await step(1, 1, "ArrowLeft"), "left, out of a merge").toEqual({ row: 1, col: 0 });
+  // Out of the vertical merge F4:F6 (rows 3..5, col 5).
+  expect(await step(3, 5, "ArrowDown"), "down, out of a merge").toEqual({ row: 6, col: 5 });
+  expect(await step(3, 5, "ArrowUp"), "up, out of a merge").toEqual({ row: 2, col: 5 });
+  // And an ordinary cell still steps by exactly one.
+  expect(await step(10, 10, "ArrowRight"), "an unmerged cell is unaffected").toEqual({
+    row: 10,
+    col: 11,
+  });
+
+  expect(problems).toEqual([]);
+});
+
+// Ctrl+Shift+End / Ctrl+Shift+Home extend rather than collapse.
+//
+// Both branches called `select` unconditionally and never tested `shiftKey`, so
+// "select everything from here down" — one of the most-used keys there is —
+// threw the selection away and left a single cell. The sibling handlers on
+// either side of them (Ctrl+arrow, and plain Home/End) already branch on it.
+test("Ctrl+Shift+End and Ctrl+Shift+Home extend the selection", async ({ page }) => {
+  const problems = await boot(page);
+  await page.evaluate(async () => {
+    window.__ed = await import(
+      document.querySelector('script[type="module"][src*="editor.js"]').src
+    );
+  });
+
+  const chord = (row, col, key) =>
+    page.evaluate(
+      ([row, col, key]) => {
+        window.__ed.selectForTest(row, col);
+        const canvas = document.getElementById("grid");
+        canvas.focus();
+        canvas.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key,
+            ctrlKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        return window.__ed.selectionRectForTest();
+      },
+      [row, col, key],
+    );
+
+  // From B2, extending to the end of the data must cover more than one cell and
+  // must still start where the cursor was.
+  const toEnd = await chord(1, 1, "End");
+  expect(toEnd.r0, "the anchor stays where the selection began").toBe(1);
+  expect(toEnd.c0).toBe(1);
+  expect(
+    toEnd.r1 > toEnd.r0 || toEnd.c1 > toEnd.c0,
+    `Ctrl+Shift+End collapsed to one cell: ${JSON.stringify(toEnd)}`,
+  ).toBe(true);
+
+  // And back to A1, which extends the other way.
+  const toHome = await chord(3, 3, "Home");
+  expect(toHome.r0, "extending to A1 reaches row 0").toBe(0);
+  expect(toHome.c0, "and column 0").toBe(0);
+  expect(toHome.r1, "while keeping the cell it started from").toBe(3);
+  expect(toHome.c1).toBe(3);
+
+  expect(problems).toEqual([]);
+});

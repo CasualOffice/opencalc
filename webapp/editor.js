@@ -2566,7 +2566,10 @@ function enterStep(back) {
   if (b) { navBlock = b; stepWithin(b, "row", back); return; }
   const col = tabOrigin !== null ? tabOrigin : state.sel.col;
   tabOrigin = null;
-  select(state.sel.row + (back ? -1 : 1), col);
+  // Merge-aware for the same reason the arrows are: Enter on a vertically
+  // merged cell otherwise lands back inside it and the cursor never moves.
+  const to = stepFrom(state.sel.row, state.sel.col, back ? -1 : 1, 0);
+  select(to.row, col);
 }
 
 // Tab: inside a block, walk it; otherwise move sideways, remembering where the
@@ -2576,8 +2579,29 @@ function tabStep(back) {
   if (b) { navBlock = b; stepWithin(b, "col", back); return; }
   if (tabOrigin === null) tabOrigin = state.sel.col;
   const origin = tabOrigin;
-  select(state.sel.row, state.sel.col + (back ? -1 : 1));
+  const to = stepFrom(state.sel.row, state.sel.col, 0, back ? -1 : 1);
+  select(to.row, to.col);
   tabOrigin = origin; // `select` cleared it; this run is still going
+}
+
+/// Step one cell from (row, col) in the direction (dr, dc), treating a merge as
+/// the single cell it looks like.
+///
+/// `select` snaps any coordinate inside a merge back to the merge's top-left
+/// anchor, which is right for a click and wrong for a step: arrowing right out
+/// of B2:D2 computed (1,2), `select` snapped it back to (1,1), and the selection
+/// **never moved**. Left and up worked, because the anchor *is* the top-left, so
+/// the failure was asymmetric — which is why it read as a frozen keyboard rather
+/// than as a merge rule. Excel treats a merge as one cell: you leave from its
+/// far edge and land on the first cell past it.
+function stepFrom(row, col, dr, dc) {
+  const m = mergeAt(row, col);
+  if (!m) return { row: row + dr, col: col + dc };
+  // Leave from the edge facing the way we are going, so the landing cell is the
+  // first one outside the merge rather than one still inside it.
+  const fromRow = dr > 0 ? m.r1 : dr < 0 ? m.r0 : row;
+  const fromCol = dc > 0 ? m.c1 : dc < 0 ? m.c0 : col;
+  return { row: fromRow + dr, col: fromCol + dc };
 }
 
 function select(row, col) {
@@ -10063,8 +10087,20 @@ function wireEvents() {
       // Print the sheet, not the app: the grid is a canvas, so the browser's
       // own print of this page would produce one clipped screenshot.
       if (k === "p") { printSheet(); e.preventDefault(); return; }
-      if (k === "home") { select(0, 0); e.preventDefault(); return; }
-      if (k === "end") { const b = usedBounds(); select(b.rows - 1, b.cols - 1); e.preventDefault(); return; }
+      // Shift extends rather than collapses. Both of these called `select`
+      // unconditionally, so Ctrl+Shift+End — "select everything from here
+      // down", one of the most-used keys there is — threw the selection away
+      // and left a single cell. The sibling handlers a few lines up (Ctrl+arrow)
+      // and below (plain Home/End) both branch on it already.
+      if (k === "home") {
+        if (e.shiftKey) extend(0, 0); else select(0, 0);
+        e.preventDefault(); return;
+      }
+      if (k === "end") {
+        const b = usedBounds();
+        if (e.shiftKey) extend(b.rows - 1, b.cols - 1); else select(b.rows - 1, b.cols - 1);
+        e.preventDefault(); return;
+      }
       // Ctrl+D / Ctrl+R: fill the selection down from its top row / right from
       // its left column — the fastest way to copy a formula over a block.
       if (k === "d" && !e.shiftKey) { fillWithin("down"); e.preventDefault(); return; }
@@ -10153,8 +10189,13 @@ function wireEvents() {
     // After a plain `select` the two are the same cell, so this is only ever
     // different mid-extension, which is exactly when it matters.
     const move = (dr, dc) => {
-      if (e.shiftKey) extend(state.anchor.row + dr, state.anchor.col + dc);
-      else select(state.sel.row + dr, state.sel.col + dc);
+      if (e.shiftKey) {
+        const to = stepFrom(state.anchor.row, state.anchor.col, dr, dc);
+        extend(to.row, to.col);
+      } else {
+        const to = stepFrom(state.sel.row, state.sel.col, dr, dc);
+        select(to.row, to.col);
+      }
     };
     switch (e.key) {
       case "ArrowUp": move(-1, 0); e.preventDefault(); break;
@@ -11491,6 +11532,16 @@ export function scrollStateForTest() {
 /// reimplements the path it is testing agrees with itself.
 export function selectForTest(row, col) {
   select(row, col);
+}
+
+/// The selected rectangle, for the browser gate.
+///
+/// `scrollStateForTest` reports the *active cell*, which is all a step needs;
+/// an extend has to be asserted on the rectangle, because the bug it guards
+/// against is precisely a selection collapsing to one cell while the active cell
+/// looks right.
+export function selectionRectForTest() {
+  return effectiveRange();
 }
 
 /// The raw engine bindings, for a host that needs something the element does
