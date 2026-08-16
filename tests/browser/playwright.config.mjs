@@ -16,6 +16,13 @@ const PORT = Number(process.env.OPENCALC_SMOKE_PORT ?? 8123);
 /// `collab.spec.mjs`, which reads the same variables with the same defaults.
 const ORIGIN_PORT = Number(process.env.OPENCALC_ORIGIN_PORT ?? 8124);
 const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
+/// A second collaboration server, configured to let go of an idle document
+/// almost immediately. Its own process rather than a shorter eviction on the
+/// one above, because eviction is global to a server: tuning the shared one
+/// down to seconds would have every other test racing a timer it does not care
+/// about, and a gate that makes twenty unrelated tests flaky to make one
+/// possible is a bad trade.
+const EVICT_PORT = Number(process.env.OPENCALC_EVICT_PORT ?? 8126);
 const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-tests-shared-secret";
 
 export default defineConfig({
@@ -91,6 +98,36 @@ export default defineConfig({
         // enough that a loaded runner does not evict one mid-assertion.
         OPENCALC_TICK_MS: "100",
         OPENCALC_PRESENCE_TTL_MS: "3000",
+        RUST_LOG: "casual_calc_collab_server=debug,warn",
+      },
+    },
+    // The same binary, set to forget an idle document almost at once.
+    //
+    // This is what makes the unresumed reconnect reachable from a test at all:
+    // a resume key belongs to its document, so evicting the document is how the
+    // server comes to *not recognise* one — the same state a restart, a
+    // rebalance to another node, or a key ageing out of a bounded map leaves
+    // behind. All four are ordinary in a deployment; only this one can be
+    // provoked in a few hundred milliseconds.
+    {
+      command: "cargo run --locked -p casual-calc-collab-server",
+      url: `http://127.0.0.1:${EVICT_PORT}/healthz`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 300_000,
+      cwd: "../..",
+      stdout: "ignore",
+      stderr: "pipe",
+      env: {
+        OPENCALC_BIND: `127.0.0.1:${EVICT_PORT}`,
+        OPENCALC_SHARED_SECRET: SECRET,
+        OPENCALC_AUDIENCE: "opencalc-test",
+        OPENCALC_ALLOW_PLAIN_CALLBACKS: "1",
+        OPENCALC_ALLOWED_HOSTS: "127.0.0.1",
+        OPENCALC_TICK_MS: "100",
+        OPENCALC_PRESENCE_TTL_MS: "3000",
+        // The whole point of this instance. A document whose roster has been
+        // empty for half a second is let go, taking its resume keys with it.
+        OPENCALC_IDLE_EVICTION_MS: "500",
         RUST_LOG: "casual_calc_collab_server=debug,warn",
       },
     },

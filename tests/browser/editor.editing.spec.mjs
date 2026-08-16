@@ -490,3 +490,87 @@ test("typing a reference leaves the grid wrapper unscrolled", async ({ page }) =
   });
   expect(headerVisible, "the column header band went blank").toBe(true);
 });
+
+// UX-GRID-02. Scrolling a cell into view by the bare minimum puts its far edge
+// against the far edge of the viewport, which leaves the *leading* edge in the
+// middle of whatever column happens to be there. The remainder is a different
+// size for every target, so arrowing across a wide sheet makes the first
+// visible column appear to shrink and — on the way back — grow again. It reads
+// as the grid resizing itself rather than scrolling, and it was reported from
+// real use on a table, which is where wide sheets actually happen.
+//
+// Excel never shows a partial leading column. Asserted on the offset the
+// renderer uses rather than on pixels: the grid is a canvas, so a pixel test
+// would be a test of whatever a column boundary is guessed to look like.
+test("scrolling a distant cell into view leaves no partial column or row at the edge", async ({
+  page,
+}) => {
+  const problems = await boot(page);
+  await page.evaluate(async () => {
+    window.__ed = await import(
+      document.querySelector('script[type="module"][src*="editor.js"]').src
+    );
+  });
+
+  // Widths that are not all the same, because a uniform grid hides an
+  // off-by-one: every offset is a multiple of one number, so an implementation
+  // that snapped to `round(px / width) * width` would pass and still be wrong.
+  await page.evaluate(() => {
+    const w = window.__ed.wasmApi();
+    for (let c = 0; c < 40; c += 1) w.session_set_col_width(0, c, 40 + ((c * 17) % 60));
+    for (let r = 0; r < 200; r += 1) w.session_set_row_height(0, r, 16 + ((r * 7) % 24));
+  });
+
+  const boundaries = await page.evaluate(() => {
+    const w = window.__ed.wasmApi();
+    return {
+      cols: Array.from({ length: 41 }, (_, c) => w.session_col_offset_px(0, c)),
+      rows: Array.from({ length: 201 }, (_, r) => w.session_row_offset_px(0, r)),
+    };
+  });
+
+  // Several targets, forward and back, because the defect is that the leftover
+  // *varies*: one jump could land on a boundary by luck.
+  for (const [row, col] of [
+    [80, 30],
+    [120, 36],
+    [40, 12],
+    [160, 39],
+    [0, 0],
+    [90, 22],
+  ]) {
+    const at = await page.evaluate(
+      ([r, c]) => {
+        window.__ed.selectForTest(r, c);
+        return window.__ed.scrollStateForTest();
+      },
+      [row, col],
+    );
+    expect(at.row).toBe(row);
+    expect(at.col).toBe(col);
+    expect(
+      boundaries.cols,
+      `scrollX ${at.scrollX} after going to r${row}c${col} is not a column edge`,
+    ).toContain(at.scrollX);
+    expect(
+      boundaries.rows,
+      `scrollY ${at.scrollY} after going to r${row}c${col} is not a row edge`,
+    ).toContain(at.scrollY);
+    // Still actually visible — an "aligned" offset that hid the cell would
+    // satisfy the assertions above and defeat the purpose.
+    const shown = await page.evaluate(
+      ([r, c]) => {
+        const w = window.__ed.wasmApi();
+        const s = window.__ed.scrollStateForTest();
+        const cL = w.session_col_offset_px(0, c);
+        const rT = w.session_row_offset_px(0, r);
+        return { cL, rT, sx: s.scrollX, sy: s.scrollY };
+      },
+      [row, col],
+    );
+    expect(shown.cL, `column ${col} scrolled off the left`).toBeGreaterThanOrEqual(shown.sx);
+    expect(shown.rT, `row ${row} scrolled off the top`).toBeGreaterThanOrEqual(shown.sy);
+  }
+
+  expect(problems).toEqual([]);
+});

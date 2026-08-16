@@ -2664,6 +2664,41 @@ function extend(row, col) {
 // Scroll the body just enough to show a cell — the active one by default, or
 // any cell (arrow-key point mode follows the cell it is pointing at, which is
 // not the selection).
+/// Round a scroll offset up to the next whole column / row boundary.
+///
+/// Scrolling a cell into view by the *bare minimum* puts its far edge against
+/// the far edge of the viewport, which leaves the **leading** edge somewhere in
+/// the middle of whatever column or row happens to be there. The remainder is a
+/// different size for every target, so arrowing across a sheet makes the first
+/// visible column look like it is growing and shrinking — the grid appears to be
+/// resizing itself rather than scrolling, and scrolling back makes it "expand"
+/// again (UX-GRID-02). Excel never shows a partial leading column: it scrolls
+/// until that column is whole, and so does this.
+///
+/// Snapping *up* only ever scrolls further in the direction already being
+/// travelled, so the cell that prompted the scroll stays on screen. `limit` is
+/// its own leading edge — itself a boundary — and is both the furthest this may
+/// go and the answer when the cell is wider or taller than the viewport, where
+/// no aligned offset can show it and showing it wins over aligning.
+///
+/// Rows go through `rowAtPx`/`rowOffsetPx` rather than the engine directly,
+/// because a row grown by wrapped or rotated text is taller than the engine
+/// thinks and those two are the pair that knows it.
+/// `px` and `limit` are body-space (what `state.scrollX`/`scrollY` hold), while
+/// the engine indexes absolute sheet pixels — hence `frozen`, the width or
+/// height of the frozen band, added on the way in and taken off on the way out.
+/// Getting that conversion wrong would misalign only on sheets with a frozen
+/// pane, which is exactly the sort of thing that survives a demo.
+function snapLeading(px, limit, frozen, isCol) {
+  if (px >= limit) return limit;
+  const abs = Math.max(0, px + frozen);
+  const at = isCol ? wasm.session_col_at_px(state.sheet, Math.round(abs)) : rowAtPx(abs);
+  const startOf = (i) =>
+    (isCol ? wasm.session_col_offset_px(state.sheet, i) : rowOffsetPx(i)) - frozen;
+  const start = startOf(at);
+  return Math.min(start >= px ? start : startOf(at + 1), limit);
+}
+
 function ensureVisible(row = state.sel.row, col = state.sel.col) {
   if (!wasm) return;
   const rect = wrap.getBoundingClientRect();
@@ -2689,13 +2724,13 @@ function ensureVisible(row = state.sel.row, col = state.sel.col) {
     const cL = wasm.session_col_offset_px(state.sheet, col) - frozenW;
     const cW = JSON.parse(wasm.session_col_px(state.sheet, col, 1))[0] || COL_W;
     if (cL < state.scrollX) state.scrollX = cL;
-    else if (cL + cW > state.scrollX + viewW) state.scrollX = cL + cW - viewW;
+    else if (cL + cW > state.scrollX + viewW) state.scrollX = snapLeading(cL + cW - viewW, cL, frozenW, true);
   }
   if (row >= f.fr) {
     const rT = rowOffsetPx(row) - frozenH;
     const rH = JSON.parse(wasm.session_row_px(state.sheet, row, 1))[0] || ROW_H;
     if (rT < state.scrollY) state.scrollY = rT;
-    else if (rT + rH > state.scrollY + viewH) state.scrollY = rT + rH - viewH;
+    else if (rT + rH > state.scrollY + viewH) state.scrollY = snapLeading(rT + rH - viewH, rT, frozenH, false);
   }
   state.scrollX = Math.max(0, state.scrollX);
   state.scrollY = Math.max(0, state.scrollY);
@@ -11431,6 +11466,31 @@ export function autofitColumnForTest(col) {
 /// passes for the wrong reason.
 export function autofitRowForTest(row) {
   autofitRow(row);
+}
+
+/// Where the body is scrolled to, and where the selection is, for the browser
+/// gate.
+///
+/// Exported because the property worth asserting — that the leading edge sits on
+/// a whole column and a whole row — is invisible from outside: the grid is a
+/// canvas, so a test can only see it by sampling pixels and deciding what a
+/// column boundary looks like, which is a test of the sampling. The number the
+/// renderer actually uses is the claim.
+export function scrollStateForTest() {
+  return { scrollX: state.scrollX, scrollY: state.scrollY, row: state.sel.row, col: state.sel.col };
+}
+
+/// Move the selection, for the browser gate — the keyboard path, without the
+/// keyboard.
+///
+/// `ensureVisible` is what decides the scroll offset, and it is reached by
+/// arrowing off the edge of the viewport. Synthesising that needs the canvas
+/// focused and the right number of key events for the window size, which is a
+/// test that measures the harness.
+/// Routed through the editor's own `select`, not a copy of it: a test that
+/// reimplements the path it is testing agrees with itself.
+export function selectForTest(row, col) {
+  select(row, col);
 }
 
 /// The raw engine bindings, for a host that needs something the element does

@@ -30,6 +30,11 @@ const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-tests-shared-secret"
 const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
 const ORIGIN_PORT = Number(process.env.OPENCALC_ORIGIN_PORT ?? 8124);
 const COLLAB_URL = `ws://127.0.0.1:${COLLAB_PORT}/collab`;
+/// The second server, which forgets an idle document in about half a second.
+/// Kept in step with `playwright.config.mjs`, which reads the same variable
+/// with the same default.
+const EVICT_PORT = Number(process.env.OPENCALC_EVICT_PORT ?? 8126);
+const EVICT_URL = `ws://127.0.0.1:${EVICT_PORT}/collab`;
 const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
 /// The protocol version the raw-socket client below speaks.
 ///
@@ -75,7 +80,7 @@ async function boot(page) {
 /// afterwards, because a value that survived the round trip into the engine is
 /// the claim worth making. A promise resolved in Node proves only that Node
 /// heard about it.
-async function join(page, { document: key, user, access = "edit" }) {
+async function join(page, { document: key, user, access = "edit", url = COLLAB_URL }) {
   const { claims } = tokenFor({ document: key, user, origin: ORIGIN, access });
   const token = mint(claims, SECRET);
 
@@ -98,7 +103,7 @@ async function join(page, { document: key, user, access = "edit" }) {
         onPresence: (p) => window.__collab.presence.push(p),
       });
     },
-    { url: COLLAB_URL, token, key },
+    { url, token, key },
   );
 
   await expect
@@ -392,6 +397,101 @@ test.describe("collaboration", () => {
 
     await away.close();
     await watching.close();
+  });
+
+  // COL-36. The test above is the good case: the server remembers the resume
+  // key and the work arrives. This is what happens when it does not — a
+  // restart, a rebalance to another node, a document evicted while the tab was
+  // away, a key aged out of a bounded map. All ordinary in a deployment, and
+  // all indistinguishable from the client's side: an unrecognised key produces
+  // no refusal at all, only a `welcome`, whose snapshot replaces the whole
+  // document and everything unacknowledged with it.
+  //
+  // Nothing here can save the work — those operations were written against a
+  // revision this client no longer holds, and replaying them untransformed is
+  // the divergence the transform exists to prevent. **Saying so is the whole
+  // remedy**, which is why the assertions below are as much about the loss
+  // being real as about it being announced: a notice that fires when nothing
+  // was lost trains people to ignore the one that matters.
+  test("work lost to a reconnect the server could not resume is announced, not hidden", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const away = await browser.newContext();
+    const alice = await away.newPage();
+    await boot(alice);
+    // Alone, and against the server that forgets: eviction needs an empty
+    // roster, so a second participant would hold the document open and there
+    // would be nothing to reconnect *into*.
+    await join(alice, { document: key, user: { id: "u-alice", name: "Alice" }, url: EVICT_URL });
+
+    // Nothing is edited before the disconnect on purpose. `evict_if_idle`
+    // refuses to let go of a document with unsaved work — correctly, since the
+    // host has to get it back — so a single edit here would keep the document
+    // resident and the resume key with it, and the test would quietly exercise
+    // the happy path instead.
+    await away.setOffline(true);
+    await alice.evaluate(() => window.__session.reconnect());
+    await expect
+      .poll(() => alice.evaluate(() => window.__collab.statuses.map((s) => s.state)))
+      .toContain("reconnecting");
+
+    await setCellIn(alice, 30, 1, "typed into the void");
+    expect(await alice.evaluate(() => window.__editor.wasmApi().collab_unacknowledged())).toBe(true);
+
+    // Long enough for the server to notice the empty roster and let go:
+    // `OPENCALC_IDLE_EVICTION_MS` is 500ms on this instance and the tick is
+    // 100ms, so this is several times the margin needed. Alice cannot reconnect
+    // meanwhile — the context is offline — so the roster stays empty.
+    await alice.waitForTimeout(3_000);
+    await away.setOffline(false);
+
+    // Announced. `unsentEdits` rather than a bare "lost", because the user has
+    // to be told *what* went, not merely that something did.
+    await expect
+      .poll(() => alice.evaluate(() => window.__collab.statuses), {
+        message: "work was discarded by a reconnect and nothing said so",
+        timeout: 30_000,
+      })
+      .toContainEqual({ state: "lost", detail: "unsentEdits" });
+    expect(
+      await alice.evaluate(() => window.__collab.documents.some((d) => d.reason === "lost")),
+    ).toBe(true);
+
+    // The loss is real: the snapshot replaced what she typed. Asserted because
+    // an announcement that does not correspond to a loss is worse than none.
+    expect(await cellIn(alice, 30, 1)).toBe("");
+    // And it was a welcome, not a resume — the mechanism, not just the symptom.
+    expect(
+      await alice.evaluate(() => window.__collab.documents.some((d) => d.reason === "resumed")),
+    ).toBe(false);
+
+    // **Not overwritten.** The transport withholds "live" while work is known
+    // lost, so the notice cannot be erased a moment later by a status line
+    // saying everything is fine — which is how the `refused` state was already
+    // going unnoticed on this same socket.
+    const afterLoss = await alice.evaluate(() => {
+      const at = window.__collab.statuses.map((s) => s.state).lastIndexOf("lost");
+      return window.__collab.statuses.slice(at + 1).map((s) => s.state);
+    });
+    expect(afterLoss).not.toContain("live");
+
+    // And it clears on its own terms: an edit made *after* the loss, once the
+    // server has acknowledged it, is the first moment "collaborating" is true
+    // again rather than merely connected.
+    await setCellIn(alice, 31, 1, "written after the loss");
+    await expect
+      .poll(
+        () =>
+          alice.evaluate(() => {
+            const at = window.__collab.statuses.map((s) => s.state).lastIndexOf("lost");
+            return window.__collab.statuses.slice(at + 1).map((s) => s.state);
+          }),
+        { message: "the session never recovered after announcing the loss", timeout: 30_000 },
+      )
+      .toContain("live");
+
+    await away.close();
   });
 
   test("a remote edit made during a disconnect is caught up on, not lost", async ({ browser }) => {

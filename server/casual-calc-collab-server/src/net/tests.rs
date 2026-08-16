@@ -137,15 +137,13 @@ async fn start(fetch: Arc<dyn Fetch>) -> SocketAddr {
     start_with(fetch, Arc::new(Collected::default()), Limits::default()).await
 }
 
-/// Start a server, choosing how it delivers and what it will hold.
-async fn start_with(
-    fetch: Arc<dyn Fetch>,
-    deliver: Arc<dyn Deliver>,
-    limits: Limits,
-) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let config = ServiceConfig {
+/// A service configuration with nothing unusual about it.
+///
+/// Extracted so the TLS test can take one and change a single field: a test
+/// that hand-builds its own config drifts from this one, and then proves
+/// something about a server nobody runs.
+fn plain_config(addr: SocketAddr) -> ServiceConfig {
+    ServiceConfig {
         bind: addr,
         verifier: Verifier::fixed(
             TokenPolicy {
@@ -158,10 +156,27 @@ async fn start_with(
         ),
         save: SavePolicy::default(),
         snapshots: SnapshotPolicy::default(),
+        fetch: Arc::new(Canned(Vec::new())) as Arc<dyn Fetch>,
+        deliver: Arc::new(Collected::default()) as Arc<dyn Deliver>,
+        limits: Limits::default(),
+        membership: None,
+        tls: None,
+    }
+}
+
+/// Start a server, choosing how it delivers and what it will hold.
+async fn start_with(
+    fetch: Arc<dyn Fetch>,
+    deliver: Arc<dyn Deliver>,
+    limits: Limits,
+) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = ServiceConfig {
         fetch,
         deliver,
         limits,
-        membership: None,
+        ..plain_config(addr)
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
@@ -1041,6 +1056,7 @@ async fn start_saving(deliver: Arc<dyn Deliver>) -> SocketAddr {
             ..Limits::default()
         },
         membership: None,
+        tls: None,
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
@@ -1330,6 +1346,7 @@ async fn start_stoppable_with(
         deliver,
         limits,
         membership: None,
+        tls: None,
     };
     let handle = shutdown.clone();
     let serving = tokio::spawn(async move {
@@ -1484,6 +1501,69 @@ fn certificate_files() -> (std::path::PathBuf, std::path::PathBuf) {
         std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
     }
     (cert_path, key_path)
+}
+
+/// DEP-01. The listener must actually speak TLS when a certificate is
+/// configured — the property the test below deliberately does not establish.
+///
+/// `tls_config` returning `Ok` proves a certificate parses, and for a long time
+/// that was the entire coverage: nothing called it outside these tests, `serve`
+/// bound a plain socket, and an operator who supplied a certificate got
+/// plaintext WebSockets carrying document contents and bearer tokens. Both
+/// things that should have revealed it agreed with the mistake — startup logged
+/// `tls = true` from the *configuration*, and `--healthcheck` downgraded to a
+/// bare TCP connect whenever a certificate was set, so neither could tell
+/// plaintext from TLS.
+///
+/// So this asserts from the outside, in both directions. A plaintext request
+/// must **fail**, because that is the symptom the defect produced and the only
+/// assertion that distinguishes a fixed server from a broken one; and a TLS
+/// request must succeed, so a server that merely refuses everything cannot pass.
+#[tokio::test]
+async fn a_configured_certificate_means_the_socket_speaks_tls() {
+    let (cert, key) = certificate_files();
+    let endpoint = crate::config::Endpoint::secured("127.0.0.1:0".parse().unwrap(), cert, key);
+    let tls = std::sync::Arc::new(tls_config(&endpoint).unwrap());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut config = plain_config(addr);
+    config.tls = Some(tls);
+    let shutdown = crate::net::Shutdown::new();
+    let serving = tokio::spawn(crate::net::serve_on_with_shutdown(
+        listener,
+        config,
+        shutdown.clone(),
+    ));
+    // The listener is open before `serve_on_with_shutdown` is called, so there
+    // is no readiness race to wait out — but the accept loop is spawned, so give
+    // it a moment to be the thing accepting.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let plain = reqwest::Client::new()
+        .get(format!("http://{addr}/healthz"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await;
+    assert!(
+        plain.is_err(),
+        "the endpoint answered a plaintext request: {plain:?}"
+    );
+
+    let secure = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap()
+        .get(format!("https://{addr}/healthz"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .expect("a TLS request must be answered");
+    assert!(secure.status().is_success());
+    assert_eq!(secure.text().await.unwrap(), "ok");
+
+    shutdown.begin();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), serving).await;
 }
 
 #[tokio::test]
@@ -2022,6 +2102,7 @@ async fn start_clustered(node: &str, namespace: &str) -> Option<SocketAddr> {
             lease_ms: 1_000,
             advertise: format!("10.0.0.1:9443/{node}"),
         }),
+        tls: None,
     };
     tokio::spawn(async move {
         let _ = serve_on(listener, config).await;
