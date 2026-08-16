@@ -34,7 +34,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{CellReference, Expr};
-use casual_calc_model::{AutoFilter, AxisSizing, CellRange, CellRef, CellStore, Sheet, Workbook};
+use casual_calc_model::{
+    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, Sheet, Table, TableColumn, Workbook,
+};
 
 use crate::{Operation, TxnError};
 
@@ -230,6 +232,10 @@ fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
 /// disagrees with itself the first time a field is added.
 pub(crate) trait Positional {
     fn merges_mut(&mut self) -> &mut Vec<CellRange>;
+    /// The sheet's tables. Position-indexed like everything else here: a table
+    /// is a *range*, and a range that does not move when rows move stops
+    /// describing the data it names.
+    fn tables_mut(&mut self) -> &mut Vec<Table>;
     fn auto_filter_mut(&mut self) -> &mut Option<AutoFilter>;
     fn filter_hidden_mut(&mut self) -> &mut BTreeSet<u32>;
     /// Sizing, hidden lines, the freeze boundary, outline levels and collapse
@@ -251,6 +257,9 @@ macro_rules! impl_positional {
         impl Positional for $t {
             fn merges_mut(&mut self) -> &mut Vec<CellRange> {
                 &mut self.merges
+            }
+            fn tables_mut(&mut self) -> &mut Vec<Table> {
+                &mut self.tables
             }
             fn auto_filter_mut(&mut self) -> &mut Option<AutoFilter> {
                 &mut self.auto_filter
@@ -323,6 +332,48 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
             Some(if k >= at { k.saturating_add(count) } else { k })
         });
     }
+    // Tables move exactly like merges, and were the one position-indexed thing
+    // this function never touched. Insert a row above a table and its range,
+    // banding, filter buttons and column list stayed on the old row numbers, so
+    // `SUM(Table1[Amount])` read the header text row and dropped the last
+    // record — a wrong number in a saved file, with no error and no report.
+    for table in sheet.tables_mut().iter_mut() {
+        let start = axis.coord(table.range.start);
+        let end_before = axis.coord(table.range.end);
+        insert_coord(axis, &mut table.range.start, at, count);
+        insert_coord(axis, &mut table.range.end, at, count);
+        // A table filters independently of the sheet, so it has its own range
+        // to move; leaving it behind puts the filter buttons on the wrong
+        // columns.
+        if let Some(filter) = table.auto_filter.as_mut() {
+            insert_coord(axis, &mut filter.range.start, at, count);
+            insert_coord(axis, &mut filter.range.end, at, count);
+        }
+        // Widening a table sideways needs a *column* as well as the room for
+        // it: `columns` is indexed left to right and every structured reference
+        // resolves through it, so a range one wider than the list silently
+        // shifts every column's meaning by one. Only an insert strictly inside
+        // widens — one at the table's own first column pushes the whole table
+        // right instead, which is what `at > start` distinguishes.
+        if axis == Axis::Col && at > start && at <= end_before {
+            let offset = (at - start) as usize;
+            let first_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            for (i, id) in (first_id..).take(count as usize).enumerate() {
+                let name = unused_column_name(&table.columns);
+                table.columns.insert(
+                    offset + i,
+                    TableColumn {
+                        id,
+                        name,
+                        totals_row_function: None,
+                        totals_row_label: None,
+                        calculated_column_formula: None,
+                        totals_row_formula: None,
+                    },
+                );
+            }
+        }
+    }
     let (sizing, hidden, frozen, outline, collapsed) = sheet.axis_mut(axis);
     let shift = |k: u32| Some(if k >= at { k.saturating_add(count) } else { k });
     reindex_map(&mut sizing.sizes, shift);
@@ -371,6 +422,42 @@ pub(crate) fn shift_metadata_delete(sheet: &mut impl Positional, axis: Axis, at:
             None => *sheet.auto_filter_mut() = None,
         }
     }
+    // Tables are clamped the way a straddling merge is, and dropped outright
+    // when the delete takes the whole range — the counterpart of the insert
+    // above, and missing for the same reason it was.
+    sheet.tables_mut().retain_mut(|table| {
+        let start = axis.coord(table.range.start);
+        let end_before = axis.coord(table.range.end);
+        let Some((new_lo, new_hi)) = map_range_delete(start, end_before, at, count) else {
+            return false;
+        };
+        table.range.start = axis.with_coord(table.range.start, new_lo);
+        table.range.end = axis.with_coord(table.range.end, new_hi);
+        if let Some(filter) = table.auto_filter.as_mut() {
+            let lo = axis.coord(filter.range.start);
+            let hi = axis.coord(filter.range.end);
+            match map_range_delete(lo, hi, at, count) {
+                Some((lo, hi)) => {
+                    filter.range.start = axis.with_coord(filter.range.start, lo);
+                    filter.range.end = axis.with_coord(filter.range.end, hi);
+                }
+                None => table.auto_filter = None,
+            }
+        }
+        // Drop the columns the delete took with it, keyed by where each one
+        // *was*. Doing this by position rather than by count matters when the
+        // deleted band only partly overlaps the table: the survivors have to be
+        // the ones outside the band, not the first or last N.
+        if axis == Axis::Col {
+            let mut column = start;
+            table.columns.retain(|_| {
+                let keep = !(column >= at && column < end);
+                column += 1;
+                keep
+            });
+        }
+        true
+    });
     if axis == Axis::Row {
         reindex_set(sheet.filter_hidden_mut(), |k| {
             map_index_delete(k, at, end, count)
@@ -386,6 +473,22 @@ pub(crate) fn shift_metadata_delete(sheet: &mut impl Positional, axis: Axis, at:
     if at < *frozen {
         let removed = end.min(*frozen).saturating_sub(at);
         *frozen = frozen.saturating_sub(removed);
+    }
+}
+
+/// A `Column{n}` name no column in `existing` already uses.
+///
+/// Excel names a column it creates for you this way, and the name is not
+/// cosmetic: it is what a structured reference resolves through, so two columns
+/// sharing one would make `Table[Column2]` ambiguous.
+fn unused_column_name(existing: &[TableColumn]) -> String {
+    let mut n = existing.len() + 1;
+    loop {
+        let candidate = format!("Column{n}");
+        if !existing.iter().any(|c| c.name == candidate) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 

@@ -2,7 +2,8 @@
 
 use casual_calc_formula::parse;
 use casual_calc_model::{
-    Cell, CellComment, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style, StyleId, Workbook,
+    AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style,
+    StyleId, Table, TableColumn, Workbook,
 };
 
 use crate::{History, Operation, apply};
@@ -769,6 +770,187 @@ fn delete_rows_removes_inner_merge_and_clamps_straddling() {
     assert_eq!(wb.sheets[0].merges.len(), 2);
     assert_eq!(wb.sheets[0].merges[0], merge(1, 0, 2, 1));
     assert_eq!(wb.sheets[0].merges[1], merge(4, 0, 5, 1));
+}
+
+/// A table is a range, and a range that does not move when rows move stops
+/// describing the data it names.
+///
+/// `structural.rs` shifted merges, the autofilter, filter-hidden rows, sizing,
+/// hidden lines, the freeze boundary and the outline — and never `sheet.tables`.
+/// Insert one row above a table and its range, banding, filter buttons and
+/// column list stayed on the old row numbers, so `SUM(Table1[Amount])` read the
+/// header text row and dropped the last record: a wrong number in a saved file,
+/// with no error and no entry in the compatibility report.
+fn table(name: &str, r0: u32, c0: u32, r1: u32, c1: u32, cols: &[&str]) -> Table {
+    Table {
+        id: 1,
+        name: name.to_owned(),
+        display_name: name.to_owned(),
+        range: merge(r0, c0, r1, c1),
+        header_row_count: 1,
+        totals_row_count: 0,
+        columns: cols
+            .iter()
+            .enumerate()
+            .map(|(i, n)| TableColumn {
+                id: i as u32 + 1,
+                name: (*n).to_owned(),
+                totals_row_function: None,
+                totals_row_label: None,
+                calculated_column_formula: None,
+                totals_row_formula: None,
+            })
+            .collect(),
+        auto_filter: Some(AutoFilter {
+            range: merge(r0, c0, r1, c1),
+            rules: Default::default(),
+        }),
+        style: Default::default(),
+        attrs: Default::default(),
+    }
+}
+
+#[test]
+fn inserting_rows_moves_a_table_rather_than_leaving_it_on_the_old_rows() {
+    let mut wb = workbook();
+    // Header on row 3, records on 4..=6.
+    wb.sheets[0]
+        .tables
+        .push(table("Sales", 3, 0, 6, 1, &["Item", "Amount"]));
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    let t = &wb.sheets[0].tables[0];
+    assert_eq!(
+        t.range,
+        merge(5, 0, 8, 1),
+        "the whole table moved down by 2"
+    );
+    assert_eq!(
+        t.auto_filter.as_ref().unwrap().range,
+        merge(5, 0, 8, 1),
+        "and so did the filter buttons, which are what the header row draws"
+    );
+    assert_eq!(t.columns.len(), 2, "a row insert changes no columns");
+}
+
+#[test]
+fn inserting_rows_inside_a_table_grows_it() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .tables
+        .push(table("Sales", 0, 0, 4, 1, &["Item", "Amount"]));
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    )
+    .unwrap();
+
+    // The header stays put and the last record moves down: the new rows are
+    // records, which is what makes them part of the table.
+    assert_eq!(wb.sheets[0].tables[0].range, merge(0, 0, 7, 1));
+}
+
+#[test]
+fn inserting_a_column_inside_a_table_gives_it_a_column_to_match() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .tables
+        .push(table("Sales", 0, 0, 4, 2, &["Item", "Qty", "Amount"]));
+
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    let t = &wb.sheets[0].tables[0];
+    assert_eq!(t.range, merge(0, 0, 4, 3), "one column wider");
+    // Width and column count must agree, or every structured reference past the
+    // insert resolves to the wrong column.
+    assert_eq!(t.columns.len(), 4);
+    let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Item", "Column4", "Qty", "Amount"]);
+    let ids: std::collections::BTreeSet<u32> = t.columns.iter().map(|c| c.id).collect();
+    assert_eq!(
+        ids.len(),
+        4,
+        "ids stay unique: a filter refers to a column by id"
+    );
+}
+
+#[test]
+fn deleting_columns_takes_the_table_columns_with_them() {
+    let mut wb = workbook();
+    wb.sheets[0].tables.push(table(
+        "Sales",
+        0,
+        1,
+        4,
+        4,
+        &["Item", "Qty", "Price", "Amount"],
+    ));
+
+    // Deletes sheet columns 2..=3, which are the table's "Qty" and "Price".
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    let t = &wb.sheets[0].tables[0];
+    assert_eq!(t.range, merge(0, 1, 4, 2));
+    let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Item", "Amount"],
+        "the survivors are the ones outside the band"
+    );
+}
+
+#[test]
+fn deleting_every_row_of_a_table_removes_the_table() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .tables
+        .push(table("Sales", 2, 0, 5, 1, &["Item", "Amount"]));
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 4,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        wb.sheets[0].tables.is_empty(),
+        "a table whose every row is gone is gone: {:?}",
+        wb.sheets[0].tables
+    );
 }
 
 #[test]
