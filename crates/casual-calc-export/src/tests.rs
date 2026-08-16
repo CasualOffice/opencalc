@@ -1723,6 +1723,241 @@ fn an_external_relationship_survives_with_its_target_mode() {
     assert_eq!(back.retained_refs, wb.retained_refs);
 }
 
+/// The value of an attribute on the first element in `xml` that carries it.
+fn attr_after(xml: &str, from: &str, attr: &str) -> String {
+    let at = xml
+        .find(from)
+        .unwrap_or_else(|| panic!("no {from} in {xml}"));
+    let rest = &xml[at..];
+    let at = rest
+        .find(attr)
+        .unwrap_or_else(|| panic!("no {attr} after {from}"));
+    let rest = &rest[at + attr.len()..];
+    rest[..rest.find('"').expect("a closing quote")].to_owned()
+}
+
+/// The `Id` of the single relationship in `rels` whose `Type` ends `suffix`.
+fn rel_id_of_type(rels: &str, suffix: &str) -> String {
+    let mut found: Vec<String> = Vec::new();
+    for element in rels.split("<Relationship ").skip(1) {
+        let element = &element[..element.find("/>").expect("a closed element")];
+        let ty = attr_after(element, "Type=\"", "Type=\"");
+        if ty.ends_with(suffix) {
+            found.push(attr_after(element, "Id=\"", "Id=\""));
+        }
+    }
+    assert_eq!(found.len(), 1, "expected one {suffix} in {rels}");
+    found.remove(0)
+}
+
+/// Every `Id` in a `.rels` part, in document order.
+fn rel_ids(rels: &str) -> Vec<&str> {
+    let mut ids = Vec::new();
+    let mut rest = rels;
+    while let Some(at) = rest.find("Id=\"") {
+        rest = &rest[at + 4..];
+        let end = rest.find('"').expect("a closing quote");
+        ids.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    ids
+}
+
+/// `Id` is an `xsd:ID`: a repeat within one part is a package Excel offers to
+/// repair, and repairing it drops relationships. Collected in order so a repeat
+/// is visible as a repeat rather than inferred from a count.
+fn assert_ids_are_unique(rels: &str) {
+    let ids = rel_ids(rels);
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for id in &ids {
+        assert!(seen.insert(id), "{id} written twice in one .rels: {ids:?}");
+    }
+}
+
+/// FID-21 — a relationship id this writer mints must step aside for a retained
+/// one, rather than being emitted twice.
+///
+/// `Id` is an `xsd:ID`, so two `<Relationship>` elements sharing one in a single
+/// `.rels` is not a duplicate to be ignored: Excel reports the package as
+/// needing repair, and repairing it drops relationships. The retained id is the
+/// one that cannot move, because `<externalReference r:id="rId1"/>` names it and
+/// travels verbatim — so the minted ids are the ones that give way, exactly as
+/// `root_rels` already does for the workbook's own relationship.
+///
+/// Two sheets and two colliding ids, because an allocator that merely starts one
+/// higher survives a single collision and fails the second.
+#[test]
+fn a_minted_relationship_id_steps_aside_for_a_retained_one() {
+    const EXTERNAL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink";
+    const WORKSHEET: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
+    let source = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets>
+                <sheet name="Sheet1" sheetId="1" r:id="rId7"/>
+                <sheet name="Sheet2" sheetId="2" r:id="rId8"/>
+              </sheets>
+              <externalReferences><externalReference r:id="rId1"/><externalReference r:id="rId2"/></externalReferences>
+            </workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+              <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="file:///first.xlsx" TargetMode="External"/>
+              <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="file:///second.xlsx" TargetMode="External"/>
+            </Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+        ),
+        (
+            "xl/worksheets/sheet2.xml",
+            br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData></worksheet>"#,
+        ),
+    ]);
+    let wb = import_package(source).unwrap().workbook;
+    assert_eq!(wb.sheets.len(), 2);
+    assert_eq!(wb.retained_rels.len(), 2, "{:?}", wb.retained_rels);
+
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+
+    assert_ids_are_unique(&rels);
+
+    // The retained ids kept, because the `<externalReference>` elements name
+    // them and were written out verbatim.
+    for (id, target) in [
+        ("rId1", "file:///first.xlsx"),
+        ("rId2", "file:///second.xlsx"),
+    ] {
+        assert!(
+            rels.contains(&format!(
+                r#"<Relationship Id="{id}" Type="{EXTERNAL}" Target="{target}" TargetMode="External"/>"#
+            )),
+            "{rels}"
+        );
+    }
+    let workbook_xml = xml_of(&written, "xl/workbook.xml");
+    assert!(
+        workbook_xml
+            .contains(r#"<externalReference r:id="rId1"/><externalReference r:id="rId2"/>"#),
+        "{workbook_xml}"
+    );
+
+    // And each sheet's `r:id` still resolves — the ids moved in `workbook.xml`
+    // and `workbook.xml.rels` together, or the sheet points at nothing.
+    let mut sheet_ids: Vec<&str> = Vec::new();
+    let mut rest = workbook_xml.as_str();
+    while let Some(at) = rest.find("<sheet ") {
+        rest = &rest[at..];
+        let tag_end = rest.find("/>").expect("a closed <sheet>");
+        let tag = &rest[..tag_end];
+        let at = tag.find("r:id=\"").expect("a sheet names its part");
+        let after = &tag[at + 6..];
+        sheet_ids.push(&after[..after.find('"').expect("a closing quote")]);
+        rest = &rest[tag_end..];
+    }
+    assert_eq!(sheet_ids.len(), 2, "{workbook_xml}");
+    for (i, id) in sheet_ids.iter().enumerate() {
+        assert!(
+            rels.contains(&format!(
+                r#"<Relationship Id="{id}" Type="{WORKSHEET}" Target="worksheets/sheet{}.xml"/>"#,
+                i + 1
+            )),
+            "sheet {} names {id}, which is not a worksheet relationship: {rels}",
+            i + 1
+        );
+    }
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets.len(), 2);
+    assert_eq!(back.retained_rels, wb.retained_rels);
+    assert_eq!(back.retained_refs, wb.retained_refs);
+}
+
+/// FID-21 on a worksheet's `.rels`, where the same collision is far easier to
+/// reach: `sheet_rels` mints a bare `rId1`/`rId2`/`rId3` for the parts behind a
+/// note, and any retained relationship the sheet carried in — a linked OLE
+/// object, a picture's drawing — is appended verbatim beside them.
+///
+/// The duplicate `Id` is the lesser half. `<legacyDrawing r:id="rId1"/>` in the
+/// worksheet names the VML that draws the note markers, and with two `rId1` in
+/// the part it resolves to whichever Excel reaches first — so a sheet with a
+/// picture and a note loses the marker, and the note becomes unreachable while
+/// still being in the file.
+#[test]
+fn a_note_and_a_retained_sheet_relationship_do_not_both_claim_rid1() {
+    use casual_calc_model::{CellComment, CellRef, RetainedRel};
+
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    wb.sheets[0].comments.push(CellComment {
+        at: CellRef::new(0, 0),
+        text: "Check this".to_owned(),
+        author: Some("Ana".to_owned()),
+        created: None,
+        resolved: false,
+        replies: Vec::new(),
+    });
+    // What an imported sheet carrying a linked object leaves behind: external,
+    // so it needs no bytes in the package, and named `rId1` because that is
+    // what a producer numbering from one calls its first relationship.
+    wb.retained_rels.push(RetainedRel {
+        id: "rId1".to_owned(),
+        source: "xl/worksheets/sheet1.xml".to_owned(),
+        rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"
+            .to_owned(),
+        target: "http://example.com/thing.bin".to_owned(),
+        external: true,
+    });
+
+    let written = write_workbook(&wb).unwrap();
+    let rels = xml_of(&written, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert_ids_are_unique(&rels);
+
+    // The retained one keeps `rId1`, because the sheet's own carried content
+    // names it and travels verbatim.
+    assert!(
+        rels.contains(r#"Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject""#),
+        "{rels}"
+    );
+
+    // And the note still resolves: whatever id the VML took, that is the id the
+    // worksheet's `<legacyDrawing>` names.
+    let vml = rel_id_of_type(&rels, "/vmlDrawing");
+    assert_ne!(vml, "rId1", "the VML must have stepped aside: {rels}");
+    let sheet_xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert_eq!(
+        attr_after(&sheet_xml, "<legacyDrawing", "r:id=\""),
+        vml,
+        "the note marker points at something other than its VML: {rels}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert!(
+        back.sheets[0]
+            .comments
+            .iter()
+            .any(|c| c.text == "Check this"),
+        "the note survived: {:?}",
+        back.sheets[0].comments
+    );
+    assert!(
+        back.retained_rels.iter().any(|r| r.id == "rId1"
+            && r.source == "xl/worksheets/sheet1.xml"
+            && r.rel_type.ends_with("/oleObject")),
+        "{:?}",
+        back.retained_rels
+    );
+}
+
 /// The other half of the same rule: a hyperlink is *modelled*, so it must not
 /// also be retained.
 ///

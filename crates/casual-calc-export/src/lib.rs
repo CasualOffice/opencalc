@@ -79,6 +79,19 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         }
     }
 
+    // Once, because `workbook.xml` and `workbook.xml.rels` have to name the
+    // same id for the same sheet.
+    let workbook_rel_ids = WorkbookRelIds::mint(workbook);
+    // Likewise per sheet, for `<legacyDrawing r:id>` and the worksheet `.rels`.
+    let sheet_rel_ids: Vec<SheetRelIds> = (0..workbook.sheets.len())
+        .map(|i| {
+            SheetRelIds::mint(
+                &workbook.retained_rels,
+                &format!("xl/worksheets/sheet{}.xml", i + 1),
+            )
+        })
+        .collect();
+
     let mut parts: Vec<(String, String)> = vec![
         (
             "[Content_Types].xml".to_owned(),
@@ -91,10 +104,19 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             ),
         ),
         ("_rels/.rels".to_owned(), root_rels(workbook)),
-        ("xl/workbook.xml".to_owned(), workbook_xml(workbook)),
+        (
+            "xl/workbook.xml".to_owned(),
+            workbook_xml(workbook, &workbook_rel_ids),
+        ),
         (
             "xl/_rels/workbook.xml.rels".to_owned(),
-            workbook_rels(workbook, has_styles, has_strings, any_theme_link(workbook)),
+            workbook_rels(
+                workbook,
+                &workbook_rel_ids,
+                has_styles,
+                has_strings,
+                any_theme_link(workbook),
+            ),
         ),
     ];
     if has_strings {
@@ -116,7 +138,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     for (i, built) in chart_builds.iter().enumerate() {
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml(workbook, i, &dxfs, built),
+            worksheet_xml(workbook, i, &dxfs, built, &sheet_rel_ids[i]),
         ));
     }
     // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
@@ -155,6 +177,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 sheet,
                 n,
                 threaded,
+                &sheet_rel_ids[i],
                 &workbook.retained_rels,
                 &(0..sheet.tables.len())
                     .map(|j| table_index(workbook, i, j))
@@ -540,6 +563,7 @@ fn sheet_rels(
     sheet: &Sheet,
     n: usize,
     threaded: bool,
+    ids: &SheetRelIds,
     retained: &[RetainedRel],
     table_part_numbers: &[usize],
     charts: &chart::SheetCharts,
@@ -547,12 +571,14 @@ fn sheet_rels(
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
     if !sheet.comments.is_empty() {
         s.push_str(&format!(
-            "<Relationship Id=\"rId1\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
-<Relationship Id=\"rId2\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>"
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
+<Relationship Id=\"{}\" Type=\"{NS_R}/comments\" Target=\"../comments{n}.xml\"/>",
+            ids.vml, ids.comments
         ));
         if threaded {
             s.push_str(&format!(
-                "<Relationship Id=\"rId3\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>"
+                "<Relationship Id=\"{}\" Type=\"{NS_R_TC}\" Target=\"../threadedComments/threadedComment{n}.xml\"/>",
+                ids.threaded
             ));
         }
     }
@@ -748,6 +774,108 @@ fn is_workbook(source: &str) -> bool {
     source.ends_with("workbook.xml")
 }
 
+/// Mints `rId`s that no retained relationship on the same part already claims.
+///
+/// A retained id cannot move: it came from the file, and the content naming it —
+/// `<externalReference r:id="rId1"/>` — is re-emitted verbatim, so a renumbered
+/// relationship would leave that element pointing at nothing. The minted ids are
+/// named by nothing but their own part, so they are the ones that step aside.
+/// `root_rels` does the same for the single relationship it mints.
+struct RelIdMinter<'a> {
+    taken: BTreeSet<&'a str>,
+    n: u32,
+}
+
+impl<'a> RelIdMinter<'a> {
+    fn avoiding(taken: impl Iterator<Item = &'a str>) -> Self {
+        Self {
+            taken: taken.collect(),
+            n: 0,
+        }
+    }
+
+    fn mint(&mut self) -> String {
+        loop {
+            self.n += 1;
+            let id = format!("rId{}", self.n);
+            if !self.taken.contains(id.as_str()) {
+                return id;
+            }
+        }
+    }
+}
+
+/// The ids the workbook part mints for the pieces this writer produces itself.
+///
+/// Minted once and handed to both writers, because two parts have to agree on
+/// them: `workbook.xml` names each sheet by id and `workbook.xml.rels` defines
+/// it, and a sheet whose `r:id` matches no relationship is a sheet Excel cannot
+/// open. Deriving the same sequence independently in each writer would hold
+/// until the day one of them grew a case the other did not.
+struct WorkbookRelIds {
+    sheets: Vec<String>,
+    styles: String,
+    strings: String,
+    theme: String,
+    person: String,
+}
+
+impl WorkbookRelIds {
+    /// Ids are allocated for the optional parts whether or not they are
+    /// written. The gaps that leaves are legal — `root_rels` already produces
+    /// them — and the alternative is a numbering that shifts depending on
+    /// whether a particular workbook happened to need a theme.
+    fn mint(workbook: &Workbook) -> Self {
+        let mut minter = RelIdMinter::avoiding(
+            workbook
+                .retained_rels
+                .iter()
+                .filter(|r| is_workbook(&r.source))
+                .map(|r| r.id.as_str()),
+        );
+        Self {
+            sheets: (0..workbook.sheets.len()).map(|_| minter.mint()).collect(),
+            styles: minter.mint(),
+            strings: minter.mint(),
+            theme: minter.mint(),
+            person: minter.mint(),
+        }
+    }
+}
+
+/// The ids a worksheet's `.rels` mints for the parts behind a note.
+///
+/// Minted once per sheet and handed to both writers for the same reason as
+/// [`WorkbookRelIds`]: the worksheet's `<legacyDrawing r:id>` names the VML that
+/// draws the note markers, so the two parts have to agree. A disagreement here
+/// does not fail — it produces a note that is in the file and has no marker to
+/// click, which is the shape of bug that survives a release.
+///
+/// Tables, hyperlinks and new drawings do not appear because their ids are
+/// deliberately prefixed (`rIdTbl1`, `rIdHl1`, `rIdDrawing1`) and so cannot
+/// collide with a producer's `rId{n}` in the first place.
+struct SheetRelIds {
+    vml: String,
+    comments: String,
+    threaded: String,
+}
+
+impl SheetRelIds {
+    fn mint(retained: &[RetainedRel], sheet_part: &str) -> Self {
+        let mut minter = RelIdMinter::avoiding(
+            retained
+                .iter()
+                .filter(|r| r.source == sheet_part)
+                .map(|r| r.id.as_str()),
+        );
+        Self {
+            vml: minter.mint(),
+            comments: minter.mint(),
+            threaded: minter.mint(),
+        }
+    }
+}
+
 /// Whether any sheet holds a thread that needs the 2018 parts.
 fn any_threaded(workbook: &Workbook) -> bool {
     workbook
@@ -771,12 +899,7 @@ fn root_rels(workbook: &Workbook) -> String {
     // package Excel repairs — `Id` is an xsd:ID — and the retained one is the id
     // that must not move, because it came from the file. The workbook's own is
     // named by nothing but its type, so it is the one that steps aside.
-    let mut workbook_id = String::from("rId1");
-    let mut n = 1u32;
-    while retained.iter().any(|r| r.id == workbook_id) {
-        n += 1;
-        workbook_id = format!("rId{n}");
-    }
+    let workbook_id = RelIdMinter::avoiding(retained.iter().map(|r| r.id.as_str())).mint();
     let mut s = format!(
         "{DECL}<Relationships xmlns=\"{NS_REL}\"><Relationship Id=\"{workbook_id}\" Type=\"{NS_R}/officeDocument\" Target=\"xl/workbook.xml\"/>"
     );
@@ -790,7 +913,7 @@ fn root_rels(workbook: &Workbook) -> String {
     s
 }
 
-fn workbook_xml(workbook: &Workbook) -> String {
+fn workbook_xml(workbook: &Workbook, ids: &WorkbookRelIds) -> String {
     let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
     // CT_Workbook's sequence: fileVersion, fileSharing, workbookPr, bookViews,
     // sheets, … calcPr. The settings travel verbatim; only `date1904` is
@@ -827,10 +950,10 @@ fn workbook_xml(workbook: &Workbook) -> String {
             .map(|v| format!(" state=\"{v}\""))
             .unwrap_or_default();
         s.push_str(&format!(
-            "<sheet name=\"{}\" sheetId=\"{}\"{state} r:id=\"rId{}\"/>",
+            "<sheet name=\"{}\" sheetId=\"{}\"{state} r:id=\"{}\"/>",
             escape_attr(&sheet.name),
             i + 1,
-            i + 1
+            ids.sheets[i]
         ));
     }
     s.push_str("</sheets>");
@@ -892,40 +1015,40 @@ fn write_retained_refs(s: &mut String, workbook: &Workbook, element: &str, wrapp
 
 fn workbook_rels(
     workbook: &Workbook,
+    ids: &WorkbookRelIds,
     has_styles: bool,
     has_strings: bool,
     has_theme: bool,
 ) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
-    let mut next_rid = workbook.sheets.len() + 1;
-    for i in 0..workbook.sheets.len() {
+    for (i, id) in ids.sheets.iter().enumerate() {
         s.push_str(&format!(
-            "<Relationship Id=\"rId{}\" Type=\"{NS_R}/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
-            i + 1,
+            "<Relationship Id=\"{id}\" Type=\"{NS_R}/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
             i + 1
         ));
     }
     if has_styles {
         s.push_str(&format!(
-            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/styles\" Target=\"styles.xml\"/>"
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/styles\" Target=\"styles.xml\"/>",
+            ids.styles
         ));
-        next_rid += 1;
     }
     if has_strings {
         s.push_str(&format!(
-            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/sharedStrings\" Target=\"sharedStrings.xml\"/>"
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/sharedStrings\" Target=\"sharedStrings.xml\"/>",
+            ids.strings
         ));
-        next_rid += 1;
     }
     if has_theme {
         s.push_str(&format!(
-            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R}/theme\" Target=\"theme/theme1.xml\"/>"
+            "<Relationship Id=\"{}\" Type=\"{NS_R}/theme\" Target=\"theme/theme1.xml\"/>",
+            ids.theme
         ));
-        next_rid += 1;
     }
     if any_threaded(workbook) {
         s.push_str(&format!(
-            "<Relationship Id=\"rId{next_rid}\" Type=\"{NS_R_PERSON}\" Target=\"persons/person1.xml\"/>"
+            "<Relationship Id=\"{}\" Type=\"{NS_R_PERSON}\" Target=\"persons/person1.xml\"/>",
+            ids.person
         ));
     }
     // Retained relationships keep their original ids: the element that names
@@ -1711,6 +1834,7 @@ fn worksheet_xml(
     sheet_index: usize,
     dxfs: &[String],
     charts: &chart::SheetCharts,
+    ids: &SheetRelIds,
 ) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
@@ -2196,7 +2320,7 @@ fn worksheet_xml(
 
     // Legacy drawing ref (the VML holding note markers).
     if !sheet.comments.is_empty() {
-        s.push_str("<legacyDrawing r:id=\"rId1\"/>");
+        s.push_str(&format!("<legacyDrawing r:id=\"{}\"/>", ids.vml));
     }
 
     carried(&mut s, "ignoredError", Some("ignoredErrors"));
