@@ -700,6 +700,10 @@ test.describe("seeing each other type", () => {
     const draftSeenBy = (page) =>
       page.evaluate(() => window.__editor.collaborators()[0]?.editing ?? null);
 
+    // What the cell holds before anybody types, so the assertion below can be
+    // about the draft rather than about the fixture.
+    const before = await cellIn(watcher, 0, 0);
+
     await typist.locator("#grid").focus();
     // A plain character on the grid opens the in-cell editor with that
     // character in it — the ordinary way anybody starts typing in a cell.
@@ -711,11 +715,16 @@ test.describe("seeing each other type", () => {
       })
       .toMatchObject({ at: [0, 0], text: "hello" });
 
-    // And it is genuinely uncommitted: the observer's own engine holds nothing,
+    // And it is genuinely uncommitted: the cell is **unchanged** on both sides,
     // so nothing entered the document, the history or the applied log on either
     // side of the wire.
-    expect(await cellIn(watcher, 0, 0)).toBe("");
-    expect(await cellIn(typist, 0, 0)).toBe("");
+    //
+    // Unchanged rather than empty: the session opens `minimal.xlsx`, whose A1
+    // already holds a value, and asserting `""` here tested the fixture rather
+    // than the property. The claim worth making is that a draft does not become
+    // a value — which is exactly "what was there is still there".
+    expect(await cellIn(watcher, 0, 0)).toBe(before);
+    expect(await cellIn(typist, 0, 0)).toBe(before);
 
     // It keeps up as she types, rather than showing the first burst and
     // stopping — the throttle drops nothing, it only delays.
@@ -742,7 +751,8 @@ test.describe("seeing each other type", () => {
         { message: "an abandoned edit left a ghost behind" },
       )
       .toEqual({ stillHere: true, editing: null });
-    expect(await cellIn(watcher, 0, 0)).toBe("");
+    // Escape abandons: the cell is what it was before any of this.
+    expect(await cellIn(watcher, 0, 0)).toBe(before);
 
     await typist.close();
     await watcher.close();
@@ -803,6 +813,10 @@ test.describe("seeing each other type", () => {
     await join(typist, { document: key, user: { id: "u-ada", name: "Ada" } });
     await join(watcher, { document: key, user: { id: "u-g", name: "Grace" } });
 
+    // What the cell holds before anybody types — the assertion at the end is
+    // that a draft did not become a value, not that the sheet started empty.
+    const before = await cellIn(watcher, 0, 0);
+
     await typist.locator("#grid").focus();
     await typist.keyboard.type("half-typ");
     await expect
@@ -815,7 +829,8 @@ test.describe("seeing each other type", () => {
         message: "the draft of somebody who left was still on the grid",
       })
       .toBe(0);
-    expect(await cellIn(watcher, 0, 0)).toBe("");
+    // And the half-typed word left nothing behind in the document either.
+    expect(await cellIn(watcher, 0, 0)).toBe(before);
 
     await watcher.close();
   });
