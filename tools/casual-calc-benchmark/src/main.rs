@@ -28,6 +28,15 @@ const SCHEMA_VERSION: u32 = 1;
 struct Report {
     schema_version: u32,
     environment: String,
+    /// `"release"` or `"debug"`.
+    ///
+    /// Reported because the frame budget is an absolute duration and a debug
+    /// build is a different program: the same frame measures 0.13 ms in release
+    /// and 5.7 ms in debug on the same machine, forty times apart. A gate on
+    /// "sixty frames a second" run against a debug build is not measuring
+    /// anything a user will ever experience, and CI had been doing exactly that
+    /// — which is most of why the ceiling had drifted to four whole frames.
+    profile: &'static str,
     smoke: bool,
     /// How each measured operation grew when its input did. The part that is
     /// actually a gate — see [`ScalingReport`].
@@ -587,9 +596,23 @@ fn main() {
         .map(|bench| run_bench(bench, iterations))
         .collect();
 
+    // A debug build measures a different program — forty times slower on the
+    // frame — so its numbers cannot be read as a verdict on anything shipped.
+    // Said on stderr, where it does not disturb the report on stdout.
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "warning: this is a debug build. The absolute budgets (the frame) \
+             describe release code; rebuild with --release before believing them."
+        );
+    }
     let report = Report {
         schema_version: SCHEMA_VERSION,
         environment,
+        profile: if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         smoke,
         cases,
         scaling: measure_all_scaling(if smoke { 3 } else { 20 }),
