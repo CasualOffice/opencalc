@@ -42,6 +42,48 @@ use casual_calc_model::{CellFlags, CellRef, CellValue, ErrorValue, Workbook};
 ///
 /// Deterministic: evaluation order does not affect results (memoized recursion
 /// over the reference graph), and identical input yields identical cached values.
+/// Whether a recalculation ran to the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recalculated {
+    /// Every formula cell holds a fresh value.
+    Fully,
+    /// The caller asked it to stop. Cached values are a mixture of fresh and
+    /// stale, which is why this is returned rather than swallowed: a host that
+    /// cancels must know not to present the result as final, and must not save
+    /// it as though it were.
+    Cancelled,
+}
+
+/// Recompute every formula cell, with a way to stop it.
+///
+/// docs/07 and docs/21 both promise full recalculation is "bounded *and*
+/// cancellable"; nothing could stop one until `SEC-012`. `cancel` is asked
+/// periodically while the formulas are evaluated — see
+/// [`CANCEL_CHECK_INTERVAL`](casual_calc_model::CANCEL_CHECK_INTERVAL).
+///
+/// Unlike an import, a cancelled recalculation **keeps what it computed**.
+/// There is nothing to fail closed about: the workbook is the user's own
+/// document and was already holding stale cached values before this started, so
+/// throwing the fresh ones away would leave it strictly worse than stopping.
+/// What matters is that the caller is told, which is what the return value is
+/// for.
+pub fn recalculate_cancellable(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+) -> Recalculated {
+    match recalculate_once_cancellable(workbook, cancel) {
+        None => return Recalculated::Cancelled,
+        Some(true) => {
+            if recalculate_once_cancellable(workbook, cancel).is_none() {
+                return Recalculated::Cancelled;
+            }
+        }
+        Some(false) => {}
+    }
+    iterate_to_convergence(workbook);
+    Recalculated::Fully
+}
+
 pub fn recalculate(workbook: &mut Workbook) {
     // A spilled cell is written *after* evaluation, so a formula that reads
     // into a spill range sees nothing on the pass that creates it. Rather than
@@ -129,13 +171,31 @@ fn converged(before: &[CellValue], after: &[CellValue], max_change: f64) -> bool
 
 /// One evaluate-and-write cycle. Returns whether any array spilled.
 fn recalculate_once(workbook: &mut Workbook) -> bool {
+    recalculate_once_cancellable(workbook, &casual_calc_model::Never)
+        .expect("`Never` never cancels")
+}
+
+/// One pass, stoppable. `None` means the caller asked it to stop.
+fn recalculate_once_cancellable(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+) -> Option<bool> {
     // Phase 1: compute new values without mutating the workbook.
     let updates = {
         let mut evaluator = Evaluator::new(workbook);
         let mut updates: Vec<(usize, CellRef, Value)> = Vec::new();
+        let mut evaluated = 0usize;
         for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
             for (at, cell) in sheet.cells.iter() {
                 if cell.formula.is_some() {
+                    // Asked here, in phase one, because this is where the time
+                    // goes: phase two is a write per already-computed value,
+                    // and stopping between them would leave the workbook
+                    // holding values nothing had written back.
+                    evaluated += 1;
+                    if casual_calc_model::should_check(evaluated) && cancel.cancelled() {
+                        return None;
+                    }
                     // The array form: only the spilling pass wants the whole
                     // block, and it is the thing about to run.
                     let value = evaluator.eval_cell_array(sheet_index, at);
@@ -153,7 +213,7 @@ fn recalculate_once(workbook: &mut Workbook) -> bool {
     for (sheet_index, at, value) in updates {
         spilled |= write_result(workbook, sheet_index, at, value);
     }
-    spilled
+    Some(spilled)
 }
 
 /// Remove every cell that a previous pass filled by spilling.

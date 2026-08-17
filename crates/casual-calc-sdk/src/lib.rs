@@ -7,9 +7,9 @@
 //! bridge) embeds. The public surface is deliberately narrower than the internal
 //! crates. See `docs/02-ARCHITECTURE.md`.
 
-use casual_calc_eval::{Recalculator, recalculate};
+use casual_calc_eval::{Recalculated, Recalculator, recalculate, recalculate_cancellable};
 use casual_calc_export::{ExportError, write_workbook};
-use casual_calc_import::{CompatibilityReport, ImportError, import_package_with};
+use casual_calc_import::{CompatibilityReport, ImportError, import_package_cancellable};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
 use casual_calc_render::{PanePaint, RenderError, render_panes_png};
@@ -332,10 +332,29 @@ impl WorkbookSession {
     /// full recalc is slow enough to be disruptive; doing one anyway before
     /// they have seen the file is the opposite of what they asked for.
     pub fn open_with(bytes: Vec<u8>, config: SessionConfig) -> Result<Self, SdkError> {
+        Self::open_cancellable(bytes, config, &casual_calc_model::Never)
+    }
+
+    /// The same, with a way to stop it.
+    ///
+    /// Opening is the longest thing a session does, and until `SEC-012` the
+    /// only way out of it was for it to finish — on a browser's single thread,
+    /// which docs/07 and docs/21 both said would not be the case. A cancelled
+    /// open returns [`SdkError::Import`] carrying `ImportError::Cancelled` and
+    /// leaves no session behind.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_with`](Self::open_with), plus a cancellation.
+    pub fn open_cancellable(
+        bytes: Vec<u8>,
+        config: SessionConfig,
+        cancel: &dyn casual_calc_model::Cancel,
+    ) -> Result<Self, SdkError> {
         // Kept before the import consumes it: an untouched file saves as
         // itself, and that is only possible if the original survives the read.
         let source = bytes.clone();
-        let outcome = import_package_with(bytes, config.limits)?;
+        let outcome = import_package_cancellable(bytes, config.limits, cancel)?;
         let mut workbook = outcome.workbook;
         apply_environment(&mut workbook, &config);
         let calculation = config
@@ -619,6 +638,22 @@ impl WorkbookSession {
     pub fn recalculate(&mut self) {
         recalculate(&mut self.workbook);
         self.stale = false;
+    }
+
+    /// The same, with a way to stop it.
+    ///
+    /// A cancelled recalculation **keeps what it computed** and leaves the
+    /// session marked stale, so the next automatic pass finishes the job. That
+    /// is the difference from a cancelled open: there is no half-built document
+    /// to throw away, only a document whose cached values were already stale
+    /// when this started.
+    pub fn recalculate_cancellable(
+        &mut self,
+        cancel: &dyn casual_calc_model::Cancel,
+    ) -> Recalculated {
+        let outcome = recalculate_cancellable(&mut self.workbook, cancel);
+        self.stale = outcome != Recalculated::Fully;
+        outcome
     }
 
     fn recalculate_if_automatic(&mut self) {

@@ -1133,3 +1133,98 @@ mod admission_budget {
         }
     }
 }
+
+// --- Cancellation (SEC-012, docs/07 §Policy, docs/21 §Policy) ----------------
+
+mod cancellation {
+    use super::*;
+    use crate::{ImportError, import_package_cancellable, import_package_with};
+    use casual_calc_model::{CancelFlag, Never};
+    use casual_calc_ooxml::OoxmlLimits;
+    use std::cell::Cell as StdCell;
+
+    /// Enough cells for the periodic check to come round **twice**.
+    ///
+    /// Once is not enough to tell a check inside the loop from a check at the
+    /// top of it, and that distinction is the whole feature.
+    const ROWS: u32 = 9000;
+
+    fn a_big_enough_sheet() -> Vec<u8> {
+        let mut rows = String::new();
+        for r in 1..=ROWS {
+            rows.push_str(&format!(
+                "<row r=\"{r}\"><c r=\"A{r}\"><v>{r}</v></c></row>"
+            ));
+        }
+        package_with_sheet(sheet_with(&rows), None)
+    }
+
+    /// **An import stops when it is asked to.**
+    ///
+    /// The promise docs/07 and docs/21 both make, and which nothing could keep:
+    /// a workbook inside every limit and merely enormous held the only thread a
+    /// browser has until it finished.
+    #[test]
+    fn an_import_stops_when_asked() {
+        let stop = CancelFlag::new();
+        stop.cancel();
+
+        // Matched rather than `expect_err`, which would Debug-print an entire
+        // workbook into the failure message.
+        match import_package_cancellable(a_big_enough_sheet(), OoxmlLimits::default(), &stop) {
+            Err(ImportError::Cancelled) => {}
+            Err(other) => panic!("expected a cancellation, got {other}"),
+            Ok(_) => panic!("a raised flag did not stop the import"),
+        }
+        assert_eq!(ImportError::Cancelled.code(), "OC-IMP-0007");
+    }
+
+    /// **It stops part-way, not only before it starts.**
+    ///
+    /// A check that only ran once, at the top, would satisfy the test above and
+    /// leave the actual problem — a job already running — exactly as it was.
+    /// The token here says yes only after the import is well under way.
+    #[test]
+    fn an_import_stops_after_it_has_begun() {
+        let asks = StdCell::new(0);
+        let stop_on_the_second_ask = || {
+            asks.set(asks.get() + 1);
+            asks.get() >= 2
+        };
+
+        match import_package_cancellable(
+            a_big_enough_sheet(),
+            OoxmlLimits::default(),
+            &stop_on_the_second_ask,
+        ) {
+            Err(ImportError::Cancelled) => {}
+            Err(other) => panic!("expected a cancellation, got {other}"),
+            Ok(_) => panic!("the import ran to completion despite being cancelled"),
+        }
+        assert!(
+            asks.get() >= 2,
+            "the loop asked {} time(s); a check that runs once, at the top, cannot stop \
+             a job that is already running",
+            asks.get()
+        );
+    }
+
+    /// **A token that never says yes changes nothing.**
+    ///
+    /// The cost of cancellability must be nil for everybody who does not use
+    /// it — including the answer.
+    #[test]
+    fn a_token_that_never_fires_is_invisible() {
+        let package = a_big_enough_sheet();
+        let plain = import_package_with(package.clone(), OoxmlLimits::default())
+            .expect("imports without a token");
+        let with_token = import_package_cancellable(package, OoxmlLimits::default(), &Never)
+            .expect("imports with a token that never fires");
+
+        assert_eq!(
+            plain.workbook.sheets[0].cells.len(),
+            with_token.workbook.sheets[0].cells.len()
+        );
+        assert_eq!(plain.workbook.sheets[0].cells.len(), ROWS as usize);
+    }
+}

@@ -28,6 +28,12 @@ pub enum ImportError {
         /// The ceiling it passed.
         limit: usize,
     },
+    /// The caller asked for this import to stop, and it did.
+    ///
+    /// Not a failure of the file. docs/07 and docs/21 both promise admission is
+    /// cancellable; until `SEC-012` nothing could ask, so a workbook inside
+    /// every limit and merely enormous held the only thread a browser has.
+    Cancelled,
 }
 
 /// Which document-scale budget an import ran past.
@@ -78,6 +84,7 @@ impl ImportError {
             ImportError::Model(err) => err.code(),
             ImportError::MissingPart { .. } => "OC-IMP-0001",
             ImportError::OverBudget { what, .. } => what.code(),
+            ImportError::Cancelled => "OC-IMP-0007",
         }
     }
 }
@@ -89,6 +96,9 @@ impl fmt::Display for ImportError {
             ImportError::Model(err) => write!(f, "{err}"),
             ImportError::MissingPart { name } => {
                 write!(f, "[OC-IMP-0001] required part missing: {name:?}")
+            }
+            ImportError::Cancelled => {
+                f.write_str("[OC-IMP-0007] this import was cancelled before it finished")
             }
             ImportError::OverBudget { what, limit } => write!(
                 f,

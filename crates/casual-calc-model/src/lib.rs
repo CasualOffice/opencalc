@@ -12,6 +12,7 @@
 //!
 //! See `docs/22-NORMALIZED-SCHEMA.md` and `docs/23-CELL-STORE-REPRESENTATION.md`.
 
+mod cancel;
 mod cell;
 mod chart;
 mod defined_name;
@@ -26,6 +27,7 @@ mod style;
 mod value;
 mod workbook;
 
+pub use cancel::{CANCEL_CHECK_INTERVAL, Cancel, CancelFlag, Never, should_check};
 pub use cell::{Cell, CellFlags};
 pub use chart::{ChartKind, ChartSeries, ChartView, Emu, ImageView};
 pub use defined_name::DefinedName;
