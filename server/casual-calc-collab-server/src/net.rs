@@ -23,7 +23,7 @@
 //! opinions about — and a test can supply bytes without a network, which is
 //! what makes the join path testable at all.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -304,6 +304,20 @@ impl core::fmt::Debug for ServiceConfig {
 struct Live {
     session: Mutex<DocumentSession>,
     roster: Mutex<Roster>,
+    /// Session-scoped access overrides, by client (`COL-40`).
+    ///
+    /// **On top of the token, never instead of it.** An entry can only ever
+    /// *reduce* what that participant's token granted — the enforcement point
+    /// takes the minimum of the two — so a compromised or buggy client cannot
+    /// promote itself and the token remains the ceiling.
+    ///
+    /// Ephemeral, and deliberately so: it lives exactly as long as this `Live`
+    /// does, and a document evicted for idleness comes back with the token's
+    /// own permissions. ADR-012 says the server holds no per-document state,
+    /// and durable policy is the host's to persist and re-express in the tokens
+    /// it mints. The alternative is a collaboration server that has become a
+    /// permissions database with no backup, no audit and no owner.
+    overrides: Mutex<BTreeMap<ClientId, Access>>,
     /// Broadcast to every connection on this document, carrying **who caused
     /// it** so a connection can skip its own.
     ///
@@ -1684,7 +1698,7 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                             &mut socket,
                             &ServerMessage::Refused {
                                 seq,
-                                reason: Refusal::CannotMerge,
+                                reason: Refusal::Malformed,
                             },
                         )
                         .await;
@@ -1841,6 +1855,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
             Ok(Arc::clone(registry.entry(key.clone()).or_insert_with(
                 || {
                     Arc::new(Live {
+                        overrides: Mutex::new(BTreeMap::new()),
                         session: Mutex::new(session),
                         roster: Mutex::new(Roster::new(state.config.limits.presence_ttl_ms)),
                         fan_out: broadcast::channel(256).0,
@@ -1966,12 +1981,57 @@ async fn handle(
             ));
             true
         }
+        ClientMessage::SetAccess {
+            client: subject,
+            access,
+        } => {
+            // Only an owner is obeyed, and `owner` is a claim the host makes —
+            // not something inferred from being an editor, which would let
+            // every editor lock out every other one.
+            if !claims.owner {
+                let _ = send(
+                    socket,
+                    &ServerMessage::Refused {
+                        seq: None,
+                        reason: Refusal::ReadOnlyAccess,
+                    },
+                )
+                .await;
+                return true;
+            }
+            let requested = Access::from_wire(access);
+            lock(&live.overrides).insert(subject, requested);
+
+            // Told in words, to the person affected — not discovered when a
+            // keystroke stops working — and the roster moves for everybody so
+            // the change is visible rather than mysterious.
+            let _ = live.fan_out.send((
+                Audience::Only(subject),
+                ServerMessage::AccessChanged { access, by: client },
+            ));
+            true
+        }
         ClientMessage::Leave => false,
         ClientMessage::Submit(submission) => {
             // The permission is enforced here, at the operation, and not by
             // having hidden a toolbar (COL-17). A viewer or commenter whose
             // client sends an edit anyway is refused by the server.
-            if !submission.ops.iter().all(|wire| claims.permits(&wire.op)) {
+            // The token is the ceiling and a session override may only lower
+            // it, so the effective access is the more restrictive of the two.
+            // Enforced *here*, at the same operation check as everything else:
+            // an override that needed its own code path would be an override
+            // with its own bugs (docs/72).
+            let effective = lock(&live.overrides)
+                .get(&client)
+                .copied()
+                .map_or(claims.permissions.access, |o| {
+                    claims.permissions.access.most_restrictive(o)
+                });
+            if !submission
+                .ops
+                .iter()
+                .all(|wire| effective.permits(&wire.op))
+            {
                 let _ = send(
                     socket,
                     &ServerMessage::Refused {

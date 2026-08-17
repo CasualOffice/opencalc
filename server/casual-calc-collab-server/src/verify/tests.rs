@@ -38,6 +38,7 @@ fn claims(document_key: &str) -> Claims {
             print: true,
             copy: true,
         },
+        owner: false,
         callback: None,
     }
 }

@@ -67,6 +67,42 @@ impl Access {
     /// failure of forgetting is silent and the failure of refusing is a bug
     /// report.
     #[must_use]
+    /// The wire spelling of this access.
+    ///
+    /// An exhaustive match on purpose: adding a variant here without deciding
+    /// how it travels will not compile, which is the only thing keeping the two
+    /// enums from drifting apart.
+    pub fn to_wire(self) -> casual_calc_transaction::protocol::WireAccess {
+        use casual_calc_transaction::protocol::WireAccess as W;
+        match self {
+            Access::View => W::View,
+            Access::Comment => W::Comment,
+            Access::Edit => W::Edit,
+        }
+    }
+
+    /// And back.
+    pub fn from_wire(wire: casual_calc_transaction::protocol::WireAccess) -> Self {
+        use casual_calc_transaction::protocol::WireAccess as W;
+        match wire {
+            W::View => Access::View,
+            W::Comment => Access::Comment,
+            W::Edit => Access::Edit,
+        }
+    }
+
+    /// The more restrictive of two.
+    ///
+    /// The whole safety property of a session override lives here: the server
+    /// takes the minimum of the token and the override, so an override can only
+    /// ever *reduce* what a token granted. A client that asks for more gets the
+    /// token's answer, which is why a compromised one cannot promote itself.
+    pub fn most_restrictive(self, other: Self) -> Self {
+        // `View < Comment < Edit`, declared in that order, so `min` is the
+        // rule rather than a table somebody has to keep right.
+        self.min(other)
+    }
+
     pub fn permits(self, op: &Operation) -> bool {
         match self {
             Access::Edit => true,
@@ -264,6 +300,15 @@ pub struct Claims {
     /// What they may do once there.
     #[serde(default)]
     pub permissions: Permissions,
+    /// Whether this participant may reduce other people's access for the life
+    /// of the session (`COL-40`).
+    ///
+    /// **Not inferred from `Access::Edit`.** Every editor being able to lock
+    /// every other editor out is a different feature and a worse one, so this
+    /// is a claim the host makes deliberately. Absent means false, which is the
+    /// safe default and what every existing token says.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
     /// Where the result goes. Absent means **the server will not save**: a
     /// preview, or a session the host intends to collect by other means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
