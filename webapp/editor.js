@@ -2377,6 +2377,7 @@ function draw() {
   drawOutlineGutter(v);
   } // end headers
   drawFreezeDividers(v);
+  drawFreezeHandles();
 
   // The in-cell editor is a DOM element over the canvas: keep it on its cell as
   // the grid scrolls or resizes under it (grid-wrap's overflow clips it once the
@@ -2401,6 +2402,20 @@ const FREEZE_GRAB = 4; // px proximity to the freeze divider that arms a drag
 
 // Prominent, draggable freeze dividers (Sheets-style), drawn on top of the
 // headers. During a drag the line follows the pointer as a live preview.
+function drawFreezeHandles() {
+  const F = state.freeze;
+  ctx.save();
+  ctx.fillStyle = colors.freezeLine;
+  ctx.globalAlpha = 0.55;
+  if (F.fc === 0) {
+    ctx.fillRect(HW - FREEZE_HANDLE + 2, HH * 0.18, FREEZE_HANDLE - 3, HH * 0.44);
+  }
+  if (F.fr === 0) {
+    ctx.fillRect(HW * 0.18, HH - FREEZE_HANDLE + 2, HW * 0.44, FREEZE_HANDLE - 3);
+  }
+  ctx.restore();
+}
+
 function drawFreezeDividers(v) {
   const F = state.freeze;
   const drag = state.freezeDrag;
@@ -2426,6 +2441,27 @@ function drawFreezeDividers(v) {
     ctx.beginPath(); ctx.moveTo(0, y - 1); ctx.lineTo(v.w, y - 1); ctx.stroke();
   }
   ctx.restore();
+}
+
+// Grab handles for *creating* a freeze, in the corner box above the row header.
+//
+// `freezeHit` below can only find a divider that already exists, because the
+// divider is drawn at the freeze line and there is no line at zero. So every
+// drag gesture worked on a freeze somebody had already made through the menu,
+// and there was no gesture that made one — the affordance a user goes looking
+// for first. These are the two handles Sheets puts in the corner: drag the
+// right-hand one out to freeze columns, the bottom one down to freeze rows.
+//
+// They live *inside* the corner box on purpose. The obvious alternative — a
+// grab zone on the body's leading edge — sits exactly where column A's cells
+// are, and would swallow ordinary selection clicks forever after.
+const FREEZE_HANDLE = 7; // px thickness of a corner grab handle
+function freezeHandleAt(px, py) {
+  if (px >= HW || py >= HH) return null;
+  const F = state.freeze;
+  if (F.fc === 0 && px >= HW - FREEZE_HANDLE && py <= HH * 0.62) return { axis: "col" };
+  if (F.fr === 0 && py >= HH - FREEZE_HANDLE && px <= HW * 0.62) return { axis: "row" };
+  return null;
 }
 
 // Is the pointer on a freeze divider (draggable to change or remove the freeze)?
@@ -9714,6 +9750,8 @@ function wireEvents() {
     // Shift-extend, Ctrl/Cmd multi-select (banking a range per addRange), and
     // drag-to-extend across adjacent headers (state.headerDrag drives both the
     // mousemove handler and edge auto-scroll below).
+    const fnew = freezeHandleAt(px, py);
+    if (fnew) { endInline(); state.freezeDrag = { axis: fnew.axis, px, py }; return; }
     if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
     if (py < HH && px >= HW) {
       endInline();
@@ -9812,8 +9850,9 @@ function wireEvents() {
     }
     const fh = freezeHit(px, py);
     const hb = fh ? null : boundaryAt(px, py);
-    canvas.style.cursor = (fh || hb)
-      ? ((fh || hb).axis === "col" ? "col-resize" : "row-resize")
+    const fnew = freezeHandleAt(px, py);
+    canvas.style.cursor = (fnew || fh || hb)
+      ? ((fnew || fh || hb).axis === "col" ? "col-resize" : "row-resize")
       : "cell";
     // Comment tooltip on hover.
     const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
@@ -12504,4 +12543,27 @@ if (byId("grid")) {
     if (status) status.textContent = `failed: ${err}`;
     else console.error(err);
   });
+}
+
+/// Where the grid's clickable chrome is, in canvas pixels, for the browser gate.
+///
+/// Returns the geometry a *user* aims at — the hidden-band handles and the two
+/// corner freeze handles — so a test clicks the same pixels rather than
+/// re-deriving them from assumptions about header widths. The alternative is a
+/// test that hunts for a five-pixel target and goes flaky the first time a
+/// default changes.
+export function gridHandlesForTest() {
+  return {
+    hiddenCols: hiddenColMarks.map((m) => ({ x: m.x, from: m.from, to: m.to })),
+    hiddenRows: hiddenRowMarks.map((m) => ({ y: m.y, from: m.from, to: m.to })),
+    freezeHandles: {
+      col: state.freeze.fc === 0 ? { x: HW - 3, y: HH * 0.4 } : null,
+      row: state.freeze.fr === 0 ? { x: HW * 0.4, y: HH - 3 } : null,
+    },
+    freeze: { fc: state.freeze.fc, fr: state.freeze.fr },
+    // Select-all is a *kind*, not a span — it does not widen the range, so a
+    // test cannot see it by measuring one.
+    selKind: state.selKind,
+    zoom: state.zoom,
+  };
 }
