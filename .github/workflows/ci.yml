@@ -308,10 +308,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Build both images
+      - name: Build every image
         run: |
           docker build -f server/casual-calc-host/Dockerfile -t opencalc-host .
           docker build -f server/casual-calc-collab-server/Dockerfile -t opencalc-collab .
+          docker build -f server/casual-calc-wopi/Dockerfile -t opencalc-wopi .
       - name: The standalone stack answers on one origin
         run: |
           set -euo pipefail
@@ -343,6 +344,23 @@ jobs:
             *) echo "collab is reachable on the page's own origin ($code)" ;;
           esac
           curl -fsS http://127.0.0.1:8080/healthz >/dev/null && echo "host reachable"
+      - name: The WOPI adapter serves a discovery document
+        run: |
+          set -euo pipefail
+          # The one URL an administrator pastes into Nextcloud or SharePoint. If
+          # it does not parse, the editor never appears in their list and there
+          # is no error anywhere to explain why.
+          docker compose --profile wopi up -d --no-build wopi
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then up=1; break; fi
+            sleep 2
+          done
+          [ "${up:-0}" = "1" ] || { docker compose logs wopi; exit 1; }
+          curl -fsS http://127.0.0.1:8090/hosting/discovery -o discovery.xml
+          python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse('discovery.xml')"
+          grep -q 'name="edit" ext="xlsx"' discovery.xml \
+            || { echo "::error::no edit action for xlsx"; cat discovery.xml; exit 1; }
+          echo "discovery is valid XML and advertises an editor"
       - if: always()
         run: docker compose down -v || true
 

@@ -135,6 +135,31 @@ ignoring it. A new secret invalidates every token in flight; a new bind address
 is a different server; a node changing identity mid-lease is the zombie the
 epoch fence exists to stop.
 
+## Putting it in Nextcloud, SharePoint or Moodle
+
+Those file stores do not each have an integration API. They have one — WOPI —
+and the way an editor gets into their list is a discovery document:
+
+```
+docker compose --profile wopi up -d
+# then paste this into the file store's settings:
+#   http://your-host:8090/hosting/discovery
+```
+
+Two settings have no useful default:
+
+- `OPENCALC_WOPI_ALLOWED_HOSTS` — **required**, and the process refuses to start
+  without it. The file's address arrives in a query string on a link, so an
+  unrestricted adapter fetches whatever a link tells it to.
+- `OPENCALC_WOPI_PUBLIC_URL` — the address a *browser* reaches the adapter on,
+  which goes into the discovery document. Behind a proxy it is never the bind
+  address.
+
+`OPENCALC_BRAND_NAME` puts your own name on it — in that editor list, in the
+browser tab, and in the editor's own toolbar.
+
+Design and the full handshake: [74](74-WOPI-INTEGRATION.md).
+
 ## Fonts, and why a sheet might be a row of boxes
 
 The editor draws every cell **the browser's way**, with the browser's own fonts,

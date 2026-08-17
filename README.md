@@ -73,6 +73,20 @@ let mut session = WorkbookSession::open_with(bytes, config)?;
 Time and randomness are **supplied, never sampled**. An engine that reaches for
 the wall clock cannot be tested, replayed, or agreed on by two hosts.
 
+## Put it in a file store
+
+Nextcloud, ownCloud, SharePoint, Moodle and Alfresco all install an editor the
+same way — WOPI. Start the adapter and paste one URL into their settings:
+
+```sh
+docker compose --profile wopi up -d
+#  →  http://your-host:8090/hosting/discovery
+```
+
+Set `OPENCALC_WOPI_ALLOWED_HOSTS` to the file stores you integrate with (it is
+required), and `OPENCALC_BRAND_NAME` if it should carry your name rather than
+ours. [docs/74](docs/74-WOPI-INTEGRATION.md).
+
 ## What it does
 
 **Formats** — `.xlsx` round-trips as a semantic fixed point (gated). CSV/TSV/PSV

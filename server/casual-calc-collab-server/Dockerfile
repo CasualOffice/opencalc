@@ -45,12 +45,14 @@ COPY --from=build /src/target/release/casual-calc-collab-server /usr/local/bin/
 # they chose instead; this is documentation of the default, not a constraint.
 EXPOSE 8443
 
-# `/healthz` says only that the process is serving — deliberately nothing about
-# documents, because a node holding none is healthy and one that cannot reach
-# Redis is a cluster problem rather than a reason to take this node out of
-# rotation and make it worse.
+# **Readiness, not liveness.** `/healthz` says only that the process is serving,
+# which is the right answer to "restart this?" and the wrong one to "send it
+# work?" — a node that cannot reach Redis is serving perfectly and can order
+# nothing, so every edit it accepts is one it will refuse (DEP-04). Docker marks
+# such a container unhealthy and does not restart it, which is exactly the
+# handling this wants: drained, still holding its sessions.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/casual-calc-collab-server", "--healthcheck"]
+  CMD ["/usr/local/bin/casual-calc-collab-server", "--readycheck"]
 
 # No shell in front of it, so the process is PID 1 and receives SIGTERM
 # directly. That matters here: the drain on shutdown is what saves documents

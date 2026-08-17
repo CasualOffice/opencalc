@@ -92,6 +92,51 @@ services:
       retries: 5
       start_period: 5s
 
+  # The WOPI adapter: what makes this installable into Nextcloud, ownCloud,
+  # SharePoint, Moodle and Alfresco (docs/74).
+  #
+  # Behind a profile because the demo does not need it — `docker compose up`
+  # gives the two-minute demo, and `--profile wopi` adds the thing an
+  # administrator points their file store at.
+  wopi:
+    profiles: ["wopi"]
+    build:
+      context: .
+      dockerfile: server/casual-calc-wopi/Dockerfile
+    environment:
+      OPENCALC_WOPI_BIND: 0.0.0.0:8090
+      # Where a *browser* reaches this service: it goes into the discovery
+      # document, so it is the address the file store sends people to.
+      OPENCALC_WOPI_PUBLIC_URL: ${OPENCALC_WOPI_PUBLIC_URL:-http://127.0.0.1:8090}
+      # Where the collaboration server reaches it, which is not the same thing.
+      OPENCALC_WOPI_INTERNAL_URL: http://wopi:8090
+      # **Required, and there is no default.** A WOPISrc arrives in a query
+      # string, so without this list the service fetches whatever URL a link
+      # puts in front of a user — a server-side request forgery with a friendly
+      # interface. Set it to the file stores you integrate with.
+      OPENCALC_WOPI_ALLOWED_HOSTS: ${OPENCALC_WOPI_ALLOWED_HOSTS:-nextcloud.local}
+      OPENCALC_SHARED_SECRET: ${OPENCALC_SHARED_SECRET:?set it in .env — see .env.example}
+      OPENCALC_AUDIENCE: ${OPENCALC_AUDIENCE:-opencalc-demo}
+      OPENCALC_COLLAB_URL: ${OPENCALC_COLLAB_URL:-/collab}
+      OPENCALC_EDITOR_URL: ${OPENCALC_EDITOR_URL:-/editor/editor.html}
+      # White-labelling. Unset means OpenCalc's own name and colours.
+      OPENCALC_BRAND_NAME: ${OPENCALC_BRAND_NAME:-}
+      OPENCALC_BRAND_FAVICON_URL: ${OPENCALC_BRAND_FAVICON_URL:-}
+      OPENCALC_BRAND_ACCENT: ${OPENCALC_BRAND_ACCENT:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${OPENCALC_WOPI_PORT:-8090}:8090"
+    # Long enough to release every WOPI lock this node holds. A lock left
+    # behind makes somebody's file read-only in their own file store until
+    # WOPI's 30-minute expiry.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/casual-calc-wopi", "--readycheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   # One origin for the editor, the API and the WebSocket. Without it the page
   # and the socket are on different ports, which is why the browser had to be
   # told an address rather than being able to use the one it already had.
