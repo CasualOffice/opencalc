@@ -35,7 +35,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{CellReference, Expr};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, Sheet, Table, TableColumn, Workbook,
+    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, DefinedName, Sheet, Table, TableColumn,
+    Workbook,
 };
 
 use crate::{Operation, TxnError};
@@ -1000,4 +1001,43 @@ fn moved_reference(
     moved.row = u32::try_from(i64::from(reference.row) + dr).ok()?;
     moved.col = u32::try_from(i64::from(reference.col) + dc).ok()?;
     Some(moved)
+}
+
+/// Defined names that must be repointed because the cells they name were moved.
+///
+/// The sibling of [`repointed_after_move`] for names rather than formulas.
+/// `FID-24` made an insert or a delete shift defined names; a **cut** left them
+/// behind, so `Rate` went on meaning `$A$1` after `$A$1` had gone to `G6` and
+/// every formula using the name silently read the wrong cell. A name is the
+/// indirection people reach for precisely so they do not have to track
+/// addresses, which makes it the worst place for an address to go stale.
+///
+/// Returns the whole list when anything changed, because that is the shape
+/// `Operation::SetDefinedNames` takes and inverts.
+#[must_use]
+pub fn defined_names_after_move(
+    workbook: &Workbook,
+    moved_sheet: &str,
+    block: (u32, u32, u32, u32),
+    delta: (i64, i64),
+) -> Option<Vec<DefinedName>> {
+    let mut names = workbook.defined_names.clone();
+    let mut changed = false;
+    for name in &mut names {
+        // A sheet-scoped name's unqualified references mean its own sheet; a
+        // workbook-scoped one has no home, so only an explicitly qualified
+        // reference can reach the moved sheet. Same rule as the insert/delete
+        // rewrite, deliberately.
+        let home = name
+            .sheet
+            .and_then(|id| workbook.sheets.iter().find(|s| s.id == id))
+            .map(|s| s.name.as_str())
+            .unwrap_or_default();
+        let moved = move_expr(&name.formula, moved_sheet, home, block, delta);
+        if moved != name.formula {
+            name.formula = moved;
+            changed = true;
+        }
+    }
+    changed.then_some(names)
 }

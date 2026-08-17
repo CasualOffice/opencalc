@@ -8659,6 +8659,19 @@ pub fn session_clip_paste_mode(
                         cell: Some(out),
                     });
                 }
+                // Defined names name cells too, and a name is the
+                // indirection people use *so that* they need not track
+                // addresses -- the worst place for one to go stale
+                // (`UX-CUT-04`). `SetDefinedNames` inverts, so this joins the
+                // same undo step.
+                if let Some(names) = casual_calc_transaction::defined_names_after_move(
+                    session.workbook(),
+                    &sheet_name,
+                    block,
+                    (dr, dc),
+                ) {
+                    front.push(EditOperation::SetDefinedNames(names));
+                }
                 ops.splice(0..0, front);
             }
             (ops, cut, false)
@@ -9876,6 +9889,53 @@ mod tests {
             session_cell_input(second, 0, 2),
             "=A1*3",
             "an unqualified reference means this sheet's A1, which never moved"
+        );
+    }
+
+    /// **A cut repoints the defined names that pointed at it.**
+    ///
+    /// `FID-24` made an insert or a delete shift defined names. A cut left
+    /// them behind: `Rate` went on meaning `$A$1` after `$A$1` had gone to
+    /// `G6`, so every formula written as `=Rate` silently read a different
+    /// cell. A name is the indirection people reach for *so that* they need
+    /// not track addresses, which makes it the worst place for one to go
+    /// stale (`UX-CUT-04`).
+    #[test]
+    fn a_cut_repoints_the_defined_names_that_pointed_at_it() {
+        use super::{
+            session_cell_input, session_clip_copy, session_clip_paste_mode, session_define_name,
+            session_names, session_new, session_set_cell, session_undo,
+        };
+
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap(); // A1, the cell to move
+        session_set_cell(0, 0, 1, "9").unwrap(); // B1, never moved
+        session_define_name("Rate", "Sheet1!$A$1").unwrap();
+        session_define_name("Other", "Sheet1!$B$1").unwrap();
+        session_set_cell(0, 2, 0, "=Rate*2").unwrap(); // A3, uses the name
+
+        session_clip_copy(0, 0, 0, 0, 0, true); // cut A1
+        session_clip_paste_mode(0, 5, 6, "all").unwrap(); // to G6
+
+        let names = session_names();
+        assert!(
+            names.contains("Sheet1!$G$6"),
+            "the name did not follow the cell it points at: {names}"
+        );
+        assert!(
+            names.contains("Sheet1!$B$1"),
+            "a name pointing outside the block must be left alone: {names}"
+        );
+        // The name still resolves to the value, which is the whole point of
+        // repointing it rather than leaving a stale address that reads blank.
+        assert_eq!(session_cell_input(0, 2, 0), "=Rate*2");
+
+        // One undo step, as the move is one action.
+        session_undo().unwrap();
+        let restored = session_names();
+        assert!(
+            restored.contains("Sheet1!$A$1"),
+            "undoing the cut left the name repointed: {restored}"
         );
     }
 
