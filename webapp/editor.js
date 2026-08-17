@@ -14,6 +14,36 @@
 const BUILD = new URL(import.meta.url).searchParams.get("v") || "dev";
 let init, wasm;
 
+// --- White-labelling --------------------------------------------------------
+//
+// An integrator reselling a spreadsheet editor cannot ship one with somebody
+// else's name in the toolbar, which is why every product in this market has it.
+// Both of these come off the page's own URL so an embedding host sets them
+// without a build: the WOPI adapter appends them when it points its iframe here
+// (docs/74), and an SDK embedder can do the same.
+//
+// Bounded and escaped at the edge. `BRAND` reaches innerHTML in the About
+// dialog, and `ACCENT` reaches a CSS custom property — a colour that is allowed
+// to be arbitrary text can close the declaration and start another.
+const PARAMS = new URL(location.href).searchParams;
+const BRAND = (PARAMS.get("brand") || "OpenCalc").slice(0, 60);
+const ACCENT = /^#[0-9a-f]{3,8}$|^[a-z]{3,20}$/i.test(PARAMS.get("accent") || "")
+  ? PARAMS.get("accent")
+  : null;
+
+/// Text that is about to become markup.
+function htmlText(raw) {
+  return String(raw).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+if (BRAND !== "OpenCalc") {
+  document.title = BRAND;
+  // `textContent`, not innerHTML: this is a name, and names contain `&`.
+  for (const node of document.querySelectorAll(".tb-brand")) node.textContent = BRAND;
+}
+if (ACCENT) document.documentElement.style.setProperty("--oc-accent-color", ACCENT);
+
 // --- Mount root -------------------------------------------------------------
 //
 // Every DOM lookup goes through here rather than through `document`, so the
@@ -4913,7 +4943,7 @@ function buildChartPanel(body) {
   if (c.imported) {
     body.appendChild(el("div", "panel-note",
       "From the file. Changing anything here replaces the chart definition Excel "
-      + "saved, and the formatting OpenCalc does not model goes with it."));
+      + `saved, and the formatting ${BRAND} does not model goes with it.`));
   }
 
   panelLabel(body, "Type");
@@ -5266,7 +5296,7 @@ function buildPivotPanel(body) {
   body.appendChild(src);
   if (p.imported) {
     body.appendChild(el("div", "panel-note",
-      "From the file. Refreshing rewrites it in OpenCalc's layout and replaces "
+      `From the file. Refreshing rewrites it in ${BRAND}'s layout and replaces `
       + "the definition Excel saved."));
   }
 
@@ -10885,8 +10915,8 @@ function wireEvents() {
         `<div class="kb-row"><span>${a}</span><span>${b.replace(/(\S+)/g, "<kbd>$1</kbd>").replace(/<kbd>\/<\/kbd>/g, "/")}</span></div>`).join(""));
     }
     function showAbout() {
-      showModal("About OpenCalc",
-        `<p>OpenCalc — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
+      showModal(`About ${BRAND}`,
+        `<p>${htmlText(BRAND)} — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
          <p style="margin-top:10px;color:var(--oc-muted-text-color)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
     }
 
@@ -11105,7 +11135,7 @@ function wireEvents() {
       ]],
       ["Help", [
         ["Keyboard shortcuts", showShortcuts],
-        ["About OpenCalc", showAbout],
+        [`About ${BRAND}`, showAbout],
       ]],
     ];
 

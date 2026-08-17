@@ -24,6 +24,10 @@ members = [
     # has neither. Enforced by the `repository-policy` CI job.
     "server/casual-calc-collab-server",
     "server/casual-calc-host",
+    # The WOPI adapter: a WOPI *client* on one side and an ordinary OpenCalc
+    # integrator on the other (docs/74). Same rule as the two above — it may
+    # depend on `crates/`, and nothing under `crates/` may depend on it.
+    "server/casual-calc-wopi",
 ]
 # The fuzz workspace is separate: it pulls nightly-only cargo-fuzz deps that must
 # stay out of the product dependency graph (docs/19, docs/29).

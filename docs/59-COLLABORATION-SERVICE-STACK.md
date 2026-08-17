@@ -328,6 +328,30 @@ writes when redundancy drops below it, which ADR-012 already describes. That
 remains configurable and is not the default, because refusing writes is a
 visible outage and most integrators would rather have the log.
 
+## 5. Probes: liveness and readiness are different questions
+
+`/healthz` is unconditional: it answers whenever the process is serving. A `no`
+means restart this pod.
+
+`/readyz` consults the coordinator. On a clustered node that cannot reach Redis
+it answers **503**, because such a node can accept an edit and then order
+nothing — every submission it takes is one it will refuse. A `no` means take it
+out of the pool and leave it running; restarting it would drop the sessions it
+is holding and fix nothing, since the fault is not in this process. Standalone
+has no coordinator to lose, so it is ready as soon as it listens.
+
+Clients are told too. When the log refuses an append, the submitter gets
+`Refused { seq, reason: NotSaving }` rather than silence — without it a client
+cannot distinguish "slow" from "will never land", and retries forever.
+
+The container image carries no `curl`, so the binary answers for itself:
+`--healthcheck` fetches `/healthz`, `--readycheck` fetches `/readyz`. Compose
+gates dependants on the readiness one; a Kubernetes deployment should map them
+to `livenessProbe` and `readinessProbe` respectively.
+
+Redis itself is still a single node (DEP-13). This section makes its loss
+*visible and safe*, not survivable.
+
 ## Consequences
 
 - The server gains an async runtime, an HTTP stack, a JWT verifier and an

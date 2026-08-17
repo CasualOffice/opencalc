@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- The page a WOPI host's browser lands on.
+     Everything it needs beyond its own session id arrives as JSON from
+     /wopi/session/{id}: the title comes from someone else's file store and the
+     brand from an operator, and neither is interpolated into markup here. The
+     only thing this file carries is a hex id. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&#8230;</title>
+<style>
+  :root { --accent: #1f6f4a; }
+  html, body { height: 100%; margin: 0; font: 14px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; background: #fff; color: #111; }
+  header {
+    display: flex; align-items: center; gap: .75rem;
+    padding: .5rem .75rem; border-bottom: 1px solid #dcdcdc; flex: none;
+  }
+  #brand { font-weight: 600; color: var(--accent); }
+  #title { font-weight: 500; }
+  #state { margin-left: auto; color: #666; }
+  #state[data-bad="1"] { color: #a11; }
+  iframe { flex: 1 1 auto; border: 0; width: 100%; }
+</style>
+
+<header>
+  <span id="brand"></span>
+  <span id="title"></span>
+  <span id="state">opening&#8230;</span>
+</header>
+<iframe id="frame" title="Spreadsheet"></iframe>
+
+<script type="module">
+  const SESSION = "__SESSION_ID__";
+  const state = document.getElementById("state");
+
+  const fail = (why) => {
+    state.dataset.bad = "1";
+    state.textContent = why;
+  };
+
+  let session;
+  try {
+    const response = await fetch(`session/${SESSION}`);
+    if (!response.ok) {
+      // The session is gone, or was never ours. Say which, because "reload"
+      // and "ask the host to open it again" are different instructions.
+      fail(response.status === 404 ? "this editing session has expired" : `session ${response.status}`);
+      throw new Error("no session");
+    }
+    session = await response.json();
+  } catch {
+    if (!state.dataset.bad) fail("could not reach the editor service");
+    throw new Error("no session");
+  }
+
+  document.title = session.title ? `${session.title} — ${session.brand}` : session.brand;
+  document.getElementById("brand").textContent = session.brand;
+  document.getElementById("title").textContent = session.title;
+  if (session.accent) document.documentElement.style.setProperty("--accent", session.accent);
+  if (session.favicon) {
+    const icon = document.createElement("link");
+    icon.rel = "icon";
+    icon.href = session.favicon;
+    document.head.append(icon);
+  }
+
+  const frame = document.getElementById("frame");
+  frame.src = session.editor;
+  frame.addEventListener("load", async () => {
+    const win = frame.contentWindow;
+    // The editor signals readiness by publishing its own module, the same way
+    // it does for any embedding parent.
+    for (let waited = 0; !win.opencalcEditor && waited < 30000; waited += 50) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const editor = win.opencalcEditor;
+    if (!editor) return fail("the editor did not load");
+
+    try {
+      await editor.collaborate({
+        endpoint: session.collab,
+        token: session.token,
+        readOnly: !session.editable,
+      });
+      state.textContent = session.editable ? "saving to the host" : "read-only";
+    } catch (why) {
+      fail(`could not join: ${why}`);
+    }
+  });
+
+  // Release the lock on the way out. `sendBeacon` because an unload handler is
+  // not given time to await a fetch — without it the file stays locked on the
+  // host until the session ages out, which is up to WOPI's own 30 minutes for
+  // every tab anybody ever closed.
+  addEventListener("pagehide", () => {
+    navigator.sendBeacon(`close/${SESSION}`);
+  });
+</script>

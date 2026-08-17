@@ -181,6 +181,24 @@ impl Redis {
     /// no key, and both are failures the test names rather than numbers it
     /// silently compares.
     #[cfg(test)]
+    /// Who currently holds a document's lease, without taking it.
+    ///
+    /// Test-facing, and it exists because `claim` is not a read: given a free
+    /// lease it takes one, so polling with it to *observe* leadership races the
+    /// node under test and wins whenever the machine is busy.
+    #[cfg(test)]
+    pub(crate) async fn holder_of(&self, document: &str) -> Option<String> {
+        let mut c = self.connection().await;
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(self.lease_key(document))
+            .query_async(&mut c)
+            .await
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw?).ok()?;
+        value.get("node")?.as_str().map(str::to_owned)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn log_ttl_ms(&self, document: &str) -> i64 {
         let mut c = self.connection().await;
         redis::cmd("PTTL")

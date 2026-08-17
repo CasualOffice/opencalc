@@ -93,7 +93,10 @@ services:
     # exists to save (DEP-05). Inherited by collab-b through the anchor above.
     stop_grace_period: 40s
     healthcheck:
-      test: ["CMD", "/usr/local/bin/casual-calc-collab-server", "--healthcheck"]
+      # Readiness, not liveness. Compose gates dependants on this, and what a
+      # dependant wants to know is whether this node can take work — a node
+      # that has lost the coordinator is serving fine and can order nothing.
+      test: ["CMD", "/usr/local/bin/casual-calc-collab-server", "--readycheck"]
       interval: 10s
       timeout: 3s
       retries: 5
