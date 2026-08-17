@@ -81,6 +81,42 @@ pub enum PaintItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<String>,
     },
+    /// A conditional-formatting **data bar**: a horizontal bar filling
+    /// `fraction` of the cell at `rect`, painted behind the cell's own text.
+    ///
+    /// A backend insets the bar a little from the cell's edges, takes
+    /// `fraction` of the width that is left, starting at the inset left edge,
+    /// and fills it in `color` — **partly transparent, because the number is
+    /// still shown through it**. A data bar annotates a value rather than
+    /// replacing it; an opaque bar across half a cell hides half the digits.
+    /// A `fraction` of zero paints nothing.
+    ///
+    /// The **cell's** rectangle travels here rather than the bar's own, with
+    /// the fraction beside it, for two reasons. The fraction *is* the datum —
+    /// where the value sits between its rule's range minimum and maximum — and
+    /// a display list that carried only a pre-multiplied width would make a
+    /// wrong fraction indistinguishable from an inset measured differently, so
+    /// no golden test could tell which had broken. And the inset is the
+    /// backend's business: it is a device-pixel quantity, and layout works in
+    /// twips at no particular resolution.
+    ///
+    /// This variant exists because the resolved bar
+    /// ([`CellEffect::data_bar`](crate::conditional::CellEffect::data_bar))
+    /// reached the browser canvas and nothing else — the display list had no
+    /// primitive for a partial-width rectangle inside a cell, so every headless
+    /// PNG (thumbnail, preview, server-side export) showed the range as plain
+    /// numbers (`RND-07`).
+    DataBar {
+        /// The **cell** rectangle the bar is drawn inside — not the bar's own,
+        /// which the backend derives from this and `fraction`.
+        rect: Rect,
+        /// How full the bar is, from zero (empty) to one (the full cell width):
+        /// where the value sits between its rule's range minimum and maximum.
+        fraction: f64,
+        /// The bar colour as `RRGGBB` hex. Empty, or anything that is not valid
+        /// hex, means the backend's own default bar colour.
+        color: String,
+    },
     /// Cell text to be shaped and painted, clipped to `rect`.
     Text {
         /// The cell rectangle the text is clipped to.

@@ -325,6 +325,93 @@ fn build_dense_workbook(rows: u32, cols: u32) -> Workbook {
     workbook
 }
 
+/// The worst-case incremental recalculation budget, from docs/30 T3.
+///
+/// **Absolute, like the frame budget and unlike everything else here.** The
+/// scaling gates are ratios because absolute times on a shared runner say more
+/// about the runner than the code — but "under fifty milliseconds" is not a
+/// shape, it is a number, and a ratio cannot express it. T3 is a hard cap in
+/// docs/30's own words, and until now nothing asserted it: the recalc cases
+/// gated how the work *grew* and never how long it *took*, so the target CI is
+/// documented as enforcing was not enforced at all.
+const RECALC_BUDGET_NS: u64 = 50_000_000;
+
+/// A worst-case recalculation, timed against [`RECALC_BUDGET_NS`].
+///
+/// The fixture is rebuilt per iteration, outside the clock, for the same reason
+/// the scaling cases do it: an edit mutates the workbook, and the second edit of
+/// the same cell measures a dirty set that is already clean.
+fn measure_recalc<T>(
+    id: &str,
+    iterations: u32,
+    setup: impl Fn() -> T,
+    work: impl Fn(&mut T) -> u64,
+) -> ScalingReport {
+    let mut samples: Vec<u128> = (0..iterations)
+        .map(|_| {
+            let mut fixture = setup();
+            let started = std::time::Instant::now();
+            std::hint::black_box(work(&mut fixture));
+            started.elapsed().as_nanos()
+        })
+        .collect();
+    samples.sort_unstable();
+    // The **worst** case, not the median. T3 says worst-case, and a median
+    // hides exactly the tail a person notices — one edit in twenty taking half
+    // a second is the complaint, and the median says everything is fine.
+    let worst_ns = percentile(&samples, 1.0);
+    ScalingReport {
+        id: id.to_owned(),
+        small_ns: worst_ns,
+        large_ns: worst_ns,
+        // Expressed against the budget so the report keeps one shape: 100 is
+        // exactly at the cap.
+        ratio_centi: worst_ns * 100 / RECALC_BUDGET_NS,
+        budget_centi: 100,
+        within_budget: worst_ns <= RECALC_BUDGET_NS,
+    }
+}
+
+/// The adversarial workbook docs/30 T3 names: **a long dependency chain and a
+/// wide fan-out**, on a sheet large enough that neither is lost in the noise.
+///
+/// Both shapes in one sheet because they fail differently. A chain is depth —
+/// it defeats anything that recurses per level, and it is the shape a
+/// running-total column has. A fan-out is breadth — one cell that thousands of
+/// formulas read, which is what a rate or an exchange rate in a corner looks
+/// like, and it is the edit that dirties the most dependents at once.
+///
+/// Column A is the chain: `A2 = A1+1`, `A3 = A2+1`, and so on. Column C is the
+/// fan-out: every cell reads `A1`, the chain's root, so editing that one cell
+/// dirties the whole chain *and* the whole fan at once — the worst edit this
+/// sheet has.
+fn build_adversarial_workbook(depth: u32, fan: u32) -> Workbook {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Adversarial");
+
+    sheet
+        .cells
+        .set(CellRef::new(0, 0), Cell::value(CellValue::Number(1.0)));
+    for row in 1..depth {
+        let mut cell = Cell::value(CellValue::Number(0.0));
+        cell.formula = Some(
+            workbook
+                .store_formula(casual_calc_formula::parse(&format!("A{}+1", row)).expect("parses")),
+        );
+        sheet.cells.set(CellRef::new(row, 0), cell);
+    }
+
+    for row in 0..fan {
+        let mut cell = Cell::value(CellValue::Number(0.0));
+        cell.formula =
+            Some(workbook.store_formula(casual_calc_formula::parse("A1*2").expect("parses")));
+        sheet.cells.set(CellRef::new(row, 2), cell);
+    }
+
+    workbook.sheets.push(sheet);
+    workbook
+}
+
 /// The frame rate docs/30 states as target T2.
 const TARGET_FPS: u64 = 60;
 
@@ -435,6 +522,56 @@ fn measure_all_scaling(iterations: u32) -> Vec<ScalingReport> {
             workbook.sheets[0].cells.iter().count() as u64
         }),
         measure_frame(iterations.max(5)),
+        // **The first edit after a document opens**, against the hard cap.
+        //
+        // The scaling case above measures the same work and asks only how it
+        // grows. This asks the question docs/30 actually poses: does it finish
+        // in fifty milliseconds. Cold on purpose — the precedent graph is built
+        // inside the clock, because that is what the first edit pays for and it
+        // is the one edit every session makes.
+        measure_recalc(
+            "recalc-cold-first-edit",
+            iterations.max(5),
+            || build_formula_workbook(10_000),
+            |workbook| {
+                let at = CellRef::new(0, 0);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(1.0)));
+                casual_calc_eval::recalculate_incremental(workbook, &[(0, at)]);
+                cheap_witness(workbook, at)
+            },
+        ),
+        // **The worst edit the adversarial sheet has**, warm.
+        //
+        // Warm because T3 is about incremental recalculation, and a kept graph
+        // is what "incremental" means; the cold case above already covers the
+        // other half. The edit is on the chain's root, which is also what the
+        // whole fan-out reads — so one keystroke dirties the depth and the
+        // breadth at once, which is the worst case docs/30 defines rather than
+        // one this benchmark found convenient.
+        measure_recalc(
+            "recalc-adversarial-chain-and-fanout",
+            iterations.max(5),
+            || {
+                let mut workbook = build_adversarial_workbook(5_000, 5_000);
+                let mut recalc = casual_calc_eval::Recalculator::new();
+                let at = CellRef::new(0, 0);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(2.0)));
+                recalc.recalculate(&mut workbook, &[(0, at)]);
+                (workbook, recalc)
+            },
+            |(workbook, recalc)| {
+                let at = CellRef::new(0, 0);
+                workbook.sheets[0]
+                    .cells
+                    .set(at, Cell::value(CellValue::Number(3.0)));
+                recalc.recalculate(workbook, &[(0, at)]);
+                cheap_witness(workbook, at)
+            },
+        ),
         // One edit to one cell, in a sheet of `cells` formulas that do not
         // depend on it. The dirty set is one cell either way, so the *only*
         // thing that can grow with the sheet is the work done to discover that

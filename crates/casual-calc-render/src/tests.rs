@@ -629,3 +629,121 @@ fn adjacent_merged_ranges_keep_a_boundary_between_them() {
         "while A/B inside the first range is not"
     );
 }
+
+// --- Data bars reach the pixels (RND-07) -------------------------------------
+
+/// A one-column sheet holding 1, 50 and 100, optionally under a data-bar rule.
+///
+/// The rule's range is the three cells, so the extremes are 1 and 100 and the
+/// middle value lands just under halfway — which is what makes the bar's width
+/// a fact about the data rather than a constant.
+fn data_bar_sheet(with_rule: bool) -> Workbook {
+    use casual_calc_model::{CellRange, CfRule, ConditionalFormat};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+    for (row, value) in [(0u32, 1.0), (1, 50.0), (2, 100.0)] {
+        sheet
+            .cells
+            .set(CellRef::new(row, 0), Cell::value(CellValue::Number(value)));
+    }
+    if with_rule {
+        sheet.conditional_formats.push(ConditionalFormat {
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)),
+            // Red, so a bar pixel cannot be confused with the gridlines, the
+            // ground, or the black glyphs.
+            rule: CfRule::DataBar("FF0000".to_owned()),
+            fill: String::new(),
+            font_color: None,
+            bold: false,
+            priority: 0,
+            stop_if_true: false,
+        });
+    }
+    wb.sheets.push(sheet);
+    wb
+}
+
+fn rendered(wb: &Workbook) -> tiny_skia::Pixmap {
+    let geo = GridGeometry::default();
+    render_pixmap(&layout_full(wb, 0, &geo), &geo, &viewport(), 96).unwrap()
+}
+
+/// **A data bar is actually painted, at the width the value earns.**
+///
+/// `RND-07`: the fraction and the colour were resolved for every renderer and
+/// consumed by exactly one of them — the browser canvas — because the display
+/// list had no primitive for a partial-width rectangle inside a cell. Asserted
+/// in pixels rather than in paint items, since a display-list assertion is
+/// satisfied by an item no backend draws, which is the defect itself.
+#[test]
+fn a_data_bar_is_painted_at_the_fraction_of_the_cell_the_value_earns() {
+    let with = rendered(&data_bar_sheet(true));
+    let without = rendered(&data_bar_sheet(false));
+
+    // Counted rather than compared with `assert_ne!`, whose failure message
+    // would be both pixmaps in full.
+    let changed = with
+        .data()
+        .iter()
+        .zip(without.data())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(changed > 0, "the data bar changed no pixel at all");
+
+    // A1 = 1 is the range minimum: fraction zero, so nothing is drawn and the
+    // cell is the plain ground it would be without the rule.
+    let empty = with.pixel(6, 8).unwrap();
+    assert!(
+        empty.red() > 240 && empty.green() > 240 && empty.blue() > 240,
+        "the minimum's bar is empty, got r{} g{} b{}",
+        empty.red(),
+        empty.green(),
+        empty.blue()
+    );
+
+    // A3 = 100 is the maximum: a full-width bar, so a red wash near both the
+    // left edge and the right of the ~64px cell. Red-over-white at the bar's
+    // alpha, not opaque red — the number is drawn on top and must stay legible.
+    // Sampled just under the top of the bar rather than through the middle,
+    // because the right-aligned "100" is painted over it there — which is the
+    // ordering working, and is asserted on its own below.
+    for x in [6u32, 55] {
+        let px = with.pixel(x, 2 * 20 + 3).unwrap();
+        assert!(
+            px.red() > 200 && px.green() < 200 && px.green() > 80,
+            "the maximum's bar should be a red wash at x={x}, got r{} g{} b{}",
+            px.red(),
+            px.green(),
+            px.blue()
+        );
+    }
+
+    // A2 = 50 sits at 49/99 of the way, so its bar ends around x = 1 + 62*0.495
+    // ≈ 31: red to the left of that and plain ground well to the right of it.
+    let inside = with.pixel(20, 20 + 10).unwrap();
+    assert!(
+        inside.red() > 200 && inside.green() < 200,
+        "the middle value's bar should cover x=20, got r{} g{} b{}",
+        inside.red(),
+        inside.green(),
+        inside.blue()
+    );
+    let past = with.pixel(40, 20 + 10).unwrap();
+    assert!(
+        past.red() > 240 && past.green() > 240 && past.blue() > 240,
+        "the middle value's bar should stop well before x=40, got r{} g{} b{}",
+        past.red(),
+        past.green(),
+        past.blue()
+    );
+
+    // And the number is still there on top of the full-width bar: a bar drawn
+    // after the text, or drawn opaque, swallows the value it annotates.
+    assert!(
+        any_pixel(&with, 0, 40, 64, 60, |r, g, b| r < 100
+            && g < 100
+            && b < 100),
+        "the maximum's digits should survive on top of its bar"
+    );
+}
