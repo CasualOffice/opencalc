@@ -16,7 +16,7 @@ mod opc;
 
 pub use discovery::{ContentTypes, SheetEntry, SpreadsheetPackage};
 pub use error::OoxmlError;
-pub use limits::OoxmlLimits;
+pub use limits::{OoxmlLimits, SpreadsheetLimits};
 pub use opc::{Relationship, SheetRef, parse_relationships, parse_sheet_refs, resolve_target};
 
 #[cfg(test)]

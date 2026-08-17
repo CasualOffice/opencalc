@@ -956,3 +956,180 @@ fn a_retained_part_typed_by_a_default_extension_keeps_its_content_type() {
         "an override names one part and outranks the default for its extension"
     );
 }
+
+// --- Admission budget (SEC-002, SEC-011, docs/21) ----------------------------
+
+mod admission_budget {
+    use super::*;
+    use crate::{ImportError, Overrun, import_package_with};
+    use casual_calc_ooxml::{OoxmlLimits, SpreadsheetLimits};
+
+    /// A workbook of two sheets, so the *sum* is observable.
+    const TWO_SHEET_WORKBOOK: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="One" sheetId="1" r:id="rId1"/><sheet name="Two" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    const TWO_SHEET_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+
+    /// One row of `n` populated cells.
+    fn row_of(n: usize) -> String {
+        let mut cells = String::new();
+        for i in 0..n {
+            cells.push_str(&format!("<c r=\"{}1\"><v>{i}</v></c>", column_name(i)));
+        }
+        format!(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">{cells}</row></sheetData></worksheet>"
+        )
+    }
+
+    /// `0 -> A`, `26 -> AA`, as SpreadsheetML spells columns.
+    fn column_name(mut index: usize) -> String {
+        let mut name = Vec::new();
+        loop {
+            name.push(b'A' + u8::try_from(index % 26).unwrap());
+            if index < 26 {
+                break;
+            }
+            index = index / 26 - 1;
+        }
+        name.reverse();
+        String::from_utf8(name).unwrap()
+    }
+
+    fn two_sheets(each: usize) -> Vec<u8> {
+        let one = row_of(each).into_bytes();
+        let two = row_of(each).into_bytes();
+        zip_parts(&[
+            ("[Content_Types].xml", CONTENT_TYPES),
+            ("_rels/.rels", ROOT_RELS),
+            ("xl/workbook.xml", TWO_SHEET_WORKBOOK),
+            ("xl/_rels/workbook.xml.rels", TWO_SHEET_RELS),
+            ("xl/worksheets/sheet1.xml", &one),
+            ("xl/worksheets/sheet2.xml", &two),
+        ])
+    }
+
+    fn with_cells(max_populated_cells: usize) -> OoxmlLimits {
+        OoxmlLimits {
+            spreadsheet: SpreadsheetLimits {
+                max_populated_cells,
+                ..SpreadsheetLimits::default()
+            },
+            ..OoxmlLimits::default()
+        }
+    }
+
+    /// **The budget is the document's, not each part's.**
+    ///
+    /// This is the whole of `SEC-002`. Every per-part limit was enforced and
+    /// every one was passing; nothing added them up, so a package of many parts
+    /// multiplied a ceiling nobody had agreed to. Two sheets of 40 cells is 80
+    /// cells, and a document allowed 79 must refuse it — a check that ran per
+    /// sheet would see 40 twice and admit the file.
+    #[test]
+    fn cells_are_counted_across_the_whole_workbook() {
+        let package = two_sheets(40);
+
+        let admitted = import_package_with(package.clone(), with_cells(80))
+            .expect("80 cells inside a budget of 80");
+        assert_eq!(
+            admitted
+                .workbook
+                .sheets
+                .iter()
+                .map(|s| s.cells.len())
+                .sum::<usize>(),
+            80
+        );
+
+        let refused = import_package_with(package, with_cells(79))
+            .expect_err("80 cells must not fit a budget of 79");
+        match refused {
+            ImportError::OverBudget { what, limit } => {
+                assert_eq!(what, Overrun::PopulatedCells);
+                assert_eq!(limit, 79);
+            }
+            other => panic!("expected an over-budget refusal, got {other}"),
+        }
+    }
+
+    /// **Refused, not truncated.**
+    ///
+    /// docs/21 requires failing closed. A workbook admitted with some of its
+    /// cells missing is worse than one refused: it looks fine, and it will be
+    /// saved back over the original with the rest gone.
+    #[test]
+    fn an_over_budget_document_is_refused_rather_than_partly_loaded() {
+        let refused = import_package_with(two_sheets(40), with_cells(50));
+        assert!(
+            matches!(refused, Err(ImportError::OverBudget { .. })),
+            "a partial load is silent data loss"
+        );
+    }
+
+    /// **The refusal carries the stable diagnostic code.**
+    #[test]
+    fn the_refusal_is_diagnosable() {
+        let refused = import_package_with(two_sheets(40), with_cells(10)).unwrap_err();
+        // The code docs/20 reserved for this condition, and which nothing
+        // emitted until now — minting a fresh one would have left a registered
+        // code dead and added an unregistered one beside it.
+        assert_eq!(refused.code(), "OC-IMP-0003");
+        let said = refused.to_string();
+        assert!(said.contains("OC-IMP-0003"), "{said}");
+        assert!(said.contains("populated cells"), "{said}");
+    }
+
+    /// **The shipped defaults are finite.**
+    ///
+    /// The cheapest way for this bound to disappear is for somebody to raise a
+    /// default "temporarily". A limit that is not a limit should fail here
+    /// rather than in a deployment.
+    #[test]
+    fn the_default_budget_is_bounded() {
+        let d = SpreadsheetLimits::default();
+        for (what, value) in [
+            ("populated cells", d.max_populated_cells),
+            ("shared strings", d.max_shared_strings),
+            ("defined names", d.max_defined_names),
+            ("merged ranges", d.max_merged_ranges),
+        ] {
+            assert!(value > 0, "{what} is zero, which admits nothing");
+            assert!(
+                value < usize::MAX / 2,
+                "{what} is effectively unbounded ({value})"
+            );
+        }
+        // And above the supported target, so a real workbook still opens.
+        assert!(
+            d.max_populated_cells >= 1_000_000,
+            "the cap is below the T1 target this engine claims to support"
+        );
+    }
+
+    /// **A shared-string table larger than the budget is refused before it is
+    /// interned.**
+    #[test]
+    fn an_oversized_shared_string_table_is_refused() {
+        let mut sst = String::from(
+            r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        );
+        for i in 0..50 {
+            sst.push_str(&format!("<si><t>s{i}</t></si>"));
+        }
+        sst.push_str("</sst>");
+        let package = package_with_sheet(sheet_with(""), Some(sst.as_bytes()));
+
+        let limits = OoxmlLimits {
+            spreadsheet: SpreadsheetLimits {
+                max_shared_strings: 49,
+                ..SpreadsheetLimits::default()
+            },
+            ..OoxmlLimits::default()
+        };
+        match import_package_with(package, limits) {
+            Err(ImportError::OverBudget { what, limit }) => {
+                assert_eq!(what, Overrun::SharedStrings);
+                assert_eq!(limit, 49);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
