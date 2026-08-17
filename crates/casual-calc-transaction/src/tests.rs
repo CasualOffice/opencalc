@@ -2077,3 +2077,124 @@ fn the_retained_bytes_field_is_not_a_wire_break() {
     let parsed: Operation = serde_json::from_str(&with_field).expect("parses with the field");
     assert_eq!(parsed, forward);
 }
+
+// --- Defined names move with what they point at (FID-24) ---------------------
+
+mod defined_names_shift {
+    use super::*;
+    use casual_calc_model::DefinedName;
+
+    fn named(refers_to: &str, scoped: bool) -> Workbook {
+        let mut wb = workbook();
+        let sheet = wb.sheets[0].id;
+        wb.defined_names.push(DefinedName {
+            name: "Total".to_owned(),
+            sheet: scoped.then_some(sheet),
+            formula: parse(refers_to).expect("parses"),
+        });
+        wb
+    }
+
+    /// The name's target, compared as a parsed expression rather than as text:
+    /// the formula crate exposes no printer, and comparing trees is the
+    /// stronger check anyway.
+    fn refers_to(wb: &Workbook, expected: &str) -> bool {
+        wb.defined_names[0].formula == parse(expected).expect("parses")
+    }
+
+    /// **A name below an insert moves with its target.**
+    ///
+    /// `structural.rs` shifted merges, sizing, hidden sets, the freeze
+    /// boundary, outline levels, tables and autofilters — everything
+    /// position-indexed except this. A name pointing at `S!$A$10` still pointed
+    /// at `S!$A$10` after five rows were inserted above it, so every formula
+    /// using the name silently read different cells.
+    ///
+    /// Silent is the whole of it: nothing is marked `#REF!`, nothing is
+    /// refused, the number simply changes.
+    #[test]
+    fn a_name_below_an_insert_follows_its_target() {
+        let mut wb = named("S!$A$10", false);
+        apply(
+            &mut wb,
+            Operation::InsertRows {
+                sheet: 0,
+                at: 2,
+                count: 5,
+            },
+        )
+        .expect("inserted");
+
+        assert!(
+            refers_to(&wb, "S!$A$15"),
+            "the name stayed where the data no longer is: {:?}",
+            wb.defined_names[0].formula
+        );
+    }
+
+    /// **And back up on a delete.**
+    #[test]
+    fn a_name_below_a_delete_follows_its_target() {
+        let mut wb = named("S!$A$10", false);
+        apply(
+            &mut wb,
+            Operation::DeleteRows {
+                sheet: 0,
+                at: 2,
+                count: 3,
+            },
+        )
+        .expect("deleted");
+
+        assert!(
+            refers_to(&wb, "S!$A$7"),
+            "{:?}",
+            wb.defined_names[0].formula
+        );
+    }
+
+    /// **A name above the insert does not move.**
+    ///
+    /// The control. A rewrite that shifted everything would be as wrong as one
+    /// that shifted nothing, and harder to notice.
+    #[test]
+    fn a_name_above_the_insert_is_left_alone() {
+        let mut wb = named("S!$A$1", false);
+        apply(
+            &mut wb,
+            Operation::InsertRows {
+                sheet: 0,
+                at: 5,
+                count: 3,
+            },
+        )
+        .expect("inserted");
+
+        assert!(
+            refers_to(&wb, "S!$A$1"),
+            "{:?}",
+            wb.defined_names[0].formula
+        );
+    }
+
+    /// **A sheet-scoped name is rewritten the same way.**
+    #[test]
+    fn a_sheet_scoped_name_follows_too() {
+        let mut wb = named("S!$B$8:$B$12", true);
+        apply(
+            &mut wb,
+            Operation::InsertRows {
+                sheet: 0,
+                at: 0,
+                count: 2,
+            },
+        )
+        .expect("inserted");
+
+        assert!(
+            refers_to(&wb, "S!$B$10:$B$14"),
+            "{:?}",
+            wb.defined_names[0].formula
+        );
+    }
+}

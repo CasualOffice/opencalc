@@ -106,6 +106,7 @@ pub(crate) fn insert(
     shift_cells_insert(workbook, sheet, axis, at, count);
     shift_metadata_insert(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
+    rewrite_defined_names(workbook, &target, axis, ShiftKind::Insert, at, count);
     Ok(delete_op(sheet, axis, at, count))
 }
 
@@ -129,6 +130,7 @@ pub(crate) fn delete(
     shift_cells_delete(workbook, sheet, axis, at, count);
     shift_metadata_delete(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Delete, at, count);
+    rewrite_defined_names(workbook, &target, axis, ShiftKind::Delete, at, count);
 
     // Inverse order: re-open the band (restores cell geometry), overwrite the
     // metadata with its pre-delete snapshot, then restore the touched cells.
@@ -624,6 +626,59 @@ fn rewrite_all_formulas(
                 updated.formula = Some(handle);
                 store.set(job.at, updated);
             }
+        }
+    }
+}
+
+/// Rewrite the references inside every defined name.
+///
+/// `structural.rs` shifts merges, sizing, hidden sets, the freeze boundary,
+/// outline levels, tables and autofilters — everything position-indexed except
+/// this, until `FID-24`. A name pointing at `A10` still pointed at `A10` after
+/// five rows were inserted above it, so every formula using that name silently
+/// read different cells. Silent is the whole of the problem: nothing is marked
+/// `#REF!`, nothing is refused, the number just changes.
+///
+/// **A workbook-scoped name has no home sheet**, and that matters for the
+/// unqualified references the rewrite decides by home. Excel writes a
+/// workbook-scoped `refersTo` fully qualified (`Sheet1!$A$10`), so an
+/// unqualified one is already unusual; treating its home as no sheet at all
+/// means such a reference is left alone rather than rewritten against a sheet
+/// picked arbitrarily. Under-rewriting an oddity beats rewriting it wrongly.
+fn rewrite_defined_names(
+    workbook: &mut Workbook,
+    target: &str,
+    axis: Axis,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+) {
+    let jobs: Vec<(usize, Expr, String)> = workbook
+        .defined_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let home = name
+                .sheet
+                .and_then(|id| workbook.sheets.iter().find(|s| s.id == id))
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            (i, name.formula.clone(), home)
+        })
+        .collect();
+
+    for (i, expr, home) in jobs {
+        let ctx = RewriteCtx {
+            target,
+            home: &home,
+            axis,
+            kind,
+            at,
+            count,
+        };
+        let rewritten = rewrite_expr(&expr, &ctx);
+        if rewritten != expr {
+            workbook.defined_names[i].formula = rewritten;
         }
     }
 }
