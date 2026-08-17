@@ -1112,6 +1112,7 @@ fn hiding_a_row_recomputes_a_subtotal_that_ignores_hidden_rows() {
             sheet: 0,
             data: Box::new(data),
             changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+            restore: Default::default(),
         })
         .expect("apply the filter");
 
@@ -1164,6 +1165,7 @@ fn applying_a_filter_reaches_the_other_participant() {
             sheet: 0,
             data: Box::new(data),
             changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+            restore: Default::default(),
         })
         .expect("apply the filter");
 

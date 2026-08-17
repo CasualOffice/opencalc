@@ -689,6 +689,7 @@ mod tests {
                     sheet: 0,
                     data: Box::new(data.clone()),
                     changed: crate::SheetFields::ALL,
+                    restore: Default::default(),
                 },
                 &wb,
             )],

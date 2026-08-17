@@ -366,6 +366,7 @@ fn comment_change() -> WireOperation {
             sheet: 0,
             data: Box::new(SheetMetadata::default()),
             changed: SheetFields::COMMENTS,
+            restore: Default::default(),
         },
         formulas: Default::default(),
         styles: Default::default(),

@@ -66,6 +66,7 @@ fn comment_change() -> Operation {
         sheet: 0,
         data: Box::new(SheetMetadata::default()),
         changed: SheetFields::COMMENTS,
+        restore: Default::default(),
     }
 }
 
@@ -247,6 +248,7 @@ fn a_commenter_may_not_smuggle_an_edit_through_a_metadata_bundle() {
         sheet: 0,
         data: Box::new(SheetMetadata::default()),
         changed: SheetFields::COMMENTS.union(SheetFields::VIEW),
+        restore: Default::default(),
     };
     assert!(!Access::Comment.permits(&sneaky));
 }

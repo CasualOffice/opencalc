@@ -541,6 +541,8 @@ fn rebase_onto_band(subject: &Operation, band: Band) -> Operation {
             sheet,
             mut data,
             changed,
+            // Bytes, not positions. A retained chart part has nothing to shift.
+            restore,
         } => {
             match band.inserting {
                 true => crate::structural::shift_metadata_insert(
@@ -560,6 +562,7 @@ fn rebase_onto_band(subject: &Operation, band: Band) -> Operation {
                 sheet,
                 data,
                 changed,
+                restore,
             }
         }
 
@@ -649,6 +652,7 @@ fn resolve_contention(subject: &Operation, against: &Operation, side: Side) -> O
             sheet,
             data,
             changed,
+            restore,
         },
         Operation::SetSheetMetadata { changed: other, .. },
     ) = (subject, against)
@@ -662,6 +666,7 @@ fn resolve_contention(subject: &Operation, against: &Operation, side: Side) -> O
             sheet: *sheet,
             data: data.clone(),
             changed: kept,
+            restore: restore.clone(),
         };
     }
 
@@ -674,6 +679,7 @@ fn resolve_contention(subject: &Operation, against: &Operation, side: Side) -> O
             sheet,
             data,
             changed,
+            restore,
         } = subject
             && let Some(patched) = concede_one_line(data, *changed, against)
         {
@@ -681,6 +687,7 @@ fn resolve_contention(subject: &Operation, against: &Operation, side: Side) -> O
                 sheet: *sheet,
                 data: Box::new(patched),
                 changed: *changed,
+                restore: restore.clone(),
             };
         }
         // The mirror: a resize ordered before a bundle that replaces the whole
