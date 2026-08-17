@@ -4,7 +4,13 @@
 #   docker build -f server/casual-calc-host/Dockerfile -t opencalc-host .
 
 # --- The editor, compiled to WebAssembly ------------------------------------
-FROM rust:1.96-slim-bookworm AS editor
+# Pinned by digest, not by tag. A tag is a moving reference: `bookworm-slim`
+# is retagged whenever Debian rebuilds it, so the same Dockerfile can produce a
+# different image with nothing in this repository having changed. That is the
+# supply-chain hole the `repository-policy` job already closes for GitHub
+# Actions, and a base image is the larger of the two — it is every byte under
+# the binary. The tag stays in the comment so a human can still read it.
+FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS editor
 WORKDIR /src
 # Built from source rather than fetched as a release tarball. The tarballs are
 # per-architecture, and a hardcoded `x86_64` URL fails on an arm64 machine with
@@ -17,13 +23,13 @@ COPY . .
 RUN wasm-pack build crates/casual-calc-wasm --release --target web --out-dir /src/webapp/pkg
 
 # --- The host binary ---------------------------------------------------------
-FROM rust:1.96-slim-bookworm AS build
+FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p casual-calc-host
 
 # --- Run ---------------------------------------------------------------------
-FROM debian:bookworm-slim AS run
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS run
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10002 --no-create-home --shell /usr/sbin/nologin opencalc
