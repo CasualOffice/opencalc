@@ -2,7 +2,7 @@
   "name": "@opencalc/sheet",
   "version": "0.0.0",
   "type": "module",
-  "description": "An embeddable spreadsheet that reads and writes real .xlsx — 347 worksheet functions, pivot tables and charts, running entirely in the browser as one custom element.",
+  "description": "An embeddable spreadsheet that reads and writes real .xlsx \u2014 347 worksheet functions, pivot tables and charts, running entirely in the browser as one custom element.",
   "keywords": [
     "spreadsheet",
     "xlsx",
@@ -32,7 +32,10 @@
   "license": "Apache-2.0",
   "author": "CasualOffice",
   "exports": {
-    ".": "./dist/embed.js",
+    ".": {
+      "types": "./dist/embed.d.ts",
+      "default": "./dist/embed.js"
+    },
     "./dist/*": "./dist/*"
   },
   "main": "./dist/embed.js",
@@ -53,5 +56,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "types": "./dist/embed.d.ts"
 }

@@ -86,7 +86,7 @@ reading the id space above them.
 | CI-005 | Supply-chain and provenance gates | Open | P1 | Largely closed by SEC-007..009 (audit, SHA pinning, weekly run). Remaining: workflow permissions, npm and container inputs. | Policy fails on an unreviewed source |
 | DOC-025 | Live docs and ADRs reconciled | WIP | P1 | This consolidation is its deliverable. Remaining: the 142 stale claims the doc audit found, and the pending-ADR list. | No doc claims a gate CI does not run |
 | SDK-008 | `WorkbookSession` escapes | Open | P1 | `config_mut`, `workbook_mut` and `apply_raw` let a host bypass the invariants the session exists to hold. | A host cannot reach an invalid workbook |
-| SDK-009 | npm packages ship no types | Open | P1 | `@opencalc/sheet` and `/react` have no declarations; all three are at `0.0.0`. | `tsc` resolves the public surface |
+| SDK-009 | npm packages ship no types | Done | P1 | `@opencalc/engine` had declarations (wasm-bindgen writes them); `@opencalc/sheet` and `@opencalc/react` had none and no `types` field, so every TypeScript host embedding this got an error and a reason to use something else. Declarations are now hand-written beside the hand-written JavaScript they describe, shipped by the build, and **compiled against**: a consumer written the way the docs tell an integrator to write one, under `strict`. A second check reads both files, because `tsc` proves the surface composes and cannot prove it is real — a `.d.ts` naming a method nobody implemented type-checks perfectly. | CI `sdk-types`: removing the tag map, an event, or adding a method that does not exist each fail it |
 
 ## P2 / P3
 
