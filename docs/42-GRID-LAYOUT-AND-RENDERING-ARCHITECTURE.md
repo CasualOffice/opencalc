@@ -105,6 +105,17 @@ For each visible cell the layout engine computes:
   gone. The display list carries a `MergedRegion` item whose fill the anchor
   does *not* repeat, because a backend paints ground-then-outline and a second
   background would paint the outline away.
+- **Conditional formatting** is resolved in layout, not in a backend. The
+  rules used to be evaluated inside `casual-calc-wasm`, so the canvas showed
+  colour scales and every headless PNG showed plain cells (RND-05) — a crate
+  boundary rather than a missing feature. A matching rule's fill and font
+  colour override the cell's own on the way into the list, and a data bar
+  travels as its own `DataBar` item carrying the **cell** rectangle and a
+  fraction, not a pre-multiplied bar rectangle: the inset is a device-pixel
+  quantity layout has no resolution for, and a pre-multiplied width would make
+  a wrong fraction indistinguishable from a different inset (RND-07). It is
+  ordered after the background and before the text, or the number is
+  unreadable through its own bar.
 - **Frozen panes / splits** partition the viewport into up to four independently
   scrolled regions; each region runs the same visible-range query against its own
   scroll offset. Row/column headers are a always-present frozen band.

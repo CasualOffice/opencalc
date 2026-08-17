@@ -2985,6 +2985,11 @@ function commit(value, advance, source = "user") {
     }
     // A table grows to take in a value typed just below or beside it. Done
     // after the value lands so the engine sees the cell it is growing for.
+    //
+    // Swallowed deliberately: the value is already committed, and this call is
+    // a probe as much as an edit — it is made after *every* commit, and the
+    // common answer is "that cell borders no table". Reporting that would put
+    // an error on the status bar for an edit that succeeded.
     try { wasm.session_table_autoexpand(state.sheet, state.sel.row, state.sel.col); } catch {}
     if (advisory) statusError(advisory);
     else status.textContent = "ok";
@@ -3401,7 +3406,11 @@ function autofitColumn(col) {
       maxw = Math.max(maxw, flat);
     }
   }
-  try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); } catch {}
+  // Said out loud, not swallowed: autofit is reached by double-clicking a
+  // column boundary, and a protected sheet refuses the width. A refusal nobody
+  // sees is a boundary you double-click again, harder.
+  try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); }
+  catch (e) { statusError(errText(e)); }
   draw();
 }
 // Double-click a row boundary: size the row to its tallest cell, honoring each
@@ -3427,7 +3436,8 @@ function autofitRow(row) {
     // against further auto-growth, that was not self-correcting.
     maxh = Math.max(maxh, measureRowHeight(it, colWAt(it.c)) ?? ROW_H);
   }
-  try { wasm.session_set_row_height(state.sheet, row, Math.ceil(maxh)); } catch {}
+  try { wasm.session_set_row_height(state.sheet, row, Math.ceil(maxh)); }
+  catch (e) { statusError(errText(e)); }
   draw();
 }
 
@@ -3948,6 +3958,9 @@ function syncClock(reseed = false) {
   // UTC serial puts TODAY() on the wrong day for most of the world's evening.
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
   const serial = local.getTime() / 86400000 + 25569;
+  // Swallowed: no user asked for this. It runs at boot and on every recalc,
+  // before a session may even exist, and there is no control here whose failure
+  // a message would explain.
   try { wasm.session_set_clock(serial, volatileSeed); } catch {}
 }
 
@@ -6432,7 +6445,8 @@ function buildDvPanel(body) {
     "Remove",
     () => {
       const s = effectiveRange();
-      try { wasm.session_clear_validation(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+      try { wasm.session_clear_validation(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+      catch (e) { statusError(errText(e)); }
       draw();
     }
   );
@@ -6511,7 +6525,8 @@ function buildCfPanel(body) {
     "Clear",
     () => {
       const s = effectiveRange();
-      try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+      try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+      catch (e) { statusError(errText(e)); }
       draw();
     }
   );
@@ -6647,7 +6662,11 @@ function buildNotePanel(body) {
     draw();
   });
   button("Delete", "danger", () => {
-    try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, "", "", ""); } catch {}
+    // On a refusal the panel is left exactly as it was. Emptying the box
+    // regardless said "deleted" for a comment that is still on the cell, and
+    // the next redraw put it back.
+    try { wasm.session_set_comment(state.sheet, state.sel.row, state.sel.col, "", "", ""); }
+    catch (e) { statusError(errText(e)); return; }
     ta.value = "";
     current = render();
     refreshPanelButtons();
@@ -7200,18 +7219,26 @@ function buildBorderMenu() {
   menu.appendChild(sw);
 }
 // Delete key / "Clear contents": clear values + formulas, keep formatting.
+//
+// All three of these are refusable — `guard_protected` rejects the range on a
+// protected sheet — and all three used to swallow the refusal, so the Delete
+// key on a protected sheet was a key that did nothing and said nothing. That is
+// the same failure the undo path was fixed for (see `doUndo`).
 function clearSelection() {
-  try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+  catch (e) { statusError(errText(e)); }
   draw();
 }
 // "Clear formats": drop styling, keep values + formulas.
 function clearFormats() {
-  try { for (const s of allRanges()) wasm.session_clear_formats(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  try { for (const s of allRanges()) wasm.session_clear_formats(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+  catch (e) { statusError(errText(e)); }
   draw();
 }
 // "Clear all": also drop styles.
 function clearAll() {
-  try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
+  try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); }
+  catch (e) { statusError(errText(e)); }
   draw();
 }
 // --- Find & replace -------------------------------------------------------
@@ -7381,6 +7408,9 @@ function stopMarch() {
   // moved the data and emptied the source the user believed they had spared.
   // The visible signal said cancelled and the state said otherwise, which is
   // the worst possible pairing for an action that deletes.
+  // Swallowed because this is teardown, not a command: it also runs from File
+  // ▸ New and from a load, where the session it would clear is being replaced
+  // anyway, and a message there would name a failure the user did not cause.
   try { wasm.session_clip_clear(); } catch {}
   clipMarch = null;
   if (marchRaf) { cancelAnimationFrame(marchRaf); marchRaf = 0; }
@@ -8712,7 +8742,16 @@ function openNameManager(x, y) {
     del.className = "nm-del";
     del.textContent = "×";
     del.title = "Delete";
-    del.addEventListener("click", (e) => { e.stopPropagation(); try { wasm.session_delete_name(n.name); } catch {} row.remove(); draw(); });
+    // The row only goes when the name did. Removing it regardless took the
+    // entry off the list while the workbook still held it, so the next time the
+    // menu was opened it was back and nobody knew why.
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      try { wasm.session_delete_name(n.name); }
+      catch (err) { statusError(errText(err)); return; }
+      row.remove();
+      draw();
+    });
     row.appendChild(go); row.appendChild(del);
     menu.appendChild(row);
   });
@@ -9069,8 +9108,11 @@ function renderTabs() {
         closeSheetMenu();
         // Jumping to a hidden sheet reveals it: the alternative is switching to
         // something with no tab and no way back.
+        // A refused reveal stays put and says why: switching anyway would land
+        // on the sheet with no tab that this branch exists to avoid.
         if (hiddenHere) {
-          try { wasm.session_set_sheet_visibility(idx, "visible"); } catch {}
+          try { wasm.session_set_sheet_visibility(idx, "visible"); }
+          catch (err) { statusError(errText(err)); return; }
         }
         switchSheet(idx);
         renderTabs();
@@ -9373,6 +9415,10 @@ function cellMenu(x, y) {
   const shiftCells = (insert, vertical, label) => () => {
     const r = effectiveRange();
     let risky = false;
+    // A probe, not the edit: `session_shift_cells` below goes through
+    // `tryEdit`, which reports. An unanswerable probe only costs the extra
+    // confirmation — though see MNT-001's note: the safe fallback is arguably
+    // `true`, and that is a behaviour change, not an error-reporting one.
     try { risky = wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical); }
     catch {}
     const run = () => {
@@ -10947,10 +10993,10 @@ function wireEvents() {
     const vaIs = (token) => () => curFmt("va") === token;
     const vtIs = (token) => () => curFmt("vt") === token;
     const headersOn = () => { try { return !wasm.session_headers_hidden(state.sheet); } catch { return true; } };
-    const clearContents = () => {
-      try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); } catch {}
-      draw();
-    };
+    // `clearSelection` rather than a second copy of it: the copy had its own
+    // swallowing catch, so the same command reported a refusal from the Delete
+    // key and said nothing from the menu.
+    const clearContents = () => clearSelection();
     const nf = (code) => () => setNumberFormat(code);
 
     const showModal = (title, html) => {
@@ -11041,11 +11087,21 @@ function wireEvents() {
           ["First column", clickEl('#freeze-menu [data-fz="col"]')],
           ["Unfreeze", clickEl('#freeze-menu [data-fz="none"]')],
         ] },
-        ["Gridlines", () => { try { wasm.session_set_gridlines_hidden(state.sheet, gridOn()); } catch {} draw(); }, null, gridOn],
+        // Both toggles report a refusal. Swallowing it left the tick unmoved
+        // with no reason given, which reads as a menu item that is broken.
+        ["Gridlines", () => {
+          try { wasm.session_set_gridlines_hidden(state.sheet, gridOn()); }
+          catch (err) { statusError(errText(err)); }
+          draw();
+        }, null, gridOn],
         // "Cell markings" = the A/B/C and 1/2/3 strips. Deliberately not called
         // "headers": that word belongs to the page header this menu bar can
         // collapse, and having both under one name is a coin-flip every time.
-        ["Cell markings", () => { try { wasm.session_set_headers_hidden(state.sheet, headersOn()); } catch {} resize(); }, null, headersOn],
+        ["Cell markings", () => {
+          try { wasm.session_set_headers_hidden(state.sheet, headersOn()); }
+          catch (err) { statusError(errText(err)); }
+          resize();
+        }, null, headersOn],
         // Both are per-sheet OOXML view flags that were being carried through
         // every save without ever being shown.
         ["Formulas instead of results", () => setViewOption("formulas"), "Ctrl+`", () => viewOn("formulas")],

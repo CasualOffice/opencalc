@@ -567,6 +567,7 @@ mod merges {
                 PaintItem::CellBackground { rect, .. }
                 | PaintItem::GridLine { rect }
                 | PaintItem::MergedRegion { rect, .. }
+                | PaintItem::DataBar { rect, .. }
                 | PaintItem::Text { rect, .. }
                 | PaintItem::CellBorder { rect, .. } => *rect,
             })
@@ -891,6 +892,130 @@ mod conditional_formatting {
         assert!(
             fills(&whole_sheet(&wb)).iter().all(Option::is_none),
             "a sheet with no rules gained a fill"
+        );
+    }
+
+    // --- Data bars (RND-07) --------------------------------------------------
+
+    /// Every data bar in the list, in painter's order.
+    fn bars(list: &DisplayList) -> Vec<(crate::Rect, f64, String)> {
+        list.items
+            .iter()
+            .filter_map(|item| match item {
+                PaintItem::DataBar {
+                    rect,
+                    fraction,
+                    color,
+                } => Some((*rect, *fraction, color.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A data bar reaches the display list, at the width the value earns.**
+    ///
+    /// This is `RND-07`: `conditional::effect_for` has always resolved the
+    /// fraction and the colour, and nothing consumed it — the display list had
+    /// no primitive for a partial-width rectangle inside a cell, so the browser
+    /// canvas drew bars from its own payload and every headless PNG did not.
+    /// The fraction is the whole point of the item, so it is what is asserted:
+    /// a bar that reached the list at a constant width would still be wrong.
+    #[test]
+    fn a_data_bar_reaches_the_display_list_at_the_right_fraction() {
+        let wb = sheet_with_rule(CfRule::DataBar("638EC6".to_owned()), "");
+        let list = whole_sheet(&wb);
+        let bars = bars(&list);
+
+        assert_eq!(bars.len(), 3, "one bar per cell in the range: {bars:?}");
+        // 1, 50 and 100 across a range whose extremes are 1 and 100.
+        let fractions: Vec<f64> = bars.iter().map(|b| b.1).collect();
+        let expected = [0.0, 49.0 / 99.0, 1.0];
+        for (got, want) in fractions.iter().zip(expected) {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "fractions {fractions:?} should be {expected:?}"
+            );
+        }
+        assert!(
+            bars.iter().all(|b| b.2 == "638EC6"),
+            "the rule's colour travels with the bar: {bars:?}"
+        );
+        // The cell's rectangle, not the bar's: the backend applies the inset
+        // and multiplies by the fraction.
+        for (i, (rect, _, _)) in bars.iter().enumerate() {
+            assert_eq!(rect.w, DEFAULT_COL_WIDTH, "bar {i} carries the cell width");
+            assert_eq!(
+                rect.y,
+                i as i64 * DEFAULT_ROW_HEIGHT,
+                "bar {i} sits on its own row"
+            );
+        }
+    }
+
+    /// **A cell with no data bar emits no data bar.**
+    ///
+    /// Every other rule kind resolves through the same `CellEffect`, so an
+    /// emit that keyed off the effect being non-empty rather than off
+    /// `data_bar` would put a zero-width bar under every highlighted cell.
+    #[test]
+    fn a_cell_without_a_data_bar_emits_none() {
+        let wb = sheet_with_rule(CfRule::GreaterThan(40.0), "FF0000");
+        assert!(
+            bars(&whole_sheet(&wb)).is_empty(),
+            "a highlight rule produced a data bar"
+        );
+
+        let mut plain = wb;
+        plain.sheets[0].conditional_formats.clear();
+        assert!(
+            bars(&whole_sheet(&plain)).is_empty(),
+            "a sheet with no rules at all produced a data bar"
+        );
+    }
+
+    /// **The bar is painted after the cell's background and before its text.**
+    ///
+    /// Both halves matter and each fails differently: behind the background the
+    /// fill paints the bar away, and in front of the text the bar covers the
+    /// number it exists to annotate.
+    #[test]
+    fn a_data_bar_is_ordered_between_the_fill_and_the_text() {
+        let mut wb = sheet_with_rule(CfRule::DataBar("638EC6".to_owned()), "");
+        let style = wb.styles.intern(Style {
+            fill_color: Some("00FF00".to_owned()),
+            ..Style::default()
+        });
+        for row in 0..3 {
+            if let Some(cell) = wb.sheets[0].cells.get(CellRef::new(row, 0)).cloned() {
+                wb.sheets[0].cells.set(
+                    CellRef::new(row, 0),
+                    Cell {
+                        style: Some(style),
+                        ..cell
+                    },
+                );
+            }
+        }
+
+        let list = whole_sheet(&wb);
+        let kinds: Vec<&'static str> = list
+            .items
+            .iter()
+            .map(|item| match item {
+                PaintItem::CellBackground { .. } => "fill",
+                PaintItem::DataBar { .. } => "bar",
+                PaintItem::Text { .. } => "text",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "fill", "bar", "text", // A1
+                "fill", "bar", "text", // A2
+                "fill", "bar", "text", // A3
+            ],
+            "fill, then bar, then text, for each of the three cells"
         );
     }
 }

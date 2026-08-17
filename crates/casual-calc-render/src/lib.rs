@@ -152,6 +152,13 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
             fill_thin(pixmap, &line, x, y, 1.0, h);
             fill_thin(pixmap, &line, x + w - 1.0, y, 1.0, h);
         }
+        PaintItem::DataBar {
+            rect,
+            fraction,
+            color,
+        } => {
+            draw_data_bar(pixmap, rect, *fraction, color, viewport, dpi);
+        }
         PaintItem::Text {
             rect,
             content,
@@ -194,8 +201,61 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
 
 /// The default font size (points) for a Text item that carries no explicit size.
 const DEFAULT_FONT_PT: f32 = 11.0;
+/// A data bar's inset from the cell's left/right edge, in pixels, so the bar
+/// reads as sitting inside the cell rather than as the cell's own fill.
+const DATA_BAR_PAD_X: f32 = 1.0;
+/// A data bar's inset from the cell's top/bottom edge, in pixels.
+const DATA_BAR_PAD_Y: f32 = 2.0;
+/// How opaque a data bar is. The number it annotates is drawn on top of it and
+/// has to stay readable, so the bar is a wash rather than a block — the same
+/// value the editor canvas uses, so the two backends agree.
+const DATA_BAR_ALPHA: f32 = 0.45;
+/// The bar colour for a rule that names none (Excel's default data-bar blue).
+fn default_data_bar() -> Color {
+    Color::from_rgba8(0x63, 0x8E, 0xC6, 255)
+}
+
 /// Cell text inset from the left/right edge, in twips (~2px at 96 dpi).
 const TEXT_PAD_TWIPS: i64 = 30;
+
+/// Paint a conditional-formatting data bar: `fraction` of the cell's inset
+/// width, from the left, in a translucent `color`.
+///
+/// The item carries the *cell* rectangle and the fraction, not a pre-measured
+/// bar, so the inset is applied here where pixels are known.
+fn draw_data_bar(
+    pixmap: &mut Pixmap,
+    rect: &LayoutRect,
+    fraction: f64,
+    color: &str,
+    viewport: &Viewport,
+    dpi: u32,
+) {
+    let Some(screen) = to_screen(rect, viewport, dpi) else {
+        return;
+    };
+    let inner_w = (screen.width() - 2.0 * DATA_BAR_PAD_X).max(0.0);
+    let inner_h = (screen.height() - 2.0 * DATA_BAR_PAD_Y).max(0.0);
+    // A fraction outside 0..1 is a resolver bug, not a licence to paint outside
+    // the cell: clamp rather than overflow into the neighbour.
+    let width = inner_w * fraction.clamp(0.0, 1.0) as f32;
+    if width <= 0.0 || inner_h <= 0.0 {
+        return;
+    }
+    let mut fill = parse_hex_color(color).unwrap_or_else(default_data_bar);
+    fill.set_alpha(DATA_BAR_ALPHA);
+    let mut paint = Paint::default();
+    paint.set_color(fill);
+    paint.anti_alias = false;
+    fill_thin(
+        pixmap,
+        &paint,
+        screen.x() + DATA_BAR_PAD_X,
+        screen.y() + DATA_BAR_PAD_Y,
+        width,
+        inner_h,
+    );
+}
 
 /// Render a cell's text by outlining each glyph from the resolved bundled face
 /// into a single `tiny-skia` path, then filling it in the font color. Glyphs are

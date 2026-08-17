@@ -388,6 +388,21 @@ fn push_cell(
         });
     }
 
+    // A data bar goes **in front of the cell background and behind the text**,
+    // and both halves of that are load-bearing. Emitted before the background
+    // it would be painted away by an opaque fill; emitted after the text it
+    // would cover the number it exists to annotate, and the cell would read as
+    // a coloured smear. It is pushed for a merged anchor too — there the
+    // `MergedRegion` above is the background, and it has already been laid
+    // down, so the bar still lands on top of the fill and under the text.
+    if let Some((fraction, color)) = &effect.data_bar {
+        list.items.push(PaintItem::DataBar {
+            rect,
+            fraction: *fraction,
+            color: color.clone(),
+        });
+    }
+
     let content = display_text(workbook, cell);
     if !content.is_empty() {
         // Effective font: the cell's own, else the workbook default.
