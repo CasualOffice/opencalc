@@ -128,9 +128,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      # `ci`, not `install`: the lockfile is committed, and `install` is free to
+      # resolve something else — which makes the gate's result depend on the day
+      # it ran. The same reasoning as `--locked` on every cargo command here.
       - name: Install the type checker
         working-directory: sdk/types
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       # Two checks, because they answer different questions. `tsc` proves the
       # surface *composes* under `strict`; it cannot prove the surface is real,
       # and a `.d.ts` naming a method nobody implemented type-checks perfectly.
@@ -162,6 +165,21 @@ jobs:
             echo "::error::pin the action above to a full commit SHA (keep the tag as a comment)" >&2
             exit 1
           fi
+      # The same rule as the action pinning above, for the larger input. A tag is
+      # a moving reference: `debian:bookworm-slim` is retagged whenever Debian
+      # rebuilds it, so the same Dockerfile produces a different image with
+      # nothing in this repository having changed — and a base image is every
+      # byte under the binary, which is more of the shipped artefact than any
+      # action touches.
+      - name: Container base images must be pinned by digest
+        run: |
+          unpinned=$(grep -hn '^FROM ' server/*/Dockerfile | grep -v '@sha256:' || true)
+          if [ -n "$unpinned" ]; then
+            echo "$unpinned"
+            echo "::error::pin the base image above by digest (keep the tag before the @)" >&2
+            exit 1
+          fi
+          echo "every container base image is pinned by digest"
       # An id is only useful if it names one thing. Two trackers ran independent
       # FID-01..FID-25 series for different work, and rows were appended without
       # checking the ids already in the file — so `git log --grep FID-13`

@@ -33,6 +33,12 @@ on:
 
 permissions:
   contents: write
+  # npm provenance. The registry mints an attestation saying *which repository,
+  # which workflow and which commit* produced these bytes, and it does that by
+  # verifying an OIDC token this job requests — which needs this scope and
+  # nothing else. Without it a consumer's only evidence that `@opencalc/sheet`
+  # came from this repository is that it says so in its own metadata (`CI-005`).
+  id-token: write
 
 concurrency:
   group: release-sdk
@@ -174,12 +180,16 @@ jobs:
               continue
             fi
             echo "publishing $name@$version"
-            if ! ( cd "sdk/packages/$p" && npm publish --access public ); then
+            if ! ( cd "sdk/packages/$p" && npm publish --access public --provenance ); then
               echo "::error::Publishing $name failed."
               echo "::error::On a 403 for a package that does not exist yet, the usual cause is a"
               echo "::error::granular token scoped to *named packages* rather than to the @opencalc"
               echo "::error::scope — a token cannot be granted rights over a package that has never"
               echo "::error::been published. Re-issue it with read/write on the whole scope."
+              echo "::error::If the failure mentions provenance or OIDC, check this workflow still"
+              echo "::error::has 'id-token: write' — the attestation is signed with a token this"
+              echo "::error::job requests, and losing the scope fails the publish rather than"
+              echo "::error::silently publishing without it."
               exit 1
             fi
           done

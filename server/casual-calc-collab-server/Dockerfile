@@ -13,7 +13,13 @@
 # The whole workspace is copied rather than the server alone: the server depends
 # on nine path crates, and a build context narrowed to its own directory cannot
 # see any of them.
-FROM rust:1.96-slim-bookworm AS build
+# Pinned by digest, not by tag. A tag is a moving reference: `bookworm-slim`
+# is retagged whenever Debian rebuilds it, so the same Dockerfile can produce a
+# different image with nothing in this repository having changed. That is the
+# supply-chain hole the `repository-policy` job already closes for GitHub
+# Actions, and a base image is the larger of the two — it is every byte under
+# the binary. The tag stays in the comment so a human can still read it.
+FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS build
 WORKDIR /src
 
 # `--locked` for the same reason CI uses it: a container that resolves its own
@@ -22,7 +28,7 @@ COPY . .
 RUN cargo build --release --locked -p casual-calc-collab-server
 
 # --- Run ---------------------------------------------------------------------
-FROM debian:bookworm-slim AS run
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS run
 
 # Required, not optional. The HTTP client uses the **system trust store** rather
 # than a bundled copy of Mozilla's roots, deliberately: an integrator inside a
