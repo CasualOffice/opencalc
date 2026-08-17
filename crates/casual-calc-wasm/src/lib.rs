@@ -8467,6 +8467,9 @@ pub fn session_clip_paste_mode(
             };
             let cut = clip.cut && mode == "all";
             let mut ops = Vec::new();
+            // Where the block landed, learned from the first cell placed. A cut
+            // is never tiled or transposed, so one delta describes the move.
+            let mut move_delta: Option<(i64, i64)> = None;
             if cut {
                 for cc in &clip.cells {
                     ops.push(EditOperation::ClearCell {
@@ -8575,6 +8578,10 @@ pub fn session_clip_paste_mode(
                         // means, only where it lives. Shifting on a cut rewrote
                         // the formula to point somewhere it never referred to —
                         // silent corruption on an everyday action.
+                        if cut && move_delta.is_none() {
+                            move_delta =
+                                Some((at.row as i64 - cc.sr as i64, at.col as i64 - cc.sc as i64));
+                        }
                         if let Some(expr) = &cc.formula
                             && !cut
                         {
@@ -8590,6 +8597,69 @@ pub fn session_clip_paste_mode(
                         });
                     }
                 }
+            }
+            // **A cut moves the cells, so everything pointing at them
+            // follows.** The block itself travels verbatim, which is right --
+            // the cell did not change what it means. But every *other* formula
+            // that named those cells kept its old address and silently began
+            // reading whatever moved in underneath (`UX-CUT-03`). Excel
+            // repoints them, and it must happen inside this same batch so the
+            // move is one undo step rather than two.
+            //
+            // Scoped to formulas *outside* the block: a reference from inside
+            // the block to another cell inside it is the verbatim-travel case
+            // above, and resurrecting a source cell this batch is about to
+            // clear would be worse than the defect.
+            if let Some((dr, dc)) = move_delta
+                && (dr != 0 || dc != 0)
+            {
+                let sheet_name = session
+                    .workbook()
+                    .sheets
+                    .get(clip.sheet)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let block = clip.cells.iter().fold(
+                    (u32::MAX, u32::MAX, 0u32, 0u32),
+                    |(r0, c0, r1, c1), cc| {
+                        (r0.min(cc.sr), c0.min(cc.sc), r1.max(cc.sr), c1.max(cc.sc))
+                    },
+                );
+                let repointed = casual_calc_transaction::repointed_after_move(
+                    session.workbook(),
+                    &sheet_name,
+                    block,
+                    (dr, dc),
+                );
+                // Ahead of the paste, so a repointed cell the paste also lands
+                // on keeps the pasted content rather than the rewrite.
+                let mut front = Vec::new();
+                for (sheet, at, expr) in repointed {
+                    let inside = sheet == clip.sheet
+                        && at.row >= block.0
+                        && at.row <= block.2
+                        && at.col >= block.1
+                        && at.col <= block.3;
+                    if inside {
+                        continue;
+                    }
+                    let Some(mut out) = session
+                        .workbook()
+                        .sheets
+                        .get(sheet)
+                        .and_then(|s| s.cells.get(at))
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    out.formula = Some(session.workbook_mut().store_formula(expr));
+                    front.push(EditOperation::SetCell {
+                        sheet,
+                        at,
+                        cell: Some(out),
+                    });
+                }
+                ops.splice(0..0, front);
             }
             (ops, cut, false)
         });
@@ -9710,6 +9780,103 @@ mod tests {
             "a cut moves the cell, so the formula still means what it meant"
         );
         assert_eq!(session_cell_input(0, 1, 1), "", "and the source is emptied");
+    }
+
+    /// **Cutting a cell repoints every formula that named it.**
+    ///
+    /// The moved cell's own formula travels verbatim, which the test above
+    /// pins. Nothing did the other half: `=A1*2` sitting in C1 kept saying
+    /// `A1` after A1 was cut to E5, so it stopped reading the value it was
+    /// written to read and silently began reading whatever moved in underneath
+    /// -- usually nothing, so a live number became zero with no error and no
+    /// visible cause (`UX-CUT-03`).
+    #[test]
+    fn a_cut_repoints_the_formulas_that_referred_to_it() {
+        use super::{
+            session_cell_input, session_clip_copy, session_clip_paste_mode, session_new,
+            session_set_cell, session_undo,
+        };
+
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap(); // A1
+        session_set_cell(0, 0, 2, "=A1*2").unwrap(); // C1 -> A1
+        session_set_cell(0, 0, 3, "=$A$1+1").unwrap(); // D1, anchored
+        session_set_cell(0, 0, 4, "=B1+1").unwrap(); // E1, a control: not moved
+        session_set_cell(0, 1, 0, "=SUM(A1:A9)").unwrap(); // A2, partial overlap
+
+        session_clip_copy(0, 0, 0, 0, 0, true); // cut A1
+        session_clip_paste_mode(0, 5, 6, "all").unwrap(); // to G6
+
+        assert_eq!(
+            session_cell_input(0, 0, 2),
+            "=G6*2",
+            "the reference did not follow the cell it names"
+        );
+        // `$` is about what a *copy* does to a reference, not about whether the
+        // cell it names may move. Excel moves both.
+        assert_eq!(
+            session_cell_input(0, 0, 3),
+            "=$G$6+1",
+            "an anchored reference names A1 too, and A1 has gone"
+        );
+        assert_eq!(
+            session_cell_input(0, 0, 4),
+            "=B1+1",
+            "a formula naming a cell outside the block must be left alone"
+        );
+        assert_eq!(
+            session_cell_input(0, 1, 0),
+            "=SUM(A1:A9)",
+            "a range only partly inside the block has no correct rewrite, so it keeps its shape"
+        );
+
+        // **One undo step.** The repoint rides in the cut's own batch, so a
+        // user who undoes a move gets the whole move back -- not a half-undone
+        // state with the data returned and the references still repointed.
+        session_undo().unwrap();
+        assert_eq!(session_cell_input(0, 0, 0), "5", "the cut is undone");
+        assert_eq!(
+            session_cell_input(0, 0, 2),
+            "=A1*2",
+            "the repoint was a separate undo step"
+        );
+    }
+
+    /// **A cross-sheet reference to a moved cell follows it too.**
+    ///
+    /// Qualified or not, the question is the same one the insert/delete
+    /// rewrite asks: does this reference reach the sheet the cells left? An
+    /// unqualified `A1` on another sheet means *that* sheet's A1 and must not
+    /// move -- getting this backwards would silently rewrite formulas on every
+    /// sheet in the workbook.
+    #[test]
+    fn a_cut_repoints_across_sheets_without_touching_other_sheets_own_cells() {
+        use super::{
+            session_add_sheet, session_cell_input, session_clip_copy, session_clip_paste_mode,
+            session_new, session_set_cell,
+        };
+
+        session_new();
+        let second = session_add_sheet().unwrap();
+        session_set_cell(0, 0, 0, "5").unwrap(); // Sheet1!A1, the cell to move
+        // On the second sheet: one formula naming Sheet1 explicitly, and one
+        // unqualified -- which means *this* sheet's A1, a different cell.
+        session_set_cell(second, 0, 1, "=Sheet1!A1*2").unwrap();
+        session_set_cell(second, 0, 2, "=A1*3").unwrap();
+
+        session_clip_copy(0, 0, 0, 0, 0, true); // cut Sheet1!A1
+        session_clip_paste_mode(0, 5, 6, "all").unwrap(); // to G6
+
+        assert_eq!(
+            session_cell_input(second, 0, 1),
+            "=Sheet1!G6*2",
+            "a qualified reference did not follow the cell across sheets"
+        );
+        assert_eq!(
+            session_cell_input(second, 0, 2),
+            "=A1*3",
+            "an unqualified reference means this sheet's A1, which never moved"
+        );
     }
 
     /// Esc after a cut has to reach the engine.
