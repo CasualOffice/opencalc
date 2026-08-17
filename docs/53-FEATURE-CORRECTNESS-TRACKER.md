@@ -6,7 +6,7 @@ model** or patched around it. Rows are generated from the code by
 written from memory._
 
 The fidelity phase ([51](51-FIDELITY-GAP-AUDIT.md),
-[52](52-FIDELITY-TRACKER.md)) took the file layer to 95.9% structural and 0
+the fidelity tracker, since deleted) took the file layer to 95.9% structural and 0
 destructive gaps. It answered *"does a workbook survive a round trip"*. This
 tracker answers a different question the first one cannot:
 
@@ -134,7 +134,7 @@ The file is right and the screen is wrong. From
 
 ## Working rules
 
-Carried from [52](52-FIDELITY-TRACKER.md), because they are what made it
+Carried from the deleted fidelity tracker, because they are what made it
 converge:
 
 1. **One row at a time, to completion.** No part-done rows.

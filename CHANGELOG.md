@@ -276,7 +276,7 @@ shipped, none of them visible to any of the 600-odd Rust tests:
 
 A sustained parity pass driven by three generated trackers — the measured
 SpreadsheetML fidelity register ([docs/51](docs/51-FIDELITY-GAP-AUDIT.md)),
-the fidelity execution tracker ([docs/52](docs/52-FIDELITY-TRACKER.md)) and the
+the fidelity execution tracker (since folded into docs/14) and the
 feature-correctness tracker ([docs/53](docs/53-FEATURE-CORRECTNESS-TRACKER.md)) —
 plus the UX completeness tracker ([docs/50](docs/73-EXCEL-UX-PARITY-AUDIT.md)),
 which closed at all 63 rows.

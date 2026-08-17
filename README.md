@@ -113,7 +113,7 @@ node relays to the document's leader, so no sticky sessions and a plain load
 balancer works.
 
 For what is supported and *how each claim was verified*, see the
-[support matrix](docs/18-SUPPORT-MATRIX.md).
+[execution tracker](docs/14-EXECUTION-TRACKER.md).
 
 ## Why it is built this way
 

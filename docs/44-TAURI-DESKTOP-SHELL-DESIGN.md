@@ -102,7 +102,7 @@ also exposes — the command layer is a transport, not logic.
 ## Packaging & security
 
 - Distributed as a signed native bundle per OS (macOS/Windows/Linux), matching
-  the Tier-1 platforms in [18](18-SUPPORT-MATRIX.md).
+  the Tier-1 platforms.
 - The security boundary is unchanged from the engine's:
   ([07](07-QUALITY-SECURITY-AND-COMPATIBILITY.md), [21](21-PARSER-LIMITS.md)):
   no macro execution, no automatic external fetch, bounded admission. The desktop

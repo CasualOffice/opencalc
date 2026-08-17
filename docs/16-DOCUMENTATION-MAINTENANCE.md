@@ -7,10 +7,8 @@ written design matches the code. This doc says when and how to keep `docs/` true
 
 - **Before** implementing: the design note exists and is finalized.
 - **With** any behavior change: the relevant design note, the
-  [18-SUPPORT-MATRIX](18-SUPPORT-MATRIX.md), and the
   [14-EXECUTION-TRACKER](14-EXECUTION-TRACKER.md) row move in the same PR.
 - **When a construct advances on any fidelity dimension** (model, round-trip,
-  edit, render, calc): its row in [52](52-FIDELITY-TRACKER.md)
   moves in the same PR.
 - **On** any ADR-trigger decision: an ADR is added to
   [08-ADR-REGISTER](08-ADR-REGISTER.md).

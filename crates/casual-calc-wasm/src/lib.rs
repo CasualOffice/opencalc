@@ -4795,6 +4795,7 @@ pub fn session_row_at_px(sheet: usize, px: i32) -> u32 {
 pub fn session_set_col_width(sheet: usize, col: u32, px: u32) -> Result<(), JsError> {
     edit_axis(
         sheet,
+        "formatColumns",
         EditOperation::SetColumnWidth {
             sheet,
             col,
@@ -4808,6 +4809,7 @@ pub fn session_set_col_width(sheet: usize, col: u32, px: u32) -> Result<(), JsEr
 pub fn session_set_row_height(sheet: usize, row: u32, px: u32) -> Result<(), JsError> {
     edit_axis(
         sheet,
+        "formatRows",
         EditOperation::SetRowHeight {
             sheet,
             row,
@@ -4821,6 +4823,7 @@ pub fn session_set_row_height(sheet: usize, row: u32, px: u32) -> Result<(), JsE
 pub fn session_clear_col_width(sheet: usize, col: u32) -> Result<(), JsError> {
     edit_axis(
         sheet,
+        "formatColumns",
         EditOperation::SetColumnWidth {
             sheet,
             col,
@@ -4834,6 +4837,7 @@ pub fn session_clear_col_width(sheet: usize, col: u32) -> Result<(), JsError> {
 pub fn session_clear_row_height(sheet: usize, row: u32) -> Result<(), JsError> {
     edit_axis(
         sheet,
+        "formatRows",
         EditOperation::SetRowHeight {
             sheet,
             row,
@@ -4958,12 +4962,55 @@ fn geometry_of(s: &WorkbookSession, sheet: usize) -> GridGeometry {
         .unwrap_or_default()
 }
 
-fn edit_axis(_sheet: usize, op: EditOperation) -> Result<(), JsError> {
+fn edit_axis(sheet: usize, action: &str, op: EditOperation) -> Result<(), JsError> {
+    axis_edit(sheet, action, op).map_err(|why| JsError::new(&why))
+}
+
+/// [`edit_axis`] without the `JsError`, which is the whole of it that can be
+/// tested.
+///
+/// `JsError::new` **panics** off-wasm, so a native test cannot call a binding
+/// that refuses — and a test asserting only [`axis_edit_blocked`] tests the
+/// rule and not its use. A mutation removing the guard from here left such a
+/// test green, which is how this split came to exist.
+fn axis_edit(sheet: usize, action: &str, op: EditOperation) -> Result<(), String> {
+    // The sheet index was `_sheet` — taken and dropped — so resizing a column
+    // on a protected sheet succeeded (`UX-PROT-01`). Every other write went
+    // through `guard_protected`; this path was the one that did not, and the
+    // unused parameter is what made it invisible.
+    //
+    // Not `guard_protected` itself, which asks whether the *cells* are locked.
+    // A resize is not a cell edit: Excel gates it behind protection's own
+    // "Format columns" / "Format rows" options, so the question is whether the
+    // file granted that permission.
+    if axis_edit_blocked(sheet, action) {
+        return Err(
+            "this sheet is protected and does not allow resizing — unprotect it, \
+                    or allow formatting rows and columns"
+                .to_owned(),
+        );
+    }
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        session.edit(op).map_err(js)
+        let session = guard.as_mut().ok_or_else(|| "no session".to_owned())?;
+        session.edit(op).map_err(|e| e.to_string())
     })
+}
+
+/// The decision behind [`edit_axis`]'s refusal, separated from it.
+///
+/// Same reason as [`protection_blocks`]: a `JsError` cannot be constructed
+/// off-wasm, so a test that exercised the guard could only ever panic. The rule
+/// is the part worth testing.
+fn axis_edit_blocked(sheet: usize, action: &str) -> bool {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.protection.as_ref())
+            .is_some_and(|p| p.is_enabled() && !p.permits(action))
+    })
+    .unwrap_or(false)
 }
 
 /// Visible cells in `[first_row..=last_row] × [first_col..=last_col]` as a JSON
@@ -9787,8 +9834,9 @@ mod fill_series_tests {
 #[cfg(test)]
 mod protection_tests {
     use super::{
-        protection_blocks, session_cell_input, session_new, session_set_cell,
-        session_set_cell_protection, session_set_sheet_protected,
+        EditOperation, axis_edit, axis_edit_blocked, protection_blocks, session_cell_input,
+        session_new, session_set_cell, session_set_cell_protection, session_set_col_width,
+        session_set_sheet_protected,
     };
 
     /// Protection was stored, round-tripped and toggleable — and never
@@ -9819,6 +9867,72 @@ mod protection_tests {
         // ...and unprotecting releases everything again.
         session_set_sheet_protected(0, false).unwrap();
         assert!(!protection_blocks(0, 0, 0, 5, 5));
+    }
+
+    /// The first column's width in pixels, read back through the binding.
+    fn width_px(sheet: usize, col: u32) -> i64 {
+        serde_json::from_str::<Vec<i64>>(&super::session_col_px(sheet, col, 1))
+            .expect("widths are json")[0]
+    }
+
+    /// **Resizing obeys sheet protection.**
+    ///
+    /// Every write went through `guard_protected` except this one: `edit_axis`
+    /// took the sheet index as `_sheet` and dropped it, so a column on a
+    /// protected sheet resized happily (`UX-PROT-01`). The unused parameter is
+    /// what made it invisible — the signature looked as though it cared.
+    ///
+    /// A resize is not a cell edit, so the question is not whether the cells
+    /// are locked. Excel gates it behind protection's own "Format columns" and
+    /// "Format rows" options, and a file that does not mention them has not
+    /// granted them.
+    #[test]
+    fn resizing_obeys_sheet_protection() {
+        session_new();
+        // Unprotected: nothing is blocked, and the resize lands.
+        assert!(!axis_edit_blocked(0, "formatColumns"));
+        session_set_col_width(0, 0, 120).expect("an unprotected sheet resizes");
+        let before = width_px(0, 0);
+
+        session_set_sheet_protected(0, true).unwrap();
+        // The sheet says nothing about formatting, so it has not allowed it.
+        assert!(
+            axis_edit_blocked(0, "formatColumns"),
+            "a protected sheet that never granted formatColumns allowed a resize"
+        );
+        assert!(axis_edit_blocked(0, "formatRows"));
+        // And the binding **honours** it. Asserting only `axis_edit_blocked`
+        // above would test the rule and not its use: removing the guard from
+        // `edit_axis` leaves that assertion green, which is exactly what a
+        // mutation showed. `is_err` rather than `expect_err`, because
+        // formatting a `JsError` off-wasm panics.
+        // And the path the binding takes **honours** it. Asserting only
+        // `axis_edit_blocked` tests the rule and not its use: removing the
+        // guard from `axis_edit` leaves that assertion green, which is exactly
+        // what a mutation showed.
+        assert!(
+            axis_edit(
+                0,
+                "formatColumns",
+                EditOperation::SetColumnWidth {
+                    sheet: 0,
+                    col: 0,
+                    width: Some(4000),
+                },
+            )
+            .is_err(),
+            "the guard exists and the edit path does not consult it"
+        );
+        assert_eq!(
+            width_px(0, 0),
+            before,
+            "the refused resize changed the column anyway"
+        );
+
+        // And unprotecting releases it again.
+        session_set_sheet_protected(0, false).unwrap();
+        assert!(!axis_edit_blocked(0, "formatColumns"));
+        session_set_col_width(0, 0, 200).expect("unprotected again");
     }
 
     /// `<protection hidden="1">` keeps the formula out of the formula bar while
