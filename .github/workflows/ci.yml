@@ -64,11 +64,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup target add wasm32-unknown-unknown
-      # The **engine** must stay WASM-clean, which is `crates/`. The
-      # collaboration server is a host (ADR-012) and was never meant to run in a
-      # browser: it has an async runtime and an HTTP stack, and checking it here
-      # would be asserting something nobody wants to be true.
-      - run: cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server --exclude casual-calc-host
+      # The **engine** must stay WASM-clean, which is `crates/`. Anything under
+      # `server/` is a host (ADR-012) and was never meant to run in a browser:
+      # each has an async runtime and an HTTP stack, and checking one here would
+      # be asserting something nobody wants to be true.
+      #
+      # The exclusions are **derived from the workspace, not listed**. They were
+      # listed, and adding a third host crate broke this job on `main` — the
+      # list is a copy of a fact the manifest already states, and a copy of a
+      # fact is a thing that goes stale. `server/` is the boundary the
+      # `dependency-policy` job already enforces, so it is the boundary to read.
+      - name: The engine still builds for the browser
+        run: |
+          mapfile -t EXCLUDES < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("/server/")) | "--exclude", .name')
+          echo "not checked for wasm: ${EXCLUDES[*]}"
+          cargo check --target wasm32-unknown-unknown --workspace "${EXCLUDES[@]}"
 
   benchmark-smoke:
     runs-on: ubuntu-latest
@@ -135,17 +146,29 @@ jobs:
             echo "::error::[profile.release] must set overflow-checks = true" >&2
             exit 1
           fi
-      # ADR-012: the collaboration server is a *host*, not an engine layer. It
-      # may depend on the crates; nothing under `crates/` may depend on it, or
-      # an async runtime and an HTTP stack arrive in a library that has neither.
-      # A documented boundary that nothing checks is a boundary that erodes.
-      - name: The engine must not depend on the server
+      # ADR-012: a host is not an engine layer. A host may depend on the
+      # crates; nothing under `crates/` may depend on a host, or an async
+      # runtime and an HTTP stack arrive in a library that has neither. A
+      # documented boundary that nothing checks is a boundary that erodes.
+      #
+      # **Every host, derived**, not the one this check was written for. It
+      # named `casual-calc-collab-server` alone, so a crate taking a dependency
+      # on `casual-calc-host` or `casual-calc-wopi` would have been told the
+      # boundary was intact — while the workspace manifest states the rule for
+      # all three.
+      - name: The engine must not depend on any host
         run: |
-          if grep -rn "casual-calc-collab-server" crates/ ; then
-            echo "::error::a crate under crates/ depends on the collaboration server (ADR-012)" >&2
-            exit 1
-          fi
-          echo "engine/server boundary intact"
+          mapfile -t HOSTS < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("/server/")) | .name')
+          broken=0
+          for host in "${HOSTS[@]}"; do
+            if grep -rn "$host" crates/ ; then
+              echo "::error::a crate under crates/ depends on $host (ADR-012)" >&2
+              broken=1
+            fi
+          done
+          [ "$broken" = "0" ] || exit 1
+          echo "engine/host boundary intact for: ${HOSTS[*]}"
       # SEC-001. A workbook is untrusted input, so any path turning its text
       # into markup runs somebody else's script in the editor's origin — where
       # the document, the session token and the collaboration socket live. The
