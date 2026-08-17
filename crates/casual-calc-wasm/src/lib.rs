@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use casual_calc_eval::recalculate;
 use casual_calc_formula::{CellReference, Expr, parse, shift_references};
@@ -4985,11 +4985,12 @@ pub fn session_cells(
         // its top-N cutoff, how often each value repeats. Done once per call
         // rather than per cell: a colour scale over a thousand rows would
         // otherwise cost a thousand scans.
-        let cf_stats: Vec<CfStats> = sheet
+        let cf_stats: Vec<casual_calc_layout::conditional::RangeStats> = sheet
             .conditional_formats
             .iter()
-            .map(|cf| cf_range_stats(wb, sheet, cf))
+            .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
             .collect();
+        let cf_order = casual_calc_layout::conditional::priority_order(sheet);
 
         let mut items = Vec::new();
         for (at, cell) in sheet.cells.row_band(first_row, last_row) {
@@ -5024,63 +5025,22 @@ pub fn session_cells(
             // value sits between the range's own minimum and maximum, so they
             // are resolved against the pre-computed span rather than by a
             // per-cell predicate.
-            let mut bar: Option<(f64, String)> = None;
-            let mut cf_font: Option<String> = None;
-            let mut cf_bold = false;
-            // Lowest priority wins, and a matching `stopIfTrue` ends the search
-            // — so rules are considered in priority order, not document order.
-            let mut order: Vec<usize> = (0..sheet.conditional_formats.len()).collect();
-            order.sort_by_key(|&i| {
-                let p = sheet.conditional_formats[i].priority;
-                (if p == 0 { u32::MAX } else { p }, i)
-            });
-            let mut cf_fill: Option<String> = None;
-            for i in order {
-                let cf = &sheet.conditional_formats[i];
-                if !cf.covers(at.row, at.col) {
-                    continue;
-                }
-                if cf.rule.has_own_presentation() {
-                    let CellValue::Number(n) = cell.value else {
-                        continue;
-                    };
-                    let (lo, hi) = (cf_stats[i].min, cf_stats[i].max);
-                    // A flat range has no gradient to speak of; put everything at
-                    // the top rather than dividing by zero.
-                    let t = if hi > lo { (n - lo) / (hi - lo) } else { 1.0 };
-                    match &cf.rule {
-                        CfRule::ColorScale(colors) => {
-                            cf_fill.get_or_insert_with(|| scale_color(colors, t));
-                        }
-                        CfRule::DataBar(color) => {
-                            bar.get_or_insert((t.clamp(0.0, 1.0), color.clone()));
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                let hit = if cf.rule.needs_range_stats() {
-                    cf_stats[i].matches(&cf.rule, &cell.value, &text)
-                } else {
-                    match cell.value {
-                        CellValue::Number(n) => cf.rule.matches_number(n),
-                        _ => cf.rule.matches_text(&text),
-                    }
-                };
-                if !hit {
-                    continue;
-                }
-                if !cf.fill.is_empty() {
-                    cf_fill.get_or_insert_with(|| cf.fill.clone());
-                }
-                if let Some(fc) = &cf.font_color {
-                    cf_font.get_or_insert_with(|| fc.clone());
-                }
-                cf_bold |= cf.bold;
-                if cf.stop_if_true {
-                    break;
-                }
-            }
+
+            // One implementation, shared with the headless renderer: the canvas
+            // used to resolve these here and the PNG not at all (`RND-05`).
+            let effect = casual_calc_layout::conditional::effect_for(
+                sheet,
+                &cf_stats,
+                &cf_order,
+                at.row,
+                at.col,
+                &cell.value,
+                &text,
+            );
+            let bar = effect.data_bar;
+            let cf_font = effect.font_color;
+            let cf_bold = effect.bold;
+            let cf_fill = effect.fill;
             let fill = cf_fill
                 .or_else(|| style.and_then(|s| s.fill_color.clone()))
                 .unwrap_or_default();
@@ -5319,38 +5279,6 @@ pub fn function_catalog() -> String {
         .map(|(n, sig)| format!("{{\"n\":{},\"sig\":{}}}", json_string(n), json_string(sig)))
         .collect();
     format!("[{}]", items.join(","))
-}
-
-/// The colour at position `t` (0..1) along a 2- or 3-stop scale, as `RRGGBB`.
-/// Interpolated in plain RGB, which is what Excel does for colour scales.
-fn scale_color(colors: &[String], t: f64) -> String {
-    let parse = |hex: &str| -> (f64, f64, f64) {
-        let v = u32::from_str_radix(hex, 16).unwrap_or(0);
-        (
-            f64::from((v >> 16) & 0xff),
-            f64::from((v >> 8) & 0xff),
-            f64::from(v & 0xff),
-        )
-    };
-    if colors.is_empty() {
-        return String::new();
-    }
-    let t = t.clamp(0.0, 1.0);
-    // With three stops the midpoint is its own anchor, so each half interpolates
-    // separately — otherwise the middle colour would never appear.
-    let (a, b, local) = if colors.len() >= 3 {
-        if t < 0.5 {
-            (&colors[0], &colors[1], t * 2.0)
-        } else {
-            (&colors[1], &colors[2], (t - 0.5) * 2.0)
-        }
-    } else {
-        (&colors[0], &colors[colors.len() - 1], t)
-    };
-    let (ar, ag, ab) = parse(a);
-    let (br, bg, bb) = parse(b);
-    let mix = |x: f64, y: f64| (x + (y - x) * local).round() as u32;
-    format!("{:02X}{:02X}{:02X}", mix(ar, br), mix(ag, bg), mix(ab, bb))
 }
 
 /// The CSS font stack for a requested family (the deterministic bundled
@@ -5699,130 +5627,6 @@ pub fn session_import_summary() -> String {
         parts.join("; ")
     })
     .unwrap_or_default()
-}
-
-/// Whole-range statistics for the conditional-format rules that cannot be
-/// decided from a cell alone. Computed once per rule per `session_cells` call.
-#[derive(Default)]
-struct CfStats {
-    /// Smallest numeric value in the range (`INFINITY` when there are none).
-    min: f64,
-    /// Largest numeric value.
-    max: f64,
-    /// Mean of the numeric values.
-    mean: f64,
-    /// The top-N cutoff for a `Top10` rule: a value passes when it is at least
-    /// this (or at most, for `bottom`). Precomputed so the per-cell test stays
-    /// a comparison rather than a re-sort.
-    cutoff: f64,
-    /// How many times each display value occurs, for duplicate/unique rules.
-    /// Empty unless such a rule needs it — building it for every rule would
-    /// allocate a string per cell for nothing.
-    counts: HashMap<String, u32>,
-}
-
-impl CfStats {
-    /// Whether a cell passes a rule that needed these statistics.
-    fn matches(&self, rule: &CfRule, value: &CellValue, text: &str) -> bool {
-        match rule {
-            CfRule::Top10 { bottom, .. } => {
-                let CellValue::Number(n) = value else {
-                    return false;
-                };
-                if *bottom {
-                    *n <= self.cutoff
-                } else {
-                    *n >= self.cutoff
-                }
-            }
-            CfRule::AboveAverage { below, equal } => {
-                let CellValue::Number(n) = value else {
-                    return false;
-                };
-                // Compare against the mean with an epsilon so a value that is
-                // arithmetically equal does not fall on the wrong side of it.
-                let d = n - self.mean;
-                if d.abs() < 1e-9 {
-                    return *equal;
-                }
-                if *below { d < 0.0 } else { d > 0.0 }
-            }
-            CfRule::DuplicateValues { unique } => {
-                // A blank is neither duplicated nor unique — Excel skips them.
-                if text.is_empty() {
-                    return false;
-                }
-                let n = self.counts.get(text).copied().unwrap_or(0);
-                if *unique { n == 1 } else { n > 1 }
-            }
-            _ => false,
-        }
-    }
-}
-
-/// Compute the statistics a rule needs, or defaults when it needs none.
-fn cf_range_stats(wb: &Workbook, sheet: &Sheet, cf: &ConditionalFormat) -> CfStats {
-    let mut stats = CfStats {
-        min: f64::INFINITY,
-        max: f64::NEG_INFINITY,
-        ..Default::default()
-    };
-    if !cf.rule.needs_range_stats() {
-        return stats;
-    }
-    let wants_counts = matches!(cf.rule, CfRule::DuplicateValues { .. });
-    let mut values: Vec<f64> = Vec::new();
-    for r in cf.range.start.row..=cf.range.end.row {
-        for c in cf.range.start.col..=cf.range.end.col {
-            let Some(cell) = sheet.cells.get(CellRef::new(r, c)) else {
-                continue;
-            };
-            if let CellValue::Number(n) = cell.value
-                && n.is_finite()
-            {
-                stats.min = stats.min.min(n);
-                stats.max = stats.max.max(n);
-                values.push(n);
-            }
-            if wants_counts {
-                // Duplicate/unique compare what is *displayed*, so two cells
-                // showing "1.0" and "1" count as different — as they do in Excel.
-                // Compare what is *displayed*: two cells showing the same thing
-                // are duplicates even if one is text and one a number, which is
-                // how Excel treats them.
-                let key = casual_calc_layout::display_text(wb, cell);
-                if !key.is_empty() {
-                    *stats.counts.entry(key).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    if !values.is_empty() {
-        stats.mean = values.iter().sum::<f64>() / values.len() as f64;
-    }
-    if let CfRule::Top10 {
-        rank,
-        bottom,
-        percent,
-    } = &cf.rule
-        && !values.is_empty()
-    {
-        // Sort once and index, rather than testing each cell against the rest.
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = values.len();
-        let take = if *percent {
-            // Excel rounds a percentage down but always keeps at least one.
-            (((*rank as f64 / 100.0) * n as f64).floor() as usize).clamp(1, n)
-        } else {
-            (*rank as usize).clamp(1, n)
-        };
-        stats.cutoff = if *bottom {
-            values[take - 1]
-        } else {
-            values[n - take]
-        };
-    }
-    stats
 }
 
 // --- Named cell styles ----------------------------------------------------

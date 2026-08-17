@@ -751,3 +751,146 @@ mod merges {
         assert_eq!(list.items.len(), 4, "the four cells of the sample sheet");
     }
 }
+
+// --- Conditional formatting reaches the display list (RND-05) ----------------
+
+mod conditional_formatting {
+    use super::*;
+    use crate::display::{DisplayList, PaintItem};
+    use casual_calc_model::{CellRange, CfRule, ConditionalFormat, Style};
+
+    fn sheet_with_rule(rule: CfRule, fill: &str) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for (row, value) in [(0u32, 1.0), (1, 50.0), (2, 100.0)] {
+            sheet
+                .cells
+                .set(CellRef::new(row, 0), Cell::value(CellValue::Number(value)));
+        }
+        sheet.conditional_formats.push(ConditionalFormat {
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)),
+            rule,
+            fill: fill.to_owned(),
+            font_color: None,
+            bold: false,
+            priority: 0,
+            stop_if_true: false,
+        });
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn fills(list: &DisplayList) -> Vec<Option<String>> {
+        list.items
+            .iter()
+            .filter_map(|item| match item {
+                PaintItem::CellBackground { fill, .. } => Some(fill.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn whole_sheet(workbook: &Workbook) -> DisplayList {
+        let geometry = GridGeometry::for_sheet(&workbook.sheets[0]);
+        layout_viewport(
+            workbook,
+            0,
+            &geometry,
+            &Viewport {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+    }
+
+    /// **A highlight rule reaches the display list.**
+    ///
+    /// This is `RND-05`: the rules were resolved inside `casual-calc-wasm`, a
+    /// host crate the render path cannot depend on, so the canvas showed them
+    /// and every headless PNG — thumbnail, preview, server-side export — showed
+    /// a sheet of plain cells. Not because the logic was missing, but because
+    /// it was in the wrong crate.
+    #[test]
+    fn a_highlight_rule_paints_the_headless_render_too() {
+        let wb = sheet_with_rule(CfRule::GreaterThan(40.0), "FF0000");
+        let painted = fills(&whole_sheet(&wb));
+
+        // Two of the three cells are over forty.
+        assert_eq!(
+            painted
+                .iter()
+                .filter(|f| f.as_deref() == Some("FF0000"))
+                .count(),
+            2,
+            "got {painted:?}"
+        );
+    }
+
+    /// **A colour scale is interpolated across the range, not applied flat.**
+    ///
+    /// The scale needs the range's own extremes, which is why the statistics
+    /// are computed per rule rather than per cell — and why a rule that reached
+    /// the display list with a single colour would still look wrong.
+    #[test]
+    fn a_colour_scale_varies_across_the_range() {
+        let wb = sheet_with_rule(
+            CfRule::ColorScale(vec!["FFFFFF".to_owned(), "000000".to_owned()]),
+            "",
+        );
+        let painted: Vec<String> = fills(&whole_sheet(&wb)).into_iter().flatten().collect();
+
+        assert_eq!(painted.len(), 3, "every cell in the range is filled");
+        let distinct: std::collections::BTreeSet<&String> = painted.iter().collect();
+        assert!(
+            distinct.len() >= 2,
+            "the scale produced one colour for the whole range: {painted:?}"
+        );
+        // Low end is the first stop, high end the last.
+        assert_eq!(painted[0], "FFFFFF");
+        assert_eq!(painted[2], "000000");
+    }
+
+    /// **A rule's fill beats the cell's own.**
+    ///
+    /// That is what conditional formatting means, and the order is what makes
+    /// it true: taking the style's fill first would paint the rule away.
+    #[test]
+    fn a_rule_overrides_the_cells_own_fill() {
+        let mut wb = sheet_with_rule(CfRule::GreaterThan(40.0), "FF0000");
+        let style = wb.styles.intern(Style {
+            fill_color: Some("00FF00".to_owned()),
+            ..Style::default()
+        });
+        for row in 0..3 {
+            if let Some(cell) = wb.sheets[0].cells.get(CellRef::new(row, 0)).cloned() {
+                wb.sheets[0].cells.set(
+                    CellRef::new(row, 0),
+                    Cell {
+                        style: Some(style),
+                        ..cell
+                    },
+                );
+            }
+        }
+
+        let painted: Vec<String> = fills(&whole_sheet(&wb)).into_iter().flatten().collect();
+        assert_eq!(
+            painted,
+            vec!["00FF00", "FF0000", "FF0000"],
+            "the first cell is under the threshold and keeps its own fill"
+        );
+    }
+
+    /// **A sheet with no rules is untouched, and pays nothing.**
+    #[test]
+    fn a_sheet_without_rules_is_unchanged() {
+        let mut wb = sheet_with_rule(CfRule::GreaterThan(40.0), "FF0000");
+        wb.sheets[0].conditional_formats.clear();
+        assert!(
+            fills(&whole_sheet(&wb)).iter().all(Option::is_none),
+            "a sheet with no rules gained a fill"
+        );
+    }
+}
