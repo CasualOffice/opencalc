@@ -7274,8 +7274,31 @@ function replaceOne() {
 
 // Undo/redo can add, remove, or reorder sheets, so rebuild the tab bar (which
 // also re-clamps the active sheet if it vanished) before redrawing the grid.
-function doUndo() { try { wasm.session_undo(); } catch {} renderTabs(); draw(); }
-function doRedo() { try { wasm.session_redo(); } catch {} renderTabs(); draw(); }
+//
+// The failure is **said out loud**, where it used to be swallowed by a bare
+// `catch {}`. A collaborative undo can now be refused — undoing an insert that
+// somebody else has since filled would delete their work, and no undo stack
+// anywhere holds it (docs/69). A refusal nobody sees is a button that appears
+// to do nothing, which is the worse of the two failures that policy chose
+// between, and it would have arrived silently through this line.
+function doUndo() {
+  try {
+    wasm.session_undo();
+  } catch (e) {
+    statusError(errText(e));
+  }
+  renderTabs();
+  draw();
+}
+function doRedo() {
+  try {
+    wasm.session_redo();
+  } catch (e) {
+    statusError(errText(e));
+  }
+  renderTabs();
+  draw();
+}
 function download(data, name, type) {
   const blob = new Blob([data], { type });
   const a = document.createElement("a");

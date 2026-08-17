@@ -30,7 +30,7 @@ pub mod transform;
 mod transform_tests;
 pub mod wire;
 
-use structural::Axis;
+pub use structural::Axis;
 
 /// An error applying an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +375,83 @@ impl RetainedBytes {
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty() && self.rels.is_empty()
     }
+}
+
+/// Why an undo was refused, and what to say about it.
+///
+/// Carried rather than reduced to a string because the caller has to *name*
+/// what stopped it — a refusal a user cannot act on is the failure mode this
+/// policy exists to avoid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WouldDiscard {
+    /// The sheet the band is on.
+    pub sheet: usize,
+    /// Whether the band is rows or columns.
+    pub axis: Axis,
+    /// The first line of the band.
+    pub at: u32,
+    /// How many lines.
+    pub count: u32,
+    /// A cell inside it that holds work, for the message.
+    pub occupied: CellRef,
+    /// How many cells in the band hold work.
+    pub cells: usize,
+}
+
+/// Whether undoing `op` would delete somebody else's work (docs/69).
+///
+/// **Only an inverse that deletes a band can do this.** Undoing a *delete*
+/// re-inserts one and is additive; undoing an *insert* removes rows that were
+/// created empty, and anything in them now arrived afterwards.
+///
+/// That is also what makes the check need no authorship, which the model does
+/// not carry. The stack is last-in-first-out: by the time an insert is the
+/// operation being undone, everything this session did after it has already
+/// been undone, so a cell still standing in the band was written by somebody
+/// else. Coarse in the direction the policy asks for — it refuses a little more
+/// often than strictly necessary, and every extra refusal is a case where the
+/// user is told to look rather than one where data disappears.
+#[must_use]
+pub fn undo_would_discard(workbook: &Workbook, op: &Operation) -> Option<WouldDiscard> {
+    let (sheet, axis, at, count) = match op {
+        Operation::DeleteRows { sheet, at, count } => (*sheet, Axis::Row, *at, *count),
+        Operation::DeleteColumns { sheet, at, count } => (*sheet, Axis::Col, *at, *count),
+        // A batch is exactly its members; the first blocked one blocks it.
+        Operation::Batch(ops) => {
+            return ops.iter().find_map(|op| undo_would_discard(workbook, op));
+        }
+        _ => return None,
+    };
+    if count == 0 {
+        return None;
+    }
+    let target = workbook.sheets.get(sheet)?;
+    let end = at.saturating_add(count);
+    let inside = |at_ref: CellRef| match axis {
+        Axis::Row => at_ref.row >= at && at_ref.row < end,
+        Axis::Col => at_ref.col >= at && at_ref.col < end,
+    };
+
+    let mut found: Option<CellRef> = None;
+    let mut cells = 0usize;
+    for (at_ref, cell) in target.cells.iter() {
+        if inside(at_ref) && !cell.is_blank() {
+            cells += 1;
+            // The topmost-leftmost, so the message names a stable cell rather
+            // than whichever the store happened to yield first.
+            if found.is_none_or(|best| (at_ref.row, at_ref.col) < (best.row, best.col)) {
+                found = Some(at_ref);
+            }
+        }
+    }
+    found.map(|occupied| WouldDiscard {
+        sheet,
+        axis,
+        at,
+        count,
+        occupied,
+        cells,
+    })
 }
 
 /// Remove the retained parts at `paths`, and the relationships reaching them.
@@ -1116,6 +1193,16 @@ impl History {
     /// user is about to get back.
     pub fn undo_label(&self) -> Option<&'static str> {
         self.undo.last().map(describe_op)
+    }
+
+    /// The operation undo would apply, without applying it.
+    ///
+    /// The stack holds inverses, so this is the thing whose effect a policy has
+    /// to judge — and it has to be judged *before* it runs, because the state it
+    /// would destroy is the evidence.
+    #[must_use]
+    pub fn peek_undo(&self) -> Option<&Operation> {
+        self.undo.last()
     }
 
     /// Likewise for redo.
