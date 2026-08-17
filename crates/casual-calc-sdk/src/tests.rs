@@ -1395,3 +1395,109 @@ mod collaborative_undo {
         );
     }
 }
+
+// --- The session's invariants (SDK-008) --------------------------------------
+
+mod escapes {
+    use super::*;
+    use crate::SdkError;
+
+    /// **A workbook made invalid through `workbook_mut` does not become a
+    /// file.**
+    ///
+    /// The session exists to hold invariants, and `workbook_mut` hands a host
+    /// the right to change anything — which it needs, for programmatic setup,
+    /// and which the session cannot supervise: it does not see what happens
+    /// through that reference, and checking on every call is not affordable,
+    /// because `validate` walks every cell and hosts reach for it per
+    /// keystroke.
+    ///
+    /// So the check is at the boundary where being wrong stops being
+    /// recoverable. A corrupt workbook in memory is a bug somebody will notice.
+    /// One that became a `.xlsx` is a file the author opens tomorrow.
+    #[test]
+    fn an_invalid_workbook_is_refused_rather_than_written() {
+        let mut session = WorkbookSession::blank();
+        let id = SheetId(Id::from_parts(9, 1));
+        {
+            let wb = session.workbook_mut();
+            // Two sheets with one identity: every lookup by id now resolves to
+            // whichever comes first, and a saved file names the same sheet
+            // twice.
+            wb.sheets.push(Sheet::new(id, "First"));
+            wb.sheets.push(Sheet::new(id, "Second"));
+        }
+
+        match session.save() {
+            Err(SdkError::Model(e)) => {
+                assert_eq!(e.code(), "OC-MDL-0001");
+                assert!(e.to_string().contains("duplicate sheet id"), "{e}");
+            }
+            Err(other) => panic!("expected the invariant to be named, got {other}"),
+            Ok(bytes) => panic!("wrote {} bytes of invalid workbook", bytes.len()),
+        }
+    }
+
+    /// **A valid workbook still saves.**
+    ///
+    /// The check must cost nothing anybody notices except the host that broke
+    /// something.
+    #[test]
+    fn an_ordinary_workbook_still_saves() {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(1.0),
+            })
+            .expect("edited");
+
+        let bytes = session.save().expect("a valid workbook saves");
+        assert!(bytes.len() > 100, "the package is suspiciously small");
+    }
+
+    /// **You cannot hold both an untouched original and a workbook you have
+    /// changed.**
+    ///
+    /// This is what makes the ordering in `save` safe, and it is the part that
+    /// can actually be tested. Validating the untouched path would be wrong —
+    /// this engine does not model every construct, so refusing to hand back a
+    /// file it merely does not understand turns "open and close" into data loss
+    /// — but no test can currently distinguish that, because import always
+    /// produces a valid model, so the check would simply pass.
+    ///
+    /// What holds the property up instead is this: taking a mutable reference
+    /// drops the original bytes. There is no reachable state where `source` is
+    /// still set and the workbook has been changed behind the session's back,
+    /// which is why the untouched path has nothing to validate.
+    #[test]
+    fn taking_a_mutable_reference_gives_up_the_untouched_original() {
+        let mut source = WorkbookSession::blank();
+        source
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        let bytes = source.save().expect("saved");
+
+        let mut opened = WorkbookSession::open(bytes.clone()).expect("opened");
+        assert!(opened.is_unmodified(), "a freshly opened file is untouched");
+        assert_eq!(
+            opened.save().expect("saves"),
+            bytes,
+            "the original bytes did not come back unchanged"
+        );
+
+        // One reference, no writes through it.
+        let _ = opened.workbook_mut();
+        assert!(
+            !opened.is_unmodified(),
+            "the session still believes it holds the file's own bytes, while a \
+             host has had the right to change anything in it"
+        );
+    }
+}
