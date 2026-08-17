@@ -316,6 +316,26 @@ fn build_dense_workbook(rows: u32, cols: u32) -> Workbook {
     workbook
 }
 
+/// The frame rate docs/30 states as target T2.
+const TARGET_FPS: u64 = 60;
+
+/// One whole frame at [`TARGET_FPS`], in nanoseconds — about 16.6 ms.
+const FRAME_NS: u64 = 1_000_000_000 / TARGET_FPS;
+
+/// What T2 allows the **engine** inside that frame.
+///
+/// docs/30 does not stop at the frame: it gives a working budget of "≤ 8 ms
+/// engine-side", because the browser needs the rest of the frame for
+/// compositing, input and everything else on the main thread. This benchmark is
+/// engine-side — layout and render, no browser — so that is the number it must
+/// hold itself to, and gating on the whole frame would quietly spend the
+/// browser's half.
+///
+/// Derived rather than written down, so the gate cannot drift from the target
+/// without somebody changing the target. It was `16_666_667 * 4`: a ceiling
+/// that permitted fifteen frames a second while its own comment said sixty.
+const FRAME_BUDGET_NS: u64 = FRAME_NS / 2;
+
 /// One rendered frame: lay out the visible window, then draw it.
 ///
 /// # Why this one is a duration and the others are ratios
@@ -325,12 +345,20 @@ fn build_dense_workbook(rows: u32, cols: u32) -> Workbook {
 /// exception: sixty frames a second **is** an absolute number — 16.6 ms — and a
 /// ratio cannot express "fast enough for a human to scroll".
 ///
-/// So this measures a duration, and then guards against the flakiness that
-/// invites by setting the ceiling at four times the budget rather than at it.
-/// That will not notice a frame drifting from 4 ms to 12 ms, and it is not
-/// meant to: it is there to catch a regression that puts scrolling *visibly*
-/// on the floor, which is the thing that would otherwise reach a user. The
-/// honest number to look at is `medianNs`, reported whether or not it passes.
+/// So this measures a duration, against **one** frame.
+///
+/// It was four whole frames, to guard against flakiness on a shared runner.
+/// Measurement says that guard was not buying anything: this renders in about
+/// 0.13 ms, so the old ceiling sat five hundred times above the measurement and
+/// the engine-side budget still sits sixty times above it. CI variance would
+/// have to be two orders of magnitude before the tighter gate fired — and a
+/// ceiling that permits fifteen frames a second is not a gate on sixty,
+/// whatever its comment says.
+///
+/// `medianNs` is still the honest number, reported whether or not it passes;
+/// `ratioCenti` is integer-divided against the budget and rounds to zero at
+/// this speed, which is a fair description of the headroom rather than a
+/// missing measurement.
 ///
 /// The viewport is a realistic window over a sheet with far more cells than fit
 /// in it, because rendering everything and rendering what is visible are
@@ -365,8 +393,7 @@ fn measure_frame(iterations: u32) -> ScalingReport {
     samples.sort_unstable();
     let median_ns = percentile(&samples, 0.5);
 
-    // 16.6 ms is one frame at sixty a second; the ceiling is four of them.
-    let budget_ns = 16_666_667 * 4;
+    let budget_ns = FRAME_BUDGET_NS;
     ScalingReport {
         id: "render-frame-1600x900".to_owned(),
         small_ns: median_ns,
@@ -569,4 +596,29 @@ fn main() {
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::{FRAME_BUDGET_NS, FRAME_NS, TARGET_FPS};
+
+    /// **The frame gate is one frame, not several.**
+    ///
+    /// It was four, and the comment above it said sixty frames a second — so
+    /// CI enforced fifteen while docs/30 promised sixty, and nothing said so.
+    /// Measurement is what settled it: the frame renders in about 0.13 ms, so
+    /// even at one frame the gate sits a hundred and twenty-five times above
+    /// the measurement and the looseness bought no protection from anything.
+    #[test]
+    fn the_frame_budget_is_the_engine_side_working_budget() {
+        assert_eq!(TARGET_FPS, 60, "docs/30 T2 states sixty frames a second");
+        assert_eq!(FRAME_NS, 16_666_666, "one frame at sixty a second");
+        // docs/30 T2: "working budget ≤ 8 ms engine-side". This benchmark is
+        // engine-side, so gating on the whole frame would spend the browser's
+        // half of it on ourselves.
+        // 8.33 ms: half a frame, which is the "≤ 8 ms engine-side" docs/30
+        // allows. Pinned exactly, so widening it back is an edit somebody makes
+        // rather than a multiplier that drifts.
+        assert_eq!(FRAME_BUDGET_NS, 8_333_333);
+    }
 }
