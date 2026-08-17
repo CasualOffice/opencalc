@@ -173,6 +173,13 @@ pub enum SdkError {
     Edit(TxnError),
     /// The session is read-only and refused an edit.
     ReadOnly,
+    /// The workbook is not in a state this engine will write out.
+    ///
+    /// Reached through [`workbook_mut`](WorkbookSession::workbook_mut), which
+    /// hands a host the right to change anything (`SDK-008`). Returned rather
+    /// than written, because a corrupt workbook in memory is a bug and one that
+    /// became a file is data loss.
+    Model(casual_calc_model::ModelError),
     /// Undo would have deleted a band somebody else has since filled (docs/69,
     /// `COL-28`). Refused, and refused loudly: the alternative is a structural
     /// undo that destroys work no undo stack anywhere can bring back.
@@ -186,6 +193,7 @@ impl core::fmt::Display for SdkError {
             SdkError::Export(e) => write!(f, "{e}"),
             SdkError::Render(e) => write!(f, "{e}"),
             SdkError::Edit(e) => write!(f, "{e}"),
+            SdkError::Model(e) => write!(f, "{e}"),
             SdkError::ReadOnly => f.write_str("this workbook is open for reading only"),
             SdkError::UndoWouldDiscard(what) => {
                 let (line, kind) = match what.axis {
@@ -209,6 +217,12 @@ impl core::fmt::Display for SdkError {
 }
 
 impl std::error::Error for SdkError {}
+
+impl From<casual_calc_model::ModelError> for SdkError {
+    fn from(e: casual_calc_model::ModelError) -> Self {
+        SdkError::Model(e)
+    }
+}
 
 impl From<ImportError> for SdkError {
     fn from(e: ImportError) -> Self {
@@ -800,8 +814,25 @@ impl WorkbookSession {
     /// values on the strength of its own recalculation is the riskier of the two.
     pub fn save(&self) -> Result<Vec<u8>, SdkError> {
         if let Some(source) = &self.source {
+            // The original bytes, untouched. Nothing has edited them, so there
+            // is nothing to validate — and validating here would refuse to hand
+            // back a file this engine merely does not fully model.
             return Ok(source.clone());
         }
+        // **The last place an invalid workbook can be stopped** (`SDK-008`).
+        //
+        // `workbook_mut` hands a host the right to change anything, including
+        // into a state the model calls invalid: a duplicate sheet id, a cell
+        // pointing at a string that was never interned. The session cannot see
+        // what happens through that reference, and checking on every call is
+        // not affordable — `validate` walks every cell, and hosts reach for
+        // that reference per keystroke.
+        //
+        // Here it is affordable, because writing the package already walks
+        // every cell, and here is where being wrong stops being recoverable: a
+        // corrupt workbook that stayed in memory is a bug, and one that became
+        // a file the author will open tomorrow is data loss.
+        self.workbook.validate()?;
         Ok(write_workbook(&self.workbook)?)
     }
 
