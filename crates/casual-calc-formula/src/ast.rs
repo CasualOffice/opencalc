@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::reference::CellReference;
 
 /// A prefix/postfix unary operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UnaryOp {
     /// Prefix `-`.
@@ -19,7 +19,7 @@ pub enum UnaryOp {
 }
 
 /// A binary operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BinaryOp {
     /// `+`
@@ -136,4 +136,74 @@ pub enum Expr {
         /// The arguments.
         args: Vec<Expr>,
     },
+}
+
+impl Expr {
+    /// A structural fingerprint, for interning identical formulas.
+    ///
+    /// [`Expr`] cannot derive `Hash`, because it carries an `f64` and floats
+    /// have no total equality — `NaN != NaN`, and `0.0 == -0.0` while their
+    /// bits differ. So the numbers are hashed **by their bits**, which makes
+    /// this a fingerprint of the written formula rather than of its
+    /// mathematical value: `=0` and `=-0` fingerprint apart, and correctly, as
+    /// they are different text that must round-trip differently.
+    ///
+    /// Only ever a *hint*. Equality still decides — a collision costs a
+    /// comparison, never a wrong answer — which is what lets this be a cheap
+    /// hash rather than a canonical serialisation.
+    ///
+    /// Written as an exhaustive match on purpose: adding a variant without
+    /// deciding how it fingerprints will not compile, where a derive or a
+    /// catch-all arm would silently make every new variant collide.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash_into(&mut hasher);
+        hasher.finish()
+    }
+
+    fn hash_into(&self, state: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        // The discriminant first, so `Text("1")` and `Name("1")` differ.
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Expr::Number(n) => n.to_bits().hash(state),
+            Expr::Bool(b) => b.hash(state),
+            Expr::Text(s) | Expr::Error(s) | Expr::Name(s) | Expr::Raw(s) => s.hash(state),
+            Expr::Reference(r) => r.hash(state),
+            Expr::Range(a, b) => {
+                a.hash(state);
+                b.hash(state);
+            }
+            Expr::Call { callee, args } => {
+                callee.hash_into(state);
+                args.len().hash(state);
+                for arg in args {
+                    arg.hash_into(state);
+                }
+            }
+            Expr::Empty => {}
+            Expr::StructuredRef { table, spec } => {
+                table.hash(state);
+                spec.hash(state);
+            }
+            Expr::Unary { op, operand } => {
+                op.hash(state);
+                operand.hash_into(state);
+            }
+            Expr::Binary { op, left, right } => {
+                op.hash(state);
+                left.hash_into(state);
+                right.hash_into(state);
+            }
+            Expr::Function { name, args } => {
+                name.hash(state);
+                args.len().hash(state);
+                for arg in args {
+                    arg.hash_into(state);
+                }
+            }
+        }
+    }
 }

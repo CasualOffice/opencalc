@@ -670,3 +670,131 @@ mod snapshot_limits {
         assert_eq!(d.max_populated_cells, 8_000_000);
     }
 }
+
+// --- Formula arena interning (PERF-09) ---------------------------------------
+
+mod formula_arena {
+    use crate::{Id, Workbook};
+    use casual_calc_formula::parse;
+
+    /// **The same formula, stored twice, is stored once.**
+    ///
+    /// `store_formula` appended unconditionally. Two consequences, and the
+    /// second is the one nobody wrote down:
+    ///
+    /// - N cells carrying the identical expression cost N ASTs, against the
+    ///   arena docs/40 describes and the 1M-cell memory budget.
+    /// - **Nothing ever reclaims.** Every edit that replaces a formula appends
+    ///   a new AST and orphans the old one, so retyping one cell's formula grew
+    ///   the table once per keystroke-committed edit, for the life of the
+    ///   session.
+    #[test]
+    fn an_identical_formula_is_stored_once() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let first = wb.store_formula(parse("SUM($A$1:$A$10)").unwrap());
+        let second = wb.store_formula(parse("SUM($A$1:$A$10)").unwrap());
+
+        assert_eq!(first, second, "the same expression got two handles");
+        assert_eq!(
+            wb.formulas.len(),
+            1,
+            "the arena holds {} ASTs",
+            wb.formulas.len()
+        );
+    }
+
+    /// **Retyping a formula does not grow the arena without bound.**
+    ///
+    /// The leak, stated as a user would meet it: a person editing one cell back
+    /// and forth between two formulas.
+    #[test]
+    fn editing_one_cell_does_not_grow_the_arena_forever() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        for i in 0..1_000 {
+            let text = if i % 2 == 0 { "A1+1" } else { "A1+2" };
+            wb.store_formula(parse(text).unwrap());
+        }
+        assert_eq!(
+            wb.formulas.len(),
+            2,
+            "a thousand edits between two formulas left {} ASTs",
+            wb.formulas.len()
+        );
+    }
+
+    /// **A workbook that came back from a snapshot still interns.**
+    ///
+    /// The index is derived state and is deliberately not serialised — storing
+    /// it beside the arena would be the same fact twice, with the usual
+    /// consequence when the two disagree. Which makes this the failure that
+    /// would otherwise be invisible: the arena arrives full and the index
+    /// empty, so every later formula appends, and the fix is undone by a round
+    /// trip with nothing to show for it.
+    #[test]
+    fn interning_survives_a_snapshot_round_trip() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.store_formula(parse("SUM($A$1:$A$10)").unwrap());
+        wb.store_formula(parse("A1+1").unwrap());
+        assert_eq!(wb.formulas.len(), 2);
+
+        let bytes = wb.to_snapshot().expect("serialises");
+        let mut reloaded = Workbook::from_snapshot(&bytes).expect("loads");
+        assert_eq!(reloaded.formulas.len(), 2, "the arena did not survive");
+
+        // The same two formulas again: both already there.
+        reloaded.store_formula(parse("SUM($A$1:$A$10)").unwrap());
+        reloaded.store_formula(parse("A1+1").unwrap());
+        assert_eq!(
+            reloaded.formulas.len(),
+            2,
+            "a round trip left {} ASTs — the index was not rebuilt, so storing \
+             started appending again",
+            reloaded.formulas.len()
+        );
+    }
+
+    /// **A fingerprint narrows; equality decides.**
+    ///
+    /// The index is keyed by a hash, so a collision is possible in principle
+    /// and impossible to construct on purpose — which is exactly why it needs
+    /// a test rather than a comment. Trusting the fingerprint would hand a cell
+    /// somebody else's formula: silent, and wrong in the worst way, because the
+    /// cell would compute a plausible number.
+    #[test]
+    fn a_colliding_fingerprint_does_not_return_the_wrong_formula() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let sum = wb.store_formula(parse("SUM($A$1:$A$10)").unwrap());
+
+        // Claim the incoming formula's fingerprint already has a candidate —
+        // the wrong one.
+        let incoming = parse("A1+1").unwrap();
+        wb.plant_collision(incoming.fingerprint(), sum.0);
+
+        let handle = wb.store_formula(incoming.clone());
+        assert_ne!(handle, sum, "the planted candidate was returned unchecked");
+        assert_eq!(
+            wb.formula(handle),
+            Some(&incoming),
+            "the handle does not resolve to the formula that was stored"
+        );
+    }
+
+    /// **Different formulas still get different handles.**
+    ///
+    /// The control: interning that collapsed distinct expressions would be a
+    /// far worse bug than the one it fixes.
+    #[test]
+    fn distinct_formulas_keep_distinct_handles() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let a = wb.store_formula(parse("A1+1").unwrap());
+        let b = wb.store_formula(parse("A1+2").unwrap());
+        let c = wb.store_formula(parse("A2+1").unwrap());
+
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        assert_eq!(wb.formulas.len(), 3);
+        assert_eq!(wb.formula(a), Some(&parse("A1+1").unwrap()));
+        assert_eq!(wb.formula(c), Some(&parse("A2+1").unwrap()));
+    }
+}
