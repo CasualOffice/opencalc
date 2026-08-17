@@ -35,7 +35,7 @@ separately:
 | Diagnostic | Is the compatibility report accurate and complete? | Phase 1A |
 
 Per-construct status across these dimensions is tracked in the living
-[52](52-FIDELITY-TRACKER.md), updated in the same PR that advances
+[14](14-EXECUTION-TRACKER.md), updated in the same PR that advances
 a construct.
 
 ## Security
@@ -63,6 +63,6 @@ a construct.
   silently dropped ([34](34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md)).
 - **Versioned contracts.** Schema, ops, SDK, and file-compat profile version
   independently ([02](02-ARCHITECTURE.md)); the support matrix
-  ([18](18-SUPPORT-MATRIX.md)) tracks target vs implemented per feature.
+  ([14](14-EXECUTION-TRACKER.md)) tracks what is implemented, with the gate that proves it.
 - **No feature is "supported" until its gate passes.** A target in the support
   matrix is aspirational until its CI/oracle gate is green.

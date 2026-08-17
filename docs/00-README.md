@@ -49,7 +49,6 @@ the other way around. This index is the map.
 | 15 | [CI & Release Gates](15-CI-AND-RELEASE-GATES.md) | The PR contract |
 | 16 | [Documentation Maintenance](16-DOCUMENTATION-MAINTENANCE.md) | Keeping docs and code in sync |
 | 17 | [Glossary](17-GLOSSARY.md) | Shared vocabulary |
-| 18 | [Support Matrix](18-SUPPORT-MATRIX.md) | Target vs implemented, per platform & feature |
 | 19 | [Workspace Scaffold & Layer Division](19-WORKSPACE-SCAFFOLD-DESIGN.md) | Crates, the dependency DAG, the seams |
 
 ### Contracts (20–28)
@@ -62,7 +61,6 @@ the other way around. This index is the map.
 | 23 | [Cell-Store Representation](23-CELL-STORE-REPRESENTATION.md) | The sparse grid internals (drives T1/T2) |
 | 24 | [Transaction & Edit Semantics](24-TRANSACTION-AND-EDIT-SEMANTICS.md) | Op set, inverses, reference rewriting, collab seam |
 | 28 | [XLSX Package Reader](28-XLSX-PACKAGE-READER.md) | SpreadsheetML OPC admission |
-| 33 | [Fidelity Ledger](52-FIDELITY-TRACKER.md) | Per-construct status across model/round-trip/edit/render/calc |
 | 29 | [Phase 0 Plan & Scaffold Specs](06-ROADMAP-AND-DELIVERY.md) | Ordered F-### items + ready-to-instantiate build config |
 | 31 | [Phase D Exit Report](06-ROADMAP-AND-DELIVERY.md) | Documentation phase closure |
 
@@ -81,8 +79,6 @@ the other way around. This index is the map.
 
 | # | Title | Purpose |
 | --- | --- | --- |
-| 45 | [Editor Parity Tracker](18-SUPPORT-MATRIX.md) | The browser editor measured against Excel and Sheets |
-| 46 | [Competitive Parity Analysis](46-COMPETITIVE-PARITY-ANALYSIS.md) | Where we stand feature-for-feature, and what that costs |
 | 47 | [UX & Feature Map](47-UX-AND-FEATURE-MAP.md) | Every surface the editor exposes, and where it lives |
 | 48 | [Feature Pipeline](48-FEATURE-PIPELINE.md) | What is queued, in what order, and why |
 | 49 | [Design System](49-DESIGN-SYSTEM.md) | The editor's visual language — tokens, spacing, chrome |
@@ -111,7 +107,6 @@ cannot quietly disagree with what shipped.
 | --- | --- | --- |
 | 50 | [UX Completeness Tracker](73-EXCEL-UX-PARITY-AUDIT.md) | Editor gaps with severity — closed at all 63 rows |
 | 51 | [Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md) | The measured SpreadsheetML construct register |
-| 52 | [Fidelity Tracker](52-FIDELITY-TRACKER.md) | FID-### / FN-### execution against that register |
 | 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach |
 
 ## Status

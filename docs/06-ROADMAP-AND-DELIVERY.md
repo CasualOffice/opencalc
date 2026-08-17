@@ -182,7 +182,7 @@ web migration of the editor.
 
 **Deliver:** stable SDK, published crate line, support guarantees, semver.
 
-**Exit gate:** the support matrix ([18](18-SUPPORT-MATRIX.md)) shows the 1.0
+**Exit gate:** the tracker ([14](14-EXECUTION-TRACKER.md)) shows the 1.0
 feature set as *implemented* with all release-evidence gates green.
 
 ---

@@ -294,6 +294,29 @@ impl SheetProtection {
             .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     }
 
+    /// Whether a protected sheet explicitly permits `action`.
+    ///
+    /// `action` is a `<sheetProtection>` attribute name — `formatColumns`,
+    /// `formatRows`, `insertRows`, and so on. In OOXML these flags mean "this
+    /// action is **protected**", so `formatColumns="0"` is what Excel writes
+    /// when the author ticks "Format columns" in the allow-list, and `"1"` (or
+    /// the attribute being absent, which is the schema's default) means they
+    /// did not.
+    ///
+    /// So an absent flag **refuses**. That is the spec's default and also the
+    /// safer reading: a file that does not say is a file whose author did not
+    /// grant the permission, and refusing tells a user to look where allowing
+    /// silently changes a sheet somebody protected.
+    ///
+    /// Only meaningful when [`is_enabled`](Self::is_enabled) — an unprotected
+    /// sheet permits everything, and callers check that first.
+    #[must_use]
+    pub fn permits(&self, action: &str) -> bool {
+        self.attrs
+            .get(action)
+            .is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+    }
+
     /// Protection with only the master flag set, for a sheet the user protects
     /// here. No password: this cannot invent a hash, and a UI that pretended to
     /// set one would be claiming a security property it has not got.

@@ -798,3 +798,59 @@ mod formula_arena {
         assert_eq!(wb.formula(c), Some(&parse("A2+1").unwrap()));
     }
 }
+
+// --- Sheet-protection permission flags (UX-PROT-01) --------------------------
+
+mod protection_flags {
+    use crate::SheetProtection;
+    use std::collections::BTreeMap;
+
+    fn with(attrs: &[(&str, &str)]) -> SheetProtection {
+        SheetProtection {
+            attrs: attrs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    /// **An absent flag refuses.**
+    ///
+    /// In OOXML these attributes mean "this action is protected", and the
+    /// schema's default is that it is. A file that does not say is a file whose
+    /// author did not grant the permission — and refusing tells a user to look,
+    /// where allowing silently changes a sheet somebody protected.
+    #[test]
+    fn a_silent_file_does_not_grant_the_permission() {
+        let protection = with(&[("sheet", "1")]);
+        assert!(protection.is_enabled());
+        assert!(!protection.permits("formatColumns"));
+        assert!(!protection.permits("formatRows"));
+    }
+
+    /// **`0` is what Excel writes when the author ticked the box.**
+    #[test]
+    fn zero_is_permission_granted() {
+        let protection = with(&[
+            ("sheet", "1"),
+            ("formatColumns", "0"),
+            ("formatRows", "false"),
+        ]);
+        assert!(protection.permits("formatColumns"));
+        assert!(protection.permits("formatRows"));
+        // And one they did not tick stays refused.
+        assert!(!protection.permits("insertRows"));
+    }
+
+    /// **`1` is the flag saying the action is protected.**
+    #[test]
+    fn one_is_permission_withheld() {
+        let protection = with(&[
+            ("sheet", "1"),
+            ("formatColumns", "1"),
+            ("formatRows", "true"),
+        ]);
+        assert!(!protection.permits("formatColumns"));
+        assert!(!protection.permits("formatRows"));
+    }
+}
