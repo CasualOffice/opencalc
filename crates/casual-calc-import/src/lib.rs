@@ -729,6 +729,27 @@ pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
 /// uploads cannot, and had no way to say so — every caller got the same numbers
 /// because they were written into this function.
 pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import, ImportError> {
+    import_package_cancellable(bytes, limits, &casual_calc_model::Never)
+}
+
+/// The same, with a way to stop it.
+///
+/// Admission is the longest thing this crate does and, until `SEC-012`, the
+/// only way out of it was for it to finish. docs/07 and docs/21 both promised
+/// otherwise. `cancel` is asked periodically — see
+/// [`CANCEL_CHECK_INTERVAL`](casual_calc_model::CANCEL_CHECK_INTERVAL) — and a
+/// cancelled import returns [`ImportError::Cancelled`] having built nothing,
+/// which is the same fail-closed rule the limits follow: a half-admitted
+/// workbook is one that gets saved back over the original.
+///
+/// # Errors
+///
+/// As [`import_package_with`], plus [`ImportError::Cancelled`].
+pub fn import_package_cancellable(
+    bytes: Vec<u8>,
+    limits: OoxmlLimits,
+    cancel: &dyn casual_calc_model::Cancel,
+) -> Result<Import, ImportError> {
     let mut package = SpreadsheetPackage::open(bytes, limits)?;
     let mut report = CompatibilityReport::default();
     let mut workbook = Workbook::new(Id::from_parts(WORKBOOK_NAMESPACE, 1));
@@ -978,6 +999,12 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
                 // Across every sheet, not this one: the sum is the thing being
                 // bounded, and it is charged before the cell is stored.
                 budget.cell()?;
+                // The one loop long enough to need stopping. Asking here rather
+                // than per part is the difference between cancelling a workbook
+                // and cancelling a workbook with one enormous sheet in it.
+                if casual_calc_model::should_check(budget.cells) && cancel.cancelled() {
+                    return Err(ImportError::Cancelled);
+                }
                 sheet.cells.set(cell_ref, cell);
             }
         }

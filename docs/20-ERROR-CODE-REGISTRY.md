@@ -47,6 +47,7 @@ with a note. A code is part of the public contract once shipped.
 | `OC-IMP-0004` | Shared-string table over admission limit | limit |
 | `OC-IMP-0005` | Defined-name count over admission limit | limit |
 | `OC-IMP-0006` | Merged-range count over admission limit | limit |
+| `OC-IMP-0007` | Import cancelled by the caller | cancelled |
 | `OC-MDL-0001` | Invariant violation: zero/duplicate ID | invariant |
 | `OC-MDL-0002` | Cell address out of range | invariant |
 | `OC-MDL-0003` | Dangling interned reference | invariant |

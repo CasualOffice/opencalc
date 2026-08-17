@@ -4287,3 +4287,116 @@ fn the_1900_leap_year_bug_is_reproduced_as_excel_has_it() {
         assert_eq!(value_at(&wb, row, 0), CellValue::Number(expect), "{why}");
     }
 }
+
+// --- Cancellation (SEC-012) --------------------------------------------------
+
+mod cancellation {
+    use super::*;
+    use crate::{Recalculated, recalculate_cancellable};
+    use casual_calc_model::{CancelFlag, Never};
+    use std::cell::Cell as StdCell;
+
+    /// Enough formula cells for the periodic check to come round twice — once
+    /// cannot distinguish a check inside the loop from one at the top of it.
+    const FORMULAS: u32 = 9000;
+
+    fn many_formulas() -> Workbook {
+        let mut builder = Builder::new();
+        builder.number((0, 0), 2.0);
+        for r in 1..=FORMULAS {
+            builder.formula((r, 0), "A1*2");
+        }
+        builder.build()
+    }
+
+    fn value_at(wb: &Workbook, row: u32) -> CellValue {
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .map(|c| c.value.clone())
+            .unwrap_or(CellValue::Empty)
+    }
+
+    /// **A full recalculation stops when it is asked to.**
+    #[test]
+    fn a_recalculation_stops_when_asked() {
+        let mut wb = many_formulas();
+        let stop = CancelFlag::new();
+        stop.cancel();
+
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &stop),
+            Recalculated::Cancelled
+        );
+    }
+
+    /// **It stops part-way, not only before it starts.**
+    #[test]
+    fn a_recalculation_stops_after_it_has_begun() {
+        let mut wb = many_formulas();
+        let asks = StdCell::new(0);
+        let stop_on_the_second_ask = || {
+            asks.set(asks.get() + 1);
+            asks.get() >= 2
+        };
+
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &stop_on_the_second_ask),
+            Recalculated::Cancelled
+        );
+        assert!(
+            asks.get() >= 2,
+            "asked {} time(s); a check at the top of the loop cannot stop a running job",
+            asks.get()
+        );
+    }
+
+    /// **The caller is told, rather than handed a half-fresh document as
+    /// though it were finished.**
+    ///
+    /// Unlike an import there is nothing to fail closed about — the workbook is
+    /// the user's own and was already holding stale cached values. Throwing the
+    /// fresh ones away would leave it strictly worse. What must not happen is
+    /// the *caller* believing the result is final, and then saving it.
+    #[test]
+    fn a_cancelled_recalculation_says_so_rather_than_looking_complete() {
+        let mut wb = many_formulas();
+        let stop = CancelFlag::new();
+        stop.cancel();
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &stop),
+            Recalculated::Cancelled,
+            "a cancelled recalc that reported success is one a host would save"
+        );
+
+        // And running it properly afterwards completes the job.
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &Never),
+            Recalculated::Fully
+        );
+        assert_eq!(value_at(&wb, 1), CellValue::Number(4.0));
+        assert_eq!(value_at(&wb, FORMULAS), CellValue::Number(4.0));
+    }
+
+    /// **A token that never fires computes exactly what no token computes.**
+    #[test]
+    fn a_token_that_never_fires_is_invisible() {
+        let mut with_token = many_formulas();
+        let mut without = many_formulas();
+
+        assert_eq!(
+            recalculate_cancellable(&mut with_token, &Never),
+            Recalculated::Fully
+        );
+        recalculate(&mut without);
+
+        for row in [1, FORMULAS / 2, FORMULAS] {
+            assert_eq!(
+                value_at(&with_token, row),
+                value_at(&without, row),
+                "row {row}"
+            );
+        }
+        assert_eq!(value_at(&without, FORMULAS), CellValue::Number(4.0));
+    }
+}
