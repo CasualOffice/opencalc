@@ -16,6 +16,7 @@
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 mod axis;
+pub mod conditional;
 mod display;
 pub mod font_substitution;
 mod geometry;
@@ -203,6 +204,38 @@ fn layout_range(
     // not N) and what is skipped (everything the range covers).
     let merged = visible_merges(sheet, range);
 
+    // Conditional formatting, resolved here so the headless renderer sees what
+    // the canvas does (`RND-05`). Skipped entirely when the sheet has no rules,
+    // which is almost every sheet: `range_stats` scans a rule's whole range,
+    // and paying for that on a sheet with nothing to show would be a cost every
+    // frame for nothing.
+    let (cf_stats, cf_order) = if sheet.conditional_formats.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            sheet
+                .conditional_formats
+                .iter()
+                .map(|cf| conditional::range_stats(workbook, sheet, cf))
+                .collect(),
+            conditional::priority_order(sheet),
+        )
+    };
+    let effect_at = |at: casual_calc_model::CellRef, cell: &Cell| {
+        if cf_order.is_empty() {
+            return conditional::CellEffect::default();
+        }
+        conditional::effect_for(
+            sheet,
+            &cf_stats,
+            &cf_order,
+            at.row,
+            at.col,
+            &cell.value,
+            &display_text(workbook, cell),
+        )
+    };
+
     // The anchors first, in the order `visible_merges` fixed, so the display
     // list stays deterministic. They cannot overlap each other or an unmerged
     // cell, so painting them before the rest costs nothing.
@@ -212,15 +245,28 @@ fn layout_range(
         // The region carries the anchor's fill, so the backend paints ground
         // and outline in one place and cannot order them wrongly. The anchor's
         // text and border follow as their own items, on top.
+        let merged_fill = cell
+            .map(|c| effect_at(merge.start, c))
+            .and_then(|e| e.fill)
+            .or_else(|| {
+                cell.and_then(|c| c.style)
+                    .and_then(|id| workbook.styles.get(id))
+                    .and_then(|s| s.fill_color.clone())
+            });
         list.items.push(PaintItem::MergedRegion {
             rect,
-            fill: cell
-                .and_then(|c| c.style)
-                .and_then(|id| workbook.styles.get(id))
-                .and_then(|s| s.fill_color.clone()),
+            fill: merged_fill,
         });
         if let Some(cell) = cell {
-            push_cell(&mut list, workbook, cell, rect, Background::AlreadyPainted);
+            let effect = effect_at(merge.start, cell);
+            push_cell(
+                &mut list,
+                workbook,
+                cell,
+                rect,
+                Background::AlreadyPainted,
+                &effect,
+            );
         }
     }
 
@@ -241,7 +287,8 @@ fn layout_range(
             w: geometry.columns.size(at.col),
             h: geometry.rows.size(at.row),
         };
-        push_cell(&mut list, workbook, cell, rect, Background::Paint);
+        let effect = effect_at(at, cell);
+        push_cell(&mut list, workbook, cell, rect, Background::Paint, &effect);
     }
     list
 }
@@ -320,12 +367,20 @@ fn push_cell(
     cell: &Cell,
     rect: Rect,
     background: Background,
+    effect: &conditional::CellEffect,
 ) {
     let style = cell.style.and_then(|id| workbook.styles.get(id));
 
     // Painter's order per cell: fill behind, then text, then border on top.
+    //
+    // A matching rule's fill wins over the cell's own — that is what
+    // conditional formatting *is*, and the order matters: taking the style's
+    // first would paint the rule away.
     if background == Background::Paint
-        && let Some(fill) = style.and_then(|s| s.fill_color.clone())
+        && let Some(fill) = effect
+            .fill
+            .clone()
+            .or_else(|| style.and_then(|s| s.fill_color.clone()))
     {
         list.items.push(PaintItem::CellBackground {
             rect,
@@ -347,8 +402,11 @@ fn push_cell(
             rect,
             content,
             align: align_for(&cell.value),
-            color: style.and_then(|s| s.font_color.clone()),
-            bold: style.is_some_and(|s| s.bold),
+            color: effect
+                .font_color
+                .clone()
+                .or_else(|| style.and_then(|s| s.font_color.clone())),
+            bold: effect.bold || style.is_some_and(|s| s.bold),
             italic: style.is_some_and(|s| s.italic),
             font_name,
             font_pt,
