@@ -39,9 +39,16 @@ jobs:
       # compiling without any local gate noticing.
       - name: Audit the workspace
         run: cargo audit --deny warnings
+      # **From the root, pointed at the other lockfile — not `cd fuzz`.**
+      # `cargo-audit` reads its decisions from `.cargo/audit.toml` relative to
+      # the working directory, so running this inside `fuzz/` looked at a file
+      # that does not exist and ignored every advisory this project has already
+      # considered. It failed on `rustls-pemfile` — an entry sitting in the root
+      # config, unread. Copying the config into `fuzz/.cargo/` would fix today
+      # and guarantee the two drift apart, which is the whole shape of this bug;
+      # one file, read from one place, cannot.
       - name: Audit the fuzz workspace
-        working-directory: fuzz
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --file fuzz/Cargo.lock
 
   fuzz-campaign:
     runs-on: ubuntu-latest
