@@ -52,6 +52,7 @@ with a note. A code is part of the public contract once shipped.
 | `OC-MDL-0002` | Cell address out of range | invariant |
 | `OC-MDL-0003` | Dangling interned reference | invariant |
 | `OC-MDL-0004` | Snapshot (de)serialization failed | snapshot |
+| `OC-MDL-0005` | Snapshot over admission limit | limit |
 | `OC-TXN-0001` | Operation target not found | edit |
 | `OC-TXN-0002` | Operation would violate an invariant | edit |
 | `OC-FML-0001` | Formula parse error | parse |

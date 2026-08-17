@@ -4378,6 +4378,135 @@ mod cancellation {
         assert_eq!(value_at(&wb, FORMULAS), CellValue::Number(4.0));
     }
 
+    /// **The iterative phase is cancellable too.**
+    ///
+    /// The iteration count comes from the *workbook* — Excel allows up to
+    /// 32,767 — so a document can ask for tens of thousands of whole-workbook
+    /// passes. A recalculation that could be stopped inside a pass but not
+    /// between them answers a cancel request in its own time, which is not
+    /// cancellable in any sense a user would recognise. It had exactly that
+    /// shape when the cancellation went in.
+    #[test]
+    fn the_iterative_phase_stops_too() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        // Iteration on, and asked for far more passes than anybody waits for.
+        for (k, v) in [
+            ("iterate", "1"),
+            ("iterateCount", "30000"),
+            ("iterateDelta", "0"),
+        ] {
+            wb.settings.calc.insert(k.to_owned(), v.to_owned());
+        }
+        // `A1 = A1 + 1` never converges, so every pass is taken.
+        let handle = wb.store_formula(parse("A1+1").unwrap());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+
+        // One formula cell, so the per-cell check inside a pass never comes
+        // round — only a check *between* passes can stop this.
+        let passes = StdCell::new(0);
+        let stop_after_a_few = || {
+            passes.set(passes.get() + 1);
+            passes.get() > 3
+        };
+
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &stop_after_a_few),
+            Recalculated::Cancelled,
+            "30,000 passes ran to the end despite a cancellation"
+        );
+        assert!(
+            passes.get() <= 10,
+            "it kept going for {} passes after being asked to stop",
+            passes.get()
+        );
+    }
+
+    /// **A recalculation stops itself, without anybody passing a token.**
+    ///
+    /// docs/21 asks for a bound, not merely a way for a caller to impose one:
+    /// an embedder who passes nothing must still be safe from a workbook that
+    /// will not finish. Measured in work rather than seconds — see
+    /// `RecalcLimits` for why a clock would be both unavailable on wasm and a
+    /// determinism regression.
+    #[test]
+    fn a_recalculation_stops_itself_at_its_budget() {
+        use crate::{RecalcLimits, recalculate_within};
+        let mut wb = many_formulas();
+
+        let outcome = recalculate_within(
+            &mut wb,
+            &Never,
+            RecalcLimits {
+                max_cell_evaluations: 100,
+            },
+        );
+        assert_eq!(outcome, Recalculated::OverBudget);
+        // Distinct from a cancellation, because nobody asked: the two want
+        // different responses from a host.
+        assert_ne!(outcome, Recalculated::Cancelled);
+    }
+
+    /// **The budget is the recalculation's, not each pass's.**
+    ///
+    /// The same distinction admission needed: a per-pass counter resets, so a
+    /// workbook asking for many iterative passes multiplies a ceiling nobody
+    /// agreed to. Here the formulas never converge, so passes keep coming.
+    #[test]
+    fn the_budget_spans_every_pass() {
+        use crate::{RecalcLimits, recalculate_within};
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        for (k, v) in [
+            ("iterate", "1"),
+            ("iterateCount", "30000"),
+            ("iterateDelta", "0"),
+        ] {
+            wb.settings.calc.insert(k.to_owned(), v.to_owned());
+        }
+        let handle = wb.store_formula(parse("A1+1").unwrap());
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(handle),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+
+        // One formula, so a per-pass budget of 5 would never be reached and
+        // all 30,000 passes would run. A per-recalculation budget stops it.
+        let outcome = recalculate_within(
+            &mut wb,
+            &Never,
+            RecalcLimits {
+                max_cell_evaluations: 5,
+            },
+        );
+        assert_eq!(
+            outcome,
+            Recalculated::OverBudget,
+            "a per-pass budget lets a workbook ask for as many passes as it likes"
+        );
+    }
+
+    /// **The default budget does not get in the way.**
+    #[test]
+    fn the_default_budget_finishes_an_ordinary_workbook() {
+        let mut wb = many_formulas();
+        assert_eq!(
+            recalculate_cancellable(&mut wb, &Never),
+            Recalculated::Fully
+        );
+    }
+
     /// **A token that never fires computes exactly what no token computes.**
     #[test]
     fn a_token_that_never_fires_is_invisible() {

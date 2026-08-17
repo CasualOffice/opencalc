@@ -311,6 +311,36 @@ pub struct NamedCellStyle {
     pub style: Style,
 }
 
+/// What one snapshot may cost.
+///
+/// The last row of docs/21's scale table. Every other admission path had a
+/// ceiling; this one accepted whatever it was handed, and it is reached from a
+/// resumed collaborative session and from any host calling the model directly.
+/// Over the wire the collaboration server's message cap bounded it in practice,
+/// which is a bound in one deployment rather than a property of the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotLimits {
+    /// The largest snapshot, in bytes, checked before parsing.
+    pub max_bytes: u64,
+    /// Populated cells across every sheet, checked after.
+    pub max_populated_cells: usize,
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        Self {
+            // A snapshot is JSON, so it is several times the size of the model
+            // it carries: this is comfortably more than a workbook at the
+            // supported cell count needs, and far less than a host can be made
+            // to allocate by accident.
+            max_bytes: 512 << 20,
+            // The same ceiling admission uses, so a workbook cannot enter by
+            // one door at a size the other refuses.
+            max_populated_cells: 8_000_000,
+        }
+    }
+}
+
 impl Workbook {
     /// A new, empty workbook at the current schema version.
     pub fn new(workbook_id: Id) -> Self {
@@ -421,9 +451,52 @@ impl Workbook {
         Ok(serde_json::to_vec(self)?)
     }
 
-    /// Parse a snapshot and validate it.
+    /// Parse a snapshot and validate it, under the default limits.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::SnapshotTooLarge`] before anything is parsed, if the bytes
+    /// are over the ceiling; see [`SnapshotLimits`].
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, ModelError> {
+        Self::from_snapshot_with(bytes, SnapshotLimits::default())
+    }
+
+    /// The same, under given limits.
+    ///
+    /// A snapshot is untrusted in exactly the way an uploaded package is — it
+    /// arrives from a host, a resumed session, or a cluster peer — and it was
+    /// the one admission path with no ceiling at all (`SEC-013`). The byte
+    /// check happens **before** `serde_json` sees the input, because a limit
+    /// applied after parsing has already paid for the allocation it exists to
+    /// prevent.
+    ///
+    /// The cell count is checked after, since it cannot be known before; it is
+    /// there so a snapshot and a package cannot admit different amounts of the
+    /// same workbook.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::SnapshotTooLarge`] over either ceiling, [`ModelError::Snapshot`]
+    /// if the bytes are not a snapshot, and whatever [`validate`](Self::validate)
+    /// refuses.
+    pub fn from_snapshot_with(bytes: &[u8], limits: SnapshotLimits) -> Result<Self, ModelError> {
+        let asked = bytes.len() as u64;
+        if asked > limits.max_bytes {
+            return Err(ModelError::SnapshotTooLarge {
+                what: "bytes",
+                limit: limits.max_bytes,
+                asked,
+            });
+        }
         let workbook: Workbook = serde_json::from_slice(bytes)?;
+        let cells: usize = workbook.sheets.iter().map(|s| s.cells.len()).sum();
+        if cells > limits.max_populated_cells {
+            return Err(ModelError::SnapshotTooLarge {
+                what: "populated cells",
+                limit: limits.max_populated_cells as u64,
+                asked: cells as u64,
+            });
+        }
         workbook.validate()?;
         Ok(workbook)
     }

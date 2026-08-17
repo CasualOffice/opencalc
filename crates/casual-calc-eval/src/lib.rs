@@ -42,11 +42,49 @@ use casual_calc_model::{CellFlags, CellRef, CellValue, ErrorValue, Workbook};
 ///
 /// Deterministic: evaluation order does not affect results (memoized recursion
 /// over the reference graph), and identical input yields identical cached values.
+/// What one recalculation may cost when the caller sets no budget of its own.
+///
+/// docs/21 calls this a *time* budget. It is measured in **work**, and that is
+/// a decision rather than an approximation:
+///
+/// - `Instant::now` **panics** on `wasm32-unknown-unknown`, so the engine
+///   cannot read a clock on the target that needs this most.
+/// - A wall-clock bound makes the result depend on how fast the machine is.
+///   The same workbook would recalculate on a laptop and stop half-way on a
+///   loaded CI runner, and determinism ranks *above* security bounds in this
+///   project's order of priorities (AGENTS.md) precisely so that cannot happen.
+///
+/// A caller who genuinely wants wall-clock has one: the cancellation token is
+/// any `Fn() -> bool`, so a host closes over its own clock. What this provides
+/// is the floor for everybody who passes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecalcLimits {
+    /// Formula cells evaluated across every pass of one recalculation.
+    pub max_cell_evaluations: usize,
+}
+
+impl Default for RecalcLimits {
+    fn default() -> Self {
+        Self {
+            // Fifty times the supported cell count, so a legitimate workbook
+            // far larger than the target still finishes, and only one that is
+            // not going to finish at all is stopped.
+            max_cell_evaluations: 50_000_000,
+        }
+    }
+}
+
 /// Whether a recalculation ran to the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recalculated {
     /// Every formula cell holds a fresh value.
     Fully,
+    /// It ran past its own budget and stopped itself.
+    ///
+    /// Distinct from [`Recalculated::Cancelled`] because the caller did not ask
+    /// for it, and the two want different responses: a cancellation is expected
+    /// and a budget overrun means this workbook cannot be recalculated here.
+    OverBudget,
     /// The caller asked it to stop. Cached values are a mixture of fresh and
     /// stale, which is why this is returned rather than swallowed: a host that
     /// cancels must know not to present the result as final, and must not save
@@ -71,17 +109,45 @@ pub fn recalculate_cancellable(
     workbook: &mut Workbook,
     cancel: &dyn casual_calc_model::Cancel,
 ) -> Recalculated {
-    match recalculate_once_cancellable(workbook, cancel) {
-        None => return Recalculated::Cancelled,
-        Some(true) => {
-            if recalculate_once_cancellable(workbook, cancel).is_none() {
-                return Recalculated::Cancelled;
-            }
-        }
-        Some(false) => {}
+    recalculate_within(workbook, cancel, RecalcLimits::default())
+}
+
+/// The same, under a given budget.
+///
+/// The budget counts evaluations across **every pass**, including the iterative
+/// ones — which is where it matters, since the pass count comes from the
+/// workbook and a document may ask for tens of thousands of them.
+pub fn recalculate_within(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+    limits: RecalcLimits,
+) -> Recalculated {
+    let spent = std::cell::Cell::new(0usize);
+    match recalculate_once_within(workbook, cancel, limits, &spent) {
+        Stopped::Cancelled => return Recalculated::Cancelled,
+        Stopped::OverBudget => return Recalculated::OverBudget,
+        Stopped::No(true) => match recalculate_once_within(workbook, cancel, limits, &spent) {
+            Stopped::Cancelled => return Recalculated::Cancelled,
+            Stopped::OverBudget => return Recalculated::OverBudget,
+            Stopped::No(_) => {}
+        },
+        Stopped::No(false) => {}
     }
-    iterate_to_convergence(workbook);
-    Recalculated::Fully
+    match iterate_within(workbook, cancel, limits, &spent) {
+        Stopped::Cancelled => Recalculated::Cancelled,
+        Stopped::OverBudget => Recalculated::OverBudget,
+        Stopped::No(_) => Recalculated::Fully,
+    }
+}
+
+/// Why a pass stopped, or what it found if it did not.
+enum Stopped {
+    /// It finished; the flag is whether anything spilled.
+    No(bool),
+    /// The caller asked.
+    Cancelled,
+    /// It ran past the budget.
+    OverBudget,
 }
 
 pub fn recalculate(workbook: &mut Workbook) {
@@ -119,19 +185,64 @@ pub fn recalculate(workbook: &mut Workbook) {
 /// Costs nothing when iteration is off, which is almost every workbook: one
 /// map lookup, then return.
 fn iterate_to_convergence(workbook: &mut Workbook) {
+    iterate_to_convergence_cancellable(workbook, &casual_calc_model::Never);
+}
+
+/// The iterative phase, stoppable. `false` means the caller asked it to stop.
+///
+/// This needs its own check rather than relying on the one inside a pass. The
+/// iteration count comes from the *workbook* — Excel allows up to 32,767 — so a
+/// document can ask for tens of thousands of passes, and a recalculation that
+/// was cancellable within a pass but not between them is one that answers a
+/// cancel request in its own time. That is the bug this branch had for exactly
+/// one merge.
+fn iterate_to_convergence_cancellable(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+) -> bool {
+    let spent = std::cell::Cell::new(0usize);
+    !matches!(
+        iterate_within(
+            workbook,
+            cancel,
+            RecalcLimits {
+                max_cell_evaluations: usize::MAX,
+            },
+            &spent,
+        ),
+        Stopped::Cancelled | Stopped::OverBudget
+    )
+}
+
+fn iterate_within(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+    limits: RecalcLimits,
+    spent: &std::cell::Cell<usize>,
+) -> Stopped {
     let iteration = workbook.settings.iteration();
     if !iteration.enabled || iteration.max_count == 0 {
-        return;
+        return Stopped::No(false);
     }
     // The first pass already happened, so this budget is for the rest.
     for _ in 1..iteration.max_count {
+        // Asked every pass, not every few thousand: a pass over the whole
+        // workbook is already a large unit of work, so the cheap-check argument
+        // that governs the cell loops does not apply here.
+        if cancel.cancelled() {
+            return Stopped::Cancelled;
+        }
         let before = formula_values(workbook);
-        recalculate_once(workbook);
+        match recalculate_once_within(workbook, cancel, limits, spent) {
+            Stopped::No(_) => {}
+            stopped => return stopped,
+        }
         let after = formula_values(workbook);
         if converged(&before, &after, iteration.max_change) {
-            return;
+            return Stopped::No(false);
         }
     }
+    Stopped::No(false)
 }
 
 /// Every formula cell's value, in a stable order, for comparing two passes.
@@ -180,11 +291,33 @@ fn recalculate_once_cancellable(
     workbook: &mut Workbook,
     cancel: &dyn casual_calc_model::Cancel,
 ) -> Option<bool> {
+    let spent = std::cell::Cell::new(0usize);
+    match recalculate_once_within(
+        workbook,
+        cancel,
+        RecalcLimits {
+            max_cell_evaluations: usize::MAX,
+        },
+        &spent,
+    ) {
+        Stopped::No(spilled) => Some(spilled),
+        _ => None,
+    }
+}
+
+/// One pass, stoppable and budgeted. `spent` is shared across every pass of one
+/// recalculation, which is what makes the budget the *recalculation's* and not
+/// each pass's — the same distinction admission needed (`SEC-002`).
+fn recalculate_once_within(
+    workbook: &mut Workbook,
+    cancel: &dyn casual_calc_model::Cancel,
+    limits: RecalcLimits,
+    spent: &std::cell::Cell<usize>,
+) -> Stopped {
     // Phase 1: compute new values without mutating the workbook.
     let updates = {
         let mut evaluator = Evaluator::new(workbook);
         let mut updates: Vec<(usize, CellRef, Value)> = Vec::new();
-        let mut evaluated = 0usize;
         for (sheet_index, sheet) in workbook.sheets.iter().enumerate() {
             for (at, cell) in sheet.cells.iter() {
                 if cell.formula.is_some() {
@@ -192,9 +325,12 @@ fn recalculate_once_cancellable(
                     // goes: phase two is a write per already-computed value,
                     // and stopping between them would leave the workbook
                     // holding values nothing had written back.
-                    evaluated += 1;
-                    if casual_calc_model::should_check(evaluated) && cancel.cancelled() {
-                        return None;
+                    spent.set(spent.get() + 1);
+                    if spent.get() > limits.max_cell_evaluations {
+                        return Stopped::OverBudget;
+                    }
+                    if casual_calc_model::should_check(spent.get()) && cancel.cancelled() {
+                        return Stopped::Cancelled;
                     }
                     // The array form: only the spilling pass wants the whole
                     // block, and it is the thing about to run.
@@ -213,7 +349,7 @@ fn recalculate_once_cancellable(
     for (sheet_index, at, value) in updates {
         spilled |= write_result(workbook, sheet_index, at, value);
     }
-    Some(spilled)
+    Stopped::No(spilled)
 }
 
 /// Remove every cell that a previous pass filled by spilling.
