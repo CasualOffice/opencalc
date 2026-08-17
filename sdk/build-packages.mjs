@@ -119,7 +119,10 @@ const dist = join(PACKAGES, "sheet", "dist");
 await rm(dist, { recursive: true, force: true });
 await mkdir(join(dist, "pkg"), { recursive: true });
 
-for (const file of ["editor.js", "editor.css", "editor.html"]) {
+// `embed.d.ts` rides along with `embed.js`: the declarations are the package's
+// public contract, and a package that ships one without the other is the state
+// SDK-009 describes.
+for (const file of ["editor.js", "editor.css", "editor.html", "embed.d.ts"]) {
   await cp(join(WEBAPP, file), join(dist, file));
 }
 for (const file of WASM_FILES) {

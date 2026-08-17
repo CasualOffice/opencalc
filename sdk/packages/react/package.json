@@ -2,7 +2,7 @@
   "name": "@opencalc/react",
   "version": "0.0.0",
   "type": "module",
-  "description": "React bindings for @opencalc/sheet — an embeddable spreadsheet that reads and writes real .xlsx, with props for configuration and callbacks for events.",
+  "description": "React bindings for @opencalc/sheet \u2014 an embeddable spreadsheet that reads and writes real .xlsx, with props for configuration and callbacks for events.",
   "keywords": [
     "react",
     "spreadsheet",
@@ -28,12 +28,16 @@
   "license": "Apache-2.0",
   "author": "CasualOffice",
   "exports": {
-    ".": "./index.js"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
   },
   "main": "./index.js",
   "module": "./index.js",
   "files": [
     "index.js",
+    "index.d.ts",
     "README.md"
   ],
   "dependencies": {
@@ -47,5 +51,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "types": "./index.d.ts"
 }

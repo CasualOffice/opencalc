@@ -113,6 +113,31 @@ jobs:
           jq -e '(.scaling | length) >= 1 and all(.scaling[]; .withinBudget)' report.json \
             || { jq '.scaling' report.json; echo "::error::a case grew faster than its budget allows"; exit 1; }
 
+  # The SDK's published surface, compiled the way an integrator compiles it.
+  #
+  # `@opencalc/sheet` and `@opencalc/react` shipped no declarations at all
+  # (SDK-009), so every TypeScript host embedding this got `any` — or, more
+  # often, an error and a decision to use something else. The declarations are
+  # hand-written beside hand-written JavaScript, which means nothing forces them
+  # to describe the code except somebody compiling against them. This job is
+  # that somebody.
+  sdk-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install the type checker
+        working-directory: sdk/types
+        run: npm install --no-audit --no-fund
+      # Two checks, because they answer different questions. `tsc` proves the
+      # surface *composes* under `strict`; it cannot prove the surface is real,
+      # and a `.d.ts` naming a method nobody implemented type-checks perfectly.
+      - name: The published surface type-checks, and exists
+        working-directory: sdk/types
+        run: npm test
+
   repository-policy:
     runs-on: ubuntu-latest
     steps:

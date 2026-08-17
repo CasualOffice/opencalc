@@ -1,0 +1,14 @@
+{
+  "name": "@opencalc/types-check",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Type-checks a consumer against the published surface of @opencalc/sheet and @opencalc/react (SDK-009).",
+  "scripts": {
+    "test": "tsc --noEmit -p tsconfig.json && node declared-methods-exist.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/react": "^18.3.0"
+  }
+}
