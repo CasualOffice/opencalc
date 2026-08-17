@@ -103,3 +103,50 @@ fn the_interned_ids_are_indices_and_cost_what_an_index_costs() {
         size_of::<CellValue>()
     );
 }
+
+/// **A million cells are actually built, not multiplied.**
+///
+/// The test above is arithmetic: `size_of` times a target, which is the right
+/// term for the budget and proves nothing about the structure that holds it. It
+/// would pass unchanged if the store grew a side table per entry, started
+/// boxing values, or could not reach a million at all — none of which changes
+/// `size_of::<Cell>()` by a byte.
+///
+/// So this builds the thing. It is still **payload**, not resident memory:
+/// measuring that needs a counting allocator, which needs `unsafe`, which this
+/// workspace forbids — a rule worth more than the number. The remaining gap is
+/// tracked as `PERF-10` rather than implied away by a test that says "memory".
+#[test]
+fn a_million_cells_can_actually_be_held() {
+    use casual_calc_model::{Id, Sheet, SheetId};
+
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Big");
+    // A square-ish block rather than one column: a million cells down column A
+    // is a shape no real workbook has, and the store's key distribution is part
+    // of what is being exercised.
+    let side = 1_000u32;
+    for row in 0..side {
+        for col in 0..side {
+            sheet.cells.set(
+                CellRef::new(row, col),
+                Cell::value(CellValue::Number(f64::from(row) + f64::from(col))),
+            );
+        }
+    }
+
+    assert_eq!(
+        sheet.cells.len(),
+        TARGET_CELLS,
+        "the store did not hold the target it is budgeted for"
+    );
+
+    // And the payload those entries account for is inside the budget the target
+    // was set against.
+    let payload = (size_of::<CellRef>() + size_of::<Cell>()) * sheet.cells.len();
+    assert!(
+        payload <= BUDGET_BYTES,
+        "a million real cells account for {} MB of payload against {} MB",
+        payload / 1_048_576,
+        BUDGET_BYTES / 1_048_576
+    );
+}
