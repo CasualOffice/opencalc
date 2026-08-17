@@ -36,6 +36,7 @@ fn claims() -> Claims {
             print: true,
             copy: true,
         },
+        owner: false,
         callback: Some(Callback::Url {
             url: "https://host.example/callback".into(),
         }),

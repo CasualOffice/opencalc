@@ -141,6 +141,7 @@ fn claims(name: &str, access: Access) -> Claims {
             print: true,
             copy: true,
         },
+        owner: false,
         callback: None,
     }
 }
@@ -3075,4 +3076,188 @@ async fn connections_waiting_to_authenticate_are_capped() {
                 || matches!(m, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))),
         "over the cap, a connection is closed rather than held"
     );
+}
+
+// --- Session access control (COL-40) and parse refusals (COL-38) -------------
+
+/// Claims for somebody the host has marked an owner.
+fn owner_claims(name: &str, access: Access) -> Claims {
+    Claims {
+        owner: true,
+        ..claims(name, access)
+    }
+}
+
+/// **An owner can take an editor down to a viewer, mid-session.**
+///
+/// And the person is *told*, in words, rather than discovering it when a
+/// keystroke stops working.
+#[tokio::test]
+async fn an_owner_can_reduce_another_participants_access() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &owner_claims("Ada", Access::Edit)).await;
+    let mut grace = connect(addr).await;
+    let Some(ServerMessage::Welcome { revision, .. }) =
+        join(&mut grace, &claims("Grace", Access::Edit)).await
+    else {
+        panic!("Grace did not get in");
+    };
+
+    say(
+        &mut ada,
+        &ClientMessage::SetAccess {
+            client: ClientId(2),
+            access: casual_calc_transaction::protocol::WireAccess::View,
+        },
+    )
+    .await;
+
+    // Told, not left to find out.
+    let told = hear_edit(&mut grace, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            told,
+            Some(ServerMessage::AccessChanged {
+                access: casual_calc_transaction::protocol::WireAccess::View,
+                ..
+            })
+        ),
+        "the demoted participant was not told; got {told:?}"
+    );
+
+    // And the next edit is refused by the same check as everything else.
+    say(
+        &mut grace,
+        &ClientMessage::Submit(Submission {
+            client: ClientId(2),
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(1.0)],
+        }),
+    )
+    .await;
+    let answer = hear_edit(&mut grace, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            answer,
+            Some(ServerMessage::Refused {
+                reason: Refusal::ReadOnlyAccess,
+                ..
+            })
+        ),
+        "a demoted participant still edited; got {answer:?}"
+    );
+}
+
+/// **An override may only reduce. It can never raise.**
+///
+/// The whole safety property. The token stays the ceiling and the server takes
+/// the minimum of the two, so a compromised or buggy client cannot promote
+/// itself — and an owner who genuinely wants to grant more mints a token, which
+/// involves the system of record.
+#[tokio::test]
+async fn an_override_cannot_raise_access_above_the_token() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &owner_claims("Ada", Access::Edit)).await;
+    let mut grace = connect(addr).await;
+    // Grace's *token* says she may only look.
+    let Some(ServerMessage::Welcome { revision, .. }) =
+        join(&mut grace, &claims("Grace", Access::View)).await
+    else {
+        panic!("Grace did not get in");
+    };
+
+    // The owner tries to promote her anyway.
+    say(
+        &mut ada,
+        &ClientMessage::SetAccess {
+            client: ClientId(2),
+            access: casual_calc_transaction::protocol::WireAccess::Edit,
+        },
+    )
+    .await;
+    let _ = hear_edit(&mut grace, std::time::Duration::from_secs(5)).await;
+
+    say(
+        &mut grace,
+        &ClientMessage::Submit(Submission {
+            client: ClientId(2),
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(1.0)],
+        }),
+    )
+    .await;
+    let answer = hear_edit(&mut grace, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            answer,
+            Some(ServerMessage::Refused {
+                reason: Refusal::ReadOnlyAccess,
+                ..
+            })
+        ),
+        "an override promoted a viewer past her own token; got {answer:?}"
+    );
+}
+
+/// **Only an owner is obeyed.**
+///
+/// `owner` is a claim the host makes, not something inferred from being an
+/// editor — every editor being able to lock every other one out is a different
+/// feature and a worse one.
+#[tokio::test]
+async fn an_editor_who_is_not_an_owner_cannot_reduce_anyone() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &claims("Ada", Access::Edit)).await;
+
+    say(
+        &mut ada,
+        &ClientMessage::SetAccess {
+            client: ClientId(1),
+            access: casual_calc_transaction::protocol::WireAccess::View,
+        },
+    )
+    .await;
+
+    let answer = hear_edit(&mut ada, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Refused { .. })),
+        "an ordinary editor changed somebody's access; got {answer:?}"
+    );
+}
+
+/// **A message the server cannot read says so** (`COL-38`).
+///
+/// It used to answer `CannotMerge`, which names the transform — the one part
+/// that was working. The socket was open, the heartbeat answered, the roster
+/// showed the participant present, and every edit went nowhere. A client seeing
+/// `Malformed` knows not to retry: it will not parse the second time either.
+#[tokio::test]
+async fn a_message_that_cannot_be_parsed_is_not_called_a_merge_failure() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &claims("Ada", Access::Edit)).await;
+
+    use futures_util::SinkExt;
+    ada.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"submit":{"seq":"not-a-number"}}"#.into(),
+    ))
+    .await
+    .expect("sent");
+
+    let answer = hear_edit(&mut ada, std::time::Duration::from_secs(10)).await;
+    match answer {
+        Some(ServerMessage::Refused { reason, .. }) => {
+            assert_eq!(
+                reason,
+                Refusal::Malformed,
+                "an unreadable message was blamed on the transform"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }

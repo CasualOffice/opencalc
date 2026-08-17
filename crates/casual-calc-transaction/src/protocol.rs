@@ -43,7 +43,7 @@ use crate::wire::WireOperation;
 /// which matters, because a bump costs every unupgraded tab its session, and
 /// spending that to add a cursor decoration would be the wrong trade. Verified,
 /// both directions, by `a_peer_that_has_never_heard_of_drafts_still_reads_a_message_carrying_one`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// What somebody is typing, before they have decided to keep it.
 ///
@@ -126,6 +126,26 @@ impl Draft {
     }
 }
 
+/// What a participant may do, as it travels on the wire.
+///
+/// Mirrors the server's own `Access`, and the two are kept in step by a `From`
+/// implementation written as an **exhaustive match**: adding a variant to
+/// either without deciding its counterpart will not compile. A duplicated enum
+/// that can silently disagree is a shape this codebase has been bitten by.
+///
+/// Ordered `View < Comment < Edit`, which is what lets "reduce, never raise" be
+/// expressed as a minimum rather than as a table somebody has to keep right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireAccess {
+    /// Read only.
+    View,
+    /// Read, and attach comments.
+    Comment,
+    /// Change it.
+    Edit,
+}
+
 /// Why the server would not do something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "camelCase")]
@@ -163,6 +183,19 @@ pub enum Refusal {
     },
     /// Two edits could not be merged. See `TransformError`.
     CannotMerge,
+    /// The message could not be read at all.
+    ///
+    /// Distinct from [`Self::CannotMerge`], and the distinction cost a live
+    /// debugging session (`COL-38`). A message the server cannot parse was
+    /// answered with `CannotMerge`, which names the **transform** — the one
+    /// part that was working. The socket was open, the heartbeat answered, the
+    /// roster showed the participant present, and every edit they made went
+    /// nowhere.
+    ///
+    /// A client seeing this should not retry the same message: it will not
+    /// parse the second time either. That is the whole reason the two are
+    /// different words.
+    Malformed,
     /// The document could not be read or written.
     Broken,
 }
@@ -171,6 +204,27 @@ pub enum Refusal {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMessage {
+    /// Reduce what another participant may do, for the life of this session.
+    ///
+    /// Only an **owner** — the token's `owner` claim — is obeyed; anyone else
+    /// is refused. And it may only ever *reduce* what that participant's own
+    /// token grants: the server takes the minimum of the two, so a compromised
+    /// or buggy client cannot promote itself and the token stays the ceiling.
+    /// Granting more access means minting a token, which is the existing path
+    /// and involves the system of record (docs/72).
+    ///
+    /// Ephemeral by design. It lives as long as the document is resident; a
+    /// document evicted for idleness comes back with the token's own
+    /// permissions. Durable policy belongs to the host — ADR-012 is explicit
+    /// that the server holds no per-document state — and the alternative is a
+    /// collaboration server that has quietly become a permissions database
+    /// with no backup, no audit and no owner.
+    SetAccess {
+        /// Whose access to reduce.
+        client: ClientId,
+        /// What they may do from now on.
+        access: WireAccess,
+    },
     /// The opening message. Nothing else is accepted before it.
     Join {
         /// The protocol the client speaks.
@@ -272,6 +326,22 @@ pub struct Resume {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMessage {
+    /// This participant's access changed while they were in the document.
+    ///
+    /// Sent to the affected participant, and the roster updates for everybody,
+    /// so the change is visible rather than mysterious.
+    ///
+    /// **Being told is the point.** Somebody demoted mid-edit must learn it in
+    /// words, not by discovering that a keystroke has silently stopped working
+    /// — and their unsent local edits are not quietly dropped, because from the
+    /// user's side that situation is identical to the unresumed reconnect this
+    /// project already built a notice for.
+    AccessChanged {
+        /// What they may do now.
+        access: WireAccess,
+        /// Which participant changed it, so the message can name somebody.
+        by: ClientId,
+    },
     /// Authorised, and the document is being fetched.
     ///
     /// Sent as soon as the token checks out, **before** the document exists on
