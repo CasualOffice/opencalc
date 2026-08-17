@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single cell reference, e.g. `A1`, `$B$7`, `Sheet2!C3`. Coordinates are
 /// zero-based.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CellReference {
     /// The qualifying sheet name, if any.

@@ -226,6 +226,14 @@ pub struct Workbook {
     /// seam). ASTs are parsed at import; the calc engine evaluates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub formulas: Vec<Expr>,
+    /// Fingerprint → candidate indices into [`Self::formulas`], so an identical
+    /// formula is stored once.
+    ///
+    /// Derived state: **not serialised**, and rebuilt on deserialisation. A
+    /// snapshot carries the arena, and carrying the index too would be storing
+    /// the same fact twice — with the usual consequence when the two disagree.
+    #[serde(skip)]
+    formula_index: BTreeMap<u64, Vec<u32>>,
     /// Defined names (workbook- or sheet-scoped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defined_names: Vec<DefinedName>,
@@ -350,6 +358,7 @@ impl Workbook {
             strings: StringTable::new(),
             styles: StyleTable::new(),
             formulas: Vec::new(),
+            formula_index: BTreeMap::new(),
             defined_names: Vec::new(),
             sheets: Vec::new(),
             default_font_name: None,
@@ -402,9 +411,60 @@ impl Workbook {
 
     /// Store a formula AST in the arena, returning a handle to it.
     pub fn store_formula(&mut self, expr: Expr) -> FormulaHandle {
+        // **Interned, not appended** (`PERF-09`). Two things were wrong with
+        // appending, and only the first was written down:
+        //
+        // - N cells carrying the identical expression cost N ASTs, against the
+        //   arena docs/40 describes and the 1M-cell budget.
+        // - Nothing reclaimed. Every edit that replaced a formula appended a
+        //   new AST and orphaned the old one, so a person editing one cell back
+        //   and forth grew the table once per edit for the life of the session.
+        //   A thousand edits between two formulas left a thousand ASTs.
+        //
+        // The index is keyed by fingerprint rather than by the expression, so
+        // the map does not hold a second copy of every AST — which would have
+        // spent on unique formulas exactly what this saves on repeated ones.
+        // A fingerprint is a hint; equality decides, so a collision costs one
+        // comparison and never a wrong handle.
+        let print = expr.fingerprint();
+        if let Some(candidates) = self.formula_index.get(&print) {
+            for &i in candidates {
+                if self.formulas.get(i as usize) == Some(&expr) {
+                    return FormulaHandle(i);
+                }
+            }
+        }
         let index = self.formulas.len() as u32;
         self.formulas.push(expr);
+        self.formula_index.entry(print).or_default().push(index);
         FormulaHandle(index)
+    }
+
+    /// Plant a wrong candidate under `print`, to exercise the collision path.
+    ///
+    /// Two expressions with the same fingerprint cannot be constructed on
+    /// purpose — that is what makes the hash worth having — so the one property
+    /// the design rests on, that **equality decides and the fingerprint only
+    /// narrows**, has no natural test. This makes it reachable.
+    #[cfg(test)]
+    pub(crate) fn plant_collision(&mut self, print: u64, index: u32) {
+        self.formula_index.entry(print).or_default().push(index);
+    }
+
+    /// Rebuild the intern index from the arena.
+    ///
+    /// The index is derived state and is not serialised — a snapshot carries
+    /// the arena, and a workbook deserialised without this would intern nothing
+    /// and start appending again, silently. Called wherever a `Workbook` is
+    /// constructed other than by `new`.
+    fn reindex_formulas(&mut self) {
+        self.formula_index.clear();
+        for (i, expr) in self.formulas.iter().enumerate() {
+            self.formula_index
+                .entry(expr.fingerprint())
+                .or_default()
+                .push(i as u32);
+        }
     }
 
     /// Resolve a formula handle to its AST.
@@ -488,7 +548,11 @@ impl Workbook {
                 asked,
             });
         }
-        let workbook: Workbook = serde_json::from_slice(bytes)?;
+        let mut workbook: Workbook = serde_json::from_slice(bytes)?;
+        // Derived state the snapshot does not carry. Without this the arena is
+        // full and the index empty, so every later formula appends — the exact
+        // behaviour PERF-09 removed, restored by a round trip.
+        workbook.reindex_formulas();
         let cells: usize = workbook.sheets.iter().map(|s| s.cells.len()).sum();
         if cells > limits.max_populated_cells {
             return Err(ModelError::SnapshotTooLarge {
