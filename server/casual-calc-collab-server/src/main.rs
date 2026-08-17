@@ -37,8 +37,20 @@ async fn main() -> std::process::ExitCode {
     // The runtime layer is `debian:bookworm-slim` plus a CA bundle: no curl, no
     // wget, and adding one to answer a question the binary can answer itself is
     // weight in every deployment for the benefit of the orchestrator.
-    if std::env::args().any(|a| a == "--healthcheck") {
-        return match healthy().await {
+    // Two questions, not one. `--healthcheck` asks "is this process serving?"
+    // and a `no` should restart it; `--readycheck` asks "should this node be
+    // given work?" and a `no` should drain it and leave it running. Answering
+    // the second with the first is what let a node that had lost the
+    // coordinator keep receiving edits it could only refuse (DEP-04).
+    let path = if std::env::args().any(|a| a == "--readycheck") {
+        Some("/readyz")
+    } else if std::env::args().any(|a| a == "--healthcheck") {
+        Some("/healthz")
+    } else {
+        None
+    };
+    if let Some(path) = path {
+        return match probe(path).await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(why) => {
                 tracing::error!("{why}");
@@ -63,9 +75,9 @@ async fn main() -> std::process::ExitCode {
 /// Reads the same `OPENCALC_BIND` the server did, so the check cannot drift from
 /// the thing it checks by being told a port twice.
 ///
-/// Fetches `/healthz` over whichever scheme the listener is configured for,
-/// which proves the whole request path works rather than that something is
-/// holding the port.
+/// Fetches `path` over whichever scheme the listener is configured for, which
+/// proves the whole request path works rather than that something is holding
+/// the port.
 ///
 /// **The TLS leg does not verify the certificate, and that is deliberate.** A
 /// certificate is issued for the hostname an operator's clients use; this
@@ -77,7 +89,14 @@ async fn main() -> std::process::ExitCode {
 /// is exactly the state DEP-01 left every deployment in. A liveness probe is not
 /// trying to authenticate the thing it is probing; it is asking whether this
 /// process is serving what it claims to serve.
-async fn healthy() -> Result<(), String> {
+async fn probe(path: &str) -> Result<(), String> {
+    let (target, secure) = probe_target()?;
+    ask(target, secure, path).await
+}
+
+/// Where to probe, and over which scheme, from the same environment the server
+/// read — so the check cannot drift from the thing it checks.
+fn probe_target() -> Result<(SocketAddr, bool), String> {
     let bind = std::env::var("OPENCALC_BIND").unwrap_or_else(|_| "0.0.0.0:8443".to_owned());
     let addr: SocketAddr = bind
         .parse()
@@ -92,7 +111,11 @@ async fn healthy() -> Result<(), String> {
         addr
     };
 
-    let secure = std::env::var("OPENCALC_TLS_CERT").is_ok();
+    Ok((target, std::env::var("OPENCALC_TLS_CERT").is_ok()))
+}
+
+/// Fetch one probe path and turn its status into an exit code's worth of answer.
+async fn ask(target: SocketAddr, secure: bool, path: &str) -> Result<(), String> {
     let scheme = if secure { "https" } else { "http" };
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(secure)
@@ -100,7 +123,7 @@ async fn healthy() -> Result<(), String> {
         .map_err(|e| format!("could not build a client: {e}"))?;
 
     let response = client
-        .get(format!("{scheme}://{target}/healthz"))
+        .get(format!("{scheme}://{target}{path}"))
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
@@ -108,7 +131,7 @@ async fn healthy() -> Result<(), String> {
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("{target} answered {}", response.status()))
+        Err(format!("{target}{path} answered {}", response.status()))
     }
 }
 
@@ -495,5 +518,54 @@ mod secret_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::ask;
+    use std::net::SocketAddr;
+
+    /// A server that answers the two probe paths differently — which is the
+    /// whole point of there being two.
+    async fn two_probes() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "ok\n" }))
+            .route(
+                "/readyz",
+                axum::routing::get(|| async {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready\n")
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// **The two probes are asked separately and can disagree.**
+    ///
+    /// The container check used to fetch `/healthz` whatever it was asked, so
+    /// `--readycheck` would have reported a drained node as fit for traffic —
+    /// the same DEP-04 blindness one layer up, and invisible in any deployment
+    /// where the two answers happen to agree, which is all of them until Redis
+    /// goes away.
+    #[tokio::test]
+    async fn readiness_and_liveness_are_asked_separately() {
+        let addr = two_probes().await;
+
+        assert!(
+            ask(addr, false, "/healthz").await.is_ok(),
+            "the process is serving"
+        );
+
+        let ready = ask(addr, false, "/readyz").await;
+        let why = ready.expect_err("a draining node is not ready");
+        assert!(
+            why.contains("/readyz") && why.contains("503"),
+            "the failure says which probe and what it answered: {why}"
+        );
     }
 }

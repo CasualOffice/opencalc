@@ -2254,6 +2254,149 @@ fn counter(body: &str, name: &str) -> u64 {
         .unwrap_or_else(|| panic!("{name} is not in:\n{body}"))
 }
 
+/// Standalone has no coordinator to be cut off from, so it is ready as soon as
+/// it is listening.
+///
+/// What this pins is that readiness exists at all, and that a node with no
+/// cluster is not reported unready for merely lacking one. The case that
+/// actually moves the probe — a coordinator that goes away — is
+/// `a_node_cut_off_from_the_coordinator_reports_itself_unready`, below.
+#[tokio::test]
+async fn a_standalone_node_is_ready_as_soon_as_it_listens() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let response = reqwest::get(format!("http://{addr}/readyz"))
+        .await
+        .expect("readyz answered");
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    assert!(body.contains("standalone"), "{body}");
+
+    // And liveness stays separate: `/healthz` is deliberately unconditional, so
+    // a probe failure means "do not send traffic" rather than "restart this".
+    let health = reqwest::get(format!("http://{addr}/healthz"))
+        .await
+        .expect("healthz answered");
+    assert!(health.status().is_success());
+}
+
+/// **A clustered node that has lost the coordinator reports itself unready,
+/// while staying alive.**
+///
+/// This is the distinction the two probes exist for, and the standalone test
+/// above cannot show it. A node that cannot reach the coordinator cannot order
+/// an edit, so every submission it accepts is one it will refuse — it should be
+/// taken out of the load balancer. It should *not* be restarted: the fault is
+/// not in this process, and cycling it loses every session it is holding for no
+/// gain. So `/readyz` must move and `/healthz` must not.
+///
+/// The coordinator is taken away by connecting this node through a proxy the
+/// test can cut, rather than by stopping the Redis every other test shares.
+#[tokio::test]
+async fn a_node_cut_off_from_the_coordinator_reports_itself_unready() {
+    let Ok(url) = std::env::var("OPENCALC_TEST_REDIS") else {
+        return;
+    };
+    let (through, cut) = proxy_to(&url).await;
+    let space = namespace("cut-off");
+    let Some(addr) = start_clustered_with(
+        &through,
+        "node-one",
+        &space,
+        SavePolicy::default(),
+        Collected::default(),
+    )
+    .await
+    else {
+        return;
+    };
+
+    let before = reqwest::get(format!("http://{addr}/readyz"))
+        .await
+        .expect("readyz answered");
+    assert!(
+        before.status().is_success(),
+        "a connected node is ready: {}",
+        before.status()
+    );
+
+    // Cut every forwarded socket. redis-rs's multiplexed connection does not
+    // reconnect on its own, which is exactly the production shape: the node
+    // stays up, holding sessions, quietly unable to order anything.
+    drop(cut);
+
+    let after = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let r = reqwest::get(format!("http://{addr}/readyz"))
+                .await
+                .expect("readyz answered");
+            if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return r;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the node noticed the coordinator had gone");
+
+    let body = after.text().await.unwrap();
+    assert!(
+        body.contains("coordinator"),
+        "the probe says why, so an operator is not left guessing: {body}"
+    );
+
+    // Liveness is unchanged: this node must not be restarted for it.
+    let health = reqwest::get(format!("http://{addr}/healthz"))
+        .await
+        .expect("healthz answered");
+    assert!(
+        health.status().is_success(),
+        "a cut-off node is unready, not unhealthy: {}",
+        health.status()
+    );
+}
+
+/// Forward a fresh local port to `url`, until the returned handle is dropped.
+///
+/// Dropping it closes the forwarded sockets, which is how a test takes the
+/// coordinator away from one node without taking it away from the rest of the
+/// suite running against the same server.
+async fn proxy_to(url: &str) -> (String, tokio::sync::broadcast::Sender<()>) {
+    let target = url
+        .trim_start_matches("redis://")
+        .trim_end_matches('/')
+        .to_owned();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let (cut, rx) = tokio::sync::broadcast::channel::<()>(1);
+    // Receivers, never a `Sender` clone: the signal *is* the last sender being
+    // dropped, so a clone held in here would keep the channel open forever and
+    // the cut would never arrive.
+    tokio::spawn(async move {
+        let mut stop = rx;
+        loop {
+            let accepted = tokio::select! {
+                a = listener.accept() => a,
+                _ = stop.recv() => return,
+            };
+            let Ok((mut client, _)) = accepted else {
+                return;
+            };
+            let target = target.clone();
+            let mut stop = stop.resubscribe();
+            tokio::spawn(async move {
+                let Ok(mut server) = tokio::net::TcpStream::connect(&target).await else {
+                    return;
+                };
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                    _ = stop.recv() => {}
+                }
+            });
+        }
+    });
+    (format!("redis://{at}"), cut)
+}
+
 async fn scrape(addr: SocketAddr) -> String {
     reqwest::get(format!("http://{addr}/metrics"))
         .await
@@ -2287,18 +2430,19 @@ async fn start_clustered_watching(
     save: SavePolicy,
 ) -> Option<(SocketAddr, Collected)> {
     let delivered = Collected::default();
-    let addr = start_clustered_with(node, namespace, save, delivered.clone()).await?;
+    let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
+    let addr = start_clustered_with(&url, node, namespace, save, delivered.clone()).await?;
     Some((addr, delivered))
 }
 
 async fn start_clustered_with(
+    url: &str,
     node: &str,
     namespace: &str,
     save: SavePolicy,
     delivered: Collected,
 ) -> Option<SocketAddr> {
-    let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
-    let store = crate::cluster::redis::Redis::connect_within(&url, namespace)
+    let store = crate::cluster::redis::Redis::connect_within(url, namespace)
         .await
         .ok()?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2370,6 +2514,110 @@ async fn hear_edit(socket: &mut Socket, within: std::time::Duration) -> Option<S
             Ok(other) => return Some(other),
         }
     }
+}
+
+/// DEP-04. A refused append is told to the person whose edit it was.
+///
+/// `order` commits locally *before* appending, so when the log refuses it the
+/// node holds an edit the cluster does not have. Returning in silence — which
+/// is what it did — left the author watching their change sit on screen,
+/// un-acknowledged, resent forever against a node that believed it had landed.
+/// The work is at risk, and `NotSaving` is exactly that statement.
+///
+/// Fenced deliberately rather than by unplugging Redis: a stolen lease is the
+/// reachable, deterministic way to make an append fail, and it is the same
+/// refusal path a genuine outage takes.
+#[tokio::test]
+async fn a_refused_append_is_reported_to_the_client_rather_than_swallowed() {
+    let space = namespace("refused-append");
+    let Some(addr) = start_clustered("node-one", &space).await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mut socket = connect_to(addr).await;
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join(&mut socket, &claims("Ada", Access::Edit)).await
+    else {
+        panic!("joined")
+    };
+
+    // **Leadership is taken on the first edit, not on the join** — `order`
+    // claims when it has something to order, deliberately, to save a round trip
+    // on documents nobody edits. So the first submission is what makes this node
+    // the leader; waiting for the lease before submitting waits for something
+    // that only the renewal loop might do, which is why an earlier version of
+    // this test passed alone and failed in a full run.
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(1.0)],
+        }),
+    )
+    .await;
+    let first = hear_edit(&mut socket, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(first, Some(ServerMessage::Ack { through: 1, .. })),
+        "the node leads and the first edit landed; got {first:?}"
+    );
+
+    let store = crate::cluster::redis::Redis::connect_within(
+        &std::env::var("OPENCALC_TEST_REDIS").unwrap(),
+        &space,
+    )
+    .await
+    .expect("a store");
+    assert_eq!(
+        store.holder_of(DOC).await.as_deref(),
+        Some("node-one"),
+        "the first edit made this node the leader"
+    );
+
+    // Now take the lease away. Claiming far in the future expires what it holds
+    // and bumps the epoch, which is what fences its next append — the same
+    // refusal path a genuine Redis outage takes, reached deterministically.
+    let stolen = store
+        .claim(
+            DOC.to_owned(),
+            "an-intruder".to_owned(),
+            60_000,
+            now_ms() + 600_000,
+        )
+        .await
+        .expect("stole the lease");
+    assert!(
+        stolen.epoch >= 2,
+        "the epoch moved past this node's: {stolen:?}"
+    );
+
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 2,
+            base: Base::Revision(revision + 1),
+            ops: vec![cell_edit(64.0)],
+        }),
+    )
+    .await;
+
+    // The claim: something comes back, and it says the work is not being saved.
+    // Silence is the defect, so a timeout here is the failure this test exists
+    // to catch.
+    let answer = hear_edit(&mut socket, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            answer,
+            Some(ServerMessage::Refused {
+                reason: Refusal::NotSaving,
+                ..
+            })
+        ),
+        "the author was told their edit did not land; got {answer:?}"
+    );
 }
 
 #[tokio::test]

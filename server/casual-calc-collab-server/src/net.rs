@@ -1117,6 +1117,14 @@ fn router(state: Arc<Service>) -> Router {
         // alert needs. `/stats` answers "is it working now" for a person;
         // this answers "has it been working" for a machine.
         .route("/metrics", get(metrics))
+        // **Readiness, which is not liveness.** `/healthz` deliberately answers
+        // `ok` whatever the coordinator is doing, because a node that cannot
+        // reach Redis is a cluster problem rather than a reason to restart this
+        // process. But a load balancer needs the other question — *should
+        // traffic come here* — and without it a node whose appends are all
+        // failing went on being handed new participants while telling nobody
+        // (DEP-04).
+        .route("/readyz", get(readyz))
         .with_state(state)
 }
 
@@ -1253,6 +1261,31 @@ async fn stats(State(state): State<Arc<Service>>) -> axum::Json<Stats> {
         documents: live.len(),
         participants: live.iter().map(|l| lock(&l.roster).len()).sum(),
     })
+}
+
+/// Whether this node should be sent traffic.
+///
+/// Standalone is ready as soon as it is listening: there is no coordinator to
+/// be cut off from, and one process leads every document by definition.
+///
+/// In a cluster it asks the coordinator something real — the peer list, which
+/// is one round trip and touches the same connection an append would. A node
+/// that cannot reach Redis can still *serve* what it holds, which is why this
+/// is separate from `/healthz` and why it says so in the body: an operator
+/// reading a failing probe should learn which half is wrong.
+async fn readyz(State(state): State<Arc<Service>>) -> impl axum::response::IntoResponse {
+    let Some(membership) = state.config.membership.as_ref() else {
+        return (axum::http::StatusCode::OK, "ready: standalone\n");
+    };
+    match membership.store.peers(now_ms()).await {
+        Ok(_) => (axum::http::StatusCode::OK, "ready\n"),
+        Err(_) => (
+            // 503 rather than 500: this is a node asking not to be given work,
+            // not a node reporting a fault in the request.
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "not ready: the coordinator is unreachable, so ordering will fail\n",
+        ),
+    }
 }
 
 async fn metrics(State(state): State<Arc<Service>>) -> impl axum::response::IntoResponse {
@@ -2473,6 +2506,20 @@ async fn order(
                 .appends_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::error!(document = %key, ?why, "the log refused this leader's append");
+            // **And the client is told.** The commit above already applied this
+            // submission locally, so returning in silence left the person who
+            // made the edit watching it sit on their screen, un-acknowledged,
+            // resending it forever against a node that believes it landed. The
+            // work is at risk and `NotSaving` is precisely that statement —
+            // where saying nothing is the same statement with nobody to hear it
+            // (DEP-04).
+            let _ = live.fan_out.send((
+                Audience::Only(submission.client),
+                ServerMessage::Refused {
+                    seq: Some(submission.seq),
+                    reason: Refusal::NotSaving,
+                },
+            ));
             return;
         }
     }
