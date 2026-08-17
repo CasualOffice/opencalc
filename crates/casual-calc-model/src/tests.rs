@@ -608,3 +608,65 @@ fn an_address_past_the_grid_is_not_in_it() {
         "one corner outside is a rectangle outside"
     );
 }
+
+// --- Snapshot admission (SEC-013, docs/21) -----------------------------------
+
+mod snapshot_limits {
+    use crate::{Id, ModelError, Sheet, SheetId, SnapshotLimits, Workbook};
+
+    fn a_workbook() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1"));
+        wb
+    }
+
+    /// **A snapshot larger than the ceiling is refused before it is parsed.**
+    ///
+    /// Before the bytes reach `serde_json`, because a limit applied after
+    /// parsing has already paid for the allocation it exists to prevent — the
+    /// whole point is not to build the thing.
+    #[test]
+    fn an_oversized_snapshot_is_refused_before_parsing() {
+        let bytes = a_workbook().to_snapshot().expect("serialises");
+        let tight = SnapshotLimits {
+            max_bytes: (bytes.len() - 1) as u64,
+            ..SnapshotLimits::default()
+        };
+
+        match Workbook::from_snapshot_with(&bytes, tight) {
+            Err(ModelError::SnapshotTooLarge { what, limit, asked }) => {
+                assert_eq!(what, "bytes");
+                assert_eq!(limit, (bytes.len() - 1) as u64);
+                assert_eq!(asked, bytes.len() as u64);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // **Not merely malformed.** A well-formed snapshot that is too big must
+        // not be reported as corruption, or an operator goes looking for a bad
+        // file instead of a limit.
+        let refused = Workbook::from_snapshot_with(&bytes, tight).unwrap_err();
+        assert_eq!(refused.code(), "OC-MDL-0005");
+        assert_ne!(refused.code(), "OC-MDL-0004");
+    }
+
+    /// **A snapshot inside the ceiling still loads.**
+    #[test]
+    fn an_ordinary_snapshot_is_unaffected() {
+        let bytes = a_workbook().to_snapshot().expect("serialises");
+        let loaded = Workbook::from_snapshot(&bytes).expect("a small snapshot loads");
+        assert_eq!(loaded.sheets.len(), 1);
+    }
+
+    /// **The shipped ceilings are finite, and above what the engine supports.**
+    #[test]
+    fn the_defaults_are_bounded_and_usable() {
+        let d = SnapshotLimits::default();
+        assert!(d.max_bytes > 0 && d.max_bytes < u64::MAX / 2);
+        assert!(d.max_populated_cells >= 1_000_000, "below the T1 target");
+        // The same ceiling admission uses, so a workbook cannot enter by one
+        // door at a size the other refuses.
+        assert_eq!(d.max_populated_cells, 8_000_000);
+    }
+}

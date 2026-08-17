@@ -55,7 +55,7 @@ larger than the document-oriented caps, but still bounded:
 | Iterative-calc iteration cap | Bound intentional cycles |
 | Iterative-calc convergence threshold | Stop when stable |
 | Max spill region size | Bound dynamic-array expansion |
-| Recalc time budget (cancellable) | Keep hostile workbooks from wedging the host |
+| Recalc work budget (cancellable) | Keep hostile workbooks from wedging the host. **Work, not wall-clock** — see below |
 
 ## Policy
 
@@ -63,6 +63,18 @@ larger than the document-oriented caps, but still bounded:
 - **No automatic external fetch** — links, external references, remote images are
   never resolved automatically.
 - **Cancellable jobs** — admission and full recalc are bounded *and* cancellable.
+  Cancellation is **cooperative**: the engine runs on one thread in a browser,
+  where nothing can interrupt it, so the long loops ask periodically rather than
+  being stopped from outside.
+- **The recalc budget is measured in work, not seconds.** Two reasons, and the
+  second is the stronger one: `Instant::now` panics on
+  `wasm32-unknown-unknown`, so the engine cannot read a clock on its primary
+  target; and a wall-clock bound would make the same workbook finish on one
+  machine and stop half-way on a slower one, which contradicts the determinism
+  this project ranks *above* security bounds. A caller who wants wall-clock has
+  it — the cancellation token is any `Fn() -> bool`, so a host closes over its
+  own clock — and the work budget is the floor for everybody who passes
+  nothing.
 - **Fail closed** — on any limit breach, reject with a code; do not partially
   admit into an inconsistent state.
 

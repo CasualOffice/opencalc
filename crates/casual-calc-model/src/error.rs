@@ -10,6 +10,19 @@ pub enum ModelError {
     Invariant(&'static str),
     /// A snapshot could not be (de)serialized.
     Snapshot(serde_json::Error),
+    /// A snapshot asked for more than one snapshot may have.
+    ///
+    /// Distinct from [`ModelError::Snapshot`] because it is not a malformed
+    /// document: the bytes may be perfectly well formed and simply too many.
+    /// An operator seeing this needs to know it is a limit, not corruption.
+    SnapshotTooLarge {
+        /// What ran out: `"bytes"` or `"populated cells"`.
+        what: &'static str,
+        /// The ceiling it passed.
+        limit: u64,
+        /// What was actually asked for.
+        asked: u64,
+    },
 }
 
 impl ModelError {
@@ -18,6 +31,7 @@ impl ModelError {
         match self {
             ModelError::Invariant(_) => "OC-MDL-0001",
             ModelError::Snapshot(_) => "OC-MDL-0004",
+            ModelError::SnapshotTooLarge { .. } => "OC-MDL-0005",
         }
     }
 }
@@ -28,6 +42,10 @@ impl fmt::Display for ModelError {
         match self {
             ModelError::Invariant(msg) => write!(f, "model invariant violated: {msg}"),
             ModelError::Snapshot(err) => write!(f, "snapshot (de)serialization failed: {err}"),
+            ModelError::SnapshotTooLarge { what, limit, asked } => write!(
+                f,
+                "this snapshot has {asked} {what}, over the {limit} one snapshot may have"
+            ),
         }
     }
 }
@@ -36,7 +54,7 @@ impl std::error::Error for ModelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ModelError::Snapshot(err) => Some(err),
-            ModelError::Invariant(_) => None,
+            ModelError::Invariant(_) | ModelError::SnapshotTooLarge { .. } => None,
         }
     }
 }
