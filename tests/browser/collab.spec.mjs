@@ -1162,6 +1162,63 @@ test.describe("undo between participants", () => {
       .toBe("");
   });
 
+  /// **Undoing an insert somebody has filled is refused, and says why.**
+  ///
+  /// The tracker's gate for `COL-28`, in the shape docs/69 specifies. Ada
+  /// inserts a row, Grace types into it, Ada presses Ctrl+Z. The stored inverse
+  /// deletes that row — and Grace's data with it. Her own history holds "typed
+  /// into row 10", not "here is row 10's content", so no undo anywhere brings
+  /// it back.
+  ///
+  /// Two things are asserted, and the second is the one that is easy to skip:
+  /// the data survives on **both** browsers, and Ada is **told**. A refusal
+  /// nobody sees is a button that appears to do nothing, which is the failure
+  /// this policy explicitly chose against — and the editor swallowed every undo
+  /// error in a bare `catch {}` until this test existed.
+  test("undoing an insert a peer has filled is refused, and says so", async ({ browser }) => {
+    const key = freshDocument();
+    const author = await browser.newPage();
+    await boot(author);
+    await join(author, { document: key, user: { id: "u-a", name: "Ada" } });
+
+    const peer = await browser.newPage();
+    await boot(peer);
+    await join(peer, { document: key, user: { id: "u-g", name: "Grace" } });
+
+    // A marker below the band, so the test can *observe* the insert reaching
+    // Grace rather than assuming it. Without this she types before she has
+    // applied it, her cell lands at the pre-insert address, and the two
+    // documents disagree for a reason that has nothing to do with undo.
+    await setCellIn(author, 20, 0, "sentinel");
+    await expect.poll(() => cellIn(peer, 20, 0)).toBe("sentinel");
+
+    // Ada inserts row 10 (index 9); the marker shifts to 21 everywhere.
+    await author.evaluate(() => window.__editor.wasmApi().session_insert_rows(0, 9, 1));
+    await expect
+      .poll(() => cellIn(peer, 21, 0), { message: "the peer never applied the insert" })
+      .toBe("sentinel");
+
+    // Only now does Grace type into the row Ada just made.
+    await setCellIn(peer, 9, 0, "grace was here");
+    await expect
+      .poll(() => cellIn(author, 9, 0), { message: "the author never saw the peer's edit" })
+      .toBe("grace was here");
+
+    await author.locator("#grid").focus();
+    await author.keyboard.press("ControlOrMeta+z");
+
+    // Refused, and said out loud.
+    await expect(author.locator("#tb-status .err")).toContainText(/undo would remove/i);
+
+    // And nothing moved, on either side.
+    await expect
+      .poll(() => cellIn(author, 9, 0), { message: "the undo ran anyway" })
+      .toBe("grace was here");
+    await expect
+      .poll(() => cellIn(peer, 9, 0), { message: "the peer lost the row" })
+      .toBe("grace was here");
+  });
+
   /// And redo, which is a fresh intention rather than the cancellation of one.
   test("a redo in one browser reaches the other", async ({ browser }) => {
     const key = freshDocument();

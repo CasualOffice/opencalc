@@ -13,7 +13,9 @@ use casual_calc_import::{CompatibilityReport, ImportError, import_package_with};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
 use casual_calc_render::{PanePaint, RenderError, render_panes_png};
-use casual_calc_transaction::{History, Operation, SheetFields, TxnError, apply};
+use casual_calc_transaction::{
+    Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, undo_would_discard,
+};
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
 pub use casual_calc_layout::Viewport as GridViewport;
@@ -171,6 +173,10 @@ pub enum SdkError {
     Edit(TxnError),
     /// The session is read-only and refused an edit.
     ReadOnly,
+    /// Undo would have deleted a band somebody else has since filled (docs/69,
+    /// `COL-28`). Refused, and refused loudly: the alternative is a structural
+    /// undo that destroys work no undo stack anywhere can bring back.
+    UndoWouldDiscard(WouldDiscard),
 }
 
 impl core::fmt::Display for SdkError {
@@ -181,6 +187,23 @@ impl core::fmt::Display for SdkError {
             SdkError::Render(e) => write!(f, "{e}"),
             SdkError::Edit(e) => write!(f, "{e}"),
             SdkError::ReadOnly => f.write_str("this workbook is open for reading only"),
+            SdkError::UndoWouldDiscard(what) => {
+                let (line, kind) = match what.axis {
+                    Axis::Row => (what.at + 1, if what.count == 1 { "row" } else { "rows" }),
+                    Axis::Col => (
+                        what.at + 1,
+                        if what.count == 1 { "column" } else { "columns" },
+                    ),
+                };
+                write!(
+                    f,
+                    "undo would remove {} {kind} starting at {line}, and somebody has since \
+                     put data there ({} cell{}). Undo it from their end, or clear the {kind} first.",
+                    what.count,
+                    what.cells,
+                    if what.cells == 1 { "" } else { "s" },
+                )
+            }
         }
     }
 }
@@ -487,6 +510,17 @@ impl WorkbookSession {
     /// committed since the sender's revision, which is exactly the treatment an
     /// inverse needs and already exists.
     pub fn undo(&mut self) -> Result<(), SdkError> {
+        // Before anything is applied, because the state this would destroy is
+        // the evidence that it must not be (docs/69). Cell edits are allowed to
+        // clobber — that is last-writer-wins, and the value is one cell somebody
+        // else's stack still holds. A structural undo is different in kind: it
+        // takes work that was never in the band when the undo was recorded, and
+        // no undo stack anywhere contains it.
+        if let Some(next) = self.history.peek_undo()
+            && let Some(blocked) = undo_would_discard(&self.workbook, next)
+        {
+            return Err(SdkError::UndoWouldDiscard(blocked));
+        }
         let applied = self.history.undo(&mut self.workbook)?;
         self.record_for_peers(applied);
         self.source = None;

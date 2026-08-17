@@ -41,8 +41,11 @@ use casual_calc_model::{
 use crate::{Operation, TxnError};
 
 /// Which axis a structural operation runs along.
+///
+/// Public because [`WouldDiscard`](crate::WouldDiscard) names one, and a caller
+/// refusing an undo has to say whether it was rows or columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Axis {
+pub enum Axis {
     /// Rows — the vertical axis; coordinate is `CellRef::row` / `CellReference::row`.
     Row,
     /// Columns — the horizontal axis; coordinate is `CellRef::col` / `CellReference::col`.

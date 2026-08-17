@@ -1193,3 +1193,205 @@ fn applying_a_filter_reaches_the_other_participant() {
     assert_eq!(total(&peer), total(&author));
     assert_eq!(total(&peer), Some(CellValue::Number(4.0)));
 }
+
+// --- Collaborative undo (COL-28, docs/69) ------------------------------------
+//
+// The policy: cell edits clobber, structural edits refuse. These cover the
+// structural half — the one where the loss is unbounded and no undo stack
+// anywhere can bring it back.
+
+mod collaborative_undo {
+    use super::*;
+    use crate::SdkError;
+
+    /// A session with one sheet and nothing in it.
+    fn blank_sheet() -> WorkbookSession {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        session
+    }
+
+    /// Write to the workbook **without** touching this session's history —
+    /// which is what an operation arriving from a peer does.
+    fn a_peer_writes(session: &mut WorkbookSession, at: CellRef, mark: f64) {
+        session.workbook_mut().sheets[0]
+            .cells
+            .set(at, casual_calc_model::Cell::value(CellValue::Number(mark)));
+    }
+
+    fn number_at(session: &WorkbookSession, at: CellRef) -> Option<f64> {
+        match session.workbook().sheets[0].cells.get(at).map(|c| &c.value) {
+            Some(CellValue::Number(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// **Undoing an insert somebody has filled is refused, and says why.**
+    ///
+    /// Ada inserts row 10; Grace types in it; Ada presses undo. The stored
+    /// inverse deletes row 10 and Grace's data goes with it — work that was
+    /// never in that row when the undo was recorded, and which Grace's own
+    /// history cannot restore, because it holds "typed into row 10" and not
+    /// "here is row 10's content".
+    #[test]
+    fn undoing_an_insert_a_peer_has_filled_is_refused() {
+        let mut session = blank_sheet();
+        session
+            .edit(EditOperation::InsertRows {
+                sheet: 0,
+                at: 9,
+                count: 1,
+            })
+            .expect("inserted");
+
+        a_peer_writes(&mut session, CellRef::new(9, 1), 250.0);
+
+        let refused = session.undo().expect_err("undo must not run");
+        let SdkError::UndoWouldDiscard(what) = &refused else {
+            panic!("expected a refusal naming the band, got {refused:?}");
+        };
+        assert_eq!(what.at, 9);
+        assert_eq!(what.count, 1);
+        assert_eq!(what.cells, 1);
+        assert_eq!(what.occupied, CellRef::new(9, 1));
+
+        // Refused *loudly*: the message names the line and what is in it, so the
+        // user can act. A button that appears to do nothing is the failure this
+        // policy exists to avoid.
+        let said = refused.to_string();
+        assert!(said.contains("row"), "{said}");
+        assert!(
+            said.contains("10"),
+            "the message does not name the line: {said}"
+        );
+
+        // And nothing moved.
+        assert_eq!(
+            number_at(&session, CellRef::new(9, 1)),
+            Some(250.0),
+            "the refusal did not leave the document alone"
+        );
+    }
+
+    /// **An insert nobody has touched still undoes.**
+    ///
+    /// The conservative check must not cost the ordinary case: this is the same
+    /// gesture with no peer involved, and it has to work.
+    #[test]
+    fn undoing_an_untouched_insert_still_works() {
+        let mut session = blank_sheet();
+        a_peer_writes(&mut session, CellRef::new(20, 0), 7.0);
+        session
+            .edit(EditOperation::InsertRows {
+                sheet: 0,
+                at: 9,
+                count: 1,
+            })
+            .expect("inserted");
+
+        session.undo().expect("an empty band undoes");
+        // The row below shifted down on insert and back up on undo.
+        assert_eq!(number_at(&session, CellRef::new(20, 0)), Some(7.0));
+    }
+
+    /// **This session's own writes do not block its undo.**
+    ///
+    /// The stack is last-in-first-out, which is the whole reason this needs no
+    /// per-cell authorship: by the time the insert is the operation being
+    /// undone, everything Ada did after it has already been undone, so the band
+    /// is empty again. If that stopped being true the check would refuse Ada's
+    /// own work and undo would appear broken.
+    #[test]
+    fn a_sessions_own_writes_do_not_block_its_undo() {
+        let mut session = blank_sheet();
+        session
+            .edit(EditOperation::InsertRows {
+                sheet: 0,
+                at: 9,
+                count: 1,
+            })
+            .expect("inserted");
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(9, 0),
+                value: CellValue::Number(1.0),
+            })
+            .expect("typed");
+
+        session
+            .undo()
+            .expect("her own typing comes back off the stack first");
+        session
+            .undo()
+            .expect("and then the insert, against an empty band");
+    }
+
+    /// **Undoing a delete is never refused.**
+    ///
+    /// It re-inserts a band, which is additive: it destroys nothing, and a
+    /// peer's concurrent edit simply keeps its shifted address. Refusing here
+    /// would be a policy that costs the user a working undo for no gain.
+    #[test]
+    fn undoing_a_delete_is_not_refused() {
+        let mut session = blank_sheet();
+        a_peer_writes(&mut session, CellRef::new(9, 0), 42.0);
+        session
+            .edit(EditOperation::DeleteRows {
+                sheet: 0,
+                at: 9,
+                count: 1,
+            })
+            .expect("deleted");
+
+        // **Into the band the undo will re-insert at.** Writing somewhere else
+        // would leave that band empty, and the test would pass whether or not
+        // the policy distinguishes a delete's inverse from an insert's — which
+        // is exactly what it is here to check.
+        a_peer_writes(&mut session, CellRef::new(9, 0), 99.0);
+
+        session
+            .undo()
+            .expect("undoing a delete restores, it does not destroy");
+        assert_eq!(
+            number_at(&session, CellRef::new(9, 0)),
+            Some(42.0),
+            "the deleted row did not come back"
+        );
+        assert_eq!(
+            number_at(&session, CellRef::new(10, 0)),
+            Some(99.0),
+            "the peer's edit was not carried down by the re-inserted row"
+        );
+    }
+
+    /// **A cell edit still clobbers.**
+    ///
+    /// Deliberate, and the other half of the policy: last-writer-wins is what
+    /// concurrent cell writes already do, an undo is a write, and the value is
+    /// one cell the peer's own stack still holds. Excel and Sheets both make
+    /// this trade. A refusal here would be the worse failure.
+    #[test]
+    fn a_cell_undo_still_overwrites_a_peers_value() {
+        let mut session = blank_sheet();
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(100.0),
+            })
+            .expect("typed");
+
+        a_peer_writes(&mut session, CellRef::new(0, 0), 250.0);
+
+        session.undo().expect("a cell undo is never refused");
+        assert_ne!(
+            number_at(&session, CellRef::new(0, 0)),
+            Some(250.0),
+            "the undo did not run"
+        );
+    }
+}
