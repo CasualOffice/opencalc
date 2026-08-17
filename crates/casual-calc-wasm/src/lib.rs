@@ -2338,9 +2338,6 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
         chart.y_title = wire.y_title;
         dropped = chart.detach().unwrap_or_default();
     })?;
-    if !dropped.is_empty() {
-        drop_chart_part(&dropped);
-    }
     Ok(dropped)
 }
 
@@ -2353,31 +2350,8 @@ pub fn session_delete_chart(sheet: usize, index: usize) -> Result<(), JsError> {
             dropped = data.charts.remove(index).part.unwrap_or_default();
         }
     })?;
-    if !dropped.is_empty() {
-        drop_chart_part(&dropped);
-    }
+    let _ = dropped;
     Ok(())
-}
-
-/// Stop writing a chart part back, and remove the relationship reaching it.
-///
-/// The drawing keeps its anchor for that chart — it is inside bytes we do not
-/// rewrite — so the anchor is left pointing at a relationship that no longer
-/// exists. Excel treats an unresolvable graphic frame as an empty one and
-/// draws nothing, which is what "this chart is gone" should look like. Removing
-/// the anchor would mean rebuilding the drawing, and that deletes every text
-/// box and shape the model does not know about.
-fn drop_chart_part(path: &str) {
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let Some(session) = guard.as_mut() else {
-            return;
-        };
-        let wb = session.workbook_mut();
-        wb.retained_parts.retain(|p| p.path != path);
-        wb.retained_rels
-            .retain(|r| !r.target.ends_with(path.rsplit('/').next().unwrap_or(path)));
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -10588,5 +10562,148 @@ mod snapshot_boundary_tests {
         session_set_cell(0, 0, 0, "something else").unwrap();
         session_load_snapshot(&bytes).expect("the server's snapshot must load");
         assert!(session_cells(0, 0, 0, 0, 0).contains("before"));
+    }
+}
+
+#[cfg(test)]
+mod retained_part_tests {
+    use super::{SESSION, WorkbookSession, session_delete_chart, session_undo, set_session};
+    use casual_calc_model::{
+        CellRange, CellRef, ChartKind, ChartView, Emu, Id, RetainedPart, Sheet, SheetId, Workbook,
+    };
+
+    const PART: &str = "xl/charts/chart1.xml";
+
+    /// A workbook holding one imported chart — one the model does not fully
+    /// describe, so its original XML is retained and written back verbatim.
+    fn with_an_imported_chart() -> Workbook {
+        let mut workbook = Workbook::new(Id::from_parts(0x5742, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1");
+        sheet.charts.push(ChartView {
+            id: 1,
+            anchor: CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            from_offset: Emu { x: 0, y: 0 },
+            to_offset: Emu { x: 0, y: 0 },
+            kind: ChartKind::Bar,
+            title: "Revenue".to_owned(),
+            series: Vec::new(),
+            legend: None,
+            x_title: String::new(),
+            y_title: String::new(),
+            part: Some(PART.to_owned()),
+        });
+        workbook.sheets.push(sheet);
+        workbook.retained_parts.push(RetainedPart {
+            path: PART.to_owned(),
+            bytes: b"<chartSpace/>".to_vec(),
+            content_type: None,
+        });
+        workbook
+    }
+
+    fn retains(workbook: &Workbook) -> bool {
+        workbook.retained_parts.iter().any(|p| p.path == PART)
+    }
+
+    /// **Deleting an imported chart reaches the other browser.**
+    ///
+    /// Two things happen on a chart delete: the sheet's chart list changes,
+    /// which travels as `SetSheetMetadata`, and the chart's retained part is
+    /// dropped, which went straight to the workbook through `workbook_mut` and
+    /// so was recorded in no operation at all.
+    ///
+    /// A replica therefore keeps a chart part whose chart is gone. Which copy
+    /// of the file that produces depends on **which node happens to save** —
+    /// the deleting one writes a coherent package, the other writes the deleted
+    /// chart's XML back into it. That is silent divergence, and the retained
+    /// part is exactly the thing the model cannot reconstruct if it is wrong.
+    #[test]
+    fn deleting_an_imported_chart_reaches_a_replica() {
+        let mut replica = with_an_imported_chart();
+        let mut session = WorkbookSession::from_workbook(with_an_imported_chart());
+        // Without this the outgoing log is off and `take_applied` returns
+        // nothing — which fails this test for the wrong reason entirely, by
+        // sending the replica no operations at all rather than the wrong ones.
+        session.record_applied();
+        set_session(session);
+
+        session_delete_chart(0, 0).expect("deleted");
+
+        // Everything this client would send to the server.
+        let sent = SESSION.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .expect("a session")
+                .take_applied()
+        });
+        assert!(!sent.is_empty(), "the delete produced no operation to send");
+        for op in sent {
+            casual_calc_transaction::apply(&mut replica, op).expect("the replica applies it");
+        }
+
+        let here = SESSION.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .expect("a session")
+                .workbook()
+                .clone()
+        });
+
+        assert!(!retains(&here), "the deleting client kept the part");
+        assert!(
+            !retains(&replica),
+            "the replica still holds the deleted chart's part: whichever node saves \
+             decides what the file contains"
+        );
+    }
+
+    /// **Undoing a chart deletion brings the chart's bytes back.**
+    ///
+    /// The part is the chart: the model does not describe one completely enough
+    /// to rebuild, which is why the original XML is retained at all. Dropping it
+    /// outside the operation meant undo restored the chart's *entry* and not the
+    /// chart — the sheet listed a chart whose part had been destroyed, and no
+    /// further undo could reach it. Silent, and unrecoverable in the session it
+    /// happened in.
+    #[test]
+    fn undoing_a_chart_deletion_restores_its_retained_bytes() {
+        let mut session = WorkbookSession::from_workbook(with_an_imported_chart());
+        session.record_applied();
+        set_session(session);
+
+        session_delete_chart(0, 0).expect("deleted");
+        let after_delete = SESSION.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .expect("a session")
+                .workbook()
+                .clone()
+        });
+        assert!(!retains(&after_delete), "the delete did not drop the part");
+        assert!(after_delete.sheets[0].charts.is_empty());
+
+        session_undo().expect("undone");
+
+        let after_undo = SESSION.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .expect("a session")
+                .workbook()
+                .clone()
+        });
+        assert_eq!(
+            after_undo.sheets[0].charts.len(),
+            1,
+            "the chart did not come back"
+        );
+        assert!(
+            retains(&after_undo),
+            "the chart came back without the bytes that are the chart"
+        );
+        assert_eq!(
+            after_undo.retained_parts[0].bytes,
+            b"<chartSpace/>".to_vec(),
+            "restored, but not the same bytes"
+        );
     }
 }

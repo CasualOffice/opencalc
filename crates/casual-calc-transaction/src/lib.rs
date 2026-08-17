@@ -15,8 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ChartView,
-    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, PrintSetup, Sheet,
-    SheetProtection, SheetView, SheetVisibility, SortState, StyleId, Table, Workbook,
+    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, PrintSetup,
+    RetainedPart, RetainedRel, Sheet, SheetProtection, SheetView, SheetVisibility, SortState,
+    StyleId, Table, Workbook,
 };
 
 pub mod protocol;
@@ -347,6 +348,78 @@ impl SheetMetadata {
     }
 }
 
+/// The retained bytes an inverse has to put back.
+///
+/// A chart imported from a file keeps its original XML as a retained part,
+/// because the model does not describe a chart completely enough to rebuild it.
+/// Removing the chart must remove that part — leaving it would put the deleted
+/// chart's XML back into the saved file, with a relationship still reaching it.
+///
+/// Only an **inverse** ever carries these. The forward direction needs no bytes
+/// at all: which parts died is derivable from the bundle, so every replica
+/// works it out from the operation it already receives. That is what makes this
+/// converge without a wire-format change — and it is why the field is
+/// `skip_serializing_if` empty, so an ordinary edit serialises exactly as before.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainedBytes {
+    /// The parts themselves.
+    pub parts: Vec<RetainedPart>,
+    /// The relationships that reached them.
+    pub rels: Vec<RetainedRel>,
+}
+
+impl RetainedBytes {
+    /// Whether there is nothing to put back.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty() && self.rels.is_empty()
+    }
+}
+
+/// Remove the retained parts at `paths`, and the relationships reaching them.
+///
+/// Returns what was taken, so the inverse can put it back. A relationship is
+/// matched by the file its target names: the target is relative to the part
+/// that declares it (`../charts/chart1.xml` from a drawing), so comparing whole
+/// paths would match nothing.
+fn take_retained(workbook: &mut Workbook, paths: &BTreeSet<String>) -> RetainedBytes {
+    if paths.is_empty() {
+        return RetainedBytes::default();
+    }
+    let files: BTreeSet<&str> = paths
+        .iter()
+        .map(|p| p.rsplit('/').next().unwrap_or(p.as_str()))
+        .collect();
+
+    let mut taken = RetainedBytes::default();
+    let mut keep = Vec::with_capacity(workbook.retained_parts.len());
+    for part in std::mem::take(&mut workbook.retained_parts) {
+        if paths.contains(&part.path) {
+            taken.parts.push(part);
+        } else {
+            keep.push(part);
+        }
+    }
+    workbook.retained_parts = keep;
+
+    let mut keep = Vec::with_capacity(workbook.retained_rels.len());
+    for rel in std::mem::take(&mut workbook.retained_rels) {
+        let names = rel
+            .target
+            .rsplit('/')
+            .next()
+            .is_some_and(|file| files.contains(file));
+        if names {
+            taken.rels.push(rel);
+        } else {
+            keep.push(rel);
+        }
+    }
+    workbook.retained_rels = keep;
+    taken
+}
+
 /// A closed set of atomic edit operations. Every operation is invertible; the
 /// inverse of any operation is expressible as a `SetCell` (or a `Batch` of them).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -464,6 +537,13 @@ pub enum Operation {
         /// let [`apply`] narrow it to what actually differs; the inverse always
         /// carries the narrowed set, so undo touches only what the op touched.
         changed: SheetFields,
+        /// Retained bytes to put back with this bundle.
+        ///
+        /// Empty on every forward edit, and populated by [`apply`] only on the
+        /// inverse of one that removed an imported chart — see [`RetainedBytes`]
+        /// for why the forward direction needs nothing.
+        #[serde(default, skip_serializing_if = "RetainedBytes::is_empty")]
+        restore: RetainedBytes,
     },
     /// Insert a fully-formed sheet at position `index`, shifting later sheets
     /// right. The caller assigns the sheet's id and name; the inverse removes it.
@@ -526,6 +606,9 @@ impl Operation {
             sheet,
             data: Box::new(data),
             changed: SheetFields::ALL,
+            // A forward edit never carries bytes: `apply` derives which retained
+            // parts died from the bundle itself.
+            restore: RetainedBytes::default(),
         }
     }
 
@@ -549,6 +632,7 @@ impl Operation {
                 sheet,
                 data,
                 changed,
+                restore,
             } => {
                 let effective = workbook.sheets.get(sheet).map_or(changed, |target| {
                     changed.intersection(data.diff(&SheetMetadata::capture(target)))
@@ -557,6 +641,7 @@ impl Operation {
                     sheet,
                     data,
                     changed: effective,
+                    restore,
                 }
             }
             Self::Batch(ops) => Self::Batch(
@@ -717,11 +802,19 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             sheet,
             data,
             changed,
+            restore,
         } => {
             let target = workbook
                 .sheets
                 .get_mut(sheet)
                 .ok_or(TxnError::SheetNotFound { index: sheet })?;
+            // Which retained chart parts this sheet was holding on to, before
+            // the bundle replaces its chart list.
+            let held: BTreeSet<String> = target
+                .charts
+                .iter()
+                .filter_map(|c| c.part.clone())
+                .collect();
             // Narrow the declared intent to what the bundle actually differs in.
             // A caller that passes `ALL` — which is most of them, because the
             // ergonomic path is "capture the sheet, change one field, submit" —
@@ -730,10 +823,48 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             // what lets two concurrent edits to different fields merge.
             let effective = changed.intersection(data.diff(&SheetMetadata::capture(target)));
             let previous = data.install_masked(target, effective);
+
+            // Put back anything this operation carries. Undoing a chart removal
+            // restores the chart *and* the bytes the model cannot rebuild.
+            for part in restore.parts {
+                if !workbook.retained_parts.iter().any(|p| p.path == part.path) {
+                    workbook.retained_parts.push(part);
+                }
+            }
+            for rel in restore.rels {
+                if !workbook
+                    .retained_rels
+                    .iter()
+                    .any(|r| r.source == rel.source && r.id == rel.id)
+                {
+                    workbook.retained_rels.push(rel);
+                }
+            }
+
+            // And take away anything this sheet was the last to reference.
+            //
+            // Derived rather than sent: every replica computes the same set from
+            // the same bundle, which is what makes a chart deletion converge
+            // without the operation carrying any bytes. Only paths this sheet
+            // *held* are candidates, so a retained part belonging to anything
+            // else — an external link, a pivot cache — is never in scope.
+            let live: BTreeSet<&str> = workbook
+                .sheets
+                .iter()
+                .flat_map(|s| s.charts.iter())
+                .filter_map(|c| c.part.as_deref())
+                .collect();
+            let dead: BTreeSet<String> = held
+                .into_iter()
+                .filter(|path| !live.contains(path.as_str()))
+                .collect();
+            let dropped = take_retained(workbook, &dead);
+
             Ok(Operation::SetSheetMetadata {
                 sheet,
                 data: Box::new(previous),
                 changed: effective,
+                restore: dropped,
             })
         }
         Operation::InsertSheet { index, sheet } => {

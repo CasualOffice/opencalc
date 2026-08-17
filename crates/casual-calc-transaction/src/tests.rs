@@ -2030,3 +2030,50 @@ mod clearing_history {
         assert!(!history.can_undo(), "and no further back than that");
     }
 }
+
+/// **A version-5 peer and this build still read each other's operations.**
+///
+/// The fix for COL-30 needed the inverse of a chart removal to carry bytes, and
+/// a new `Operation` *variant* would have been a wire break — an older client
+/// cannot parse a variant it has never heard of, which is exactly the failure
+/// COL-38 describes. A new **field** is not, on three conditions, and this
+/// pins all three:
+///
+/// 1. the forward operation serialises byte-identically to before, so ordinary
+///    editing traffic is unchanged;
+/// 2. a message written without the field still parses here;
+/// 3. `Operation` does not deny unknown fields, so an older peer given a
+///    message that has it ignores it rather than refusing the batch.
+///
+/// If any of these stops holding, `PROTOCOL_VERSION` has to move — and this
+/// test is what will say so.
+#[test]
+fn the_retained_bytes_field_is_not_a_wire_break() {
+    use crate::SheetMetadata;
+    use casual_calc_model::{Id, Sheet, SheetId};
+
+    let sheet = Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1");
+    let forward = Operation::set_sheet_metadata(0, SheetMetadata::capture(&sheet));
+
+    // 1. Nothing new on the wire for an ordinary edit.
+    let json = serde_json::to_string(&forward).expect("serialises");
+    assert!(
+        !json.contains("restore"),
+        "a forward edit grew a field: {json}"
+    );
+
+    // 2. A message from a peer that has never heard of it.
+    let from_v5 = json.clone();
+    let parsed: Operation = serde_json::from_str(&from_v5).expect("an older message still parses");
+    assert_eq!(parsed, forward);
+
+    // 3. And a message carrying it is readable by anything that ignores unknown
+    //    fields — which is what `Operation` does, having no `deny_unknown_fields`.
+    let with_field = json.replace(
+        r#""changed":"#,
+        r#""restore":{"parts":[],"rels":[]},"changed":"#,
+    );
+    assert_ne!(with_field, json, "the substitution found nothing to do");
+    let parsed: Operation = serde_json::from_str(&with_field).expect("parses with the field");
+    assert_eq!(parsed, forward);
+}

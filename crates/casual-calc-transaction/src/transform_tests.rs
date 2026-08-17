@@ -686,11 +686,13 @@ fn metadata_edits_to_different_fields_both_survive() {
         sheet: 0,
         data: Box::new(resize),
         changed: crate::SheetFields::COLUMNS,
+        restore: Default::default(),
     };
     let b = Operation::SetSheetMetadata {
         sheet: 0,
         data: Box::new(view),
         changed: crate::SheetFields::VIEW,
+        restore: Default::default(),
     };
 
     assert_eq!(
@@ -716,11 +718,13 @@ fn metadata_edits_to_the_same_field_are_ordered_not_merged() {
         sheet: 0,
         data: Box::new(a_data),
         changed: crate::SheetFields::COLUMNS,
+        restore: Default::default(),
     };
     let b = Operation::SetSheetMetadata {
         sheet: 0,
         data: Box::new(b_data),
         changed: crate::SheetFields::COLUMNS,
+        restore: Default::default(),
     };
 
     assert!(
