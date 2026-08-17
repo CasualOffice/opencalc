@@ -169,6 +169,27 @@ jobs:
           done
           [ "$broken" = "0" ] || exit 1
           echo "engine/host boundary intact for: ${HOSTS[*]}"
+      # A diagnostic code is a promise to whoever reads a log, and docs/20 is
+      # where that promise is written down. Nothing checked the two agreed, and
+      # both drifts had already happened: `OC-IMP-0003` sat in the registry for
+      # a limit nothing enforced, and the first fix for it emitted a fresh
+      # `OC-IMP-0004` that the registry had never heard of.
+      #
+      # Checked in one direction only. A code the *code* emits must be
+      # registered; a code the registry lists need not be emitted yet, because
+      # the registry deliberately reserves codes for work that is planned.
+      - name: Every emitted error code is in the registry
+        run: |
+          missing=0
+          for code in $(grep -rhoE '"OC-[A-Z]+-[0-9]{4}"' crates/ server/ --include='*.rs' \
+                        | tr -d '"' | sort -u); do
+            if ! grep -q "\`$code\`" docs/20-ERROR-CODE-REGISTRY.md ; then
+              echo "::error::$code is emitted but not in docs/20-ERROR-CODE-REGISTRY.md" >&2
+              missing=1
+            fi
+          done
+          [ "$missing" = "0" ] || exit 1
+          echo "every emitted diagnostic code is registered"
       # SEC-001. A workbook is untrusted input, so any path turning its text
       # into markup runs somebody else's script in the editor's origin — where
       # the document, the session token and the collaboration socket live. The

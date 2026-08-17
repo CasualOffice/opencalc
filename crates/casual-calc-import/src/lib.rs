@@ -22,7 +22,7 @@ mod report;
 mod styles;
 mod theme;
 
-pub use error::ImportError;
+pub use error::{ImportError, Overrun};
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
 pub use theme::stock_theme_slots;
 
@@ -648,6 +648,75 @@ fn merge_threaded_comments(
 }
 
 /// Import a SpreadsheetML package into the normalized model.
+/// What this document has spent, against what one document may spend.
+///
+/// One of these per import, never per part — which is the whole point. Each
+/// per-part limit was already enforced and each was passing; nothing added them
+/// up, so a package of many parts multiplied a bound nobody had agreed to
+/// (`SEC-002`).
+///
+/// Every method fails closed on the way past the line, before the thing is
+/// stored, so the model is never left holding a fraction of a document.
+struct Budget {
+    limits: casual_calc_ooxml::SpreadsheetLimits,
+    cells: usize,
+    merges: usize,
+}
+
+impl Budget {
+    fn new(limits: casual_calc_ooxml::SpreadsheetLimits) -> Self {
+        Self {
+            limits,
+            cells: 0,
+            merges: 0,
+        }
+    }
+
+    fn cell(&mut self) -> Result<(), ImportError> {
+        self.cells += 1;
+        if self.cells > self.limits.max_populated_cells {
+            return Err(ImportError::OverBudget {
+                what: crate::Overrun::PopulatedCells,
+                limit: self.limits.max_populated_cells,
+            });
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self) -> Result<(), ImportError> {
+        self.merges += 1;
+        if self.merges > self.limits.max_merged_ranges {
+            return Err(ImportError::OverBudget {
+                what: crate::Overrun::MergedRanges,
+                limit: self.limits.max_merged_ranges,
+            });
+        }
+        Ok(())
+    }
+
+    /// Checked before interning, because the table's size is known up front and
+    /// there is no reason to build it first.
+    fn shared_strings(&self, count: usize) -> Result<(), ImportError> {
+        if count > self.limits.max_shared_strings {
+            return Err(ImportError::OverBudget {
+                what: crate::Overrun::SharedStrings,
+                limit: self.limits.max_shared_strings,
+            });
+        }
+        Ok(())
+    }
+
+    fn defined_names(&self, count: usize) -> Result<(), ImportError> {
+        if count > self.limits.max_defined_names {
+            return Err(ImportError::OverBudget {
+                what: crate::Overrun::DefinedNames,
+                limit: self.limits.max_defined_names,
+            });
+        }
+        Ok(())
+    }
+}
+
 pub fn import_package(bytes: Vec<u8>) -> Result<Import, ImportError> {
     import_package_with(bytes, OoxmlLimits::default())
 }
@@ -663,12 +732,15 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
     let mut package = SpreadsheetPackage::open(bytes, limits)?;
     let mut report = CompatibilityReport::default();
     let mut workbook = Workbook::new(Id::from_parts(WORKBOOK_NAMESPACE, 1));
+    let mut budget = Budget::new(limits.spreadsheet);
 
     // Shared strings → interned into the workbook, keeping index → StringId.
     let mut shared_ids: Vec<StringId> = Vec::new();
     if package.contains(SHARED_STRINGS_PART) {
         let xml = package.read_part(SHARED_STRINGS_PART)?;
-        for value in parse_shared_strings(&xml)? {
+        let values = parse_shared_strings(&xml)?;
+        budget.shared_strings(values.len())?;
+        for value in values {
             shared_ids.push(workbook.intern_rich_text(value));
         }
     }
@@ -903,6 +975,9 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
                 None => {}
             }
             if !cell.is_blank() {
+                // Across every sheet, not this one: the sum is the thing being
+                // bounded, and it is charged before the cell is stored.
+                budget.cell()?;
                 sheet.cells.set(cell_ref, cell);
             }
         }
@@ -912,7 +987,10 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
             // `A1:ZZZZ4294967295` is 475,254 columns by 4 billion rows: the
             // layout walked it, and the writer emitted it verbatim.
             match parse_range_classified(reference) {
-                Parsed::Ok(range) => sheet.merges.push(range),
+                Parsed::Ok(range) => {
+                    budget.merge()?;
+                    sheet.merges.push(range);
+                }
                 Parsed::OutOfGrid => report.record(
                     "mergeCell/outOfGrid",
                     ModelOutcome::Omitted,
@@ -1287,7 +1365,9 @@ pub fn import_package_with(bytes: Vec<u8>, limits: OoxmlLimits) -> Result<Import
     workbook.date1904 = parse_date1904(&workbook_xml)?;
     workbook.settings = parse_workbook_settings(&workbook_xml)?;
     workbook.retained_refs = parse_retained_refs(&workbook_xml)?;
-    for (name, local_sheet, refers_to) in parse_defined_names(&workbook_xml)? {
+    let names = parse_defined_names(&workbook_xml)?;
+    budget.defined_names(names.len())?;
+    for (name, local_sheet, refers_to) in names {
         // A target this parser cannot read is kept verbatim rather than
         // dropped. Discarding it lost the name from the file entirely, and the
         // commonest casualty was `Print_Titles`, whose value is a whole-row

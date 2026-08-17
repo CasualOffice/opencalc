@@ -44,6 +44,9 @@ with a note. A code is part of the public contract once shipped.
 | `OC-IMP-0001` | Required part missing (`workbook.xml`) | malformed |
 | `OC-IMP-0002` | Unresolvable relationship (`r:id`) | malformed |
 | `OC-IMP-0003` | Populated-cell count over admission limit | limit |
+| `OC-IMP-0004` | Shared-string table over admission limit | limit |
+| `OC-IMP-0005` | Defined-name count over admission limit | limit |
+| `OC-IMP-0006` | Merged-range count over admission limit | limit |
 | `OC-MDL-0001` | Invariant violation: zero/duplicate ID | invariant |
 | `OC-MDL-0002` | Cell address out of range | invariant |
 | `OC-MDL-0003` | Dangling interned reference | invariant |
@@ -56,6 +59,7 @@ with a note. A code is part of the public contract once shipped.
 | `OC-CAL-0002` | Iterative-calc iteration cap reached | calc |
 | `OC-CAL-0003` | Spill region over limit | limit |
 | `OC-LAY-0001` | Layout invariant violation | layout |
+| `OC-RND-0001` | Render refused (viewport over limit, or PNG encoding failed) | render |
 | `OC-EXP-0001` | Model not writable in requested mode | export |
 | `OC-IO-0001`  | Unrecognized / ambiguous format | detection |
 
