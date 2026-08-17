@@ -5,7 +5,7 @@ The trackers are cross-referenced from commit messages, pull requests and each
 other, so an id is only useful if it is unique. It stopped being unique twice,
 in two different ways, and neither was noticed by a person:
 
-  * `docs/14` and `docs/52` ran independent `FID-01..FID-25` series for
+  * `docs/14` and the since-deleted `docs/52` ran independent `FID-01..FID-25` series for
     different work, colliding across eighteen numbers. `FID-13` was both "a
     sheet name that is not an identifier is written unquoted" and "`sheetView`:
     rightToLeft/showFormulas", so `git log --grep FID-13` returned two
@@ -32,7 +32,6 @@ from collections import defaultdict
 # The documents that carry `| ID | ...` rows other things cite by id.
 TRACKERS = [
     "docs/14-EXECUTION-TRACKER.md",
-    "docs/52-FIDELITY-TRACKER.md",
     "docs/53-FEATURE-CORRECTNESS-TRACKER.md",
     "docs/67-REPOSITORY-REMEDIATION-PLAN.md",
 ]
