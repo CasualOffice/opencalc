@@ -176,12 +176,24 @@ body {
  * elements at mount, and a missing node would be a null dereference in a code
  * path that has nothing to do with chrome. */
 .oc-hide-header .app-header,
-.oc-hide-menubar .menubar,
 .oc-hide-toolbar .toolbar,
 .oc-hide-formulabar .formula-bar,
 .oc-hide-statusbar .bottom-bar { display: none; }
 /* The tabs live inside the bottom bar, so hiding them alone keeps the bar. */
 .oc-hide-tabs .sheet-tabs { display: none; }
+/* **The menu bar hides its items, not itself** — because the roster lives
+   inside it (COL-33 put it there so it would not fold away with the page
+   header) and `display: none` on the bar takes the whole subtree with it. A
+   host that hid the menus lost the ability to see who else was in the document,
+   which is not a menu (`UX-CHROME-01`).
+   The bar's own box is neutralised as well, so with nobody else present — the
+   roster carries `hidden` until there is a session — it collapses to nothing
+   and a hidden menu bar is genuinely gone. With somebody present it is a thin
+   strip carrying only the faces. */
+.oc-hide-menubar .menubar > *:not(.presence) { display: none; }
+.oc-hide-menubar .menubar {
+  height: auto; min-height: 0; padding: 0; background: none; border-bottom: 0;
+}
 .oc-hide-localepicker .locale-picker { display: none; }
 .locale-picker select {
   font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
