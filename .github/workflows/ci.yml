@@ -195,6 +195,13 @@ jobs:
       # the page must exist, and the code may hold names the page leaves out.
       - name: The deployment page names settings that exist
         run: python3 tools/check-deploy-docs.py
+      # A duplicate nav entry is not a broken link, is not invalid HTML, and is
+      # invisible to any test that renders the page successfully. It just looks
+      # careless to everyone who sees it — which is what happened when the
+      # self-hosting page was linked in by a script that guarded against a
+      # repeated *link* and not a repeated *label*.
+      - name: The site's navigation has no duplicates or dead links
+        run: python3 tools/check-site-nav.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a
