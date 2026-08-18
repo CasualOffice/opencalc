@@ -94,9 +94,7 @@ impl SessionFormat {
     #[must_use]
     pub fn content_type(self) -> &'static str {
         match self {
-            Self::Xlsx => {
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            }
+            Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             Self::Delimited(casual_calc_io::COMMA) => "text/csv;charset=utf-8",
             Self::Delimited(casual_calc_io::TAB) => "text/tab-separated-values;charset=utf-8",
             Self::Delimited(_) => "text/plain;charset=utf-8",
@@ -1103,12 +1101,9 @@ impl WorkbookSession {
             // No byte-order mark. `read_delimited` does not strip one, so a BOM
             // written here comes back as part of the first field — a save that
             // makes its own output unreadable by the reader that produced it.
-            SessionFormat::Delimited(delimiter) => Ok(write_delimited(
-                &self.workbook,
-                DELIMITED_SHEET,
-                delimiter,
-            )
-            .into_bytes()),
+            SessionFormat::Delimited(delimiter) => {
+                Ok(write_delimited(&self.workbook, DELIMITED_SHEET, delimiter).into_bytes())
+            }
         }
     }
 
@@ -1306,13 +1301,19 @@ fn delimited_loss(workbook: &Workbook, sheet_index: usize) -> CompatibilityRepor
         "outline groups",
         sheet.row_outline_levels.len() + sheet.col_outline_levels.len(),
     );
-    gone("frozen panes", usize::from(sheet.view != Default::default()));
+    gone(
+        "frozen panes",
+        usize::from(sheet.view != Default::default()),
+    );
     gone("tab colour", usize::from(sheet.tab_color.is_some()));
     gone("data validation", sheet.validations.len());
     gone("conditional formatting", sheet.conditional_formats.len());
     gone("comments", sheet.comments.len());
     gone("hyperlinks", sheet.hyperlinks.len());
-    gone("print setup", usize::from(sheet.print != Default::default()));
+    gone(
+        "print setup",
+        usize::from(sheet.print != Default::default()),
+    );
     gone("charts", sheet.charts.len());
     gone("images", sheet.images.len());
     gone("sort state", usize::from(sheet.sort_state.is_some()));

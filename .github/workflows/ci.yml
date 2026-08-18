@@ -272,6 +272,22 @@ jobs:
       # a menu scaffold) and rewriting those as DOM calls buys nothing. They
       # carry an `oc-safe-html:` marker naming *why* they are safe, so a new one
       # has to be argued for rather than merely typed.
+      #
+      # **`[[:space:]]`, not `\s`.** `git grep -E` is POSIX ERE, where `\s` is
+      # undefined — so the `innerHTML`/`outerHTML` half of this pattern matched
+      # *nothing*, and the gate had been passing on one sink in seven. The one
+      # it did catch was `document.write(`, the only alternative with no `\s`
+      # in it, which is why the job still looked alive. Every existing sink
+      # turned out to be marked, so nothing was exploitable — but a new one
+      # would have sailed through the check written to stop it.
+      #
+      # **Every host's markup, by pattern rather than by name.** This listed
+      # `casual-calc-host` alone, so `casual-calc-wopi/src/editor.html` — which
+      # is served to a browser exactly the same way — was outside the gate, and
+      # a sink added there would have passed. That is the third time a
+      # hand-maintained list of hosts has gone stale here (the wasm excludes
+      # and the ADR-012 boundary were the other two), so this one matches a
+      # path shape instead of naming crates.
       - name: Dynamic HTML sinks must be marked as audited
         run: |
           unmarked=0
@@ -288,8 +304,8 @@ jobs:
             fi
             echo "::error file=$file,line=$line::unmarked dynamic HTML sink (SEC-001). Build DOM with textContent, or add an 'oc-safe-html:' comment saying why this markup is static."
             unmarked=$((unmarked + 1))
-          done < <(git grep -nE '\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write\(' \
-                     -- 'webapp/*.js' 'webapp/*.html' 'server/casual-calc-host/src/*.html' \
+          done < <(git grep -nE '\.(innerHTML|outerHTML)[[:space:]]*=|insertAdjacentHTML|document\.write\(' \
+                     -- 'webapp/*.js' 'webapp/*.html' 'server/**/*.html' 'server/**/*.js' \
                    | grep -v 'oc-safe-html:')
           if [ "$unmarked" -gt 0 ]; then
             echo "$unmarked unmarked sink(s)" >&2

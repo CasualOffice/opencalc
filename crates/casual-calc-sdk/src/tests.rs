@@ -1547,7 +1547,11 @@ mod delimited_sessions {
         // And the bytes are readable as what they claim to be.
         let reread = read_delimited(&saved, COMMA).expect("the saved bytes are delimited text");
         assert_eq!(
-            reread.sheets[0].cells.get(CellRef::new(1, 1)).unwrap().value,
+            reread.sheets[0]
+                .cells
+                .get(CellRef::new(1, 1))
+                .unwrap()
+                .value,
             CellValue::Number(7.0),
         );
     }
@@ -1733,7 +1737,10 @@ mod delimited_sessions {
             SessionFormat::for_extension("tab"),
             Some(SessionFormat::Delimited(TAB))
         );
-        assert_eq!(SessionFormat::for_extension("xlsx"), Some(SessionFormat::Xlsx));
+        assert_eq!(
+            SessionFormat::for_extension("xlsx"),
+            Some(SessionFormat::Xlsx)
+        );
         assert_eq!(
             SessionFormat::for_extension("ods"),
             None,

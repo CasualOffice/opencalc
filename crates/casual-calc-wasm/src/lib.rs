@@ -169,8 +169,11 @@ pub fn session_format() -> String {
 /// The MIME type [`session_save`]'s bytes should be served as.
 #[wasm_bindgen]
 pub fn session_format_content_type() -> String {
-    with_session(|s| s.format().content_type().to_owned())
-        .unwrap_or_else(|| casual_calc_sdk::SessionFormat::Xlsx.content_type().to_owned())
+    with_session(|s| s.format().content_type().to_owned()).unwrap_or_else(|| {
+        casual_calc_sdk::SessionFormat::Xlsx
+            .content_type()
+            .to_owned()
+    })
 }
 
 /// What saving in the session's own format cannot carry, as one sentence — or

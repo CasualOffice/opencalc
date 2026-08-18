@@ -149,7 +149,13 @@ async fn a_rejected_token_is_reported_as_such() {
 async fn a_lock_conflict_keeps_the_id_that_won() {
     let (src, _) = stub(409, &[("X-WOPI-Lock", "held-by-word")], b"").await;
     let problem = Host::new(64 << 20)
-        .put_file(&src, "t", Some("ours"), "text/csv;charset=utf-8", b"x".to_vec())
+        .put_file(
+            &src,
+            "t",
+            Some("ours"),
+            "text/csv;charset=utf-8",
+            b"x".to_vec(),
+        )
         .await
         .expect_err("conflict");
     match problem {
@@ -192,9 +198,15 @@ async fn a_save_is_addressed_the_way_wopi_specifies() {
     );
 
     // A different format announces itself as one.
-    host.put_file(&src, "tok", None, "text/csv;charset=utf-8", b"a,b\r\n".to_vec())
-        .await
-        .expect("saved");
+    host.put_file(
+        &src,
+        "tok",
+        None,
+        "text/csv;charset=utf-8",
+        b"a,b\r\n".to_vec(),
+    )
+    .await
+    .expect("saved");
     assert_eq!(
         stub.last().content_type,
         "text/csv;charset=utf-8",

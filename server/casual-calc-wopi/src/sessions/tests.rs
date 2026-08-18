@@ -36,9 +36,36 @@ fn session_ids_are_random_and_long() {
 /// to find out, because by then there is work to lose.
 #[test]
 fn writing_needs_both_permission_and_a_host_that_accepts_it() {
-    assert!(Session::from("s".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0).editable);
-    assert!(!Session::from("s".into(), "t".into(), &info(true, false), SessionFormat::Xlsx, 0).editable);
-    assert!(!Session::from("s".into(), "t".into(), &info(false, true), SessionFormat::Xlsx, 0).editable);
+    assert!(
+        Session::from(
+            "s".into(),
+            "t".into(),
+            &info(true, true),
+            SessionFormat::Xlsx,
+            0
+        )
+        .editable
+    );
+    assert!(
+        !Session::from(
+            "s".into(),
+            "t".into(),
+            &info(true, false),
+            SessionFormat::Xlsx,
+            0
+        )
+        .editable
+    );
+    assert!(
+        !Session::from(
+            "s".into(),
+            "t".into(),
+            &info(false, true),
+            SessionFormat::Xlsx,
+            0
+        )
+        .editable
+    );
 }
 
 /// **The format comes from the host's filename, and an unrecognised one has no
@@ -50,8 +77,14 @@ fn writing_needs_both_permission_and_a_host_that_accepts_it() {
 #[test]
 fn a_filename_names_the_format_and_an_unknown_one_names_nothing() {
     assert_eq!(format_for("Q3.xlsx"), Some(SessionFormat::Xlsx));
-    assert_eq!(format_for("Books.CSV"), Some(SessionFormat::Delimited(b',')));
-    assert_eq!(format_for("Books.tsv"), Some(SessionFormat::Delimited(b'\t')));
+    assert_eq!(
+        format_for("Books.CSV"),
+        Some(SessionFormat::Delimited(b','))
+    );
+    assert_eq!(
+        format_for("Books.tsv"),
+        Some(SessionFormat::Delimited(b'\t'))
+    );
     // The last dot wins, both ways round.
     assert_eq!(
         format_for("report.2024.csv"),
@@ -81,10 +114,22 @@ fn a_filename_names_the_format_and_an_unknown_one_names_nothing() {
 #[test]
 fn a_full_registry_returns_the_session_so_its_lock_can_be_released() {
     let sessions = Sessions::new(1, 60_000);
-    let first = Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0);
+    let first = Session::from(
+        "a".into(),
+        "t".into(),
+        &info(true, true),
+        SessionFormat::Xlsx,
+        0,
+    );
     sessions.insert(first, 0).expect("room for one");
 
-    let second = Session::from("b".into(), "t2".into(), &info(true, true), SessionFormat::Xlsx, 0);
+    let second = Session::from(
+        "b".into(),
+        "t2".into(),
+        &info(true, true),
+        SessionFormat::Xlsx,
+        0,
+    );
     let returned = sessions.insert(second, 0).expect_err("the node is full");
     assert_eq!(
         returned.src, "b",
@@ -99,7 +144,13 @@ fn sessions_expire_and_are_collected() {
     let sessions = Sessions::new(10, 1_000);
     let id = sessions
         .insert(
-            Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0),
+            Session::from(
+                "a".into(),
+                "t".into(),
+                &info(true, true),
+                SessionFormat::Xlsx,
+                0,
+            ),
             0,
         )
         .expect("inserted");
@@ -127,7 +178,13 @@ fn locks_come_due_on_a_timer() {
     let sessions = Sessions::new(10, 3_600_000);
     let id = sessions
         .insert(
-            Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0),
+            Session::from(
+                "a".into(),
+                "t".into(),
+                &info(true, true),
+                SessionFormat::Xlsx,
+                0,
+            ),
             0,
         )
         .expect("inserted");
