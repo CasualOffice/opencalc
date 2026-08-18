@@ -477,6 +477,28 @@ jobs:
             *) echo "collab is reachable on the page's own origin ($code)" ;;
           esac
           curl -fsS http://127.0.0.1:8080/healthz >/dev/null && echo "host reachable"
+      # **PROD-13: the whole chain, on the deployed stack.**
+      #
+      # Every leg of this is covered on its own — the importer has unit tests,
+      # the collaboration protocol has a browser suite, the steps above prove
+      # the containers answer. What nothing covered is the *chain*: that the
+      # file a person uploads is the file the collaboration server fetches over
+      # an internal address that only exists inside this network, and that two
+      # participants handed tokens by the host converge on it.
+      #
+      # That is where a deployment breaks, and every previous failure of the
+      # kind looked like a blank editor with three healthy containers and
+      # nothing in any log.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # 22 for a global `WebSocket`, so the check speaks the protocol with
+          # no dependencies to install into a job that has none.
+          node-version: "22"
+      - name: A real workbook survives upload, sharing, co-editing and download
+        run: node tools/e2e-document-lifecycle.mjs http://127.0.0.1:8080
+      - name: Show the stack's logs if the chain broke
+        if: failure()
+        run: docker compose logs
       - name: The WOPI adapter serves a discovery document
         run: |
           set -euo pipefail

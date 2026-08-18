@@ -4,6 +4,13 @@
 # the ones that would invalidate the layer cache on every edit.
 target/
 fuzz/target/
+# Agent scratch space, and it is not small: a finished worktree keeps its own
+# full `target/` tree, so this directory reached 4.4 GB and every `docker build`
+# was shipping all of it as context — which failed outright on one machine
+# rather than merely being slow. `target/` above does not cover it, because
+# these are *nested* copies under a different prefix. It is also working state
+# that has no business in a layer.
+.claude/
 webapp/pkg/
 tests/browser/node_modules/
 tests/browser/test-results/
