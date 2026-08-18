@@ -202,6 +202,13 @@ jobs:
       # repeated *link* and not a repeated *label*.
       - name: The site's navigation has no duplicates or dead links
         run: python3 tools/check-site-nav.py
+      # `cp .env.example .env && docker compose up` is the documented quick
+      # start, so whatever is in that file *is* the deployment for anybody
+      # trying this for the first time. It shipped a collaboration endpoint on
+      # a port the stack `expose`s but does not publish, so co-editing — the
+      # one thing the demo exists to demonstrate — never connected.
+      - name: The example environment points at ports the stack publishes
+        run: python3 tools/check-env-example.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a

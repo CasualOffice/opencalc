@@ -1125,6 +1125,40 @@ mod endpoint_tests {
         assert_eq!(at, "ws://sheets.example.com/collab");
     }
 
+    /// **A forwarded host keeps its port.**
+    ///
+    /// This is the contract the reverse proxies have to satisfy, and the reason
+    /// they now send `X-Forwarded-Host: $http_host` rather than relying on
+    /// `Host: $host` — nginx's `$host` **strips the port**, so the demo reached
+    /// on `127.0.0.1:8080` announced itself as `127.0.0.1` and the endpoint
+    /// derived from it named port 80, where nothing is listening (`PROD-16`).
+    ///
+    /// The browser then fails to open the socket with nothing in any log to say
+    /// why, which is the same silence `PROD-12` was about. Pinned here because
+    /// the proxy configuration is not something any test in this repository
+    /// executes, so this assertion is what stops the two drifting apart.
+    #[test]
+    fn a_forwarded_host_keeps_its_port() {
+        let at = collab_endpoint(
+            &config(""),
+            &headers(&[("x-forwarded-host", "127.0.0.1:8080")]),
+        );
+        assert_eq!(
+            at, "ws://127.0.0.1:8080/collab",
+            "the port was dropped, so the browser is sent at the wrong one"
+        );
+
+        // And over TLS, where the port is just as easily lost.
+        let secure = collab_endpoint(
+            &config(""),
+            &headers(&[
+                ("x-forwarded-host", "calc.example:8443"),
+                ("x-forwarded-proto", "https"),
+            ]),
+        );
+        assert_eq!(secure, "wss://calc.example:8443/collab");
+    }
+
     /// An HTTPS page cannot open `ws://` at all, so guessing the scheme breaks
     /// every TLS deployment rather than merely inconveniencing it.
     #[test]
