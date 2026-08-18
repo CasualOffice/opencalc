@@ -1604,16 +1604,31 @@ async fn a_host_that_hangs_does_not_stop_the_node_exiting() {
 /// Generated rather than committed: a checked-in private key is a private key
 /// somebody will eventually use somewhere real.
 fn certificate_files() -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("opencalc-tls-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cert_path = dir.join("cert.pem");
-    let key_path = dir.join("key.pem");
-    if !cert_path.exists() {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
-        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
-    }
-    (cert_path, key_path)
+    // **Generated exactly once, by whoever asks first, with everyone else
+    // waiting.** This used to guard on `!cert_path.exists()` and write the
+    // certificate *before* the key — so a second test thread that arrived in
+    // between saw the certificate, concluded the pair was ready, and was handed
+    // a key file that did not exist yet. Tests in one binary share a process, so
+    // they share the pid-named directory and run concurrently by default.
+    //
+    // It failed as `tls_config(...).unwrap()` panicking in an unrelated test,
+    // on one platform, some of the time — the shape that gets called flaky and
+    // re-run rather than fixed. `OnceLock` closes the window instead of making
+    // it smaller: there is no observable half-written state to race with.
+    static FILES: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("opencalc-tls-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let cert_path = dir.join("cert.pem");
+            let key_path = dir.join("key.pem");
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+            std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+            std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+            (cert_path, key_path)
+        })
+        .clone()
 }
 
 /// DEP-01. The listener must actually speak TLS when a certificate is

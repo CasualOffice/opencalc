@@ -9355,6 +9355,29 @@ function deleteLines() {
 // special, Insert, Delete, Hide, Clear, Sort) fold into submenus so the menu
 // stays short; the heavier editors (validation / conditional format / notes)
 // live in the side panel, reached from the toolbar.
+/// Whether a cell shift needs confirming before it runs.
+///
+/// **A probe that cannot answer means "warn", not "proceed".** This began at
+/// `false` inside a swallowing `catch`, so a probe that threw asserted the
+/// *safe* answer and the confirmation was skipped for precisely the shift that
+/// was about to break formulas — the one case where the warning is the only
+/// thing standing between the user and silent corruption (`UX-SHIFT-01`).
+///
+/// The cost of the two answers is not symmetric, which is the whole argument:
+/// guessing "risky" wrongly costs one extra dialog, and guessing "safe" wrongly
+/// costs formulas that now point at different cells with nothing on screen to
+/// say so.
+///
+/// Takes the probe as a callback so the failing case is reachable from a test
+/// without a wasm module that can be made to throw on demand.
+export function shiftIsRisky(probe) {
+  try {
+    return Boolean(probe());
+  } catch {
+    return true;
+  }
+}
+
 function cellMenu(x, y) {
   closeSheetMenu();
   const menu = document.createElement("div");
@@ -9414,13 +9437,8 @@ function cellMenu(x, y) {
   // the user is told when that matters rather than discovering it later.
   const shiftCells = (insert, vertical, label) => () => {
     const r = effectiveRange();
-    let risky = false;
-    // A probe, not the edit: `session_shift_cells` below goes through
-    // `tryEdit`, which reports. An unanswerable probe only costs the extra
-    // confirmation — though see MNT-001's note: the safe fallback is arguably
-    // `true`, and that is a behaviour change, not an error-reporting one.
-    try { risky = wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical); }
-    catch {}
+    const risky = shiftIsRisky(() =>
+      wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical));
     const run = () => {
       tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
       status.textContent = label.toLowerCase();
