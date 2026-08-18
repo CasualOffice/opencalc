@@ -12,8 +12,15 @@ use std::sync::Mutex;
 /// A WOPI host: it holds one file, and it locks.
 #[derive(Clone, Default)]
 struct StubHost {
+    /// What the file is called. The **only** thing that says what format it is
+    /// in — the bytes of a `.csv` are just text — so the adapter reads it from
+    /// here and nowhere else.
+    name: Arc<Mutex<String>>,
     /// What the file contains. Starts as a marker so a fetch can be recognised.
     content: Arc<Mutex<Vec<u8>>>,
+    /// The `Content-Type` the last `PutFile` announced. A host indexes,
+    /// previews and scans on this, so bytes and header have to agree.
+    put_type: Arc<Mutex<Option<String>>>,
     /// The lock id currently held, if any.
     lock: Arc<Mutex<Option<String>>>,
     /// Every override the host was asked to perform, in order.
@@ -34,12 +41,21 @@ impl StubHost {
     fn locked(&self) -> Option<String> {
         self.lock.lock().unwrap().clone()
     }
+    fn put_type(&self) -> Option<String> {
+        self.put_type.lock().unwrap().clone()
+    }
+}
+
+/// Start the stub over the usual `.xlsx`.
+async fn wopi_host() -> (String, StubHost) {
+    wopi_host_holding("Q3.xlsx", b"ORIGINAL").await
 }
 
 /// Start the stub, returning the `WOPISrc` of its one file.
-async fn wopi_host() -> (String, StubHost) {
+async fn wopi_host_holding(name: &str, content: &[u8]) -> (String, StubHost) {
     let state = StubHost::default();
-    *state.content.lock().unwrap() = b"ORIGINAL".to_vec();
+    *state.name.lock().unwrap() = name.to_owned();
+    *state.content.lock().unwrap() = content.to_vec();
     *state.can_write.lock().unwrap() = true;
 
     let app = Router::new()
@@ -52,7 +68,7 @@ async fn wopi_host() -> (String, StubHost) {
                         return (StatusCode::UNAUTHORIZED, String::new()).into_response();
                     }
                     Json(serde_json::json!({
-                        "BaseFileName": "Q3.xlsx",
+                        "BaseFileName": s.name.lock().unwrap().clone(),
                         "Size": s.content.lock().unwrap().len(),
                         "UserCanWrite": *s.can_write.lock().unwrap(),
                         "SupportsLocks": true,
@@ -116,6 +132,10 @@ async fn wopi_host() -> (String, StubHost) {
             .post(
                 |State(s): State<StubHost>, headers: HeaderMap, body: axum::body::Bytes| async move {
                     s.calls.lock().unwrap().push("PutFile".to_owned());
+                    *s.put_type.lock().unwrap() = headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
                     if *s.refuse_writes.lock().unwrap() {
                         return StatusCode::INTERNAL_SERVER_ERROR;
                     }
@@ -251,6 +271,187 @@ async fn a_file_opens_edits_and_saves_back_to_the_host() {
         vec!["CheckFileInfo", "LOCK", "GetFile", "PutFile", "UNLOCK"],
         "the sequence a host sees"
     );
+}
+
+/// **A host's `.csv` opens, edits, and comes back a `.csv`** (`WOPI-05`).
+///
+/// The defect this holds shut, and the reason discovery advertised one
+/// extension: the save leg emitted an OOXML package whatever it opened, so a
+/// host that handed us `Books.csv` got a zip back under that name. The original
+/// was gone, every tool downstream saw a corrupt CSV, and nothing anywhere said
+/// so.
+///
+/// Both conversions are asserted, because each is a different failure. The
+/// collaboration server reads packages and only packages, so the fetch leg must
+/// hand it one; the host holds a `.csv`, so the save leg must hand it text —
+/// and the `Content-Type` has to say the same thing the bytes do, because that
+/// is what a host indexes, previews and virus-scans on.
+#[tokio::test]
+async fn a_csv_opens_as_a_package_and_saves_back_as_a_csv() {
+    let (src, host) = wopi_host_holding("Books.csv", b"Item,Qty\r\nWidget,3\r\n").await;
+    let at = adapter().await;
+    let client = reqwest::Client::new();
+
+    let page = client
+        .get(format!("{at}/wopi/edit"))
+        .query(&[("WOPISrc", src.as_str()), ("access_token", "host-token")])
+        .send()
+        .await
+        .expect("the action URL answered");
+    assert!(page.status().is_success(), "{}", page.status());
+    let id = session_id(&page.text().await.unwrap());
+
+    // The page is told what will be written back, before any editing happens.
+    let info: serde_json::Value = client
+        .get(format!("{at}/wopi/session/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["format"], "csv", "the session forgot what it opened");
+
+    // 1. The collaboration server fetches — and is handed a package, which is
+    //    the only thing it can open.
+    let package = client
+        .get(format!("{at}/wopi/content/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        &package[..2],
+        b"PK",
+        "the collaboration server was handed something it cannot open: {}",
+        String::from_utf8_lossy(&package[..package.len().min(40)])
+    );
+
+    // 2. It edits and posts the finished package back, exactly as it would for
+    //    an `.xlsx`. Nothing about the server knows this file is a CSV.
+    let mut session = WorkbookSession::open(package).expect("the package we served opens");
+    session
+        .edit(casual_calc_sdk::EditOperation::SetValue {
+            sheet: 0,
+            at: casual_calc_sdk::CellRef::new(1, 1),
+            value: casual_calc_sdk::CellValue::Number(7.0),
+        })
+        .expect("edited");
+    let finished = session.save().expect("the server writes a package");
+
+    let saved = client
+        .post(format!("{at}/wopi/callback/{id}"))
+        .body(finished)
+        .send()
+        .await
+        .unwrap();
+    assert!(saved.status().is_success(), "{}", saved.status());
+
+    // 3. The host's file is still a CSV, and carries the edit.
+    assert_eq!(
+        String::from_utf8(host.content()).expect("the host's file is still text"),
+        "Item,Qty\r\nWidget,7\r\n",
+        "the host's .csv was overwritten with something else"
+    );
+    assert_eq!(
+        host.put_type().as_deref(),
+        Some("text/csv;charset=utf-8"),
+        "the bytes were CSV and the header said they were a spreadsheet package"
+    );
+}
+
+/// **A file this service cannot save back in its own format is refused before
+/// it is locked.**
+///
+/// Discovery only advertises what the save leg can write, so a host following
+/// it never asks. A hand-written link, a stale host configuration or an `.ods`
+/// does — and the old behaviour was to assume `.xlsx`, edit it, and write a
+/// package over it under its original name.
+#[tokio::test]
+async fn a_format_this_service_cannot_write_is_never_opened() {
+    let (src, host) = wopi_host_holding("Notes.ods", b"PK\x03\x04...").await;
+    let at = adapter().await;
+
+    let refused = reqwest::Client::new()
+        .get(format!("{at}/wopi/edit"))
+        .query(&[("WOPISrc", src.as_str()), ("access_token", "host-token")])
+        .send()
+        .await
+        .expect("answered");
+
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(host.locked(), None, "a file we cannot write was locked");
+    assert!(
+        !host.calls().contains(&"LOCK".to_owned()),
+        "{:?}",
+        host.calls()
+    );
+}
+
+/// **A `.csv` save of a workbook the format cannot hold names everything it
+/// drops, and drops nothing quietly.**
+///
+/// The case that decides whether this row is honest rather than merely working:
+/// somebody opens `Books.csv`, adds a second sheet and a formula, and saves. A
+/// `.csv` holds one sheet of values. The save goes ahead — they are editing a
+/// CSV and asked for a CSV — but every part of the document that does not
+/// survive is counted and named on the way out.
+///
+/// Asserted on the pure pair rather than through the socket, because what is
+/// being checked is the *report*, and a log line read back out of a subscriber
+/// is a test of `tracing`.
+#[test]
+fn a_csv_save_names_the_sheets_and_formulas_it_cannot_carry() {
+    use casual_calc_model::{Id, Sheet, SheetId};
+
+    let mut session = WorkbookSession::open_delimited(b"Item,Qty\r\nWidget,3\r\n".to_vec(), b',')
+        .expect("the csv opens");
+    let workbook = session.workbook_mut();
+    // A formula: its answer reaches the file, the formula itself does not.
+    let handle = workbook.store_formula(casual_calc_formula::parse("1+1").unwrap());
+    let mut cell = casual_calc_sdk::Cell::value(casual_calc_sdk::CellValue::Number(2.0));
+    cell.formula = Some(handle);
+    workbook.sheets[0]
+        .cells
+        .set(casual_calc_sdk::CellRef::new(2, 1), cell);
+    // A second sheet, with something on it that must not silently vanish.
+    let mut notes = Sheet::new(SheetId(Id::from_parts(0x5345_5300_0000_0000, 2)), "Notes");
+    let text = workbook.intern_string("do not lose me");
+    notes.cells.set(
+        casual_calc_sdk::CellRef::new(0, 0),
+        casual_calc_sdk::Cell::value(casual_calc_sdk::CellValue::SharedString(text)),
+    );
+    workbook.sheets.push(notes);
+
+    let package = session
+        .save_as(SessionFormat::Xlsx)
+        .expect("the collaboration server's package");
+    let (bytes, loss) = save_as(package, SessionFormat::Delimited(b',')).expect("converts");
+
+    let loss = loss.expect("a second sheet and a formula were dropped and nothing said so");
+    assert!(
+        loss.contains("other sheets (1)"),
+        "the sheet that is not written was not named: {loss}"
+    );
+    assert!(
+        loss.contains("formulas (1)"),
+        "a formula written as its value was not named: {loss}"
+    );
+
+    // And the loss is real, not a warning about something that survived.
+    let text = String::from_utf8(bytes).expect("csv is text");
+    assert!(
+        !text.contains("do not lose me"),
+        "the second sheet was written into the csv after all: {text:?}"
+    );
+
+    // An `.xlsx` save loses nothing and must not cry wolf: a warning on every
+    // file is a warning nobody reads on the one that matters.
+    let package = session.save_as(SessionFormat::Xlsx).unwrap();
+    assert_eq!(save_as(package, SessionFormat::Xlsx).unwrap().1, None);
 }
 
 /// **A `WOPISrc` that is not on the allow-list is refused before any request is

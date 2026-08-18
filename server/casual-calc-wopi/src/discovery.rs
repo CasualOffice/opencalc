@@ -6,14 +6,26 @@
 //! editor handles and where to send a browser for each. Without it there is no
 //! way to point any of them at OpenCalc at all.
 //!
-//! # Why the extension list is short
+//! # The extension list is exactly what a save can write back
 //!
-//! Only `xlsx`. The save leg of a session emits an OOXML package, so
-//! advertising a format we can *read* but not write back — `.ods`, `.csv` —
-//! would mean a host handing us one file and getting a different one back under
-//! the same name. That is silent data loss with an administrator's blessing,
-//! and the list stays honest until save can preserve the format it opened
-//! (`WOPI-05`).
+//! An extension belongs here only if a file opened under it is written back
+//! **in the same format** — a host handing us one file and getting a different
+//! one back under the same name is silent data loss with an administrator's
+//! blessing. That used to mean `xlsx` alone, because the save leg emitted an
+//! OOXML package whatever it opened; it now includes the delimited formats,
+//! because `save_as` converts the finished package back to the format the file
+//! arrived in before it reaches `PutFile` (`WOPI-05`).
+//!
+//! `.ods` is still absent, and the rule is the test beside this module: every
+//! extension here must be one `SessionFormat::for_extension` recognises, which
+//! is the same table the save leg writes from. A format this engine can read
+//! but not write can never be added by editing this list alone.
+//!
+//! **What delimited text cannot carry is another matter, and is not silent.**
+//! A `.csv` holds one sheet of values: no second sheet, no formulas, no
+//! formatting. The save leg counts and names every bit of that before it
+//! writes — see `describe_loss` — because the alternative to warning an
+//! administrator is surprising them.
 //!
 //! # The brand is operator input, and goes into markup
 //!
@@ -71,8 +83,14 @@ fn non_empty(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The formats advertised for editing. See the module note before adding one.
-const EDITABLE: &[&str] = &["xlsx"];
+/// The formats advertised for editing. See the module note before adding one:
+/// an extension here is a promise that a file opened under it is saved back in
+/// the same format, and the test beside this module holds that promise to the
+/// engine's own table rather than to this comment.
+///
+/// `xlsx` stays first because it is the `default="true"` action and the one a
+/// host offers for a new document.
+pub const EDITABLE: &[&str] = &["xlsx", "csv", "tsv", "psv"];
 
 /// Render `/hosting/discovery` for a service published at `public_url`.
 ///

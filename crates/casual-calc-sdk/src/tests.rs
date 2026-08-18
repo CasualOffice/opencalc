@@ -1501,3 +1501,340 @@ mod escapes {
         );
     }
 }
+
+/// A session opened from delimited text saves back as delimited text
+/// (`WOPI-05`).
+///
+/// The defect these hold shut: the session built the workbook and then forgot
+/// where it came from, so `save` reached for the only writer it knew and
+/// returned an OOXML package. A host that handed us `books.csv` got a zip back
+/// under that name — every tool downstream sees a corrupt CSV, and the original
+/// is gone.
+mod delimited_sessions {
+    use casual_calc_io::{COMMA, PIPE, TAB, read_delimited};
+    use casual_calc_model::{Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style};
+
+    use crate::{EditOperation, SessionFormat, WorkbookSession};
+
+    const CSV: &[u8] = b"Item,Qty\r\nWidget,3\r\n";
+
+    #[test]
+    fn an_edited_csv_session_saves_csv_that_reads_back_with_the_edit() {
+        let mut session =
+            WorkbookSession::open_delimited(CSV.to_vec(), COMMA).expect("the csv opens");
+        assert_eq!(session.format(), SessionFormat::Delimited(COMMA));
+
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(1, 1),
+                value: CellValue::Number(7.0),
+            })
+            .expect("edited");
+
+        let saved = session.save().expect("saves");
+        assert_ne!(
+            &saved[..2],
+            b"PK",
+            "a csv session saved an OOXML package: {}",
+            String::from_utf8_lossy(&saved[..saved.len().min(40)])
+        );
+        assert_eq!(
+            String::from_utf8(saved.clone()).unwrap(),
+            "Item,Qty\r\nWidget,7\r\n"
+        );
+
+        // And the bytes are readable as what they claim to be.
+        let reread = read_delimited(&saved, COMMA).expect("the saved bytes are delimited text");
+        assert_eq!(
+            reread.sheets[0].cells.get(CellRef::new(1, 1)).unwrap().value,
+            CellValue::Number(7.0),
+        );
+    }
+
+    /// Opened and not edited saves as itself, exactly as a package does — a
+    /// file that was only looked at is not rewritten.
+    ///
+    /// Written with bare newlines and a needlessly quoted field, both of which
+    /// the writer normalises away: a source the writer would reproduce anyway
+    /// could not tell the two paths apart, and this test would pass with the
+    /// guarantee removed.
+    #[test]
+    fn an_untouched_csv_saves_byte_for_byte() {
+        const AS_WRITTEN: &[u8] = b"Item,Qty\nWidget,\"3\"\n";
+        let session = WorkbookSession::open_delimited(AS_WRITTEN.to_vec(), COMMA).expect("opens");
+        assert_eq!(
+            String::from_utf8(session.save().expect("saves")).unwrap(),
+            String::from_utf8(AS_WRITTEN.to_vec()).unwrap(),
+            "opening a csv and saving it rewrote the author's file"
+        );
+        assert!(session.is_unmodified());
+    }
+
+    /// The tab and pipe separators are remembered too, and each writes its own.
+    #[test]
+    fn a_tsv_session_saves_tabs_and_a_psv_pipes() {
+        for (delimiter, source) in [(TAB, "a\tb\r\n"), (PIPE, "a|b\r\n")] {
+            let mut session =
+                WorkbookSession::open_delimited(source.as_bytes().to_vec(), delimiter)
+                    .expect("opens");
+            session
+                .edit(EditOperation::SetValue {
+                    sheet: 0,
+                    at: CellRef::new(1, 0),
+                    value: CellValue::Number(1.0),
+                })
+                .expect("edited");
+            let saved = String::from_utf8(session.save().expect("saves")).unwrap();
+            assert_eq!(
+                saved,
+                format!("a{d}b\r\n1{d}\r\n", d = delimiter as char),
+                "delimiter {delimiter} was not the one written back"
+            );
+        }
+    }
+
+    /// The regression guard: nothing about an `.xlsx` session changed.
+    #[test]
+    fn an_edited_xlsx_session_still_saves_a_package() {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        assert_eq!(session.format(), SessionFormat::Xlsx);
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(1.0),
+            })
+            .expect("edited");
+
+        let saved = session.save().expect("saves");
+        assert_eq!(
+            &saved[..2],
+            b"PK",
+            "an xlsx session stopped writing a package"
+        );
+        let reopened = WorkbookSession::open(saved).expect("the package reopens");
+        assert_eq!(
+            reopened.workbook().sheets[0]
+                .cells
+                .get(CellRef::new(0, 0))
+                .unwrap()
+                .value,
+            CellValue::Number(1.0),
+        );
+        assert!(
+            reopened.format_loss().is_empty(),
+            "an xlsx session claimed its format loses something"
+        );
+    }
+
+    /// **What the format costs is counted, never dropped quietly.**
+    ///
+    /// The three losses everyone names — one sheet, formulas as values, no
+    /// formatting — plus the ones nobody does, which disappear just as
+    /// completely.
+    #[test]
+    fn a_delimited_save_names_everything_it_cannot_carry() {
+        let mut session = WorkbookSession::open_delimited(CSV.to_vec(), COMMA).expect("opens");
+        let wb = session.workbook_mut();
+
+        // A formula on the sheet that will be written.
+        let handle = wb.store_formula(casual_calc_formula::parse("1+1").unwrap());
+        let mut b3 = Cell::value(CellValue::Number(2.0));
+        b3.formula = Some(handle);
+        // Bold: formatting a text field has nowhere to go.
+        let bold = wb.intern_style(Style {
+            bold: true,
+            ..Style::default()
+        });
+        // A date format, which *is* carried — `write_delimited` renders it as
+        // written and `read_delimited` types it back.
+        let dated = wb.intern_style(Style {
+            number_format: Some("yyyy-mm-dd".to_owned()),
+            ..Style::default()
+        });
+        // A *non*-date number format, which is not: the writer puts `1234.5`
+        // where the sheet showed `1,234.50`.
+        let money = wb.intern_style(Style {
+            number_format: Some("#,##0.00".to_owned()),
+            ..Style::default()
+        });
+        let text = wb.intern_string("note");
+        let sheet = &mut wb.sheets[0];
+        sheet.cells.set(CellRef::new(2, 1), b3);
+        let mut a3 = Cell::value(CellValue::SharedString(text));
+        a3.style = Some(bold);
+        sheet.cells.set(CellRef::new(2, 0), a3);
+        let mut c1 = Cell::value(CellValue::Number(45356.0));
+        c1.style = Some(dated);
+        sheet.cells.set(CellRef::new(0, 2), c1);
+        let mut c2 = Cell::value(CellValue::Number(1234.5));
+        c2.style = Some(money);
+        sheet.cells.set(CellRef::new(1, 2), c2);
+        sheet
+            .merges
+            .push(CellRange::new(CellRef::new(4, 0), CellRef::new(4, 1)));
+        sheet.view.frozen_rows = 1;
+        // A second sheet: not written at all.
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 2)), "Notes"));
+
+        let loss = session.format_loss();
+        let named: std::collections::BTreeMap<String, (crate::ModelOutcome, u64)> = loss
+            .entries()
+            .into_iter()
+            .map(|e| (e.feature, (e.model, e.count)))
+            .collect();
+
+        assert_eq!(
+            named.get("other sheets").map(|e| e.1),
+            Some(1),
+            "the second sheet is not written and was not reported: {named:?}"
+        );
+        assert_eq!(
+            named.get("formulas"),
+            Some(&(crate::ModelOutcome::Degraded, 1)),
+            "a formula written as its value is a degradation, and must be said: {named:?}"
+        );
+        assert_eq!(
+            named.get("cell formatting").map(|e| e.1),
+            Some(2),
+            "bold and a currency format are lost, a date format is not — exactly \
+             two cells are reportable: {named:?}"
+        );
+        assert_eq!(named.get("merged cells").map(|e| e.1), Some(1), "{named:?}");
+        assert_eq!(named.get("frozen panes").map(|e| e.1), Some(1), "{named:?}");
+    }
+
+    /// A clean single-sheet CSV loses nothing, and says so. A report that
+    /// warned about every file would be ignored on the one that mattered.
+    #[test]
+    fn a_plain_csv_reports_no_loss_at_all() {
+        let session = WorkbookSession::open_delimited(CSV.to_vec(), COMMA).expect("opens");
+        assert!(
+            session.format_loss().is_empty(),
+            "a plain csv was reported as lossy: {:?}",
+            session.format_loss().entries()
+        );
+    }
+
+    /// The extension a host must put on the file it writes.
+    #[test]
+    fn a_format_names_its_own_extension_and_type() {
+        assert_eq!(
+            SessionFormat::for_extension("CSV"),
+            Some(SessionFormat::Delimited(COMMA))
+        );
+        assert_eq!(
+            SessionFormat::for_extension("tab"),
+            Some(SessionFormat::Delimited(TAB))
+        );
+        assert_eq!(SessionFormat::for_extension("xlsx"), Some(SessionFormat::Xlsx));
+        assert_eq!(
+            SessionFormat::for_extension("ods"),
+            None,
+            "ods is read but not written, so it must not name a save format"
+        );
+        assert_eq!(SessionFormat::Delimited(PIPE).extension(), "psv");
+        assert!(
+            SessionFormat::Delimited(COMMA)
+                .content_type()
+                .starts_with("text/csv")
+        );
+    }
+
+    /// **Asking for a format that is not the session's own gets that format,
+    /// not the file that was opened.**
+    ///
+    /// The trap in `save_as`: the byte-for-byte guarantee returns the source
+    /// bytes when nothing has been edited, and returning them for *any*
+    /// requested format hands a caller a `.csv` when it asked for a package.
+    /// This is the WOPI adapter's whole fetch leg — it converts a file it has
+    /// not touched — so the untouched case is exactly the one that matters.
+    #[test]
+    fn converting_an_untouched_session_does_not_return_the_original_bytes() {
+        let session = WorkbookSession::open_delimited(CSV.to_vec(), COMMA).expect("opens");
+        assert!(session.is_unmodified(), "nothing was edited");
+
+        let package = session
+            .save_as(crate::SessionFormat::Xlsx)
+            .expect("converts to a package");
+        assert_eq!(
+            &package[..2],
+            b"PK",
+            "asked for a package and got the csv back: {}",
+            String::from_utf8_lossy(&package[..package.len().min(40)])
+        );
+        let reopened = WorkbookSession::open(package).expect("the package opens");
+        assert_eq!(
+            reopened.workbook().sheets[0]
+                .cells
+                .get(CellRef::new(1, 0))
+                .unwrap()
+                .value,
+            reread_first_column(),
+        );
+
+        // And the session is unchanged: `save` still gives its own format.
+        assert_eq!(session.save().expect("saves"), CSV.to_vec());
+    }
+
+    /// The value `Widget` as it comes back out of a workbook, interned.
+    fn reread_first_column() -> CellValue {
+        // Compared through the round trip rather than by handle: the interned
+        // id belongs to whichever workbook interned it.
+        let wb = read_delimited(CSV, COMMA).expect("reads");
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(1, 0))
+            .unwrap()
+            .value
+            .clone()
+    }
+
+    /// **The loss of a format is asked of the document, not of the session's
+    /// own format.**
+    ///
+    /// A converter holds an `.xlsx` in memory and is about to write a `.csv`;
+    /// asking `format_loss` would say "nothing", because the session it built
+    /// to do the reading is an xlsx one.
+    #[test]
+    fn a_conversion_can_ask_what_another_format_would_cost() {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 2)), "Notes"));
+
+        assert!(
+            session.format_loss().is_empty(),
+            "an xlsx session loses nothing writing xlsx"
+        );
+        let loss = session.loss_writing(SessionFormat::Delimited(COMMA));
+        assert_eq!(
+            loss.entries()
+                .into_iter()
+                .find(|e| e.feature == "other sheets")
+                .map(|e| e.count),
+            Some(1),
+            "converting to csv would drop a sheet and said nothing: {:?}",
+            loss.entries()
+        );
+    }
+
+    /// Text that is not UTF-8 is refused rather than mangled.
+    #[test]
+    fn a_csv_that_is_not_utf8_is_refused() {
+        let err = WorkbookSession::open_delimited(vec![0xff, 0xfe, b'a'], COMMA)
+            .expect_err("invalid utf-8 must not open");
+        assert!(matches!(err, crate::SdkError::Io(_)), "{err:?}");
+    }
+}

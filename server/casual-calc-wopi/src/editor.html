@@ -82,7 +82,15 @@
         token: session.token,
         readOnly: !session.editable,
       });
-      state.textContent = session.editable ? "saving to the host" : "read-only";
+      // A delimited file keeps one sheet of values, and the honest moment to
+      // say so is now — the save leg will do it anyway, into a log nobody
+      // editing the file can read.
+      const lossy = session.format && session.format !== "xlsx";
+      state.textContent = !session.editable
+        ? "read-only"
+        : lossy
+          ? `saving to the host as .${session.format} — one sheet, values only`
+          : "saving to the host";
     } catch (why) {
       fail(`could not join: ${why}`);
     }

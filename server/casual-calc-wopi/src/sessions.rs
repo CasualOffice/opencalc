@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use casual_calc_sdk::SessionFormat;
+
 use crate::wopi::FileInfo;
 
 /// One open file.
@@ -35,6 +37,14 @@ pub struct Session {
     pub lock: Option<String>,
     /// The filename, for the editor's title bar.
     pub title: String,
+    /// **The format the file on the host is in**, taken from that filename.
+    ///
+    /// The only place the answer exists. The bytes do not say — a `.csv` is
+    /// text and so is half of everything else — and by the time the finished
+    /// package comes back from the collaboration server there is nothing left
+    /// to ask. A session that forgot this wrote an OOXML package over the
+    /// host's `books.csv` (`WOPI-05`).
+    pub format: SessionFormat,
     /// Whether this user may write. Derived from `UserCanWrite`, and from
     /// whether the host will accept a `PutFile` at all.
     pub editable: bool,
@@ -48,14 +58,42 @@ pub struct Session {
     pub refreshed_ms: u64,
 }
 
+/// The format a host's filename names, or `None` for one this service will not
+/// take responsibility for.
+///
+/// `None` rather than a fallback to `.xlsx`, and this is the whole of the
+/// decision: assuming a package is how a `.ods` — or a name with no extension
+/// at all — gets opened, edited, and written back as a zip under its original
+/// name. The caller refuses the open instead, which costs a user one error
+/// message and costs nobody a file.
+///
+/// The extension is taken after the **last** dot, so `report.2024.csv` is a
+/// CSV and `archive.csv.gz` is not a CSV, which is the truth in both cases.
+#[must_use]
+pub fn format_for(base_file_name: &str) -> Option<SessionFormat> {
+    let (_, ext) = base_file_name.rsplit_once('.')?;
+    SessionFormat::for_extension(ext)
+}
+
 impl Session {
     /// Build a session from what `CheckFileInfo` said.
+    ///
+    /// `format` comes from [`format_for`] and is passed in rather than derived
+    /// here, because the caller has to have refused an unrecognised one before
+    /// it ever locks the file.
     #[must_use]
-    pub fn from(src: String, token: String, info: &FileInfo, now_ms: u64) -> Self {
+    pub fn from(
+        src: String,
+        token: String,
+        info: &FileInfo,
+        format: SessionFormat,
+        now_ms: u64,
+    ) -> Self {
         Self {
             src,
             token,
             lock: None,
+            format,
             title: info.base_file_name.clone(),
             // Both, not either: a host that says the user may write but does
             // not implement `PutFile` cannot be saved to, and finding that out

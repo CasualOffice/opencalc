@@ -85,19 +85,64 @@ fn an_unset_favicon_is_absent_rather_than_empty() {
 }
 
 /// **Nothing is advertised that the save leg would rewrite into another
-/// format.**
+/// format** (`WOPI-05`).
 ///
-/// A session saves an OOXML package. A host that handed us `.ods` and got that
-/// back under the same name has lost the original, silently, with an
-/// administrator's blessing — so the advertisement is the thing that has to
-/// stay narrow until save preserves what it opened.
+/// The list used to be `xlsx` alone, because a save emitted a package whatever
+/// it opened: a host that handed us `.ods` got that package back under the same
+/// name and had lost the original, silently, with an administrator's blessing.
+///
+/// Now the save leg converts, so the list is wider — and the guard has to
+/// change shape with it, because a longer literal list of formats to *forbid*
+/// stops meaning anything the moment somebody adds a format. It is asserted
+/// against the engine's own table instead: an extension may be advertised only
+/// if [`casual_calc_sdk::SessionFormat::for_extension`] recognises it, which is
+/// the same table `save_as` writes from. Adding `.ods` here cannot pass this
+/// until the engine can *write* one.
 #[test]
 fn only_formats_that_round_trip_are_advertised() {
+    use casual_calc_sdk::SessionFormat;
+
+    for ext in EDITABLE {
+        let format = SessionFormat::for_extension(ext).unwrap_or_else(|| {
+            panic!("`{ext}` is advertised, and a save would rewrite it as something else")
+        });
+        assert_eq!(
+            format.extension(),
+            *ext,
+            "`{ext}` opens as a format that writes `.{}` back — a host would get \
+             one kind of file under another kind's name",
+            format.extension()
+        );
+    }
+
+    // And the ones that must stay out, named so the reason survives: this
+    // engine reads them and cannot write them.
     let xml = document("https://c.example", &Brand::default());
-    for lossy in ["ods", "csv", "tsv", "xls", "fods"] {
+    for unwritable in ["ods", "fods", "xls"] {
         assert!(
-            !xml.contains(&format!(r#"ext="{lossy}""#)),
-            "{lossy} is advertised but a save would rewrite it as xlsx"
+            !xml.contains(&format!(r#"ext="{unwritable}""#)),
+            "{unwritable} is advertised but this engine cannot write one"
+        );
+        assert_eq!(SessionFormat::for_extension(unwritable), None);
+    }
+}
+
+/// **The formats a save can now preserve are advertised, both actions each.**
+///
+/// The point of the row: an administrator installing this into Nextcloud gets
+/// it offered for the spreadsheets their users actually have, and `.csv` is
+/// most of them.
+#[test]
+fn the_delimited_formats_are_offered_for_editing() {
+    let xml = document("https://calc.example", &Brand::default());
+    for ext in ["xlsx", "csv", "tsv", "psv"] {
+        assert!(
+            xml.contains(&format!(r#"<action name="edit" ext="{ext}""#)),
+            "no edit action for {ext}: {xml}"
+        );
+        assert!(
+            xml.contains(&format!(r#"<action name="view" ext="{ext}""#)),
+            "no view action for {ext}: {xml}"
         );
     }
 }

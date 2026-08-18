@@ -389,6 +389,7 @@ dependencies = [
  "casual-calc-export",
  "casual-calc-formula",
  "casual-calc-import",
+ "casual-calc-io",
  "casual-calc-layout",
  "casual-calc-model",
  "casual-calc-ooxml",
@@ -434,6 +435,9 @@ name = "casual-calc-wopi"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "casual-calc-formula",
+ "casual-calc-model",
+ "casual-calc-sdk",
  "getrandom 0.3.4",
  "jsonwebtoken",
  "reqwest",
