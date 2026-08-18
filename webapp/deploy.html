@@ -365,14 +365,33 @@ GET  /api/documents/{id}/download    <span class="c"># what a user takes away</s
           retention and backup become whatever your product already does. That is the point
           of the boundary.
         </p>
+        <p>
+          The reference host keeps the previous contents of a document each time it is
+          saved, bounded by <code>OPENCALC_MAX_VERSIONS</code> (default 20). They are
+          listed, downloadable and restorable:
+        </p>
+<pre>GET  /api/documents/{id}/versions             <span class="c"># newest first</span>
+GET  /api/documents/{id}/versions/{at}        <span class="c"># look at one</span>
+POST /api/documents/{id}/versions/{at}/restore</pre>
+        <p>
+          Restoring keeps the current document as a version first, so a restore is itself
+          undoable — the one button whose purpose is undoing a mistake should not be the
+          only one that cannot be undone.
+        </p>
         <div class="callout warn">
           <p>
-            <b>There is no version history or point-in-time restore yet.</b> A save replaces
-            what was there. If you need history, keep it on your side of the host contract —
-            the callback is where the finished bytes arrive, and nothing stops you writing
-            each one somewhere durable.
+            <b>A restore lands on the stored file, not on open sessions.</b> Anyone with the
+            document open is still editing what was there before, and their next save
+            overwrites the restore. Everyone should reload. Making a restore reach live
+            sessions means the collaboration server evicting the document, which is a
+            change to a boundary that is deliberate — it holds no per-document state.
           </p>
         </div>
+        <p>
+          When you replace the reference host with your own, this stops being ours:
+          retention and restore become whatever your product already does, and the callback
+          is where each finished version arrives.
+        </p>
 
         <h2 id="wopi">Nextcloud, SharePoint, Moodle, ownCloud, Alfresco</h2>
         <p>
@@ -409,7 +428,6 @@ https://your-host/hosting/discovery</pre>
         <ul>
           <li><b>No Helm chart or Kubernetes manifests.</b> Compose is the supported path today.</li>
           <li><b>Redis in the cluster stack is a single unreplicated instance.</b> Fine for capacity, not yet an availability story.</li>
-          <li><b>No version history or restore</b>, as above.</li>
           <li><b>Secrets are environment variables and mounted files</b> — there is no integration with a secret manager yet.</li>
           <li><b>No published image.</b> You build from the repository; images are built in CI but not yet pushed to a registry.</li>
         </ul>
