@@ -1697,6 +1697,43 @@ async fn a_plain_endpoint_is_refused_rather_than_silently_downgraded() {
     assert!(tls_config(&endpoint).is_err());
 }
 
+/// **A key file that holds no key says so, rather than reporting a parse error.**
+///
+/// The certificate half of this was covered; the key half was not, and the two
+/// libraries disagree about how they report it. `rustls_pemfile::private_key`
+/// returned `Ok(None)` for a file with nothing in it, so the "holds no private
+/// key" message came from an explicit `ok_or_else`. `PrivateKeyDer::from_pem_reader`
+/// returns an *error* instead, so that message survives only if the variant is
+/// matched (`DEP-14`).
+///
+/// It matters because this is what an operator reads at boot when TLS will not
+/// come up. "no items found in PEM file" sends somebody looking for a corrupt
+/// file; "holds no private key" tells them which of the two files is wrong.
+#[tokio::test]
+async fn a_key_file_holding_no_key_is_named_rather_than_reported_as_a_parse_error() {
+    let (cert, _) = certificate_files();
+
+    // Exists, is readable, is even valid PEM-adjacent text — and holds no key.
+    let empty = std::env::temp_dir().join("opencalc-empty-key.pem");
+    std::fs::write(&empty, b"# nothing here\n").unwrap();
+
+    let err = tls_config(&crate::config::Endpoint::secured(
+        "127.0.0.1:0".parse().unwrap(),
+        cert,
+        empty,
+    ))
+    .unwrap_err();
+
+    assert!(
+        err.contains("holds no private key"),
+        "the operator must be told which file is wrong, got: {err}"
+    );
+    assert!(
+        err.contains("opencalc-empty-key.pem"),
+        "and it must name the file: {err}"
+    );
+}
+
 #[tokio::test]
 async fn a_missing_or_empty_certificate_is_named_rather_than_guessed_at() {
     let (cert, key) = certificate_files();

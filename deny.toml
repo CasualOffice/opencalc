@@ -2,6 +2,28 @@
 
 [advisories]
 yanked = "deny"
+# **Individually listed, each with a reason and a row — never a category.**
+#
+# Relaxing `unmaintained` wholesale would be how a supply-chain gate stops
+# being one: the next unmaintained crate would arrive silently. These two are
+# named one at a time so that adding a third is a deliberate edit somebody has
+# to justify in review, and so an entry that stops being needed shows up as
+# unused rather than living here forever.
+#
+# Both are the text-shaping stack, both are unmaintained with **no upgrade
+# available**, and neither is a vulnerability — they are "the author has
+# stopped", not "this crate is exploitable". Migration is tracked as `DEP-14`:
+# the destination is already half-built, since this crate ships `skrifa` (the
+# crate ttf-parser's own advisory recommends) for outlines and only uses
+# rustybuzz for glyph ids. Moving the shaper too also amends ADR-018, which is
+# why it is a row rather than a line in a CI fix.
+ignore = [
+    # `rustybuzz` is unmaintained. Latest published (0.20.1) is what we are on.
+    "RUSTSEC-2026-0206",
+    # `ttf-parser` is unmaintained; reached only through `rustybuzz`, so it
+    # leaves when the shaper does.
+    "RUSTSEC-2026-0192",
+]
 
 [bans]
 multiple-versions = "warn"
