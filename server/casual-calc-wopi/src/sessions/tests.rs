@@ -36,9 +36,40 @@ fn session_ids_are_random_and_long() {
 /// to find out, because by then there is work to lose.
 #[test]
 fn writing_needs_both_permission_and_a_host_that_accepts_it() {
-    assert!(Session::from("s".into(), "t".into(), &info(true, true), 0).editable);
-    assert!(!Session::from("s".into(), "t".into(), &info(true, false), 0).editable);
-    assert!(!Session::from("s".into(), "t".into(), &info(false, true), 0).editable);
+    assert!(Session::from("s".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0).editable);
+    assert!(!Session::from("s".into(), "t".into(), &info(true, false), SessionFormat::Xlsx, 0).editable);
+    assert!(!Session::from("s".into(), "t".into(), &info(false, true), SessionFormat::Xlsx, 0).editable);
+}
+
+/// **The format comes from the host's filename, and an unrecognised one has no
+/// format at all** (`WOPI-05`).
+///
+/// `None` is the load-bearing half. Defaulting to `.xlsx` is what let a session
+/// open somebody's `.ods` and write a package back over it under its own name;
+/// the caller refuses on `None` before it locks anything.
+#[test]
+fn a_filename_names_the_format_and_an_unknown_one_names_nothing() {
+    assert_eq!(format_for("Q3.xlsx"), Some(SessionFormat::Xlsx));
+    assert_eq!(format_for("Books.CSV"), Some(SessionFormat::Delimited(b',')));
+    assert_eq!(format_for("Books.tsv"), Some(SessionFormat::Delimited(b'\t')));
+    // The last dot wins, both ways round.
+    assert_eq!(
+        format_for("report.2024.csv"),
+        Some(SessionFormat::Delimited(b','))
+    );
+    assert_eq!(
+        format_for("archive.csv.gz"),
+        None,
+        "a compressed csv is not a csv, and writing one back as text destroys it"
+    );
+
+    for refused in ["Notes.ods", "Old.xls", "README", "", ".csvx", "trailing."] {
+        assert_eq!(
+            format_for(refused),
+            None,
+            "{refused:?} would have been opened and saved back as something else"
+        );
+    }
 }
 
 /// **A full registry hands the session back rather than dropping it.**
@@ -50,10 +81,10 @@ fn writing_needs_both_permission_and_a_host_that_accepts_it() {
 #[test]
 fn a_full_registry_returns_the_session_so_its_lock_can_be_released() {
     let sessions = Sessions::new(1, 60_000);
-    let first = Session::from("a".into(), "t".into(), &info(true, true), 0);
+    let first = Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0);
     sessions.insert(first, 0).expect("room for one");
 
-    let second = Session::from("b".into(), "t2".into(), &info(true, true), 0);
+    let second = Session::from("b".into(), "t2".into(), &info(true, true), SessionFormat::Xlsx, 0);
     let returned = sessions.insert(second, 0).expect_err("the node is full");
     assert_eq!(
         returned.src, "b",
@@ -68,7 +99,7 @@ fn sessions_expire_and_are_collected() {
     let sessions = Sessions::new(10, 1_000);
     let id = sessions
         .insert(
-            Session::from("a".into(), "t".into(), &info(true, true), 0),
+            Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0),
             0,
         )
         .expect("inserted");
@@ -96,7 +127,7 @@ fn locks_come_due_on_a_timer() {
     let sessions = Sessions::new(10, 3_600_000);
     let id = sessions
         .insert(
-            Session::from("a".into(), "t".into(), &info(true, true), 0),
+            Session::from("a".into(), "t".into(), &info(true, true), SessionFormat::Xlsx, 0),
             0,
         )
         .expect("inserted");

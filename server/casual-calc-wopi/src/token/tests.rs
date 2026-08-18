@@ -31,6 +31,7 @@ fn session(src: &str, can_write: bool) -> Session {
             supports_locks: true,
             supports_update: true,
         },
+        casual_calc_sdk::SessionFormat::Xlsx,
         0,
     )
 }

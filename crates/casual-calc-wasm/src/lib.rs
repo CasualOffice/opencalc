@@ -145,11 +145,69 @@ pub fn session_open(bytes: &[u8]) -> Result<(), JsError> {
 
 /// Open delimited text (CSV/TSV/PSV) into the editor session. `delimiter` is the
 /// separator byte (e.g. `,`, tab, `|`).
+///
+/// Goes through the SDK rather than building a workbook and handing it over,
+/// because that is what makes the session **remember it opened a `.csv`** —
+/// and so what makes [`session_save`] write one back instead of a package with
+/// a `.csv` name on it (`WOPI-05`).
 #[wasm_bindgen]
 pub fn session_open_delimited(bytes: &[u8], delimiter: u8) -> Result<(), JsError> {
-    let workbook = casual_calc_io::read_delimited(bytes, delimiter).map_err(js)?;
-    set_session(WorkbookSession::from_workbook(workbook));
+    set_session(WorkbookSession::open_delimited(bytes.to_vec(), delimiter).map_err(js)?);
     Ok(())
+}
+
+/// The format the session saves as: `xlsx`, `csv`, `tsv`, `psv` or `txt`.
+///
+/// A host names the file it downloads and picks a content type from this. Bytes
+/// that are CSV under a name ending `.xlsx` are the same lie as the one this
+/// row exists to fix, pointing the other way.
+#[wasm_bindgen]
+pub fn session_format() -> String {
+    with_session(|s| s.format().extension().to_owned()).unwrap_or_else(|| "xlsx".to_owned())
+}
+
+/// The MIME type [`session_save`]'s bytes should be served as.
+#[wasm_bindgen]
+pub fn session_format_content_type() -> String {
+    with_session(|s| s.format().content_type().to_owned())
+        .unwrap_or_else(|| casual_calc_sdk::SessionFormat::Xlsx.content_type().to_owned())
+}
+
+/// What saving in the session's own format cannot carry, as one sentence — or
+/// empty when it carries everything.
+///
+/// The counterpart of [`session_import_summary`] on the way out: a `.csv`
+/// session holds one sheet of values, so a workbook that has grown a second
+/// sheet, a formula or any formatting is about to lose it. Said **before** the
+/// download, because afterwards the file is already on disk.
+#[wasm_bindgen]
+pub fn session_save_loss() -> String {
+    with_session(|s| {
+        let loss = s.format_loss();
+        if loss.is_empty() {
+            return String::new();
+        }
+        let mut dropped: Vec<String> = Vec::new();
+        let mut degraded: Vec<String> = Vec::new();
+        for e in loss.entries() {
+            match e.model {
+                casual_calc_sdk::ModelOutcome::Omitted => dropped.push(e.feature),
+                casual_calc_sdk::ModelOutcome::Degraded => degraded.push(e.feature),
+                casual_calc_sdk::ModelOutcome::Mapped => {}
+            }
+        }
+        let mut parts = Vec::new();
+        if !dropped.is_empty() {
+            parts.push(format!("not written: {}", dropped.join(", ")));
+        }
+        // Named separately because the distinction is the one a user acts on:
+        // a formula's *answer* is in the file, the formula itself is not.
+        if !degraded.is_empty() {
+            parts.push(format!("written as values: {}", degraded.join(", ")));
+        }
+        parts.join("; ")
+    })
+    .unwrap_or_default()
 }
 
 /// Serialize a sheet to delimited text (CSV/TSV/PSV) using the cached values.
@@ -9224,8 +9282,32 @@ pub fn session_can_redo() -> bool {
 }
 
 /// Save the session workbook to `.xlsx` bytes.
+///
+/// **Always a package, whatever the session was opened from** — the editor's
+/// "Save as Excel" writes these bytes to a name ending `.xlsx`, and a session
+/// that opened a `.csv` handing back CSV here would put one format's bytes
+/// under another's name. That is the defect `WOPI-05` exists to remove, and
+/// making this method format-native would have reintroduced it pointing the
+/// other way. [`session_save_native`] is the one that follows the format.
 #[wasm_bindgen]
 pub fn session_save() -> Result<Vec<u8>, JsError> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let session = guard.as_ref().ok_or_else(|| JsError::new("no session"))?;
+        session
+            .save_as(casual_calc_sdk::SessionFormat::Xlsx)
+            .map_err(js)
+    })
+}
+
+/// Save in the format the session was **opened from**: a `.csv` back as CSV.
+///
+/// Paired with [`session_format`] and [`session_format_content_type`], which
+/// name what these bytes are, and with [`session_save_loss`], which says what
+/// the format could not carry. A caller that writes these bytes without asking
+/// the last of those is dropping part of a document silently.
+#[wasm_bindgen]
+pub fn session_save_native() -> Result<Vec<u8>, JsError> {
     SESSION.with(|cell| {
         let guard = cell.borrow();
         let session = guard.as_ref().ok_or_else(|| JsError::new("no session"))?;

@@ -9,7 +9,8 @@
 
 use casual_calc_eval::{Recalculated, Recalculator, recalculate, recalculate_cancellable};
 use casual_calc_export::{ExportError, write_workbook};
-use casual_calc_import::{CompatibilityReport, ImportError, import_package_cancellable};
+use casual_calc_import::{ImportError, import_package_cancellable};
+use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
 use casual_calc_render::{PanePaint, RenderError, render_panes_png};
@@ -18,6 +19,14 @@ use casual_calc_transaction::{
 };
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
+//
+// The report types among them are returned by two methods on the session
+// ([`WorkbookSession::compatibility_report`] and
+// [`WorkbookSession::format_loss`]), and a return type a caller cannot name
+// without adding a second dependency is a leak rather than a facade.
+pub use casual_calc_import::{
+    CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome,
+};
 pub use casual_calc_layout::Viewport as GridViewport;
 pub use casual_calc_model::{Cell, CellRef, CellValue, Sheet, SheetId, Style};
 pub use casual_calc_transaction::{Operation as EditOperation, SheetMetadata};
@@ -25,6 +34,75 @@ pub use casual_calc_transaction::{Operation as EditOperation, SheetMetadata};
 pub use casual_calc_ooxml::OoxmlLimits;
 
 const SESSION_NAMESPACE: u64 = 0x5345_5300_0000_0000; // "SES"
+
+/// The sheet a delimited save writes.
+///
+/// The first, not the active one: a `.csv` holds exactly one sheet, and the one
+/// the file arrived as is the first. Saving whichever tab the user happened to
+/// be looking at would let a click decide which half of the document survives.
+const DELIMITED_SHEET: usize = 0;
+
+/// The file format a session was opened from, and the one [`WorkbookSession::save`]
+/// writes back.
+///
+/// Remembered because a host that hands us a `.csv` and gets an OOXML package
+/// back has had its file replaced with a different one under the same name —
+/// silent data loss, and the reason the WOPI discovery document advertises one
+/// extension (`WOPI-05`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SessionFormat {
+    /// An OOXML package: the format the model is shaped for, and the default
+    /// for a session built in memory rather than opened from a file.
+    #[default]
+    Xlsx,
+    /// Delimited text (CSV / TSV / PSV), carrying the separator byte it was
+    /// read with so the save uses the same one.
+    Delimited(u8),
+}
+
+impl SessionFormat {
+    /// The format a filename extension names, or `None` for one this engine
+    /// does not write.
+    ///
+    /// `None` rather than a fallback to [`Xlsx`](Self::Xlsx): guessing is how a
+    /// `.ods` would be opened and saved as a package under its original name.
+    #[must_use]
+    pub fn for_extension(ext: &str) -> Option<Self> {
+        if ext.eq_ignore_ascii_case("xlsx") {
+            return Some(Self::Xlsx);
+        }
+        casual_calc_io::delimiter_for_extension(ext).map(Self::Delimited)
+    }
+
+    /// The extension a save in this format writes.
+    ///
+    /// A delimiter with no conventional extension is `txt`, which is what a
+    /// separator nobody standardised produces.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Xlsx => "xlsx",
+            Self::Delimited(casual_calc_io::COMMA) => "csv",
+            Self::Delimited(casual_calc_io::TAB) => "tsv",
+            Self::Delimited(casual_calc_io::PIPE) => "psv",
+            Self::Delimited(_) => "txt",
+        }
+    }
+
+    /// The MIME type a save in this format should be served as.
+    #[must_use]
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Xlsx => {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+            Self::Delimited(casual_calc_io::COMMA) => "text/csv;charset=utf-8",
+            Self::Delimited(casual_calc_io::TAB) => "text/tab-separated-values;charset=utf-8",
+            Self::Delimited(_) => "text/plain;charset=utf-8",
+        }
+    }
+}
 
 /// When the engine recalculates.
 ///
@@ -165,6 +243,8 @@ impl SessionConfig {
 pub enum SdkError {
     /// Import failed.
     Import(ImportError),
+    /// Reading a delimited (CSV/TSV/PSV) file failed.
+    Io(IoError),
     /// Export failed.
     Export(ExportError),
     /// A render failed.
@@ -190,6 +270,7 @@ impl core::fmt::Display for SdkError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             SdkError::Import(e) => write!(f, "{e}"),
+            SdkError::Io(e) => write!(f, "{e}"),
             SdkError::Export(e) => write!(f, "{e}"),
             SdkError::Render(e) => write!(f, "{e}"),
             SdkError::Edit(e) => write!(f, "{e}"),
@@ -229,6 +310,11 @@ impl From<ImportError> for SdkError {
         SdkError::Import(e)
     }
 }
+impl From<IoError> for SdkError {
+    fn from(e: IoError) -> Self {
+        SdkError::Io(e)
+    }
+}
 impl From<ExportError> for SdkError {
     fn from(e: ExportError) -> Self {
         SdkError::Export(e)
@@ -254,6 +340,13 @@ pub struct WorkbookSession {
     config: SessionConfig,
     /// The mode in force, after resolving the config against the file.
     calculation: CalculationMode,
+    /// The format this session was opened from, which is the one it saves back.
+    ///
+    /// Recorded **here**, at the moment the bytes are read, because that is the
+    /// only place the answer is known: by the time [`save`](Self::save) runs
+    /// there is a `Workbook` and nothing on it remembers whether it arrived as
+    /// a package or as a line of commas.
+    format: SessionFormat,
     /// Whether an edit has changed a value since the last recalculation. Only
     /// meaningful in manual mode; automatic never leaves it set.
     stale: bool,
@@ -303,6 +396,9 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            // Nothing was opened, so the format is the one this engine writes
+            // by default.
+            format: SessionFormat::Xlsx,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -315,6 +411,11 @@ impl WorkbookSession {
     }
 
     /// A session over an already-built workbook, configured.
+    ///
+    /// The format is [`SessionFormat::Xlsx`], because a workbook handed over as
+    /// a model came from nowhere in particular. A host that built it by reading
+    /// a `.csv` wants [`open_delimited`](Self::open_delimited) instead, which is
+    /// the path that remembers.
     pub fn from_workbook_with(mut workbook: Workbook, config: SessionConfig) -> Self {
         apply_environment(&mut workbook, &config);
         recalculate(&mut workbook);
@@ -327,6 +428,7 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            format: SessionFormat::Xlsx,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
             source: None,
@@ -389,7 +491,95 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            format: SessionFormat::Xlsx,
             source: Some(source),
+        })
+    }
+
+    /// Open bytes in a named format, whichever it is.
+    ///
+    /// For a caller that learned the format from a filename rather than from
+    /// the bytes — a WOPI adapter is handed `Q3.csv` and a body, and has no
+    /// business branching on the extension itself when
+    /// [`SessionFormat::for_extension`] already knows.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open) or [`open_delimited`](Self::open_delimited),
+    /// according to `format`.
+    pub fn open_as(bytes: Vec<u8>, format: SessionFormat) -> Result<Self, SdkError> {
+        Self::open_as_with(bytes, format, SessionConfig::new())
+    }
+
+    /// The same, under a given configuration.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_as`](Self::open_as).
+    pub fn open_as_with(
+        bytes: Vec<u8>,
+        format: SessionFormat,
+        config: SessionConfig,
+    ) -> Result<Self, SdkError> {
+        match format {
+            SessionFormat::Xlsx => Self::open_with(bytes, config),
+            SessionFormat::Delimited(delimiter) => {
+                Self::open_delimited_with(bytes, delimiter, config)
+            }
+        }
+    }
+
+    /// Open delimited text (CSV / TSV / PSV) by its separator byte.
+    ///
+    /// **The format is remembered**, so [`save`](Self::save) writes the same
+    /// kind of file back rather than an OOXML package. What that file cannot
+    /// carry — every sheet but the first, formulas as formulas, formatting — is
+    /// named by [`format_loss`](Self::format_loss); it is never dropped
+    /// silently.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Io`] if the bytes are not UTF-8. Delimited text has no
+    /// encoding declaration, so a host that may be handed UTF-16 decodes before
+    /// calling this.
+    pub fn open_delimited(bytes: Vec<u8>, delimiter: u8) -> Result<Self, SdkError> {
+        Self::open_delimited_with(bytes, delimiter, SessionConfig::new())
+    }
+
+    /// The same, under a given configuration.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_delimited`](Self::open_delimited).
+    pub fn open_delimited_with(
+        bytes: Vec<u8>,
+        delimiter: u8,
+        config: SessionConfig,
+    ) -> Result<Self, SdkError> {
+        let mut workbook = read_delimited(&bytes, delimiter)?;
+        apply_environment(&mut workbook, &config);
+        // A parsed field is a literal; nothing here has a formula. The pass is
+        // still run so a session opened this way starts in the same state as
+        // any other — `stale` false and cached values current.
+        recalculate(&mut workbook);
+        Ok(Self {
+            calculation: config.calculation.unwrap_or_default(),
+            history: History::with_depth(config.undo_depth),
+            workbook,
+            // Reading delimited text degrades nothing: every field is either
+            // typed or interned, and what it *cannot* represent is not in the
+            // file. The losses of this format are on the way out, and
+            // `format_loss` is where they are counted.
+            report: CompatibilityReport::default(),
+            config,
+            stale: false,
+            applied: None,
+            recalc: Recalculator::new(),
+            format: SessionFormat::Delimited(delimiter),
+            // Same guarantee as a package: opened and not edited saves as
+            // itself, byte for byte. Without it, merely opening a file
+            // rewrites its line endings and re-quotes its fields.
+            source: Some(bytes),
         })
     }
 
@@ -793,7 +983,58 @@ impl WorkbookSession {
         render_sheet_png(&self.workbook, sheet_index, &geometry, viewport, dpi)
     }
 
-    /// Serialize the workbook to a `.xlsx` package.
+    /// The format this session was opened from, and the one
+    /// [`save`](Self::save) writes.
+    ///
+    /// A host needs it to name the file and to set a content type: bytes that
+    /// are CSV inside a name ending `.xlsx` are the same lie in the other
+    /// direction.
+    #[must_use]
+    pub fn format(&self) -> SessionFormat {
+        self.format
+    }
+
+    /// What saving in this session's format cannot carry.
+    ///
+    /// **Ask before saving.** A delimited file holds the values of one sheet
+    /// and nothing else: every other sheet, every formula (written as its
+    /// computed value), and all formatting, merges, comments, charts and images
+    /// are gone from the file even though they are still in this session. The
+    /// engine will not refuse the save — the host asked for that format — but
+    /// [no loss is silent](../../../docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md),
+    /// so everything it costs is counted and named here.
+    ///
+    /// Empty for [`SessionFormat::Xlsx`], which is the format the model is
+    /// shaped for. What a *file* lost coming in is a different question, and
+    /// [`compatibility_report`](Self::compatibility_report) answers it.
+    ///
+    /// Recomputed on each call rather than kept, because it describes the
+    /// document as it is now: a formula typed a second ago changes the answer.
+    #[must_use]
+    pub fn format_loss(&self) -> CompatibilityReport {
+        self.loss_writing(self.format)
+    }
+
+    /// What writing this document in `format` would cost, whatever it was
+    /// opened from.
+    ///
+    /// The general form of [`format_loss`](Self::format_loss). A converter has
+    /// the same duty as a session — a service that reads an OOXML package and
+    /// writes a `.csv` back to a host is dropping exactly as much as an editor
+    /// would, and its report must be asked for before the write, not after.
+    #[must_use]
+    pub fn loss_writing(&self, format: SessionFormat) -> CompatibilityReport {
+        match format {
+            SessionFormat::Xlsx => CompatibilityReport::default(),
+            SessionFormat::Delimited(_) => delimited_loss(&self.workbook, DELIMITED_SHEET),
+        }
+    }
+
+    /// Serialize the workbook to the format it was opened from.
+    ///
+    /// A `.csv` opened here comes back as `.csv` — see [`format`](Self::format)
+    /// for which, and [`format_loss`](Self::format_loss) for what that format
+    /// cannot carry. Everything below describes the `.xlsx` path.
     ///
     /// A file that was **opened and not edited saves as itself, byte for byte**
     /// (P1B-002). That is not an optimisation: the semantic writer reconstructs
@@ -813,7 +1054,31 @@ impl WorkbookSession {
     /// that might explain the difference, so overwriting the author's cached
     /// values on the strength of its own recalculation is the riskier of the two.
     pub fn save(&self) -> Result<Vec<u8>, SdkError> {
-        if let Some(source) = &self.source {
+        self.save_as(self.format)
+    }
+
+    /// Serialize the workbook to a named format, whatever it was opened from.
+    ///
+    /// The general form of [`save`](Self::save), and the one a *converter*
+    /// wants: a service that has to hand an OOXML package to something that
+    /// only reads packages, while the file on the host is a `.csv`, is doing
+    /// two conversions and neither of them is "save".
+    ///
+    /// **Ask [`loss_writing`](Self::loss_writing) first.** Writing a format
+    /// that cannot carry this document is allowed — the caller chose it — but
+    /// the caller is the one that has to say what it cost.
+    ///
+    /// The byte-for-byte guarantee documented on [`save`](Self::save) applies
+    /// only when `format` is the one the session was opened from. Asking for a
+    /// different format is by definition asking for different bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`save`](Self::save).
+    pub fn save_as(&self, format: SessionFormat) -> Result<Vec<u8>, SdkError> {
+        if format == self.format
+            && let Some(source) = &self.source
+        {
             // The original bytes, untouched. Nothing has edited them, so there
             // is nothing to validate — and validating here would refuse to hand
             // back a file this engine merely does not fully model.
@@ -833,7 +1098,18 @@ impl WorkbookSession {
         // corrupt workbook that stayed in memory is a bug, and one that became
         // a file the author will open tomorrow is data loss.
         self.workbook.validate()?;
-        Ok(write_workbook(&self.workbook)?)
+        match format {
+            SessionFormat::Xlsx => Ok(write_workbook(&self.workbook)?),
+            // No byte-order mark. `read_delimited` does not strip one, so a BOM
+            // written here comes back as part of the first field — a save that
+            // makes its own output unreadable by the reader that produced it.
+            SessionFormat::Delimited(delimiter) => Ok(write_delimited(
+                &self.workbook,
+                DELIMITED_SHEET,
+                delimiter,
+            )
+            .into_bytes()),
+        }
     }
 
     /// Whether saving now would return the opened file unchanged.
@@ -976,6 +1252,101 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 
 #[cfg(test)]
 mod tests;
+
+/// Everything in a workbook that a delimited save leaves behind, counted.
+///
+/// The enumeration is deliberately exhaustive over [`Sheet`]'s fields rather
+/// than a list of the three losses people remember (one sheet, no formulas, no
+/// styles). A file's comments, its charts and its data validations disappear
+/// just as completely, and a report that names only the famous three tells a
+/// host its document survived when a third of it did not.
+///
+/// Written against the sheet that is actually saved, `sheet_index`; everything
+/// on every other sheet is covered by the `other sheets` entry, which is the
+/// coarser and more truthful statement — none of it is written at all.
+fn delimited_loss(workbook: &Workbook, sheet_index: usize) -> CompatibilityReport {
+    let mut report = CompatibilityReport::default();
+    let mut gone = |feature: &str, count: usize| {
+        report.record_n(
+            feature,
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            count as u64,
+        );
+    };
+
+    gone("other sheets", workbook.sheets.len().saturating_sub(1));
+    gone("defined names", workbook.defined_names.len());
+
+    let Some(sheet) = workbook.sheets.get(sheet_index) else {
+        return report;
+    };
+
+    let mut formulas = 0usize;
+    let mut formatted = 0usize;
+    for (_, cell) in sheet.cells.iter() {
+        if cell.formula.is_some() {
+            formulas += 1;
+        }
+        if cell
+            .style
+            .and_then(|id| workbook.styles.get(id))
+            .is_some_and(|style| !delimited_carries_style(style))
+        {
+            formatted += 1;
+        }
+    }
+    gone("cell formatting", formatted);
+    gone("merged cells", sheet.merges.len());
+    gone("column widths", usize::from(!sheet.columns.is_empty()));
+    gone("row heights", usize::from(!sheet.rows.is_empty()));
+    gone("hidden rows", sheet.hidden_rows.len());
+    gone("hidden columns", sheet.hidden_cols.len());
+    gone(
+        "outline groups",
+        sheet.row_outline_levels.len() + sheet.col_outline_levels.len(),
+    );
+    gone("frozen panes", usize::from(sheet.view != Default::default()));
+    gone("tab colour", usize::from(sheet.tab_color.is_some()));
+    gone("data validation", sheet.validations.len());
+    gone("conditional formatting", sheet.conditional_formats.len());
+    gone("comments", sheet.comments.len());
+    gone("hyperlinks", sheet.hyperlinks.len());
+    gone("print setup", usize::from(sheet.print != Default::default()));
+    gone("charts", sheet.charts.len());
+    gone("images", sheet.images.len());
+    gone("sort state", usize::from(sheet.sort_state.is_some()));
+    gone("sheet format", sheet.format_pr.len());
+
+    // Degraded rather than omitted, and recorded last so the borrow of the
+    // closure above is over: a formula's *value* is written, which is why a
+    // delimited export is useful at all. What is gone is the formula.
+    report.record_n(
+        "formulas",
+        ModelOutcome::Degraded,
+        RetentionOutcome::NotRetained,
+        formulas as u64,
+    );
+    report
+}
+
+/// Whether a delimited write carries everything a style says.
+///
+/// Almost nothing survives: a field is text, so weight, colour, borders and
+/// alignment have nowhere to go. The exception is a **date or time number
+/// format**, which [`write_delimited`](casual_calc_io::write_delimited) honours
+/// by writing the date as it reads on the sheet — and which `read_delimited`
+/// recognises again on the way back in, so that one round-trips.
+///
+/// Decided by clearing the number format and comparing what is left to the
+/// default style, rather than by listing the fields that matter. A style gains
+/// fields (four Mac font effects arrived at once), and a list would go on
+/// claiming fidelity for whichever one was added last.
+fn delimited_carries_style(style: &Style) -> bool {
+    let mut bare = style.clone();
+    let format = bare.number_format.take();
+    bare == Style::default() && format.is_none_or(|code| casual_calc_io::is_date_format(&code))
+}
 
 /// Install the configured clock and seed on the workbook.
 ///

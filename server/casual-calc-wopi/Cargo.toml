@@ -8,6 +8,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# The engine, through its one facade. The adapter converts between the format
+# the *host* holds and the OOXML package the collaboration server reads, so it
+# needs both readers, both writers, and the table that maps an extension to a
+# format — and one crate that already agrees with the editor about all three is
+# better than three crates and a second copy of the table (`WOPI-05`).
+casual-calc-sdk = { path = "../../crates/casual-calc-sdk" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
@@ -17,6 +23,16 @@ jsonwebtoken = "9"
 getrandom = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Building a second worksheet, to prove a `.csv` save does not drop one
+# quietly. The facade deliberately does not re-export id minting, and a test
+# that cannot construct the awkward document is a test that only ever sees the
+# easy one.
+casual-calc-model = { path = "../../crates/casual-calc-model" }
+# And a real formula, so the sentence the administrator reads in the log is the
+# one the test asserts rather than a simplified stand-in.
+casual-calc-formula = { path = "../../crates/casual-calc-formula" }
 
 [lints]
 workspace = true

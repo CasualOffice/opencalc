@@ -15,6 +15,7 @@ struct Seen {
     query: String,
     over: String,
     lock: String,
+    content_type: String,
     body: Vec<u8>,
 }
 
@@ -59,6 +60,7 @@ async fn stub(status: u16, headers: &[(&str, &str)], body: &[u8]) -> (String, St
                     query: uri.query().unwrap_or_default().to_owned(),
                     over: header(&head, "X-WOPI-Override"),
                     lock: header(&head, "X-WOPI-Lock"),
+                    content_type: header(&head, "Content-Type"),
                     body: body.to_vec(),
                 });
                 let (code, headers, body) = state.reply.lock().unwrap().clone();
@@ -147,7 +149,7 @@ async fn a_rejected_token_is_reported_as_such() {
 async fn a_lock_conflict_keeps_the_id_that_won() {
     let (src, _) = stub(409, &[("X-WOPI-Lock", "held-by-word")], b"").await;
     let problem = Host::new(64 << 20)
-        .put_file(&src, "t", Some("ours"), b"x".to_vec())
+        .put_file(&src, "t", Some("ours"), "text/csv;charset=utf-8", b"x".to_vec())
         .await
         .expect_err("conflict");
     match problem {
@@ -156,23 +158,48 @@ async fn a_lock_conflict_keeps_the_id_that_won() {
     }
 }
 
-/// **`PutFile` is a `POST` to `/contents` with the override and the lock.**
+/// **`PutFile` is a `POST` to `/contents` with the override, the lock, and the
+/// content type of the bytes it is actually carrying.**
 ///
 /// Every one of those is load-bearing: without the override a host answers 404
-/// or 501, and without the lock a host that locked on open answers 409.
+/// or 501, and without the lock a host that locked on open answers 409. The
+/// content type used to be the OOXML constant whatever was being written —
+/// which was true only for as long as a save could write nothing else, and
+/// became a lie the moment one could (`WOPI-05`). A host indexes, previews and
+/// virus-scans on this header.
 #[tokio::test]
 async fn a_save_is_addressed_the_way_wopi_specifies() {
     let (src, stub) = stub(200, &[], b"").await;
-    Host::new(64 << 20)
-        .put_file(&src, "tok", Some("lock-9"), b"package".to_vec())
-        .await
-        .expect("saved");
+    let host = Host::new(64 << 20);
+    host.put_file(
+        &src,
+        "tok",
+        Some("lock-9"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        b"package".to_vec(),
+    )
+    .await
+    .expect("saved");
     let seen = stub.last();
     assert!(seen.path.ends_with("/contents"), "{}", seen.path);
     assert_eq!(seen.over, "PUT");
     assert_eq!(seen.lock, "lock-9");
     assert_eq!(seen.body, b"package");
     assert!(seen.query.contains("access_token=tok"));
+    assert_eq!(
+        seen.content_type,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    // A different format announces itself as one.
+    host.put_file(&src, "tok", None, "text/csv;charset=utf-8", b"a,b\r\n".to_vec())
+        .await
+        .expect("saved");
+    assert_eq!(
+        stub.last().content_type,
+        "text/csv;charset=utf-8",
+        "csv bytes were announced as a spreadsheet package"
+    );
 }
 
 /// **The three lock calls differ only by their override header.**
@@ -233,7 +260,7 @@ async fn a_failure_never_repeats_the_access_token() {
             .to_string(),
         host.get_file(&src, SECRET).await.unwrap_err().to_string(),
         host.lock(&src, SECRET, "l").await.unwrap_err().to_string(),
-        host.put_file(&src, SECRET, Some("l"), vec![])
+        host.put_file(&src, SECRET, Some("l"), "text/plain", vec![])
             .await
             .unwrap_err()
             .to_string(),

@@ -18,6 +18,7 @@ shaping = ["casual-calc-render/shaping"]
 casual-calc-eval = { path = "../casual-calc-eval" }
 casual-calc-export = { path = "../casual-calc-export" }
 casual-calc-import = { path = "../casual-calc-import" }
+casual-calc-io = { path = "../casual-calc-io" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }

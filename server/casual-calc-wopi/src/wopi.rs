@@ -22,9 +22,6 @@
 
 use std::time::Duration;
 
-/// The MIME type a spreadsheet package is sent as.
-const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-
 /// What went wrong talking to the host.
 #[derive(Debug)]
 pub enum Problem {
@@ -204,6 +201,11 @@ impl Host {
     /// matching id is a 409 rather than a save. It is `Option` only because a
     /// host that reports `SupportsLocks: false` has none to send.
     ///
+    /// `content_type` is the caller's, not a constant: this service saves back
+    /// in whatever format the host's file is in, and a `.csv` announced as an
+    /// OOXML package is the same lie as the bytes themselves being wrong —
+    /// hosts index, preview and virus-scan on what this header says (`WOPI-05`).
+    ///
     /// # Errors
     ///
     /// [`Problem::LockMismatch`] if the lock was lost — which is the case worth
@@ -214,6 +216,7 @@ impl Host {
         src: &str,
         token: &str,
         lock: Option<&str>,
+        content_type: &str,
         bytes: Vec<u8>,
     ) -> Result<(), Problem> {
         let mut request = self
@@ -223,7 +226,7 @@ impl Host {
             // Without this the host does not know the request is `PutFile`, and
             // answers 404 or 501 rather than saving.
             .header("X-WOPI-Override", "PUT")
-            .header(reqwest::header::CONTENT_TYPE, XLSX);
+            .header(reqwest::header::CONTENT_TYPE, content_type);
         if let Some(lock) = lock {
             request = request.header("X-WOPI-Lock", lock);
         }

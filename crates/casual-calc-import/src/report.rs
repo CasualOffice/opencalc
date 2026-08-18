@@ -79,6 +79,29 @@ fn severity(outcome: ModelOutcome) -> u8 {
 impl CompatibilityReport {
     /// Record one observation of `feature`, keeping the worst model outcome.
     pub fn record(&mut self, feature: &str, model: ModelOutcome, retention: RetentionOutcome) {
+        self.record_n(feature, model, retention, 1);
+    }
+
+    /// Record `count` observations of `feature` at once.
+    ///
+    /// For a caller that already knows how many there are — a writer asking how
+    /// much of a workbook its format cannot carry counts the cells rather than
+    /// meeting them one at a time — where the alternative is a loop whose only
+    /// purpose is to increment a number this already holds.
+    ///
+    /// A count of zero records **nothing**: a feature that did not occur must
+    /// not appear in the report at all, or a host reading "0 charts" learns the
+    /// opposite of the truth.
+    pub fn record_n(
+        &mut self,
+        feature: &str,
+        model: ModelOutcome,
+        retention: RetentionOutcome,
+        count: u64,
+    ) {
+        if count == 0 {
+            return;
+        }
         // The cap lives here rather than at the call sites. There are two dozen
         // of those and exactly one of them remembered to bound anything, which
         // is the argument: a limit every caller must opt into is a limit that
@@ -100,7 +123,7 @@ impl CompatibilityReport {
             entry.0 = model;
             entry.1 = retention;
         }
-        entry.2 += 1;
+        entry.2 = entry.2.saturating_add(count);
     }
 
     /// The entries, sorted by feature.

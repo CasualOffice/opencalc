@@ -27,6 +27,21 @@
 //! token is a bearer credential for somebody else's file store; keeping it here
 //! keeps it out of the server's configuration, its logs and its cluster log.
 //! One extra hop, three fewer places to leak from.
+//!
+//! # And that is where the format conversion lives
+//!
+//! The collaboration server reads and writes OOXML packages, and only those: a
+//! document has one canonical form whatever opened it. A WOPI host holds
+//! whatever its user uploaded. Because both legs already pass through this
+//! process, this is the one place that can hold both truths at once — the
+//! *package* goes to the server, the *original format* goes back to the host,
+//! and neither end ever learns about the other.
+//!
+//! Which is what lets [`mod@discovery`] advertise more than `xlsx` (`WOPI-05`).
+//! Everything a format cannot carry is counted and named by `describe_loss`
+//! before the bytes leave: a `.csv` is one sheet of values, and an administrator
+//! finding that out from the file rather than from the log is the failure this
+//! row was opened for.
 
 mod config;
 mod discovery;
@@ -41,6 +56,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use casual_calc_sdk::{SessionFormat, WorkbookSession};
 
 use config::Config;
 use sessions::{Session, Sessions, fresh_id};
@@ -137,11 +153,26 @@ async fn open(
         }
     };
 
+    // **Before the lock**, because a file this service cannot write back is one
+    // it must not hold open. Discovery advertises the formats `format_for`
+    // knows, so a host following it never lands here; a hand-written link, a
+    // stale host configuration or an `.ods` does, and the alternative to
+    // refusing is opening it and saving a package over it under its own name.
+    let Some(format) = sessions::format_for(&info.base_file_name) else {
+        tracing::warn!("refused a file this service cannot save back in its own format");
+        return (
+            StatusCode::BAD_REQUEST,
+            "this editor cannot save that kind of file back in its own format",
+        )
+            .into_response();
+    };
+
     let now = now_ms();
     let mut session = Session::from(
         opening.src.clone(),
         opening.access_token.clone(),
         &info,
+        format,
         now,
     );
     // A view action is read-only regardless of what the user is entitled to.
@@ -204,6 +235,10 @@ async fn session_info(
         "editor": branded(&service.config.editor_url, brand),
         "title": session.title,
         "editable": session.editable,
+        // Said at the top of the session, not at the end of it. A `.csv` keeps
+        // one sheet of values, and the moment to learn that is before an hour
+        // of work goes into a second sheet.
+        "format": session.format.extension(),
         "brand": brand.name,
         "accent": brand.accent,
         "favicon": brand.favicon,
@@ -253,20 +288,88 @@ async fn content(
     let Some(session) = service.sessions.get(&id, now_ms()) else {
         return (StatusCode::NOT_FOUND, "no such session").into_response();
     };
-    match service.host.get_file(&session.src, &session.token).await {
-        Ok(bytes) => (
-            [(
-                header::CONTENT_TYPE,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )],
-            bytes,
-        )
-            .into_response(),
+    let bytes = match service.host.get_file(&session.src, &session.token).await {
+        Ok(bytes) => bytes,
         Err(why) => {
             tracing::error!("GetFile failed: {why}");
-            (StatusCode::BAD_GATEWAY, "the host would not serve the file").into_response()
+            return (StatusCode::BAD_GATEWAY, "the host would not serve the file").into_response();
         }
+    };
+    // Whatever the host holds, the collaboration server is handed a package —
+    // so the content type below is true of every answer this endpoint gives,
+    // which it was not before.
+    let package = match to_package(bytes, session.format) {
+        Ok(package) => package,
+        Err(why) => {
+            tracing::error!("the host's file could not be read: {why}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "the file could not be read as the kind of file it is named",
+            )
+                .into_response();
+        }
+    };
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )],
+        package,
+    )
+        .into_response()
+}
+
+/// The host's bytes, in the OOXML package the collaboration server reads.
+///
+/// An `.xlsx` is handed straight through — untouched, not re-imported and
+/// re-written. That matters beyond the wasted work: a round trip through the
+/// semantic writer would rebuild every part this engine does not model, so
+/// merely *opening* a workbook and closing it again would change the file even
+/// when nobody typed anything.
+fn to_package(bytes: Vec<u8>, format: SessionFormat) -> Result<Vec<u8>, String> {
+    if format == SessionFormat::Xlsx {
+        return Ok(bytes);
     }
+    let session =
+        WorkbookSession::open_as(bytes, format).map_err(|e| format!("could not open: {e}"))?;
+    session
+        .save_as(SessionFormat::Xlsx)
+        .map_err(|e| format!("could not convert to a package: {e}"))
+}
+
+/// The finished package, in the format the file on the host is in — and what
+/// that format could not carry.
+///
+/// The loss is returned rather than logged here so the caller decides what to
+/// do with it. It is never `None` when something was dropped: that is the whole
+/// contract, and the reason this returns a pair instead of just bytes.
+fn save_as(package: Vec<u8>, format: SessionFormat) -> Result<(Vec<u8>, Option<String>), String> {
+    if format == SessionFormat::Xlsx {
+        return Ok((package, None));
+    }
+    let session = WorkbookSession::open(package)
+        .map_err(|e| format!("the finished package could not be read back: {e}"))?;
+    let loss = describe_loss(&session.loss_writing(format));
+    let bytes = session
+        .save_as(format)
+        .map_err(|e| format!("could not write the file back in its own format: {e}"))?;
+    Ok((bytes, loss))
+}
+
+/// A compatibility report as one line, or `None` when it is empty.
+///
+/// Every feature is **named and counted**. A summary that said "some formatting
+/// was lost" would be the same silence in a longer sentence: the administrator
+/// reading this log line is deciding whether to tell somebody their file needs
+/// re-saving as `.xlsx`, and "3 sheets" and "1 merged cell" are different
+/// answers to that.
+fn describe_loss(report: &casual_calc_sdk::CompatibilityReport) -> Option<String> {
+    let named: Vec<String> = report
+        .entries()
+        .into_iter()
+        .map(|e| format!("{} ({})", e.feature, e.count))
+        .collect();
+    (!named.is_empty()).then(|| named.join(", "))
 }
 
 /// The finished package, on its way back to the host.
@@ -285,13 +388,34 @@ async fn callback(
         return (StatusCode::FORBIDDEN, "this session is read-only").into_response();
     }
 
+    // Back into the format the host's file is in, before a byte is sent. A
+    // failure here is **not** a save: answering anything successful would tell
+    // the collaboration server the work is safe when nothing was written.
+    let (bytes, loss) = match save_as(body.to_vec(), session.format) {
+        Ok(converted) => converted,
+        Err(why) => {
+            tracing::error!("could not convert the finished document: {why}");
+            return (StatusCode::BAD_GATEWAY, why).into_response();
+        }
+    };
+    if let Some(loss) = loss {
+        // Named and counted, not "some formatting was lost". The save goes
+        // ahead — the user is editing a `.csv` and asked for a `.csv` — but no
+        // part of a document leaves this process without being said out loud.
+        tracing::warn!(
+            "saving as .{} drops what that format cannot hold: {loss}",
+            session.format.extension()
+        );
+    }
+
     match service
         .host
         .put_file(
             &session.src,
             &session.token,
             session.lock.as_deref(),
-            body.to_vec(),
+            session.format.content_type(),
+            bytes,
         )
         .await
     {
