@@ -47,6 +47,14 @@ pub struct Config {
     pub session_ttl_ms: u64,
     /// The largest file this service will fetch or hold.
     pub max_document_bytes: u64,
+    /// PKCS#8 DER private key used to sign WOPI proof headers, if any.
+    ///
+    /// Optional because no host currently *requires* proof keys, and a service
+    /// with none configured behaves exactly as it did before (`WOPI-06`). It is
+    /// a path rather than the key itself so the secret arrives through a mounted
+    /// file rather than through an environment variable, which is readable from
+    /// `/proc` and lands in `docker inspect`.
+    pub proof_key_path: Option<std::path::PathBuf>,
     /// What this deployment calls itself.
     pub brand: crate::discovery::Brand,
 }
@@ -101,6 +109,7 @@ impl Config {
             max_sessions: number("OPENCALC_WOPI_MAX_SESSIONS", 500)?,
             session_ttl_ms: number("OPENCALC_WOPI_SESSION_TTL_MS", 8 * 3600 * 1000)?,
             max_document_bytes: number("OPENCALC_WOPI_MAX_DOCUMENT_BYTES", 64 << 20)?,
+            proof_key_path: std::env::var_os("OPENCALC_WOPI_PROOF_KEY").map(Into::into),
             brand: crate::discovery::Brand::from_env(),
         })
     }

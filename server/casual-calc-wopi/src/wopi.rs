@@ -84,6 +84,8 @@ pub struct FileInfo {
 pub struct Host {
     client: reqwest::Client,
     max_document_bytes: u64,
+    /// Signs every outgoing request, when configured. See `crate::proof`.
+    proof: Option<std::sync::Arc<crate::proof::ProofKeys>>,
 }
 
 impl Host {
@@ -94,7 +96,12 @@ impl Host {
     /// If the TLS backend cannot be initialised, which is a broken build rather
     /// than a runtime condition.
     #[must_use]
-    pub fn new(max_document_bytes: u64) -> Self {
+    /// `proof` signs each outgoing request; `None` sends them unsigned, which
+    /// is what every host has accepted all along (`WOPI-06`).
+    pub fn new(
+        max_document_bytes: u64,
+        proof: Option<std::sync::Arc<crate::proof::ProofKeys>>,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -105,7 +112,64 @@ impl Host {
                 .build()
                 .expect("a TLS backend"),
             max_document_bytes,
+            proof,
         }
+    }
+
+    /// The request URL a host will reconstruct, token and all.
+    ///
+    /// Built here rather than left to `reqwest`'s `.query()` because the proof
+    /// signs **the URL as sent**: if the two differ by so much as the token's
+    /// encoding, the signature covers a URL nobody received and verification
+    /// fails on every request.
+    fn addressed(raw: &str, token: &str) -> String {
+        let separator = if raw.contains('?') { '&' } else { '?' };
+        let mut out = String::with_capacity(raw.len() + token.len() + 16);
+        out.push_str(raw);
+        out.push(separator);
+        out.push_str("access_token=");
+        for byte in token.bytes() {
+            // The unreserved set of RFC 3986; everything else is escaped, so a
+            // token containing `&` or `=` cannot invent a query parameter.
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                out.push(char::from(byte));
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+
+    /// Attach the proof headers, if this service has a key.
+    ///
+    /// Silently a no-op without one, which is the documented default: no host
+    /// requires proof keys, and an unsigned request is what every host has been
+    /// accepting all along.
+    fn signed(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: &str,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
+        let Some(keys) = &self.proof else {
+            return request;
+        };
+        let ticks = crate::proof::ticks_now();
+        let Ok(signature) = keys.sign(token, url, ticks) else {
+            // Signing cannot fail for a key that loaded, but if it ever does,
+            // sending the request *unsigned* would be the wrong repair: a host
+            // that requires proof would reject it, and one that does not would
+            // accept it — silently dropping the protection on that path. The
+            // header is sent empty so the host refuses rather than proceeds.
+            return request.header("X-WOPI-Proof", "");
+        };
+        request
+            // Both slots carry the same signature: this service publishes one
+            // key as both current and old, because it does not rotate yet. A
+            // host tries each and needs one to match.
+            .header("X-WOPI-Proof", signature.clone())
+            .header("X-WOPI-ProofOld", signature)
+            .header("X-WOPI-TimeStamp", ticks.to_string())
     }
 
     /// `CheckFileInfo` — what the file is, and what this user may do to it.
@@ -116,10 +180,9 @@ impl Host {
     /// how the token is *validated*: we cannot check someone else's credential
     /// ourselves, so we use it and see.
     pub async fn check_file_info(&self, src: &str, token: &str) -> Result<FileInfo, Problem> {
+        let url = Self::addressed(src, token);
         let response = self
-            .client
-            .get(src)
-            .query(&[("access_token", token)])
+            .signed(self.client.get(&url), &url, token)
             .send()
             .await
             .map_err(transport)?;
@@ -140,10 +203,9 @@ impl Host {
     /// fetch is an untrusted download however trusted the host is: without a
     /// ceiling an endless body makes this process allocate until it dies.
     pub async fn get_file(&self, src: &str, token: &str) -> Result<Vec<u8>, Problem> {
+        let url = Self::addressed(&contents_of(src), token);
         let response = self
-            .client
-            .get(contents_of(src))
-            .query(&[("access_token", token)])
+            .signed(self.client.get(&url), &url, token)
             .send()
             .await
             .map_err(transport)?;
@@ -219,10 +281,9 @@ impl Host {
         content_type: &str,
         bytes: Vec<u8>,
     ) -> Result<(), Problem> {
+        let url = Self::addressed(&contents_of(src), token);
         let mut request = self
-            .client
-            .post(contents_of(src))
-            .query(&[("access_token", token)])
+            .signed(self.client.post(&url), &url, token)
             // Without this the host does not know the request is `PutFile`, and
             // answers 404 or 501 rather than saving.
             .header("X-WOPI-Override", "PUT")
@@ -242,10 +303,9 @@ impl Host {
         operation: &str,
         lock: &str,
     ) -> Result<(), Problem> {
+        let url = Self::addressed(src, token);
         let response = self
-            .client
-            .post(src)
-            .query(&[("access_token", token)])
+            .signed(self.client.post(&url), &url, token)
             .header("X-WOPI-Override", operation)
             .header("X-WOPI-Lock", lock)
             .send()

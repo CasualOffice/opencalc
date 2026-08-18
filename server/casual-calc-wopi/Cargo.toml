@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ring = "0.17"
+base64 = "0.22"
 # The engine, through its one facade. The adapter converts between the format
 # the *host* holds and the OOXML package the collaboration server reads, so it
 # needs both readers, both writers, and the table that maps an extension to a

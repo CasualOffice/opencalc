@@ -18,7 +18,7 @@ fn brand(name: &str) -> Brand {
 /// 404s — the failure looks like a routing bug and is a string bug.
 #[test]
 fn an_edit_action_is_advertised_and_takes_parameters() {
-    let xml = document("https://calc.example/", &brand("OpenCalc"));
+    let xml = document("https://calc.example/", &brand("OpenCalc"), None);
 
     assert!(
         xml.contains(r#"<action name="edit" ext="xlsx" default="true""#),
@@ -42,8 +42,8 @@ fn an_edit_action_is_advertised_and_takes_parameters() {
 /// every current browser, which presents as the editor simply never appearing.
 #[test]
 fn the_net_zone_matches_the_scheme() {
-    assert!(document("https://calc.example", &Brand::default()).contains("external-https"));
-    assert!(document("http://localhost:8090", &Brand::default()).contains("external-http"));
+    assert!(document("https://calc.example", &Brand::default(), None).contains("external-https"));
+    assert!(document("http://localhost:8090", &Brand::default(), None).contains("external-http"));
 }
 
 /// **The brand name reaches the document, and cannot break out of it.**
@@ -54,7 +54,11 @@ fn the_net_zone_matches_the_scheme() {
 /// from the administrator's list with no error anywhere.
 #[test]
 fn a_brand_name_is_escaped_into_the_markup() {
-    let xml = document("https://calc.example", &brand("Ada & Co \"Sheets\" <beta>"));
+    let xml = document(
+        "https://calc.example",
+        &brand("Ada & Co \"Sheets\" <beta>"),
+        None,
+    );
 
     assert!(
         xml.contains(r#"<app name="Ada &amp; Co &quot;Sheets&quot; &lt;beta&gt;""#),
@@ -72,14 +76,14 @@ fn a_brand_name_is_escaped_into_the_markup() {
 /// and cache the 404 as the icon.
 #[test]
 fn an_unset_favicon_is_absent_rather_than_empty() {
-    assert!(!document("https://c.example", &Brand::default()).contains("favIconUrl"));
+    assert!(!document("https://c.example", &Brand::default(), None).contains("favIconUrl"));
 
     let with = Brand {
         favicon: "https://cdn.example/logo.png".to_owned(),
         ..Brand::default()
     };
     assert!(
-        document("https://c.example", &with)
+        document("https://c.example", &with, None)
             .contains(r#"favIconUrl="https://cdn.example/logo.png""#)
     );
 }
@@ -117,7 +121,7 @@ fn only_formats_that_round_trip_are_advertised() {
 
     // And the ones that must stay out, named so the reason survives: this
     // engine reads them and cannot write them.
-    let xml = document("https://c.example", &Brand::default());
+    let xml = document("https://c.example", &Brand::default(), None);
     for unwritable in ["ods", "fods", "xls"] {
         assert!(
             !xml.contains(&format!(r#"ext="{unwritable}""#)),
@@ -134,7 +138,7 @@ fn only_formats_that_round_trip_are_advertised() {
 /// most of them.
 #[test]
 fn the_delimited_formats_are_offered_for_editing() {
-    let xml = document("https://calc.example", &Brand::default());
+    let xml = document("https://calc.example", &Brand::default(), None);
     for ext in ["xlsx", "csv", "tsv", "psv"] {
         assert!(
             xml.contains(&format!(r#"<action name="edit" ext="{ext}""#)),
