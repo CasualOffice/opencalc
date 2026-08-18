@@ -10,6 +10,14 @@ use axum::http::HeaderMap;
 use std::sync::Mutex;
 
 /// A WOPI host: it holds one file, and it locks.
+/// A token shaped like a real one.
+///
+/// SharePoint's access tokens are long and base64-ish, so they contain `+`, `/`
+/// and `=` — characters that must be percent-encoded in a query string. A test
+/// token of plain letters makes the encoding a no-op and hides whether the URL
+/// that is *signed* matches the URL that is *sent*.
+const REALISTIC_TOKEN: &str = "eyJhbGc+iJI/UzI1N=";
+
 #[derive(Clone, Default)]
 struct StubHost {
     /// What the file is called. The **only** thing that says what format it is
@@ -29,6 +37,12 @@ struct StubHost {
     refuse_writes: Arc<Mutex<bool>>,
     /// What `CheckFileInfo` claims.
     can_write: Arc<Mutex<bool>>,
+    /// The proof headers and request target of the last `GetFile`.
+    ///
+    /// A host verifies against the URL *it received*, so the target is recorded
+    /// alongside the signature rather than reconstructed by the test — that is
+    /// the whole thing `WOPI-06` can get subtly wrong.
+    proof_seen: Arc<Mutex<Option<(String, String, String)>>>,
 }
 
 impl StubHost {
@@ -64,7 +78,15 @@ async fn wopi_host_holding(name: &str, content: &[u8]) -> (String, StubHost) {
             get(
                 |State(s): State<StubHost>, Query(q): Query<std::collections::HashMap<String, String>>| async move {
                     s.calls.lock().unwrap().push("CheckFileInfo".to_owned());
-                    if q.get("access_token").map(String::as_str) != Some("host-token") {
+                    // Two accepted values, and the second is the point: it
+                    // contains `+`, `/` and `=`, so this check also proves the
+                    // token survives being put on a query string and taken off
+                    // again. With only `host-token` the encoding is a no-op and
+                    // a broken encoder passes.
+                    if !matches!(
+                        q.get("access_token").map(String::as_str),
+                        Some("host-token") | Some(REALISTIC_TOKEN)
+                    ) {
                         return (StatusCode::UNAUTHORIZED, String::new()).into_response();
                     }
                     Json(serde_json::json!({
@@ -125,10 +147,26 @@ async fn wopi_host_holding(name: &str, content: &[u8]) -> (String, StubHost) {
         )
         .route(
             "/wopi/files/1/contents",
-            get(|State(s): State<StubHost>| async move {
-                s.calls.lock().unwrap().push("GetFile".to_owned());
-                s.content.lock().unwrap().clone()
-            })
+            get(
+                |State(s): State<StubHost>,
+                 headers: HeaderMap,
+                 uri: axum::http::Uri| async move {
+                    s.calls.lock().unwrap().push("GetFile".to_owned());
+                    let header = |name: &str| {
+                        headers
+                            .get(name)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned()
+                    };
+                    *s.proof_seen.lock().unwrap() = Some((
+                        header("X-WOPI-Proof"),
+                        header("X-WOPI-TimeStamp"),
+                        uri.to_string(),
+                    ));
+                    s.content.lock().unwrap().clone()
+                },
+            )
             .post(
                 |State(s): State<StubHost>, headers: HeaderMap, body: axum::body::Bytes| async move {
                     s.calls.lock().unwrap().push("PutFile".to_owned());
@@ -164,7 +202,15 @@ async fn wopi_host_holding(name: &str, content: &[u8]) -> (String, StubHost) {
 
 /// Start the adapter, returning its base URL.
 async fn adapter() -> String {
+    adapter_with_proof(None).await.0
+}
+
+/// The same, optionally signing its outgoing calls — and handing back the key
+/// so a test can verify exactly what a host would see.
+async fn adapter_with_proof(key: Option<&[u8]>) -> (String, Option<Arc<crate::proof::ProofKeys>>) {
+    let proof = key.map(|der| Arc::new(crate::proof::ProofKeys::from_pkcs8(der).unwrap()));
     let config = Config {
+        proof_key_path: None,
         bind: "127.0.0.1:0".into(),
         public_url: "http://calc.example".into(),
         internal_url: "http://wopi:8090".into(),
@@ -182,7 +228,8 @@ async fn adapter() -> String {
         brand: discovery::Brand::default(),
     };
     let service = Arc::new(Service {
-        host: Host::new(config.max_document_bytes),
+        proof: proof.clone(),
+        host: Host::new(config.max_document_bytes, proof.clone()),
         sessions: Sessions::new(config.max_sessions, config.session_ttl_ms),
         config,
     });
@@ -191,7 +238,7 @@ async fn adapter() -> String {
     tokio::spawn(async move {
         let _ = axum::serve(listener, router(service)).await;
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), proof)
 }
 
 /// Pull the session id out of the page the action URL served.
@@ -651,4 +698,137 @@ fn the_brand_is_appended_to_the_editor_url_safely() {
         branded("/editor/editor.html?fonts=/api/fonts", &theirs),
         "/editor/editor.html?fonts=/api/fonts&brand=Ada%20%26%20Co&accent=%23ff0055"
     );
+}
+
+/// **A host can verify the proof on a request this service actually made.**
+///
+/// The unit tests in `crate::proof` prove the signature is well-formed. They
+/// cannot prove the *service* signs the right thing: the payload covers the URL
+/// as sent, token and all, so the one mistake that matters — signing a URL that
+/// differs from the one on the wire by an encoding, a separator or a missing
+/// query parameter — is only visible end to end. Against a real SharePoint it
+/// would appear as every request being rejected, with nothing local to look at.
+///
+/// So this drives the whole path: the adapter opens a file, the stub host
+/// records the proof headers and the request target it received, and the
+/// signature is verified against the modulus and exponent read out of the
+/// **discovery document** — which is the only key a host is ever given.
+#[tokio::test]
+async fn a_host_can_verify_the_proof_on_a_request_this_service_made() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
+
+    const TEST_KEY: &[u8] = include_bytes!("../tests/fixtures/proof-test-key.pkcs8.der");
+
+    let (src, host) = wopi_host_holding("Book.xlsx", b"PK\x03\x04not-a-real-package").await;
+    let (at, _) = adapter_with_proof(Some(TEST_KEY)).await;
+    let client = reqwest::Client::new();
+
+    // An open, which makes the adapter call `GetFile` on the host.
+    let page = client
+        .get(format!("{at}/wopi/edit"))
+        .query(&[("WOPISrc", src.as_str()), ("access_token", REALISTIC_TOKEN)])
+        .send()
+        .await
+        .expect("the action URL answered");
+    let st = page.status();
+    let body = page.text().await.unwrap();
+    assert!(st.is_success(), "{st}: {body}");
+    let id = session_id(&body);
+
+    // The fetch is a separate leg: opening reserves the session, and the
+    // collaboration server pulling the content is what actually calls `GetFile`
+    // on the host. That call is the one carrying the proof.
+    client
+        .get(format!("{at}/wopi/content/{id}"))
+        .send()
+        .await
+        .unwrap();
+
+    let (signature, timestamp, target) = host
+        .proof_seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the host never saw a GetFile");
+    assert!(!signature.is_empty(), "no X-WOPI-Proof header was sent");
+    assert!(!timestamp.is_empty(), "no X-WOPI-TimeStamp header was sent");
+
+    // The key exactly as a host obtains it: parsed out of the discovery XML.
+    let xml = client
+        .get(format!("{at}/hosting/discovery"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let attribute = |name: &str| {
+        let needle = format!("{name}=\"");
+        let start = xml.find(&needle).expect("attribute missing from discovery") + needle.len();
+        xml[start..].split('"').next().unwrap().to_owned()
+    };
+    let public = RsaPublicKeyComponents {
+        n: B64.decode(attribute("modulus")).unwrap(),
+        e: B64.decode(attribute("exponent")).unwrap(),
+    };
+
+    // The URL as the *host* saw it, not as the adapter believes it sent it.
+    let base = src.trim_end_matches("/wopi/files/1");
+    let url = format!("{base}{target}");
+    let ticks: i64 = timestamp.parse().expect("the timestamp is a tick count");
+
+    public
+        .verify(
+            &RSA_PKCS1_2048_8192_SHA256,
+            &crate::proof::signed_payload(REALISTIC_TOKEN, &url, ticks),
+            &B64.decode(&signature).unwrap(),
+        )
+        .expect("a host could not verify the proof this service sent");
+}
+
+/// **Without a key configured, nothing is advertised and nothing is signed.**
+///
+/// The feature is optional and off by default. Advertising a proof key while
+/// signing with a different one — or with none — makes a host reject every
+/// request, so "off" has to mean off in both places at once.
+#[tokio::test]
+async fn an_unconfigured_service_advertises_no_proof_key_and_signs_nothing() {
+    let (src, host) = wopi_host_holding("Book.xlsx", b"PK\x03\x04not-a-real-package").await;
+    let at = adapter().await;
+    let client = reqwest::Client::new();
+
+    let xml = client
+        .get(format!("{at}/hosting/discovery"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !xml.contains("proof-key"),
+        "a service with no key advertised one: {xml}"
+    );
+
+    let page = client
+        .get(format!("{at}/wopi/edit"))
+        .query(&[("WOPISrc", src.as_str()), ("access_token", REALISTIC_TOKEN)])
+        .send()
+        .await
+        .unwrap();
+    let id = session_id(&page.text().await.unwrap());
+    client
+        .get(format!("{at}/wopi/content/{id}"))
+        .send()
+        .await
+        .unwrap();
+    let seen = host.proof_seen.lock().unwrap().clone();
+    let (signature, timestamp, _) = seen.expect("the host never saw a GetFile");
+    assert!(
+        signature.is_empty(),
+        "an unconfigured service signed anyway"
+    );
+    assert!(timestamp.is_empty(), "and sent a timestamp");
 }

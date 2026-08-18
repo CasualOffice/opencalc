@@ -33,6 +33,8 @@
 //! element. Everything interpolated here is escaped, and it is escaped in one
 //! place so a new field cannot quietly skip it.
 
+use crate::proof::ProofKeys;
+
 /// What this deployment calls itself.
 ///
 /// White-labelling is table stakes in the market this competes in — an
@@ -97,7 +99,7 @@ pub const EDITABLE: &[&str] = &["xlsx", "csv", "tsv", "psv"];
 /// `public_url` is the address a *browser* will be sent to, which is not
 /// necessarily the one this process is bound to — behind a proxy it never is.
 #[must_use]
-pub fn document(public_url: &str, brand: &Brand) -> String {
+pub fn document(public_url: &str, brand: &Brand, proof: Option<&ProofKeys>) -> String {
     let base = public_url.trim_end_matches('/');
     // WOPI distinguishes the zones so a host can pick the one matching its own
     // scheme; publishing an `http` action to an `https` host gives a browser a
@@ -130,7 +132,21 @@ pub fn document(public_url: &str, brand: &Brand) -> String {
             "      <action name=\"view\" ext=\"{ext}\" urlsrc=\"{base}/wopi/view?\"/>\n"
         ));
     }
-    out.push_str("    </app>\n  </net-zone>\n</wopi-discovery>\n");
+    out.push_str("    </app>\n");
+    // **After the apps, inside the net-zone**, which is where a host looks for
+    // it. Emitted only when a key is configured: advertising a proof key this
+    // service does not sign with would make every request fail verification,
+    // which is strictly worse than not advertising one at all (`WOPI-06`).
+    if let Some(keys) = proof {
+        let (modulus, exponent) = (keys.modulus_b64(), keys.exponent_b64());
+        out.push_str(&format!(
+            "    <proof-key value=\"{m}\" modulus=\"{m}\" exponent=\"{e}\" \
+oldvalue=\"{m}\" oldmodulus=\"{m}\" oldexponent=\"{e}\"/>\n",
+            m = escape(&modulus),
+            e = escape(&exponent),
+        ));
+    }
+    out.push_str("  </net-zone>\n</wopi-discovery>\n");
     out
 }
 

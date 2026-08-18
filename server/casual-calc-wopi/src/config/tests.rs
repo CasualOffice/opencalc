@@ -5,6 +5,7 @@ use super::*;
 
 fn config(hosts: &[&str], allow_plain: bool) -> Config {
     Config {
+        proof_key_path: None,
         bind: "127.0.0.1:0".into(),
         public_url: "https://calc.example".into(),
         internal_url: "http://wopi:8090".into(),

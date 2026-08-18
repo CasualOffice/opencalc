@@ -435,12 +435,14 @@ name = "casual-calc-wopi"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64",
  "casual-calc-formula",
  "casual-calc-model",
  "casual-calc-sdk",
  "getrandom 0.3.4",
  "jsonwebtoken",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

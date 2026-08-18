@@ -118,7 +118,7 @@ fn the_contents_url_is_built_around_an_existing_query() {
 #[tokio::test]
 async fn write_permission_is_not_assumed() {
     let (src, _) = stub(200, &[], br#"{"BaseFileName":"Q3.xlsx"}"#).await;
-    let info = Host::new(64 << 20)
+    let info = Host::new(64 << 20, None)
         .check_file_info(&src, "t")
         .await
         .expect("info");
@@ -134,7 +134,7 @@ async fn write_permission_is_not_assumed() {
 #[tokio::test]
 async fn a_rejected_token_is_reported_as_such() {
     let (src, _) = stub(401, &[], b"").await;
-    let problem = Host::new(64 << 20)
+    let problem = Host::new(64 << 20, None)
         .check_file_info(&src, "stale")
         .await
         .expect_err("rejected");
@@ -148,7 +148,7 @@ async fn a_rejected_token_is_reported_as_such() {
 #[tokio::test]
 async fn a_lock_conflict_keeps_the_id_that_won() {
     let (src, _) = stub(409, &[("X-WOPI-Lock", "held-by-word")], b"").await;
-    let problem = Host::new(64 << 20)
+    let problem = Host::new(64 << 20, None)
         .put_file(
             &src,
             "t",
@@ -176,7 +176,7 @@ async fn a_lock_conflict_keeps_the_id_that_won() {
 #[tokio::test]
 async fn a_save_is_addressed_the_way_wopi_specifies() {
     let (src, stub) = stub(200, &[], b"").await;
-    let host = Host::new(64 << 20);
+    let host = Host::new(64 << 20, None);
     host.put_file(
         &src,
         "tok",
@@ -223,7 +223,7 @@ async fn the_lock_operations_are_named_on_the_wire() {
         ("unlock", "UNLOCK"),
     ] {
         let (src, stub) = stub(200, &[], b"").await;
-        let host = Host::new(64 << 20);
+        let host = Host::new(64 << 20, None);
         match operation {
             "lock" => host.lock(&src, "t", "id-1").await,
             "refresh" => host.refresh_lock(&src, "t", "id-1").await,
@@ -242,7 +242,7 @@ async fn the_lock_operations_are_named_on_the_wire() {
 #[tokio::test]
 async fn an_oversized_file_is_refused() {
     let (src, _) = stub(200, &[], &vec![0u8; 4096]).await;
-    let problem = Host::new(1024)
+    let problem = Host::new(1024, None)
         .get_file(&src, "t")
         .await
         .expect_err("refused");
@@ -264,7 +264,7 @@ async fn a_failure_never_repeats_the_access_token() {
 
     // A host that answers unhelpfully.
     let (src, _) = stub(500, &[], b"upstream exploded").await;
-    let host = Host::new(64 << 20);
+    let host = Host::new(64 << 20, None);
     let mut messages = vec![
         host.check_file_info(&src, SECRET)
             .await

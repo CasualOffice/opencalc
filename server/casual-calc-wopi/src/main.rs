@@ -45,6 +45,7 @@
 
 mod config;
 mod discovery;
+mod proof;
 mod sessions;
 mod token;
 mod wopi;
@@ -72,6 +73,8 @@ struct Service {
     config: Config,
     host: Host,
     sessions: Sessions,
+    /// Absent unless a key is configured — see `Config::proof_key_path`.
+    proof: Option<std::sync::Arc<proof::ProofKeys>>,
 }
 
 /// What a WOPI host puts on the action URL.
@@ -95,7 +98,11 @@ fn now_ms() -> u64 {
 async fn discovery(State(service): State<Arc<Service>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/xml; charset=utf-8")],
-        discovery::document(&service.config.public_url, &service.config.brand),
+        discovery::document(
+            &service.config.public_url,
+            &service.config.brand,
+            service.proof.as_deref(),
+        ),
     )
 }
 
@@ -533,10 +540,28 @@ async fn start() -> Result<(), String> {
         );
     }
 
+    // **A configured key that will not load is fatal, not a warning.** An
+    // operator who set `OPENCALC_WOPI_PROOF_KEY` wants requests signed; starting
+    // anyway would advertise no proof key and sign nothing, and the deployment
+    // would look healthy while being exactly as unprotected as before.
+    let proof = match &config.proof_key_path {
+        Some(path) => {
+            let der = std::fs::read(path)
+                .map_err(|e| format!("OPENCALC_WOPI_PROOF_KEY {}: {e}", path.display()))?;
+            let keys = proof::ProofKeys::from_pkcs8(&der)
+                .map_err(|e| format!("OPENCALC_WOPI_PROOF_KEY {}: {e}", path.display()))?;
+            tracing::info!("WOPI proof keys enabled");
+            Some(keys)
+        }
+        None => None,
+    };
+
+    let proof = proof.map(std::sync::Arc::new);
     let service = Arc::new(Service {
-        host: Host::new(config.max_document_bytes),
+        host: Host::new(config.max_document_bytes, proof.clone()),
         sessions: Sessions::new(config.max_sessions, config.session_ttl_ms),
         config,
+        proof,
     });
 
     let sweeper = Arc::clone(&service);
