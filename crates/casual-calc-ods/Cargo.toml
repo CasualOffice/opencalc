@@ -7,5 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+casual-calc-formula = { path = "../casual-calc-formula" }
+casual-calc-import = { path = "../casual-calc-import" }
+casual-calc-model = { path = "../casual-calc-model" }
+quick-xml = "0.41"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [lints]
 workspace = true
