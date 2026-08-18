@@ -760,3 +760,34 @@ fn a_data_bar_is_painted_at_the_fraction_of_the_cell_the_value_earns() {
         "the maximum's digits should survive on top of its bar"
     );
 }
+
+/// **The exported default colour is the colour this renderer actually draws.**
+///
+/// `data_bar_style` hands a hex string across the WebAssembly boundary for the
+/// browser canvas to use, while this renderer parses its own. A typo in one of
+/// them gives two renderers two different blues — which is the whole failure
+/// `RND-08` is about, in the one place the export cannot prevent by
+/// construction.
+#[test]
+fn the_exported_default_bar_colour_is_the_one_drawn() {
+    let exported = crate::data_bar_style().default_color;
+    let parsed = crate::parse_hex_color(exported).expect("the exported colour must be a colour");
+    assert_eq!(
+        parsed,
+        crate::default_data_bar(),
+        "the colour handed to the canvas is not the colour this renderer draws"
+    );
+}
+
+/// **The exported geometry is the geometry this renderer insets by.**
+///
+/// Not a tautology despite reading like one: the export could be given its own
+/// literals, which is exactly how the canvas came to have a second copy in the
+/// first place.
+#[test]
+fn the_exported_geometry_matches_the_constants_used_to_draw() {
+    let style = crate::data_bar_style();
+    assert_eq!(style.pad_x, crate::DATA_BAR_PAD_X);
+    assert_eq!(style.pad_y, crate::DATA_BAR_PAD_Y);
+    assert_eq!(style.alpha, crate::DATA_BAR_ALPHA);
+}

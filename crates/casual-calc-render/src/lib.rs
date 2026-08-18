@@ -203,16 +203,60 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
 const DEFAULT_FONT_PT: f32 = 11.0;
 /// A data bar's inset from the cell's left/right edge, in pixels, so the bar
 /// reads as sitting inside the cell rather than as the cell's own fill.
-const DATA_BAR_PAD_X: f32 = 1.0;
+pub const DATA_BAR_PAD_X: f32 = 1.0;
 /// A data bar's inset from the cell's top/bottom edge, in pixels.
-const DATA_BAR_PAD_Y: f32 = 2.0;
+pub const DATA_BAR_PAD_Y: f32 = 2.0;
 /// How opaque a data bar is. The number it annotates is drawn on top of it and
 /// has to stay readable, so the bar is a wash rather than a block — the same
 /// value the editor canvas uses, so the two backends agree.
-const DATA_BAR_ALPHA: f32 = 0.45;
+pub const DATA_BAR_ALPHA: f32 = 0.45;
 /// The bar colour for a rule that names none (Excel's default data-bar blue).
+/// The colour a data bar uses when its rule names none, as `RRGGBB`.
+///
+/// Excel's default data-bar blue. A string rather than a `Color` because this
+/// is what leaves the engine — the browser canvas needs the same value and
+/// cannot take a `tiny_skia::Color`.
+pub const DEFAULT_DATA_BAR: &str = "638EC6";
+
+/// Everything needed to draw a data bar, for a renderer that is not this one.
+///
+/// **The canvas in the editor draws its own bars**, because there is no display
+/// list on that side of the WebAssembly boundary — building one is a far larger
+/// change than `RND-08` reads as. What that row is actually about is the two
+/// renderers being able to disagree, and they could: the inset, the alpha and
+/// the default colour were written out twice, in Rust and in JavaScript, and
+/// agreed only because somebody had copied them across.
+///
+/// Exporting them makes this file the single place they are decided. The canvas
+/// still does its own painting; it no longer does its own *deciding*.
+#[must_use]
+pub const fn data_bar_style() -> DataBarStyle {
+    DataBarStyle {
+        pad_x: DATA_BAR_PAD_X,
+        pad_y: DATA_BAR_PAD_Y,
+        alpha: DATA_BAR_ALPHA,
+        default_color: DEFAULT_DATA_BAR,
+    }
+}
+
+/// The geometry and colour of a data bar. See [`data_bar_style`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataBarStyle {
+    /// Inset from the cell's left and right edges, in pixels.
+    pub pad_x: f32,
+    /// Inset from the cell's top and bottom edges, in pixels.
+    pub pad_y: f32,
+    /// How opaque the bar is, `0.0`–`1.0`.
+    pub alpha: f32,
+    /// The bar colour when the rule names none, as `RRGGBB`.
+    pub default_color: &'static str,
+}
+
 fn default_data_bar() -> Color {
-    Color::from_rgba8(0x63, 0x8E, 0xC6, 255)
+    // Parsed from the exported constant rather than written out again, so this
+    // renderer and the browser canvas cannot end up with different blues — the
+    // whole point of `data_bar_style` (`RND-08`).
+    parse_hex_color(DEFAULT_DATA_BAR).unwrap_or(Color::BLACK)
 }
 
 /// Cell text inset from the left/right edge, in twips (~2px at 96 dpi).

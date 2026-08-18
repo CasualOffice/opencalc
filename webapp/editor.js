@@ -1681,15 +1681,22 @@ function draw() {
   // Data bars sit behind the value: drawn after the cell fills so they read as
   // part of the cell, before the text so they never obscure it.
   ctx.textBaseline = "middle";
+  // **The geometry comes from the engine, not from here.** These numbers used
+  // to be written out twice — once in `casual-calc-render` and once in this
+  // file — and agreed only because somebody had copied them across, which is
+  // the two-renderers-can-disagree shape `conditional.rs` argues against,
+  // reintroduced one layer up (`RND-08`). The canvas still paints; it no longer
+  // decides.
+  const bar = dataBarStyle();
   for (const it of items) {
     if (it.bar === undefined) continue;
     const bx = colXAt(it.c), by = rowYAt(it.r);
     if (bx === undefined || by === undefined) continue;
-    const bw = Math.max(0, (colWAt(it.c) - 2) * it.bar);
+    const bw = Math.max(0, (colWAt(it.c) - 2 * bar.padX) * it.bar);
     withQuad(it.r, it.c, () => {
-      ctx.fillStyle = "#" + (it.barc || "638EC6");
-      ctx.globalAlpha = 0.45;
-      ctx.fillRect(bx + 1, by + 2, bw, rowHAt(it.r) - 4);
+      ctx.fillStyle = "#" + (it.barc || bar.defaultColor);
+      ctx.globalAlpha = bar.alpha;
+      ctx.fillRect(bx + bar.padX, by + bar.padY, bw, rowHAt(it.r) - 2 * bar.padY);
       ctx.globalAlpha = 1;
     });
   }
@@ -2787,6 +2794,24 @@ function snapLeading(px, limit, frozen, isCol) {
     (isCol ? wasm.session_col_offset_px(state.sheet, i) : rowOffsetPx(i)) - frozen;
   const start = startOf(at);
   return Math.min(start >= px ? start : startOf(at + 1), limit);
+}
+
+/// How the engine says a data bar is drawn.
+///
+/// Read once: it is a set of constants compiled into the engine, so asking per
+/// frame would cross the WebAssembly boundary sixty times a second to be told
+/// the same thing. The fallback matches the engine's own values and exists so a
+/// build predating `session_data_bar_style` still draws bars rather than
+/// throwing in the paint loop.
+let dataBarStyleCache = null;
+function dataBarStyle() {
+  if (dataBarStyleCache) return dataBarStyleCache;
+  try {
+    dataBarStyleCache = JSON.parse(wasm.session_data_bar_style());
+  } catch {
+    dataBarStyleCache = { padX: 1, padY: 2, alpha: 0.45, defaultColor: "638EC6" };
+  }
+  return dataBarStyleCache;
 }
 
 function ensureVisible(row = state.sel.row, col = state.sel.col) {
