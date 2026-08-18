@@ -928,8 +928,14 @@ mod conditional_formatting {
 
         assert_eq!(bars.len(), 3, "one bar per cell in the range: {bars:?}");
         // 1, 50 and 100 across a range whose extremes are 1 and 100.
+        //
+        // The position in the range is interpolated between `minLength` and
+        // `maxLength` -- ECMA-376's `dataBar` defaults, 10% and 90% of the cell
+        // -- rather than emitted raw, so the range minimum draws a short bar
+        // instead of nothing at all (`RND-09`).
         let fractions: Vec<f64> = bars.iter().map(|b| b.1).collect();
-        let expected = [0.0, 49.0 / 99.0, 1.0];
+        let (lo, hi) = (0.10, 0.90);
+        let expected = [lo, lo + (49.0 / 99.0) * (hi - lo), hi];
         for (got, want) in fractions.iter().zip(expected) {
             assert!(
                 (got - want).abs() < 1e-9,
@@ -970,6 +976,46 @@ mod conditional_formatting {
         assert!(
             bars(&whole_sheet(&plain)).is_empty(),
             "a sheet with no rules at all produced a data bar"
+        );
+    }
+
+    /// **The smallest value in the range still draws a bar.**
+    ///
+    /// A raw `(n - lo) / (hi - lo)` gives the range minimum a fraction of
+    /// zero, so it rendered nothing — indistinguishable from a cell the rule
+    /// does not cover, or from an empty one. That is the one value a reader
+    /// most wants to pick out of the range, and it was the only one with no
+    /// mark on it (`RND-09`).
+    ///
+    /// The bound is not a guess at what Excel appears to do: ECMA-376 gives
+    /// `dataBar` a `minLength` defaulting to 10% of the cell width, and the
+    /// fraction is interpolated from there.
+    #[test]
+    fn the_lowest_value_in_a_data_bar_range_still_draws_a_bar() {
+        let wb = sheet_with_rule(CfRule::DataBar("638EC6".to_owned()), "");
+        let bars = bars(&whole_sheet(&wb));
+
+        // **By position, not by sorting the fractions.** The range holds 1, 50
+        // and 100 down column A, so the first bar belongs to the smallest
+        // value. Taking `min` of the fractions instead would pass just as
+        // happily on a bar that runs backwards -- the smallest value drawing
+        // the longest bar -- because reversing the scale leaves the *set* of
+        // fractions untouched and only moves which cell gets which.
+        let (smallest, largest) = (bars[0].1, bars[2].1);
+        assert!(
+            smallest > 0.0,
+            "the range minimum drew no bar at all: {bars:?}"
+        );
+        assert!(
+            (smallest - 0.10).abs() < 1e-9,
+            "the smallest value should draw ECMA-376's default minLength of 10%: {bars:?}"
+        );
+
+        // And the largest stops short of the full cell, per the matching
+        // `maxLength` default -- a bar with no edge is not readable as a bar.
+        assert!(
+            (largest - 0.90).abs() < 1e-9,
+            "the largest value should draw maxLength, 90%: {bars:?}"
         );
     }
 

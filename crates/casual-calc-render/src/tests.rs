@@ -691,15 +691,28 @@ fn a_data_bar_is_painted_at_the_fraction_of_the_cell_the_value_earns() {
         .count();
     assert!(changed > 0, "the data bar changed no pixel at all");
 
-    // A1 = 1 is the range minimum: fraction zero, so nothing is drawn and the
-    // cell is the plain ground it would be without the rule.
-    let empty = with.pixel(6, 8).unwrap();
+    // A1 = 1 is the range minimum, and it draws a **short** bar rather than
+    // none. It used to draw nothing -- a raw fraction of zero -- which made
+    // the one value a reader most wants to pick out of the range the only one
+    // with no mark on it, and indistinguishable from a cell the rule does not
+    // cover (`RND-09`). ECMA-376's `minLength` default is 10% of the cell, so
+    // across a 62px inner width the bar runs to about x=7.
+    let short = with.pixel(3, 8).unwrap();
     assert!(
-        empty.red() > 240 && empty.green() > 240 && empty.blue() > 240,
-        "the minimum's bar is empty, got r{} g{} b{}",
-        empty.red(),
-        empty.green(),
-        empty.blue()
+        short.red() > 200 && short.green() < 200,
+        "the minimum drew no bar at all, got r{} g{} b{}",
+        short.red(),
+        short.green(),
+        short.blue()
+    );
+    // And it is short: plain ground well before the middle value's bar ends.
+    let beyond = with.pixel(20, 8).unwrap();
+    assert!(
+        beyond.red() > 240 && beyond.green() > 240 && beyond.blue() > 240,
+        "the minimum's bar should stop near x=7, but x=20 is painted: r{} g{} b{}",
+        beyond.red(),
+        beyond.green(),
+        beyond.blue()
     );
 
     // A3 = 100 is the maximum: a full-width bar, so a red wash near both the

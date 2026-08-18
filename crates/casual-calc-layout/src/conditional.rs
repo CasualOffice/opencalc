@@ -255,7 +255,7 @@ pub fn effect_for(
                 CfRule::DataBar(color) => {
                     effect
                         .data_bar
-                        .get_or_insert((t.clamp(0.0, 1.0), color.clone()));
+                        .get_or_insert((bar_length(t), color.clone()));
                 }
                 _ => {}
             }
@@ -284,4 +284,28 @@ pub fn effect_for(
         }
     }
     effect
+}
+
+/// The shortest bar a data bar draws, as a fraction of the cell.
+///
+/// A raw `(n - lo) / (hi - lo)` gives the range **minimum** a fraction of zero,
+/// so the smallest value rendered nothing at all — indistinguishable from a
+/// cell the rule does not cover, or from an empty one (`RND-09`). That is the
+/// one value in the range a reader most wants to identify, and it was the one
+/// with no mark.
+///
+/// The numbers are not guessed from what Excel appears to do: ECMA-376 gives
+/// `dataBar` the attributes `minLength` and `maxLength`, defaulting to `10` and
+/// `90` percent of the cell width, and the fraction is interpolated between
+/// them. So the minimum draws a short bar and the maximum stops short of the
+/// full width, which is also what makes a data bar readable — a full-width bar
+/// has no edge to see.
+const BAR_MIN_LENGTH: f64 = 0.10;
+/// The longest, per the same `maxLength` default.
+const BAR_MAX_LENGTH: f64 = 0.90;
+
+/// A position in the range, as the fraction of the cell the bar fills.
+fn bar_length(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    BAR_MIN_LENGTH + t * (BAR_MAX_LENGTH - BAR_MIN_LENGTH)
 }
