@@ -39,6 +39,7 @@ use casual_calc_transaction::protocol::{
     ClientMessage, Draft, PROTOCOL_VERSION, Refusal, Resume, ServerMessage,
 };
 use casual_calc_transaction::session::ClientId;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem, pem::PemObject};
 use tokio::sync::broadcast;
 
 use crate::cluster::Coordinator;
@@ -572,22 +573,32 @@ pub fn tls_config(endpoint: &crate::config::Endpoint) -> Result<rustls::ServerCo
         std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
     };
 
-    let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(&read(&files.certificate)?[..]))
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("{}: {e}", files.certificate.display()))?;
+    let certs: Vec<_> =
+        CertificateDer::pem_reader_iter(&mut BufReader::new(&read(&files.certificate)?[..]))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("{}: {e}", files.certificate.display()))?;
     if certs.is_empty() {
         return Err(format!(
             "{} holds no certificate",
             files.certificate.display()
         ));
     }
-    let key = rustls_pemfile::private_key(&mut BufReader::new(&read(&files.key)?[..]))
-        .map_err(|e| format!("{}: {e}", files.key.display()))?
-        .ok_or_else(|| format!("{} holds no private key", files.key.display()))?;
+    let key = PrivateKeyDer::from_pem_reader(&mut BufReader::new(&read(&files.key)?[..])).map_err(
+        |e| match e {
+            // Where `rustls_pemfile::private_key` returned `Ok(None)`, this
+            // returns an error — so the "there was no key" case has to be
+            // recognised by its variant to keep saying what is actually wrong
+            // with the file, rather than degrading to a parser message.
+            pem::Error::NoItemsFound => {
+                format!("{} holds no private key", files.key.display())
+            }
+            other => format!("{}: {other}", files.key.display()),
+        },
+    )?;
 
     let builder = if let Some(ca_path) = &endpoint.client_ca {
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut BufReader::new(&read(ca_path)?[..])) {
+        for cert in CertificateDer::pem_reader_iter(&mut BufReader::new(&read(ca_path)?[..])) {
             let cert = cert.map_err(|e| format!("{}: {e}", ca_path.display()))?;
             roots
                 .add(cert)
@@ -742,7 +753,7 @@ pub async fn serve_on_with_shutdown(
             axum_server::from_tcp_rustls(
                 std_listener,
                 axum_server::tls_rustls::RustlsConfig::from_config(tls),
-            )
+            )?
             .handle(handle)
             .serve(app.into_make_service())
             .await?;
