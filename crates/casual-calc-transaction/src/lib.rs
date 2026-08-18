@@ -30,7 +30,7 @@ pub mod transform;
 mod transform_tests;
 pub mod wire;
 
-pub use structural::Axis;
+pub use structural::{Axis, defined_names_after_move, repointed_after_move};
 
 /// An error applying an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]

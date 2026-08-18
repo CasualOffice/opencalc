@@ -35,7 +35,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::{CellReference, Expr};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, Sheet, Table, TableColumn, Workbook,
+    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, DefinedName, Sheet, Table, TableColumn,
+    Workbook,
 };
 
 use crate::{Operation, TxnError};
@@ -864,4 +865,179 @@ fn map_range_delete(lo: u32, hi: u32, at: u32, count: u32) -> Option<(u32, u32)>
         return None;
     }
     Some((new_lo, new_hi))
+}
+
+/// Formulas that must be repointed because the cells they name were **moved**.
+///
+/// Cutting a block and pasting it elsewhere moves those cells. Excel then
+/// rewrites every *other* formula that pointed at them so it follows — `=A1*2`
+/// becomes `=C3*2` when `A1` is cut to `C3`. Only the moved cells' own formulas
+/// were handled here (correctly: a cut travels verbatim, because the cell did
+/// not change what it means, only where it lives). Everything pointing *at*
+/// them kept its old address and silently began reading whatever moved in
+/// underneath (`UX-CUT-03`).
+///
+/// Returned rather than applied, so the caller can fold these into the same
+/// operation batch as the paste — one undo step, as a move should be.
+///
+/// # A range that only partly overlaps the block is left alone
+///
+/// `=SUM(A1:A10)` when `A1:A5` is cut has no correct rewrite: moving one
+/// endpoint changes which cells the range covers, and leaving it changes what
+/// it reads. Excel keeps the range and lets it read whatever is there now,
+/// which at least preserves the shape the author wrote. Silently resizing
+/// somebody's range would be the worse of the two.
+#[must_use]
+pub fn repointed_after_move(
+    workbook: &Workbook,
+    moved_sheet: &str,
+    block: (u32, u32, u32, u32),
+    delta: (i64, i64),
+) -> Vec<(usize, CellRef, Expr)> {
+    let mut out = Vec::new();
+    for (index, sheet) in workbook.sheets.iter().enumerate() {
+        for (at, cell) in sheet.cells.iter() {
+            let Some(handle) = cell.formula else { continue };
+            let Some(expr) = workbook.formula(handle) else {
+                continue;
+            };
+            let moved = move_expr(expr, moved_sheet, &sheet.name, block, delta);
+            if moved != *expr {
+                out.push((index, at, moved));
+            }
+        }
+    }
+    out
+}
+
+fn move_expr(
+    expr: &Expr,
+    moved_sheet: &str,
+    home: &str,
+    block: (u32, u32, u32, u32),
+    delta: (i64, i64),
+) -> Expr {
+    match expr {
+        // Same reasoning as the insert/delete rewrite: a structured reference
+        // names columns rather than addresses, and unparsed text cannot be
+        // rewritten without understanding it.
+        Expr::StructuredRef { .. } | Expr::Raw(_) | Expr::Empty => expr.clone(),
+        Expr::Reference(reference) => {
+            match moved_reference(reference, moved_sheet, home, block, delta) {
+                Some(moved) => Expr::Reference(moved),
+                None => expr.clone(),
+            }
+        }
+        // Both endpoints, or neither. See the note above.
+        Expr::Range(a, b) => {
+            let (Some(a2), Some(b2)) = (
+                moved_reference(a, moved_sheet, home, block, delta),
+                moved_reference(b, moved_sheet, home, block, delta),
+            ) else {
+                return expr.clone();
+            };
+            Expr::Range(a2, b2)
+        }
+        Expr::Unary { op, operand } => Expr::Unary {
+            op: *op,
+            operand: Box::new(move_expr(operand, moved_sheet, home, block, delta)),
+        },
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op: *op,
+            left: Box::new(move_expr(left, moved_sheet, home, block, delta)),
+            right: Box::new(move_expr(right, moved_sheet, home, block, delta)),
+        },
+        Expr::Function { name, args } => Expr::Function {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| move_expr(a, moved_sheet, home, block, delta))
+                .collect(),
+        },
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(move_expr(callee, moved_sheet, home, block, delta)),
+            args: args
+                .iter()
+                .map(|a| move_expr(a, moved_sheet, home, block, delta))
+                .collect(),
+        },
+        _ => expr.clone(),
+    }
+}
+
+/// The reference's new address, if it named a cell inside the moved block.
+///
+/// A reference reaches the moved sheet either by naming it or by being
+/// unqualified in a formula that lives there — the same rule the insert and
+/// delete rewrite uses, so the two cannot disagree about what "this sheet"
+/// means.
+fn moved_reference(
+    reference: &CellReference,
+    moved_sheet: &str,
+    home: &str,
+    (r0, c0, r1, c1): (u32, u32, u32, u32),
+    (dr, dc): (i64, i64),
+) -> Option<CellReference> {
+    let reaches = match reference.sheet.as_deref() {
+        Some(named) => named == moved_sheet,
+        None => home == moved_sheet,
+    };
+    if !reaches {
+        return None;
+    }
+    // A whole-row or whole-column reference names no single cell, so it cannot
+    // be inside a block.
+    if reference.row_implicit || reference.col_implicit {
+        return None;
+    }
+    if reference.row < r0 || reference.row > r1 || reference.col < c0 || reference.col > c1 {
+        return None;
+    }
+    // **`$` anchoring does not exempt it.** An absolute reference is about what
+    // a *copy* does to it, not about whether the cell it names may move: `$A$1`
+    // still means A1, and if A1 has gone to C3 then it means C3 now. Excel
+    // moves both.
+    let mut moved = reference.clone();
+    moved.row = u32::try_from(i64::from(reference.row) + dr).ok()?;
+    moved.col = u32::try_from(i64::from(reference.col) + dc).ok()?;
+    Some(moved)
+}
+
+/// Defined names that must be repointed because the cells they name were moved.
+///
+/// The sibling of [`repointed_after_move`] for names rather than formulas.
+/// `FID-24` made an insert or a delete shift defined names; a **cut** left them
+/// behind, so `Rate` went on meaning `$A$1` after `$A$1` had gone to `G6` and
+/// every formula using the name silently read the wrong cell. A name is the
+/// indirection people reach for precisely so they do not have to track
+/// addresses, which makes it the worst place for an address to go stale.
+///
+/// Returns the whole list when anything changed, because that is the shape
+/// `Operation::SetDefinedNames` takes and inverts.
+#[must_use]
+pub fn defined_names_after_move(
+    workbook: &Workbook,
+    moved_sheet: &str,
+    block: (u32, u32, u32, u32),
+    delta: (i64, i64),
+) -> Option<Vec<DefinedName>> {
+    let mut names = workbook.defined_names.clone();
+    let mut changed = false;
+    for name in &mut names {
+        // A sheet-scoped name's unqualified references mean its own sheet; a
+        // workbook-scoped one has no home, so only an explicitly qualified
+        // reference can reach the moved sheet. Same rule as the insert/delete
+        // rewrite, deliberately.
+        let home = name
+            .sheet
+            .and_then(|id| workbook.sheets.iter().find(|s| s.id == id))
+            .map(|s| s.name.as_str())
+            .unwrap_or_default();
+        let moved = move_expr(&name.formula, moved_sheet, home, block, delta);
+        if moved != name.formula {
+            name.formula = moved;
+            changed = true;
+        }
+    }
+    changed.then_some(names)
 }
