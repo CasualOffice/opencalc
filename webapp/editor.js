@@ -10216,6 +10216,26 @@ function wireEvents() {
       return;
     }
 
+    // Alt+PageUp/PageDown page sideways (Excel parity).
+    //
+    // **Outside the Ctrl/Cmd branch**, where it spent its life one nesting
+    // level too deep: inside `if (mod)` it answered only to Ctrl+Alt+PgUp/PgDn,
+    // so Excel's own binding did nothing at all and the feature was unreachable
+    // by the keys it documents (`UX-PAGE-01`). It sits with the other Alt
+    // shortcuts, which are out here for exactly the same reason — Alt is not
+    // one of `mod`, and Alt+= had already been moved for it.
+    //
+    // Placed before the branch rather than after, so Ctrl+Alt keeps paging
+    // sideways as it always did instead of falling through to the sheet switch.
+    if (e.altKey && (e.key === "PageDown" || e.key === "PageUp")) {
+      const v = wrap.clientWidth / state.zoom;
+      state.scrollX += (e.key === "PageDown" ? 1 : -1) * Math.max(1, v - HW);
+      clampScroll();
+      draw();
+      e.preventDefault();
+      return;
+    }
+
     // Keyboard shortcuts.
     if (mod) {
       // Ctrl+Arrow: jump to the data-edge (Excel block-jump).
@@ -10228,15 +10248,6 @@ function wireEvents() {
         const to = JSON.parse(wasm.session_edge(state.sheet, from.row, from.col, arrow[0], arrow[1]));
         if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
         e.preventDefault(); return;
-      }
-      // Alt+PageUp/PageDown page sideways (Excel parity); Ctrl pages sheets.
-      if (e.altKey && (e.key === "PageDown" || e.key === "PageUp")) {
-        const v = wrap.clientWidth / state.zoom;
-        state.scrollX += (e.key === "PageDown" ? 1 : -1) * Math.max(1, v - HW);
-        clampScroll();
-        draw();
-        e.preventDefault();
-        return;
       }
       // Ctrl+PageDown / PageUp switch sheets (Excel parity).
       if (e.key === "PageDown") { const n = JSON.parse(wasm.session_sheet_names()).length; if (state.sheet < n - 1) switchSheet(state.sheet + 1); e.preventDefault(); return; }
@@ -11690,7 +11701,35 @@ export function autofitRowForTest(row) {
 /// column boundary looks like, which is a test of the sampling. The number the
 /// renderer actually uses is the claim.
 export function scrollStateForTest() {
-  return { scrollX: state.scrollX, scrollY: state.scrollY, row: state.sel.row, col: state.sel.col };
+  // **The raw inputs, not the viewport `ensureVisible` computed from them.**
+  //
+  // The defect this guards was a unit conversion *inside* that calculation, so
+  // a hook that handed back its result would agree with the bug and assert
+  // nothing. The test derives the viewport itself from the rectangle, the zoom
+  // and the frozen origin — three things it can read independently — and checks
+  // the scroll offset against that (`UX-GRID-02`).
+  const rect = wrap.getBoundingClientRect();
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  return {
+    scrollX: state.scrollX,
+    scrollY: state.scrollY,
+    row: state.sel.row,
+    col: state.sel.col,
+    zoom: state.zoom || 1,
+    rectW: rect.width,
+    rectH: rect.height,
+    bodyX0: f.bodyX0,
+    bodyY0: f.bodyY0,
+  };
+}
+
+/// Set the magnification, for the browser gate.
+///
+/// Routed through the editor's own `setZoom` rather than assigning
+/// `state.zoom`, so the gate exercises what the menu does — including whatever
+/// clamping and repaint that entails.
+export function setZoomForTest(z) {
+  setZoom(z);
 }
 
 /// Move the selection, for the browser gate — the keyboard path, without the
