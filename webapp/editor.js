@@ -145,6 +145,7 @@ const state = {
   sel: { row: 0, col: 0 }, // focus cell
   anchor: { row: 0, col: 0 }, // selection anchor
   selKind: "cells", // "cells" | "rows" | "cols" | "all"
+  endMode: false, // Excel's End mode: armed by `End`, spent by the next arrow
   ranges: [], // committed extra rectangles for a multi-range (Ctrl+click) selection
   dragging: false,
   headerDrag: null, // "row" | "col" | null — which axis a header drag extends
@@ -2812,6 +2813,17 @@ function dataBarStyle() {
     dataBarStyleCache = { padX: 1, padY: 2, alpha: 0.45, defaultColor: "638EC6" };
   }
   return dataBarStyleCache;
+}
+
+/// Arm or disarm End mode, and say so.
+///
+/// Announced in the status bar because an armed mode with no indicator is a
+/// keystroke that behaves differently for reasons the user cannot see — Excel
+/// shows "End Mode" for exactly that reason.
+function setEndMode(on) {
+  if (state.endMode === on) return;
+  state.endMode = on;
+  if (status) status.textContent = on ? "End mode — press an arrow key" : "";
 }
 
 function ensureVisible(row = state.sel.row, col = state.sel.col) {
@@ -10395,6 +10407,38 @@ function wireEvents() {
         select(to.row, to.col);
       }
     };
+    // **End mode** (Excel): `End` on its own arms it and moves nothing; the next
+    // arrow jumps to the edge of the data block, and `End` then `Home` goes to
+    // the last used cell. It is how a keyboard user crosses a large sheet
+    // without holding a modifier, and it was the one navigation idiom missing
+    // (`UX-END-01`).
+    //
+    // Handled before the switch below, because armed `End` changes what the
+    // *next* key means — and because arming it must not also move the cursor,
+    // which is what `End` used to do.
+    if (state.endMode && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const jump = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+      if (jump) {
+        setEndMode(false);
+        const from = e.shiftKey ? state.anchor : state.sel;
+        const to = JSON.parse(wasm.session_edge(state.sheet, from.row, from.col, jump[0], jump[1]));
+        if (e.shiftKey) extend(to.row, to.col); else select(to.row, to.col);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Home") {
+        // Excel's End,Home — the bottom-right of the used range.
+        setEndMode(false);
+        const b = usedBounds();
+        const at = { r: Math.max(0, b.rows - 1), c: Math.max(0, b.cols - 1) };
+        if (e.shiftKey) extend(at.r, at.c); else select(at.r, at.c);
+        e.preventDefault();
+        return;
+      }
+      // Anything else cancels it, as in Excel — an armed mode that survives an
+      // unrelated keystroke fires on a later arrow the user has forgotten about.
+      if (e.key !== "End" && e.key !== "Shift") setEndMode(false);
+    }
     switch (e.key) {
       case "ArrowUp": move(-1, 0); e.preventDefault(); break;
       case "ArrowDown": move(1, 0); e.preventDefault(); break;
@@ -10403,7 +10447,12 @@ function wireEvents() {
       case "ArrowRight": move(0, 1); e.preventDefault(); break;
       case "Tab": tabStep(e.shiftKey); e.preventDefault(); break;
       case "Home": if (e.shiftKey) extend(state.anchor.row, 0); else select(state.sel.row, 0); e.preventDefault(); break;
-      case "End": { const ec = Math.max(0, usedBounds().cols - 1); if (e.shiftKey) extend(state.anchor.row, ec); else select(state.sel.row, ec); e.preventDefault(); break; }
+      // **`End` alone arms End mode and moves nothing**, which is what Excel
+      // does. It used to jump to the last used column — which is Excel's
+      // *`End` then `Right`*, so the shortcut existed while the mode it belongs
+      // to did not, and the two-key idiom a spreadsheet user has in their
+      // fingers did nothing.
+      case "End": setEndMode(!state.endMode); e.preventDefault(); break;
       case "PageDown": { const p = Math.max(1, geo.rows - 1); move(p, 0); e.preventDefault(); break; }
       case "PageUp": { const p = Math.max(1, geo.rows - 1); move(-p, 0); e.preventDefault(); break; }
       case "Backspace": case "Delete":

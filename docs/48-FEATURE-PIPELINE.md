@@ -1,5 +1,28 @@
 # 48 — Feature Pipeline
 
+> **Audited 2026-08-19 against the code, and it had gone badly stale.**
+>
+> Of the 35 P0 and P1 items below, **33 have implementation in the tree** —
+> including every one of the six P0s. This document was synthesized on
+> 2026-08-06 and read, two weeks later, as a list of things still to do. It is
+> the same failure `docs/46` had before it was deleted: a second roadmap that
+> nobody re-derives, answering "what is missing?" with a snapshot of the past.
+>
+> The two real gaps the audit found:
+>
+> | Item | Finding |
+> | --- | --- |
+> | `M4-3` | **End mode was genuinely missing** — `End` jumped to the last used column, which is Excel's *End then Right*, so the destination existed while the two-key idiom did not. Now implemented and gated (`UX-END-01`). |
+> | `M10-1` | **Partial.** 24 semantic colour tokens exist and the chrome uses them; there is no elevation/surface layer. Tracked as `UX-TOKEN-01`. |
+>
+> **What this audit is not.** It searched for evidence that each item's code
+> exists; it did not verify that each is *complete*. An item like "keyboard nav
+> completeness" has several parts, and finding one is not finding all of them.
+> Read a ✓ here as "this is not un-started", not as "this is done" — the
+> execution tracker in [docs/14](14-EXECUTION-TRACKER.md) is where done is
+> recorded, one row at a time, with the evidence that made it true.
+
+
 _Generated 2026-08-06. A dependency-ordered roadmap synthesized from the [feature/UX map](47-UX-AND-FEATURE-MAP.md) and the [design system](49-DESIGN-SYSTEM.md) assessment. Priority: P0 broken-basics · P1 core parity · P2 advanced · P3 nice-to-have. Effort: S/M/L/XL. ∥ = parallelizable as an isolated workflow agent without file conflicts._
 
 ## M1 — Transaction integrity & undo correctness
