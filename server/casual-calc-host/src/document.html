@@ -38,8 +38,18 @@
   <span id="who"></span>
   <button id="share" class="primary">Share</button>
   <button id="download">Download</button>
+  <button id="history">History</button>
 </header>
 <iframe id="frame" title="Spreadsheet"></iframe>
+
+<dialog id="historybox">
+  <strong>Previous versions</strong>
+  <!-- Built with textContent by the script below, never markup: a title comes
+       from a filename somebody chose (SEC-001). -->
+  <div id="versions">Loading…</div>
+  <p class="note" id="history-note"></p>
+  <button id="history-close">Close</button>
+</dialog>
 
 <dialog id="sharebox">
   <strong>Anyone with this link can edit</strong>
@@ -167,4 +177,80 @@
     // callback matters: without it this is the file as it was uploaded.
     location.href = `/api/documents/${id}/download`;
   });
+
+  // --- Version history (COL-41) --------------------------------------------
+  //
+  // The host keeps the previous contents before every save, so this list is
+  // "what it was", newest first. Restore is offered next to each because a
+  // person who wants an old version almost always wants it *back*, not merely
+  // to look at — but Open is there too, so looking is possible without
+  // replacing anything.
+  const historyBox = document.getElementById("historybox");
+  const versionsEl = document.getElementById("versions");
+  const historyNote = document.getElementById("history-note");
+
+  function when(ms) {
+    // The absolute time, not "3 hours ago": choosing between saves means
+    // recognising one, and a person recognises a clock time.
+    return new Date(Number(ms)).toLocaleString();
+  }
+
+  async function showHistory() {
+    versionsEl.textContent = "Loading…";
+    historyNote.textContent = "";
+    historyBox.showModal();
+    let list = [];
+    try {
+      const response = await fetch(`/api/documents/${id}/versions`);
+      if (!response.ok) throw new Error(String(response.status));
+      ({ versions: list } = await response.json());
+    } catch (why) {
+      versionsEl.textContent = `Could not load the history: ${why.message}`;
+      return;
+    }
+    versionsEl.textContent = "";
+    if (!list.length) {
+      // Said plainly rather than shown as an empty box, because "no versions"
+      // and "the list failed to load" look identical when both are blank.
+      versionsEl.textContent = "No previous versions yet — one is kept each time the document is saved.";
+      return;
+    }
+    for (const v of list) {
+      const row = document.createElement("div");
+      row.className = "version";
+      const label = document.createElement("span");
+      label.textContent = `${when(v.at)} · ${Math.round(v.bytes / 1024)} KB`;
+      const open = document.createElement("button");
+      open.textContent = "Open";
+      open.addEventListener("click", () => {
+        location.href = `/api/documents/${id}/versions/${v.at}`;
+      });
+      const restore = document.createElement("button");
+      restore.textContent = "Restore";
+      restore.addEventListener("click", async () => {
+        restore.disabled = true;
+        historyNote.textContent = "Restoring…";
+        try {
+          const response = await fetch(
+            `/api/documents/${id}/versions/${v.at}/restore`,
+            { method: "POST" },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          // **Said out loud**, because the restore lands on the stored file and
+          // anyone with the document already open is still looking at what was
+          // there before — including this page's own iframe.
+          historyNote.textContent =
+            "Restored. Reload this page, and ask anyone else with it open to reload too.";
+        } catch (why) {
+          historyNote.textContent = `Could not restore: ${why.message}`;
+          restore.disabled = false;
+        }
+      });
+      row.append(label, open, restore);
+      versionsEl.append(row);
+    }
+  }
+
+  document.getElementById("history").addEventListener("click", showHistory);
+  document.getElementById("history-close").addEventListener("click", () => historyBox.close());
 </script>

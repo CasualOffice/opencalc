@@ -59,6 +59,12 @@ struct Config {
     /// left to a framework default, because the number a deployment wants
     /// depends on its documents and its disk, and neither is knowable from here.
     max_upload: usize,
+    /// How many previous versions of a document to keep.
+    ///
+    /// Bounded because a version is written on every save, and a document being
+    /// edited all day would otherwise fill the volume — a demo that eats its own
+    /// disk is worse than one with no history.
+    max_versions: usize,
     /// The WebSocket endpoint a **browser** should connect to.
     collab_ws: String,
     /// The audience the collaboration server is configured to require.
@@ -251,6 +257,123 @@ async fn load_meta(config: &Config, id: &str) -> Option<DocumentMeta> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Where a document's previous versions live.
+///
+/// A directory beside the document, one file per version, named for the moment
+/// it was taken. **The name is the metadata**: no second file to keep in step
+/// with the first, nothing to go stale, and a directory listing is already in
+/// order.
+fn versions_dir(config: &Config, id: &str) -> Option<PathBuf> {
+    doc_path(config, id).map(|p| p.with_extension("versions"))
+}
+
+/// The path of one version, refusing anything that is not a timestamp.
+///
+/// The version id arrives in a URL, so it is chosen by whoever wrote the link —
+/// the same reason `doc_path` refuses anything that is not a plain id. Digits
+/// only means `..` cannot appear at all.
+fn version_path(config: &Config, id: &str, at: &str) -> Option<PathBuf> {
+    if at.is_empty() || !at.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    versions_dir(config, id).map(|d| d.join(format!("{at}.xlsx")))
+}
+
+/// Milliseconds since the Unix epoch, as a version name.
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+}
+
+/// Every version of `id`, newest first.
+async fn list_versions(config: &Config, id: &str) -> Vec<(u128, u64)> {
+    let Some(dir) = versions_dir(config, id) else {
+        return Vec::new();
+    };
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        // No directory means no versions, which is the ordinary case for a
+        // document nobody has saved twice — not an error.
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".xlsx")) else {
+            continue;
+        };
+        let Ok(at) = stem.parse::<u128>() else {
+            continue;
+        };
+        let bytes = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+        out.push((at, bytes));
+    }
+    // Newest first: a list of saves is read from the top.
+    out.sort_unstable_by_key(|(at, _)| std::cmp::Reverse(*at));
+    out
+}
+
+/// Keep what the document says *now* as a version, before something replaces it.
+///
+/// Called before every write that would lose the current bytes — a save and a
+/// restore alike. A restore that did not do this would be the one destructive
+/// button in the product with no way back, which is precisely what version
+/// history exists to prevent.
+///
+/// Failures are logged and swallowed on purpose. Not being able to keep a
+/// version is worse if it also refuses the save that prompted it: the save is
+/// the user's work, the version is a convenience.
+async fn keep_version(config: &Config, id: &str) {
+    let (Some(doc), Some(dir)) = (doc_path(config, id), versions_dir(config, id)) else {
+        return;
+    };
+    let Ok(current) = tokio::fs::read(&doc).await else {
+        return; // Nothing to keep: no document yet.
+    };
+    if current.is_empty() {
+        return;
+    }
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        tracing::warn!(%id, "could not create the version directory");
+        return;
+    }
+    // **Two saves in the same millisecond must not become one version.**
+    //
+    // The timestamp is the name, so a collision silently overwrites the older
+    // of the two and history quietly loses an entry — the failure that is
+    // hardest to notice, because the list still looks plausible. A save that
+    // lands in an occupied millisecond takes the next free one instead; the
+    // bound stops a pathological clock spinning here for ever.
+    let mut at = now_millis();
+    let mut path = dir.join(format!("{at}.xlsx"));
+    for _ in 0..1000 {
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            break;
+        }
+        at += 1;
+        path = dir.join(format!("{at}.xlsx"));
+    }
+    if let Err(why) = tokio::fs::write(&path, &current).await {
+        tracing::warn!(%id, ?why, "could not keep a version");
+        return;
+    }
+    prune_versions(config, id).await;
+}
+
+/// Drop the oldest versions beyond `max_versions`.
+async fn prune_versions(config: &Config, id: &str) {
+    let Some(dir) = versions_dir(config, id) else {
+        return;
+    };
+    for (at, _) in list_versions(config, id)
+        .await
+        .into_iter()
+        .skip(config.max_versions)
+    {
+        let _ = tokio::fs::remove_file(dir.join(format!("{at}.xlsx"))).await;
+    }
+}
+
 /// A blank workbook, as `.xlsx` bytes.
 fn blank_xlsx(title: &str) -> Vec<u8> {
     let mut workbook = Workbook::new(Id::from_parts(1, 1));
@@ -426,6 +549,10 @@ async fn callback(
     if body.is_empty() {
         return StatusCode::BAD_REQUEST;
     }
+    // **Before the overwrite**, so a version is what the document *was* rather
+    // than what it became — which is what somebody reaching for history wants
+    // (`COL-41`).
+    keep_version(&config, &id).await;
     // Written beside and renamed, so a crash mid-write leaves the previous
     // version rather than half of the new one.
     let tmp = path.with_extension("xlsx.part");
@@ -435,6 +562,108 @@ async fn callback(
     }
     tracing::info!(%id, bytes = body.len(), "saved");
     StatusCode::OK
+}
+
+/// Every kept version of a document, newest first.
+///
+/// Sizes rather than a preview: a list is for choosing, and a person choosing
+/// between saves recognises "the one from before lunch" by its time. Rendering
+/// each version to say what changed would mean opening every one of them to
+/// draw a list.
+async fn versions(State(config): State<Arc<Config>>, Path(id): Path<String>) -> impl IntoResponse {
+    if load_meta(&config, &id).await.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let list: Vec<_> = list_versions(&config, &id)
+        .await
+        .into_iter()
+        .map(|(at, bytes)| serde_json::json!({ "at": at.to_string(), "bytes": bytes }))
+        .collect();
+    Json(serde_json::json!({ "versions": list })).into_response()
+}
+
+/// One version's bytes, so it can be looked at before it is restored.
+///
+/// Downloading a version is not restoring it, and having both is what makes
+/// restore a considered act rather than a guess — somebody can open the old
+/// file, check it is the one they meant, and only then replace what is live.
+async fn version_download(
+    State(config): State<Arc<Config>>,
+    Path((id, at)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let (Some(path), Some(meta)) = (
+        version_path(&config, &id, &at),
+        load_meta(&config, &id).await,
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(path).await {
+        Ok(bytes) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_owned(),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    // Prefixed with the version, so downloading one does not
+                    // land on top of the live file in somebody's downloads
+                    // folder — which would make "look at it before restoring"
+                    // the thing that loses their current work.
+                    format!(
+                        "attachment; filename=\"{at}-{}\"",
+                        meta.title.replace('"', "")
+                    ),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Make a kept version the live document again.
+///
+/// **The current document becomes a version first**, so a restore is itself
+/// undoable. Without that, the one button in the product whose whole purpose is
+/// undoing a mistake would be the only one that cannot be undone.
+///
+/// The version is left in place rather than moved, so restoring the same one
+/// twice does the same thing both times.
+async fn version_restore(
+    State(config): State<Arc<Config>>,
+    Path((id, at)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let (Some(from), Some(doc)) = (version_path(&config, &id, &at), doc_path(&config, &id)) else {
+        return (StatusCode::BAD_REQUEST, "not a version id").into_response();
+    };
+    if load_meta(&config, &id).await.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(&from).await else {
+        return (StatusCode::NOT_FOUND, "no such version").into_response();
+    };
+    // Refuse to restore something that cannot be opened, rather than making it
+    // live and finding out when somebody tries. The importer is the only thing
+    // that actually knows — the same check the upload path makes.
+    if let Err(why) = casual_calc_import::import_package(bytes.clone()) {
+        tracing::warn!(%id, %at, ?why, "refused to restore an unopenable version");
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "that version cannot be opened as a spreadsheet",
+        )
+            .into_response();
+    }
+
+    keep_version(&config, &id).await;
+    let tmp = doc.with_extension("xlsx.part");
+    if tokio::fs::write(&tmp, &bytes).await.is_err() || tokio::fs::rename(&tmp, &doc).await.is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    tracing::info!(%id, %at, bytes = bytes.len(), "restored");
+    Json(serde_json::json!({ "restored": at, "bytes": bytes.len() })).into_response()
 }
 
 /// Download whatever has been saved.
@@ -731,6 +960,10 @@ async fn main() {
             .unwrap_or_else(|_| "dev-secret-change-me".to_owned()),
         internal_base: std::env::var("OPENCALC_HOST_INTERNAL")
             .unwrap_or_else(|_| "http://host:8080".to_owned()),
+        max_versions: std::env::var("OPENCALC_MAX_VERSIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20),
         max_upload: std::env::var("OPENCALC_MAX_UPLOAD_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -773,6 +1006,16 @@ async fn main() {
         .route("/api/documents/{id}/content", get(content))
         .route("/api/documents/{id}/callback", post(callback))
         .route("/api/documents/{id}/download", get(download))
+        // History lives on the host because storage does. The collaboration
+        // server is deliberately not a file store (docs/57), and a WOPI
+        // deployment already has its own versioning — this is for the SDK and
+        // demo paths, which had none (`COL-41`).
+        .route("/api/documents/{id}/versions", get(versions))
+        .route("/api/documents/{id}/versions/{at}", get(version_download))
+        .route(
+            "/api/documents/{id}/versions/{at}/restore",
+            post(version_restore),
+        )
         .route("/api/documents/{id}/session", get(session))
         .route("/healthz", get(|| async { "ok" }))
         .route("/admin", get(admin_page))
@@ -846,6 +1089,7 @@ mod endpoint_tests {
 
     fn config(collab_ws: &str) -> Config {
         Config {
+            max_versions: 20,
             store: PathBuf::from("/tmp/opencalc-test-store"),
             secret: "s".into(),
             internal_base: "http://host:8080".into(),
@@ -919,5 +1163,301 @@ mod endpoint_tests {
             &headers(&[("host", "sheets.example.com")]),
         );
         assert_eq!(at, "wss://collab.example.com/collab");
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    /// A store of its own per test, so retention and pruning cannot see each
+    /// other's files.
+    fn store(name: &str) -> Arc<Config> {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-versions-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(Config {
+            store: dir,
+            secret: "s".into(),
+            internal_base: "http://host:8080".into(),
+            max_upload: 1 << 20,
+            max_versions: 3,
+            collab_ws: String::new(),
+            audience: "a".into(),
+            admin_token: None,
+        })
+    }
+
+    async fn put(config: &Config, id: &str, bytes: &[u8]) {
+        tokio::fs::write(doc_path(config, id).unwrap(), bytes)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            meta_path(config, id).unwrap(),
+            serde_json::to_vec(&DocumentMeta {
+                id: id.to_owned(),
+                title: "T.xlsx".into(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// **A save keeps what the document was, not what it became.**
+    ///
+    /// Somebody reaching for history wants the state they are trying to get
+    /// back to. A version taken *after* the write would be a copy of the thing
+    /// they are trying to undo, and the list would look right while being
+    /// useless.
+    #[tokio::test]
+    async fn a_save_keeps_the_previous_contents() {
+        let config = store("previous");
+        put(&config, "doc", b"first").await;
+
+        keep_version(&config, "doc").await;
+        tokio::fs::write(doc_path(&config, "doc").unwrap(), b"second")
+            .await
+            .unwrap();
+
+        let versions = list_versions(&config, "doc").await;
+        assert_eq!(versions.len(), 1, "no version was kept");
+        let at = versions[0].0.to_string();
+        let kept = tokio::fs::read(version_path(&config, "doc", &at).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            kept, b"first",
+            "the version holds the new bytes, not the old ones"
+        );
+    }
+
+    /// **Newest first**, because a list of saves is read from the top.
+    #[tokio::test]
+    async fn versions_are_listed_newest_first() {
+        let config = store("order");
+        put(&config, "doc", b"one").await;
+        for body in [b"two".as_slice(), b"three", b"four"] {
+            keep_version(&config, "doc").await;
+            tokio::fs::write(doc_path(&config, "doc").unwrap(), body)
+                .await
+                .unwrap();
+        }
+        let versions = list_versions(&config, "doc").await;
+        assert_eq!(versions.len(), 3);
+        let times: Vec<u128> = versions.iter().map(|v| v.0).collect();
+        let mut sorted = times.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(times, sorted, "versions came back oldest first: {times:?}");
+    }
+
+    /// **Two versions in the same millisecond are both kept.**
+    ///
+    /// The name is the timestamp, so a collision overwrites the older one and
+    /// history loses an entry while still looking plausible — the failure that
+    /// is hardest to notice. Saves this fast are exactly what a script or a
+    /// burst of collaborative activity produces.
+    #[tokio::test]
+    async fn two_versions_in_the_same_millisecond_are_both_kept() {
+        let config = store("collide");
+        put(&config, "doc", b"a").await;
+        // No sleeps: the point is that the code does not need them.
+        keep_version(&config, "doc").await;
+        tokio::fs::write(doc_path(&config, "doc").unwrap(), b"b")
+            .await
+            .unwrap();
+        keep_version(&config, "doc").await;
+
+        assert_eq!(
+            list_versions(&config, "doc").await.len(),
+            2,
+            "one of two versions taken in the same millisecond was lost"
+        );
+    }
+
+    /// **Retention is bounded**, and drops the oldest.
+    #[tokio::test]
+    async fn only_the_most_recent_versions_are_kept() {
+        let config = store("prune");
+        put(&config, "doc", b"v0").await;
+        for n in 1..8 {
+            keep_version(&config, "doc").await;
+            tokio::fs::write(doc_path(&config, "doc").unwrap(), format!("v{n}"))
+                .await
+                .unwrap();
+        }
+        let versions = list_versions(&config, "doc").await;
+        assert_eq!(
+            versions.len(),
+            config.max_versions,
+            "retention did not bound the list"
+        );
+
+        // The survivors are the newest ones, not an arbitrary three.
+        let newest = versions[0].0;
+        let oldest_kept = versions[versions.len() - 1].0;
+        assert!(newest >= oldest_kept);
+        let bodies: Vec<Vec<u8>> = {
+            let mut out = Vec::new();
+            for (at, _) in &versions {
+                out.push(
+                    tokio::fs::read(version_path(&config, "doc", &at.to_string()).unwrap())
+                        .await
+                        .unwrap(),
+                );
+            }
+            out
+        };
+        assert!(
+            bodies.iter().all(|b| b != b"v0"),
+            "the oldest version survived pruning: {bodies:?}"
+        );
+    }
+
+    /// **Zero keeps none**, which `.env.example` offers as a way to turn the
+    /// feature off.
+    ///
+    /// Gated because it is a documented contract, and a documented contract
+    /// nothing checks is the kind that quietly stops being true. Here it also
+    /// happens to be the boundary case of the pruning arithmetic.
+    #[tokio::test]
+    async fn a_maximum_of_zero_keeps_no_versions() {
+        let mut config = store("none");
+        Arc::get_mut(&mut config).unwrap().max_versions = 0;
+        put(&config, "doc", b"one").await;
+
+        keep_version(&config, "doc").await;
+        keep_version(&config, "doc").await;
+
+        assert!(
+            list_versions(&config, "doc").await.is_empty(),
+            "versions were kept with the maximum set to zero"
+        );
+    }
+
+    /// **Restoring keeps the current document first**, so a restore is itself
+    /// undoable.
+    ///
+    /// Without this, the one button whose whole purpose is undoing a mistake
+    /// would be the only one that cannot be undone.
+    #[tokio::test]
+    async fn restoring_is_itself_undoable() {
+        let config = store("restore");
+        let good = crate::blank_xlsx("T.xlsx");
+        put(&config, "doc", &good).await;
+        keep_version(&config, "doc").await;
+        let target = list_versions(&config, "doc").await[0].0.to_string();
+
+        // The document moves on.
+        tokio::fs::write(doc_path(&config, "doc").unwrap(), &good)
+            .await
+            .unwrap();
+
+        let before = list_versions(&config, "doc").await.len();
+        let response = version_restore(
+            State(Arc::clone(&config)),
+            axum::extract::Path(("doc".to_owned(), target)),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK, "the restore was refused");
+
+        assert_eq!(
+            list_versions(&config, "doc").await.len(),
+            before + 1,
+            "restoring did not keep what it replaced"
+        );
+    }
+
+    /// **A save through the real handler keeps the previous contents.**
+    ///
+    /// Through `callback`, not through `keep_version`. The ordering — version
+    /// first, write second — lives in the caller, so a test that calls the
+    /// helper directly passes with the two swapped and the whole point lost:
+    /// every version would be a copy of the save that replaced it.
+    #[tokio::test]
+    async fn a_save_through_the_handler_keeps_what_it_replaced() {
+        let config = store("callback");
+        // **Distinct bytes, not two blank workbooks.** `blank_xlsx` ignores its
+        // title, so two of them are byte-identical and the assertion below
+        // cannot tell "kept the old one" from "kept the new one" — this test
+        // passed with the ordering swapped until that was noticed. Neither
+        // `callback` nor `keep_version` parses what it is handed, so plain
+        // bytes exercise the same path.
+        let first = b"FIRST-CONTENTS".to_vec();
+        put(&config, "doc", &first).await;
+        let second = b"SECOND-CONTENTS".to_vec();
+        let response = callback(
+            State(Arc::clone(&config)),
+            axum::extract::Path("doc".to_owned()),
+            axum::body::Bytes::from(second.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let versions = list_versions(&config, "doc").await;
+        assert_eq!(versions.len(), 1, "the save kept no version");
+        let kept =
+            tokio::fs::read(version_path(&config, "doc", &versions[0].0.to_string()).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(
+            kept, first,
+            "the version holds what the save wrote, not what it replaced"
+        );
+    }
+
+    /// **A version id that is not a timestamp is refused.**
+    ///
+    /// It arrives in a URL, so it is chosen by whoever wrote the link. Digits
+    /// only means `..` cannot appear at all — the same guard `doc_path` makes,
+    /// for the same reason.
+    #[tokio::test]
+    async fn a_version_id_cannot_escape_the_store() {
+        let config = store("escape");
+        for hostile in ["..", "../../etc/passwd", "1/../..", "abc", ""] {
+            assert!(
+                version_path(&config, "doc", hostile).is_none(),
+                "{hostile:?} was accepted as a version id"
+            );
+        }
+        assert!(version_path(&config, "doc", "1700000000000").is_some());
+    }
+
+    /// **A version that cannot be opened is not made live.**
+    ///
+    /// Restoring first and discovering later leaves a document that exists, is
+    /// shared, and opens for nobody — with no way to tell a corrupt file from a
+    /// broken server. The importer is the only thing that knows, which is the
+    /// same argument the upload path makes.
+    #[tokio::test]
+    async fn an_unopenable_version_is_refused_rather_than_restored() {
+        let config = store("corrupt");
+        let good = crate::blank_xlsx("T.xlsx");
+        put(&config, "doc", &good).await;
+
+        let dir = versions_dir(&config, "doc").unwrap();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("1700000000000.xlsx"), b"not a spreadsheet")
+            .await
+            .unwrap();
+
+        let response = version_restore(
+            State(Arc::clone(&config)),
+            axum::extract::Path(("doc".to_owned(), "1700000000000".to_owned())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let live = tokio::fs::read(doc_path(&config, "doc").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            live, good,
+            "the live document was replaced with rubbish anyway"
+        );
     }
 }
