@@ -188,6 +188,26 @@ jobs:
       # that id.
       - name: Tracker ids must be unique
         run: python3 tools/check-tracker-ids.py
+      # The browser suite speaks the wire protocol over a raw socket, so it
+      # carries its own copy of the version number. Bumping the engine and
+      # forgetting this one turned three collaboration tests red *after* a
+      # merge, and only in `browser-smoke` -- a ten-minute job, on main. The
+      # same drift is a one-second grep here.
+      - name: The browser suite speaks the engine's protocol version
+        run: |
+          engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
+            crates/casual-calc-transaction/src/protocol.rs | grep -oE '[0-9]+$')
+          suite=$(grep -oE '^const PROTOCOL = [0-9]+' \
+            tests/browser/collab.spec.mjs | grep -oE '[0-9]+$')
+          if [ -z "$engine" ] || [ -z "$suite" ] ; then
+            echo "::error::could not read a protocol version from one of the two files" >&2
+            exit 1
+          fi
+          if [ "$engine" != "$suite" ] ; then
+            echo "::error::engine speaks protocol $engine, tests/browser/collab.spec.mjs speaks $suite" >&2
+            exit 1
+          fi
+          echo "both speak protocol $engine"
       # Cargo defaults `overflow-checks` off in release, so arithmetic that
       # panics in a debug test wraps silently in the shipped binary — the tests
       # then prove a property the artefact does not have. This engine's
