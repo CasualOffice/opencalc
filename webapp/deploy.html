@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCalc — self-hosting and deployment</title>
+    <meta name="description" content="Run OpenCalc on your own servers: Docker Compose, the host contract, every environment variable, reverse proxies, TLS, WOPI, monitoring and the failures worth knowing about first." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css?v=6" />
+    <style>
+      .doc { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 48px; align-items: start; padding: 40px 0 80px; }
+      @media (max-width: 940px) { .doc { grid-template-columns: 1fr; gap: 20px; } .toc { position: static !important; } }
+      .toc { position: sticky; top: 84px; font-size: 14px; }
+      .toc h4 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 20px 0 8px; }
+      .toc h4:first-child { margin-top: 0; }
+      .toc a { display: block; padding: 4px 0; color: var(--muted); text-decoration: none; }
+      .toc a:hover { color: var(--fg); }
+      .body h2 { font-size: 26px; letter-spacing: -.01em; margin: 44px 0 10px; scroll-margin-top: 84px; }
+      .body h2:first-child { margin-top: 0; }
+      .body h3 { font-size: 17px; margin: 28px 0 8px; scroll-margin-top: 84px; }
+      .body p, .body li { color: var(--muted); line-height: 1.7; }
+      .body li { margin: 4px 0; }
+      .body b, .body strong { color: var(--fg); }
+      .body table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14.5px; }
+      .body th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--border); padding: 8px 10px 8px 0; }
+      .body td { border-bottom: 1px solid var(--line); padding: 10px 10px 10px 0; color: var(--muted); vertical-align: top; }
+      .body td code, .body p code, .body li code { font-size: 13px; background: #f2f4f7; border-radius: 5px; padding: 1px 5px; color: #0b0d12; }
+      pre { background: #0f1216; color: #d7dee9; border-radius: 12px; padding: 16px 18px; overflow: auto; font: 400 13px/1.65 ui-monospace, Menlo, Consolas, monospace; margin: 14px 0; }
+      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; } pre .n { color: #f78c6c; }
+      .callout { border-left: 3px solid var(--accent, #2f6df6); background: #f6f9ff; border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 18px 0; }
+      .callout.warn { border-left-color: #d97706; background: #fffaf0; }
+      .callout p { color: #444c59; }
+      .lede { font-size: 18px; line-height: 1.6; color: var(--muted); }
+      .numlist { list-style: none; counter-reset: n; padding: 0; margin: 22px 0 0; }
+      .numlist > li { position: relative; counter-increment: n; padding: 0 0 22px 44px; margin: 0; border-left: 1px solid var(--border); }
+      .numlist > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+      .numlist > li::before {
+        content: counter(n); position: absolute; left: -13px; top: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: #fff;
+        font-family: var(--mono); font-size: 13px; font-weight: 600;
+      }
+      .numlist h3 { margin: 1px 0 6px; font-size: 16.5px; color: var(--fg); }
+      .numlist pre { margin: 10px 0 0; }
+    </style>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="./index.html" aria-label="OpenCalc home">
+          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+          OpenCalc
+        </a>
+        <nav class="nav-links">
+          <a href="./index.html#product">Product</a>
+          <a href="./index.html#today">What works</a>
+          <a href="./index.html#embed">Embed</a>
+          <a href="./docs.html">SDK docs</a>
+          <a href="./deploy.html">Self-host</a>
+          <a href="./embed.html">Live demo</a>
+          <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="wrap doc">
+      <aside class="toc">
+        <h4>Start</h4>
+        <a href="#two-minutes">Two minutes</a>
+        <a href="#shape">What the pieces are</a>
+        <a href="#stacks">Standalone or cluster</a>
+        <h4>Integrate</h4>
+        <a href="#contract">The host contract</a>
+        <a href="#addresses">The two addresses</a>
+        <a href="#tokens">Tokens and identity</a>
+        <h4>Configure</h4>
+        <a href="#env-host">Host variables</a>
+        <a href="#env-collab">Collaboration variables</a>
+        <a href="#env-wopi">WOPI variables</a>
+        <a href="#admin">The admin page</a>
+        <a href="#fonts">Fonts</a>
+        <h4>Operate</h4>
+        <a href="#proxy">Behind a reverse proxy</a>
+        <a href="#tls">TLS</a>
+        <a href="#health">Health and metrics</a>
+        <a href="#backup">Storage and backup</a>
+        <h4>Integrations</h4>
+        <a href="#wopi">Nextcloud, SharePoint, Moodle</a>
+        <h4>Notes</h4>
+        <a href="#failures">Failures worth knowing first</a>
+        <a href="#limits">What is not done yet</a>
+      </aside>
+
+      <main class="body">
+        <p class="eyebrow">Self-hosting</p>
+        <h2 id="two-minutes">Two minutes</h2>
+        <p class="lede">
+          OpenCalc runs on your own servers. Nothing phones home, there is no licence
+          check, and no document leaves your network.
+        </p>
+<pre><span class="c"># from a clone of the repository</span>
+cp .env.example .env
+<span class="c"># change OPENCALC_SHARED_SECRET — the file ships with a value the server refuses</span>
+docker compose up --build
+open http://localhost:8080</pre>
+        <p>
+          New spreadsheet → <b>Share</b> → send the link to somebody else. You are both
+          editing the same sheet. <b>Download</b> takes away an <code>.xlsx</code>
+          containing what you both typed.
+        </p>
+        <div class="callout">
+          <p>
+            <b>Change the secret first.</b> <code>.env.example</code> is a public file, so
+            the value in it is not a secret and the collaboration server rejects it by
+            name at startup rather than booting into a deployment anybody can mint tokens
+            for. <code>openssl rand -hex 32</code> is enough.
+          </p>
+        </div>
+
+        <h2 id="shape">What the pieces are</h2>
+        <table>
+          <tr><th>Container</th><th>What it does</th><th>Who supplies it in the end</th></tr>
+          <tr><td><code>host</code></td><td>Documents, identity, tokens, saving</td><td><b>You.</b> This is your product</td></tr>
+          <tr><td><code>collab</code></td><td>Ordering, presence, the WebSocket</td><td>OpenCalc</td></tr>
+          <tr><td><code>proxy</code></td><td>Puts the page and the socket on one origin</td><td>Yours, or use ours</td></tr>
+          <tr><td><code>wopi</code></td><td>Makes OpenCalc appear inside Nextcloud, SharePoint and friends</td><td>OpenCalc, optional</td></tr>
+        </table>
+        <p>
+          That split is the integration boundary, not an artefact of the demo. The
+          collaboration server holds <b>no per-document state</b> and deliberately
+          <b>cannot mint tokens</b>. Per join, it is told by a party that already knows:
+          where the file lives, where the finished bytes go, who is joining and what they
+          may do.
+        </p>
+        <p>
+          <code>server/casual-calc-host</code> is that party, written small enough to read
+          in one sitting. When you integrate, you replace it — the collaboration server and
+          the editor stay as they are.
+        </p>
+
+        <h2 id="stacks">Standalone or cluster</h2>
+        <p>
+          Two stacks, both <code>docker compose up</code>.
+        </p>
+<pre><span class="c"># one collaboration node — what most deployments should run</span>
+docker compose up --build                                   <span class="c"># :8080</span>
+
+<span class="c"># two nodes behind a proxy, coordinating through Redis</span>
+docker compose -f docker-compose.cluster.yml up --build      <span class="c"># :8090</span></pre>
+        <p>
+          The cluster buys horizontal capacity, not correctness. Standalone is a
+          first-class mode and not a degraded one, which is a deliberate architectural
+          position rather than a limitation we have not got round to.
+        </p>
+
+        <h2 id="contract">The host contract</h2>
+        <p>Four endpoints and a signature is the whole of it.</p>
+<pre>GET  /api/documents/{id}/content     <span class="c"># what the collaboration server fetches</span>
+POST /api/documents/{id}/callback    <span class="c"># where the finished bytes come back</span>
+GET  /api/documents/{id}/session     <span class="c"># a minted token, for the browser</span>
+GET  /api/documents/{id}/download    <span class="c"># what a user takes away</span></pre>
+        <p>
+          Implement those four against your own storage and identity, and you have
+          replaced the reference host. Nothing else in the system needs to know.
+        </p>
+
+        <h2 id="addresses">The two addresses that get confused</h2>
+        <div class="callout warn">
+          <p>
+            This is the most common first failure, and it produces an editor that says
+            <i>connecting</i> forever with nothing in any log.
+          </p>
+        </div>
+        <table>
+          <tr><th>Variable</th><th>Who dials it</th><th>What to set</th></tr>
+          <tr>
+            <td><code>OPENCALC_COLLAB_WS</code></td>
+            <td>The <b>browser</b></td>
+            <td><b>Usually leave it unset.</b> The host derives it from the request the browser just made — same origin, <code>/collab</code>, and <code>wss://</code> when <code>X-Forwarded-Proto</code> says the page arrived over TLS. Set it only when collaboration lives on a hostname of its own.</td>
+          </tr>
+          <tr>
+            <td><code>OPENCALC_HOST_INTERNAL</code></td>
+            <td>The <b>collaboration server</b></td>
+            <td>What that server calls your host. On a compose network, a service name — <code>http://host:8080</code>. Point it at <code>localhost</code> and the server fetches itself.</td>
+          </tr>
+        </table>
+        <p>
+          They look interchangeable and are on different networks. If you do set
+          <code>OPENCALC_COLLAB_WS</code>, the <code>/collab</code> path is added when you
+          leave it off, because the server serves that path and nothing else — an endpoint
+          without it is an address nothing answers.
+        </p>
+
+        <h2 id="tokens">Tokens and identity</h2>
+        <p>
+          Your host mints a short-lived JWT per join; the collaboration server verifies it
+          and cannot produce one. The claims are the whole contract: who the user is, which
+          document, where its bytes live, where to post them back, and what this person may
+          do.
+        </p>
+        <table>
+          <tr><th>Variable</th><th>Meaning</th></tr>
+          <tr><td><code>OPENCALC_SHARED_SECRET</code></td><td>HS256, the same string on both sides. <b>Fine for a demo.</b> It means the collaboration server can mint tokens as well as check them, and it says so loudly at boot.</td></tr>
+          <tr><td><code>OPENCALC_JWKS_URL</code></td><td><b>What a real deployment should use.</b> The server fetches your public keys and can verify a token without being able to forge one. Keys are re-read periodically, and a token naming an unknown <code>kid</code> prompts one refresh — throttled, so an invented <code>kid</code> cannot make the server hammer your endpoint.</td></tr>
+          <tr><td><code>OPENCALC_AUDIENCE</code></td><td>The audience a token must name. Any string, the same on both sides.</td></tr>
+          <tr><td><code>OPENCALC_TOKEN_LEEWAY_SECS</code></td><td>Clock skew allowed when checking expiry. Defaults to 60.</td></tr>
+        </table>
+        <p>
+          Access is <code>view</code>, <code>comment</code> or <code>edit</code>, and it is
+          enforced <b>at the operation, on the server</b>. A client that hides its toolbar
+          and a server that enforces nothing look identical until somebody edits anyway.
+        </p>
+
+        <h2 id="env-host">Host variables</h2>
+        <table>
+          <tr><th>Variable</th><th>Default</th><th>What it is</th></tr>
+          <tr><td><code>OPENCALC_HOST_BIND</code></td><td><code>0.0.0.0:8080</code></td><td>Where the host listens.</td></tr>
+          <tr><td><code>OPENCALC_STORE</code></td><td>—</td><td>Directory for documents and their metadata. A volume in compose.</td></tr>
+          <tr><td><code>OPENCALC_SHARED_SECRET</code></td><td>—</td><td>Signs the tokens it mints. See above.</td></tr>
+          <tr><td><code>OPENCALC_AUDIENCE</code></td><td><code>opencalc-demo</code></td><td>Audience claim.</td></tr>
+          <tr><td><code>OPENCALC_HOST_INTERNAL</code></td><td>—</td><td>What the collaboration server calls this host.</td></tr>
+          <tr><td><code>OPENCALC_COLLAB_WS</code></td><td>derived</td><td>What the browser dials. Usually unset.</td></tr>
+          <tr><td><code>OPENCALC_MAX_UPLOAD_BYTES</code></td><td><code>67108864</code> (64&nbsp;MB)</td><td>Largest workbook accepted. The web framework's own default is 2&nbsp;MB, which is smaller than many real spreadsheets.</td></tr>
+          <tr><td><code>OPENCALC_ADMIN_TOKEN</code></td><td>unset</td><td>Switches <code>/admin</code> on. Unset means there is no admin page at all.</td></tr>
+          <tr><td><code>OPENCALC_FONT_DIR</code></td><td>unset</td><td>Extra faces for the headless renderer. See <a href="#fonts">Fonts</a>.</td></tr>
+          <tr><td><code>OPENCALC_EDITOR_DIR</code></td><td><code>/editor</code></td><td>Where the editor bundle is served from.</td></tr>
+        </table>
+
+        <h2 id="env-collab">Collaboration variables</h2>
+        <p>The ones an operator actually changes:</p>
+        <table>
+          <tr><th>Variable</th><th>What it is</th></tr>
+          <tr><td><code>OPENCALC_BIND</code></td><td>Public listener.</td></tr>
+          <tr><td><code>OPENCALC_INTERNAL_BIND</code></td><td>A second listener for metrics and health, so they need not be exposed with the socket.</td></tr>
+          <tr><td><code>OPENCALC_ALLOWED_HOSTS</code></td><td>Hosts this server will fetch documents from and post results to. A token names a URL, so this is what stops a forged one pointing it anywhere.</td></tr>
+          <tr><td><code>OPENCALC_ALLOW_PLAIN_CALLBACKS</code></td><td>Permits plain <code>http</code> for those calls. Local development only; off by default.</td></tr>
+          <tr><td><code>OPENCALC_MAX_DOCUMENTS</code>, <code>OPENCALC_MAX_PARTICIPANTS</code></td><td>Capacity per node.</td></tr>
+          <tr><td><code>OPENCALC_MAX_DOCUMENT_BYTES</code>, <code>OPENCALC_MAX_MESSAGE_BYTES</code></td><td>Size bounds on what it will hold and accept.</td></tr>
+          <tr><td><code>OPENCALC_MAX_PENDING_CONNECTIONS</code>, <code>OPENCALC_JOIN_TIMEOUT_MS</code></td><td>A WebSocket upgrade cannot require a token — the token arrives in the first frame — so these bound how many sockets may be open and silent. Separate from <code>MAX_PARTICIPANTS</code>, which counts people in a document.</td></tr>
+          <tr><td><code>OPENCALC_IDLE_EVICTION_MS</code></td><td>How long a document with nobody in it stays resident.</td></tr>
+          <tr><td><code>OPENCALC_CLIENT_PING_MS</code>, <code>OPENCALC_CLIENT_IDLE_MS</code></td><td>How the server decides a participant is gone. See the proxy note below.</td></tr>
+          <tr><td><code>OPENCALC_DRAIN_TIMEOUT_MS</code>, <code>OPENCALC_DRAIN_DEADLINE_MS</code>, <code>OPENCALC_DRAIN_CONCURRENCY</code></td><td>Shutdown: how long it will spend saving open documents before it stops.</td></tr>
+          <tr><td><code>OPENCALC_TLS</code>, <code>OPENCALC_TLS_CERT</code>, <code>OPENCALC_INTERNAL_TLS</code></td><td>Terminate TLS in the process rather than at a proxy.</td></tr>
+          <tr><td><code>OPENCALC_TRUSTED_PROXIES</code>, <code>OPENCALC_TRUST_ANY_PROXY</code></td><td>Whose <code>X-Forwarded-*</code> headers to believe. Believing anybody's is how a client picks its own address.</td></tr>
+          <tr><td><code>OPENCALC_REDIS_URL</code>, <code>OPENCALC_REDIS_NAMESPACE</code>, <code>OPENCALC_NODE_ID</code>, <code>OPENCALC_ADVERTISE</code>, <code>OPENCALC_LEASE_MS</code></td><td>Cluster only: coordination, identity and how long a node's lease on a document lives.</td></tr>
+        </table>
+        <div class="callout">
+          <p>
+            Everything is read <b>once at startup and checked before the listener opens</b>.
+            A node that starts and is subtly wrong costs more than one that refuses to start
+            and says why.
+          </p>
+        </div>
+
+        <h2 id="env-wopi">WOPI variables</h2>
+        <table>
+          <tr><th>Variable</th><th>What it is</th></tr>
+          <tr><td><code>OPENCALC_WOPI_ALLOWED_HOSTS</code></td><td><b>Required, no default, and the process will not start without it.</b> A <code>WOPISrc</code> arrives in a query string, so it is chosen by whoever wrote the link the user clicked. Without a list, the service fetches whatever that link says — a server-side request forgery with a friendly interface.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_PUBLIC_URL</code></td><td>Where a <b>browser</b> reaches the adapter. It goes into the discovery document, so it is the address the file store sends people to. Behind a proxy it is never the bind address.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_INTERNAL_URL</code></td><td>Where the collaboration server reaches it, which is not the same thing.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_SESSION_TTL_MS</code></td><td>How long an editing session — and the WOPI lock it holds — lives. Default 8 hours. A lock left behind makes somebody's file read-only in their own file store.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_MAX_SESSIONS</code></td><td>Default 500.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_PROOF_KEY</code></td><td>A PKCS#8 private key, as a <b>file path</b> so the secret arrives on a mounted file rather than an environment variable. Signs every outgoing request so a host can prove it came from this editor. Optional; a key that will not load is fatal at boot rather than a warning.</td></tr>
+          <tr><td><code>OPENCALC_WOPI_ALLOW_PLAIN</code></td><td>Permits a plain <code>http</code> <code>WOPISrc</code>. Local development only.</td></tr>
+          <tr><td><code>OPENCALC_BRAND_NAME</code>, <code>OPENCALC_BRAND_FAVICON_URL</code>, <code>OPENCALC_BRAND_ACCENT</code></td><td>White-labelling: the entry in the file store's editor list, the browser tab and the toolbar.</td></tr>
+        </table>
+
+        <h2 id="admin">Changing things while it runs</h2>
+        <p>
+          <code>/admin</code> is <b>off entirely</b> unless <code>OPENCALC_ADMIN_TOKEN</code>
+          is set. There is no default password — a demo that ships with a known one is a
+          demo somebody exposes to the internet once and then explains.
+        </p>
+        <p>
+          It changes what can safely move under a live server: the endpoint new sessions are
+          given, whether uploads are offered, the banner. Settings are written beside the
+          documents, so they survive a restart.
+        </p>
+
+        <h2 id="fonts">Fonts</h2>
+        <p>
+          Only the <b>headless renderer</b> needs these — thumbnails and PNG export. The
+          editor never does; the browser draws cells with its own faces.
+        </p>
+        <p>
+          Latin is built in. Drop a <code>.ttf</code>, <code>.otf</code> or
+          <code>.ttc</code> into <code>OPENCALC_FONT_DIR</code> for any other script and it
+          is registered at boot. Empty is fine and is the normal case.
+        </p>
+
+        <h2 id="proxy">Behind a reverse proxy</h2>
+        <p>
+          Working configurations for nginx and Caddy are in
+          <a href="https://github.com/CasualOffice/opencalc/tree/main/deploy"><code>deploy/</code></a>.
+          Two things are not obvious, and each produces the same symptom — an editor that
+          reconnects forever:
+        </p>
+        <ol class="numlist">
+          <li>
+            <h3>The WebSocket upgrade headers</h3>
+            <p>Without <code>Upgrade</code> and <code>Connection</code>, the handshake is answered with a plain <code>200</code>.</p>
+          </li>
+          <li>
+            <h3>A read timeout longer than the server's client ping</h3>
+            <p>A co-editing socket is idle whenever nobody is typing, and nginx closes idle proxied connections after sixty seconds by default. The server should decide when a participant has gone; the proxy deciding for it looks like a network fault to everybody in the document.</p>
+          </li>
+        </ol>
+        <p>
+          <b>Serve everything from one origin</b> — editor, API and WebSocket. A share link
+          is then a single URL, with no CORS to configure and no second certificate. The
+          standalone stack does this itself: <code>docker compose up</code> starts an nginx
+          in front of both services, so the page and the socket share a hostname.
+        </p>
+
+        <h2 id="tls">TLS</h2>
+        <p>
+          Terminate at your proxy, which is what most deployments already do, and forward
+          <code>X-Forwarded-Proto</code> so the host hands out <code>wss://</code> rather
+          than <code>ws://</code>. An <code>https</code> page cannot open a
+          <code>ws://</code> socket at all, and the browser's refusal is the only thing that
+          reports it.
+        </p>
+        <p>
+          If you would rather the collaboration server terminate TLS itself, point
+          <code>OPENCALC_TLS_CERT</code> at a certificate and key. Set
+          <code>OPENCALC_TRUSTED_PROXIES</code> to the proxies whose forwarding headers you
+          are willing to believe — believing anybody's lets a client choose its own
+          apparent address.
+        </p>
+
+        <h2 id="health">Health and metrics</h2>
+        <table>
+          <tr><th>Endpoint</th><th>Answers</th></tr>
+          <tr><td><code>/healthz</code></td><td>Is the process alive.</td></tr>
+          <tr><td><code>/readyz</code></td><td>Is it ready to take work.</td></tr>
+          <tr><td><code>/stats</code></td><td>Documents and participants, as JSON — "is it working <i>now</i>", for a person.</td></tr>
+          <tr><td><code>/metrics</code></td><td>Prometheus text — "has it been working", for a machine.</td></tr>
+        </table>
+        <p>The counters worth putting on a dashboard:</p>
+        <table>
+          <tr><th>Metric</th><th>Answers</th></tr>
+          <tr><td><code>opencalc_saves_accepted_total</code> / <code>_failed_total</code></td><td>Are documents getting back to the host?</td></tr>
+          <tr><td><code>opencalc_save_duration_milliseconds_total</code></td><td>Divided by the counts, how slow is your callback?</td></tr>
+          <tr><td><code>opencalc_fetches_ok_total</code> / <code>_failed_total</code></td><td>Can the server reach your host at all?</td></tr>
+          <tr><td><code>opencalc_connections_refused_pending_total</code></td><td>Is the node full while still answering <code>/healthz</code>?</td></tr>
+          <tr><td><code>opencalc_slow_consumers_total</code></td><td>Are clients being dropped for lagging? Survivable, but silent.</td></tr>
+          <tr><td><code>opencalc_documents</code> / <code>opencalc_participants</code></td><td>Current load, as gauges.</td></tr>
+        </table>
+        <div class="callout">
+          <p>
+            <b>Alert on <code>saves_failed_total</code> increasing first.</b> It is the only
+            counter that means work is at risk, rather than that something is merely busy.
+          </p>
+        </div>
+
+        <h2 id="backup">Storage and backup</h2>
+        <p>
+          The reference host keeps each document and its metadata as files under
+          <code>OPENCALC_STORE</code>, which compose mounts as a named volume. Back that
+          directory up and you have backed up every document.
+        </p>
+        <p>
+          When you replace the reference host with your own, this stops being ours: storage,
+          retention and backup become whatever your product already does. That is the point
+          of the boundary.
+        </p>
+        <div class="callout warn">
+          <p>
+            <b>There is no version history or point-in-time restore yet.</b> A save replaces
+            what was there. If you need history, keep it on your side of the host contract —
+            the callback is where the finished bytes arrive, and nothing stops you writing
+            each one somewhere durable.
+          </p>
+        </div>
+
+        <h2 id="wopi">Nextcloud, SharePoint, Moodle, ownCloud, Alfresco</h2>
+        <p>
+          The WOPI adapter is what makes OpenCalc <i>installable</i> into a file store: an
+          administrator pastes one URL into their settings and OpenCalc appears in the
+          editor list.
+        </p>
+<pre>docker compose --profile wopi up -d
+<span class="c"># then give your file store:</span>
+https://your-host/hosting/discovery</pre>
+        <p>
+          A file opened that way is fetched from the store, edited — with everybody who
+          opens it in the same session — and written back under its own name, in the format
+          it arrived in. <code>.xlsx</code>, <code>.csv</code>, <code>.tsv</code> and
+          <code>.psv</code> round-trip today. <code>.ods</code> does not yet, and is
+          deliberately absent from the advertised list rather than accepted and silently
+          converted.
+        </p>
+
+        <h2 id="failures">Failures worth knowing about first</h2>
+        <table>
+          <tr><th>Symptom</th><th>Almost always</th></tr>
+          <tr><td>The editor says <i>connecting</i> forever</td><td><code>OPENCALC_HOST_INTERNAL</code> pointing at <code>localhost</code>, so the collaboration server fetches itself. Or a proxy without the upgrade headers.</td></tr>
+          <tr><td>It works on your machine and nowhere else</td><td><code>OPENCALC_COLLAB_WS</code> set to a loopback address. Unset it and let the host derive it.</td></tr>
+          <tr><td>Everybody drops out after about a minute</td><td>The proxy's read timeout is shorter than the server's client ping, so the proxy is deciding who has left.</td></tr>
+          <tr><td>An <code>https</code> page never connects</td><td><code>X-Forwarded-Proto</code> is not reaching the host, so it is handing out <code>ws://</code>, which the browser will not open from an <code>https</code> page.</td></tr>
+          <tr><td>The server refuses to start and names the secret</td><td>Working as intended — <code>.env.example</code>'s value is public and is rejected by name.</td></tr>
+          <tr><td>The WOPI container will not start</td><td><code>OPENCALC_WOPI_ALLOWED_HOSTS</code> is empty. It has no default on purpose.</td></tr>
+          <tr><td>Uploads over a couple of megabytes fail</td><td><code>OPENCALC_MAX_UPLOAD_BYTES</code>, and your proxy's own body limit, which is a separate number.</td></tr>
+          <tr><td>Non-Latin text is boxes in a PNG export</td><td>No face for that script in <code>OPENCALC_FONT_DIR</code>. The editor is unaffected.</td></tr>
+        </table>
+
+        <h2 id="limits">What is not done yet</h2>
+        <ul>
+          <li><b>No Helm chart or Kubernetes manifests.</b> Compose is the supported path today.</li>
+          <li><b>Redis in the cluster stack is a single unreplicated instance.</b> Fine for capacity, not yet an availability story.</li>
+          <li><b>No version history or restore</b>, as above.</li>
+          <li><b>Secrets are environment variables and mounted files</b> — there is no integration with a secret manager yet.</li>
+          <li><b>No published image.</b> You build from the repository; images are built in CI but not yet pushed to a registry.</li>
+        </ul>
+        <p>
+          These are tracked in the open, not hidden: the execution tracker lists every one
+          with its priority.
+        </p>
+
+        <p style="margin-top:36px">
+          The operator's reference is
+          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/65-RUNNING-IT.md">docs/65</a>,
+          the WOPI handshake is in
+          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/74-WOPI-INTEGRATION.md">docs/74</a>,
+          and every variable's authoritative default is the <code>main.rs</code> of the
+          binary that reads it — the only copy that cannot go stale.
+        </p>
+      </main>
+    </div>
+  </body>
+</html>

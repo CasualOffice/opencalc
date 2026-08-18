@@ -188,6 +188,13 @@ jobs:
       # that id.
       - name: Tracker ids must be unique
         run: python3 tools/check-tracker-ids.py
+      # The self-hosting page is dense with the exact strings an operator
+      # pastes into a compose file. Prose that goes vague is survivable; a
+      # wrong `OPENCALC_*` name costs somebody an afternoon before they
+      # conclude the documentation is lying. Checked one way — every name on
+      # the page must exist, and the code may hold names the page leaves out.
+      - name: The deployment page names settings that exist
+        run: python3 tools/check-deploy-docs.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a
