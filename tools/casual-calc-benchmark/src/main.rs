@@ -41,6 +41,8 @@ struct Report {
     /// How each measured operation grew when its input did. The part that is
     /// actually a gate — see [`ScalingReport`].
     scaling: Vec<ScalingReport>,
+    /// What a million cells cost in resident memory — see [`MemoryReport`].
+    memory: MemoryReport,
     cases: Vec<CaseReport>,
 }
 
@@ -217,6 +219,103 @@ struct ScalingReport {
     /// The largest ratio this case may show.
     budget_centi: u64,
     within_budget: bool,
+}
+
+/// What a million cells actually cost in memory, or why that is unknown.
+///
+/// `PERF-08` measured a real million-cell build, which is *payload* — the bytes
+/// a document holds — and not what the process asks the operating system for.
+/// The two differ by whatever the allocator, the index structures and the
+/// interning add, and that difference is the whole question when the target is
+/// "a million cells on a laptop".
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryReport {
+    /// Whether this platform could be measured at all.
+    ///
+    /// Reported rather than omitted so a run on a machine with no `/proc` says
+    /// so, instead of looking like a run where the number happened to be
+    /// missing. macOS is that machine, which is why this had to be honest
+    /// rather than convenient.
+    available: bool,
+    /// Peak resident set before the workbook was built, in bytes.
+    baseline_bytes: u64,
+    /// Peak resident set after it was built.
+    peak_bytes: u64,
+    /// The workbook's own cost: `peak - baseline`.
+    workbook_bytes: u64,
+    cells: u64,
+    /// `workbook_bytes / cells`, in hundredths of a byte so the report stays
+    /// integers.
+    ///
+    /// **This is the figure worth comparing across machines.** A byte is a byte
+    /// on every runner, unlike a nanosecond — so unlike the timing gates, an
+    /// absolute per-cell ceiling here is calibratable and does not need to be
+    /// expressed as a ratio.
+    centi_bytes_per_cell: u64,
+}
+
+/// Peak resident set size, from `/proc/self/status`.
+///
+/// `VmHWM` (high-water mark) rather than `VmRSS`: resident size falls when the
+/// kernel reclaims pages, so a reading taken after a build can be lower than
+/// what the build actually needed. The peak is what "will this fit" means.
+///
+/// **No counting allocator**, because `unsafe_code = "forbid"` is set
+/// workspace-wide and `GlobalAlloc` cannot be implemented without `unsafe`.
+/// Reading a file needs none, and this is the measurement the target is
+/// expressed in anyway — the operating system's view, not the allocator's.
+fn peak_resident_bytes() -> Option<u64> {
+    parse_vm_hwm(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// Pull `VmHWM` out of a `/proc/self/status` body, in bytes.
+///
+/// Separated from the file read so it can be tested on a machine that has no
+/// `/proc` — which is every developer machine here. The alternative was a
+/// parser that only ever ran on CI, and a parser nobody can run is one nobody
+/// can be sure of.
+fn parse_vm_hwm(status: &str) -> Option<u64> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Build a million-cell workbook and report what it cost.
+fn measure_memory(cells: u32) -> MemoryReport {
+    let Some(baseline) = peak_resident_bytes() else {
+        return MemoryReport {
+            available: false,
+            baseline_bytes: 0,
+            peak_bytes: 0,
+            workbook_bytes: 0,
+            cells: u64::from(cells),
+            centi_bytes_per_cell: 0,
+        };
+    };
+    let workbook = build_workbook(cells);
+    let peak = peak_resident_bytes().unwrap_or(baseline);
+    // Read the peak *before* dropping, and keep the workbook alive to here, or
+    // the optimiser is entitled to have freed it already.
+    let held = workbook.sheets.len();
+    debug_assert!(held > 0);
+    let grew = peak.saturating_sub(baseline);
+    MemoryReport {
+        available: true,
+        baseline_bytes: baseline,
+        peak_bytes: peak,
+        workbook_bytes: grew,
+        cells: u64::from(cells),
+        centi_bytes_per_cell: if cells == 0 {
+            0
+        } else {
+            grew.saturating_mul(100) / u64::from(cells)
+        },
+    }
 }
 
 /// Twenty-five times, for ten times the work.
@@ -753,9 +852,74 @@ fn main() {
         smoke,
         cases,
         scaling: measure_all_scaling(if smoke { 3 } else { 20 }),
+        // Smaller under `--smoke` for the same reason every other case is: the
+        // shape is what is being checked, not the headline number.
+        memory: measure_memory(if smoke { 50_000 } else { 1_000_000 }),
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    /// A real `/proc/self/status`, trimmed. The fields around `VmHWM` are kept
+    /// because they are what a naive parser trips over: `VmHW` is a prefix of
+    /// nothing, but `VmRSS` sits next to it and `VmPeak` looks similar.
+    const STATUS: &str = "\
+Name:\tbench
+VmPeak:\t  812345 kB
+VmSize:\t  712345 kB
+VmHWM:\t   524288 kB
+VmRSS:\t   412345 kB
+Threads:\t1
+";
+
+    /// **The peak is read, in bytes, from the right line.**
+    #[test]
+    fn the_high_water_mark_is_parsed_in_bytes() {
+        assert_eq!(parse_vm_hwm(STATUS), Some(524_288 * 1024));
+    }
+
+    /// **`VmHWM`, not `VmRSS` or `VmPeak`.**
+    ///
+    /// `VmRSS` falls when the kernel reclaims pages, so a reading taken after a
+    /// build can be lower than what the build needed — the number would drift
+    /// down on a busy runner and the gate would loosen itself. `VmPeak` is
+    /// address space, which is not memory.
+    #[test]
+    fn neither_the_current_size_nor_the_address_space_is_used() {
+        let got = parse_vm_hwm(STATUS).unwrap();
+        assert_ne!(got, 412_345 * 1024, "VmRSS was read instead of VmHWM");
+        assert_ne!(got, 812_345 * 1024, "VmPeak was read instead of VmHWM");
+    }
+
+    /// **A platform with no such field says so**, rather than reporting zero as
+    /// though it had measured nothing being used.
+    #[test]
+    fn a_status_without_the_field_is_unavailable() {
+        assert_eq!(parse_vm_hwm("Name:\tbench\nThreads:\t1\n"), None);
+        assert_eq!(parse_vm_hwm(""), None);
+    }
+
+    /// **An unmeasurable platform is reported as unmeasurable.**
+    ///
+    /// The distinction the row insisted on: a run on a machine with no `/proc`
+    /// must not look like a run where a million cells cost nothing.
+    #[test]
+    fn an_unmeasurable_platform_is_not_reported_as_zero_cost() {
+        let report = measure_memory(1_000);
+        if report.available {
+            assert!(
+                report.peak_bytes > 0,
+                "measured, but reported no memory at all"
+            );
+        } else {
+            assert_eq!(report.workbook_bytes, 0);
+            assert_eq!(report.centi_bytes_per_cell, 0);
+        }
+    }
 }
 
 #[cfg(test)]
