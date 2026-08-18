@@ -124,6 +124,10 @@ const TOKENS = [
   "tableHeaderColor", "tableBandColor",
   "tooltipBackgroundColor", "tooltipTextColor",
   "controlShadow", "popoverShadow", "monoFontFamily",
+  // Derived from the tokens above and overridable in their own right: a host
+  // whose brand needs a stronger focus ring than a 32% mix should not have to
+  // restyle the accent to get one.
+  "elevationRaised", "elevationOverlay", "accentRing", "accentSoft", "dangerRing",
 ];
 
 /// `accentColor` -> `--oc-accent-color`.

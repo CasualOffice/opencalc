@@ -87,8 +87,38 @@
   --oc-selection-color: rgba(47, 109, 246, .10);
   --oc-find-highlight-color: rgba(245, 158, 11, .28);
   --oc-success-color: #16a34a;
+  /* Advertised in the SDK's theme list and referenced by nothing, so a host
+     that set `dangerColor` changed exactly nothing. Two different reds were
+     spelled out instead — `#e53935` for an invalid-input ring and `#e5484d`
+     for a destructive menu item — which is the same value meaning the same
+     thing written twice, differently (`UX-TOKEN-01`). */
+  --oc-danger-color: #e5484d;
+  /* These were already honoured through a `var(…, fallback)`, so setting them
+     worked; declaring them here makes the default discoverable in the same
+     place as every other token rather than hidden in one rule. */
+  --oc-tooltip-background-color: #1f2430;
+  --oc-tooltip-text-color: #ffffff;
   --oc-control-shadow: 0 1px 2px rgba(11, 13, 18, .08);
   --oc-popover-shadow: 0 1px 2px rgba(11, 13, 18, .06), 0 14px 34px rgba(11, 13, 18, .14);
+  /* --- Elevation and state, derived ------------------------------------
+     Two elevations, because a third is a distinction nobody applies
+     consistently: `raised` is attached to the page (a control), `overlay`
+     floats above it (a menu, a popover, a dialog, a toast). They alias the
+     component-named shadows rather than replacing them, because `controlShadow`
+     and `popoverShadow` are in the published theme contract and renaming them
+     would break every host that sets one.
+  
+     The accent derivations are the reason this is not only tidiness: the focus
+     ring and the text selection used to be written as `rgba(47, 109, 246, ...)`
+     — the *default* accent, spelled out. A host that set a brand accent got
+     brand-coloured buttons and blue focus rings, which is exactly the "assembled
+     rather than designed" look, and it was invisible to us because our own
+     accent is that blue (`UX-TOKEN-01`). */
+  --oc-elevation-raised: var(--oc-control-shadow);
+  --oc-elevation-overlay: var(--oc-popover-shadow);
+  --oc-accent-ring: color-mix(in srgb, var(--oc-accent-color) 32%, transparent);
+  --oc-accent-soft: color-mix(in srgb, var(--oc-accent-color) 18%, transparent);
+  --oc-danger-ring: color-mix(in srgb, var(--oc-danger-color) 30%, transparent);
   --oc-mono-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 /* Dark tokens — applied both by the manual theme toggle (data-theme="dark",
@@ -115,7 +145,29 @@
   --oc-selection-color: rgba(91, 139, 255, .16);
   --oc-find-highlight-color: rgba(245, 158, 11, .34);
   --oc-control-shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  --oc-danger-color: #ff6b6b;
+  --oc-tooltip-background-color: #eef1f6;
+  --oc-tooltip-text-color: #10131a;
   --oc-popover-shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
+  /* --- Elevation and state, derived ------------------------------------
+     Two elevations, because a third is a distinction nobody applies
+     consistently: `raised` is attached to the page (a control), `overlay`
+     floats above it (a menu, a popover, a dialog, a toast). They alias the
+     component-named shadows rather than replacing them, because `controlShadow`
+     and `popoverShadow` are in the published theme contract and renaming them
+     would break every host that sets one.
+  
+     The accent derivations are the reason this is not only tidiness: the focus
+     ring and the text selection used to be written as `rgba(47, 109, 246, ...)`
+     — the *default* accent, spelled out. A host that set a brand accent got
+     brand-coloured buttons and blue focus rings, which is exactly the "assembled
+     rather than designed" look, and it was invisible to us because our own
+     accent is that blue (`UX-TOKEN-01`). */
+  --oc-elevation-raised: var(--oc-control-shadow);
+  --oc-elevation-overlay: var(--oc-popover-shadow);
+  --oc-accent-ring: color-mix(in srgb, var(--oc-accent-color) 32%, transparent);
+  --oc-accent-soft: color-mix(in srgb, var(--oc-accent-color) 18%, transparent);
+  --oc-danger-ring: color-mix(in srgb, var(--oc-danger-color) 30%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]), :host(:not([data-theme="light"])) {
@@ -138,7 +190,29 @@
     --oc-selection-color: rgba(91, 139, 255, .16);
   --oc-find-highlight-color: rgba(245, 158, 11, .34);
     --oc-control-shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  --oc-danger-color: #ff6b6b;
+  --oc-tooltip-background-color: #eef1f6;
+  --oc-tooltip-text-color: #10131a;
     --oc-popover-shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 40px rgba(0, 0, 0, .55);
+    /* --- Elevation and state, derived ------------------------------------
+       Two elevations, because a third is a distinction nobody applies
+       consistently: `raised` is attached to the page (a control), `overlay`
+       floats above it (a menu, a popover, a dialog, a toast). They alias the
+       component-named shadows rather than replacing them, because `controlShadow`
+       and `popoverShadow` are in the published theme contract and renaming them
+       would break every host that sets one.
+    
+       The accent derivations are the reason this is not only tidiness: the focus
+       ring and the text selection used to be written as `rgba(47, 109, 246, ...)`
+       — the *default* accent, spelled out. A host that set a brand accent got
+       brand-coloured buttons and blue focus rings, which is exactly the "assembled
+       rather than designed" look, and it was invisible to us because our own
+       accent is that blue (`UX-TOKEN-01`). */
+    --oc-elevation-raised: var(--oc-control-shadow);
+    --oc-elevation-overlay: var(--oc-popover-shadow);
+    --oc-accent-ring: color-mix(in srgb, var(--oc-accent-color) 32%, transparent);
+    --oc-accent-soft: color-mix(in srgb, var(--oc-accent-color) 18%, transparent);
+  --oc-danger-ring: color-mix(in srgb, var(--oc-danger-color) 30%, transparent);
   }
 }
 body {
@@ -149,7 +223,7 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-::selection { background: rgba(47, 109, 246, .18); }
+::selection { background: var(--oc-accent-soft); }
 .editor-body {
   margin: 0;
   height: 100vh;
@@ -473,7 +547,7 @@ body {
   padding: 0 10px; margin-bottom: 12px; border-radius: 8px;
   background: var(--oc-surface-color); font-family: var(--oc-mono-font-family); font-size: 14px;
 }
-.cf-preview.bad { color: #e5484d; }
+.cf-preview.bad { color: var(--oc-danger-color); }
 .cf-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .cf-preset {
   padding: 4px 9px; border-radius: 999px; border: 1px solid var(--oc-control-border-color);
@@ -626,7 +700,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 }
 .swatch-menu button:hover { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 .swatch-menu .no-fill { background: var(--oc-background-color); color: var(--oc-muted-text-color); }
-.popmenu button.danger { color: #e5484d; }
+.popmenu button.danger { color: var(--oc-danger-color); }
 .menu-sep { height: 1px; background: var(--oc-border-color); margin: 4px 2px; }
 .ctx-menu { position: fixed; min-width: 168px; }
 /* Submenu row: a › affordance; its child popmenu is fixed-positioned by JS. */
@@ -730,7 +804,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   background: var(--oc-background-color); color: var(--oc-text-color); font-family: var(--oc-mono-font-family); font-size: 13px;
 }
 .formula-bar input#formula-input:focus {
-  outline: none; border-color: var(--oc-accent-color); box-shadow: 0 0 0 3px rgba(47, 109, 246, .12);
+  outline: none; border-color: var(--oc-accent-color); box-shadow: 0 0 0 3px var(--oc-accent-ring);
 }
 
 .bottom-bar {
@@ -779,7 +853,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .swatch-row .swatch:hover { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 .swatch-row .swatch-none {
   background: var(--oc-background-color);
-  background-image: linear-gradient(45deg, transparent 45%, #e53935 45%, #e53935 55%, transparent 55%);
+  background-image: linear-gradient(45deg, transparent 45%, var(--oc-danger-color) 45%, var(--oc-danger-color) 55%, transparent 55%);
 }
 /* Column filter checklist dropdown. */
 .filter-menu { min-width: 200px; padding: 6px; }
@@ -830,7 +904,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 /* Cell comment tooltip + editor. */
 .comment-tip {
   position: absolute; z-index: 45; max-width: 260px; padding: 8px 11px; border-radius: 8px;
-  background: #fffbe6; color: #52410b; border: 1px solid #f0d98a; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  background: #fffbe6; color: #52410b; border: 1px solid #f0d98a; box-shadow: var(--oc-elevation-overlay);
   font-size: 13px; line-height: 1.45; white-space: pre-wrap; pointer-events: none;
 }
 @media (prefers-color-scheme: dark) { .comment-tip { background: #3a340f; color: #f4e7b0; border-color: #6b5c1e; } }
@@ -845,7 +919,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .nm-go b { font-size: 13px; color: var(--oc-text-color); }
 .nm-go span { font-size: 12px; color: var(--oc-muted-text-color); font-family: var(--oc-mono-font-family); }
 .nm-del { width: 30px; border: 0; background: none; color: var(--oc-muted-text-color); font-size: 18px; cursor: pointer; border-radius: 6px; }
-.nm-del:hover { background: color-mix(in srgb, #e5484d 18%, transparent); color: #e5484d; }
+.nm-del:hover { background: var(--oc-danger-ring); color: var(--oc-danger-color); }
 /* Formula function autocomplete. */
 /* Fixed, not absolute: the same menu is anchored under the in-cell editor
    (inside the grid wrapper) and under the formula bar (outside it), so its
@@ -853,7 +927,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .ac-menu {
   position: fixed; z-index: 70; min-width: 260px; max-width: 360px;
   background: var(--oc-background-color); border: 1px solid var(--oc-border-color); border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; overflow: hidden;
+  box-shadow: var(--oc-elevation-overlay); padding: 4px; overflow: hidden;
 }
 /* Argument hint: which parameter of the current call is being typed. */
 .sig-tip {
@@ -874,7 +948,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 /* Invalid-formula editor outline + status error text. */
 /* Rejected-formula outline — on whichever surface the edit came from. */
 .inline-edit.invalid, #formula-input.invalid {
-  outline: 2px solid #e53935; box-shadow: 0 0 0 2px rgba(229,57,53,.25);
+  outline: 2px solid var(--oc-danger-color); box-shadow: 0 0 0 2px var(--oc-danger-ring);
 }
 #tb-status .err, .err { color: #e53935; font-weight: 600; }
 .sheet-add {
@@ -930,7 +1004,7 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .find-bar {
   position: absolute; top: 6px; right: 18px; z-index: 20; display: flex; align-items: center; gap: 6px;
   background: var(--oc-popover-background-color); border: 1px solid var(--oc-border-color); border-radius: 10px; padding: 6px 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--oc-elevation-overlay);
 }
 .find-bar[hidden] { display: none; }
 .find-field {
@@ -1276,7 +1350,7 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   padding: 7px 10px; font-size: 12px; line-height: 1.4;
   color: var(--oc-text-color); background: var(--oc-surface-color);
   border: 1px solid var(--oc-control-border-color); border-radius: 8px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+  box-shadow: var(--oc-elevation-overlay);
   pointer-events: none;   /* a hint must never intercept a click on the grid */
 }
 .dv-prompt strong { font-size: 12px; }

@@ -115,6 +115,15 @@ export interface ThemeTokens {
   dangerColor?: string;
   tableHeaderColor?: string;
   tableBandColor?: string;
+  /// How far a surface sits above the page: `raised` is attached to it (a
+  /// control), `overlay` floats above it (a menu, a dialog, a toast).
+  elevationRaised?: string;
+  elevationOverlay?: string;
+  /// Derived from `accentColor` and `dangerColor`. Set one only to override the
+  /// mix — the defaults follow whatever accent you choose.
+  accentRing?: string;
+  accentSoft?: string;
+  dangerRing?: string;
   [token: string]: string | undefined;
 }
 

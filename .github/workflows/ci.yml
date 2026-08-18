@@ -209,6 +209,12 @@ jobs:
       # one thing the demo exists to demonstrate — never connected.
       - name: The example environment points at ports the stack publishes
         run: python3 tools/check-env-example.py
+      # `THEME_TOKENS` is a published list a host reads to build a theme picker.
+      # A name on it that no stylesheet mentions is a promise the product does
+      # not keep: the host sets it, nothing changes, and there is no error to
+      # explain why. `dangerColor` was exactly that.
+      - name: Every advertised theme token is honoured
+        run: python3 tools/check-theme-tokens.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a
