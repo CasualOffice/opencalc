@@ -486,10 +486,34 @@ struct Joining {
 /// decides `ws` against `wss`, and a spoofed one costs a failed connection
 /// rather than a leak — the alternative, guessing the scheme, breaks every TLS
 /// deployment.
+/// Give a configured endpoint the `/collab` path if it has none.
+///
+/// The derived form below always ends in `/collab`, because that is the only
+/// path the collaboration server serves. A **configured** endpoint used to be
+/// returned exactly as written — so `OPENCALC_COLLAB_WS=ws://collab:8443`,
+/// which is what the variable's own name suggests, produced an address nothing
+/// answers. The socket failed, the editor stayed blank, and there was nothing
+/// in any log on either side to say why: the host had done as it was told and
+/// the server was never asked.
+///
+/// Only the clearly-wrong case is repaired. An endpoint with a real path is
+/// left alone, because a deployment behind a proxy may genuinely mount the
+/// socket somewhere else, and silently rewriting *that* would break the setup
+/// it was configured for.
+fn with_collab_path(configured: &str) -> String {
+    let trimmed = configured.trim_end_matches('/');
+    // Past the scheme, so the `//` in `ws://` is not mistaken for the path.
+    let authority_at = trimmed.find("://").map_or(0, |i| i + 3);
+    if trimmed[authority_at..].contains('/') {
+        return configured.to_owned();
+    }
+    format!("{trimmed}/collab")
+}
+
 fn collab_endpoint(config: &Config, headers: &axum::http::HeaderMap) -> String {
     let configured = Settings::load(config).collab_ws;
     if !configured.is_empty() {
-        return configured;
+        return with_collab_path(&configured);
     }
     let secure = headers
         .get("x-forwarded-proto")
@@ -779,6 +803,46 @@ async fn main() {
 mod endpoint_tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    /// **A configured endpoint with no path still reaches the socket.**
+    ///
+    /// The collaboration server serves `/collab` and nothing else, and the
+    /// derived endpoint has always ended in it. A configured one was returned
+    /// verbatim, so `OPENCALC_COLLAB_WS=ws://collab:8443` — which is exactly
+    /// what the variable's name invites — produced an address nothing answers.
+    ///
+    /// It is a silent failure on both sides: the host did as it was told, the
+    /// server was never asked, and the only symptom is an editor that never
+    /// connects. Found by running the stack rather than reading it (`PROD-13`).
+    #[test]
+    fn a_configured_endpoint_without_a_path_gets_the_collab_one() {
+        // **Through `collab_endpoint`, not the helper.** Asserting on
+        // `with_collab_path` alone passes with the call site reverted — the
+        // helper is still correct, it is just no longer used. That is the
+        // defect this test exists for, so it has to go through the function a
+        // session actually calls.
+        let at = |configured: &str| collab_endpoint(&config(configured), &headers(&[]));
+        assert_eq!(at("ws://collab:8443"), "ws://collab:8443/collab");
+        assert_eq!(at("wss://calc.example"), "wss://calc.example/collab");
+        // A trailing slash is the same mistake with a slash on the end.
+        assert_eq!(at("ws://collab:8443/"), "ws://collab:8443/collab");
+    }
+
+    /// **An endpoint that names a path keeps it.**
+    ///
+    /// A deployment behind a proxy may mount the socket anywhere, and silently
+    /// rewriting a deliberate path would break the setup it was configured for
+    /// — turning a fix for one mistake into a different one.
+    #[test]
+    fn a_configured_endpoint_with_a_path_is_left_alone() {
+        let at = |configured: &str| collab_endpoint(&config(configured), &headers(&[]));
+        assert_eq!(at("wss://calc.example/ws"), "wss://calc.example/ws");
+        assert_eq!(at("wss://calc.example/collab"), "wss://calc.example/collab");
+        assert_eq!(
+            at("wss://calc.example/edit/socket"),
+            "wss://calc.example/edit/socket"
+        );
+    }
 
     fn config(collab_ws: &str) -> Config {
         Config {
