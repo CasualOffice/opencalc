@@ -510,6 +510,13 @@ jobs:
       # gate somebody is relying on.
       - run: cargo install cargo-audit --locked
       - run: cargo audit --deny warnings
+      # **`fuzz/` resolves its own lockfile, and CI compiles it.** `cargo audit`
+      # reads one lockfile, so this second dependency tree sat outside the
+      # supply-chain gate entirely — it was still pinning the h2 that
+      # RUSTSEC-2026-0258 is against, and building it, while the job above said
+      # "0 vulnerabilities". Audited here rather than trusted to stay in step,
+      # because it is resolved separately and will drift again.
+      - run: cargo audit --deny warnings --file fuzz/Cargo.lock
 
   platform:
     strategy:
