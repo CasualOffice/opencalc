@@ -4619,6 +4619,26 @@ pub fn session_used_bounds(sheet: usize) -> String {
     .unwrap_or_else(|| "{\"rows\":0,\"cols\":0}".to_owned())
 }
 
+/// How a data bar is drawn, so the canvas need not decide for itself.
+///
+/// The editor paints its own data bars — there is no display list across this
+/// boundary, and building one is a much larger change than `RND-08` reads as.
+/// What that row is really about is the two renderers being able to drift
+/// apart, and they could: the inset, the alpha and the default colour were
+/// written out twice and agreed only because somebody had copied them.
+///
+/// This makes `casual-calc-render` the one place they are decided. The canvas
+/// still does its own painting; it no longer does its own deciding.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_data_bar_style() -> String {
+    let style = casual_calc_render::data_bar_style();
+    format!(
+        r#"{{"padX":{},"padY":{},"alpha":{},"defaultColor":"{}"}}"#,
+        style.pad_x, style.pad_y, style.alpha, style.default_color
+    )
+}
+
 /// Column widths in device pixels (96 dpi) for `count` columns starting at
 /// `first`, as a JSON array. Lets the editor draw real `.xlsx` column widths.
 #[wasm_bindgen]
