@@ -13,7 +13,7 @@ use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
 use casual_calc_model::{Id, Workbook};
-use casual_calc_render::{PanePaint, RenderError, render_panes_png};
+use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
     Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, undo_would_discard,
 };
@@ -29,6 +29,11 @@ pub use casual_calc_import::{
 };
 pub use casual_calc_layout::Viewport as GridViewport;
 pub use casual_calc_model::{Cell, CellRef, CellValue, Sheet, SheetId, Style};
+// The picture vocabulary, for the same reason: `render_png_with_report` hands
+// back what the renderer could not draw, and a host that cannot name
+// `UndrawnReason` cannot tell an EMF it will never draw from a media part the
+// package was missing.
+pub use casual_calc_render::{ImageReport, UndrawnImage, UndrawnReason};
 pub use casual_calc_transaction::{Operation as EditOperation, SheetMetadata};
 
 pub use casual_calc_ooxml::OoxmlLimits;
@@ -61,10 +66,10 @@ pub enum SessionFormat {
     Delimited(u8),
     /// An OpenDocument spreadsheet.
     ///
-    /// Carries **values, formulas and sheets**; everything else in the model —
-    /// formatting, merges, widths, validation, charts, images — has no writer
-    /// in `casual-calc-ods` yet and is counted by
-    /// [`loss_writing`](WorkbookSession::loss_writing) rather than dropped
+    /// Carries **values, formulas, sheets and the document's own metadata**;
+    /// everything else in the model — formatting, merges, widths, validation,
+    /// charts, images — has no writer in `casual-calc-ods` yet and is counted
+    /// by [`loss_writing`](WorkbookSession::loss_writing) rather than dropped
     /// quietly.
     Ods,
 }
@@ -1157,6 +1162,36 @@ impl WorkbookSession {
         render_sheet_png(&self.workbook, sheet_index, &geometry, viewport, dpi)
     }
 
+    /// Render a viewport, and say what its pictures cost.
+    ///
+    /// The same bytes [`render_png`](Self::render_png) returns, plus the half
+    /// of the answer that signature cannot carry: the pictures are drawn from
+    /// this session's own media either way, and this one names the ones that
+    /// could not be.
+    ///
+    /// The report is a [`CompatibilityReport`] — the type
+    /// [`compatibility_report`](Self::compatibility_report) and
+    /// [`format_loss`](Self::format_loss) already speak — so a host has one
+    /// place to show what a document lost rather than two that must be merged
+    /// by hand. [`image_loss`] is the fold, and
+    /// [`render_sheet_png_with_report`] the unfolded form for a caller that
+    /// wants the part paths.
+    ///
+    /// # Errors
+    ///
+    /// As [`render_png`](Self::render_png).
+    pub fn render_png_with_report(
+        &self,
+        sheet_index: usize,
+        viewport: &Viewport,
+        dpi: u32,
+    ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+        let geometry = self.geometry(sheet_index);
+        let (png, images) =
+            render_sheet_png_with_report(&self.workbook, sheet_index, &geometry, viewport, dpi)?;
+        Ok((png, image_loss(&images)))
+    }
+
     /// The format this session was opened from, and the one
     /// [`save`](Self::save) writes.
     ///
@@ -1319,6 +1354,28 @@ pub fn render_sheet_png(
     viewport: &Viewport,
     dpi: u32,
 ) -> Result<Vec<u8>, SdkError> {
+    render_sheet_png_with_report(workbook, sheet_index, geometry, viewport, dpi).map(|(png, _)| png)
+}
+
+/// Render a sheet's viewport to PNG bytes **and** say what its pictures cost.
+///
+/// The same render as [`render_sheet_png`], with the half of the answer that
+/// signature has nowhere to return. A picture the backend could not draw leaves
+/// a frame-shaped hole indistinguishable from a sheet that never had one, and
+/// [nothing here is lost without being named](../../../docs/34-SPREADSHEETML-FIDELITY-ARCHITECTURE.md)
+/// — so a caller producing a thumbnail somebody will trust should call this
+/// one and show what it returns.
+///
+/// # Errors
+///
+/// As [`render_sheet_png`].
+pub fn render_sheet_png_with_report(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+) -> Result<(Vec<u8>, ImageReport), SdkError> {
     let freeze = workbook
         .sheets
         .get(sheet_index)
@@ -1342,7 +1399,84 @@ pub fn render_sheet_png(
         })
         .collect();
 
-    Ok(render_panes_png(&paints, geometry, viewport, dpi)?)
+    let media = RetainedMedia::of(workbook);
+    Ok(render_panes_png_with_images(
+        &paints, geometry, viewport, dpi, &media,
+    )?)
+}
+
+/// The workbook's own media, as something the renderer can draw from.
+///
+/// A [`PaintItem::Image`](casual_calc_layout::PaintItem::Image) carries the
+/// package path of a media part rather than its bytes, and the bytes are
+/// already in the model:
+/// [`ImageView::part`](casual_calc_model::ImageView::part) names an entry of
+/// [`Workbook::retained_parts`](casual_calc_model::Workbook::retained_parts),
+/// which the importer filled with the part **under that same path**. So the
+/// wiring the renderer asks for is an index over what a session is already
+/// holding — no copy of any picture is made here, and none needs to be.
+///
+/// Built per render rather than kept on the session, because a retained part
+/// can be replaced by an edit and an index outliving its workbook would draw
+/// yesterday's logo.
+#[derive(Debug, Default)]
+struct RetainedMedia<'a> {
+    /// Borrowed, not owned: a picture is megabytes and a render is not the
+    /// place to duplicate one.
+    parts: BTreeMap<&'a str, &'a [u8]>,
+}
+
+impl<'a> RetainedMedia<'a> {
+    /// Index a workbook's retained parts by package path.
+    ///
+    /// Every retained part, not only the ones some sheet anchors: which parts
+    /// a viewport asks for depends on where it is scrolled, and a map is built
+    /// once where a linear scan of the retained parts would run per picture per
+    /// pane.
+    fn of(workbook: &'a Workbook) -> Self {
+        Self {
+            parts: workbook
+                .retained_parts
+                .iter()
+                .map(|part| (part.path.as_str(), part.bytes.as_slice()))
+                .collect(),
+        }
+    }
+}
+
+impl ImageSource for RetainedMedia<'_> {
+    fn part_bytes(&self, path: &str) -> Option<&[u8]> {
+        self.parts.get(path).copied()
+    }
+}
+
+/// What a render's pictures cost, in the report type a host already shows.
+///
+/// **One answer, not two.** A host that has to merge an [`ImageReport`] with a
+/// [`CompatibilityReport`] itself will render the first and forget the second,
+/// or show them in two places and let a reader believe the file has two
+/// unrelated problems. The reason keys come from
+/// [`UndrawnReason::feature`], so an EMF that will never be drawn and a media
+/// part the package was missing stay distinguishable after the fold — which is
+/// the difference between "install nothing, this file uses EMF" and "this file
+/// is damaged".
+///
+/// Counted as [`Omitted`](ModelOutcome::Omitted) /
+/// [`NotRetained`](RetentionOutcome::NotRetained): the picture is missing from
+/// *this rendering*. The workbook still holds the part, and saving it back
+/// writes it out untouched — a render is a projection, and losing something in
+/// one is not losing it from the document.
+#[must_use]
+pub fn image_loss(images: &ImageReport) -> CompatibilityReport {
+    let mut report = CompatibilityReport::default();
+    for undrawn in &images.undrawn {
+        report.record(
+            undrawn.reason.feature(),
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    }
+    report
 }
 
 /// How an operation should be recalculated.
@@ -1425,7 +1559,7 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 
 pub mod views;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::views::PersonalViews;
 

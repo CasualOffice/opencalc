@@ -120,6 +120,96 @@ impl Default for Iteration {
     }
 }
 
+/// Who wrote a document, what it is called, and when it was written.
+///
+/// **Format-neutral on purpose.** Every spreadsheet format carries the same
+/// handful of facts about the document itself under different names, and this
+/// is the one place for them so that a converter does not have to invent a
+/// second. ODF puts them in `meta.xml`; OOXML puts them in
+/// `docProps/core.xml`, which the `.xlsx` importer currently keeps as a
+/// [retained part](Self) rather than reading — so this starts out populated by
+/// the OpenDocument path only, and the OOXML side can be moved onto it without
+/// the model changing shape.
+///
+/// # The one mapping worth being careful about
+///
+/// `dc:creator` does **not** mean the same thing in the two formats. In ODF it
+/// is who saved the document last, and the original author is
+/// `meta:initial-creator`; in OOXML it is the original author, and the last
+/// saver is `cp:lastModifiedBy`. Read one as the other and every file's author
+/// silently becomes whoever last opened it. Hence two fields with the meanings
+/// spelled out, rather than one field named after whichever format was
+/// implemented first.
+///
+/// # Why the timestamps are strings
+///
+/// They are kept exactly as the file wrote them — ISO-8601 text — and are not
+/// parsed. Parsing would need a date library this workspace does not have, and
+/// would put a *reformatted* timestamp back into somebody's file over a detail
+/// this engine has no opinion about. A host that wants a `struct` has the text
+/// to parse; a host that wants a round trip gets its bytes back.
+///
+/// Empty strings mean the document said nothing, which is distinct from saying
+/// something empty only in theory: no format distinguishes the two either.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentProperties {
+    /// The document's title (`dc:title`), which is not its file name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Its subject (`dc:subject`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    /// A free-text description or comment (`dc:description`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Keywords, one per entry.
+    ///
+    /// A list rather than a joined string, which is the shape ODF uses — one
+    /// `meta:keyword` element each. OOXML writes them as a single
+    /// `cp:keywords`, so that side has to pick a separator; doing the joining
+    /// *here* would mean a keyword containing the separator could not be told
+    /// from two keywords, and a document whose keyword is `Q3, Q4` would come
+    /// back with two of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// The **original author** — ODF `meta:initial-creator`, OOXML
+    /// `dc:creator`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub creator: String,
+    /// Who saved it last — ODF `dc:creator`, OOXML `cp:lastModifiedBy`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_modified_by: String,
+    /// When it was created, as written (`meta:creation-date` /
+    /// `dcterms:created`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
+    /// When it was last saved, as written (`dc:date` / `dcterms:modified`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modified: String,
+    /// The document language (`dc:language`), e.g. `en-GB`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub language: String,
+    /// The application that wrote the file (`meta:generator` /
+    /// OOXML `Application`).
+    ///
+    /// Carried rather than overwritten. It is the document's own account of
+    /// where it came from, and a converter that stamps its own name over it
+    /// has destroyed the one field that would have told a support engineer
+    /// which program to blame — a silent loss, and this crate's whole reason
+    /// for existing is not to do that.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generator: String,
+}
+
+impl DocumentProperties {
+    /// Whether the document said nothing about itself.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkbookSettings {
@@ -260,6 +350,18 @@ pub struct Workbook {
     /// Workbook-level settings, carried through verbatim.
     #[serde(default, skip_serializing_if = "WorkbookSettings::is_empty")]
     pub settings: WorkbookSettings,
+    /// What the document says about itself: author, title, timestamps.
+    ///
+    /// Not part of any sheet and not reachable from one, which is exactly how
+    /// it went missing — a reader that walks the cells never meets it. See
+    /// [`DocumentProperties`].
+    ///
+    /// Additive by ADR-010: defaulted on the way in so an older snapshot still
+    /// reads, and skipped on the way out when empty so a workbook that carries
+    /// no properties serializes to the bytes it always did. `SCHEMA_VERSION`
+    /// therefore does not move.
+    #[serde(default, skip_serializing_if = "DocumentProperties::is_empty")]
+    pub properties: DocumentProperties,
     /// The moment `TODAY()` and `NOW()` report, as a date serial.
     ///
     /// Supplied by the host rather than read from a clock here, and **not**
@@ -365,6 +467,7 @@ impl Workbook {
             default_font_size_hp: None,
             theme_colors: Vec::new(),
             settings: WorkbookSettings::default(),
+            properties: DocumentProperties::default(),
             volatile_now: 0.0,
             volatile_seed: 0,
             retained_parts: Vec::new(),
