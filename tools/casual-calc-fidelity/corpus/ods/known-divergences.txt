@@ -1,0 +1,39 @@
+# Divergences from LibreOffice this corpus expects, and why.
+#
+# One `<document> [re-saved] <cell> @differs: <reason>` per line. A line here
+# does not silence a difference — every run prints it with its reason — and it
+# is **self-expiring**: the moment the two sides agree, or the cell stops
+# existing, the run fails as a stale marker and the line must be deleted. An
+# excuse cannot outlive the defect it excuses.
+#
+# Two kinds of entry live here, and they are not the same thing:
+#
+#   * **A limit of the oracle.** CSV carries what LibreOffice *shows*, not what
+#     the file stores, so a cell whose number format changes its appearance
+#     cannot be compared as a value. These stay until the comparison gets a
+#     better oracle than CSV.
+#   * **A defect of ours, with a row.** These are findings, written down where
+#     the harness that found them will notice them being fixed. They go when
+#     the row does.
+
+# --- Defects of ours -------------------------------------------------------
+#
+# None. This section held two, and both are closed:
+#
+#   * `ODS-04` — `<text:s text:c="N"/>` space elements were walked past, so
+#     "  padded  " arrived as "padded" and a space-only cell arrived empty.
+#   * `ODS-06` — `content.xml` never declared `xmlns:of`, so LibreOffice
+#     answered `Err:510` for every formula this engine wrote.
+#
+# Both were found here and nowhere else, and both were reported by this file
+# going *stale* rather than by anybody remembering to check — which is the
+# property the format exists for.
+
+# --- Limits of the oracle --------------------------------------------------
+#
+# `=D5>100` is stored by LibreOffice as `office:value-type="float"
+# office:value="1"` with a boolean *format*, and CSV exports what is displayed:
+# `TRUE`. We read the value it stored, which is 1, and are right about it. This
+# is the number-format pipeline being outside what a CSV oracle can adjudicate,
+# not a disagreement about the value.
+values-and-formulas.ods D6 @differs: the oracle shows a boolean-formatted float as TRUE; the file stores 1, which is what we read

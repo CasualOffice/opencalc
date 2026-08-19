@@ -225,11 +225,14 @@ dependencies = [
  "casual-calc-formula",
  "casual-calc-layout",
  "casual-calc-model",
+ "casual-calc-ods",
  "casual-calc-ooxml",
  "casual-calc-package",
  "casual-calc-transaction",
  "libfuzzer-sys",
+ "quick-xml",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -257,6 +260,17 @@ dependencies = [
  "casual-calc-formula",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "casual-calc-ods"
+version = "0.0.0"
+dependencies = [
+ "casual-calc-formula",
+ "casual-calc-import",
+ "casual-calc-model",
+ "quick-xml",
+ "zip",
 ]
 
 [[package]]

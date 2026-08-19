@@ -18,8 +18,17 @@ casual-calc-layout = { path = "../crates/casual-calc-layout" }
 casual-calc-ooxml = { path = "../crates/casual-calc-ooxml" }
 casual-calc-collab-server = { path = "../server/casual-calc-collab-server" }
 casual-calc-model = { path = "../crates/casual-calc-model" }
+casual-calc-ods = { path = "../crates/casual-calc-ods" }
 casual-calc-transaction = { path = "../crates/casual-calc-transaction" }
 serde_json = "1"
+# Both already in this lockfile, at these versions, via `casual-calc-package`
+# and `casual-calc-ods` — so the fuzz dependency set gains no third-party crate
+# and `cargo audit --file fuzz/Cargo.lock` has nothing new to judge. `zip`
+# builds the package the reader admits from; `quick-xml` lets the ODS target
+# estimate a document's expansion with the *same* parser and the same
+# attribute-matching rules the reader uses, which a byte scan could not.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
 
 [[bin]]
 name = "bounded_package"
@@ -69,6 +78,13 @@ bench = false
 [[bin]]
 name = "token_verify"
 path = "fuzz_targets/token_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ods"
+path = "fuzz_targets/ods.rs"
 test = false
 doc = false
 bench = false

@@ -26,10 +26,17 @@ the other way around. This index is the map.
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **45–49, 54–57** — product surface: editor parity, UX map, design system,
+  - **45–49, 54–75** — product surface: editor parity, UX map, design system,
     per-construct design notes (added as phases open).
-  - **50–53** — measured gap trackers, generated from or audited against the
-    code rather than hand-maintained.
+  - **50–53, 73** — measured gap trackers and audits, generated from or audited
+    against the code rather than hand-maintained.
+- **The index is gated, not remembered.** `tools/check-doc-index.py` fails CI
+  when a document in `docs/` has no row here, when a row links to a file that
+  does not exist, or when two rows claim one number. Eight documents once
+  accumulated unlisted because writing one never forced this file to change;
+  now it does. A row whose own file has been superseded keeps its number and
+  links to where the content went (`29`, `31`, `50`, `60`), which the gate
+  allows deliberately.
 
 ## Index
 
@@ -46,6 +53,7 @@ the other way around. This index is the map.
 | 11 | [Design-First Process](11-DESIGN-FIRST-PROCESS.md) | How work is designed before it is built |
 | 12 | [Competitive Analysis](12-COMPETITIVE-ANALYSIS.md) | Excel, LibreOffice, OnlyOffice, Univer, IronCalc, Formualizer, Google Sheets |
 | 14 | [Execution Tracker](14-EXECUTION-TRACKER.md) | Live state of all work (tracked, always) |
+| 14a | [Closed Work Archive](14a-ARCHIVE-CLOSED-WORK.md) | Rows that reached Done/Dropped/Accepted, moved out of 14 verbatim |
 | 15 | [CI & Release Gates](15-CI-AND-RELEASE-GATES.md) | The PR contract |
 | 16 | [Documentation Maintenance](16-DOCUMENTATION-MAINTENANCE.md) | Keeping docs and code in sync |
 | 17 | [Glossary](17-GLOSSARY.md) | Shared vocabulary |
@@ -75,7 +83,7 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
-### Product, UX & the SDK (45–49, 54–57)
+### Product, UX & the SDK (45–49, 54–75)
 
 | # | Title | Purpose |
 | --- | --- | --- |
@@ -97,8 +105,15 @@ the other way around. This index is the map.
 | 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
 | 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
 | 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | Pasting from Excel, LibreOffice and Sheets: who parses the markup, why it is safe, and what is deliberately not mapped |
+| 69 | [Collaborative Undo Policy](69-COLLABORATIVE-UNDO-POLICY.md) | What undo *means* once somebody else has been typing — whose edit comes back, and what is refused |
+| 70 | [Comparison Semantics](70-COMPARISON-SEMANTICS.md) | What `=`, `<` and `>` mean across types, and why text and numbers never mix |
+| 71 | [Filter Sharing & Views](71-FILTER-SHARING-AND-VIEWS.md) | Whose filter a co-editor sees, and what a personal view does not change |
+| 72 | [Session Access Control](72-SESSION-ACCESS-CONTROL.md) | Changing what somebody may do while they are doing it |
+| 74 | [WOPI Integration](74-WOPI-INTEGRATION.md) | Opening and saving through a WOPI host: the discovery surface, the lock protocol, and the upload boundary |
+| 75 | [Relative Formula Sharing](75-RELATIVE-FORMULA-SHARING-DESIGN.md) | One AST for a filled column: the shared-formula representation `PERF-11` needs |
+| 76 | [Drawing charts in the headless renderer](76-CHART-RENDERING-BACKEND.md) | Why the plot backend already exists in the editor, and what `RND-11` actually needs |
 
-### Measured gap trackers (50–53)
+### Measured gap trackers (50–53, 73)
 
 Generated or audited against the code rather than written by hand, so a row
 cannot quietly disagree with what shipped.
@@ -108,6 +123,7 @@ cannot quietly disagree with what shipped.
 | 50 | [UX Completeness Tracker](73-EXCEL-UX-PARITY-AUDIT.md) | Editor gaps with severity — closed at all 63 rows |
 | 51 | [Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md) | The measured SpreadsheetML construct register |
 | 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach |
+| 73 | [Excel UX Parity Audit](73-EXCEL-UX-PARITY-AUDIT.md) | What a user notices, ranked — the 2026-08-16 audit that 14's rows are created from |
 
 ## Status
 
