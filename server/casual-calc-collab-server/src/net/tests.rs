@@ -110,6 +110,72 @@ impl Fetch for Unreachable {
     }
 }
 
+/// A fetch that fails with a *particular* reason, so a test can look for it.
+///
+/// `Unreachable` proves the join ends; this proves the operator is told which
+/// failure it was, which is a different claim and the one `SRV-05` is about.
+struct Failing(&'static str);
+
+impl Fetch for Failing {
+    fn get(&self, _url: String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>> {
+        let why = self.0;
+        Box::pin(async move { Err(why.to_owned()) })
+    }
+}
+
+/// Everything this test binary logged, appended to by the subscriber below.
+static LOGGED: Mutex<String> = Mutex::new(String::new());
+
+#[derive(Debug)]
+struct Capture;
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        LOGGED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for Capture {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        Self
+    }
+}
+
+/// Send this binary's logs to a buffer a test can read.
+///
+/// Global and once, because a subscriber is global and a test binary is one
+/// process — so the buffer holds every test's output and a caller has to look
+/// for something only its own test could have written. A per-test subscriber
+/// would not work at all here: the line under test is emitted from a spawned
+/// task on another thread, where a thread-local default does not reach.
+fn capture_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(Capture)
+            .try_init();
+    });
+}
+
+fn logged() -> String {
+    LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// Claims for a *different* document, so a test can fill a node rather than
 /// crowd one document.
 fn claims_for(name: &str, key: &str, access: Access) -> Claims {
@@ -1018,6 +1084,215 @@ async fn a_document_that_cannot_be_fetched_is_reported_rather_than_hung() {
     assert!(
         matches!(answer, Some(ServerMessage::Stopped { .. })),
         "got {answer:?}"
+    );
+}
+
+/// `SRV-05`: the one failure that said nothing now says what and why.
+///
+/// Reproduced by starting a node whose token names a URL nothing is serving:
+/// fifteen clients failed to join and the log recorded *nothing* — no warning,
+/// no counter — while the neighbouring refusal (a URL off the allow-list) logs
+/// once per attempt. The reason was `.map_err(|_| Refusal::NotSaving)`, which
+/// threw the origin's own explanation away.
+#[tokio::test]
+async fn a_join_whose_fetch_fails_says_why_in_the_log() {
+    capture_logs();
+    let addr = start(Arc::new(Failing("connection refused (os error 61)"))).await;
+    let mut socket = connect(addr).await;
+
+    // A URL only this test uses, because the buffer is the whole binary's.
+    // The query carries something a host would put there — the credential that
+    // authorises the download — and it must not survive into the log.
+    let mut ada = claims("Ada", Access::Edit);
+    ada.document.url = "https://host.example/srv-05-probe/1?token=must-not-be-logged".into();
+
+    let answer = join(&mut socket, &ada).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "got {answer:?}"
+    );
+
+    let logs = logged();
+    let line = logs
+        .lines()
+        .find(|l| l.contains("/srv-05-probe/1"))
+        .unwrap_or_else(|| {
+            panic!("nothing in the log named the document that could not be fetched:\n{logs}")
+        });
+    assert!(
+        line.contains("connection refused (os error 61)"),
+        "the log has to carry what went wrong, not only that something did: {line}"
+    );
+    assert!(
+        !logs.contains("must-not-be-logged"),
+        "the query string carries the host's download credential and must not be logged:\n{logs}"
+    );
+}
+
+/// The counter half, which is what an alert can see at three in the morning.
+///
+/// `opencalc_fetches_failed_total` was declared, documented in `docs/65` and
+/// exposed on `/metrics` — and incremented **nowhere**, so it read zero through
+/// an outage in which every join failed.
+#[tokio::test]
+async fn a_join_whose_fetch_fails_moves_the_counter() {
+    let addr = start(Arc::new(Failing("the origin answered 502 Bad Gateway"))).await;
+    let mut socket = connect(addr).await;
+    let _ = join(&mut socket, &claims("Ada", Access::Edit)).await;
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_fetches_failed_total"),
+        1,
+        "a failed fetch has to be countable: {body}"
+    );
+    assert_eq!(
+        counter(&body, "opencalc_fetches_ok_total"),
+        0,
+        "and must not be counted as a success: {body}"
+    );
+}
+
+/// The other side of the same counter, so "always zero" cannot pass as "no
+/// failures".
+#[tokio::test]
+async fn a_join_that_fetches_a_document_counts_it_as_a_success() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    assert!(matches!(
+        join(&mut socket, &claims("Ada", Access::Edit)).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_fetches_ok_total"),
+        1,
+        "the fetch that opened the document was not counted: {body}"
+    );
+    assert_eq!(counter(&body, "opencalc_fetches_failed_total"), 0, "{body}");
+}
+
+/// An origin that answers 200 with something that is not a workbook — a login
+/// page, an error document — fails on the far side of the fetch, and was just
+/// as silent.
+#[tokio::test]
+async fn a_document_that_is_not_a_workbook_says_so_and_is_counted() {
+    capture_logs();
+    let addr = start(Arc::new(Canned(b"<html>please log in</html>".to_vec()))).await;
+    let mut socket = connect(addr).await;
+
+    let mut ada = claims("Ada", Access::Edit);
+    ada.document.url = "https://host.example/srv-05-not-a-workbook/1".into();
+    let answer = join(&mut socket, &ada).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "got {answer:?}"
+    );
+
+    let logs = logged();
+    assert!(
+        logs.lines().any(|l| l.contains("/srv-05-not-a-workbook/1")),
+        "an origin answering a login page produced no log line:\n{logs}"
+    );
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_documents_unreadable_total"),
+        1,
+        "{body}"
+    );
+}
+
+/// A full document turns arrivals away, and says so. Same silence, same class:
+/// `opencalc_joins_refused_capacity_total` was exposed and incremented nowhere.
+#[tokio::test]
+async fn a_join_refused_for_capacity_is_logged_and_counted() {
+    capture_logs();
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            max_participants: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+    let mut ada = connect(addr).await;
+    assert!(matches!(
+        join(&mut ada, &claims("Ada", Access::Edit)).await,
+        Some(ServerMessage::Welcome { .. })
+    ));
+
+    let before = counter(&scrape(addr).await, "opencalc_joins_refused_capacity_total");
+    let mut grace = connect(addr).await;
+    assert!(matches!(
+        join(&mut grace, &claims("Grace", Access::Edit)).await,
+        Some(ServerMessage::Stopped { .. })
+    ));
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_joins_refused_capacity_total"),
+        before + 1,
+        "a node turning people away looks exactly like a node nobody is using: {body}"
+    );
+    assert!(
+        logged().contains("this document or this node is full"),
+        "and the log said nothing about it"
+    );
+}
+
+/// Start a node with a particular token policy, which is otherwise ordinary.
+async fn start_with_policy(policy: TokenPolicy) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = ServiceConfig {
+        verifier: Verifier::fixed(policy, KeySet::shared_secret(SECRET)),
+        fetch: Arc::new(Canned(package())),
+        ..plain_config(addr)
+    };
+    tokio::spawn(async move {
+        let _ = serve_on(listener, config).await;
+    });
+    addr
+}
+
+/// The second sharp edge in the same area, end to end.
+///
+/// `OPENCALC_ALLOWED_HOSTS=host.example:443` looks stricter than
+/// `host.example` and is in fact dead: the comparison strips the port, so the
+/// entry matches nothing at all. The refusal named only the URL, which sends
+/// the operator to look at a token that is fine. This checks the explanation
+/// survives the whole way out — through `VerifyError`'s passthrough and into
+/// the line an operator actually reads.
+#[tokio::test]
+async fn the_log_says_when_an_allowed_host_can_never_match_because_it_names_a_port() {
+    capture_logs();
+    let addr = start_with_policy(TokenPolicy {
+        audience: "opencalc-collab".into(),
+        leeway_secs: 60,
+        allowed_hosts: BTreeSet::from(["host.example:443".to_owned()]),
+        require_https: true,
+    })
+    .await;
+
+    let mut socket = connect(addr).await;
+    let mut ada = claims("Ada", Access::Edit);
+    ada.document.url = "https://host.example/srv-05-port-hint/1".into();
+    let answer = join(&mut socket, &ada).await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "got {answer:?}"
+    );
+
+    let logs = logged();
+    let line = logs
+        .lines()
+        .find(|l| l.contains("srv-05-port-hint"))
+        .unwrap_or_else(|| panic!("the refusal was not logged at all:\n{logs}"));
+    assert!(
+        line.contains("host.example:443") && line.contains("port"),
+        "the refusal has to name the entry that can never match: {line}"
     );
 }
 

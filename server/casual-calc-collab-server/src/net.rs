@@ -1252,6 +1252,9 @@ pub struct Metrics {
     pub fetches_ok: AtomicU64,
     /// Fetches that failed, so joins were refused.
     pub fetches_failed: AtomicU64,
+    /// Documents that were fetched and then could not be opened — an origin
+    /// answering something that is not a workbook, typically with a 200.
+    pub documents_unreadable: AtomicU64,
     /// Operations ordered into the log.
     pub revisions: AtomicU64,
     /// Connections turned away before authenticating, because the pending
@@ -1312,6 +1315,11 @@ impl Metrics {
             "opencalc_fetches_failed_total",
             "Fetches that failed, so a join was refused.",
             self.fetches_failed.load(Relaxed),
+        );
+        counter(
+            "opencalc_documents_unreadable_total",
+            "Documents fetched from the host that could not be opened.",
+            self.documents_unreadable.load(Relaxed),
         );
         counter(
             "opencalc_revisions_total",
@@ -1561,12 +1569,25 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
     // `admits_more_work` here refused every arrival once the node reached its
     // document cap, including people joining a document already in front of
     // them. What bounds this is the roster and the node's memory.
-    if !state.admits_memory()
-        || over_count(
-            lock(&live.roster).len(),
-            state.config.limits.max_participants,
-        )
-    {
+    //
+    // Counted and logged for the same reason the fetch failure is (`SRV-05`):
+    // a node that is turning people away is indistinguishable, from outside,
+    // from one nobody is using. The roster is read into a `usize` on its own
+    // line — the guard must not still be alive at the `send` below, and it must
+    // not be held across `admits_memory` either.
+    let participants = lock(&live.roster).len();
+    let room = state.admits_memory();
+    if !room || over_count(participants, state.config.limits.max_participants) {
+        state
+            .metrics
+            .refused_capacity
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            participants,
+            limit = state.config.limits.max_participants,
+            memory = room,
+            "refused a join: this document or this node is full"
+        );
         let _ = send(
             &mut socket,
             &ServerMessage::Stopped {
@@ -1930,6 +1951,35 @@ async fn authorise(
     }
 }
 
+/// A document URL as it may appear in a log.
+///
+/// Everything up to the query string, and a marker where the rest was. A host's
+/// download URL routinely carries the credential that authorises the download
+/// in its query — OnlyOffice and WOPI both do this — so logging the URL whole
+/// would put a bearer token in every operator's log aggregator, permanently,
+/// on the one path that fires when a deployment is misconfigured and somebody
+/// is about to paste the log into an issue.
+///
+/// The marker matters as much as the redaction: an operator who copies this
+/// into `curl` and gets a 401 needs to know something was removed.
+fn loggable(url: &str) -> String {
+    // A fragment is never sent to a server, so it is dropped silently; a query
+    // is, so its absence is marked.
+    let (visible, query) = match url.split_once('?') {
+        Some((head, _)) => (head, true),
+        None => (url.split_once('#').map_or(url, |(head, _)| head), false),
+    };
+    // Bounded: a URL comes from a token, and a token comes from outside.
+    let mut out: String = visible.chars().take(200).collect();
+    if out.chars().count() < visible.chars().count() {
+        out.push('…');
+    }
+    if query {
+        out.push_str("?<redacted>");
+    }
+    out
+}
+
 /// Find the document, or open it from the URL the token named.
 async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refusal> {
     let key = claims.document.key.clone();
@@ -1943,6 +1993,15 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
     // again after, because it can change while this awaits, and that one is the
     // authority.
     if !state.admits_more_work() {
+        state
+            .metrics
+            .refused_capacity
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            documents = lock(&state.registry.live).len(),
+            limit = state.config.limits.max_documents,
+            "refused a join: this node will not open another document"
+        );
         return Err(Refusal::NotSaving);
     }
 
@@ -1962,16 +2021,70 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
             // Fetched with no lock held: a slow origin must not stop every
             // other document on this node, and this await can last as long as
             // the configured HTTP timeout.
-            let bytes = state
-                .config
-                .fetch
-                .get(claims.document.url.clone())
-                .await
-                .map_err(|_| Refusal::NotSaving)?;
+            // **Said out loud, both ways.**
+            //
+            // This used to be `.map_err(|_| Refusal::NotSaving)`, and the `_`
+            // was the whole defect (`SRV-05`): the reason the origin gave —
+            // connection refused, a timeout, a status code — was discarded on
+            // the floor, no counter moved, and the client was told only
+            // `Stopped`. Fifteen clients failing to join a server whose
+            // document URL nothing was serving produced *not one line* of log,
+            // while the neighbouring refusal (a URL off the allow-list) logs
+            // once per attempt. An unreachable host URL is the likeliest
+            // mistake in a first deployment and it was the one failure that
+            // said nothing.
+            let bytes = match state.config.fetch.get(claims.document.url.clone()).await {
+                Ok(bytes) => {
+                    state
+                        .metrics
+                        .fetches_ok
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    bytes
+                }
+                Err(why) => {
+                    state
+                        .metrics
+                        .fetches_failed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        url = %loggable(&claims.document.url),
+                        reason = %why,
+                        "refused a join: the document could not be fetched"
+                    );
+                    return Err(Refusal::NotSaving);
+                }
+            };
 
-            let session =
-                DocumentSession::open(bytes, state.config.save, state.config.snapshots, now_ms())
-                    .map_err(|_| Refusal::NotSaving)?;
+            // Read before the bytes are moved into the session, so a failure
+            // can say how big what arrived was.
+            let size = bytes.len();
+            let session = match DocumentSession::open(
+                bytes,
+                state.config.save,
+                state.config.snapshots,
+                now_ms(),
+            ) {
+                Ok(session) => session,
+                Err(why) => {
+                    state
+                        .metrics
+                        .documents_unreadable
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // The bytes arrived and were not a workbook. Overwhelmingly
+                    // an origin answering a login page or an error document
+                    // with 200, which is indistinguishable from success at the
+                    // fetch and unmistakable here — so the size is logged with
+                    // it, because "the document is 412 bytes" is usually the
+                    // whole diagnosis.
+                    tracing::error!(
+                        url = %loggable(&claims.document.url),
+                        bytes = size,
+                        reason = %why,
+                        "refused a join: the document was fetched but could not be opened"
+                    );
+                    return Err(Refusal::NotSaving);
+                }
+            };
 
             let mut registry = lock(&state.registry.live);
             // `registry` is held here, so the count comes from the guard and
@@ -1980,6 +2093,15 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                 && (over_count(registry.len(), state.config.limits.max_documents)
                     || !state.admits_memory())
             {
+                state
+                    .metrics
+                    .refused_capacity
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    documents = registry.len(),
+                    limit = state.config.limits.max_documents,
+                    "refused a join: the node filled up while the document was being fetched"
+                );
                 return Err(Refusal::NotSaving);
             }
             // `entry` rather than `insert`: a document evicted and reopened
