@@ -14,9 +14,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use casual_calc_eval::recalculate;
+use casual_calc_eval::{Recalculated, recalculate};
 use casual_calc_formula::{CellReference, Expr, parse, shift_references};
-use casual_calc_import::import_package;
 use casual_calc_layout::table_style::table_style_colors;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_color, display_text,
@@ -35,6 +34,75 @@ use wasm_bindgen::prelude::*;
 
 thread_local! {
     static SESSION: RefCell<Option<WorkbookSession>> = const { RefCell::new(None) };
+    /// How long the next long job may hold the thread, in milliseconds, or
+    /// `None` for "until it finishes". See [`session_set_time_budget_ms`].
+    static TIME_BUDGET_MS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+// ---------------------------------------------------------------------------
+// Stopping a long job (`SEC-017`).
+//
+// `SEC-012` made admission and full recalculation cancellable and no host took
+// the seam, so the scenario `casual_calc_model::cancel`'s own header describes
+// — a workbook inside every limit and simply enormous holding the one thread a
+// browser has — was still exactly what a browser user got. This is the host
+// side of that seam.
+// ---------------------------------------------------------------------------
+
+#[wasm_bindgen]
+extern "C" {
+    /// The browser's monotonic clock, in milliseconds.
+    ///
+    /// Imported rather than taken from `std`, because
+    /// `std::time::Instant::now` **panics** on `wasm32-unknown-unknown` — which
+    /// is the reason [`casual_calc_model::Cancel`] is implemented for any
+    /// `Fn() -> bool` and leaves the clock to the host. This bridge is that
+    /// host, and `performance.now()` is the clock this target has.
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
+
+/// Give the next long job a wall-clock budget, in milliseconds.
+///
+/// **A deadline, not a flag, because a flag cannot work here.** JavaScript and
+/// WebAssembly share the one thread a tab has, so nothing outside a running job
+/// can raise anything while it runs: a `stop()` call would not execute until
+/// the job it was meant to stop had already returned. The only token that can
+/// fire *during* a long call is one the job evaluates itself, and that is a
+/// clock.
+///
+/// The budget stays in force until it is changed or cleared, and it bounds each
+/// job separately — the deadline is taken when the job starts, not when the
+/// budget was set. It applies to [`session_open`] / [`session_open_as`] (a
+/// cancelled open loads **nothing** and leaves any previous session in place)
+/// and to [`session_recalculate`] (a cancelled recalculation keeps what it
+/// computed and reports that it did).
+///
+/// A negative or non-finite budget means the same as
+/// [`session_clear_time_budget`].
+#[wasm_bindgen]
+pub fn session_set_time_budget_ms(ms: f64) {
+    let budget = (ms.is_finite() && ms >= 0.0).then_some(ms);
+    TIME_BUDGET_MS.with(|b| b.set(budget));
+}
+
+/// Let long jobs run to completion again.
+#[wasm_bindgen]
+pub fn session_clear_time_budget() {
+    TIME_BUDGET_MS.with(|b| b.set(None));
+}
+
+/// A token that stops the job it is given to once the budget is spent.
+///
+/// The deadline is fixed when the token is made, so one budget bounds one job
+/// rather than every job restarting somebody else's clock. With no budget set
+/// the closure never reads the clock at all, which is what keeps the imported
+/// `performance.now()` off every native build of this crate.
+fn budget_token() -> impl casual_calc_model::Cancel {
+    let deadline = TIME_BUDGET_MS
+        .with(std::cell::Cell::get)
+        .map(|ms| performance_now() + ms);
+    move || deadline.is_some_and(|at| performance_now() > at)
 }
 
 /// The engine version string.
@@ -84,6 +152,16 @@ pub fn eval_formula(input: &str) -> String {
 }
 
 /// Open an `.xlsx` and render a viewport of the first sheet to PNG bytes.
+///
+/// Stoppable, like every other admission on this thread
+/// ([`session_set_time_budget_ms`]): the landing page hands this a file its
+/// visitor picked, so "enormous but admissible" is exactly as reachable here as
+/// it is in the editor.
+///
+/// # Errors
+///
+/// If the bytes are not an admissible package, if the render fails, or if the
+/// import was stopped.
 #[wasm_bindgen]
 pub fn render_xlsx(
     bytes: &[u8],
@@ -91,7 +169,7 @@ pub fn render_xlsx(
     height_px: u32,
     dpi: u32,
 ) -> Result<Vec<u8>, JsError> {
-    let outcome = import_package(bytes.to_vec()).map_err(js)?;
+    let outcome = admit(bytes)?;
     let mut workbook = outcome.workbook;
     recalculate(&mut workbook);
     let geometry = workbook
@@ -103,10 +181,31 @@ pub fn render_xlsx(
     render_sheet_png(&workbook, 0, &geometry, &viewport, dpi).map_err(js)
 }
 
+/// Admit a package under whatever time budget is in force.
+///
+/// The stateless helpers below share this so that "the landing page can be
+/// frozen by a large file and the editor cannot" is not a state this crate can
+/// be in — which is the shape `SEC-017` came in as, one host short.
+fn admit(bytes: &[u8]) -> Result<casual_calc_import::Import, JsError> {
+    let cancel = budget_token();
+    // `Default::default()` rather than naming `OoxmlLimits`: the stock
+    // admission bounds are what `import_package` uses, and inferring the type
+    // from the signature keeps this crate off a dependency it needs for one
+    // word.
+    casual_calc_import::import_package_cancellable(bytes.to_vec(), Default::default(), &cancel)
+        .map_err(js)
+}
+
 /// A short summary of an opened `.xlsx`.
+///
+/// Stoppable: see [`render_xlsx`].
+///
+/// # Errors
+///
+/// If the bytes are not an admissible package, or the import was stopped.
 #[wasm_bindgen]
 pub fn describe_xlsx(bytes: &[u8]) -> Result<String, JsError> {
-    let outcome = import_package(bytes.to_vec()).map_err(js)?;
+    let outcome = admit(bytes)?;
     let wb = outcome.workbook;
     let (name, cells) = wb
         .sheets
@@ -135,12 +234,119 @@ pub fn session_new() {
 }
 
 /// Open an `.xlsx` into the editor session.
+///
+/// Stoppable: see [`session_set_time_budget_ms`]. A cancelled open reports
+/// `OC-IMP-0007` and leaves whatever session was already loaded untouched,
+/// because a half-built workbook under the old one's name is worse than no
+/// workbook at all.
+///
+/// # Errors
+///
+/// If the bytes are not a package this build admits, or the open was stopped.
 #[wasm_bindgen]
 pub fn session_open(bytes: &[u8]) -> Result<(), JsError> {
-    let mut session = WorkbookSession::open(bytes.to_vec()).map_err(js)?;
+    session_open_as("xlsx", bytes)
+}
+
+/// Open bytes whose format is named by a filename extension.
+///
+/// **The SDK decides what `ext` means**
+/// ([`casual_calc_sdk::SessionFormat::for_extension`]) — not this bridge, and
+/// not the page. An editor carrying its own extension table opens exactly the
+/// formats it was last told about, which is how a `.csv` came to be openable
+/// through the WOPI service and not in the editor itself (`WASM-01`). Anything
+/// the SDK learns to read becomes openable here with no change to this
+/// function.
+///
+/// The session **remembers** the format, so [`session_save_native`] writes the
+/// same kind of file back and [`session_format`] /
+/// [`session_format_content_type`] name what those bytes are.
+///
+/// Delimited text has no encoding declaration, so its bytes must already be
+/// UTF-8 — ask [`format_is_text`] and decode before calling this.
+///
+/// # Errors
+///
+/// If `ext` is not a format this build can open, if the bytes are not that
+/// format, or if the open was stopped ([`session_set_time_budget_ms`]).
+#[wasm_bindgen]
+pub fn session_open_as(ext: &str, bytes: &[u8]) -> Result<(), JsError> {
+    let format = casual_calc_sdk::SessionFormat::for_extension(ext)
+        .ok_or_else(|| JsError::new(&format!(".{ext} is not a format this build can open")))?;
+    let cancel = budget_token();
+    let opened = match format {
+        // The one long job here: admission walks every cell of the package.
+        casual_calc_sdk::SessionFormat::Xlsx => WorkbookSession::open_cancellable(
+            bytes.to_vec(),
+            casual_calc_sdk::SessionConfig::new(),
+            &cancel,
+        ),
+        // `SessionFormat` is `#[non_exhaustive]`, and this arm is the point:
+        // a format the SDK grows opens here without this file changing.
+        other => WorkbookSession::open_as(bytes.to_vec(), other),
+    };
+    let mut session = opened.map_err(js)?;
     reapply_filters_after_load(&mut session);
     set_session(session);
     Ok(())
+}
+
+/// The canonical extension `ext` names, or `""` when this build cannot open it.
+///
+/// `.tab` answers `tsv`, `.XLSX` answers `xlsx`. A host asks this instead of
+/// keeping its own table of which extension is which format — the second table
+/// is the defect, not the answer.
+#[wasm_bindgen]
+pub fn format_for_extension(ext: &str) -> String {
+    casual_calc_sdk::SessionFormat::for_extension(ext)
+        .map(|f| f.extension().to_owned())
+        .unwrap_or_default()
+}
+
+/// The MIME type a file with this extension should be served as, or `""` when
+/// this build does not know the extension.
+///
+/// The counterpart of [`format_for_extension`] for a host that is *writing*:
+/// `.tsv` is `text/tab-separated-values`, not `text/csv`. A page keeping its
+/// own answer to this gets one of the three delimited types right.
+#[wasm_bindgen]
+pub fn format_content_type(ext: &str) -> String {
+    casual_calc_sdk::SessionFormat::for_extension(ext)
+        .map(|f| f.content_type().to_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `ext` names a **text** format, whose bytes carry no encoding
+/// declaration and so must be decoded to UTF-8 before the engine reads them.
+///
+/// A package says its own encoding and must be handed over byte for byte;
+/// delimited text does not, and a UTF-16 export read as UTF-8 is not slightly
+/// wrong but unreadable.
+#[wasm_bindgen]
+pub fn format_is_text(ext: &str) -> bool {
+    matches!(
+        casual_calc_sdk::SessionFormat::for_extension(ext),
+        Some(casual_calc_sdk::SessionFormat::Delimited(_))
+    )
+}
+
+/// The extensions this build can open, as a JSON array of `".ext"` strings.
+///
+/// What a file picker's `accept` list should be. `SessionFormat` cannot
+/// enumerate itself, so this **asks it about candidates** rather than
+/// answering from a list of its own: every name below is a format some
+/// spreadsheet engine writes, and which of them survive is the SDK's answer.
+/// That is the difference that matters — a candidate the SDK does not know is
+/// simply absent, and one it learns appears here the day it does.
+#[wasm_bindgen]
+pub fn openable_extensions() -> String {
+    const CANDIDATES: [&str; 6] = ["xlsx", "ods", "csv", "tsv", "tab", "psv"];
+    let offered: Vec<String> = CANDIDATES
+        .iter()
+        .filter(|ext| casual_calc_sdk::SessionFormat::for_extension(ext).is_some())
+        .map(|ext| format!("\".{ext}\""))
+        .collect();
+    format!("[{}]", offered.join(","))
 }
 
 /// Open delimited text (CSV/TSV/PSV) into the editor session. `delimiter` is the
@@ -4051,15 +4257,30 @@ pub fn session_needs_recalculation() -> bool {
 /// recalculating produces the values the formulas already imply, so there is
 /// nothing to undo and nothing new to save. Putting it through `session.edit`
 /// would fill the undo stack with steps that change nothing visible.
+///
+/// Stoppable: see [`session_set_time_budget_ms`]. Returns what happened —
+/// `"full"`, `"cancelled"`, `"over-budget"`, or `"none"` when there is no
+/// session. A cancelled recalculation **keeps what it computed** and leaves the
+/// workbook stale, which is why the answer is returned rather than swallowed: a
+/// host that presents a half-fresh sheet as final is showing numbers that do
+/// not follow from the formulas above them.
 #[wasm_bindgen]
-pub fn session_recalculate() {
+pub fn session_recalculate() -> String {
+    let cancel = budget_token();
     SESSION.with(|cell| {
-        if let Some(session) = cell.borrow_mut().as_mut() {
-            // The SDK's, not the engine's: it also clears the outstanding flag,
-            // which is the whole point of pressing Calculate in manual mode.
-            session.recalculate();
+        let mut guard = cell.borrow_mut();
+        let Some(session) = guard.as_mut() else {
+            return "none".to_owned();
+        };
+        // The SDK's, not the engine's: it also clears the outstanding flag,
+        // which is the whole point of pressing Calculate in manual mode.
+        match session.recalculate_cancellable(&cancel) {
+            Recalculated::Fully => "full",
+            Recalculated::Cancelled => "cancelled",
+            Recalculated::OverBudget => "over-budget",
         }
-    });
+        .to_owned()
+    })
 }
 
 /// The charts on a sheet, with their data already resolved, as JSON.

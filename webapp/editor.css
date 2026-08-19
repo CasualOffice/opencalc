@@ -783,6 +783,10 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   background: var(--oc-background-color); color: var(--oc-text-color); font-size: 13px; font-weight: 600; outline: none;
 }
 .tb-status { color: var(--oc-faint-text-color); font-size: 12px; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+/* The offer to re-run a job that was stopped for taking too long (`SEC-017`).
+   A sibling of the status text, not a child: `.tb-status` is one ellipsised
+   line with a `max-width`, so a control inside it is clipped out of reach. */
+.keep-waiting { padding: 3px 9px; font-size: 12px; border-radius: 6px; flex: 0 0 auto; }
 
 .formula-bar {
   /* The tint mirror is absolutely positioned against this box, so it has to be
