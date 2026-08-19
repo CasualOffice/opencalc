@@ -54,6 +54,12 @@ pub enum OdsError {
     Malformed(String),
     /// The document is larger than this build will admit.
     TooLarge { bytes: u64, limit: u64 },
+    /// The document declares more cells than this build will materialise.
+    ///
+    /// Separate from [`OdsError::TooLarge`], which is about bytes: a repeat
+    /// attribute makes these two quantities unrelated, and conflating them
+    /// would report a 574-byte file as too large.
+    TooManyCells { cells: usize, limit: usize },
     /// Writing failed.
     Write(String),
 }
@@ -68,6 +74,13 @@ impl std::fmt::Display for OdsError {
                 write!(
                     f,
                     "content.xml is {bytes} bytes, over the {limit}-byte limit"
+                )
+            }
+            Self::TooManyCells { cells, limit } => {
+                write!(
+                    f,
+                    "the document declares {cells} cells, over the {limit}-cell limit \
+                     (a repeat attribute can declare millions from a few hundred bytes)"
                 )
             }
             Self::Write(why) => write!(f, "could not write the package: {why}"),
@@ -98,6 +111,25 @@ const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// high — silently, in a document that opens without complaint. The gap costs
 /// nothing to skip, because an empty run stores no cells at all.
 const MAX_REPEAT: u32 = 4096;
+
+/// Populated cells this reader will materialise, across every sheet.
+///
+/// **`MAX_REPEAT` bounds each repeat attribute and nothing bounded their
+/// product.** One `<table:table-cell>` inside one `<table:table-row>` can carry
+/// `number-columns-repeated` and `number-rows-repeated` together, so a single
+/// element materialises 4096 x 4096 = **16.7 million cells**, measured at
+/// 2.0 GB of resident memory from a 574-byte file. Ten such rows fit in 2 KB.
+///
+/// The ODF reader is reachable from a WOPI host's upload, so that is a denial
+/// of service behind a friendly file extension. Found by the fuzz target added
+/// with `ODS-02`, which is the first thing that ever fed this reader an input
+/// nobody wrote by hand.
+///
+/// The value is **not invented here**: it is the `max_populated_cells` the
+/// OOXML reader has enforced since `SEC-011`. Two readers admitting different
+/// amounts of the same workbook is its own defect, so this is deliberately the
+/// same number rather than a fresh judgement.
+const MAX_POPULATED_CELLS: usize = 8_000_000;
 
 /// Read a `.ods` into a workbook, with a report of everything not carried.
 ///
@@ -403,6 +435,8 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
 
     let mut workbook = Workbook::new(Id::from_parts(1, 1));
     let mut report = CompatibilityReport::default();
+    // Materialised cells so far, bounded by `MAX_POPULATED_CELLS`.
+    let mut cells: usize = 0;
 
     let mut row: u32 = 0;
     let mut col: u32 = 0;
@@ -485,7 +519,8 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                                 col,
                                 row_repeat,
                                 &cell,
-                            ));
+                                &mut cells,
+                            )?);
                         } else {
                             pending = Some(cell);
                         }
@@ -571,7 +606,15 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                 "p" => in_text = false,
                 "table-cell" | "covered-table-cell" => {
                     if let Some(p) = pending.take() {
-                        let width = place(&mut workbook, &mut report, row, col, row_repeat, &p);
+                        let width = place(
+                            &mut workbook,
+                            &mut report,
+                            row,
+                            col,
+                            row_repeat,
+                            &p,
+                            &mut cells,
+                        )?;
                         col = col.saturating_add(width);
                     }
                 }
@@ -602,9 +645,10 @@ fn place(
     col: u32,
     row_repeat: u32,
     p: &Pending,
-) -> u32 {
+    cells: &mut usize,
+) -> Result<u32, OdsError> {
     if workbook.sheets.is_empty() {
-        return p.repeat.max(1);
+        return Ok(p.repeat.max(1));
     }
     let value = match p.value_type.as_str() {
         "float" | "percentage" | "currency" => p
@@ -637,7 +681,7 @@ fn place(
     if value == CellValue::Empty && !has_formula {
         // An empty run: move the cursor, store nothing. However long it claims
         // to be, it costs nothing — which is why the cursor is not clamped.
-        return p.repeat.max(1);
+        return Ok(p.repeat.max(1));
     }
 
     // A formula is stored once and shared by handle, which is what the model's
@@ -657,11 +701,24 @@ fn place(
     }
     let mut outside = 0u64;
     let Some(sheet) = workbook.sheets.last_mut() else {
-        return p.repeat.max(1);
+        return Ok(p.repeat.max(1));
     };
     // Clamped **here**, where cells are actually stored, and nowhere else.
-    for dr in 0..row_repeat.clamp(1, MAX_REPEAT) {
-        for dc in 0..p.repeat.clamp(1, MAX_REPEAT) {
+    // Bounded on the **product**, not on each factor. Clamping the two
+    // separately still admits 4096 x 4096 from one element; see
+    // `MAX_POPULATED_CELLS`. The cursor is unaffected — a document may legally
+    // *span* a huge range, it may just not materialise one.
+    let rows = row_repeat.clamp(1, MAX_REPEAT);
+    let cols = p.repeat.clamp(1, MAX_REPEAT);
+    if *cells + (rows as usize).saturating_mul(cols as usize) > MAX_POPULATED_CELLS {
+        return Err(OdsError::TooManyCells {
+            cells: *cells + (rows as usize).saturating_mul(cols as usize),
+            limit: MAX_POPULATED_CELLS,
+        });
+    }
+    *cells += (rows as usize).saturating_mul(cols as usize);
+    for dr in 0..rows {
+        for dc in 0..cols {
             let at = CellRef::new(row.saturating_add(dr), col.saturating_add(dc));
             // A file may address further than this engine's grid reaches. Kept
             // out rather than stored, because a cell past the last column is
@@ -685,7 +742,7 @@ fn place(
             outside,
         );
     }
-    p.repeat.max(1)
+    Ok(p.repeat.max(1))
 }
 
 /// Turn an ODF formula into one this engine can parse, or `None`.
@@ -984,6 +1041,17 @@ fn content_xml(workbook: &Workbook) -> String {
         r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
         r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#,
         r#" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0""#,
+        // **Declared because every formula uses it.** `table:formula` is
+        // written as `of:=…`, and a prefix that is used and never bound is not
+        // merely untidy — it is not well-formed namespace XML. LibreOffice
+        // answers `Err:510` for every formula cell in the document, so a file
+        // this engine saved opened with an error in place of each formula.
+        //
+        // Invisible from inside this crate, and that is the lesson: our own
+        // reader matches attributes by *local* name, so it read the file back
+        // perfectly and every round-trip test passed. Only a real LibreOffice
+        // round trip could see it (`ODS-06`).
+        r#" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2""#,
         r#" office:version="1.2">"#,
         r#"<office:body><office:spreadsheet>"#,
     ));
@@ -1301,6 +1369,177 @@ fn escape(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A few hundred bytes must not become gigabytes.**
+    ///
+    /// `MAX_REPEAT` bounded each repeat attribute and nothing bounded their
+    /// product: one `<table:table-cell>` carrying both
+    /// `number-columns-repeated` and `number-rows-repeated` materialised
+    /// 4096 x 4096 = 16.7 million cells — measured at 2.0 GB of resident
+    /// memory from a 574-byte file, and ten such rows fit in 2 KB.
+    ///
+    /// This reader is reachable from a WOPI host's upload, so that was a denial
+    /// of service behind a friendly extension. Found by the fuzz target, which
+    /// was the first thing ever to feed this reader an input nobody wrote.
+    ///
+    /// The document is **refused**, not truncated: silently keeping the first
+    /// eight million cells of a file that claims sixteen would be the silent
+    /// loss this project refuses.
+    #[test]
+    fn a_repeat_product_cannot_amplify_a_tiny_file_into_gigabytes() {
+        let xml = format!(
+            r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="S"><table:table-row table:number-rows-repeated="{r}"><table:table-cell table:number-columns-repeated="{c}" office:value-type="float" office:value="1"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
+            r = MAX_REPEAT,
+            c = MAX_REPEAT,
+        );
+        let package = package_of(&xml);
+        assert!(
+            package.len() < 2_000,
+            "the reproducer must be tiny, or it proves nothing: {} bytes",
+            package.len()
+        );
+
+        match import_ods(&package) {
+            Err(OdsError::TooManyCells { cells, limit }) => {
+                assert!(cells > limit, "refused without exceeding the limit");
+                assert_eq!(limit, MAX_POPULATED_CELLS);
+            }
+            Err(other) => panic!("refused for the wrong reason: {other}"),
+            Ok(_) => panic!(
+                "{} bytes materialised {} cells unchecked",
+                package.len(),
+                MAX_REPEAT as u64 * MAX_REPEAT as u64
+            ),
+        }
+    }
+
+    /// **An ordinary wide fill still opens.** The bound must refuse the attack
+    /// and not the documents LibreOffice actually writes, which use repeat runs
+    /// on nearly every row.
+    #[test]
+    fn an_ordinary_repeat_run_is_still_admitted() {
+        let xml = r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="S"><table:table-row table:number-rows-repeated="20"><table:table-cell table:number-columns-repeated="50" office:value-type="float" office:value="7"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+        let wb = import_ods(&package_of(xml)).expect("an ordinary wide fill was refused");
+        assert_eq!(
+            wb.0.sheets[0]
+                .cells
+                .get(CellRef::new(19, 49))
+                .map(|c| c.value.clone()),
+            Some(CellValue::Number(7.0)),
+            "the fill did not reach its far corner"
+        );
+    }
+
+    /// **Every namespace prefix the writer uses is declared.**
+    ///
+    /// `table:formula` is written as `of:=…`, and `of:` was never bound. That is
+    /// not untidy XML, it is not well-formed namespace XML — and LibreOffice
+    /// answers `Err:510` for every formula cell in a document this engine saved.
+    /// Measured, with a real `soffice`: `Err:510` before the declaration, `10`
+    /// after.
+    ///
+    /// **Why this was invisible from inside the crate**, which is the part worth
+    /// keeping: `import_ods` matches attributes by *local* name, so it read the
+    /// broken file back perfectly and every round-trip test passed. A round trip
+    /// through your own reader cannot see a namespace defect, by construction.
+    ///
+    /// So this asserts the property mechanically rather than re-testing the one
+    /// prefix: any prefix that appears on an element or an attribute must appear
+    /// in an `xmlns:` declaration. A future prefix is covered without an edit.
+    #[test]
+    fn every_prefix_the_writer_uses_is_declared() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(2.0)));
+        let handle = wb.store_formula(casual_calc_formula::parse("SUM(A1:A1)").unwrap());
+        let mut total = Cell::value(CellValue::Number(2.0));
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(1, 0), total);
+        wb.sheets.push(sheet);
+
+        let bytes = export_ods(&wb).expect("write");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip");
+        for part in ["content.xml", "meta.xml"] {
+            let Ok(mut entry) = zip.by_name(part) else {
+                continue;
+            };
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut xml).expect("read");
+
+            // Only a real `xmlns:` **attribute** declares anything. Matching
+            // the bare text also hits the URNs, which themselves contain
+            // `…:xmlns:office:1.0` — the first version of this did, and its
+            // "declared" set held entries like `office:1.0" xmlns:table`.
+            // Harmless here by luck, and exactly the loose parsing that hides
+            // the next defect.
+            let declared: std::collections::BTreeSet<&str> = xml
+                .match_indices(" xmlns:")
+                .filter_map(|(at, _)| {
+                    let name = xml[at + 7..].split('=').next()?;
+                    name.chars()
+                        .all(|c| c.is_ascii_alphanumeric())
+                        .then_some(name)
+                })
+                .collect();
+            // Prefixes actually in use: `<pfx:name` and ` pfx:name=`.
+            let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for (at, _) in xml.match_indices(':') {
+                let before = &xml[..at];
+                let Some(start) = before.rfind(['<', ' ', '/']) else {
+                    continue;
+                };
+                let prefix = &before[start + 1..];
+                if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_lowercase()) {
+                    continue;
+                }
+                let after = &xml[at + 1..];
+                // A real qualified name, not a URN or a formula body.
+                if after.starts_with(|c: char| c.is_ascii_alphabetic()) && prefix != "xmlns" {
+                    let name: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect();
+                    let rest = &after[name.len()..];
+                    if rest.starts_with('=') || rest.starts_with(' ') || rest.starts_with('>') {
+                        used.insert(prefix.to_owned());
+                    }
+                }
+            }
+            for prefix in &used {
+                assert!(
+                    declared.contains(prefix.as_str()),
+                    "{part} uses the prefix `{prefix}:` and never declares it, so the \
+                     document is not well-formed and LibreOffice will not read it; \
+                     declared: {declared:?}"
+                );
+            }
+            assert!(
+                used.contains("office"),
+                "{part}: the scan found no prefixes at all"
+            );
+
+            // **A prefix can also live inside an attribute value, and that is the
+            // one that bit.** `table:formula="of:=SUM(…)"` binds `of:` in the
+            // *value*, which the scan above cannot see: it requires a name after
+            // the colon and finds `=`. ODF requires that prefix declared all the
+            // same, and the first version of this test passed with `xmlns:of`
+            // deleted — proving nothing about the defect it was written for.
+            for (attr, prefix) in [("table:formula=\"", "of:")] {
+                if let Some(at) = xml.find(attr) {
+                    let value = &xml[at + attr.len()..];
+                    if value.starts_with(prefix) {
+                        assert!(
+                            declared.contains(prefix.trim_end_matches(':')),
+                            "{part} writes {attr}{prefix}…\" and never declares `{prefix}`, so \
+                         LibreOffice answers Err:510 for every formula cell; declared: {declared:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// Written by LibreOffice, not by the writer below.
     ///
