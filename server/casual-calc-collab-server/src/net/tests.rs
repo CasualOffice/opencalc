@@ -110,6 +110,15 @@ impl Fetch for Unreachable {
     }
 }
 
+/// Claims for a *different* document, so a test can fill a node rather than
+/// crowd one document.
+fn claims_for(name: &str, key: &str, access: Access) -> Claims {
+    let mut c = claims(name, access);
+    c.document.key = key.into();
+    c.document.id = format!("file-{key}");
+    c
+}
+
 fn claims(name: &str, access: Access) -> Claims {
     Claims {
         iss: "https://host.example".into(),
@@ -1292,11 +1301,55 @@ async fn a_document_with_unsaved_work_is_not_evicted() {
 
 #[tokio::test]
 async fn a_full_node_turns_a_new_document_away_rather_than_degrading() {
+    // **A cap of one, and two documents** — not a cap of zero.
+    //
+    // This used to say `max_documents: 0`, which meant "capacity zero, refuse
+    // everything". `SRV-03` made zero mean *unlimited*, because admission is
+    // decided by memory now and the counts are an optional belt on top. Reusing
+    // zero to mean fullness would have quietly inverted the setting for anybody
+    // who had set it, so the test says what it means instead: fill the node,
+    // then knock.
+    let addr = start_with(
+        Arc::new(Canned(package())),
+        Arc::new(Collected::default()),
+        Limits {
+            max_documents: 1,
+            ..Limits::default()
+        },
+    )
+    .await;
+
+    let mut first = connect(addr).await;
+    let welcomed = join(&mut first, &claims("Ada", Access::Edit)).await;
+    assert!(
+        matches!(welcomed, Some(ServerMessage::Welcome { .. })),
+        "the first document should have been admitted, got {welcomed:?}"
+    );
+
+    let mut second = connect(addr).await;
+    let answer = join(
+        &mut second,
+        &claims_for("Bob", "other-document", Access::Edit),
+    )
+    .await;
+    assert!(
+        matches!(answer, Some(ServerMessage::Stopped { .. })),
+        "a second document was admitted past a cap of one: {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_count_of_zero_means_no_limit_rather_than_no_capacity() {
+    // The inversion `SRV-03` introduced, pinned so it cannot happen twice. A
+    // deployment that had set `0` meaning "refuse everything" would, after that
+    // change, accept everything — the most dangerous direction for a safety
+    // setting to flip, and invisible without this.
     let addr = start_with(
         Arc::new(Canned(package())),
         Arc::new(Collected::default()),
         Limits {
             max_documents: 0,
+            max_participants: 0,
             ..Limits::default()
         },
     )
@@ -1304,8 +1357,8 @@ async fn a_full_node_turns_a_new_document_away_rather_than_degrading() {
     let mut socket = connect(addr).await;
     let answer = join(&mut socket, &claims("Ada", Access::Edit)).await;
     assert!(
-        matches!(answer, Some(ServerMessage::Stopped { .. })),
-        "got {answer:?}"
+        matches!(answer, Some(ServerMessage::Welcome { .. })),
+        "zero was read as no capacity rather than no limit: {answer:?}"
     );
 }
 

@@ -15,6 +15,18 @@ Two rules, both checked per page:
 
 * No two entries in one nav share a visible label. Same label, different target,
   is the failure above; same label, same target is a stray copy.
+* **No two entries lead to the same place.** Two links to one page, however
+  they are labelled, are a stray copy.
+
+What this deliberately does **not** check: two entries about the same *subject*
+at different destinations. The homepage once carried a `#selfhost` section
+anchor beside a link to the self-hosting page, labelled differently — two routes
+to one topic, and a reader had to guess which was real. That is the mistake this
+gate was extended for, and it turned out not to be lintable: every mechanical
+rule tried for it also flagged ordinary cross-linking, like the "Embed" section
+pointing readers at the SDK guide. A check that cries wolf gets switched off, so
+that one stays a review question and is written down here rather than pretended
+away.
 * Every relative target exists, and every `#anchor` has an element with that id
   on the page that links to it.
 """
@@ -45,6 +57,7 @@ def main() -> int:
         ids = set(re.findall(r'id="([^"]+)"', source))
 
         seen: dict[str, str] = {}
+        destinations: dict[str, str] = {}
         for href, label_markup in LINK.findall(nav.group(1)):
             label = text_of(label_markup)
             if not label:
@@ -55,6 +68,12 @@ def main() -> int:
                     f"({seen[label]} and {href})"
                 )
             seen[label] = href
+
+            if href in destinations:
+                problems.append(
+                    f"{page}: {destinations[href]!r} and {label!r} both go to {href}"
+                )
+            destinations[href] = label
 
             if href.startswith("http"):
                 continue
