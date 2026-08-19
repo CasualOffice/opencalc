@@ -56,7 +56,7 @@
           <a href="./index.html#today">What works</a>
           <a href="./index.html#embed">Embed</a>
           <a href="./docs.html">SDK docs</a>
-          <a href="./deploy.html">Deploy docs</a>
+          <a href="./deploy.html">Self-host</a>
           <a href="./embed.html">Live demo</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
           <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
@@ -452,20 +452,78 @@ POST /api/documents/{id}/versions/{at}/restore</pre>
         </p>
         <table>
           <tr><th>RAM for documents</th><th>10k-cell sheets</th><th>100k-cell sheets</th><th>1M-cell sheets</th></tr>
-          <tr><td>4 GB</td><td>capped at 1 000 · 3 000 users</td><td>~490 · 1 460 users</td><td>~49 · 145 users</td></tr>
-          <tr><td>8 GB</td><td>capped at 1 000 · 3 000 users</td><td>~975 · <b>2 900 users</b></td><td>~98 · 290 users</td></tr>
-          <tr><td>16 GB</td><td>capped at 1 000 · 3 000 users</td><td>capped at 1 000 · 3 000 users</td><td>~195 · 585 users</td></tr>
+          <tr><td>4 GB</td><td>~4 900 · 14 700 users</td><td>~490 · 1 460 users</td><td>~49 · 145 users</td></tr>
+          <tr><td>8 GB</td><td>~9 900 · 29 700 users</td><td>~975 · <b>2 900 users</b></td><td>~98 · 290 users</td></tr>
+          <tr><td>16 GB</td><td>~19 800 · 59 400 users</td><td>~1 950 · 5 850 users</td><td>~195 · 585 users</td></tr>
         </table>
         <p>
-          <b>The crossover is around 100 000 cells a sheet.</b> Below it the document cap
-          binds before memory does — an 8&nbsp;GB node running ordinary 10k-cell sheets is
-          limited by configuration, and you should raise <code>OPENCALC_MAX_DOCUMENTS</code>
-          rather than buy RAM. Above it, memory binds and the cap is irrelevant.
-        </p>
-        <p>
-          Rule of thumb: <b>8 GB ≈ 1 000 sheets ≈ 3 000 concurrent editors</b>, if sheets
-          average 100k cells or fewer. It scales by adding nodes — a document is owned by
+          <b>Nothing here is a configured ceiling.</b> There is no cap on documents or on
+          people; a node admits work until its <i>memory</i> is short, and the figures above
+          are what that works out to. It scales by adding nodes — a document is owned by
           exactly one node at a time, so nodes do not contend for it.
+        </p>
+        <div class="callout">
+          <p>
+            <b>Admission stops at 85% of the node's limit, not at 100%.</b> Reaching the
+            cgroup ceiling is an OOM kill, and that takes <i>every</i> document on the node
+            — including the unsaved work of everybody in them. Refusing one new document
+            costs one person a click. The limit is read from the container's cgroup, not
+            from the host: a 2&nbsp;GB container on a 64&nbsp;GB machine is a 2&nbsp;GB node.
+            <code>OPENCALC_MEMORY_HIGH_WATER_PERCENT</code> moves the mark between 50 and 95.
+          </p>
+        </div>
+
+        <h3>A rule of thumb</h3>
+        <p>
+          If you want one line to size a node from, this is it:
+        </p>
+<pre><span class="c"># RAM for documents, in GB</span>
+GB  =  users ÷ 3  ×  average cells per sheet  ×  84 bytes  ×  1.4
+
+<span class="c"># or, backwards — how many people a node holds</span>
+users  =  GB × 3 ÷ (average cells × 84 bytes × 1.4)</pre>
+        <p>
+          <code>÷ 3</code> is the editors-per-sheet assumption — change it to yours.
+          <b>84 bytes</b> is the measured per-cell cost. <b>×1.4</b> is headroom: it covers
+          the 85% admission mark and leaves room for the per-document overhead this has not
+          yet measured. It is a deliberately generous fudge, and it is the number to
+          revisit first when <code>PERF-12</code> lands.
+        </p>
+
+        <h3>Worked ranges</h3>
+        <p>
+          At three editors a sheet, sized with the headroom above. Pick the row that
+          matches your documents, not your ambitions — sheet size moves this far more than
+          user count does.
+        </p>
+        <table>
+          <tr>
+            <th>Concurrent users</th>
+            <th>Sheets</th>
+            <th>Small (10k cells)</th>
+            <th>Typical (50k cells)</th>
+            <th>Large (250k cells)</th>
+          </tr>
+          <tr><td>30</td><td>10</td><td>&lt; 0.1 GB</td><td>~0.06 GB</td><td>~0.3 GB</td></tr>
+          <tr><td>150</td><td>50</td><td>~0.06 GB</td><td>~0.3 GB</td><td>~1.5 GB</td></tr>
+          <tr><td>300</td><td>100</td><td>~0.12 GB</td><td>~0.6 GB</td><td>~3 GB</td></tr>
+          <tr><td>1 500</td><td>500</td><td>~0.6 GB</td><td>~3 GB</td><td>~15 GB</td></tr>
+          <tr><td>3 000</td><td>1 000</td><td>~1.2 GB</td><td>~6 GB</td><td>~30 GB</td></tr>
+          <tr><td>15 000</td><td>5 000</td><td>~6 GB</td><td>~30 GB</td><td>~147 GB · <b>split across nodes</b></td></tr>
+        </table>
+        <div class="callout">
+          <p>
+            <b>Start at 2 GB and watch.</b> Nearly every deployment below a few hundred
+            people fits there, and the two gauges on <code>/metrics</code> —
+            <code>opencalc_documents</code> and <code>opencalc_participants</code> — tell
+            you what is actually resident rather than what a table predicted. Size from
+            those after a week; the table is for the first day.
+          </p>
+        </div>
+        <p>
+          <b>Add nodes rather than growing one</b> past about 16 GB. A document is owned by
+          exactly one node, so capacity adds up cleanly, and one large node is a single
+          thing to lose.
         </p>
 
         <h3>The engine is not what runs out first</h3>

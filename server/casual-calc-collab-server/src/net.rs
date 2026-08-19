@@ -106,10 +106,19 @@ pub trait Deliver: Send + Sync + 'static {
 /// open connections until it runs out of descriptors.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// How many documents this node will hold at once.
+    /// How many documents this node will hold at once. **0 means no count
+    /// limit**, which is the default: admission is decided by memory pressure,
+    /// not by a number somebody guessed (see [`crate::memory`]).
     pub max_documents: usize,
-    /// How many connections one document will accept.
+    /// How many connections one document will accept. **0 means no count
+    /// limit**, which is the default.
     pub max_participants: usize,
+    /// What this node may use before it stops admitting work.
+    ///
+    /// `None` where it cannot be discovered — no cgroup limit and no `/proc`.
+    /// Then nothing bounds this node but the counts above, which default to
+    /// unlimited, so the operator is warned loudly at startup.
+    pub memory_budget: Option<crate::memory::MemoryBudget>,
     /// The largest WebSocket message accepted, in bytes.
     pub max_message_bytes: usize,
     /// How long a document with nobody in it and nothing unsaved is kept before
@@ -180,8 +189,19 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_documents: 1_000,
-            max_participants: 200,
+            // **Uncapped by count.** These were 1 000 and 200 — numbers that
+            // guessed at what a machine could hold, and so were wrong in both
+            // directions at once: a 64 GB node turned work away at 8 GB, and a
+            // 2 GB node accepted a thousand documents it could not hold. What
+            // bounds a node now is its actual memory (see `memory_budget`).
+            max_documents: 0,
+            max_participants: 0,
+            memory_budget: crate::memory::container_limit_bytes().map(|limit_bytes| {
+                crate::memory::MemoryBudget {
+                    limit_bytes,
+                    high_water_percent: 85,
+                }
+            }),
             // Comfortably above a large submission and far below a memory
             // problem. A client with more to say than this is misbehaving.
             max_message_bytes: 4 * 1024 * 1024,
@@ -472,7 +492,41 @@ struct Registry {
     opening: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<Live>>>>>,
 }
 
+/// Whether a count limit has been reached.
+///
+/// **Zero means no limit**, which is the default for both counts now that
+/// memory decides. Written once rather than at each site, because `>= 0` is
+/// true for every count and getting it wrong would silently refuse everything.
+#[must_use]
+fn over_count(current: usize, limit: usize) -> bool {
+    limit != 0 && current >= limit
+}
+
 impl Service {
+    /// Whether this node has room to take on another document or participant.
+    ///
+    /// The gate is memory, not a count. See [`crate::memory`] for why it
+    /// refuses at a high-water mark rather than at exhaustion: an OOM kill
+    /// takes every document on the node, including everybody's unsaved work,
+    /// where a refusal costs one person a click.
+    ///
+    /// An unmeasurable platform admits. A node that cannot read its own usage
+    /// must not become one that refuses everything, and the operator is warned
+    /// at startup instead.
+    #[must_use]
+    pub fn admits_more_work(&self) -> bool {
+        if over_count(
+            lock(&self.registry.live).len(),
+            self.config.limits.max_documents,
+        ) {
+            return false;
+        }
+        crate::memory::admits(
+            self.config.limits.memory_budget,
+            crate::memory::current_resident_bytes(),
+        )
+    }
+
     /// Turn this node's own counter into an id unique across the cluster.
     ///
     /// A `ClientId` used to be a bare per-node counter, so the first
@@ -1448,7 +1502,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
 
     // A document that is already full turns the next arrival away rather than
     // degrading for everybody in it.
-    if lock(&live.roster).len() >= state.config.limits.max_participants {
+    if !state.admits_more_work()
+        || over_count(
+            lock(&live.roster).len(),
+            state.config.limits.max_participants,
+        )
+    {
         let _ = send(
             &mut socket,
             &ServerMessage::Stopped {
@@ -1824,7 +1883,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
     // node's memory to reach the same answer more slowly. The count is checked
     // again after, because it can change while this awaits, and that one is the
     // authority.
-    if lock(&state.registry.live).len() >= state.config.limits.max_documents {
+    if !state.admits_more_work() {
         return Err(Refusal::NotSaving);
     }
 
@@ -1856,7 +1915,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                     .map_err(|_| Refusal::NotSaving)?;
 
             let mut registry = lock(&state.registry.live);
-            if !registry.contains_key(&key) && registry.len() >= state.config.limits.max_documents {
+            if !registry.contains_key(&key) && !state.admits_more_work() {
                 return Err(Refusal::NotSaving);
             }
             // `entry` rather than `insert`: a document evicted and reopened
