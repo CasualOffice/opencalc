@@ -25,6 +25,7 @@ mod print;
 mod reference;
 mod refscan;
 mod rewrite;
+pub mod stored;
 
 pub use ast::{BinaryOp, Expr, UnaryOp};
 pub use error::FormulaError;
