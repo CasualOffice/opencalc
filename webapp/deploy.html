@@ -445,16 +445,55 @@ POST /api/documents/{id}/versions/{at}/restore</pre>
           </p>
         </div>
 
+        <h3>What a live document costs on the server</h3>
+        <p>
+          The per-cell figure above is the workbook. A document that is <i>open</i> costs
+          more than its cells: an operation log, participant state, and the broadcast path
+          to everyone in it. That overhead is now measured — <b>190&nbsp;KB per open
+          document at three editors</b> — from a sweep against a Linux container, with the
+          node reporting its own resident set.
+        </p>
+        <table>
+          <tr><th>Documents</th><th>Editors</th><th>Edits</th><th>p50</th><th>p99</th><th>Node RSS</th><th>Per document</th></tr>
+          <tr><td>idle</td><td>0</td><td>—</td><td>—</td><td>—</td><td>6.6 MB</td><td>—</td></tr>
+          <tr><td>10</td><td>30</td><td>1 200 / 1 200</td><td>27 µs</td><td>1.5 ms</td><td>11.6 MB</td><td>514 KB</td></tr>
+          <tr><td>25</td><td>75</td><td>3 000 / 3 000</td><td>16 µs</td><td>2.8 ms</td><td>12.4 MB</td><td>235 KB</td></tr>
+          <tr><td>50</td><td>150</td><td>6 000 / 6 000</td><td>18 µs</td><td>1.1 ms</td><td>15.9 MB</td><td>188 KB</td></tr>
+        </table>
+        <p>
+          <b>Every edit was acknowledged at every step</b> — 10 200 of 10 200. The
+          per-document column falls as documents are added because it still carries a share
+          of the 6.6&nbsp;MB a node costs when empty; the <i>marginal</i> cost between the
+          25- and 50-document runs is <b>143&nbsp;KB</b>. Round to 190&nbsp;KB and it is a
+          safe number to size with.
+        </p>
+        <div class="callout warn">
+          <p>
+            <b>This corrects the sizing advice that was on this page.</b> Sizing from cells
+            alone is fine for large sheets and badly wrong for small ones: at 1 000 cells
+            the overhead is <b>70% of the total</b>, so a deployment of many small documents
+            was under-sized by <b>3.3×</b>. At 100 000 cells it is 2% and does not matter.
+            If your documents are small, the document count is what you are sizing for, not
+            the cell count.
+          </p>
+        </div>
+        <p>
+          Latency is a Docker Desktop VM on a laptop, so treat p99 as an upper bound rather
+          than a specification — it did not degrade between 50 and 150 concurrent editors,
+          which is the part that matters. RSS is the figure to trust: it is read from the
+          node's own <code>opencalc_resident_bytes</code> gauge inside the container.
+        </p>
+
         <h3>Nodes, sheets and people</h3>
         <p>
           At <b>three concurrent editors per sheet</b>, and with the default
           <code>OPENCALC_MAX_DOCUMENTS</code> of 1 000 per node:
         </p>
         <table>
-          <tr><th>RAM for documents</th><th>10k-cell sheets</th><th>100k-cell sheets</th><th>1M-cell sheets</th></tr>
-          <tr><td>4 GB</td><td>~4 900 · 14 700 users</td><td>~490 · 1 460 users</td><td>~49 · 145 users</td></tr>
-          <tr><td>8 GB</td><td>~9 900 · 29 700 users</td><td>~975 · <b>2 900 users</b></td><td>~98 · 290 users</td></tr>
-          <tr><td>16 GB</td><td>~19 800 · 59 400 users</td><td>~1 950 · 5 850 users</td><td>~195 · 585 users</td></tr>
+          <tr><th>RAM for documents</th><th>1k-cell sheets</th><th>10k-cell sheets</th><th>100k-cell sheets</th><th>1M-cell sheets</th></tr>
+          <tr><td>4 GB</td><td>~15 400 · 46 200 users</td><td>~4 150 · 12 400 users</td><td>~500 · 1 500 users</td><td>~51 · 153 users</td></tr>
+          <tr><td>8 GB</td><td>~30 800 · 92 500 users</td><td>~8 300 · 24 900 users</td><td>~1 000 · <b>3 000 users</b></td><td>~102 · 306 users</td></tr>
+          <tr><td>16 GB</td><td>~61 600 · 185 000 users</td><td>~16 600 · 49 800 users</td><td>~2 000 · 6 000 users</td><td>~204 · 612 users</td></tr>
         </table>
         <p>
           <b>Nothing here is a configured ceiling.</b> There is no cap on documents or on
@@ -478,16 +517,19 @@ POST /api/documents/{id}/versions/{at}/restore</pre>
           If you want one line to size a node from, this is it:
         </p>
 <pre><span class="c"># RAM for documents, in GB</span>
-GB  =  users ÷ 3  ×  average cells per sheet  ×  84 bytes  ×  1.4
+GB  =  users ÷ 3  ×  (average cells per sheet × 84 bytes  +  190 KB)  ×  1.2
 
 <span class="c"># or, backwards — how many people a node holds</span>
-users  =  GB × 3 ÷ (average cells × 84 bytes × 1.4)</pre>
+users  =  GB × 3 ÷ ((average cells × 84 bytes + 190 KB) × 1.2)</pre>
         <p>
           <code>÷ 3</code> is the editors-per-sheet assumption — change it to yours.
-          <b>84 bytes</b> is the measured per-cell cost. <b>×1.4</b> is headroom: it covers
-          the 85% admission mark and leaves room for the per-document overhead this has not
-          yet measured. It is a deliberately generous fudge, and it is the number to
-          revisit first when <code>PERF-12</code> lands.
+          <b>84 bytes</b> is the measured per-cell cost and <b>190 KB</b> the measured
+          per-document one; both are figures this project ran for, not estimates.
+          <b>×1.2</b> is what is left of the headroom once the overhead is a term rather
+          than a guess — it covers the 85% admission mark and nothing else.
+          The previous form of this line multiplied cells alone by a generous ×1.4 to stand
+          in for an unmeasured overhead, and that stand-in was too small by 3× for small
+          documents. <b>Add the 190&nbsp;KB; do not fold it into a fudge.</b>
         </p>
 
         <h3>Worked ranges</h3>

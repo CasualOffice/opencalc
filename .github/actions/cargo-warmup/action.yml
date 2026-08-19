@@ -1,0 +1,52 @@
+name: Warm the registry cache, with retries
+description: >
+  Fetch every dependency before the real cargo command runs, retrying on the
+  transient registry failures that otherwise red an entire run.
+
+  This exists because a run failed with "download of config.json failed → curl
+  failed → [35] SSL connect error", 0.3 seconds after starting, having compiled
+  nothing. Cargo's own `net.retry` did not absorb it: the gap between the fetch
+  starting and the error is far too short for any backoff to have happened, so
+  the error was never classified as one worth retrying. Raising `net.retry`
+  would therefore have been an inert fix — configuration that looks like a
+  remedy and changes nothing, which is worse than no fix because it stops
+  anybody looking again.
+
+  So the retry is here, in the shell, where it does not depend on how cargo
+  classifies a curl error code.
+
+inputs:
+  manifest-path:
+    description: Which workspace to fetch. Defaults to the repository root.
+    required: false
+    default: Cargo.toml
+  attempts:
+    description: How many times to try before giving up.
+    required: false
+    default: "5"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        # Free if cargo does classify the error, harmless if it does not. The
+        # shell loop below is what actually carries this.
+        CARGO_NET_RETRY: "10"
+      run: |
+        set -uo pipefail
+        attempts="${{ inputs.attempts }}"
+        for attempt in $(seq 1 "$attempts"); do
+          if cargo fetch --locked --manifest-path "${{ inputs.manifest-path }}"; then
+            exit 0
+          fi
+          if [ "$attempt" -eq "$attempts" ]; then break; fi
+          # Linear rather than exponential: a registry blip clears in seconds,
+          # and a run that sits for minutes on the last attempt is its own
+          # failure. 5s, 10s, 15s, 20s — under a minute in total.
+          delay=$((attempt * 5))
+          echo "registry fetch failed (attempt ${attempt}/${attempts}); retrying in ${delay}s"
+          sleep "$delay"
+        done
+        echo "::error::the crates.io registry was unreachable after ${attempts} attempts"
+        exit 1
