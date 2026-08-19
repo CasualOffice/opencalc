@@ -76,8 +76,14 @@ jobs:
       # `dependency-policy` job already enforces, so it is the boundary to read.
       - name: The engine still builds for the browser
         run: |
+          # **Hosts and tools, both derived.** `server/` was excluded and
+          # `tools/` was not, so the first tool with a native dependency —
+          # `casual-calc-loadtest`, which drives sockets — was compiled for the
+          # browser and failed on `mio`. Neither a server nor a developer tool
+          # ever runs in a webview; what this gate is for is the *engine*
+          # staying portable, and a build tool is not the engine.
           mapfile -t EXCLUDES < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.manifest_path | contains("/server/")) | "--exclude", .name')
+            | jq -r '.packages[] | select(.manifest_path | test("/(server|tools)/")) | "--exclude", .name')
           echo "not checked for wasm: ${EXCLUDES[*]}"
           cargo check --target wasm32-unknown-unknown --workspace "${EXCLUDES[@]}"
 
