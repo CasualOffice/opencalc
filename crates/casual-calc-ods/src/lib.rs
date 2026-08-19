@@ -2,15 +2,26 @@
 //!
 //! # What this is, and what it is not
 //!
-//! This carries **values, formulas and sheets**, and nothing else. It exists so
-//! that a LibreOffice-first shop can open a `.ods`, work on it, and get a `.ods`
-//! back — which is the difference between OpenCalc being usable at all in those
-//! shops and not. It is explicitly not a fidelity implementation: styles,
-//! merges, charts, images, conditional formatting, validation and print setup
-//! are **counted and named** on the way through, never dropped quietly — by the
-//! [`CompatibilityReport`] [`import_ods`] returns on the way in, and by
-//! [`export_loss`] on the way out, which a host asks *before* it overwrites
-//! somebody's file.
+//! This carries **values, formulas, sheets and the document's own metadata**,
+//! and nothing else. It exists so that a LibreOffice-first shop can open a
+//! `.ods`, work on it, and get a `.ods` back — which is the difference between
+//! OpenCalc being usable at all in those shops and not. It is explicitly not a
+//! fidelity implementation: styles, merges, charts, images, conditional
+//! formatting, validation and print setup are **counted and named** on the way
+//! through, never dropped quietly — by the [`CompatibilityReport`]
+//! [`import_ods`] returns on the way in, and by [`export_loss`] on the way out,
+//! which a host asks *before* it overwrites somebody's file.
+//!
+//! # Why the metadata is carried rather than counted
+//!
+//! `meta.xml` was the last part of a `.ods` this dropped **silently** — not
+//! because anybody decided to, but because the report is assembled while
+//! reading `content.xml`, and nothing can count what was never opened
+//! (`ODS-03`). It is now read into
+//! [`DocumentProperties`](casual_calc_model::DocumentProperties) and written
+//! back, so an author's name survives a round trip instead of appearing in a
+//! list of regrets. `styles.xml` and `settings.xml` are still not read, and are
+//! now named for the same reason.
 //!
 //! That distinction is the point. A converter that silently discards formatting
 //! looks like it worked and loses somebody's afternoon; one that says what it
@@ -97,21 +108,280 @@ const MAX_REPEAT: u32 = 4096;
 pub fn import_ods(bytes: &[u8]) -> Result<(Workbook, CompatibilityReport), OdsError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| OdsError::NotAPackage(e.to_string()))?;
-    let mut entry = zip
-        .by_name("content.xml")
-        .map_err(|_| OdsError::NoContent)?;
-    if entry.size() > MAX_CONTENT_BYTES {
+    let Some(xml) = read_part(&mut zip, "content.xml")? else {
+        return Err(OdsError::NoContent);
+    };
+    let (mut workbook, mut report) = read_content(&xml)?;
+    read_document_meta(&mut zip, &mut workbook.properties, &mut report);
+    report_unread_parts(&mut zip, &mut report);
+    Ok((workbook, report))
+}
+
+/// Decompress one part of the package as text, or `None` if it has no such
+/// part.
+///
+/// **Bounded twice, and the second bound is the one that holds.** A zip entry
+/// declares its own uncompressed size, so checking it refuses an obvious bomb
+/// without inflating a byte — but the declaration is written by the archive and
+/// a hostile file simply declares something small. The read is therefore capped
+/// as well, which is what actually stops the decompression. Both use
+/// [`MAX_CONTENT_BYTES`]: a bomb in `meta.xml` is the same attack as one in
+/// `content.xml`, and a limit that only guards the part somebody thought of
+/// first is not a limit.
+fn read_part(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+) -> Result<Option<String>, OdsError> {
+    read_part_bounded(zip, name, MAX_CONTENT_BYTES)
+}
+
+/// [`read_part`] at an arbitrary limit, so the bound itself can be tested
+/// without allocating a quarter of a gigabyte to do it.
+fn read_part_bounded(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+    limit: u64,
+) -> Result<Option<String>, OdsError> {
+    let Ok(mut entry) = zip.by_name(name) else {
+        return Ok(None);
+    };
+    if entry.size() > limit {
         return Err(OdsError::TooLarge {
             bytes: entry.size(),
-            limit: MAX_CONTENT_BYTES,
+            limit,
         });
     }
     let mut xml = String::new();
-    entry
+    // One byte over, so that reaching the cap is distinguishable from a part
+    // that is exactly the largest allowed.
+    Read::by_ref(&mut entry)
+        .take(limit + 1)
         .read_to_string(&mut xml)
         .map_err(|e| OdsError::Malformed(e.to_string()))?;
-    drop(entry);
-    read_content(&xml)
+    if xml.len() as u64 > limit {
+        return Err(OdsError::TooLarge {
+            bytes: xml.len() as u64,
+            limit,
+        });
+    }
+    Ok(Some(xml))
+}
+
+/// Read `meta.xml` into the workbook's document properties.
+///
+/// **The one loss in this crate that used to be silent** (`ODS-03`). Every
+/// other thing a `.ods` carries and this does not — styles, merges, charts —
+/// is met while reading `content.xml` and named there. Document metadata is not
+/// in `content.xml` at all, so nothing ever met it: the author, the title and
+/// the timestamps went missing on a round trip with an empty report to say so,
+/// because a reader that never opens a part cannot count what is in it.
+///
+/// Failure here is **not** fatal. A `.ods` whose `meta.xml` is corrupt, or
+/// absurdly large, is still a perfectly good spreadsheet, and refusing to open
+/// it over its author's name would be a worse answer than the one this gives:
+/// open it, and say in the report that the metadata did not come through.
+fn read_document_meta(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    properties: &mut casual_calc_model::DocumentProperties,
+    report: &mut CompatibilityReport,
+) {
+    let unreadable = |report: &mut CompatibilityReport| {
+        report.record(
+            "document metadata (unreadable)",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    };
+    let xml = match read_part(zip, "meta.xml") {
+        Ok(Some(xml)) => xml,
+        // No `meta.xml`: the document said nothing about itself, so there is
+        // nothing to carry and nothing to report. A report that names an
+        // absence is a report that names something on every file.
+        Ok(None) => return,
+        Err(_) => return unreadable(report),
+    };
+    let Ok((read, unmodelled)) = parse_meta(&xml) else {
+        return unreadable(report);
+    };
+    *properties = read;
+    for name in unmodelled {
+        report.record(
+            &format!("document metadata: {name}"),
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    }
+}
+
+/// Name the parts of the package this reader does not open at all.
+///
+/// `styles.xml` holds the named styles and page layouts, `settings.xml` the
+/// view state — the frozen panes, the zoom, which sheet was active. Neither is
+/// modelled and neither is written back, and until this was here neither was
+/// *counted*, for the same reason the metadata was not: an unopened part
+/// contributes nothing to a report assembled while reading a different one.
+///
+/// Recorded from the package's own directory rather than by parsing them, which
+/// is the point — knowing the file had page styles costs no decompression at
+/// all.
+fn report_unread_parts(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, report: &mut CompatibilityReport) {
+    for (part, feature) in [
+        ("styles.xml", "document styles (styles.xml)"),
+        ("settings.xml", "view settings (settings.xml)"),
+    ] {
+        if zip.index_for_name(part).is_some() {
+            report.record(
+                feature,
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
+        }
+    }
+}
+
+/// Parse `meta.xml` into the properties this model holds, plus the local names
+/// of everything in `<office:meta>` that it does not.
+///
+/// Matched on **local** names, as the rest of this crate is: the prefixes
+/// (`dc:`, `meta:`) are bound per document and a file is free to call the
+/// Dublin Core namespace anything it likes.
+#[allow(clippy::type_complexity)]
+fn parse_meta(
+    xml: &str,
+) -> Result<
+    (
+        casual_calc_model::DocumentProperties,
+        std::collections::BTreeSet<String>,
+    ),
+    OdsError,
+> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut properties = casual_calc_model::DocumentProperties::default();
+    let mut unmodelled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut in_meta = false;
+    // The element whose text is being collected. `Some` suppresses the start of
+    // any element nested inside it, so a field with markup in it contributes
+    // its text rather than a second, bogus field name.
+    let mut field: Option<String> = None;
+    let mut text = String::new();
+
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| OdsError::Malformed(e.to_string()))?
+        {
+            Event::Eof => break,
+            Event::Start(e) => {
+                let name = local_name(e.name().as_ref());
+                if name == "meta" {
+                    in_meta = true;
+                } else if in_meta && field.is_none() {
+                    field = Some(name);
+                    text.clear();
+                }
+            }
+            // A self-closing element has no text and no `End`, so it can only
+            // ever be one this does not model — `<meta:template .../>`,
+            // `<meta:document-statistic .../>`. Named, not skipped.
+            //
+            // Filed through the same function as a closed element rather than
+            // against a second copy of the list of modelled names, which is a
+            // list that would drift: adding a field in one place and forgetting
+            // the other makes an element both stored *and* reported as lost.
+            Event::Empty(e) => {
+                let name = local_name(e.name().as_ref());
+                if in_meta && field.is_none() {
+                    store_meta(&mut properties, &mut unmodelled, &name, "");
+                }
+            }
+            Event::Text(t) if field.is_some() => {
+                let raw = t.decode().map_err(|e| OdsError::Malformed(e.to_string()))?;
+                text.push_str(&unescaped(&raw));
+            }
+            // As in `content.xml`: an entity arrives as its own event, and
+            // dropping it takes the character with it — an author called
+            // "Ada & Co" would come back as "Ada  Co".
+            Event::GeneralRef(r) if field.is_some() => {
+                let name = r.decode().map_err(|e| OdsError::Malformed(e.to_string()))?;
+                match r.resolve_char_ref() {
+                    Ok(Some(c)) => text.push(c),
+                    _ => text.push_str(
+                        quick_xml::escape::resolve_predefined_entity(&name)
+                            .unwrap_or(&format!("&{name};")),
+                    ),
+                }
+            }
+            Event::End(e) => {
+                let name = local_name(e.name().as_ref());
+                if name == "meta" {
+                    in_meta = false;
+                } else if field.as_deref() == Some(name.as_str()) {
+                    store_meta(&mut properties, &mut unmodelled, &name, &text);
+                    field = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // **Truncation is a failure, not a short document.** A `meta.xml` cut off
+    // inside `<office:meta>` yields whatever was read before the cut and loses
+    // the rest — and an XML reader does not object, because "no more input" and
+    // "the end" look identical to it. Reported as unreadable, which is the
+    // difference between a host being told the metadata is incomplete and a
+    // host being shown half of it as though it were all.
+    if in_meta {
+        return Err(OdsError::Malformed(
+            "meta.xml ends inside <office:meta>".to_owned(),
+        ));
+    }
+
+    Ok((properties, unmodelled))
+}
+
+/// File one `<office:meta>` child into the model, or note that it has no home.
+///
+/// **The one list of what this models.** Called for a self-closing element too,
+/// with empty text, so that "which names are modelled" is written down once —
+/// two copies drift, and the drift shows up as an element both stored and
+/// reported as lost.
+///
+/// **`dc:creator` is the trap.** In ODF it names whoever saved the document
+/// last, and the original author is `meta:initial-creator`; OOXML uses the same
+/// element name for the opposite one. Read it as the author and every file's
+/// author silently becomes whoever last opened it.
+fn store_meta(
+    properties: &mut casual_calc_model::DocumentProperties,
+    unmodelled: &mut std::collections::BTreeSet<String>,
+    name: &str,
+    text: &str,
+) {
+    match name {
+        "generator" => properties.generator = text.to_owned(),
+        "title" => properties.title = text.to_owned(),
+        "description" => properties.description = text.to_owned(),
+        "subject" => properties.subject = text.to_owned(),
+        // One element per keyword, kept as one entry per keyword — a join here
+        // would make a keyword containing the separator indistinguishable from
+        // two keywords. An empty one is not a keyword.
+        "keyword" if !text.is_empty() => properties.keywords.push(text.to_owned()),
+        "keyword" => {}
+        "initial-creator" => properties.creator = text.to_owned(),
+        "creator" => properties.last_modified_by = text.to_owned(),
+        "creation-date" => properties.created = text.to_owned(),
+        "date" => properties.modified = text.to_owned(),
+        "language" => properties.language = text.to_owned(),
+        // `meta:editing-cycles`, `meta:editing-duration`, `meta:printed-by`,
+        // `meta:user-defined` and the rest. Named individually rather than
+        // lumped together, because "this file carries custom user-defined
+        // properties" is something an administrator can act on and "some
+        // metadata was dropped" is not.
+        other => {
+            unmodelled.insert(other.to_owned());
+        }
+    }
 }
 
 /// One cell, as ODF describes it before it becomes a `Cell`.
@@ -616,12 +886,26 @@ pub fn export_ods(workbook: &Workbook) -> Result<Vec<u8>, OdsError> {
             .map_err(|e| OdsError::Write(e.to_string()))?;
 
         let deflated = zip::write::SimpleFileOptions::default();
+        // Written only when the document has something to say about itself, so
+        // a workbook that never carried metadata still produces the minimal
+        // package it used to — and the manifest is built to match, because a
+        // manifest naming a part the package does not hold is as invalid as a
+        // part the manifest does not name.
+        let meta = (!workbook.properties.is_empty()).then(|| meta_xml(&workbook.properties));
+
         zip.add_directory("META-INF", deflated)
             .map_err(|e| OdsError::Write(e.to_string()))?;
         zip.start_file("META-INF/manifest.xml", deflated)
             .map_err(|e| OdsError::Write(e.to_string()))?;
-        zip.write_all(MANIFEST.as_bytes())
+        zip.write_all(manifest(meta.is_some()).as_bytes())
             .map_err(|e| OdsError::Write(e.to_string()))?;
+
+        if let Some(meta) = meta {
+            zip.start_file("meta.xml", deflated)
+                .map_err(|e| OdsError::Write(e.to_string()))?;
+            zip.write_all(meta.as_bytes())
+                .map_err(|e| OdsError::Write(e.to_string()))?;
+        }
 
         zip.start_file("content.xml", deflated)
             .map_err(|e| OdsError::Write(e.to_string()))?;
@@ -632,13 +916,66 @@ pub fn export_ods(workbook: &Workbook) -> Result<Vec<u8>, OdsError> {
     Ok(out)
 }
 
-const MANIFEST: &str = concat!(
-    r#"<?xml version="1.0" encoding="UTF-8"?>"#,
-    r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">"#,
-    r#"<manifest:file-entry manifest:full-path="/" manifest:version="1.2" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>"#,
-    r#"<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>"#,
-    r#"</manifest:manifest>"#,
-);
+/// The package manifest, naming exactly the parts that were written.
+fn manifest(with_meta: bool) -> String {
+    let mut out = String::from(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">"#,
+        r#"<manifest:file-entry manifest:full-path="/" manifest:version="1.2" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>"#,
+        r#"<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>"#,
+    ));
+    if with_meta {
+        out.push_str(
+            r#"<manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/>"#,
+        );
+    }
+    out.push_str("</manifest:manifest>");
+    out
+}
+
+/// The document's own account of itself, as ODF's `meta.xml`.
+///
+/// Written from the model rather than copied from the source bytes, because the
+/// source may have been a `.xlsx` — the point of a format-neutral
+/// [`DocumentProperties`](casual_calc_model::DocumentProperties) is that the
+/// author of a workbook survives the conversion, not only the round trip.
+///
+/// `meta:generator` goes back out **as the file declared it**. ODF defines it as
+/// the application that last modified the document, so stamping this engine's
+/// name would be the more literal reading — and it would also throw away the
+/// only field that records where the file came from, with nothing to record the
+/// loss. Of the two readings, one loses data and one does not.
+fn meta_xml(properties: &casual_calc_model::DocumentProperties) -> String {
+    let mut out = String::from(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<office:document-meta"#,
+        r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+        r#" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0""#,
+        r#" xmlns:dc="http://purl.org/dc/elements/1.1/""#,
+        r#" office:version="1.2">"#,
+        r#"<office:meta>"#,
+    ));
+    let element = |out: &mut String, name: &str, value: &str| {
+        if !value.is_empty() {
+            out.push_str(&format!("<{name}>{}</{name}>", escape(value)));
+        }
+    };
+    element(&mut out, "meta:generator", &properties.generator);
+    element(&mut out, "dc:title", &properties.title);
+    element(&mut out, "dc:description", &properties.description);
+    element(&mut out, "dc:subject", &properties.subject);
+    for keyword in &properties.keywords {
+        element(&mut out, "meta:keyword", keyword);
+    }
+    element(&mut out, "meta:initial-creator", &properties.creator);
+    element(&mut out, "meta:creation-date", &properties.created);
+    // The last saver, **not** the author. See `store_meta`.
+    element(&mut out, "dc:creator", &properties.last_modified_by);
+    element(&mut out, "dc:date", &properties.modified);
+    element(&mut out, "dc:language", &properties.language);
+    out.push_str("</office:meta></office:document-meta>");
+    out
+}
 
 fn content_xml(workbook: &Workbook) -> String {
     let mut out = String::from(concat!(
@@ -1457,5 +1794,313 @@ mod tests {
             zip.finish().unwrap();
         }
         assert!(matches!(import_ods(&empty), Err(OdsError::NoContent)));
+    }
+
+    /// **Document metadata: the one loss this crate used to make silently**
+    /// (`ODS-03`).
+    ///
+    /// Everything else a `.ods` carries and this does not is met while reading
+    /// `content.xml`, and named there. `meta.xml` was never opened, so the
+    /// author, the title and the timestamps went missing with an **empty
+    /// report** — nothing can count what was never read.
+    mod document_metadata {
+        use super::*;
+
+        /// Exactly what the fixture's own `meta.xml` declares.
+        ///
+        /// Asserted against the string LibreOffice wrote rather than against
+        /// anything this crate produces: a round trip through our own writer
+        /// and reader agrees with itself whether or not either is right.
+        const REAL_GENERATOR: &str = "LibreOffice/26.2.4.2$MacOSX_AARCH64 LibreOffice_project/0229ac93fcf0d7cbc6376066c6f35021cef002dc";
+
+        fn part_of(package: &[u8], name: &str) -> Option<String> {
+            let mut zip = zip::ZipArchive::new(Cursor::new(package)).expect("a zip");
+            let mut xml = String::new();
+            zip.by_name(name).ok()?.read_to_string(&mut xml).ok()?;
+            Some(xml)
+        }
+
+        fn features(report: &CompatibilityReport) -> Vec<String> {
+            report
+                .entries()
+                .into_iter()
+                .map(|e| e.feature.to_string())
+                .collect()
+        }
+
+        /// **A real document's metadata reaches the model.**
+        #[test]
+        fn a_real_documents_metadata_is_read() {
+            let (wb, _) = import_ods(REAL).expect("LibreOffice's own output must open");
+            assert_eq!(
+                wb.properties.generator, REAL_GENERATOR,
+                "meta.xml was not read: the model knows nothing about where this file came from"
+            );
+        }
+
+        /// **…and survives a round trip, in the file's bytes.**
+        ///
+        /// Through `export_ods` and back out of the zip, because the question is
+        /// what a `.ods` this engine hands back actually contains — a model that
+        /// holds the generator and a writer that drops it lose it just as
+        /// completely.
+        #[test]
+        fn a_real_documents_metadata_survives_a_round_trip() {
+            let (wb, _) = import_ods(REAL).expect("opens");
+            let written = export_ods(&wb).expect("writes");
+
+            let meta = part_of(&written, "meta.xml")
+                .expect("the written package has no meta.xml: the metadata was dropped on save");
+            assert!(
+                meta.contains(REAL_GENERATOR),
+                "meta.xml came back without the generator the file declared: {meta}"
+            );
+
+            // And it reads back as itself, so the round trip closes.
+            let (again, _) = import_ods(&written).expect("re-opens");
+            assert_eq!(again.properties, wb.properties);
+        }
+
+        /// **The manifest names what the package holds.**
+        ///
+        /// A manifest that names a part the zip does not carry, or omits one it
+        /// does, is an invalid package — and one that still opens in
+        /// LibreOffice, which is how it would go unnoticed.
+        #[test]
+        fn the_manifest_agrees_with_the_parts_written() {
+            let (wb, _) = import_ods(REAL).expect("opens");
+            let with = export_ods(&wb).expect("writes");
+            assert!(
+                part_of(&with, "META-INF/manifest.xml")
+                    .expect("a manifest")
+                    .contains(r#"manifest:full-path="meta.xml""#),
+                "meta.xml was written and the manifest does not name it"
+            );
+
+            // A workbook with nothing to say about itself writes neither.
+            let mut plain = Workbook::new(Id::from_parts(1, 1));
+            plain
+                .sheets
+                .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+            let without = export_ods(&plain).expect("writes");
+            assert!(part_of(&without, "meta.xml").is_none());
+            assert!(
+                !part_of(&without, "META-INF/manifest.xml")
+                    .expect("a manifest")
+                    .contains("meta.xml"),
+                "the manifest names a meta.xml the package does not hold"
+            );
+        }
+
+        /// **`mimetype` is still first and still uncompressed**, with `meta.xml`
+        /// in the package.
+        ///
+        /// The ODF rule the writer already kept, re-checked on the path that now
+        /// writes an extra part before `content.xml`: `mimetype` second is a
+        /// file that opens in LibreOffice and is unidentifiable everywhere else.
+        #[test]
+        fn a_package_with_metadata_still_leads_with_an_uncompressed_mimetype() {
+            let (wb, _) = import_ods(REAL).expect("opens");
+            let written = export_ods(&wb).expect("writes");
+
+            let mut zip = zip::ZipArchive::new(Cursor::new(&written[..])).expect("a zip");
+            let first = zip.by_index(0).expect("at least one entry");
+            assert_eq!(first.name(), "mimetype", "mimetype is not the first entry");
+            assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+        }
+
+        /// **What `meta.xml` held and this does not model is named.**
+        ///
+        /// The fixture's `meta.xml` carries a `<meta:document-statistic>` that
+        /// nothing here models. Carried or counted — those are the two allowed
+        /// outcomes, and before this it was neither.
+        #[test]
+        fn what_meta_xml_held_and_this_does_not_model_is_named() {
+            let (_, report) = import_ods(REAL).expect("opens");
+            let named = features(&report);
+            assert!(
+                named.contains(&"document metadata: document-statistic".to_owned()),
+                "a part of meta.xml was dropped without a word: {named:?}"
+            );
+        }
+
+        /// **The parts this reader never opens are named too.**
+        ///
+        /// `styles.xml` and `settings.xml` are in the fixture and are not read.
+        /// Same defect as the metadata, same shape: a report assembled while
+        /// reading `content.xml` cannot mention a file nobody opened.
+        #[test]
+        fn the_parts_this_reader_never_opens_are_named() {
+            let (_, report) = import_ods(REAL).expect("opens");
+            let named = features(&report);
+            assert!(
+                named.contains(&"document styles (styles.xml)".to_owned()),
+                "{named:?}"
+            );
+            assert!(
+                named.contains(&"view settings (settings.xml)".to_owned()),
+                "{named:?}"
+            );
+
+            // …and not on a package that holds neither, or the report warns on
+            // every file and is read on none.
+            let (_, bare) = import_ods(&package_of(&format!(
+                "{}{}",
+                r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"><office:body><office:spreadsheet><table:table table:name="S"/>"#,
+                "</office:spreadsheet></office:body></office:document-content>"
+            )))
+            .expect("opens");
+            assert!(features(&bare).is_empty(), "{:?}", features(&bare));
+        }
+
+        /// A `.ods` holding a `content.xml` and the given `meta.xml`.
+        fn package_with_meta(meta: &str) -> Vec<u8> {
+            let mut out = Vec::new();
+            {
+                let mut zip = zip::ZipWriter::new(Cursor::new(&mut out));
+                let plain = zip::write::SimpleFileOptions::default();
+                zip.start_file("content.xml", plain).unwrap();
+                zip.write_all(
+                    concat!(
+                        r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+                        r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">"#,
+                        r#"<office:body><office:spreadsheet><table:table table:name="S"/>"#,
+                        r#"</office:spreadsheet></office:body></office:document-content>"#,
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+                zip.start_file("meta.xml", plain).unwrap();
+                zip.write_all(meta.as_bytes()).unwrap();
+                zip.finish().unwrap();
+            }
+            out
+        }
+
+        /// **The author and the last saver are not confused for each other.**
+        ///
+        /// `dc:creator` means opposite things in the two formats this engine
+        /// reads: in ODF it is whoever saved last, and the author is
+        /// `meta:initial-creator`; in OOXML it is the author. Read one as the
+        /// other and every file's author silently becomes whoever last opened
+        /// it — a wrong answer that looks like a right one, which is why it gets
+        /// its own test rather than a line in a round trip.
+        ///
+        /// Synthetic, because the real fixture was written by a LibreOffice that
+        /// recorded neither, and a trap this specific has to be sprung
+        /// deliberately.
+        #[test]
+        fn the_author_and_the_last_saver_do_not_swap() {
+            let package = package_with_meta(concat!(
+                r#"<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+                r#" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0""#,
+                r#" xmlns:dc="http://purl.org/dc/elements/1.1/"><office:meta>"#,
+                r#"<meta:initial-creator>Ada Lovelace</meta:initial-creator>"#,
+                r#"<dc:creator>Grace Hopper</dc:creator>"#,
+                r#"<dc:title>Q3 &amp; Q4</dc:title>"#,
+                r#"<meta:creation-date>2026-01-02T03:04:05</meta:creation-date>"#,
+                r#"<dc:date>2026-08-17T09:10:11</dc:date>"#,
+                // The second one contains the separator a joined form would
+                // have used, so a `String` of keywords would come back as three.
+                r#"<meta:keyword>budget</meta:keyword><meta:keyword>Q3, Q4</meta:keyword>"#,
+                r#"</office:meta></office:document-meta>"#,
+            ));
+
+            let (wb, _) = import_ods(&package).expect("opens");
+            assert_eq!(wb.properties.creator, "Ada Lovelace", "the author moved");
+            assert_eq!(
+                wb.properties.last_modified_by, "Grace Hopper",
+                "the last saver moved"
+            );
+            // An entity in a name is a character, not four of them.
+            assert_eq!(wb.properties.title, "Q3 & Q4");
+            assert_eq!(wb.properties.created, "2026-01-02T03:04:05");
+            assert_eq!(wb.properties.modified, "2026-08-17T09:10:11");
+            assert_eq!(
+                wb.properties.keywords,
+                ["budget", "Q3, Q4"],
+                "a keyword with a comma in it was split into two"
+            );
+
+            // …and the two stay apart through the writer, which is the half a
+            // reader test cannot see: a writer that swapped them back would
+            // make the reader's correctness invisible.
+            let written = export_ods(&wb).expect("writes");
+            let meta = part_of(&written, "meta.xml").expect("a meta.xml");
+            assert!(
+                meta.contains("<meta:initial-creator>Ada Lovelace</meta:initial-creator>"),
+                "{meta}"
+            );
+            assert!(
+                meta.contains("<dc:creator>Grace Hopper</dc:creator>"),
+                "{meta}"
+            );
+            assert!(meta.contains("<dc:title>Q3 &amp; Q4</dc:title>"), "{meta}");
+            assert!(
+                meta.contains("<meta:keyword>Q3, Q4</meta:keyword>"),
+                "the keyword was rewritten on the way out: {meta}"
+            );
+
+            let (again, _) = import_ods(&written).expect("re-opens");
+            assert_eq!(again.properties, wb.properties);
+        }
+
+        /// **A broken `meta.xml` costs the metadata, not the document.**
+        ///
+        /// A spreadsheet whose `content.xml` is perfectly good is still a
+        /// spreadsheet. Refusing to open it over its author's name would be a
+        /// worse answer than opening it and saying the metadata did not come
+        /// through — but saying nothing would be the worst of the three.
+        #[test]
+        fn a_broken_meta_xml_is_reported_rather_than_fatal() {
+            let (wb, report) =
+                import_ods(&package_with_meta("<office:meta><unclosed>")).expect("still opens");
+            assert_eq!(
+                wb.sheets.len(),
+                1,
+                "the document was lost with its metadata"
+            );
+            assert!(
+                features(&report).contains(&"document metadata (unreadable)".to_owned()),
+                "{:?}",
+                features(&report)
+            );
+        }
+
+        /// **A part over the limit is refused before it is decompressed.**
+        ///
+        /// The bound `content.xml` already had, applied to every part this now
+        /// opens: a zip bomb in `meta.xml` is the same attack with a different
+        /// file name, and a limit that only guards the part somebody thought of
+        /// first is not a limit.
+        ///
+        /// Exercised at a small limit rather than the real 256 MB, which no test
+        /// should have to allocate; it is the same code path.
+        #[test]
+        fn a_part_over_the_limit_is_refused() {
+            let package = package_with_meta(&format!(
+                "<office:meta>{}</office:meta>",
+                " ".repeat(64 * 1024)
+            ));
+            let mut zip = zip::ZipArchive::new(Cursor::new(&package[..])).expect("a zip");
+
+            assert!(
+                matches!(
+                    read_part_bounded(&mut zip, "meta.xml", 1024),
+                    Err(OdsError::TooLarge { limit: 1024, .. })
+                ),
+                "a part over the limit was decompressed"
+            );
+            // The same part under a limit that admits it, so the refusal above is
+            // the bound rather than a part this cannot read at all.
+            assert!(
+                read_part_bounded(&mut zip, "meta.xml", 1024 * 1024)
+                    .unwrap()
+                    .is_some()
+            );
+            // A part the package does not hold is absent, not an error: a `.ods`
+            // without a `meta.xml` is an ordinary file.
+            assert!(read_part(&mut zip, "nothing.xml").unwrap().is_none());
+        }
     }
 }

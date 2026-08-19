@@ -52,8 +52,8 @@ pub use style::{
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{
-    Iteration, NamedCellStyle, RetainedPart, RetainedRef, RetainedRel, SCHEMA_VERSION,
-    STOCK_THEME_SLOTS, SnapshotLimits, Workbook, WorkbookSettings,
+    DocumentProperties, Iteration, NamedCellStyle, RetainedPart, RetainedRef, RetainedRel,
+    SCHEMA_VERSION, STOCK_THEME_SLOTS, SnapshotLimits, Workbook, WorkbookSettings,
 };
 
 #[cfg(test)]

@@ -2264,3 +2264,158 @@ mod ods_sessions {
         assert!(WorkbookSession::open(ODS.to_vec()).is_err());
     }
 }
+
+/// **The pictures a workbook holds reach the renderer** (`RND-14`).
+///
+/// `casual-calc-render` grew a picture backend, an `ImageSource` to feed it and
+/// an [`ImageReport`](crate::ImageReport) to say what it could not draw — and
+/// nothing in this crate asked for any of it, so the entry point every host
+/// actually calls went on producing pictureless PNGs and saying nothing about
+/// it. These tests are about the wiring, not the drawing: the render crate
+/// proves the blit lands where the anchor says, and what is proven here is that
+/// a session hands over its own media and hands back what that cost.
+mod images {
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, Emu, Id, ImageView, RetainedPart, Sheet, SheetId,
+        Workbook,
+    };
+
+    use crate::{GridViewport, UndrawnReason, WorkbookSession, render_sheet_png_with_report};
+
+    const PART: &str = "xl/media/image1.png";
+    const RED: (u8, u8, u8) = (220, 20, 20);
+
+    /// A 40x40 PNG of one solid colour.
+    ///
+    /// Solid rather than the render crate's four quadrants, because the
+    /// question here is whether the bytes travelled at all — where they landed
+    /// is that crate's test, and duplicating it would mean two places to fix an
+    /// orientation bug.
+    fn red_png() -> Vec<u8> {
+        let mut src = tiny_skia::Pixmap::new(40, 40).unwrap();
+        src.fill(tiny_skia::Color::from_rgba8(RED.0, RED.1, RED.2, 255));
+        src.encode_png().unwrap()
+    }
+
+    /// A sheet whose picture covers `A1:C3` — 192x60 device pixels at 96 dpi
+    /// with the default geometry — with the media held where the importer puts
+    /// it: in `retained_parts`, under the path the anchor names.
+    fn workbook_with_picture(media: Option<Vec<u8>>) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(8.0)));
+        sheet.images.push(ImageView {
+            anchor: CellRange::new(CellRef::new(0, 0), CellRef::new(2, 2)),
+            from_offset: Emu::default(),
+            to_offset: Emu::default(),
+            part: PART.to_owned(),
+        });
+        wb.sheets.push(sheet);
+        if let Some(bytes) = media {
+            wb.retained_parts.push(RetainedPart {
+                path: PART.to_owned(),
+                bytes,
+                content_type: Some("image/png".to_owned()),
+            });
+        }
+        wb
+    }
+
+    fn viewport() -> GridViewport {
+        GridViewport {
+            x: 0,
+            y: 0,
+            width: 4 * 960,
+            height: 4 * 300,
+        }
+    }
+
+    #[track_caller]
+    fn pixel(png: &[u8], x: u32, y: u32) -> (u8, u8, u8) {
+        let map = tiny_skia::Pixmap::decode_png(png).expect("the session returned a readable PNG");
+        let p = map.pixel(x, y).expect("pixel out of surface");
+        (p.red(), p.green(), p.blue())
+    }
+
+    /// **A session draws its own pictures.**
+    ///
+    /// The media is already in the workbook, keyed by the same package path the
+    /// display list carries, so nothing had to be handed in for this to work —
+    /// which is exactly why the gap was invisible: the capability was complete
+    /// and the one call that mattered went to the form without it.
+    #[test]
+    fn a_session_render_draws_the_workbooks_own_media() {
+        let session = WorkbookSession::from_workbook(workbook_with_picture(Some(red_png())));
+        let png = session.render_png(0, &viewport(), 96).unwrap();
+
+        let close = |a: u8, b: u8| a.abs_diff(b) <= 3;
+        let got = pixel(&png, 96, 30);
+        assert!(
+            close(got.0, RED.0) && close(got.1, RED.1) && close(got.2, RED.2),
+            "the middle of the picture's frame is {got:?}, not the picture: \
+             the session rendered without its media"
+        );
+        // …and only inside the frame, or a red pixel proves nothing except that
+        // something painted the whole surface.
+        assert_eq!(
+            pixel(&png, 230, 70),
+            (255, 255, 255),
+            "the picture painted outside its own frame"
+        );
+    }
+
+    /// **A picture that could not be drawn is named, not left as a blank.**
+    ///
+    /// A frame-shaped hole and a sheet that never had a logo produce the same
+    /// pixels, and only one of them is a file somebody should be told about.
+    #[test]
+    fn a_picture_with_no_media_is_named_in_the_report() {
+        let wb = workbook_with_picture(None);
+        let geometry = casual_calc_layout::GridGeometry::for_sheet(&wb.sheets[0]);
+        let (_, images) = render_sheet_png_with_report(&wb, 0, &geometry, &viewport(), 96).unwrap();
+
+        assert_eq!(images.drawn, 0);
+        assert!(!images.is_complete(), "a missing picture reported complete");
+        assert_eq!(images.undrawn.len(), 1);
+        assert_eq!(images.undrawn[0].part, PART, "the part is named");
+        assert_eq!(images.undrawn[0].reason, UndrawnReason::NotSupplied);
+    }
+
+    /// **One report, not two.**
+    ///
+    /// A host already shows a `CompatibilityReport`; handing it a second,
+    /// differently-shaped answer about the same document is how the second one
+    /// stops being shown.
+    #[test]
+    fn an_undrawn_picture_folds_into_the_compatibility_report() {
+        let session = WorkbookSession::from_workbook(workbook_with_picture(None));
+        let (_, loss) = session.render_png_with_report(0, &viewport(), 96).unwrap();
+
+        let named: Vec<(String, u64)> = loss
+            .entries()
+            .into_iter()
+            .map(|e| (e.feature.to_string(), e.count))
+            .collect();
+        assert!(
+            named.contains(&("image (media not supplied)".to_owned(), 1)),
+            "the render's loss did not reach the report a host reads: {named:?}"
+        );
+    }
+
+    /// A picture that *was* drawn leaves the report clean.
+    ///
+    /// The other half of the one above: a report that names something on every
+    /// render is a report nobody reads by the third document.
+    #[test]
+    fn a_drawn_picture_reports_no_loss() {
+        let session = WorkbookSession::from_workbook(workbook_with_picture(Some(red_png())));
+        let (_, loss) = session.render_png_with_report(0, &viewport(), 96).unwrap();
+        assert!(
+            loss.is_empty(),
+            "a picture that was drawn was reported as lost: {:?}",
+            loss.entries()
+        );
+    }
+}
