@@ -122,7 +122,13 @@ impl Settings {
 
     fn save(&self, config: &Config) -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(self).unwrap_or_default();
-        std::fs::write(Self::path(config), bytes)
+        // Synchronous, so it does the same dance by hand. A truncated
+        // settings file is not a lost document, but it is a node that will not
+        // start — and it happens at exactly the moment an operator is changing
+        // something under load.
+        let path = Self::path(config);
+        let tmp = path.with_extension("part");
+        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path))
     }
 }
 
@@ -353,7 +359,7 @@ async fn keep_version(config: &Config, id: &str) {
         at += 1;
         path = dir.join(format!("{at}.xlsx"));
     }
-    if let Err(why) = tokio::fs::write(&path, &current).await {
+    if let Err(why) = write_atomically(&path, &current).await {
         tracing::warn!(%id, ?why, "could not keep a version");
         return;
     }
@@ -371,6 +377,52 @@ async fn prune_versions(config: &Config, id: &str) {
         .skip(config.max_versions)
     {
         let _ = tokio::fs::remove_file(dir.join(format!("{at}.xlsx"))).await;
+    }
+}
+
+/// Where the temporary for `path` goes: **beside it**, never in `/tmp`.
+///
+/// A rename is only atomic within one filesystem. `/tmp` is frequently a
+/// different one, and there `rename` silently degrades to copy-then-delete —
+/// which has exactly the truncation window this exists to close, in the one
+/// place nobody would look for it.
+///
+/// A separate function because that is the property that makes the whole thing
+/// work, and it is the only part of it a test can reach: whether a *crash*
+/// mid-write leaves the old bytes cannot be asserted without crashing.
+fn temp_beside(path: &std::path::Path) -> std::path::PathBuf {
+    path.with_extension("part")
+}
+
+/// Replace a file's contents, or leave the previous contents entirely alone.
+///
+/// `fs::write` truncates first and then writes. A crash, a full disk or a
+/// killed container in between leaves a file that exists, is the right name,
+/// and is **half a document** — which is worse than no document, because a
+/// backup taken afterwards copies the truncated version over the good one.
+///
+/// Writing beside and renaming makes the replacement a single atomic step at
+/// the filesystem level: either the rename happened and the new bytes are
+/// there, or it did not and the old ones are. The save callback and the version
+/// restore already did this; `create`, `upload` and the settings file did not
+/// (`DEP-12`).
+///
+/// # Errors
+///
+/// If the temporary file cannot be written or the rename fails. The original is
+/// untouched in both cases.
+async fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = temp_beside(path);
+    tokio::fs::write(&tmp, bytes).await?;
+    match tokio::fs::rename(&tmp, path).await {
+        Ok(()) => Ok(()),
+        Err(why) => {
+            // A failed rename leaves the temporary behind, and a directory
+            // slowly filling with `.part` files is how a disk fills up for
+            // reasons nobody can explain.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(why)
+        }
     }
 }
 
@@ -402,8 +454,12 @@ async fn create(State(config): State<Arc<Config>>, Json(body): Json<NewDoc>) -> 
     let (Some(doc), Some(metap)) = (doc_path(&config, &id), meta_path(&config, &id)) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "bad id").into_response();
     };
-    if tokio::fs::write(&doc, blank_xlsx(&title)).await.is_err()
-        || tokio::fs::write(&metap, serde_json::to_vec(&meta).unwrap_or_default())
+    // **Document first, then metadata**, and that order is the recovery story:
+    // a crash between them leaves a document nothing points at, which is
+    // invisible and recoverable. The other order leaves a listed document whose
+    // bytes do not exist, which is a broken link somebody has to explain.
+    if write_atomically(&doc, &blank_xlsx(&title)).await.is_err()
+        || write_atomically(&metap, &serde_json::to_vec(&meta).unwrap_or_default())
             .await
             .is_err()
     {
@@ -487,7 +543,7 @@ async fn upload(State(config): State<Arc<Config>>, mut form: Multipart) -> impl 
     // Both writes checked, and the document written first. A metadata file with
     // no document behind it is a listing entry that opens to nothing; ignoring
     // either error produced exactly that, silently, on a full disk.
-    if let Err(why) = tokio::fs::write(&doc, bytes).await {
+    if let Err(why) = write_atomically(&doc, &bytes).await {
         tracing::error!(?why, ?doc, "cannot store the uploaded document");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -495,7 +551,7 @@ async fn upload(State(config): State<Arc<Config>>, mut form: Multipart) -> impl 
         )
             .into_response();
     }
-    if let Err(why) = tokio::fs::write(&metap, serde_json::to_vec(&meta).unwrap_or_default()).await
+    if let Err(why) = write_atomically(&metap, &serde_json::to_vec(&meta).unwrap_or_default()).await
     {
         tracing::error!(?why, ?metap, "cannot store the document metadata");
         // The orphan is removed rather than left behind, so a retry is a clean
@@ -1237,6 +1293,104 @@ mod version_tests {
         )
         .await
         .unwrap();
+    }
+
+    /// **A failed write leaves the previous contents entirely alone.**
+    ///
+    /// `fs::write` truncates before it writes, so a crash in between leaves a
+    /// file that exists, has the right name, and is half a document — worse
+    /// than no document, because a backup taken afterwards copies the truncated
+    /// version over the good one (`DEP-12`).
+    #[tokio::test]
+    async fn a_failed_write_does_not_damage_what_was_there() {
+        let config = store("atomic");
+        let path = config.store.join("thing.bin");
+        tokio::fs::write(&path, b"the original").await.unwrap();
+
+        // A directory where the file should be: the rename cannot succeed, and
+        // this is reachable without crashing the test process.
+        let blocked = config.store.join("blocked.bin");
+        tokio::fs::create_dir_all(&blocked).await.unwrap();
+        assert!(
+            write_atomically(&blocked, b"new bytes").await.is_err(),
+            "writing over a directory should fail"
+        );
+
+        // And the unrelated original is untouched.
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"the original",
+            "a failed write elsewhere damaged an existing file"
+        );
+    }
+
+    /// **The temporary sits beside its target, not in `/tmp`.**
+    ///
+    /// This is the property atomicity rests on: `rename` is only atomic within
+    /// a filesystem, and across one it silently becomes copy-then-delete —
+    /// which reopens the truncation window in the one place nobody would think
+    /// to look.
+    ///
+    /// Asserted here because it is the part that *can* be: whether a crash
+    /// mid-write leaves the old bytes needs an actual crash, and this test says
+    /// so rather than pretending to cover it.
+    #[test]
+    fn the_temporary_is_a_sibling_of_its_target() {
+        let target = std::path::Path::new("/data/documents/abc.xlsx");
+        let tmp = temp_beside(target);
+        assert_eq!(
+            tmp.parent(),
+            target.parent(),
+            "the temporary is on another path, so the rename may cross a filesystem"
+        );
+        assert_ne!(tmp, target.to_path_buf());
+        assert!(
+            !tmp.starts_with("/tmp"),
+            "the temporary went to the system temp directory"
+        );
+    }
+
+    /// **A successful write leaves no `.part` behind.**
+    ///
+    /// A directory slowly filling with temporary files is how a disk fills up
+    /// for reasons nobody can explain afterwards.
+    #[tokio::test]
+    async fn a_write_leaves_no_temporary_behind() {
+        let config = store("no-temp");
+        let path = config.store.join("thing.bin");
+
+        write_atomically(&path, b"first").await.unwrap();
+        write_atomically(&path, b"second").await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"second");
+
+        let mut entries = tokio::fs::read_dir(&config.store).await.unwrap();
+        let mut names = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert!(
+            !names.iter().any(|n| n.ends_with(".part")),
+            "a temporary file survived a successful write: {names:?}"
+        );
+    }
+
+    /// **A failed rename does not leave its temporary either.**
+    #[tokio::test]
+    async fn a_failed_write_leaves_no_temporary_behind() {
+        let config = store("failed-temp");
+        let blocked = config.store.join("blocked.bin");
+        tokio::fs::create_dir_all(&blocked).await.unwrap();
+        let _ = write_atomically(&blocked, b"new bytes").await;
+
+        let mut entries = tokio::fs::read_dir(&config.store).await.unwrap();
+        let mut names = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert!(
+            !names.iter().any(|n| n.ends_with(".part")),
+            "a temporary survived a failed write: {names:?}"
+        );
     }
 
     /// **A save keeps what the document was, not what it became.**
