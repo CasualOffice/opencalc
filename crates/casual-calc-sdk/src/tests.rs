@@ -1845,3 +1845,263 @@ mod delimited_sessions {
         assert!(matches!(err, crate::SdkError::Io(_)), "{err:?}");
     }
 }
+
+use std::collections::BTreeSet;
+
+// ---------------------------------------------------------------------------
+// COL-32 — personal views. docs/71.
+//
+// The whole feature is a set of things that must *not* happen, so these are
+// mostly assertions of absence. That makes them easy to write and easy to write
+// uselessly, so each one is paired with a positive control: the shared filter
+// doing the same thing, visibly.
+// ---------------------------------------------------------------------------
+
+/// A sheet of 1..=3 in column A with `SUBTOTAL(109, A1:A3)` beneath it.
+fn sheet_with_subtotal() -> WorkbookSession {
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        for (row, n) in [(0u32, 1.0), (1, 2.0), (2, 3.0)] {
+            sheet.cells.set(
+                CellRef::new(row, 0),
+                casual_calc_model::Cell::value(CellValue::Number(n)),
+            );
+        }
+        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let mut total = casual_calc_model::Cell::value(CellValue::Empty);
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(3, 0), total);
+        wb.sheets.push(sheet);
+    }
+    session.recalculate();
+    session
+}
+
+fn subtotal(session: &WorkbookSession) -> Option<CellValue> {
+    session.workbook().sheets[0]
+        .cells
+        .get(CellRef::new(3, 0))
+        .map(|c| c.value.clone())
+}
+
+/// **A personal view does not move a subtotal; a shared filter does.**
+///
+/// This is the constraint the whole design turns on. If a personal view could
+/// change a value, two participants would hold different numbers for the same
+/// cell and convergence — which every other part of the collaboration design
+/// assumes — would simply be false.
+///
+/// The shared filter in the second half is the control: without it this test
+/// would pass just as well against a build where filtering does nothing at all.
+#[test]
+fn a_personal_view_does_not_move_a_subtotal() {
+    let mut session = sheet_with_subtotal();
+    assert_eq!(subtotal(&session), Some(CellValue::Number(6.0)));
+
+    session.set_personal_filter(0, BTreeSet::from([1]));
+    session.recalculate();
+    assert_eq!(
+        subtotal(&session),
+        Some(CellValue::Number(6.0)),
+        "a personal view changed a cell value, so two participants now disagree"
+    );
+    // ...and the row really is hidden, for this participant, on screen.
+    assert!(
+        !session.is_row_visible(0, 1),
+        "the view did not hide the row"
+    );
+    assert!(session.is_row_visible(0, 0));
+
+    // The control: the shared filter moves it, so hiding row 1 is observable.
+    let mut data = crate::SheetMetadata::capture(&session.workbook().sheets[0]);
+    data.filter_hidden.insert(1);
+    session
+        .edit(EditOperation::SetSheetMetadata {
+            sheet: 0,
+            data: Box::new(data),
+            changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+            restore: Default::default(),
+        })
+        .expect("apply the shared filter");
+    assert_eq!(
+        subtotal(&session),
+        Some(CellValue::Number(4.0)),
+        "the shared filter did not move the subtotal, so this test proves nothing"
+    );
+}
+
+/// **A personal view puts nothing on the wire.**
+///
+/// The test that fails if somebody later routes this through `edit` for
+/// convenience — which is the obvious refactor, and would silently make every
+/// participant's rows disappear.
+#[test]
+fn a_personal_view_emits_nothing_for_peers() {
+    let mut session = sheet_with_subtotal();
+    session.record_applied();
+    assert!(!session.has_applied());
+
+    session.set_personal_filter(0, BTreeSet::from([1]));
+    session.clear_personal_view(0);
+    session.set_personal_filter(0, BTreeSet::from([0, 2]));
+    session.clear_all_personal_views();
+
+    assert!(
+        !session.has_applied(),
+        "a personal view reached the outgoing log: every peer would see these rows vanish"
+    );
+    assert!(session.take_applied().is_empty());
+
+    // Control: an ordinary edit does reach it, so the assertion above is not
+    // just observing that recording was never on.
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 1),
+            value: CellValue::Number(1.0),
+        })
+        .expect("an ordinary edit");
+    assert!(
+        session.has_applied(),
+        "recording was not on, so nothing was proven"
+    );
+}
+
+/// **A personal view is not undoable, and does not disturb the undo stack.**
+///
+/// Undo after applying one undoes the last thing done to the *document*. That
+/// will surprise somebody, which is why `clear_all_personal_views` exists as a
+/// deliberate action rather than something reached for with ctrl-Z.
+#[test]
+fn a_personal_view_is_not_in_the_history() {
+    let mut session = sheet_with_subtotal();
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 1),
+            value: CellValue::Number(42.0),
+        })
+        .expect("an ordinary edit");
+
+    session.set_personal_filter(0, BTreeSet::from([1]));
+    session.undo().expect("undo");
+
+    // Undo reversed the *edit*, not the view.
+    assert_eq!(
+        session.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(0, 1))
+            .map(|c| c.value.clone())
+            .unwrap_or(CellValue::Empty),
+        CellValue::Empty,
+        "undo did not reverse the document edit"
+    );
+    assert!(
+        session.views().has_view(0),
+        "undo cleared a personal view, so it had entered the history"
+    );
+}
+
+/// **A personal view is not saved.**
+///
+/// "Not part of the document" has to be true of the bytes, not just of the
+/// wire. The shared filter in the same test is the control: it *is* saved, so a
+/// build that dropped both would not pass.
+#[test]
+fn a_personal_view_does_not_reach_the_saved_file() {
+    let mut session = sheet_with_subtotal();
+
+    let mut data = crate::SheetMetadata::capture(&session.workbook().sheets[0]);
+    data.filter_hidden.insert(2);
+    session
+        .edit(EditOperation::SetSheetMetadata {
+            sheet: 0,
+            data: Box::new(data),
+            changed: casual_calc_transaction::SheetFields::FILTER_HIDDEN,
+            restore: Default::default(),
+        })
+        .expect("apply the shared filter");
+    session.set_personal_filter(0, BTreeSet::from([0]));
+
+    let bytes = session.save().expect("save");
+    let reopened = WorkbookSession::open(bytes).expect("reopen");
+
+    // `is_row_hidden`, not `filter_hidden`: `.xlsx` has no separate notion of a
+    // filter-hidden row — ECMA-376 stores one as `<row hidden="1">` like any
+    // other — so a shared filter comes back in `hidden_rows`. Asserting on
+    // `filter_hidden` here fails, and the first version of this test did.
+    assert!(
+        reopened.workbook().sheets[0].is_row_hidden(2),
+        "the shared filter was lost, so this test cannot see the personal one either"
+    );
+    assert!(
+        !reopened.workbook().sheets[0].is_row_hidden(0),
+        "a personal view was written into the file"
+    );
+    assert!(
+        !reopened.views().has_view(0),
+        "a personal view survived a round trip; it is meant to survive nothing"
+    );
+}
+
+/// **One participant's view leaves the other's rows exactly as they were.**
+///
+/// The tracker's acceptance, at the session level: two sessions over the same
+/// document, one applies a personal filter, the other sees nothing — not the
+/// rows, not the subtotal.
+#[test]
+fn one_participants_view_does_not_reach_another() {
+    let mut mine = sheet_with_subtotal();
+    let bytes = mine.save().expect("save");
+    let theirs = WorkbookSession::open(bytes).expect("open a second session");
+
+    mine.set_personal_filter(0, BTreeSet::from([1]));
+
+    assert!(
+        !mine.is_row_visible(0, 1),
+        "my own view did not take effect"
+    );
+    assert!(
+        theirs.is_row_visible(0, 1),
+        "my personal view hid a row for another participant"
+    );
+    assert_eq!(
+        subtotal(&theirs),
+        subtotal(&mine),
+        "the two disagree about a cell"
+    );
+}
+
+/// **A view follows its sheet through a real structural edit.**
+///
+/// Not the unit test in `views::tests` — this one goes through `edit`, which is
+/// the path that actually renumbers sheets, and would catch the resequencing
+/// being wired to the wrong operations or not wired at all.
+#[test]
+fn a_view_follows_its_sheet_through_an_insert() {
+    let mut session = sheet_with_subtotal();
+    session.set_personal_filter(0, BTreeSet::from([1]));
+
+    session
+        .edit(EditOperation::InsertSheet {
+            index: 0,
+            sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 2)), "Ahead")),
+        })
+        .expect("insert a sheet in front");
+
+    assert!(
+        !session.views().has_view(0),
+        "the view stayed on index 0, which is now a sheet nobody filtered"
+    );
+    assert!(
+        session.views().hides(1, 1),
+        "the view did not follow its sheet"
+    );
+    assert!(!session.is_row_visible(1, 1));
+    assert!(
+        session.is_row_visible(0, 1),
+        "the new sheet inherited a filter"
+    );
+}

@@ -1,6 +1,6 @@
 # 71 — Filtering with other people in the document
 
-**For** COL-32. **Status:** design, awaiting implementation.
+**For** COL-32. **Status:** implemented. The first increment is built as described; named, shareable view *definitions* remain out of scope.
 
 A filter hides rows. In a document with one person in it that is a display
 choice; in a document with three people in it, it is a question nobody has
@@ -128,3 +128,27 @@ collaboration bug rather than a calculation one.
 - `collab_flush()` emits nothing at all for a personal view. This is the test
   that would fail if somebody later routes it through `session.edit` for
   convenience.
+
+## What the building added to this note
+
+Two things the design did not anticipate, both recorded because the next person
+will meet them:
+
+**The file format has no filter-hidden row.** ECMA-376 stores a filtered row as
+`<row hidden="1">`, exactly like a hand-hidden one, so the `filter_hidden` /
+`hidden_rows` distinction this engine keeps is *its own* and does not survive a
+save. A shared filter comes back from a round trip in `hidden_rows`. The first
+version of the save test asserted on `filter_hidden` and failed — correctly.
+
+**A view keyed by sheet index has to be resequenced.** Insert, remove or move a
+sheet and an unmaintained key goes on hiding rows on whichever sheet inherits
+the number. That surfaces as rows vanishing on a sheet the participant never
+filtered, with nothing on the wire to explain it and nothing in the history to
+undo it — the worst shape a defect can take, because every instinct points at
+the collaboration layer and the cause is local bookkeeping.
+
+**The filter control is shared; only the rule is personal.** Turning the
+autofilter on is a document edit — Excel stores `<autoFilter>` and every
+participant sees the buttons. Only the values ticked inside it can be personal.
+The other way round would put one participant's dropdown on another's screen
+with no operation to account for it.

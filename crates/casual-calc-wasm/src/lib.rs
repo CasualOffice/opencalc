@@ -220,6 +220,58 @@ pub fn session_save_delimited(sheet: usize, delimiter: u8) -> String {
         .unwrap_or_default()
 }
 
+/// Hide `rows` on `sheet` **for this participant only** (`COL-32`, docs/71).
+///
+/// Not an edit: no operation is relayed, nothing enters the undo history,
+/// nothing is saved, and no cell value moves — the `SUBTOTAL` under a personal
+/// view reads the same number here as on every co-editor's screen.
+///
+/// `rows` is a JSON array of zero-based row indices.
+#[wasm_bindgen]
+pub fn session_set_personal_filter(sheet: usize, rows: &str) -> Result<(), JsError> {
+    let rows: std::collections::BTreeSet<u32> =
+        serde_json::from_str(rows).map_err(|why| JsError::new(&why.to_string()))?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session.set_personal_filter(sheet, rows);
+        Ok(())
+    })
+}
+
+/// Drop this participant's view of one sheet.
+#[wasm_bindgen]
+pub fn session_clear_personal_view(sheet: usize) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session.clear_personal_view(sheet);
+        Ok(())
+    })
+}
+
+/// Drop every personal view.
+///
+/// A first-class command because undo will not do it: a personal view is not a
+/// document edit, so undo after applying one reverses the last change to the
+/// *document* instead.
+#[wasm_bindgen]
+pub fn session_clear_all_personal_views() -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        session.clear_all_personal_views();
+        Ok(())
+    })
+}
+
+/// Whether this participant has a personal view on `sheet`, for chrome that
+/// offers to clear it.
+#[wasm_bindgen]
+pub fn session_has_personal_view(sheet: usize) -> bool {
+    with_session(|s| s.views().has_view(sheet)).unwrap_or(false)
+}
+
 /// Append a new blank sheet, returning its index.
 #[wasm_bindgen]
 pub fn session_add_sheet() -> Result<usize, JsError> {
@@ -4669,9 +4721,13 @@ fn axis_px(sheet: usize, first: u32, count: u32, fallback: i64, columns: bool) -
                 if columns {
                     sh.hidden_cols.contains(&line)
                 } else {
-                    // `is_row_hidden`, not `hidden_rows`: a filtered-out row has
-                    // to collapse here too or the filter changes nothing on screen.
-                    sh.is_row_hidden(line)
+                    // The *display* question, so it asks the session and gets
+                    // the union of the shared hidden sets and this
+                    // participant's own personal view (`COL-32`, docs/71).
+                    // `Sheet::is_row_hidden` is the other question — the one
+                    // `SUBTOTAL` asks — and answering this one with it is what
+                    // makes a personal filter invisible on screen.
+                    !s.is_row_visible(sheet, line)
                 }
             });
             let twips = if hidden {
@@ -7469,6 +7525,49 @@ pub fn session_clear_filter_rules(sheet: usize) -> Result<(), JsError> {
 /// behave: filtering Region to "West" leaves only West's cities on offer.
 /// `custom` flags that this column carries a condition rather than a checklist,
 /// so the host can say so instead of showing every box ticked.
+/// Which rows a value-set would hide on `col` — **without applying anything**
+/// (`COL-32`).
+///
+/// The personal half of filtering needs the same answer the shared path gets,
+/// and must not reach it the same way: `session_set_filter_values` writes
+/// `filter_hidden` onto the sheet, which is document state and goes to every
+/// participant. This computes the rows and hands them back, leaving the
+/// document untouched, so the caller can put them in a personal view instead.
+///
+/// Deliberately reuses `filter_at_col` and `filter_operands`, the same helpers
+/// the shared path uses. Two implementations of "which rows does this value-set
+/// hide" would drift, and the drift would show up as a personal filter hiding
+/// different rows from the shared one for the same tick-boxes.
+///
+/// `values` is a JSON array of kept display strings; empty keeps everything.
+/// Returns a JSON array of zero-based row indices.
+#[wasm_bindgen]
+pub fn session_rows_hidden_by_values(sheet: usize, col: u32, values: &str) -> String {
+    let kept: Vec<String> = serde_json::from_str(values).unwrap_or_default();
+    let out = with_session(|s| {
+        let wb = s.workbook();
+        let sh = wb.sheets.get(sheet)?;
+        let (_, filter) = filter_at_col(sh, col)?;
+        // Everything kept means no rule at all, which hides nothing. Matches
+        // the shared path, where an all-ticked apply clears the rule rather
+        // than storing one that excludes nobody.
+        if kept.is_empty() {
+            return Some(String::from("[]"));
+        }
+        let hidden: Vec<String> = (filter.body_start()..=filter.range.end.row)
+            .filter(|&row| {
+                let value = filter_operands(wb, sh, row, col).0;
+                // Case-insensitive, as the shared path's checklist is.
+                !kept.iter().any(|k| k.eq_ignore_ascii_case(&value))
+            })
+            .map(|row| row.to_string())
+            .collect();
+        Some(format!("[{}]", hidden.join(",")))
+    })
+    .flatten();
+    out.unwrap_or_else(|| "[]".to_owned())
+}
+
 #[wasm_bindgen]
 pub fn session_filter_values(sheet: usize, col: u32) -> String {
     let empty = "{\"values\":[],\"truncated\":0,\"custom\":0}".to_owned();
