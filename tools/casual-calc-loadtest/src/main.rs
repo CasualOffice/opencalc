@@ -167,6 +167,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bytes_per_document,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
+
+    // A load test that measured nothing must not report success. See `verdict`.
+    verdict(report.edits_sent, report.edits_acknowledged)?;
+
     Ok(())
 }
 
@@ -339,5 +343,71 @@ opencalc_participants 36
         assert_eq!(percentile(&sorted, 100.0), 100);
         assert_eq!(percentile(&[], 99.0), 0);
         assert_eq!(percentile(&[7], 99.0), 7);
+    }
+}
+
+/// Whether a completed run is a result or the absence of one.
+///
+/// Run against no server at all, this harness printed a report of zeroes and
+/// exited **0**. Wired into CI that way it would be a job that goes green
+/// whether the collaboration server works, is broken, or was never started —
+/// the same shape as a submission the server silently drops, which this project
+/// has now paid for more than once.
+///
+/// Separate from `main` because that is what makes it testable: the failure
+/// being guarded against is a *successful-looking* run, and a test that has to
+/// stand up a server to check it would never be written.
+fn verdict(sent: u64, acknowledged: u64) -> Result<(), String> {
+    if acknowledged == 0 {
+        return Err(
+            "no edit was acknowledged: the harness measured nothing, so its \
+                    zeroes are the absence of a result rather than a result"
+                .to_owned(),
+        );
+    }
+    // The percentiles are computed only over edits that came back, so a server
+    // dropping work under load is *invisible* in them — the surviving edits
+    // just look fast. This is the one place that difference can be seen.
+    if acknowledged < sent {
+        return Err(format!(
+            "{} of {sent} edits were never acknowledged: the server dropped work under load",
+            sent - acknowledged
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::verdict;
+
+    /// **A run that measured nothing is a failure, not a pass.**
+    ///
+    /// This is the whole point: before it, `cargo run -p casual-calc-loadtest`
+    /// against nothing at all exited 0.
+    #[test]
+    fn measuring_nothing_is_not_success() {
+        let why = verdict(0, 0).expect_err("a run that acknowledged nothing reported success");
+        assert!(why.contains("measured nothing"), "{why}");
+        // And it stays a failure even when edits were sent — that is the
+        // "server refused every join" case, which is what actually happened.
+        assert!(
+            verdict(6_000, 0).is_err(),
+            "every edit lost, yet reported success"
+        );
+    }
+
+    /// **Dropped work fails, even though the percentiles would look healthy.**
+    #[test]
+    fn dropped_edits_are_a_failure() {
+        let why = verdict(6_000, 5_999).expect_err("a dropped edit reported success");
+        assert!(why.contains("1 of 6000"), "{why}");
+        assert!(why.contains("dropped work"), "{why}");
+    }
+
+    /// **A clean run passes**, or the gate is just noise.
+    #[test]
+    fn a_complete_run_passes() {
+        assert!(verdict(6_000, 6_000).is_ok());
     }
 }

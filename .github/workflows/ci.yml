@@ -22,12 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: cargo fmt --all -- --check
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
@@ -47,6 +49,7 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: cargo test --workspace --all-features --locked
         env:
           OPENCALC_TEST_REDIS: redis://127.0.0.1:6379
@@ -57,12 +60,14 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: cargo doc --workspace --all-features --no-deps
 
   wasm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: rustup target add wasm32-unknown-unknown
       # The **engine** must stay WASM-clean, which is `crates/`. Anything under
       # `server/` is a host (ADR-012) and was never meant to run in a browser:
@@ -91,6 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       # **`--release`, and the report has to say so.**
       #
       # The frame budget is an absolute duration, and a debug build is a
@@ -148,6 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -168,6 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - name: Verify fixture checksums against manifest
         run: |
           jq -r '.fixtures[] | "\(.sha256)  fixtures/\(.path)"' fixtures/manifest.json \
@@ -238,6 +246,13 @@ jobs:
       # explain why. `dangerColor` was exactly that.
       - name: Every advertised theme token is honoured
         run: python3 tools/check-theme-tokens.py
+      # A registry blip is not a code defect, but it reds the run just as hard --
+      # and a red main that means nothing is what teaches everybody to ignore a
+      # red main that means something. One `lint` job died on an SSL connect
+      # error 0.3s in, having compiled nothing, and passed unchanged on re-run.
+      # The warm-up absorbs that; this asserts no cargo job is added without it.
+      - name: Every cargo job warms the registry with retries
+        run: python3 tools/check-ci-retry.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a
@@ -373,6 +388,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -416,6 +432,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - name: Install the oracle
         run: |
           sudo apt-get update
@@ -442,6 +459,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
+        with:
+          manifest-path: fuzz/Cargo.toml
       - name: Install pinned nightly + cargo-fuzz
         run: |
           rustup toolchain install nightly-2026-07-20 --profile minimal
@@ -604,6 +624,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/cargo-warmup
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
       - run: rustup override set ${{ matrix.toolchain }}
       - run: cargo test --workspace --all-features --locked
