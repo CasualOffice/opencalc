@@ -1354,3 +1354,26 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   pointer-events: none;   /* a hint must never intercept a click on the grid */
 }
 .dv-prompt strong { font-size: 12px; }
+
+/* The scope choice in a column filter (COL-32, docs/71).
+   Sits above the footer so it is read before Apply is pressed rather than
+   discovered afterwards — the two do very different things and only one of
+   them is visible to everybody else in the document. */
+.filter-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  color: var(--oc-text-color);
+  cursor: pointer;
+  user-select: none;
+}
+.filter-scope input {
+  margin: 0;
+  accent-color: var(--oc-accent-color);
+}
+.filter-scope + .panel-hint {
+  padding: 0 10px 6px 28px;
+  margin: 0;
+}

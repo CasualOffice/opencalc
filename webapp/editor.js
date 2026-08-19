@@ -4400,6 +4400,39 @@ function refreshFilterInfo() {
   } catch {}
 }
 
+// Hide the rows a value-set excludes, for this participant only (COL-32).
+//
+// The engine computes *which* rows so that the personal and shared paths cannot
+// disagree about the same tick-boxes; only where the answer is stored differs.
+function applyPersonalFilter(col, values) {
+  if (!wasm) return;
+  try {
+    const rows = wasm.session_rows_hidden_by_values(state.sheet, col, JSON.stringify(values));
+    wasm.session_set_personal_filter(state.sheet, rows);
+    const n = JSON.parse(rows).length;
+    status.textContent = n
+      ? `${n} row${n === 1 ? "" : "s"} hidden — for you only`
+      : "your view shows every row";
+  } catch (why) {
+    status.textContent = "could not apply your view";
+    console.error("[opencalc] personal filter", why);
+  }
+}
+
+// Drop every personal view. A first-class command because undo will not do it:
+// a personal view is not a document edit, so undo reverses the last change to
+// the *document* instead.
+function clearMyView() {
+  if (!wasm) return;
+  try {
+    wasm.session_clear_all_personal_views();
+    status.textContent = "your view cleared — showing every row";
+    afterFilterChange();
+  } catch (why) {
+    console.error("[opencalc] clear view", why);
+  }
+}
+
 // Turn the filter on over the current block, or off if one is already on.
 function toggleFilter() {
   if (!wasm) return;
@@ -4617,6 +4650,26 @@ function openColumnFilter(col, x, y) {
   search.addEventListener("input", build);
   build();
 
+  // Whose filter is this? docs/71: the choice is offered, and defaults to
+  // shared, because shared is what a spreadsheet has always done and the only
+  // one the file format can express. "Just for me" never touches the document —
+  // no operation on the wire, nothing in the undo history, nothing saved, and
+  // the SUBTOTAL underneath does not move.
+  const scope = document.createElement("label");
+  scope.className = "filter-scope";
+  const mine = document.createElement("input");
+  mine.type = "checkbox";
+  mine.className = "filter-scope-box";
+  scope.appendChild(mine);
+  scope.appendChild(document.createTextNode(" Just for me"));
+  const scopeHint = document.createElement("div");
+  scopeHint.className = "panel-hint";
+  scopeHint.textContent = "Others keep seeing every row.";
+  scopeHint.hidden = true;
+  mine.addEventListener("change", () => { scopeHint.hidden = !mine.checked; });
+  menu.appendChild(scope);
+  menu.appendChild(scopeHint);
+
   const foot = document.createElement("div");
   foot.className = "filter-foot";
   const clr = document.createElement("button");
@@ -4624,6 +4677,13 @@ function openColumnFilter(col, x, y) {
   clr.textContent = "Clear";
   clr.addEventListener("click", () => {
     closeSheetMenu();
+    // Clearing drops this participant's view *and* the shared rule, because
+    // "Clear" on a column means the column is not filtering — and a user who
+    // cannot tell which of the two hid a row cannot be asked to clear the right
+    // one.
+    if (wasm.session_has_personal_view(state.sheet)) {
+      try { wasm.session_clear_personal_view(state.sheet); } catch {}
+    }
     tryEdit(() => wasm.session_set_filter_values(state.sheet, col, []));
     afterFilterChange();
   });
@@ -4639,7 +4699,15 @@ function openColumnFilter(col, x, y) {
       status.textContent = "tick at least one value";
       return;
     }
-    tryEdit(() => wasm.session_set_filter_values(state.sheet, col, values));
+    if (mine.checked) {
+      // Personal: ask the engine which rows this value-set hides, then keep
+      // them in the session's own view. Deliberately *not* `tryEdit` — this is
+      // not an edit, and routing it through one is the mistake docs/71 exists
+      // to prevent.
+      applyPersonalFilter(col, values);
+    } else {
+      tryEdit(() => wasm.session_set_filter_values(state.sheet, col, values));
+    }
     afterFilterChange();
   });
   foot.appendChild(clr);
@@ -11314,6 +11382,7 @@ function wireEvents() {
         ["Text to columns…", () => textToColumnsDialog()],
         ["Filter", () => toggleFilter()],
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
+        ["Clear my view", () => clearMyView()],
         ["Data validation…", clickEl("#tb-dv")],
         "sep",
         ["PivotTable fields…", () => pivotDialog()],
@@ -12762,6 +12831,42 @@ if (byId("grid")) {
 /// re-deriving them from assumptions about header widths. The alternative is a
 /// test that hunts for a five-pixel target and goes flaky the first time a
 /// default changes.
+// The personal-view state a browser test needs (COL-32). Row visibility is
+// asked of the *engine*, not of the DOM, because a row hidden by a personal
+// view collapses to zero pixels and "did not render" is indistinguishable from
+// "rendered somewhere else".
+export function personalViewForTest() {
+  const heights = JSON.parse(wasm.session_row_px(state.sheet, 0, 8));
+  return {
+    sheet: state.sheet,
+    hasView: wasm.session_has_personal_view(state.sheet),
+    // A row whose height is 0 is hidden, whichever set hid it.
+    rowHeights: heights,
+    visibleRows: heights.map((h, i) => (h > 0 ? i : -1)).filter((i) => i >= 0),
+    // The shared half, which co-editors also see.
+    sharedHidden: filterHidden,
+  };
+}
+
+// Apply a personal filter without driving the dropdown, so a test can assert
+// the *policy* (nothing relayed, nothing saved, subtotal unmoved) rather than
+// the menu's markup.
+export function personalFilterForTest(col, values) {
+  applyPersonalFilter(col, values);
+  afterFilterChange();
+}
+
+// Clearing, and opening a column's dropdown, from a test. Both go through the
+// same functions the menu and the header button call, so a test cannot pass
+// against a path a user never takes.
+export function clearMyViewForTest() {
+  clearMyView();
+}
+
+export function openColumnFilterForTest(col) {
+  openColumnFilter(col, 100, 100);
+}
+
 export function gridHandlesForTest() {
   return {
     hiddenCols: hiddenColMarks.map((m) => ({ x: m.x, from: m.from, to: m.to })),

@@ -373,6 +373,14 @@ pub struct WorkbookSession {
     /// host that opens from a `Vec<u8>` and drops it — which is the normal
     /// shape — this is the only copy rather than a second one.
     source: Option<Vec<u8>>,
+    /// Rows this participant hides for themselves alone (`COL-32`, docs/71).
+    ///
+    /// On the session and **not** on `Sheet`, because `SUBTOTAL`'s 101–111
+    /// codes and `AGGREGATE` reach the sheet: anything stored there is shared
+    /// by definition, and a personal view that moved a subtotal would let two
+    /// people hold different numbers for the same cell. Never relayed, never
+    /// undoable, never saved.
+    views: PersonalViews,
 }
 
 impl WorkbookSession {
@@ -394,6 +402,7 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            views: PersonalViews::new(),
             // Nothing was opened, so the format is the one this engine writes
             // by default.
             format: SessionFormat::Xlsx,
@@ -426,6 +435,7 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            views: PersonalViews::new(),
             format: SessionFormat::Xlsx,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
@@ -489,6 +499,7 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            views: PersonalViews::new(),
             format: SessionFormat::Xlsx,
             source: Some(source),
         })
@@ -573,6 +584,7 @@ impl WorkbookSession {
             stale: false,
             applied: None,
             recalc: Recalculator::new(),
+            views: PersonalViews::new(),
             format: SessionFormat::Delimited(delimiter),
             // Same guarantee as a package: opened and not edited saves as
             // itself, byte for byte. Without it, merely opening a file
@@ -626,6 +638,91 @@ impl WorkbookSession {
     }
 
     /// The normalized workbook model.
+    /// Rows this participant hides for themselves alone (`COL-32`).
+    ///
+    /// See [`views`] for why this is session state and not document state.
+    #[must_use]
+    pub fn views(&self) -> &PersonalViews {
+        &self.views
+    }
+
+    /// Hide `rows` on `sheet` **for this participant only**.
+    ///
+    /// Not an edit: nothing goes on the wire, nothing enters the undo history,
+    /// nothing reaches the saved file, and no cell value changes — a `SUBTOTAL`
+    /// under a personal view reads the same number here as on every other
+    /// participant's screen. That surprises people once; the alternative is a
+    /// spreadsheet where one cell holds two different numbers.
+    ///
+    /// It is deliberately *not* routed through [`edit`](Self::edit), and there
+    /// is a test asserting the outgoing log stays empty across it.
+    pub fn set_personal_filter(&mut self, sheet: usize, rows: BTreeSet<u32>) {
+        self.views.set(sheet, rows);
+    }
+
+    /// Drop this participant's view of one sheet.
+    pub fn clear_personal_view(&mut self, sheet: usize) {
+        self.views.clear(sheet);
+    }
+
+    /// Drop every personal view.
+    ///
+    /// Worth its own call because undo will not do it: a personal view is not a
+    /// document edit, so undo after applying one undoes the last thing done to
+    /// the *document*. Clearing has to be one obvious action instead.
+    pub fn clear_all_personal_views(&mut self) {
+        self.views.clear_all();
+    }
+
+    /// Whether `row` should be **drawn** on `sheet` — the layout's question.
+    ///
+    /// The union of the shared hidden sets and this participant's own. The
+    /// evaluator asks a different question, of `Sheet::is_row_hidden`, and
+    /// gets only the shared half; the two look identical and are not.
+    #[must_use]
+    pub fn is_row_visible(&self, sheet: usize, row: u32) -> bool {
+        let shared = self
+            .workbook
+            .sheets
+            .get(sheet)
+            .is_some_and(|s| s.is_row_hidden(row));
+        !shared && !self.views.hides(sheet, row)
+    }
+
+    /// Keep view keys pointing at the sheets they were applied to.
+    fn resequence_views(&mut self, op: &Operation) {
+        if self.views.is_empty() {
+            return;
+        }
+        match *op {
+            Operation::InsertSheet { index, .. } => {
+                self.views
+                    .resequence(|at| Some(if at >= index { at + 1 } else { at }));
+            }
+            Operation::RemoveSheet { index } => {
+                self.views.resequence(|at| match at.cmp(&index) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(at - 1),
+                    std::cmp::Ordering::Less => Some(at),
+                });
+            }
+            Operation::MoveSheet { from, to } => {
+                self.views.resequence(|at| {
+                    Some(if at == from {
+                        to
+                    } else if from < to && at > from && at <= to {
+                        at - 1
+                    } else if to < from && at >= to && at < from {
+                        at + 1
+                    } else {
+                        at
+                    })
+                });
+            }
+            _ => {}
+        }
+    }
+
     pub fn workbook(&self) -> &Workbook {
         &self.workbook
     }
@@ -663,6 +760,12 @@ impl WorkbookSession {
             .applied
             .is_some()
             .then(|| op.clone().narrowed(&self.workbook));
+        // A personal view is keyed by sheet index, so the structural operations
+        // renumber it. Done here rather than in the editor because the index is
+        // the session's own bookkeeping: leave it and the view keeps hiding
+        // rows on whichever sheet inherits the number, with nothing on the wire
+        // to explain it and nothing in the history to undo.
+        self.resequence_views(&op);
         self.history.apply(&mut self.workbook, op)?;
         if let Some(narrowed) = candidate
             && let Some(log) = self.applied.as_mut()
@@ -1244,6 +1347,12 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         }
     }
 }
+
+pub mod views;
+
+use std::collections::BTreeSet;
+
+use crate::views::PersonalViews;
 
 #[cfg(test)]
 mod tests;
