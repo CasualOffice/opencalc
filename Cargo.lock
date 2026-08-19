@@ -414,6 +414,7 @@ dependencies = [
  "casual-calc-io",
  "casual-calc-layout",
  "casual-calc-model",
+ "casual-calc-ods",
  "casual-calc-ooxml",
  "casual-calc-render",
  "casual-calc-transaction",

@@ -21,6 +21,10 @@ casual-calc-import = { path = "../casual-calc-import" }
 casual-calc-io = { path = "../casual-calc-io" }
 casual-calc-layout = { path = "../casual-calc-layout" }
 casual-calc-model = { path = "../casual-calc-model" }
+# The OpenDocument reader and writer, so a `.ods` a host holds can be opened
+# and saved back as one (`WOPI-07`). A peer of the OOXML path rather than a
+# layer under it: the two formats share the model and nothing else.
+casual-calc-ods = { path = "../casual-calc-ods" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }
 casual-calc-render = { path = "../casual-calc-render", default-features = false }
 casual-calc-transaction = { path = "../casual-calc-transaction" }

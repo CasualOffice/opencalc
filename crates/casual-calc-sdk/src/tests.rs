@@ -1743,9 +1743,13 @@ mod delimited_sessions {
         );
         assert_eq!(
             SessionFormat::for_extension("ods"),
-            None,
-            "ods is read but not written, so it must not name a save format"
+            Some(SessionFormat::Ods)
         );
+        // A format this engine neither reads nor writes must **not** name one:
+        // falling back to `Xlsx` is how a `.xls` is opened, edited and written
+        // back as a package under its original name.
+        assert_eq!(SessionFormat::for_extension("xls"), None);
+        assert_eq!(SessionFormat::for_extension("numbers"), None);
         assert_eq!(SessionFormat::Delimited(PIPE).extension(), "psv");
         assert!(
             SessionFormat::Delimited(COMMA)
@@ -2104,4 +2108,159 @@ fn a_view_follows_its_sheet_through_an_insert() {
         session.is_row_visible(0, 1),
         "the new sheet inherited a filter"
     );
+}
+
+/// A session opened from a `.ods` saves back as a `.ods` (`WOPI-07`).
+///
+/// The same rule the delimited sessions above hold, for the format a
+/// LibreOffice-first shop actually has. The engine could read one and write one
+/// before this; what it could not do was *remember* which, so a `.ods` handed to
+/// the SDK came back as an OOXML package under its original name — the failure
+/// `WOPI-05` was opened for, one format later.
+mod ods_sessions {
+    use casual_calc_model::{CellRange, CellRef, CellValue, Id, Sheet, SheetId};
+
+    use crate::{EditOperation, SessionFormat, WorkbookSession};
+
+    /// Written by LibreOffice. A fixture this engine wrote itself would prove
+    /// the reader and the writer agree and nothing about whether either is
+    /// right, and the files this has to open come from somebody else.
+    const ODS: &[u8] = include_bytes!("../../casual-calc-ods/tests/fixtures/libreoffice-basic.ods");
+
+    fn ods() -> SessionFormat {
+        SessionFormat::for_extension("ods")
+            .expect("`.ods` must name a format, or nothing downstream can save one back")
+    }
+
+    /// The ODF package marker: `mimetype`, stored uncompressed and first, so
+    /// the media type sits in the first bytes of the zip.
+    fn is_odf_package(bytes: &[u8]) -> bool {
+        const MARKER: &[u8] = b"mimetypeapplication/vnd.oasis.opendocument.spreadsheet";
+        bytes.starts_with(b"PK")
+            && bytes
+                .windows(MARKER.len())
+                .take(128)
+                .any(|window| window == MARKER)
+    }
+
+    /// **A `.ods` opened, edited and saved is still a `.ods`, and carries the
+    /// edit.**
+    #[test]
+    fn an_edited_ods_session_saves_an_ods_that_reads_back_with_the_edit() {
+        let mut session = WorkbookSession::open_as(ODS.to_vec(), ods()).expect("the ods opens");
+        assert_eq!(
+            session.format(),
+            ods(),
+            "the session forgot what it was opened from"
+        );
+
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(1, 1),
+                value: CellValue::Number(9.0),
+            })
+            .expect("edited");
+
+        let saved = session.save().expect("saves");
+        assert!(
+            is_odf_package(&saved),
+            "a .ods session saved something that is not an ODF package: {:?}",
+            String::from_utf8_lossy(&saved[..saved.len().min(64)])
+        );
+
+        let again = WorkbookSession::open_as(saved, ods()).expect("what we wrote must open");
+        assert_eq!(
+            again.workbook().sheets[0]
+                .cells
+                .get(CellRef::new(1, 1))
+                .map(|c| c.value.clone()),
+            Some(CellValue::Number(9.0)),
+            "the edit did not survive the save"
+        );
+        assert_eq!(again.workbook().sheets[0].name, "seed");
+    }
+
+    /// **Opening a `.ods` and saving it without editing returns the file
+    /// itself.**
+    ///
+    /// Merely looking at a workbook must not rewrite it — and here that matters
+    /// more than for `.xlsx`, because this writer keeps far less than the reader
+    /// takes in.
+    #[test]
+    fn an_untouched_ods_saves_as_itself() {
+        let session = WorkbookSession::open_as(ODS.to_vec(), ods()).expect("opens");
+        assert!(session.is_unmodified());
+        assert_eq!(
+            session.save().expect("saves"),
+            ODS.to_vec(),
+            "an untouched .ods was rewritten"
+        );
+    }
+
+    /// **The extension and content type are ODF's, not a package's.**
+    ///
+    /// A host names the file and sets a header from these; bytes that are ODF
+    /// under an `.xlsx` name are the same lie as the wrong bytes would be.
+    #[test]
+    fn the_format_names_its_own_extension_and_type() {
+        assert_eq!(ods().extension(), "ods");
+        assert_eq!(
+            ods().content_type(),
+            "application/vnd.oasis.opendocument.spreadsheet"
+        );
+        assert_eq!(SessionFormat::for_extension("ODS"), Some(ods()));
+    }
+
+    /// **What a `.ods` save cannot carry is counted before it is written.**
+    ///
+    /// The condition on advertising the format at all: this writer carries
+    /// values, formulas and sheets, so a merge or a bold cell is gone from the
+    /// file even though it is still in the session. The save is allowed — the
+    /// user is editing a `.ods` — but nothing leaves without being said out
+    /// loud (`AGENTS.md`: no silent data loss).
+    #[test]
+    fn saving_as_ods_names_what_that_format_costs() {
+        let mut session = WorkbookSession::open_as(ODS.to_vec(), ods()).expect("opens");
+        assert!(
+            session.format_loss().is_empty(),
+            "a document of nothing but values and formulas was reported as lossy: {:?}",
+            session.format_loss().entries()
+        );
+
+        let workbook = session.workbook_mut();
+        workbook.sheets[0]
+            .merges
+            .push(CellRange::new(CellRef::new(0, 0), CellRef::new(0, 1)));
+        workbook
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 7)), "Notes"));
+
+        let loss = session.format_loss();
+        let named: Vec<(String, u64)> = loss
+            .entries()
+            .into_iter()
+            .map(|e| (e.feature.to_string(), e.count))
+            .collect();
+        assert!(
+            named.contains(&("merged cells".to_owned(), 1)),
+            "a merge is not written and was not named: {named:?}"
+        );
+        // …and the second sheet *is* carried, so it must not be reported as
+        // lost. A report that warns about everything is read on nothing.
+        assert!(
+            !named.iter().any(|(feature, _)| feature == "other sheets"),
+            "a .ods holds every sheet, and this claimed one was dropped: {named:?}"
+        );
+    }
+
+    /// **A `.ods` is not read as a package by mistake.**
+    ///
+    /// `open_as` dispatches on the format the *caller* named, which for a WOPI
+    /// adapter comes from the host's filename. ODF bytes handed to the OOXML
+    /// importer have to fail rather than half-succeed.
+    #[test]
+    fn ods_bytes_are_not_read_as_a_package() {
+        assert!(WorkbookSession::open(ODS.to_vec()).is_err());
+    }
 }

@@ -1,4 +1,4 @@
-//! Reading and writing OpenDocument Spreadsheets — deliberately a placeholder.
+//! Reading and writing OpenDocument Spreadsheets — deliberately narrow.
 //!
 //! # What this is, and what it is not
 //!
@@ -7,7 +7,10 @@
 //! back — which is the difference between OpenCalc being usable at all in those
 //! shops and not. It is explicitly not a fidelity implementation: styles,
 //! merges, charts, images, conditional formatting, validation and print setup
-//! are **counted and named** on the way through, never dropped quietly.
+//! are **counted and named** on the way through, never dropped quietly — by the
+//! [`CompatibilityReport`] [`import_ods`] returns on the way in, and by
+//! [`export_loss`] on the way out, which a host asks *before* it overwrites
+//! somebody's file.
 //!
 //! That distinction is the point. A converter that silently discards formatting
 //! looks like it worked and loses somebody's afternoon; one that says what it
@@ -71,11 +74,18 @@ impl std::error::Error for OdsError {}
 /// decompress is a denial of service with a friendly file extension.
 const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The rows a single `number-rows-repeated` may expand to.
+/// The cells a single repeat attribute may **materialise**.
 ///
 /// LibreOffice writes `number-rows-repeated="1048576"` to fill the sheet. That
 /// is a description of emptiness, not a million rows of data, and materialising
 /// it would exhaust memory reading a file that holds nothing.
+///
+/// **It bounds what is stored, never how far the cursor moves.** Clamping the
+/// cursor is the same defect the repeat attributes exist to avoid: a sheet with
+/// data on row 1 and row 50,000 writes the gap as one repeated empty row, and a
+/// reader that advanced by 4,096 instead put every later row 45,904 rows too
+/// high — silently, in a document that opens without complaint. The gap costs
+/// nothing to skip, because an empty run stores no cells at all.
 const MAX_REPEAT: u32 = 4096;
 
 /// Read a `.ods` into a workbook, with a report of everything not carried.
@@ -111,6 +121,8 @@ struct Pending {
     value: String,
     text: String,
     formula: String,
+    /// How many columns this cell covers — **unclamped**, because it is the
+    /// cursor's step. See [`MAX_REPEAT`], which bounds only what is stored.
     repeat: u32,
 }
 
@@ -152,9 +164,19 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                     "table-row" => {
                         row_repeat = attr(e, "table:number-rows-repeated")
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(1)
-                            .min(MAX_REPEAT);
+                            .unwrap_or(1);
                         col = 0;
+                        // **A self-closing row has no `End` event either.** The
+                        // same defect as the cell below, one level up, and the
+                        // one LibreOffice actually triggers: it writes the gap
+                        // between two blocks of data as a single
+                        // `<table:table-row table:number-rows-repeated="N"/>`,
+                        // and a reader that waits for a close that never comes
+                        // leaves the row cursor where it was — so the second
+                        // block lands on top of the first.
+                        if self_closing {
+                            row = row.saturating_add(row_repeat);
+                        }
                     }
                     "table-cell" | "covered-table-cell" => {
                         if name == "covered-table-cell" {
@@ -177,8 +199,7 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                             formula: attr(e, "table:formula").unwrap_or_default(),
                             repeat: attr(e, "table:number-columns-repeated")
                                 .and_then(|v| v.parse().ok())
-                                .unwrap_or(1)
-                                .min(MAX_REPEAT),
+                                .unwrap_or(1),
                         };
                         // **A self-closing cell has no `End` event.** A blank
                         // run is written `<table:table-cell repeated="2"/>`,
@@ -187,12 +208,32 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                         // run landed on top of it. LibreOffice writes those
                         // runs on nearly every row.
                         if self_closing {
-                            col += place(&mut workbook, &mut report, row, col, row_repeat, &cell);
+                            col = col.saturating_add(place(
+                                &mut workbook,
+                                &mut report,
+                                row,
+                                col,
+                                row_repeat,
+                                &cell,
+                            ));
                         } else {
                             pending = Some(cell);
                         }
                     }
-                    "p" => in_text = true,
+                    "p" => {
+                        in_text = !self_closing;
+                        // **The line break belongs here, at the paragraph
+                        // boundary.** A cell's text is one `<text:p>` per line,
+                        // and putting the newline on every *text event* instead
+                        // broke a single line into several: an entity like
+                        // `&amp;` arrives as its own event, so "Ada & Co" came
+                        // back as three lines.
+                        if let Some(p) = pending.as_mut()
+                            && !p.text.is_empty()
+                        {
+                            p.text.push('\n');
+                        }
+                    }
                     // Named so an operator can see what a file carried that this
                     // did not take. Recorded once per kind, not per instance:
                     // the report is for deciding, not for counting.
@@ -232,11 +273,28 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
             }
             Event::Text(t) => {
                 if in_text && let Some(p) = pending.as_mut() {
-                    let text = t.decode().map_err(|e| OdsError::Malformed(e.to_string()))?;
-                    if !p.text.is_empty() {
-                        p.text.push('\n');
+                    // Unescaped, for the same reason the attributes are: a cell
+                    // holding "Ada & Co" is written `Ada &amp; Co`, and reading
+                    // it raw gains four characters on every save.
+                    let raw = t.decode().map_err(|e| OdsError::Malformed(e.to_string()))?;
+                    p.text.push_str(&unescaped(&raw));
+                }
+            }
+            // `&amp;` and `&#38;` are their own events, not part of the text
+            // around them. Dropped, they take the character with them.
+            Event::GeneralRef(r) => {
+                if in_text && let Some(p) = pending.as_mut() {
+                    let name = r.decode().map_err(|e| OdsError::Malformed(e.to_string()))?;
+                    match r.resolve_char_ref() {
+                        Ok(Some(c)) => p.text.push(c),
+                        _ => p.text.push_str(
+                            quick_xml::escape::resolve_predefined_entity(&name)
+                                // An entity from a DTD this reader does not
+                                // read is kept as written: visibly wrong beats
+                                // invisibly gone.
+                                .unwrap_or(&format!("&{name};")),
+                        ),
                     }
-                    p.text.push_str(&text);
                 }
             }
             Event::End(e) => match local_name(e.name().as_ref()).as_str() {
@@ -244,10 +302,10 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                 "table-cell" | "covered-table-cell" => {
                     if let Some(p) = pending.take() {
                         let width = place(&mut workbook, &mut report, row, col, row_repeat, &p);
-                        col += width;
+                        col = col.saturating_add(width);
                     }
                 }
-                "table-row" => row += row_repeat,
+                "table-row" => row = row.saturating_add(row_repeat),
                 _ => {}
             },
             _ => {}
@@ -276,7 +334,7 @@ fn place(
     p: &Pending,
 ) -> u32 {
     if workbook.sheets.is_empty() {
-        return p.repeat;
+        return p.repeat.max(1);
     }
     let value = match p.value_type.as_str() {
         "float" | "percentage" | "currency" => p
@@ -307,7 +365,9 @@ fn place(
 
     let has_formula = !p.formula.is_empty();
     if value == CellValue::Empty && !has_formula {
-        return p.repeat; // An empty run: move the cursor, store nothing.
+        // An empty run: move the cursor, store nothing. However long it claims
+        // to be, it costs nothing — which is why the cursor is not clamped.
+        return p.repeat.max(1);
     }
 
     // A formula is stored once and shared by handle, which is what the model's
@@ -325,25 +385,55 @@ fn place(
             RetentionOutcome::NotRetained,
         );
     }
+    let mut outside = 0u64;
     let Some(sheet) = workbook.sheets.last_mut() else {
         return p.repeat.max(1);
     };
-    for dr in 0..row_repeat.max(1) {
-        for dc in 0..p.repeat.max(1) {
+    // Clamped **here**, where cells are actually stored, and nowhere else.
+    for dr in 0..row_repeat.clamp(1, MAX_REPEAT) {
+        for dc in 0..p.repeat.clamp(1, MAX_REPEAT) {
+            let at = CellRef::new(row.saturating_add(dr), col.saturating_add(dc));
+            // A file may address further than this engine's grid reaches. Kept
+            // out rather than stored, because a cell past the last column is
+            // one no writer here can put back — and counted, because a cell
+            // that disappears without a word is the failure this report exists
+            // to prevent.
+            if !at.in_grid() {
+                outside += 1;
+                continue;
+            }
             let mut cell = Cell::value(value.clone());
             cell.formula = handle;
-            sheet.cells.set(CellRef::new(row + dr, col + dc), cell);
+            sheet.cells.set(at, cell);
         }
+    }
+    if outside > 0 {
+        report.record_n(
+            "cells outside this engine's grid",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            outside,
+        );
     }
     p.repeat.max(1)
 }
 
 /// Turn an ODF formula into one this engine can parse, or `None`.
 ///
-/// ODF writes `of:=[.A1]+[.B1]` — a namespace prefix, and every reference
-/// wrapped in brackets with a leading dot for "this sheet". The addresses
-/// themselves are the same A1 notation, so the translation is mechanical:
-/// strip the prefix, unwrap the brackets, drop the dot.
+/// ODF writes `of:=IF([.A1]>0;[.B1];0)`. Three things differ from what this
+/// engine's parser expects, and all three are load-bearing:
+///
+/// - a namespace prefix (`of:`), which is dropped;
+/// - every reference wrapped in brackets, `[.A1]` for this sheet and
+///   `[$Sheet2.A1]` for another, with the name quoted when it needs to be;
+/// - **`;` between arguments, not `,`.** `of:` is the locale-independent
+///   formula namespace and the semicolon is what it uses. A translation that
+///   ignored this failed on every multi-argument function — which is nearly
+///   every formula in a real document — so the file opened, the numbers looked
+///   right, and every `IF` had quietly become a constant.
+///
+/// String literals are copied through untouched: a `;` inside quotes is data,
+/// and rewriting it edits somebody's text.
 ///
 /// **Returns `None` rather than guessing.** A formula this cannot translate has
 /// its *value* kept and the formula reported as lost — a cell that quietly stops
@@ -359,27 +449,125 @@ fn translate_formula(raw: &str) -> Option<casual_calc_formula::Expr> {
     let mut out = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
     while let Some(c) = chars.next() {
-        if c != '[' {
-            out.push(c);
-            continue;
-        }
-        // `[.A1]`, `[.A1:.B2]`, or `['Sheet 2'.A1]`. Anything with a sheet
-        // qualifier is left for the parser to reject: this converter does not
-        // resolve ODF's quoting rules, and inventing a translation for them is
-        // how a formula ends up pointing somewhere it never did.
-        let mut inner = String::new();
-        for c in chars.by_ref() {
-            if c == ']' {
-                break;
+        match c {
+            '"' => {
+                out.push('"');
+                while let Some(d) = chars.next() {
+                    out.push(d);
+                    // A doubled quote escapes one and does not end the literal.
+                    if d == '"' {
+                        if chars.peek() == Some(&'"') {
+                            out.push('"');
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
             }
-            inner.push(c);
+            ';' => out.push(','),
+            '[' => {
+                let mut inner = String::new();
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                    inner.push(c);
+                }
+                out.push_str(&a1_from_odf(&inner)?);
+            }
+            _ => out.push(c),
         }
-        if inner.contains('\'') || inner.contains('$') && inner.contains('#') {
-            return None;
-        }
-        out.push_str(&inner.replace('.', ""));
     }
     casual_calc_formula::parse(&out).ok()
+}
+
+/// The A1 form of one bracketed ODF reference, or `None` for one this engine
+/// cannot express.
+///
+/// The shapes: `.A1`, `.$A$1`, `.A1:.B2`, `$Sheet2.A1`, `$'My Sheet'.A1`, and a
+/// qualified range `$Sheet2.A1:.B2` whose far end takes the near end's sheet.
+///
+/// Refused rather than approximated: a reference to a deleted sheet (`#REF!`),
+/// a named expression (`$$name`), and a range spanning two different sheets —
+/// which is a 3-D reference this engine does not model, and picking one of the
+/// two sheets would silently point the formula somewhere it never did.
+fn a1_from_odf(inner: &str) -> Option<String> {
+    if inner.contains('#') || inner.starts_with("$$") {
+        return None;
+    }
+    let (first, second) = split_odf_range(inner);
+    let (sheet, address) = odf_parts(first)?;
+    let mut out = String::new();
+    if let Some(name) = &sheet {
+        out.push_str(name);
+        out.push('!');
+    }
+    out.push_str(address);
+    if let Some(second) = second {
+        let (far_sheet, far_address) = odf_parts(second)?;
+        if far_sheet.is_some() && far_sheet != sheet {
+            return None; // A 3-D range.
+        }
+        out.push(':');
+        out.push_str(far_address);
+    }
+    Some(out)
+}
+
+/// Split `a:b` on the colon that separates the two ends of a range, ignoring
+/// one inside a quoted sheet name.
+fn split_odf_range(inner: &str) -> (&str, Option<&str>) {
+    let mut quoted = false;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            ':' if !quoted => return (&inner[..i], Some(&inner[i + 1..])),
+            _ => {}
+        }
+    }
+    (inner, None)
+}
+
+/// One end of an ODF reference, split into its sheet (already in this engine's
+/// quoting) and its A1 address.
+fn odf_parts(part: &str) -> Option<(Option<String>, &str)> {
+    let rest = part.strip_prefix('$').unwrap_or(part);
+    if let Some(quoted) = rest.strip_prefix('\'') {
+        // `'My Sheet'.A1`, with `''` escaping a quote inside the name.
+        let mut name = String::new();
+        let mut chars = quoted.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c != '\'' {
+                name.push(c);
+                continue;
+            }
+            if quoted[i + 1..].starts_with('\'') {
+                name.push('\'');
+                chars.next();
+                continue;
+            }
+            let address = quoted[i + 1..].strip_prefix('.')?;
+            // Re-quoted the way this engine's parser expects, which is the same
+            // convention with the same escape.
+            return Some((Some(format!("'{}'", name.replace('\'', "''"))), address));
+        }
+        return None;
+    }
+    let (name, address) = rest.split_once('.')?;
+    if name.is_empty() {
+        return Some((None, address));
+    }
+    Some((Some(name.to_owned()), address))
+}
+
+/// XML text with its entities resolved.
+///
+/// Text this cannot resolve — an entity declared in a DTD this reader does not
+/// read — is kept **as written** rather than dropped. The raw `&thing;` is
+/// wrong in a way somebody can see and correct; a silently empty cell is not.
+fn unescaped(raw: &str) -> String {
+    quick_xml::escape::unescape(raw).map_or_else(|_| raw.to_owned(), |text| text.into_owned())
 }
 
 /// The element name without its namespace prefix.
@@ -389,12 +577,18 @@ fn local_name(raw: &[u8]) -> String {
 }
 
 /// One attribute's value, by its qualified name.
+///
+/// **Unescaped.** XML has five characters that cannot be written literally, and
+/// an attribute holding `A1&amp;"x"` is a formula with an `&` in it — read raw
+/// it is nine characters of nonsense that no parser accepts, and a sheet name
+/// with an ampersand grows four characters every time the file is opened and
+/// saved. Neither failure is visible until somebody looks.
 fn attr(e: &quick_xml::events::BytesStart<'_>, want: &str) -> Option<String> {
     let short = want.rsplit(':').next().unwrap_or(want);
     e.attributes().flatten().find_map(|a| {
         let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
         let matches = key == want || key.rsplit(':').next() == Some(short);
-        matches.then(|| String::from_utf8_lossy(&a.value).to_string())
+        matches.then(|| unescaped(&String::from_utf8_lossy(&a.value)))
     })
 }
 
@@ -461,24 +655,35 @@ fn content_xml(workbook: &Workbook) -> String {
             r#"<table:table table:name="{}">"#,
             escape(&sheet.name)
         ));
-        let last = sheet.cells.iter().map(|(at, _)| at.row).max();
-        for row in 0..=last.unwrap_or(0) {
-            out.push_str("<table:table-row>");
-            let cols: Vec<u32> = sheet
-                .cells
-                .iter()
-                .filter(|(at, _)| at.row == row)
-                .map(|(at, _)| at.col)
-                .collect();
-            let widest = cols.iter().copied().max();
-            for col in 0..=widest.unwrap_or(0) {
-                match sheet.cells.get(CellRef::new(row, col)) {
-                    Some(cell) if cols.contains(&col) => {
-                        out.push_str(&cell_xml(workbook, cell));
-                    }
-                    _ => out.push_str("<table:table-cell/>"),
+        // **One pass over the populated cells**, which arrive in row-major
+        // order, with the gaps between them written as the repeat runs ODF has
+        // for exactly this. The shape it replaces walked every row from zero
+        // and re-scanned every cell in the sheet to find that row's columns —
+        // quadratic in the cell count, on the save path of a service that
+        // accepts uploads, and it also materialised a blank cell for every gap
+        // in a sparse sheet.
+        let mut open_row: Option<u32> = None;
+        let mut next_col = 0u32;
+        for (at, cell) in sheet.cells.iter() {
+            if open_row != Some(at.row) {
+                if open_row.is_some() {
+                    out.push_str("</table:table-row>");
                 }
+                let first_free = open_row.map_or(0, |r| r + 1);
+                if at.row > first_free {
+                    out.push_str(&repeated("table:table-row", at.row - first_free));
+                }
+                out.push_str("<table:table-row>");
+                open_row = Some(at.row);
+                next_col = 0;
             }
+            if at.col > next_col {
+                out.push_str(&repeated("table:table-cell", at.col - next_col));
+            }
+            out.push_str(&cell_xml(workbook, cell));
+            next_col = at.col + 1;
+        }
+        if open_row.is_some() {
             out.push_str("</table:table-row>");
         }
         out.push_str("</table:table>");
@@ -487,20 +692,257 @@ fn content_xml(workbook: &Workbook) -> String {
     out
 }
 
+/// An empty run of `count` rows or cells, as one element.
+fn repeated(element: &str, count: u32) -> String {
+    let attribute = if element == "table:table-row" {
+        "table:number-rows-repeated"
+    } else {
+        "table:number-columns-repeated"
+    };
+    if count == 1 {
+        format!("<{element}/>")
+    } else {
+        format!(r#"<{element} {attribute}="{count}"/>"#)
+    }
+}
+
 fn cell_xml(workbook: &Workbook, cell: &Cell) -> String {
+    // **The formula, first.** Without it a saved `.ods` is a table of constants
+    // that opens without complaint and shows the right numbers — until somebody
+    // changes an input. `None` where this converter cannot express the formula
+    // in ODF; the cached value below still goes out, and [`export_loss`] counts
+    // what the file no longer recalculates.
+    let formula = cell
+        .formula
+        .and_then(|handle| workbook.formula(handle))
+        .and_then(odf_formula)
+        .map(|text| format!(r#" table:formula="{}""#, escape(&text)))
+        .unwrap_or_default();
+
     match &cell.value {
         CellValue::Number(n) => format!(
-            r#"<table:table-cell office:value-type="float" office:value="{n}"><text:p>{n}</text:p></table:table-cell>"#
+            r#"<table:table-cell{formula} office:value-type="float" office:value="{n}"><text:p>{n}</text:p></table:table-cell>"#
         ),
         CellValue::Bool(b) => format!(
-            r#"<table:table-cell office:value-type="boolean" office:boolean-value="{b}"><text:p>{b}</text:p></table:table-cell>"#
+            r#"<table:table-cell{formula} office:value-type="boolean" office:boolean-value="{b}"><text:p>{b}</text:p></table:table-cell>"#
         ),
         CellValue::SharedString(id) | CellValue::InlineString(id) => format!(
-            r#"<table:table-cell office:value-type="string"><text:p>{}</text:p></table:table-cell>"#,
+            r#"<table:table-cell{formula} office:value-type="string"><text:p>{}</text:p></table:table-cell>"#,
             escape(workbook.strings.get(*id).unwrap_or_default())
         ),
-        _ => "<table:table-cell/>".to_owned(),
+        // An error is written as its text rather than dropped. It reads back as
+        // a string rather than an error, which [`export_loss`] says out loud —
+        // a cell that held `#DIV/0!` and comes back blank is the failure that
+        // looks like the file was fixed.
+        CellValue::Error(e) => format!(
+            r#"<table:table-cell{formula} office:value-type="string"><text:p>{}</text:p></table:table-cell>"#,
+            escape(&e.to_string())
+        ),
+        CellValue::Empty => format!("<table:table-cell{formula}/>"),
     }
+}
+
+/// One formula in ODF's own syntax (without the `of:=` prefix's `=`), or `None`
+/// for one this converter cannot express there.
+///
+/// The inverse of [`translate_formula`], and it has the same duty: a formula
+/// that cannot be written faithfully is **not** approximated. The printed A1
+/// text is walked once — string literals copied through, `,` turned into ODF's
+/// `;`, and every reference wrapped by [`odf_reference`].
+fn odf_formula(expr: &casual_calc_formula::Expr) -> Option<String> {
+    if !writable_in_odf(expr) {
+        return None;
+    }
+    let text = expr.to_string();
+    let chars: Vec<char> = text.chars().collect();
+    let spans = casual_calc_formula::reference_spans(&text);
+
+    let mut out = String::from("of:=");
+    let mut next = 0usize;
+    let mut i = 0usize;
+    while i < chars.len() {
+        while spans.get(next).is_some_and(|s| s.start < i) {
+            next += 1;
+        }
+        if let Some(span) = spans.get(next).filter(|s| s.start == i) {
+            let raw: String = chars[span.start..span.end].iter().collect();
+            out.push_str(&odf_reference(&raw)?);
+            i = span.end;
+            next += 1;
+            continue;
+        }
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    if chars[i] == '"' {
+                        if chars.get(i + 1) == Some(&'"') {
+                            out.push('"');
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            ',' => {
+                out.push(';');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Whether every part of this expression has an ODF form this writer can
+/// produce.
+///
+/// Written as an exhaustive match, so a new [`Expr`](casual_calc_formula::Expr)
+/// variant has to be decided about rather than silently assumed writable —
+/// which is how a construct starts being written as something it is not.
+///
+/// Refused: a defined name and a structured (table) reference, whose ODF
+/// spellings this does not produce; text the parser could not read, which came
+/// in from a `.xlsx` and has no ODF meaning; a call of a `LAMBDA` value, which
+/// OpenFormula has no notation for; and a whole-row or whole-column reference
+/// (`A:A`), which ODF writes as an explicit block to the sheet's last row —
+/// a different reference, and one that stops growing with the data.
+fn writable_in_odf(expr: &casual_calc_formula::Expr) -> bool {
+    use casual_calc_formula::Expr;
+    match expr {
+        Expr::Number(_) | Expr::Bool(_) | Expr::Text(_) | Expr::Error(_) | Expr::Empty => true,
+        Expr::Reference(r) => !r.col_implicit && !r.row_implicit,
+        Expr::Range(a, b) => {
+            !a.col_implicit && !a.row_implicit && !b.col_implicit && !b.row_implicit
+        }
+        Expr::Name(_) | Expr::Raw(_) | Expr::StructuredRef { .. } | Expr::Call { .. } => false,
+        Expr::Unary { operand, .. } => writable_in_odf(operand),
+        Expr::Binary { left, right, .. } => writable_in_odf(left) && writable_in_odf(right),
+        Expr::Function { args, .. } => args.iter().all(writable_in_odf),
+    }
+}
+
+/// One A1 reference as ODF writes it: `A1` → `[.A1]`, `Sheet2!A1:B2` →
+/// `[$Sheet2.A1:.B2]`.
+fn odf_reference(raw: &str) -> Option<String> {
+    let (sheet, address) = match raw.rfind('!') {
+        // A sheet name never contains `!` and an address never does either, so
+        // the last one is the separator.
+        Some(at) => (Some(&raw[..at]), &raw[at + 1..]),
+        None => (None, raw),
+    };
+    let qualifier = match sheet {
+        None => ".".to_owned(),
+        Some(name) => format!("${name}."),
+    };
+    match address.split_once(':') {
+        // The far end takes the near end's sheet, which is how ODF spells a
+        // range: `[$Sheet2.A1:.B2]`.
+        Some((near, far)) => Some(format!("[{qualifier}{near}:.{far}]")),
+        None => Some(format!("[{qualifier}{address}]")),
+    }
+}
+
+/// What writing this workbook as a `.ods` cannot carry.
+///
+/// **Ask before saving.** This converter carries values, formulas and sheets;
+/// everything else in the model — formatting, merges, widths, validation,
+/// conditional formats, comments, charts, images, print setup — has no writer
+/// here yet, and the rule this repository runs on is that nothing is dropped
+/// quietly (`AGENTS.md`). Counted per feature, so a host can tell an
+/// administrator what a save costs before they commit to it.
+///
+/// Recomputed on each call rather than kept: it describes the document as it is
+/// now, and a merge made a second ago changes the answer.
+#[must_use]
+pub fn export_loss(workbook: &Workbook) -> CompatibilityReport {
+    let mut report = CompatibilityReport::default();
+    let mut gone = |feature: &str, count: usize| {
+        report.record_n(
+            feature,
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            count as u64,
+        );
+    };
+
+    gone("defined names", workbook.defined_names.len());
+
+    let mut formatted = 0usize;
+    let mut untranslatable = 0usize;
+    let mut errors = 0usize;
+    for sheet in &workbook.sheets {
+        gone("merged cells", sheet.merges.len());
+        gone("column widths", usize::from(!sheet.columns.is_empty()));
+        gone("row heights", usize::from(!sheet.rows.is_empty()));
+        gone("hidden rows", sheet.hidden_rows.len());
+        gone("hidden columns", sheet.hidden_cols.len());
+        gone(
+            "outline groups",
+            sheet.row_outline_levels.len() + sheet.col_outline_levels.len(),
+        );
+        gone(
+            "frozen panes",
+            usize::from(sheet.view != Default::default()),
+        );
+        gone("tab colour", usize::from(sheet.tab_color.is_some()));
+        gone("data validation", sheet.validations.len());
+        gone("conditional formatting", sheet.conditional_formats.len());
+        gone("comments", sheet.comments.len());
+        gone("hyperlinks", sheet.hyperlinks.len());
+        gone(
+            "print setup",
+            usize::from(sheet.print != Default::default()),
+        );
+        gone("charts", sheet.charts.len());
+        gone("images", sheet.images.len());
+        gone("sort state", usize::from(sheet.sort_state.is_some()));
+        gone("sheet format", sheet.format_pr.len());
+
+        for (_, cell) in sheet.cells.iter() {
+            if cell.style.is_some() {
+                formatted += 1;
+            }
+            if matches!(cell.value, CellValue::Error(_)) {
+                errors += 1;
+            }
+            // Asked of the same function the writer uses, so the count and the
+            // file cannot disagree.
+            if cell
+                .formula
+                .and_then(|handle| workbook.formula(handle))
+                .is_some_and(|expr| odf_formula(expr).is_none())
+            {
+                untranslatable += 1;
+            }
+        }
+    }
+    gone("cell formatting", formatted);
+
+    // Degraded rather than omitted, and after the closure's borrow ends: the
+    // cell keeps its value in both cases, and what is gone is the formula that
+    // produced it or the fact that it was an error rather than text.
+    report.record_n(
+        "formulas this converter cannot write as ODF",
+        ModelOutcome::Degraded,
+        RetentionOutcome::NotRetained,
+        untranslatable as u64,
+    );
+    report.record_n(
+        "error values written as text",
+        ModelOutcome::Degraded,
+        RetentionOutcome::NotRetained,
+        errors as u64,
+    );
+    report
 }
 
 /// Escape text for an XML attribute or element body.
@@ -643,6 +1085,271 @@ mod tests {
         );
     }
 
+    /// A `.ods` holding exactly this `content.xml`.
+    fn package_of(content: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut out));
+            zip.start_file("content.xml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        out
+    }
+
+    /// A document with `body` between the sheet tags.
+    fn sheet_of(body: &str) -> Vec<u8> {
+        package_of(&format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+                r#"<office:document-content"#,
+                r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+                r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#,
+                r#" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">"#,
+                r#"<office:body><office:spreadsheet>"#,
+                r#"<table:table table:name="s">{}</table:table>"#,
+                r#"</office:spreadsheet></office:body></office:document-content>"#,
+            ),
+            body
+        ))
+    }
+
+    fn cell(text: &str) -> String {
+        format!(
+            r#"<table:table-cell office:value-type="string"><text:p>{text}</text:p></table:table-cell>"#
+        )
+    }
+
+    /// **A long empty run moves the cursor by its whole length.**
+    ///
+    /// The bound on repeats exists so that `number-rows-repeated="1048576"` —
+    /// which LibreOffice writes on nearly every sheet — does not materialise a
+    /// million rows. Applying it to the *cursor* as well turned any gap longer
+    /// than the bound into a silent shift: a sheet with data on row 1 and row
+    /// 9,000 came back with the second block 4,900 rows too high, in a document
+    /// that opens without complaint. An empty run costs nothing to skip, which
+    /// is exactly why the clamp does not belong on the cursor.
+    #[test]
+    fn a_long_empty_run_does_not_shift_what_follows_it() {
+        let rows = sheet_of(&format!(
+            concat!(
+                r#"<table:table-row>{}</table:table-row>"#,
+                r#"<table:table-row table:number-rows-repeated="9000"/>"#,
+                r#"<table:table-row>{}</table:table-row>"#,
+            ),
+            cell("top"),
+            cell("bottom")
+        ));
+        let (wb, _) = import_ods(&rows).expect("opens");
+        assert_eq!(text_at(&wb, 0, 0, 0), "top");
+        assert_eq!(
+            text_at(&wb, 0, 9001, 0),
+            "bottom",
+            "the row gap was clamped, so everything after it moved up"
+        );
+
+        let cols = sheet_of(&format!(
+            r#"<table:table-row>{}<table:table-cell table:number-columns-repeated="9000"/>{}</table:table-row>"#,
+            cell("left"),
+            cell("right")
+        ));
+        let (wb, _) = import_ods(&cols).expect("opens");
+        assert_eq!(
+            text_at(&wb, 0, 0, 9001),
+            "right",
+            "the column gap was clamped, so everything after it moved left"
+        );
+    }
+
+    /// **A repeat that reaches past the grid is counted, not stored.**
+    ///
+    /// A file can address further than this engine's grid goes, and a cell
+    /// stored outside it is one no writer can put back.
+    #[test]
+    fn cells_beyond_the_grid_are_named_rather_than_stored() {
+        let body = format!(
+            r#"<table:table-row><table:table-cell table:number-columns-repeated="20000"/>{}</table:table-row>"#,
+            cell("far")
+        );
+        let (wb, report) = import_ods(&sheet_of(&body)).expect("opens");
+        assert!(
+            wb.sheets[0].cells.iter().all(|(at, _)| at.in_grid()),
+            "a cell was stored outside the grid"
+        );
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|e| e.feature == "cells outside this engine's grid"),
+            "a cell was dropped and nothing said so: {:?}",
+            report.entries()
+        );
+    }
+
+    /// **ODF separates arguments with `;`, and this engine with `,`.**
+    ///
+    /// Not a detail: `of:` is the locale-independent formula namespace, and it
+    /// uses the semicolon. Handing `IF(A1>0;1;2)` to a parser that expects
+    /// commas fails on *every multi-argument function*, which is nearly every
+    /// formula in a real document — so the file opens, the numbers look right,
+    /// and every `IF`, `SUM(a;b)` and `VLOOKUP` has quietly become a constant.
+    #[test]
+    fn odf_argument_separators_are_translated() {
+        let expr = translate_formula("of:=IF([.A1]>0;[.B1];0)")
+            .expect("a multi-argument function is the common case, not an exotic one");
+        assert_eq!(format!("{expr}"), "IF(A1>0,B1,0)");
+
+        // And a semicolon *inside a string* is text, not a separator. Replacing
+        // them blindly rewrites somebody's data.
+        let expr = translate_formula(r#"of:=IF([.A1];"a;b";"c")"#).expect("translates");
+        assert_eq!(format!("{expr}"), r#"IF(A1,"a;b","c")"#);
+    }
+
+    /// **`&` and `<` come back as themselves.**
+    ///
+    /// XML has five characters that cannot be written literally, and the writer
+    /// escapes them. A reader that does not *un*escape reads `Ada &amp; Co`
+    /// back as those nine characters — so a name with an ampersand in it gains
+    /// four characters every time the file is opened and saved, and a formula
+    /// with a `&` concat operator stops parsing altogether. Nothing about
+    /// either failure is visible until somebody looks at the cell.
+    #[test]
+    fn xml_entities_survive_the_round_trip() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "P&L <2024>"));
+        let text = wb.strings.intern("Ada & Co <ltd>");
+        wb.sheets[0].cells.set(
+            CellRef::new(0, 0),
+            Cell::value(CellValue::InlineString(text)),
+        );
+        // A formula whose text carries an escaped character in an *attribute*.
+        let concat = wb.store_formula(casual_calc_formula::parse(r#"A1&"x""#).expect("parses"));
+        let mut cell = Cell::value(CellValue::Number(0.0));
+        cell.formula = Some(concat);
+        wb.sheets[0].cells.set(CellRef::new(1, 0), cell);
+
+        let (again, _) = import_ods(&export_ods(&wb).expect("writes")).expect("opens");
+        assert_eq!(
+            again.sheets[0].name, "P&L <2024>",
+            "the sheet name came back escaped"
+        );
+        assert_eq!(
+            text_at(&again, 0, 0, 0),
+            "Ada & Co <ltd>",
+            "the cell text came back escaped"
+        );
+        let formula = again.sheets[0]
+            .cells
+            .get(CellRef::new(1, 0))
+            .and_then(|c| c.formula)
+            .and_then(|h| again.formula(h))
+            .expect("a formula with an `&` in it did not survive");
+        assert_eq!(format!("{formula}"), r#"A1&"x""#);
+    }
+
+    /// **A reference to another sheet points at that sheet.**
+    ///
+    /// ODF qualifies with `$Sheet.A1`, quoting the name when it needs it. The
+    /// alternative to translating this is dropping every cross-sheet formula in
+    /// any workbook with more than one tab.
+    #[test]
+    fn a_sheet_qualified_reference_is_translated() {
+        let expr = translate_formula("of:=[$Sheet2.A1]+[$'My Sheet'.B2]")
+            .expect("a cross-sheet reference is not exotic either");
+        assert_eq!(format!("{expr}"), "Sheet2!A1+'My Sheet'!B2");
+
+        // A range keeps its qualifier, and the far end's implied sheet is the
+        // same one — `[$S.A1:.B2]`.
+        let expr = translate_formula("of:=SUM([$Sheet2.A1:.B2])").expect("translates");
+        assert_eq!(format!("{expr}"), "SUM(Sheet2!A1:B2)");
+    }
+
+    /// **A formula this converter cannot express is refused, not guessed at.**
+    #[test]
+    fn an_untranslatable_reference_is_refused() {
+        // A reference to a deleted sheet.
+        assert!(translate_formula("of:=[#REF!.A1]").is_none());
+        // Two different sheets in one range is a 3-D reference, which this
+        // engine does not model — pointing it at one of the two would be an
+        // answer nobody asked for.
+        assert!(translate_formula("of:=SUM([$One.A1:$Two.B2])").is_none());
+    }
+
+    /// **A formula survives the round trip as a formula, not as its answer.**
+    ///
+    /// The reader translates `of:=[.B2]*[.C2]` in; a writer that emitted only
+    /// the cached number would turn a LibreOffice user's model into a table of
+    /// constants the first time they saved it — and the file would open
+    /// without complaint, showing the right numbers, until somebody changed an
+    /// input. That is the failure this crate's own first paragraph promises not
+    /// to have: it says this carries "values, **formulas** and sheets".
+    #[test]
+    fn formulas_survive_a_round_trip() {
+        let (original, _) = import_ods(REAL).expect("opens");
+        let written = export_ods(&original).expect("writes");
+        let (again, _) = import_ods(&written).expect("what we wrote must open");
+
+        // D2 is the row total, `=B2*C2`.
+        let before = original.sheets[0]
+            .cells
+            .get(CellRef::new(1, 3))
+            .and_then(|c| c.formula)
+            .and_then(|h| original.formula(h))
+            .expect("the fixture's D2 has a formula to begin with");
+        let after = again.sheets[0]
+            .cells
+            .get(CellRef::new(1, 3))
+            .and_then(|c| c.formula)
+            .and_then(|h| again.formula(h))
+            .expect("D2 came back as a constant: the writer dropped the formula");
+        assert_eq!(
+            format!("{after}"),
+            format!("{before}"),
+            "D2's formula came back as something else"
+        );
+
+        // And the range form, where the reference wrapping has to reach inside
+        // a colon: `SUM([.D2:.D3])`.
+        let sum = again.sheets[0]
+            .cells
+            .get(CellRef::new(3, 3))
+            .and_then(|c| c.formula)
+            .and_then(|h| again.formula(h))
+            .expect("D4's SUM came back as a constant");
+        assert_eq!(format!("{sum}"), "SUM(D2:D3)");
+    }
+
+    /// **A formula reaches the file in ODF's own syntax, not this engine's.**
+    ///
+    /// Asserted on the bytes, because the reader above is forgiving — it takes
+    /// a bare `=B2*C2` as happily as `of:=[.B2]*[.C2]`, so a round trip through
+    /// our own reader proves nothing about whether LibreOffice can read what we
+    /// wrote. ODF wants the bracketed references, and a file without them opens
+    /// there with `#NAME?` in every formula cell.
+    #[test]
+    fn a_written_formula_is_in_odf_syntax() {
+        let (original, _) = import_ods(REAL).expect("opens");
+        let written = export_ods(&original).expect("writes");
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(&written[..])).expect("a zip");
+        let mut xml = String::new();
+        zip.by_name("content.xml")
+            .expect("content.xml")
+            .read_to_string(&mut xml)
+            .expect("utf-8");
+
+        assert!(
+            xml.contains(r#"table:formula="of:=[.B2]*[.C2]""#),
+            "D2's formula is not in ODF syntax: {xml}"
+        );
+        assert!(
+            xml.contains(r#"table:formula="of:=SUM([.D2:.D3])""#),
+            "the range form is not in ODF syntax: {xml}"
+        );
+    }
+
     /// **Values survive a round trip through our own writer.**
     ///
     /// Weaker than the read tests above by design — it proves the writer emits
@@ -662,6 +1369,78 @@ mod tests {
             );
         }
         assert_eq!(again.sheets[0].name, original.sheets[0].name);
+    }
+
+    /// **What the writer cannot carry is counted before it is written.**
+    ///
+    /// The report is what makes advertising `.ods` honest: this converter
+    /// carries values, formulas and sheets, and a host that saves one has to be
+    /// able to tell somebody what it cost *before* the file is overwritten.
+    /// Asserted against the bytes as well, so the report cannot drift into
+    /// warning about things that actually survived.
+    #[test]
+    fn what_the_writer_cannot_carry_is_counted() {
+        use casual_calc_model::{CellRange, Style};
+
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        // A merge, which has no writer here.
+        wb.sheets[0]
+            .merges
+            .push(CellRange::new(CellRef::new(0, 0), CellRef::new(0, 1)));
+        // A formatted cell.
+        let bold = wb.styles.intern(Style {
+            bold: true,
+            ..Style::default()
+        });
+        let text = wb.strings.intern("Item");
+        let mut cell = Cell::value(CellValue::InlineString(text));
+        cell.style = Some(bold);
+        wb.sheets[0].cells.set(CellRef::new(0, 0), cell);
+        // A formula with no ODF spelling this converter produces.
+        let named = wb.store_formula(casual_calc_formula::parse("TAX_RATE").expect("parses"));
+        let mut cell = Cell::value(CellValue::Number(0.2));
+        cell.formula = Some(named);
+        wb.sheets[0].cells.set(CellRef::new(1, 0), cell);
+
+        let report = export_loss(&wb);
+        let named_features: Vec<(String, u64)> = report
+            .entries()
+            .into_iter()
+            .map(|e| (e.feature.to_string(), e.count))
+            .collect();
+        let count = |want: &str| {
+            named_features
+                .iter()
+                .find(|(feature, _)| feature == want)
+                .map_or(0, |(_, count)| *count)
+        };
+        assert_eq!(count("merged cells"), 1, "{named_features:?}");
+        assert_eq!(count("cell formatting"), 1, "{named_features:?}");
+        assert_eq!(
+            count("formulas this converter cannot write as ODF"),
+            1,
+            "{named_features:?}"
+        );
+
+        // And what was named is genuinely absent, rather than a warning about
+        // something that survived after all.
+        let written = export_ods(&wb).expect("writes");
+        let mut zip = zip::ZipArchive::new(Cursor::new(&written[..])).expect("a zip");
+        let mut xml = String::new();
+        zip.by_name("content.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(!xml.contains("covered-table-cell"), "{xml}");
+        assert!(!xml.contains("TAX_RATE"), "{xml}");
+        // A workbook that loses nothing must not cry wolf either.
+        let mut plain = Workbook::new(Id::from_parts(1, 1));
+        plain
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        assert!(export_loss(&plain).is_empty());
     }
 
     /// **Rubbish is refused, not half-read.**

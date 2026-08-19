@@ -100,8 +100,8 @@ fn an_unset_favicon_is_absent_rather_than_empty() {
 /// stops meaning anything the moment somebody adds a format. It is asserted
 /// against the engine's own table instead: an extension may be advertised only
 /// if [`casual_calc_sdk::SessionFormat::for_extension`] recognises it, which is
-/// the same table `save_as` writes from. Adding `.ods` here cannot pass this
-/// until the engine can *write* one.
+/// the same table `save_as` writes from. That is what `.ods` had to earn before
+/// it could be added here, and what a binary `.xls` still has not.
 #[test]
 fn only_formats_that_round_trip_are_advertised() {
     use casual_calc_sdk::SessionFormat;
@@ -120,9 +120,10 @@ fn only_formats_that_round_trip_are_advertised() {
     }
 
     // And the ones that must stay out, named so the reason survives: this
-    // engine reads them and cannot write them.
+    // engine neither reads nor writes them, and assuming a package for an
+    // unrecognised name is how a file is replaced by a different one.
     let xml = document("https://c.example", &Brand::default(), None);
-    for unwritable in ["ods", "fods", "xls"] {
+    for unwritable in ["fods", "xls", "numbers"] {
         assert!(
             !xml.contains(&format!(r#"ext="{unwritable}""#)),
             "{unwritable} is advertised but this engine cannot write one"
@@ -134,12 +135,12 @@ fn only_formats_that_round_trip_are_advertised() {
 /// **The formats a save can now preserve are advertised, both actions each.**
 ///
 /// The point of the row: an administrator installing this into Nextcloud gets
-/// it offered for the spreadsheets their users actually have, and `.csv` is
-/// most of them.
+/// it offered for the spreadsheets their users actually have — `.csv` is most
+/// of them, and in a LibreOffice-first shop `.ods` is the rest (`WOPI-07`).
 #[test]
 fn the_delimited_formats_are_offered_for_editing() {
     let xml = document("https://calc.example", &Brand::default(), None);
-    for ext in ["xlsx", "csv", "tsv", "psv"] {
+    for ext in ["xlsx", "csv", "tsv", "psv", "ods"] {
         assert!(
             xml.contains(&format!(r#"<action name="edit" ext="{ext}""#)),
             "no edit action for {ext}: {xml}"

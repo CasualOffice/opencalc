@@ -16,16 +16,19 @@
 //! because `save_as` converts the finished package back to the format the file
 //! arrived in before it reaches `PutFile` (`WOPI-05`).
 //!
-//! `.ods` is still absent, and the rule is the test beside this module: every
-//! extension here must be one `SessionFormat::for_extension` recognises, which
-//! is the same table the save leg writes from. A format this engine can read
-//! but not write can never be added by editing this list alone.
+//! `.ods` joined them once the engine could *write* one (`WOPI-07`): a session
+//! opened from an OpenDocument file remembers that it was, and saves back as
+//! one. The rule is the test beside this module: every extension here must be
+//! one `SessionFormat::for_extension` recognises, which is the same table the
+//! save leg writes from. A format this engine can read but not write can never
+//! be added by editing this list alone.
 //!
-//! **What delimited text cannot carry is another matter, and is not silent.**
+//! **What a format cannot carry is another matter, and is not silent.**
 //! A `.csv` holds one sheet of values: no second sheet, no formulas, no
-//! formatting. The save leg counts and names every bit of that before it
-//! writes — see `describe_loss` — because the alternative to warning an
-//! administrator is surprising them.
+//! formatting. A `.ods` written here holds values, formulas and sheets, and not
+//! the formatting, merges, charts or validation around them. The save leg counts
+//! and names every bit of that before it writes — see `describe_loss` — because
+//! the alternative to warning an administrator is surprising them.
 //!
 //! # The brand is operator input, and goes into markup
 //!
@@ -92,7 +95,7 @@ fn non_empty(key: &str) -> Option<String> {
 ///
 /// `xlsx` stays first because it is the `default="true"` action and the one a
 /// host offers for a new document.
-pub const EDITABLE: &[&str] = &["xlsx", "csv", "tsv", "psv"];
+pub const EDITABLE: &[&str] = &["xlsx", "csv", "tsv", "psv", "ods"];
 
 /// Render `/hosting/discovery` for a service published at `public_url`.
 ///

@@ -306,7 +306,21 @@ async fn content(
     // so the content type below is true of every answer this endpoint gives,
     // which it was not before.
     let package = match to_package(bytes, session.format) {
-        Ok(package) => package,
+        Ok((package, loss)) => {
+            if let Some(loss) = loss {
+                // **The way in is a conversion too.** A `.ods` carries styles,
+                // merges and charts this engine's reader does not model, and
+                // they are gone from the package the editor works on — so they
+                // are gone from what is written back. Said here, at the moment
+                // the document is admitted, because that is when an
+                // administrator can still tell somebody to keep the original.
+                tracing::warn!(
+                    "reading a .{} drops what this engine does not model: {loss}",
+                    session.format.extension()
+                );
+            }
+            package
+        }
         Err(why) => {
             tracing::error!("the host's file could not be read: {why}");
             return (
@@ -326,22 +340,30 @@ async fn content(
         .into_response()
 }
 
-/// The host's bytes, in the OOXML package the collaboration server reads.
+/// The host's bytes, in the OOXML package the collaboration server reads — and
+/// what reading them cost.
 ///
 /// An `.xlsx` is handed straight through — untouched, not re-imported and
 /// re-written. That matters beyond the wasted work: a round trip through the
 /// semantic writer would rebuild every part this engine does not model, so
 /// merely *opening* a workbook and closing it again would change the file even
 /// when nobody typed anything.
-fn to_package(bytes: Vec<u8>, format: SessionFormat) -> Result<Vec<u8>, String> {
+///
+/// Every other format is *read*, and a reader that does not model everything in
+/// the file loses it here rather than on the way out. Returned as a pair for the
+/// same reason [`save_as`] is: the caller decides what to do with the loss, and
+/// a function that only returned bytes would make the silence the default.
+fn to_package(bytes: Vec<u8>, format: SessionFormat) -> Result<(Vec<u8>, Option<String>), String> {
     if format == SessionFormat::Xlsx {
-        return Ok(bytes);
+        return Ok((bytes, None));
     }
     let session =
         WorkbookSession::open_as(bytes, format).map_err(|e| format!("could not open: {e}"))?;
-    session
+    let loss = describe_loss(session.compatibility_report());
+    let package = session
         .save_as(SessionFormat::Xlsx)
-        .map_err(|e| format!("could not convert to a package: {e}"))
+        .map_err(|e| format!("could not convert to a package: {e}"))?;
+    Ok((package, loss))
 }
 
 /// The finished package, in the format the file on the host is in — and what

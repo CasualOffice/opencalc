@@ -59,6 +59,14 @@ pub enum SessionFormat {
     /// Delimited text (CSV / TSV / PSV), carrying the separator byte it was
     /// read with so the save uses the same one.
     Delimited(u8),
+    /// An OpenDocument spreadsheet.
+    ///
+    /// Carries **values, formulas and sheets**; everything else in the model —
+    /// formatting, merges, widths, validation, charts, images — has no writer
+    /// in `casual-calc-ods` yet and is counted by
+    /// [`loss_writing`](WorkbookSession::loss_writing) rather than dropped
+    /// quietly.
+    Ods,
 }
 
 impl SessionFormat {
@@ -66,11 +74,15 @@ impl SessionFormat {
     /// does not write.
     ///
     /// `None` rather than a fallback to [`Xlsx`](Self::Xlsx): guessing is how a
-    /// `.ods` would be opened and saved as a package under its original name.
+    /// `.numbers` would be opened and saved as a package under its original
+    /// name.
     #[must_use]
     pub fn for_extension(ext: &str) -> Option<Self> {
         if ext.eq_ignore_ascii_case("xlsx") {
             return Some(Self::Xlsx);
+        }
+        if ext.eq_ignore_ascii_case("ods") {
+            return Some(Self::Ods);
         }
         casual_calc_io::delimiter_for_extension(ext).map(Self::Delimited)
     }
@@ -83,6 +95,7 @@ impl SessionFormat {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Xlsx => "xlsx",
+            Self::Ods => "ods",
             Self::Delimited(casual_calc_io::COMMA) => "csv",
             Self::Delimited(casual_calc_io::TAB) => "tsv",
             Self::Delimited(casual_calc_io::PIPE) => "psv",
@@ -95,6 +108,7 @@ impl SessionFormat {
     pub fn content_type(self) -> &'static str {
         match self {
             Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            Self::Ods => "application/vnd.oasis.opendocument.spreadsheet",
             Self::Delimited(casual_calc_io::COMMA) => "text/csv;charset=utf-8",
             Self::Delimited(casual_calc_io::TAB) => "text/tab-separated-values;charset=utf-8",
             Self::Delimited(_) => "text/plain;charset=utf-8",
@@ -243,6 +257,8 @@ pub enum SdkError {
     Import(ImportError),
     /// Reading a delimited (CSV/TSV/PSV) file failed.
     Io(IoError),
+    /// Reading or writing an OpenDocument spreadsheet failed.
+    Ods(casual_calc_ods::OdsError),
     /// Export failed.
     Export(ExportError),
     /// A render failed.
@@ -269,6 +285,7 @@ impl core::fmt::Display for SdkError {
         match self {
             SdkError::Import(e) => write!(f, "{e}"),
             SdkError::Io(e) => write!(f, "{e}"),
+            SdkError::Ods(e) => write!(f, "{e}"),
             SdkError::Export(e) => write!(f, "{e}"),
             SdkError::Render(e) => write!(f, "{e}"),
             SdkError::Edit(e) => write!(f, "{e}"),
@@ -311,6 +328,11 @@ impl From<ImportError> for SdkError {
 impl From<IoError> for SdkError {
     fn from(e: IoError) -> Self {
         SdkError::Io(e)
+    }
+}
+impl From<casual_calc_ods::OdsError> for SdkError {
+    fn from(e: casual_calc_ods::OdsError) -> Self {
+        SdkError::Ods(e)
     }
 }
 impl From<ExportError> for SdkError {
@@ -532,10 +554,61 @@ impl WorkbookSession {
     ) -> Result<Self, SdkError> {
         match format {
             SessionFormat::Xlsx => Self::open_with(bytes, config),
+            SessionFormat::Ods => Self::open_ods_with(bytes, config),
             SessionFormat::Delimited(delimiter) => {
                 Self::open_delimited_with(bytes, delimiter, config)
             }
         }
+    }
+
+    /// Open an OpenDocument spreadsheet.
+    ///
+    /// **The format is remembered**, so [`save`](Self::save) writes a `.ods`
+    /// back rather than an OOXML package. What that writer cannot carry —
+    /// formatting, merges, widths, validation, charts, images — is named by
+    /// [`format_loss`](Self::format_loss) before the save, and what the *file*
+    /// lost coming in is named by
+    /// [`compatibility_report`](Self::compatibility_report). The two are
+    /// different questions and both have answers.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Ods`] if the bytes are not a readable OpenDocument package.
+    pub fn open_ods(bytes: Vec<u8>) -> Result<Self, SdkError> {
+        Self::open_ods_with(bytes, SessionConfig::new())
+    }
+
+    /// The same, under a given configuration.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_ods`](Self::open_ods).
+    pub fn open_ods_with(bytes: Vec<u8>, config: SessionConfig) -> Result<Self, SdkError> {
+        let (mut workbook, report) = casual_calc_ods::import_ods(&bytes)?;
+        apply_environment(&mut workbook, &config);
+        // The file's own cached values came from LibreOffice's engine, and this
+        // reader does not carry a calculation mode to say otherwise; a formula
+        // that translated is recalculated here so the session starts consistent
+        // with itself.
+        recalculate(&mut workbook);
+        Ok(Self {
+            calculation: config.calculation.unwrap_or_default(),
+            history: History::with_depth(config.undo_depth),
+            workbook,
+            report,
+            config,
+            stale: false,
+            applied: None,
+            recalc: Recalculator::new(),
+            views: PersonalViews::new(),
+            format: SessionFormat::Ods,
+            // Same guarantee as a package: opened and not edited saves as
+            // itself, byte for byte. It matters more here than anywhere, since
+            // this writer keeps far less than the reader takes in — a save that
+            // rebuilt the file would throw away the styles it merely could not
+            // model.
+            source: Some(bytes),
+        })
     }
 
     /// Open delimited text (CSV / TSV / PSV) by its separator byte.
@@ -1127,6 +1200,7 @@ impl WorkbookSession {
     pub fn loss_writing(&self, format: SessionFormat) -> CompatibilityReport {
         match format {
             SessionFormat::Xlsx => CompatibilityReport::default(),
+            SessionFormat::Ods => casual_calc_ods::export_loss(&self.workbook),
             SessionFormat::Delimited(_) => delimited_loss(&self.workbook, DELIMITED_SHEET),
         }
     }
@@ -1201,6 +1275,7 @@ impl WorkbookSession {
         self.workbook.validate()?;
         match format {
             SessionFormat::Xlsx => Ok(write_workbook(&self.workbook)?),
+            SessionFormat::Ods => Ok(casual_calc_ods::export_ods(&self.workbook)?),
             // No byte-order mark. `read_delimited` does not strip one, so a BOM
             // written here comes back as part of the first field — a save that
             // makes its own output unreadable by the reader that produced it.
