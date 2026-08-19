@@ -342,6 +342,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "casual-calc-loadtest"
+version = "0.0.0"
+dependencies = [
+ "casual-calc-collab-server",
+ "casual-calc-transaction",
+ "futures-util",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+]
+
+[[package]]
 name = "casual-calc-model"
 version = "0.0.0"
 dependencies = [

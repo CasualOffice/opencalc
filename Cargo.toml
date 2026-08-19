@@ -17,6 +17,7 @@ members = [
     "crates/casual-calc-sdk",
     "crates/casual-calc-wasm",
     "tools/casual-calc-benchmark",
+    "tools/casual-calc-loadtest",
     "tools/casual-calc-fidelity",
     # The collaboration server is a *host*, not an engine layer (ADR-012). It
     # may depend on the crates; nothing under `crates/` may depend on it, which

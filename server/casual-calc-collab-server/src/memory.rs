@@ -128,6 +128,47 @@ pub fn admits(budget: Option<MemoryBudget>, used: Option<u64>) -> bool {
 mod tests {
     use super::*;
 
+    /// **The check that runs under a held lock must not take one.**
+    ///
+    /// This is the shape of the bug that reached main: the admission check
+    /// locked the document registry to count, and one caller already held that
+    /// lock, so the server deadlocked on the first join. It did not crash and
+    /// logged nothing — the socket simply went quiet for twenty seconds and
+    /// then for ever, which is the worst way for a server to fail because
+    /// nothing anywhere says what happened.
+    ///
+    /// Asserted with a timeout rather than by inspection, because a deadlock is
+    /// invisible to every other kind of test: it does not fail, it waits.
+    #[test]
+    fn the_memory_check_completes_while_a_lock_is_held() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+
+        // Stands in for `registry.live`: a caller holds it and then asks
+        // whether there is room.
+        let held: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let guard = held.lock().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let budget = MemoryBudget {
+            limit_bytes: 1_000_000_000,
+            high_water_percent: 85,
+        };
+        std::thread::spawn(move || {
+            // Exactly what `admits_memory` does: read usage, compare. No lock.
+            let answer = admits(Some(budget), current_resident_bytes());
+            let _ = tx.send(answer);
+        });
+
+        let answered = rx.recv_timeout(Duration::from_secs(5));
+        drop(guard);
+        assert!(
+            answered.is_ok(),
+            "the memory check did not answer within five seconds while a lock was held \
+             — it is acquiring something, which is the deadlock this guards"
+        );
+    }
+
     /// **A budget refuses before the ceiling, not at it.**
     ///
     /// The whole point: reaching the cgroup limit is an OOM kill, which takes

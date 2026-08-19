@@ -513,6 +513,29 @@ impl Service {
     /// An unmeasurable platform admits. A node that cannot read its own usage
     /// must not become one that refuses everything, and the operator is warned
     /// at startup instead.
+    /// **Takes no locks**, so it is safe to call with the registry held.
+    ///
+    /// The first version of this locked `registry.live` to check the document
+    /// count — and one of its callers already held that lock, so the server
+    /// deadlocked on the first join that reached it. Not a crash and not an
+    /// error: the socket simply went quiet for ever, which is the worst way for
+    /// a server to fail because nothing anywhere says so.
+    ///
+    /// The count and the memory check are separate now precisely so this one
+    /// can never acquire anything.
+    #[must_use]
+    pub fn admits_memory(&self) -> bool {
+        crate::memory::admits(
+            self.config.limits.memory_budget,
+            crate::memory::current_resident_bytes(),
+        )
+    }
+
+    /// Whether this node has room for another document.
+    ///
+    /// Locks the registry to count, so it must **not** be called with that lock
+    /// already held — use [`Service::admits_memory`] and count from the guard
+    /// you have.
     #[must_use]
     pub fn admits_more_work(&self) -> bool {
         if over_count(
@@ -521,10 +544,7 @@ impl Service {
         ) {
             return false;
         }
-        crate::memory::admits(
-            self.config.limits.memory_budget,
-            crate::memory::current_resident_bytes(),
-        )
+        self.admits_memory()
     }
 
     /// Turn this node's own counter into an id unique across the cluster.
@@ -1252,7 +1272,15 @@ impl Metrics {
     /// Gauges are passed in rather than stored, because they are derived from
     /// the registry and a stored copy would be a second source of truth for
     /// something already known exactly.
-    fn expose(&self, documents: usize, participants: usize) -> String {
+    /// `budget` comes from the caller rather than a field: metrics count
+    /// events, and the admission ceiling is configuration. Threading it through
+    /// keeps the two apart.
+    fn expose(
+        &self,
+        documents: usize,
+        participants: usize,
+        budget: Option<crate::memory::MemoryBudget>,
+    ) -> String {
         use std::sync::atomic::Ordering::Relaxed;
         let mut out = String::new();
         let mut counter = |name: &str, help: &str, value: u64| {
@@ -1318,6 +1346,30 @@ impl Metrics {
              # TYPE opencalc_participants gauge\n\
              opencalc_participants {participants}\n"
         ));
+        // **What the node is actually using, and what it may use.**
+        //
+        // Admission is decided by memory now (`SRV-03`), so the two numbers
+        // that explain a refusal have to be visible. Without them a node that
+        // stops taking documents looks broken rather than full, and the first
+        // question — "is it near its limit?" — has no answer.
+        //
+        // Absent rather than zero where the platform cannot be read: a gauge
+        // reporting zero bytes resident would be alarming and wrong.
+        if let Some(used) = crate::memory::current_resident_bytes() {
+            out.push_str(&format!(
+                "# HELP opencalc_resident_bytes Resident set size of this node.\n\
+                 # TYPE opencalc_resident_bytes gauge\n\
+                 opencalc_resident_bytes {used}\n"
+            ));
+        }
+        if let Some(budget) = budget {
+            let high_water = budget.high_water_bytes();
+            out.push_str(&format!(
+                "# HELP opencalc_admission_limit_bytes Resident size at which this node stops admitting work.\n\
+                 # TYPE opencalc_admission_limit_bytes gauge\n\
+                 opencalc_admission_limit_bytes {high_water}\n"
+            ));
+        }
         out
     }
 }
@@ -1378,7 +1430,9 @@ async fn metrics(State(state): State<Arc<Service>>) -> impl axum::response::Into
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.metrics.expose(live.len(), participants),
+        state
+            .metrics
+            .expose(live.len(), participants, state.config.limits.memory_budget),
     )
 }
 
@@ -1502,7 +1556,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
 
     // A document that is already full turns the next arrival away rather than
     // degrading for everybody in it.
-    if !state.admits_more_work()
+    // **The document count is not this decision.** Joining a document already
+    // open costs one connection, not one document — so asking
+    // `admits_more_work` here refused every arrival once the node reached its
+    // document cap, including people joining a document already in front of
+    // them. What bounds this is the roster and the node's memory.
+    if !state.admits_memory()
         || over_count(
             lock(&live.roster).len(),
             state.config.limits.max_participants,
@@ -1915,7 +1974,12 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                     .map_err(|_| Refusal::NotSaving)?;
 
             let mut registry = lock(&state.registry.live);
-            if !registry.contains_key(&key) && !state.admits_more_work() {
+            // `registry` is held here, so the count comes from the guard and
+            // the check that must not lock is the one that is called.
+            if !registry.contains_key(&key)
+                && (over_count(registry.len(), state.config.limits.max_documents)
+                    || !state.admits_memory())
+            {
                 return Err(Refusal::NotSaving);
             }
             // `entry` rather than `insert`: a document evicted and reopened
