@@ -41,6 +41,8 @@ struct Report {
     /// How each measured operation grew when its input did. The part that is
     /// actually a gate — see [`ScalingReport`].
     scaling: Vec<ScalingReport>,
+    /// What a million cells cost in resident memory — see [`MemoryReport`].
+    memory: MemoryReport,
     cases: Vec<CaseReport>,
 }
 
@@ -217,6 +219,123 @@ struct ScalingReport {
     /// The largest ratio this case may show.
     budget_centi: u64,
     within_budget: bool,
+}
+
+/// What a million cells actually cost in memory, or why that is unknown.
+///
+/// `PERF-08` measured a real million-cell build, which is *payload* — the bytes
+/// a document holds — and not what the process asks the operating system for.
+/// The two differ by whatever the allocator, the index structures and the
+/// interning add, and that difference is the whole question when the target is
+/// "a million cells on a laptop".
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryReport {
+    /// Whether this platform could be measured at all.
+    ///
+    /// Reported rather than omitted so a run on a machine with no `/proc` says
+    /// so, instead of looking like a run where the number happened to be
+    /// missing. macOS is that machine, which is why this had to be honest
+    /// rather than convenient.
+    available: bool,
+    /// Peak resident set before the workbook was built, in bytes.
+    baseline_bytes: u64,
+    /// Peak resident set after it was built.
+    peak_bytes: u64,
+    /// The workbook's own cost: `peak - baseline`.
+    workbook_bytes: u64,
+    cells: u64,
+    /// `workbook_bytes / cells`, in hundredths of a byte so the report stays
+    /// integers.
+    ///
+    /// **This is the figure worth comparing across machines.** A byte is a byte
+    /// on every runner, unlike a nanosecond — so unlike the timing gates, an
+    /// absolute per-cell ceiling here is calibratable and does not need to be
+    /// expressed as a ratio.
+    centi_bytes_per_cell: u64,
+}
+
+/// Peak resident set size, from `/proc/self/status`.
+///
+/// `VmHWM` (high-water mark) rather than `VmRSS`: resident size falls when the
+/// kernel reclaims pages, so a reading taken after a build can be lower than
+/// what the build actually needed. The peak is what "will this fit" means.
+///
+/// **No counting allocator**, because `unsafe_code = "forbid"` is set
+/// workspace-wide and `GlobalAlloc` cannot be implemented without `unsafe`.
+/// Reading a file needs none, and this is the measurement the target is
+/// expressed in anyway — the operating system's view, not the allocator's.
+fn peak_resident_bytes() -> Option<u64> {
+    parse_vm_hwm(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// Pull `VmHWM` out of a `/proc/self/status` body, in bytes.
+///
+/// Separated from the file read so it can be tested on a machine that has no
+/// `/proc` — which is every developer machine here. The alternative was a
+/// parser that only ever ran on CI, and a parser nobody can run is one nobody
+/// can be sure of.
+fn parse_vm_hwm(status: &str) -> Option<u64> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Turn two readings into a report.
+///
+/// Pure, and separated from the measuring for the same reason [`parse_vm_hwm`]
+/// is: every machine here lacks `/proc`, so a decision made inside the
+/// measurement could only ever be exercised on CI. The first version of this
+/// *was* inside, and a mutation that broke the guard could not be caught
+/// locally at all — the function returned at the no-`/proc` path long before
+/// reaching it.
+fn classify_memory(baseline: Option<u64>, peak: Option<u64>, cells: u32) -> MemoryReport {
+    let unavailable = |baseline: u64, peak: u64| MemoryReport {
+        available: false,
+        baseline_bytes: baseline,
+        peak_bytes: peak,
+        workbook_bytes: 0,
+        cells: u64::from(cells),
+        centi_bytes_per_cell: 0,
+    };
+    let (Some(baseline), Some(peak)) = (baseline, peak) else {
+        return unavailable(0, 0);
+    };
+    let grew = peak.saturating_sub(baseline);
+    // **A build that cost nothing did not get measured.**
+    //
+    // `VmHWM` is a process-lifetime peak, so if anything larger ran first this
+    // reads zero — indistinguishable from a workbook that is free, and reading
+    // far more reassuringly. Reported as *unavailable* instead: "we could not
+    // measure this" and "this costs nothing" must never look the same in a
+    // report somebody sets a budget from.
+    if grew == 0 || cells == 0 {
+        return unavailable(baseline, peak);
+    }
+    MemoryReport {
+        available: true,
+        baseline_bytes: baseline,
+        peak_bytes: peak,
+        workbook_bytes: grew,
+        cells: u64::from(cells),
+        centi_bytes_per_cell: grew.saturating_mul(100) / u64::from(cells),
+    }
+}
+
+/// Build a workbook of `cells` cells and report what it cost.
+fn measure_memory(cells: u32) -> MemoryReport {
+    let baseline = peak_resident_bytes();
+    let workbook = build_workbook(cells);
+    let peak = peak_resident_bytes();
+    // Read the peak before dropping, and keep the workbook alive to here, or
+    // the optimiser is entitled to have freed it already.
+    let held = workbook.sheets.len();
+    debug_assert!(held > 0 || cells == 0);
+    classify_memory(baseline, peak, cells)
 }
 
 /// Twenty-five times, for ten times the work.
@@ -728,6 +847,23 @@ fn main() {
     let environment = arg_value(&args, "--env").unwrap_or_else(|| "unspecified".to_owned());
     let iterations = if smoke { 5 } else { 200 };
 
+    // **Memory first, before any other case runs.**
+    //
+    // `VmHWM` is a high-water mark for the *process*, not for this build. The
+    // scaling cases build workbooks an order of magnitude larger, so measuring
+    // afterwards compares a small build against a peak something else already
+    // set — and reports that a million cells cost nothing. That is exactly what
+    // the first CI run showed: `baselineBytes` and `peakBytes` identical to the
+    // byte, and a workbook that apparently occupied no memory at all.
+    //
+    // The order therefore matters, which is a fragile thing to depend on. It is
+    // depended on anyway because the alternative — re-exec'ing into a child
+    // process — buys robustness at the cost of a failure mode in every sandbox
+    // this runs in. What makes it safe is that the failure is *loud*: a real
+    // build cannot cost zero bytes, so CI asserts the number is positive and
+    // caught this on the first run rather than reporting a comforting zero.
+    let memory = measure_memory(if smoke { 50_000 } else { 1_000_000 });
+
     let cases = build_cases()
         .iter()
         .map(|bench| run_bench(bench, iterations))
@@ -753,9 +889,101 @@ fn main() {
         smoke,
         cases,
         scaling: measure_all_scaling(if smoke { 3 } else { 20 }),
+        memory,
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    /// A real `/proc/self/status`, trimmed. The fields around `VmHWM` are kept
+    /// because they are what a naive parser trips over: `VmHW` is a prefix of
+    /// nothing, but `VmRSS` sits next to it and `VmPeak` looks similar.
+    const STATUS: &str = "\
+Name:\tbench
+VmPeak:\t  812345 kB
+VmSize:\t  712345 kB
+VmHWM:\t   524288 kB
+VmRSS:\t   412345 kB
+Threads:\t1
+";
+
+    /// **The peak is read, in bytes, from the right line.**
+    #[test]
+    fn the_high_water_mark_is_parsed_in_bytes() {
+        assert_eq!(parse_vm_hwm(STATUS), Some(524_288 * 1024));
+    }
+
+    /// **`VmHWM`, not `VmRSS` or `VmPeak`.**
+    ///
+    /// `VmRSS` falls when the kernel reclaims pages, so a reading taken after a
+    /// build can be lower than what the build needed — the number would drift
+    /// down on a busy runner and the gate would loosen itself. `VmPeak` is
+    /// address space, which is not memory.
+    #[test]
+    fn neither_the_current_size_nor_the_address_space_is_used() {
+        let got = parse_vm_hwm(STATUS).unwrap();
+        assert_ne!(got, 412_345 * 1024, "VmRSS was read instead of VmHWM");
+        assert_ne!(got, 812_345 * 1024, "VmPeak was read instead of VmHWM");
+    }
+
+    /// **A platform with no such field says so**, rather than reporting zero as
+    /// though it had measured nothing being used.
+    #[test]
+    fn a_status_without_the_field_is_unavailable() {
+        assert_eq!(parse_vm_hwm("Name:\tbench\nThreads:\t1\n"), None);
+        assert_eq!(parse_vm_hwm(""), None);
+    }
+
+    /// **A peak that did not move is not a free workbook.**
+    ///
+    /// This is what the first CI run reported: `baselineBytes` and `peakBytes`
+    /// identical to the byte, and a million cells apparently costing nothing —
+    /// because `VmHWM` is a process-lifetime peak and the scaling cases had
+    /// already set it. The reassuring reading is the dangerous one.
+    #[test]
+    fn a_peak_that_did_not_move_is_reported_as_unmeasured() {
+        let report = classify_memory(Some(17_088_512), Some(17_088_512), 1_000_000);
+        assert!(
+            !report.available,
+            "a build that moved no pages was reported as a successful measurement"
+        );
+        assert_eq!(report.workbook_bytes, 0);
+        assert_eq!(report.centi_bytes_per_cell, 0);
+    }
+
+    /// **A peak that did move is measured, and divided per cell.**
+    ///
+    /// The control: a guard that rejected everything would satisfy the test
+    /// above and measure nothing ever again.
+    #[test]
+    fn a_real_growth_is_measured_per_cell() {
+        let report = classify_memory(Some(16_000_000), Some(66_000_000), 1_000_000);
+        assert!(
+            report.available,
+            "a 50 MB growth was not treated as a measurement"
+        );
+        assert_eq!(report.workbook_bytes, 50_000_000);
+        // 50 bytes a cell, in hundredths.
+        assert_eq!(report.centi_bytes_per_cell, 5_000);
+    }
+
+    /// **An unreadable platform is unavailable, not zero-cost.**
+    ///
+    /// The distinction the row insisted on: a run on a machine with no `/proc`
+    /// must not look like a run where a million cells cost nothing.
+    #[test]
+    fn an_unreadable_platform_is_not_reported_as_zero_cost() {
+        for (base, peak) in [(None, None), (None, Some(1)), (Some(1), None)] {
+            assert!(
+                !classify_memory(base, peak, 1_000).available,
+                "an unreadable reading was reported as a measurement"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

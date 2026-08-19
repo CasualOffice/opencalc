@@ -112,6 +112,23 @@ jobs:
         run: |
           jq -e '(.scaling | length) >= 1 and all(.scaling[]; .withinBudget)' report.json \
             || { jq '.scaling' report.json; echo "::error::a case grew faster than its budget allows"; exit 1; }
+      # **Measured here, not bounded here — yet.** `PERF-10` says an
+      # uncalibrated threshold is worse than none, and it is right: this
+      # project's own machines have no `/proc`, so the first honest figure can
+      # only come from this runner. What is asserted is that the measurement
+      # *happened* — a reading that silently stops working looks exactly like a
+      # workbook that got cheaper.
+      #
+      # Unlike the timing gates, the per-cell figure will be directly
+      # comparable: a byte is a byte on every runner, so the ceiling that
+      # follows can be an absolute number rather than a ratio.
+      - name: Resident memory for a million cells is measured
+        run: |
+          jq -e '.memory.available == true
+                 and .memory.workbookBytes > 0
+                 and .memory.centiBytesPerCell > 0' report.json \
+            || { jq '.memory' report.json; echo "::error::the memory measurement did not run"; exit 1; }
+          jq -r '"a million cells cost \(.memory.workbookBytes) bytes, \(.memory.centiBytesPerCell / 100) bytes per cell"' report.json
 
   # The SDK's published surface, compiled the way an integrator compiles it.
   #
