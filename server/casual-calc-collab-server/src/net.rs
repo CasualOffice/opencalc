@@ -2405,6 +2405,21 @@ async fn handle(
                             (revision, Vec::new())
                         }
                     };
+                    // **Counted where the ordering happens.** Standalone has
+                    // no log to append to, so this commit *is* the ordering,
+                    // and `revisions` read zero on a node doing nothing but
+                    // this. By operations rather than by call: a revision
+                    // number counts operations — the editor batches a flush
+                    // window into one submission, and `order()` computes the
+                    // range it spans as `revision - ops.len()` — so counting
+                    // submissions would report a rate the revision numbers
+                    // contradict. A duplicate carries no ops and so adds
+                    // nothing, which is right: it was ordered once.
+                    state
+                        .metrics
+                        .revisions
+                        .fetch_add(ops.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
                     // Everyone else sees what landed. The sender does not need
                     // it — its own ops are already applied locally, and the ack
                     // is what tells it they are ordered.
@@ -2839,6 +2854,15 @@ async fn order(
             return;
         }
     }
+    // In the log, so it happened. Counted here rather than at the commit
+    // above, because a commit whose append was refused is work this node has
+    // and the cluster does not — `appends_refused` is that, and counting it as
+    // a revision too would make the two disagree.
+    state
+        .metrics
+        .revisions
+        .fetch_add(batch.ops.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
     let channel = crate::relay::committed_channel(membership.store.namespace(), key);
     if let Err(why) = membership.store.publish(&channel, payload).await {
         // Every other node will notice the gap and read the log, so this is

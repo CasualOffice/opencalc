@@ -2629,6 +2629,273 @@ async fn metrics_count_a_save_that_really_happened() {
     assert!(body.contains("# TYPE opencalc_documents gauge"));
 }
 
+/// **An edit moves `opencalc_revisions_total`.**
+///
+/// The last of the four counters that were declared, exposed and incremented
+/// nowhere (`SRV-06`). It reports edit throughput, so a cluster taking a
+/// thousand operations a second read as idle — and "idle" is the shape of both
+/// "nobody is here" and "every submission is being dropped", which is the one
+/// distinction this number exists to make.
+///
+/// Counted in operations, because that is what a revision number counts: the
+/// editor batches a flush window into one submission, so a two-operation
+/// submission advances the revision by two and must move this by two.
+#[tokio::test]
+async fn an_ordered_edit_moves_the_revision_counter() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join(&mut socket, &claims("Ada", Access::Edit)).await
+    else {
+        panic!("joined")
+    };
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        0,
+        "nothing has been ordered yet: {body}"
+    );
+
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(7.0), cell_at(2, 8.0)],
+        }),
+    )
+    .await;
+    let ack = hear(&mut socket).await;
+    let Some(ServerMessage::Ack {
+        revision: reached, ..
+    }) = ack
+    else {
+        panic!("ordered, got {ack:?}")
+    };
+    assert_eq!(reached, revision + 2, "two operations, two revisions");
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        2,
+        "the edit that moved the document did not move the counter: {body}"
+    );
+
+    // And a redelivery is not throughput. The client resends the chunk it
+    // already sent — a reconnecting editor does exactly this — and the server
+    // answers from its idempotency record without ordering anything.
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(7.0), cell_at(2, 8.0)],
+        }),
+    )
+    .await;
+    assert!(matches!(
+        hear(&mut socket).await,
+        Some(ServerMessage::Ack { .. })
+    ));
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        2,
+        "a duplicate was counted as new work: {body}"
+    );
+}
+
+// --- The gate the four dead counters got past -------------------------------
+//
+// `fetches_ok`, `fetches_failed`, `refused_capacity` and `revisions` were each
+// declared on `Metrics`, exposed on `/metrics`, written down in `docs/65` — and
+// incremented nowhere. Nothing caught it for months, and nothing could: a
+// Prometheus exposition full of zeros parses exactly as well as one full of
+// real numbers, so every test that scraped the endpoint passed.
+//
+// The gate below is therefore about the *declaration*, not about any particular
+// counter: it reads the fields off `Metrics` itself and demands that each one
+// is both exposed and incremented by shipping code. A list of counter names
+// written into a test would be the same artefact as the list in `docs/65` —
+// correct on the day it was written, and silently short by one the day somebody
+// adds a counter, which is precisely how this happened.
+
+/// **Every `AtomicU64` on `Metrics` is exposed, and incremented by shipping
+/// code.**
+///
+/// Driven from the struct rather than from a list. Adding a counter extends
+/// this test with no edit; deleting an increment fails it; adding a counter and
+/// forgetting to wire it fails it on the first run rather than during the
+/// outage it was meant to explain.
+///
+/// It reads the crate's own sources, which is the part worth defending. The
+/// alternative — drive every counter from a live scenario and diff the
+/// exposition — proves more but cannot be written without a hand-kept
+/// field-to-scenario table (and a coordinator, for the counters that only move
+/// in a cluster), which is the maintenance burden this is avoiding. So: the
+/// scenario tests above prove the *paths*, and this proves *coverage*.
+#[test]
+fn every_counter_on_metrics_is_exposed_and_incremented_somewhere() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let net = std::fs::read_to_string(src.join("net.rs")).expect("the crate's own source");
+
+    let declared = declared_counters(&net);
+    assert!(
+        declared.len() >= 5,
+        "the struct was not parsed — a gate that finds no fields passes vacuously: {declared:?}"
+    );
+
+    // Shipping code only. An increment that exists in a test module is a test
+    // exercising nothing, and would let a dead counter pass the very check
+    // written to find it.
+    let shipping: Vec<String> = shipping_sources(&src)
+        .iter()
+        .map(|path| code_only(&std::fs::read_to_string(path).expect("a source file")))
+        .collect();
+    assert!(
+        shipping.len() >= 10,
+        "the walk found {} files under {} — it is not reading the crate",
+        shipping.len(),
+        src.display()
+    );
+
+    let exposition = code_only(&net);
+    for field in &declared {
+        assert!(
+            exposition.contains(&format!(".{field}.load(")),
+            "`{field}` is a counter nobody can scrape: it is declared on Metrics and never read \
+             into the exposition"
+        );
+        let increment = format!(".{field}.fetch_add(");
+        assert!(
+            shipping.iter().any(|code| code.contains(&increment)),
+            "`{field}` is incremented by no shipping code path, so it reports zero for ever — \
+             which is indistinguishable from the thing it counts never happening"
+        );
+    }
+}
+
+/// The `AtomicU64` fields of `pub struct Metrics`, in declaration order.
+fn declared_counters(net: &str) -> Vec<String> {
+    net.split_once("pub struct Metrics {")
+        .map(|(_, body)| body)
+        .unwrap_or_default()
+        .lines()
+        .take_while(|line| line.trim_end() != "}")
+        .filter(|line| line.contains("AtomicU64"))
+        .filter_map(|line| {
+            let (name, _) = line.trim().trim_start_matches("pub ").split_once(':')?;
+            Some(name.trim().to_owned())
+        })
+        .collect()
+}
+
+/// Every `.rs` under `src` that is compiled into the binary rather than into
+/// the test harness.
+fn shipping_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("a readable source tree") {
+            let path = entry.expect("a directory entry").path();
+            // `foo/tests.rs` and anything under a `tests/` directory is the
+            // harness, by this crate's own layout.
+            if path.file_stem().is_some_and(|stem| stem == "tests") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Rust source with comments, string literals and whitespace removed.
+///
+/// All three matter. The comments in this crate are long enough that "the text
+/// `.revisions.fetch_add(` appears somewhere" would be satisfied by a comment
+/// *describing* the increment that was deleted; string literals can hold
+/// anything at all; and the increments are formatted across four lines, so a
+/// search over the raw text would be a search for one particular line-breaking.
+fn code_only(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match (c, next) {
+            ('/', Some('/')) => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            ('/', Some('*')) => {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+            }
+            ('"', _) => {
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            // A char literal, which may be `'"'` — and mistaking that for the
+            // start of a string swallows the rest of the file. A lifetime has
+            // no closing quote and falls through to be copied out.
+            ('\'', Some(escaped)) if escaped == '\\' || chars.get(i + 2) == Some(&'\'') => {
+                i += if chars[i + 1] == '\\' { 4 } else { 3 };
+            }
+            _ => {
+                if !c.is_whitespace() {
+                    out.push(c);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The stripper the gate depends on, checked on the shapes that would break it.
+///
+/// A `code_only` that quietly ate the file would make the gate pass on an empty
+/// string — the failure mode of a checker is that it stops checking.
+#[test]
+fn code_only_keeps_code_and_drops_everything_that_is_not() {
+    assert_eq!(code_only("let x = 1; // .a.fetch_add("), "letx=1;");
+    assert_eq!(code_only("/* .a.fetch_add( */ let x = 1;"), "letx=1;");
+    assert_eq!(
+        code_only("let s = \"// .a.fetch_add(\"; f();"),
+        "lets=;f();"
+    );
+    // The escape that would otherwise end the literal early.
+    assert_eq!(code_only("let s = \"\\\"//\"; f();"), "lets=;f();");
+    // A char literal holding a quote, which is in this crate's `config.rs`.
+    assert_eq!(
+        code_only("t.trim_matches('\"'); f();"),
+        "t.trim_matches();f();"
+    );
+    assert_eq!(code_only("fn f<'a>(x: &'a str) {}"), "fnf<'a>(x:&'astr){}");
+    // And the shape the gate actually looks for, as rustfmt writes it.
+    assert!(
+        code_only("state\n    .metrics\n    .revisions\n    .fetch_add(1, Relaxed);")
+            .contains(".revisions.fetch_add(")
+    );
+}
+
 /// One counter's value out of a Prometheus exposition.
 fn counter(body: &str, name: &str) -> u64 {
     body.lines()
@@ -2999,6 +3266,79 @@ async fn a_refused_append_is_reported_to_the_client_rather_than_swallowed() {
             })
         ),
         "the author was told their edit did not land; got {answer:?}"
+    );
+
+    // **And it was not counted as throughput.** `revisions` is incremented on
+    // the far side of the append, deliberately: `order` commits locally before
+    // it appends, so a fenced leader holds an edit the cluster does not have.
+    // Counting that as an ordered revision would make this node report work the
+    // log has never seen — `appends_refused` is the number that describes it.
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        1,
+        "only the first edit reached the log: {body}"
+    );
+    assert_eq!(
+        counter(&body, "opencalc_appends_refused_total"),
+        1,
+        "and the refusal is what the second one is: {body}"
+    );
+}
+
+/// **A leader counts the revisions it appends.**
+///
+/// The other half of `SRV-06`. Standalone counts at the commit and a clustered
+/// leader counts at the append, because there is no log in the first case and
+/// the append can be refused in the second — two lines, so two tests. Without
+/// this, the counter could be wired on the path a single-node test exercises
+/// and dead on the path production runs.
+#[tokio::test]
+async fn a_leader_counts_the_revisions_it_orders() {
+    let space = namespace("revision-counter");
+    let Some(addr) = start_clustered("node-one", &space).await else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let mut socket = connect_to(addr).await;
+    let Some(ServerMessage::Welcome {
+        client, revision, ..
+    }) = join(&mut socket, &claims("Ada", Access::Edit)).await
+    else {
+        panic!("joined")
+    };
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        0,
+        "nothing has been ordered yet: {body}"
+    );
+
+    // Two operations in one submission, as the editor's flush window produces:
+    // a revision counts operations, so this must move the counter by two and
+    // not by one.
+    say(
+        &mut socket,
+        &ClientMessage::Submit(Submission {
+            client,
+            seq: 1,
+            base: Base::Revision(revision),
+            ops: vec![cell_edit(7.0), cell_at(2, 8.0)],
+        }),
+    )
+    .await;
+    let landed = hear_edit(&mut socket, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(landed, Some(ServerMessage::Ack { through: 1, .. })),
+        "the node leads and the edit landed; got {landed:?}"
+    );
+
+    let body = scrape(addr).await;
+    assert_eq!(
+        counter(&body, "opencalc_revisions_total"),
+        2,
+        "the leader appended two operations and reported none: {body}"
     );
 }
 

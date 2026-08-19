@@ -265,6 +265,97 @@ fn an_ordinary_refusal_does_not_blame_a_port() {
     );
 }
 
+/// **SEC-018. An IPv6 literal reaches the allow-list intact.**
+///
+/// The port used to be stripped with `rsplit_once(':')`, which for `[::1]`
+/// splits at the last colon *of the address* — leaving `[:`, which trimmed to
+/// `":"`. So `OPENCALC_ALLOWED_HOSTS=::1` matched nothing at all, and a
+/// deployment reaching its host over IPv6 could not be configured to work.
+/// It failed closed, so it is a dead allow-list entry rather than an open door
+/// — the same shape as the `host:port` trap above, and just as invisible from
+/// both ends: the entry looks right and the URL looks right.
+#[test]
+fn a_bracketed_ipv6_literal_matches_the_allowed_host_that_names_it() {
+    let mut p = policy();
+    p.allowed_hosts.insert("::1".into());
+
+    for url in [
+        "https://[::1]/files/1",
+        "https://[::1]:8443/files/1",
+        "https://user:pw@[::1]/files/1",
+        "https://[::1]/files/1?x=1#y",
+        // The same address, spelled the long way. An entry that *is* the host
+        // being refused, in another spelling, is the defect again.
+        "https://[0:0:0:0:0:0:0:1]/files/1",
+    ] {
+        assert_eq!(check_url(url, &p), Ok(()), "should allow {url}");
+    }
+
+    // And the operator may write the brackets a URL puts around it, because
+    // that is what they will have copied from the URL.
+    let mut bracketed = policy();
+    bracketed.allowed_hosts.insert("[2001:db8::1]".into());
+    assert_eq!(
+        check_url("https://[2001:db8::1]:8443/files/1", &bracketed),
+        Ok(())
+    );
+
+    // The allow-list still bites: another address is another host.
+    assert!(check_url("https://[2001:db8::2]/files/1", &p).is_err());
+    assert!(check_url("https://[::2]/files/1", &p).is_err());
+}
+
+/// The adversarial half. This is a URL from a signed token, and the signature
+/// says the host issued it — not that it is well-formed, and not that whoever
+/// obtained it means well. Every shape here must refuse, because each is a way
+/// of reading one origin and resolving to another.
+#[test]
+fn an_authority_the_parser_cannot_read_is_refused_rather_than_guessed_at() {
+    let mut p = policy();
+    p.allowed_hosts.insert("::1".into());
+    p.allowed_hosts.insert("host.example".into());
+
+    for url in [
+        // Unterminated, so where the host ends is a guess.
+        "https://[::1/files/1",
+        // Anything at all after the brackets that is not a port.
+        "https://[::1]x/files/1",
+        "https://[::1]:8443x/files/1",
+        "https://[::1]:-1/files/1",
+        // The allowed literal as *userinfo*, with the real host after the `@`.
+        "https://[::1]@attacker.example/collect",
+        // The allowed literal as the start of a longer name.
+        "https://[::1].attacker.example/collect",
+        // Brackets holding something that is not an address.
+        "https://[not-an-address]/files/1",
+        "https://[host.example]/files/1",
+        "https://[]/files/1",
+        // An IPv6 literal that forgot its brackets is not an authority.
+        "https://::1/files/1",
+        // A host that is not on the list, with and without a port.
+        "https://attacker.example/collect",
+        "https://attacker.example:8443/collect",
+    ] {
+        assert!(check_url(url, &p).is_err(), "should refuse {url}");
+    }
+}
+
+/// The hint, for the bracketed spelling of the same dead entry.
+///
+/// `[::1]:8443` names a port, so the comparison can never match it — exactly
+/// like `127.0.0.1:8080`, and the operator deserves the same sentence.
+#[test]
+fn an_allowed_host_that_brackets_an_address_and_names_a_port_is_diagnosed_too() {
+    let mut p = policy();
+    p.allowed_hosts.insert("[::1]:8443".into());
+
+    let refusal = check_url("https://[::1]:8443/files/1", &p)
+        .expect_err("the port is stripped, so this cannot match")
+        .to_string();
+    assert!(refusal.contains("port"), "{refusal}");
+    assert!(refusal.contains("[::1]:8443"), "{refusal}");
+}
+
 #[test]
 fn a_url_with_no_scheme_or_no_host_is_refused() {
     for url in ["", "host.example/files", "https://", "file:///etc/passwd"] {

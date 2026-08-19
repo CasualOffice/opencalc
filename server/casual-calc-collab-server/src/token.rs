@@ -464,7 +464,9 @@ fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
         Some(("http", rest)) if !policy.require_https => rest,
         _ => return Err(forbidden()),
     };
-    // Authority ends at the first `/`, `?` or `#`; strip userinfo and the port.
+    // Authority ends at the first `/`, `?` or `#`; userinfo is everything up to
+    // the last `@`, and is thrown away — a host in the userinfo is the oldest
+    // way to make a URL read as one origin and resolve to another.
     let authority = rest
         .split(['/', '?', '#'])
         .next()
@@ -472,14 +474,10 @@ fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
         .rsplit('@')
         .next()
         .unwrap_or_default();
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, _)| host)
-        .trim_matches(['[', ']']);
-    if host.is_empty() {
+    let Some(host) = host_of(authority) else {
         return Err(forbidden());
-    }
-    if policy.allowed_hosts.is_empty() || policy.allowed_hosts.contains(host) {
+    };
+    if policy.allowed_hosts.is_empty() || allows(policy, host) {
         return Ok(());
     }
     // Refused, and the refusal says so — but if the allow-list itself contains
@@ -497,6 +495,78 @@ fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
     })
 }
 
+/// The host out of a URL authority: no userinfo, no port, no brackets.
+///
+/// Four shapes, and the third is what `SEC-018` was about: `host`,
+/// `host:port`, `[::1]` and `[::1]:8443`. Stripping the port by splitting on
+/// the **last** colon is right for the first two and cuts an IPv6 literal in
+/// the middle of itself — `[::1]` became `[:`, which trimmed to `":"`, so an
+/// `OPENCALC_ALLOWED_HOSTS` entry of `::1` could never match `https://[::1]/`.
+/// It failed closed, so it was a dead allow-list entry rather than an open
+/// door; it is the same trap as the port one above, and the same cost —
+/// configuration that looks correct and matches nothing.
+///
+/// `None` for an authority this cannot read, which is a refusal: an address
+/// the server cannot name is one it should not connect to. So a bracketed
+/// literal must contain an IPv6 address and nothing else, an unbracketed host
+/// must contain no colon beyond its port, and what follows the brackets can
+/// only be a port.
+fn host_of(authority: &str) -> Option<&str> {
+    let is_port = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let Some(rest) = authority.strip_prefix('[') else {
+        // `host` or `host:port`. A colon inside the host is an IPv6 literal
+        // that forgot its brackets, which is not an authority — refused rather
+        // than guessed at, because guessing is how this went wrong.
+        let host = match authority.split_once(':') {
+            Some((host, port)) if is_port(port) => host,
+            Some(_) => return None,
+            None => authority,
+        };
+        return (!host.is_empty() && !host.contains([':', '[', ']'])).then_some(host);
+    };
+    let (inside, after) = rest.split_once(']')?;
+    if !after.is_empty() && !after.strip_prefix(':').is_some_and(is_port) {
+        return None;
+    }
+    // Checked as an address, not merely as text between brackets: it is the
+    // one thing the brackets are allowed to hold, and parsing it here is what
+    // keeps `[anything]` from becoming a host nobody wrote down.
+    inside.parse::<std::net::Ipv6Addr>().ok()?;
+    Some(inside)
+}
+
+/// Whether the allow-list names this host.
+///
+/// Text first, which is the whole answer for a DNS name. Then as an address,
+/// because an IPv6 literal has many spellings of the same thing — `::1`,
+/// `0:0:0:0:0:0:0:1`, `[::1]` written with the brackets a URL needs — and an
+/// entry that is *the address being refused*, spelled differently, is exactly
+/// the failure this function has already produced twice.
+fn allows(policy: &TokenPolicy, host: &str) -> bool {
+    if policy.allowed_hosts.contains(host) {
+        return true;
+    }
+    let Ok(wanted) = host.parse::<std::net::IpAddr>() else {
+        // A name, and names have one spelling here. Comparing them any more
+        // loosely — case, trailing dot, unicode — is a widening of a security
+        // boundary and belongs to whoever needs it, with its own tests.
+        return false;
+    };
+    policy
+        .allowed_hosts
+        .iter()
+        .any(|entry| unbracketed(entry).parse::<std::net::IpAddr>() == Ok(wanted))
+}
+
+/// An allow-list entry without the brackets a URL would put around an IPv6
+/// literal, so an operator may write either.
+fn unbracketed(entry: &str) -> &str {
+    entry
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(entry)
+}
+
 /// An allow-list entry that names a port, and therefore matches nothing.
 ///
 /// [`check_url`] compares the host **without** its port, deliberately: a port
@@ -505,20 +575,26 @@ fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
 /// `OPENCALC_ALLOWED_HOSTS` is not a stricter rule, it is a dead one — and
 /// nothing said so, which cost real time in a first deployment.
 ///
-/// Only an unambiguous `host:port` counts. An IPv6 literal is full of colons
-/// and none of them is a port, so `::1` and `2001:db8::1` are left alone.
+/// Only an unambiguous `host:port` counts. A bare IPv6 literal is full of
+/// colons and none of them is a port, so `::1` and `2001:db8::1` are left
+/// alone — but `[::1]:8443` is a port, and is just as dead.
 fn names_a_port(policy: &TokenPolicy) -> Option<&str> {
     policy
         .allowed_hosts
         .iter()
         .find(|entry| {
+            let digits = |port: &str| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+            if let Some(rest) = entry.strip_prefix('[') {
+                // `[literal]:port`. The brackets themselves are fine: an entry
+                // may be written with or without them.
+                return rest
+                    .split_once(']')
+                    .is_some_and(|(_, after)| after.strip_prefix(':').is_some_and(digits));
+            }
             let Some((host, port)) = entry.split_once(':') else {
                 return false;
             };
-            !host.is_empty()
-                && !port.is_empty()
-                && port.chars().all(|c| c.is_ascii_digit())
-                && !host.contains([':', '[', ']'])
+            !host.is_empty() && digits(port) && !host.contains([':', '[', ']'])
         })
         .map(String::as_str)
 }
