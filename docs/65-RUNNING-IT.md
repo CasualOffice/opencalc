@@ -99,13 +99,23 @@ page and the socket share a hostname and the endpoint above needs no setting.
 | `opencalc_saves_accepted_total` / `_failed_total` | Are documents getting back to the host? |
 | `opencalc_save_duration_milliseconds_total` | Divided by the counts, how slow is your callback? |
 | `opencalc_fetches_ok_total` / `_failed_total` | Can the server reach your host at all? |
+| `opencalc_documents_unreadable_total` | Is the host answering 200 with something that is not a workbook? |
+| `opencalc_revisions_total` | Is anything being edited? Counts **operations**, so it moves in step with the revision number rather than with submissions. |
 | `opencalc_connections_refused_pending_total` | Is the node full while still answering `/healthz`? |
+| `opencalc_joins_refused_capacity_total` | Are arrivals being turned away by a cap? |
 | `opencalc_slow_consumers_total` | Are clients being dropped for lagging? Survivable, but silent. |
 | `opencalc_appends_refused_total` | Cluster: is a fenced or stale leader still trying to write? |
 | `opencalc_documents` / `opencalc_participants` | Current load, as gauges. |
 
 The one to alert on first is `saves_failed_total` increasing: it is the only
 counter that means work is at risk rather than merely that something is busy.
+
+Every counter in this table is asserted to be incremented by some code path, by
+a test that reads the fields off the `Metrics` struct itself
+(`net::tests::every_counter_on_metrics_is_exposed_and_incremented_somewhere`).
+Four of them once were not: they were declared, exposed, and written down here,
+and reported zero for ever — which reads exactly like a quiet server, and is why
+this list is checked against the code rather than maintained beside it.
 
 `GET /stats` remains, returning the two gauges as JSON — it answers "is it
 working *now*" for a person, where `/metrics` answers "has it been working" for

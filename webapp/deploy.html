@@ -344,8 +344,12 @@ GET  /api/documents/{id}/download    <span class="c"># what a user takes away</s
           <tr><td><code>opencalc_saves_accepted_total</code> / <code>_failed_total</code></td><td>Are documents getting back to the host?</td></tr>
           <tr><td><code>opencalc_save_duration_milliseconds_total</code></td><td>Divided by the counts, how slow is your callback?</td></tr>
           <tr><td><code>opencalc_fetches_ok_total</code> / <code>_failed_total</code></td><td>Can the server reach your host at all?</td></tr>
+          <tr><td><code>opencalc_documents_unreadable_total</code></td><td>Is the host answering 200 with something that is not a workbook?</td></tr>
+          <tr><td><code>opencalc_revisions_total</code></td><td>Is anything being edited? Counts <strong>operations</strong>, so it moves in step with the revision number rather than with submissions.</td></tr>
           <tr><td><code>opencalc_connections_refused_pending_total</code></td><td>Is the node full while still answering <code>/healthz</code>?</td></tr>
+          <tr><td><code>opencalc_joins_refused_capacity_total</code></td><td>Are arrivals being turned away by a cap?</td></tr>
           <tr><td><code>opencalc_slow_consumers_total</code></td><td>Are clients being dropped for lagging? Survivable, but silent.</td></tr>
+          <tr><td><code>opencalc_appends_refused_total</code></td><td>Cluster: is a fenced or stale leader still trying to write?</td></tr>
           <tr><td><code>opencalc_documents</code> / <code>opencalc_participants</code></td><td>Current load, as gauges.</td></tr>
         </table>
         <div class="callout">
