@@ -791,3 +791,308 @@ fn the_exported_geometry_matches_the_constants_used_to_draw() {
     assert_eq!(style.pad_y, crate::DATA_BAR_PAD_Y);
     assert_eq!(style.alpha, crate::DATA_BAR_ALPHA);
 }
+
+/// Pictures reaching the raster, and the ones that cannot saying so (`RND-06`).
+mod images {
+    use std::collections::BTreeMap;
+
+    use casual_calc_layout::{GridGeometry, Viewport, layout_full};
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, Emu, Id, ImageView, Sheet, SheetId, Workbook,
+    };
+
+    use crate::{
+        ImageReport, MAX_IMAGE_PIXELS, NoImages, UndrawnImage, UndrawnReason,
+        render_pixmap_with_images,
+    };
+
+    const PART: &str = "xl/media/image1.png";
+
+    /// The four quadrant colours of the test picture, clockwise from top-left.
+    const RED: (u8, u8, u8) = (220, 20, 20);
+    const GREEN: (u8, u8, u8) = (20, 200, 20);
+    const BLUE: (u8, u8, u8) = (20, 20, 220);
+    const YELLOW: (u8, u8, u8) = (230, 230, 20);
+
+    /// A 40x40 PNG in four solid quadrants.
+    ///
+    /// Big enough that the centre of each quadrant is far from every edge, so
+    /// the assertions below are about *where the picture landed* rather than
+    /// about the resampling filter — a 2x2 source scaled to the frame would be
+    /// one interpolated smear and could not tell a correct blit from a
+    /// mirrored one.
+    fn quadrant_png() -> Vec<u8> {
+        let mut src = tiny_skia::Pixmap::new(40, 40).unwrap();
+        for y in 0..40u32 {
+            for x in 0..40u32 {
+                let (r, g, b) = match (x < 20, y < 20) {
+                    (true, true) => RED,
+                    (false, true) => GREEN,
+                    (true, false) => BLUE,
+                    (false, false) => YELLOW,
+                };
+                let mut one = tiny_skia::Paint::default();
+                one.set_color(tiny_skia::Color::from_rgba8(r, g, b, 255));
+                one.anti_alias = false;
+                src.fill_rect(
+                    tiny_skia::Rect::from_xywh(x as f32, y as f32, 1.0, 1.0).unwrap(),
+                    &one,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            }
+        }
+        src.encode_png().unwrap()
+    }
+
+    /// A sheet whose picture covers `A1:C3` exactly — 192x60 device pixels at
+    /// 96 dpi with the default geometry — over a cell that holds a number, so
+    /// the picture has something to be drawn *over*.
+    fn sheet_with_picture() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(8.0)));
+        sheet.images.push(ImageView {
+            anchor: CellRange::new(CellRef::new(0, 0), CellRef::new(2, 2)),
+            from_offset: Emu::default(),
+            to_offset: Emu::default(),
+            part: PART.to_owned(),
+        });
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn viewport() -> Viewport {
+        Viewport {
+            x: 0,
+            y: 0,
+            width: 4 * 960,
+            height: 4 * 300,
+        }
+    }
+
+    fn media(bytes: Vec<u8>) -> BTreeMap<String, Vec<u8>> {
+        BTreeMap::from([(PART.to_owned(), bytes)])
+    }
+
+    fn render(
+        wb: &Workbook,
+        source: &BTreeMap<String, Vec<u8>>,
+    ) -> (tiny_skia::Pixmap, ImageReport) {
+        let geo = GridGeometry::default();
+        let list = layout_full(wb, 0, &geo);
+        render_pixmap_with_images(&list, &geo, &viewport(), 96, source).unwrap()
+    }
+
+    /// Assert the pixel at `(x, y)` is `expect`, within a tolerance for the
+    /// resampler's last bit.
+    #[track_caller]
+    fn assert_pixel(pixmap: &tiny_skia::Pixmap, x: u32, y: u32, expect: (u8, u8, u8), what: &str) {
+        let p = pixmap.pixel(x, y).expect("pixel out of surface");
+        let got = (p.red(), p.green(), p.blue());
+        let close = |a: u8, b: u8| a.abs_diff(b) <= 3;
+        assert!(
+            close(got.0, expect.0) && close(got.1, expect.1) && close(got.2, expect.2),
+            "{what}: pixel ({x},{y}) is {got:?}, expected {expect:?}"
+        );
+    }
+
+    /// The picture lands in its frame, the right way up and the right way
+    /// round: each quadrant's colour at the point of the surface its quadrant
+    /// maps to. A mirrored, rotated or offset blit fails here; "the PNG is not
+    /// blank" would pass against any of them.
+    #[test]
+    fn a_picture_is_drawn_into_its_frame_the_right_way_round() {
+        let (pixmap, report) = render(&sheet_with_picture(), &media(quadrant_png()));
+
+        // The frame is 192x60 device pixels, so the quadrants split at x=96 and
+        // y=30; these are the four quadrant centres.
+        assert_pixel(&pixmap, 48, 15, RED, "top-left quadrant");
+        assert_pixel(&pixmap, 144, 15, GREEN, "top-right quadrant");
+        assert_pixel(&pixmap, 48, 45, BLUE, "bottom-left quadrant");
+        assert_pixel(&pixmap, 144, 45, YELLOW, "bottom-right quadrant");
+
+        assert_eq!(report.drawn, 1);
+        assert!(report.is_complete(), "unexpected misses: {report:?}");
+    }
+
+    /// The picture stops at its frame: the grid beyond it is untouched.
+    #[test]
+    fn a_picture_does_not_paint_outside_its_frame() {
+        let (pixmap, _) = render(&sheet_with_picture(), &media(quadrant_png()));
+        let white = (255, 255, 255);
+        // Just past the frame's right edge (192) and below its bottom (60),
+        // and not on a gridline.
+        assert_pixel(&pixmap, 200, 30, white, "right of the frame");
+        assert_pixel(&pixmap, 100, 70, white, "below the frame");
+    }
+
+    /// A picture bigger than the frame it is anchored in is **scaled into it**,
+    /// not drawn at its own size and cropped. The 40x40 source goes into `A1`
+    /// alone — 64x20 device pixels — so all four quadrants have to be inside
+    /// those 64 pixels; drawn unscaled, the right half of the picture would be
+    /// past the frame's edge and its top-right quadrant would never appear.
+    #[test]
+    fn a_picture_larger_than_its_frame_is_scaled_into_it() {
+        let mut wb = sheet_with_picture();
+        wb.sheets[0].images[0].anchor = CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0));
+        let (pixmap, report) = render(&wb, &media(quadrant_png()));
+        assert_eq!(report.drawn, 1);
+
+        // A1 is 64x20 px at 96 dpi, so the quadrants split at x=32 and y=10.
+        assert_pixel(&pixmap, 16, 5, RED, "top-left quadrant");
+        assert_pixel(&pixmap, 48, 5, GREEN, "top-right quadrant");
+        assert_pixel(&pixmap, 16, 15, BLUE, "bottom-left quadrant");
+        assert_pixel(&pixmap, 48, 15, YELLOW, "bottom-right quadrant");
+        // And nothing below the frame, which an unscaled draw would reach.
+        assert_pixel(&pixmap, 16, 25, (255, 255, 255), "below the frame");
+    }
+
+    /// A picture floats over the cells it covers. `A1` holds a number, and the
+    /// glyph the renderer drew for it must be underneath: no dark pixel is left
+    /// anywhere in `A1`.
+    #[test]
+    fn a_picture_covers_the_cell_text_beneath_it() {
+        let (pixmap, _) = render(&sheet_with_picture(), &media(quadrant_png()));
+        assert!(
+            !super::any_pixel(&pixmap, 0, 0, 64, 20, |r, g, b| r < 128
+                && g < 128
+                && b < 128),
+            "the glyph in A1 is still visible through the picture"
+        );
+    }
+
+    /// The no-media form still renders, and still says nothing — which is why
+    /// it is not the one a host should call.
+    #[test]
+    fn the_media_less_form_draws_no_picture() {
+        let wb = sheet_with_picture();
+        let geo = GridGeometry::default();
+        let list = layout_full(&wb, 0, &geo);
+        let (pixmap, report) =
+            render_pixmap_with_images(&list, &geo, &viewport(), 96, &NoImages).unwrap();
+        assert_pixel(&pixmap, 48, 15, (255, 255, 255), "no picture drawn");
+        assert_eq!(report.drawn, 0);
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::NotSupplied,
+            }]
+        );
+    }
+
+    /// No silent loss: media the host did not supply is named, not skipped.
+    #[test]
+    fn a_picture_with_no_media_is_named_not_skipped() {
+        let (_, report) = render(&sheet_with_picture(), &BTreeMap::new());
+        assert_eq!(report.drawn, 0);
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::NotSupplied,
+            }]
+        );
+    }
+
+    /// A format this backend does not decode is named as that format, so the
+    /// report says something a person can act on.
+    #[test]
+    fn a_jpeg_is_named_as_a_format_this_does_not_decode() {
+        let jpeg = {
+            let mut b = vec![0xff, 0xd8, 0xff, 0xe0];
+            b.extend_from_slice(b"\x00\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+            b
+        };
+        let (_, report) = render(&sheet_with_picture(), &media(jpeg));
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::UnsupportedFormat("jpeg"),
+            }]
+        );
+    }
+
+    /// A PNG signature over bytes that are not a PNG is *undecodable*, not
+    /// "unsupported": the distinction is what tells a host whether the file is
+    /// damaged or merely uses a format this does not read.
+    #[test]
+    fn a_corrupt_png_is_undecodable_rather_than_unsupported() {
+        let mut bytes = quadrant_png();
+        bytes.truncate(40);
+        let (_, report) = render(&sheet_with_picture(), &media(bytes));
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::Undecodable,
+            }]
+        );
+    }
+
+    /// The pixel bound is checked against the header, so a few hundred bytes
+    /// declaring a gigantic image are refused rather than allocated.
+    #[test]
+    fn a_png_over_the_pixel_limit_is_refused_from_its_header() {
+        // A valid signature and IHDR chunk header, then dimensions well past
+        // the cap. Nothing after them matters: the refusal happens first.
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&30_000u32.to_be_bytes());
+        bytes.extend_from_slice(&30_000u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        const { assert!(30_000u64 * 30_000 > MAX_IMAGE_PIXELS) };
+
+        let (_, report) = render(&sheet_with_picture(), &media(bytes));
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::TooLarge {
+                    width: 30_000,
+                    height: 30_000,
+                },
+            }]
+        );
+    }
+
+    /// The same picture failing in several panes is one entry, not one per
+    /// pane — a report that repeats itself per surface is a report nobody
+    /// reads.
+    #[test]
+    fn a_repeated_failure_is_reported_once() {
+        use casual_calc_layout::{Freeze, layout_viewport, panes};
+
+        let wb = sheet_with_picture();
+        let geo = GridGeometry::default();
+        let vp = viewport();
+        let split = panes(&geo, &vp, Freeze { rows: 1, cols: 1 });
+        assert!(split.len() > 1, "expected a split viewport");
+        let lists: Vec<_> = split
+            .iter()
+            .map(|p| layout_viewport(&wb, 0, &geo, &p.viewport))
+            .collect();
+        let paints: Vec<crate::PanePaint<'_>> = split
+            .iter()
+            .zip(&lists)
+            .map(|(pane, display_list)| crate::PanePaint {
+                pane: *pane,
+                display_list,
+            })
+            .collect();
+        let (_, report) =
+            crate::render_panes_with_images(&paints, &geo, &vp, 96, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::NotSupplied,
+            }]
+        );
+    }
+}

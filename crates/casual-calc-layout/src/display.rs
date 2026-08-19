@@ -144,6 +144,31 @@ pub enum PaintItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_pt: Option<f32>,
     },
+    /// A picture anchored on the sheet, drawn into `rect` on top of the cells.
+    ///
+    /// **The bytes are not here, and deliberately.** What travels is the
+    /// package path of the media part —
+    /// [`ImageView::part`](casual_calc_model::ImageView::part) — because a
+    /// display list is rebuilt for every viewport and every frame, and a
+    /// display list that owned its pictures would copy every megabyte of them
+    /// each time. The model makes the same choice for the same reason: a
+    /// picture is stored once, under its part path, and everything else refers
+    /// to it. A backend resolves the path against whatever holds the media.
+    ///
+    /// That is the one place this list is not self-contained, so it is worth
+    /// being exact about what the consequence is: a backend handed no media
+    /// cannot draw the picture, and **must say so** rather than skip it. The
+    /// CPU backend returns the ones it could not draw, named and counted.
+    ///
+    /// `rect` is the frame in sheet twips, resolved from the anchor's cells
+    /// **and** its EMU offsets — a picture's edge sits wherever it was dragged,
+    /// which is almost never on a gridline.
+    Image {
+        /// The frame rectangle, in sheet twips.
+        rect: Rect,
+        /// The package path of the media part, e.g. `xl/media/image1.png`.
+        part: String,
+    },
     /// The border edges of a cell, painted on top of fills and text.
     CellBorder {
         /// The cell rectangle whose edges are stroked.

@@ -11,8 +11,12 @@
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 mod fonts;
+mod images;
 
 pub use fonts::{MissingScript, missing_scripts, register_face, registered_count};
+pub use images::{
+    ImageReport, ImageSource, MAX_IMAGE_PIXELS, NoImages, UndrawnImage, UndrawnReason,
+};
 #[cfg(feature = "shaping")]
 mod shape;
 
@@ -23,7 +27,10 @@ use casual_calc_layout::{
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, MetadataProvider};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{
+    Color, FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, Rect, SpreadMode,
+    Transform,
+};
 
 /// The default border color when an edge specifies none.
 fn default_border() -> Color {
@@ -79,12 +86,34 @@ fn to_screen(rect: &LayoutRect, viewport: &Viewport, dpi: u32) -> Option<Rect> {
 }
 
 /// Render a viewport's display list to a `tiny-skia` pixmap.
+///
+/// **Draws no pictures.** There is nowhere in this signature to hand over the
+/// media a [`PaintItem::Image`] refers to, and nowhere to return what could not
+/// be drawn, so a sheet with pictures renders without them and says nothing —
+/// which is why [`render_pixmap_with_images`] exists and is what a host that
+/// cares about fidelity should call.
 pub fn render_pixmap(
     display_list: &DisplayList,
     geometry: &GridGeometry,
     viewport: &Viewport,
     dpi: u32,
 ) -> Result<Pixmap, RenderError> {
+    render_pixmap_with_images(display_list, geometry, viewport, dpi, &NoImages).map(|(p, _)| p)
+}
+
+/// Render a viewport's display list, drawing the pictures `images` supplies.
+///
+/// Returns the surface and an [`ImageReport`]: what was drawn, and what was
+/// not, named with the reason. A picture that cannot be drawn is **reported**
+/// rather than skipped — a blank frame where a logo should be is
+/// indistinguishable from a file that never had one.
+pub fn render_pixmap_with_images(
+    display_list: &DisplayList,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+) -> Result<(Pixmap, ImageReport), RenderError> {
     let width = twips_to_px(viewport.width, dpi).ceil() as u32;
     let height = twips_to_px(viewport.height, dpi).ceil() as u32;
     let mut pixmap =
@@ -94,15 +123,23 @@ pub fn render_pixmap(
     draw_gridlines(&mut pixmap, geometry, viewport, dpi);
 
     // The display list is in deterministic painter's order (fills behind text,
-    // borders on top). Execute it in that order.
+    // borders on top, pictures over the lot). Execute it in that order.
+    let mut report = ImageReport::default();
     for item in &display_list.items {
-        draw_item(&mut pixmap, item, viewport, dpi);
+        draw_item(&mut pixmap, item, viewport, dpi, images, &mut report);
     }
 
-    Ok(pixmap)
+    Ok((pixmap, report))
 }
 
-fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u32) {
+fn draw_item(
+    pixmap: &mut Pixmap,
+    item: &PaintItem,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+    report: &mut ImageReport,
+) {
     match item {
         PaintItem::CellBackground { rect, fill } => {
             let Some(color) = fill.as_deref().and_then(parse_hex_color) else {
@@ -187,6 +224,9 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
                 dpi,
             );
         }
+        PaintItem::Image { rect, part } => {
+            draw_image(pixmap, rect, part, viewport, dpi, images, report);
+        }
         PaintItem::CellBorder {
             rect,
             left,
@@ -197,6 +237,77 @@ fn draw_item(pixmap: &mut Pixmap, item: &PaintItem, viewport: &Viewport, dpi: u3
             draw_borders(pixmap, rect, viewport, dpi, left, right, top, bottom);
         }
     }
+}
+
+/// Paint one picture into its frame, or record why it could not be.
+///
+/// The frame is filled with the decoded picture as a **pattern** whose
+/// transform maps the source's own pixel rectangle onto the frame exactly,
+/// rather than blitted a pixel at a time. That scale is what fits the picture
+/// to its frame — resampled rather than point-sampled, so a photograph shrunk
+/// into a few cells is not aliased into noise — and it is also what bounds the
+/// picture: the pattern's extent *is* the frame, so the fill and the picture
+/// stop in the same place whatever rectangle is filled.
+///
+/// `SpreadMode::Pad` decides what the sampler sees at that boundary: the
+/// picture's own edge colour rather than transparent black, so a frame whose
+/// pixel size is not an exact multiple of the source's has no fringe along its
+/// edges.
+///
+/// **The picture fills its frame; it is not letterboxed inside it.** The anchor
+/// *is* the extent in OOXML — dragging a corner handle in Excel distorts the
+/// picture, and a `twoCellAnchor` records the result — so fitting it inside and
+/// centring it would put the picture somewhere the file does not say it is.
+/// Note that the editor canvas does letterbox (`drawImages` in
+/// `webapp/editor.js`), so the two disagree today; the canvas is the one that
+/// does not match Excel, and that is tracked rather than silently copied here.
+fn draw_image(
+    pixmap: &mut Pixmap,
+    rect: &LayoutRect,
+    part: &str,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+    report: &mut ImageReport,
+) {
+    // Layout does not emit a frame with no area, so this is unreachable for a
+    // display list this crate was given rather than handed synthetically. There
+    // is nothing lost to report either way: a frame of no size shows nothing.
+    let Some(screen) = to_screen(rect, viewport, dpi) else {
+        return;
+    };
+    // Decoded here and dropped at the end of this call, rather than cached
+    // across the render. One picture is in memory at a time, so a sheet of
+    // twenty photographs costs the largest of them and not the sum — which is
+    // the bound worth keeping, since `MAX_IMAGE_PIXELS` alone allows 64 MB
+    // apiece. The cost is that a picture anchored across a freeze boundary is
+    // decoded once per pane it appears in.
+    let source = match images::decode(part, images) {
+        Ok(pixmap) => pixmap,
+        Err(reason) => {
+            report.missed(part, reason);
+            return;
+        }
+    };
+    // A zero-dimension pixmap cannot be constructed, so both ratios are finite.
+    let scale_x = screen.width() / source.width() as f32;
+    let scale_y = screen.height() / source.height() as f32;
+    let paint = Paint {
+        shader: Pattern::new(
+            source.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Bilinear,
+            1.0,
+            Transform::from_row(scale_x, 0.0, 0.0, scale_y, screen.x(), screen.y()),
+        ),
+        // The picture's own edges are wherever its pixels stop; anti-aliasing
+        // the frame would fringe them against whatever the cells underneath
+        // happen to be, differently at every scroll position.
+        anti_alias: false,
+        ..Paint::default()
+    };
+    pixmap.fill_rect(screen, &paint, Transform::identity(), None);
+    report.drew();
 }
 
 /// The default font size (points) for a Text item that carries no explicit size.
@@ -596,6 +707,8 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 }
 
 /// Render a viewport to a PNG byte buffer.
+///
+/// Draws no pictures, for the reason [`render_pixmap`] gives.
 pub fn render_png(
     display_list: &DisplayList,
     geometry: &GridGeometry,
@@ -605,6 +718,20 @@ pub fn render_png(
     render_pixmap(display_list, geometry, viewport, dpi)?
         .encode_png()
         .map_err(|_| RenderError::Encode)
+}
+
+/// Render a viewport to a PNG, drawing the pictures `images` supplies.
+pub fn render_png_with_images(
+    display_list: &DisplayList,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+) -> Result<(Vec<u8>, ImageReport), RenderError> {
+    let (pixmap, report) =
+        render_pixmap_with_images(display_list, geometry, viewport, dpi, images)?;
+    let png = pixmap.encode_png().map_err(|_| RenderError::Encode)?;
+    Ok((png, report))
 }
 
 /// A pane and the display list laid out for it.
@@ -639,14 +766,38 @@ pub fn render_panes(
     viewport: &Viewport,
     dpi: u32,
 ) -> Result<Pixmap, RenderError> {
+    render_panes_with_images(panes, geometry, viewport, dpi, &NoImages).map(|(p, _)| p)
+}
+
+/// Render a split viewport, drawing the pictures `images` supplies.
+///
+/// A picture straddling a freeze boundary is laid out into more than one pane
+/// and therefore drawn more than once, which is what makes it hold still in the
+/// frozen band and scroll in the body. The reports are folded together, so a
+/// picture that could not be drawn in three panes is one entry, not three.
+pub fn render_panes_with_images(
+    panes: &[PanePaint<'_>],
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+) -> Result<(Pixmap, ImageReport), RenderError> {
     let width = twips_to_px(viewport.width.max(0), dpi).ceil() as u32;
     let height = twips_to_px(viewport.height.max(0), dpi).ceil() as u32;
     let mut pixmap =
         Pixmap::new(width, height).ok_or(RenderError::InvalidSize { width, height })?;
     pixmap.fill(Color::WHITE);
 
+    let mut report = ImageReport::default();
     for paint in panes {
-        let rendered = render_pixmap(paint.display_list, geometry, &paint.pane.viewport, dpi)?;
+        let (rendered, pane_report) = render_pixmap_with_images(
+            paint.display_list,
+            geometry,
+            &paint.pane.viewport,
+            dpi,
+            images,
+        )?;
+        report.absorb(pane_report);
         blit(
             &mut pixmap,
             &rendered,
@@ -656,7 +807,7 @@ pub fn render_panes(
     }
 
     draw_freeze_lines(&mut pixmap, panes, dpi);
-    Ok(pixmap)
+    Ok((pixmap, report))
 }
 
 /// Render a split viewport to a PNG byte buffer.
@@ -669,6 +820,19 @@ pub fn render_panes_png(
     render_panes(panes, geometry, viewport, dpi)?
         .encode_png()
         .map_err(|_| RenderError::Encode)
+}
+
+/// Render a split viewport to a PNG, drawing the pictures `images` supplies.
+pub fn render_panes_png_with_images(
+    panes: &[PanePaint<'_>],
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    dpi: u32,
+    images: &dyn ImageSource,
+) -> Result<(Vec<u8>, ImageReport), RenderError> {
+    let (pixmap, report) = render_panes_with_images(panes, geometry, viewport, dpi, images)?;
+    let png = pixmap.encode_png().map_err(|_| RenderError::Encode)?;
+    Ok((png, report))
 }
 
 /// Copy `src` into `dst` at `(x, y)`, clipped at the destination's edges.

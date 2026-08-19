@@ -569,6 +569,7 @@ mod merges {
                 | PaintItem::MergedRegion { rect, .. }
                 | PaintItem::DataBar { rect, .. }
                 | PaintItem::Text { rect, .. }
+                | PaintItem::Image { rect, .. }
                 | PaintItem::CellBorder { rect, .. } => *rect,
             })
             .collect()
@@ -1063,5 +1064,173 @@ mod conditional_formatting {
             ],
             "fill, then bar, then text, for each of the three cells"
         );
+    }
+}
+
+/// Images: an anchored picture reaching the display list at the rectangle its
+/// anchor and EMU offsets put it at (`RND-06`).
+mod images {
+    use super::*;
+    use crate::{DisplayList, PaintItem, Rect};
+    use casual_calc_model::{CellRange, Emu, ImageView};
+
+    /// A workbook whose sheet carries one picture over `B2:C3`, offset into
+    /// both corners so the frame does not land on a gridline — which is the
+    /// case that a cell-only anchor gets visibly wrong.
+    fn with_image() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(1.0)));
+        sheet.images.push(ImageView {
+            anchor: CellRange::new(CellRef::new(1, 1), CellRef::new(2, 2)),
+            // 635 EMU to the twip exactly (914_400 per inch / 1_440 per inch).
+            from_offset: Emu {
+                x: 10 * 635,
+                y: 5 * 635,
+            },
+            to_offset: Emu {
+                x: 20 * 635,
+                y: 7 * 635,
+            },
+            part: "xl/media/image1.png".to_owned(),
+        });
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn images_of(list: &DisplayList) -> Vec<(Rect, String)> {
+        list.items
+            .iter()
+            .filter_map(|item| match item {
+                PaintItem::Image { rect, part } => Some((*rect, part.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_image_reaches_the_display_list_at_its_anchor_rect() {
+        let wb = with_image();
+        let geo = GridGeometry::default();
+        let list = layout_full(&wb, 0, &geo);
+
+        let found = images_of(&list);
+        assert_eq!(found.len(), 1, "expected one image item, got {found:?}");
+        let (rect, part) = &found[0];
+        assert_eq!(part, "xl/media/image1.png");
+        // Left/top: the anchor cell's own edge plus the `from` offset.
+        assert_eq!(rect.x, DEFAULT_COL_WIDTH + 10, "left edge");
+        assert_eq!(rect.y, DEFAULT_ROW_HEIGHT + 5, "top edge");
+        // Right/bottom: the far edge of the *last covered* line plus the `to`
+        // offset. `to` is measured past that edge, so the width is
+        // `offset(end + 1) + to - x`.
+        assert_eq!(
+            rect.w,
+            3 * DEFAULT_COL_WIDTH + 20 - (DEFAULT_COL_WIDTH + 10),
+            "width"
+        );
+        assert_eq!(
+            rect.h,
+            3 * DEFAULT_ROW_HEIGHT + 7 - (DEFAULT_ROW_HEIGHT + 5),
+            "height"
+        );
+    }
+
+    /// A picture floats over the grid: it is drawn after every cell item, not
+    /// interleaved with the cells it happens to overlap. Emitted before them it
+    /// would be painted away by the backgrounds of the cells underneath.
+    #[test]
+    fn an_image_is_painted_on_top_of_the_cells() {
+        let wb = with_image();
+        let geo = GridGeometry::default();
+        let list = layout_full(&wb, 0, &geo);
+
+        let image_at = list
+            .items
+            .iter()
+            .position(|i| matches!(i, PaintItem::Image { .. }))
+            .expect("no image item");
+        let last_cell_item = list
+            .items
+            .iter()
+            .rposition(|i| !matches!(i, PaintItem::Image { .. }))
+            .expect("no cell items");
+        assert!(
+            image_at > last_cell_item,
+            "image at {image_at} should follow every cell item (last at {last_cell_item})"
+        );
+    }
+
+    /// The display list is serialisable so it can be golden-tested (ADR-008),
+    /// which a variant carrying a `String` can break on its own: the picture's
+    /// part path has to survive the round trip or a golden compares two lists
+    /// that only look alike.
+    #[test]
+    fn a_picture_survives_a_display_list_round_trip() {
+        let list = layout_full(&with_image(), 0, &GridGeometry::default());
+        assert!(!images_of(&list).is_empty(), "nothing to round trip");
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(
+            json.contains("xl/media/image1.png"),
+            "the part path did not reach the JSON: {json}"
+        );
+        let back: DisplayList = serde_json::from_str(&json).unwrap();
+        assert_eq!(list, back);
+    }
+
+    /// Virtualization: a picture anchored outside the window is not laid out,
+    /// and one straddling the window's edge still is — the anchor is often off
+    /// screen precisely because the frame is large.
+    #[test]
+    fn an_image_is_virtualized_by_its_frame() {
+        let mut wb = with_image();
+        wb.sheets[0].images.push(ImageView {
+            anchor: CellRange::new(CellRef::new(40, 40), CellRef::new(41, 41)),
+            from_offset: Emu::default(),
+            to_offset: Emu::default(),
+            part: "xl/media/faraway.png".to_owned(),
+        });
+        let geo = GridGeometry::default();
+        // A window over A1:E5 — the first picture is inside it, the second is
+        // nowhere near.
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 5 * DEFAULT_COL_WIDTH,
+            height: 5 * DEFAULT_ROW_HEIGHT,
+        };
+        let parts: Vec<String> = images_of(&layout_viewport(&wb, 0, &geo, &vp))
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(parts, vec!["xl/media/image1.png".to_owned()]);
+    }
+
+    /// A picture whose anchor starts left of and above the window but whose
+    /// frame reaches into it is still laid out. Testing containment rather than
+    /// intersection is how a large picture flickers out of existence as it is
+    /// scrolled into.
+    #[test]
+    fn an_image_straddling_the_window_edge_is_kept() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet.images.push(ImageView {
+            anchor: CellRange::new(CellRef::new(0, 0), CellRef::new(30, 30)),
+            from_offset: Emu::default(),
+            to_offset: Emu::default(),
+            part: "xl/media/big.png".to_owned(),
+        });
+        wb.sheets.push(sheet);
+        let geo = GridGeometry::default();
+        // A window well inside the picture, touching neither of its corners.
+        let vp = Viewport {
+            x: 10 * DEFAULT_COL_WIDTH,
+            y: 10 * DEFAULT_ROW_HEIGHT,
+            width: 2 * DEFAULT_COL_WIDTH,
+            height: 2 * DEFAULT_ROW_HEIGHT,
+        };
+        assert_eq!(images_of(&layout_viewport(&wb, 0, &geo, &vp)).len(), 1);
     }
 }
