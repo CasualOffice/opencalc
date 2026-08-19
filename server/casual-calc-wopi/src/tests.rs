@@ -410,16 +410,157 @@ async fn a_csv_opens_as_a_package_and_saves_back_as_a_csv() {
     );
 }
 
+/// **A host's `.ods` opens, edits, and comes back a `.ods`** (`WOPI-07`).
+///
+/// The format a LibreOffice-first shop actually has, and the one this service
+/// refused to open at all until the engine could write one. The same two
+/// conversions as the `.csv` above, and the same reason for asserting both: the
+/// collaboration server reads packages and only packages, and the host holds an
+/// ODF document that its indexer, previewer and virus scanner will read
+/// according to the `Content-Type` this service sets.
+#[tokio::test]
+async fn an_ods_opens_as_a_package_and_saves_back_as_an_ods() {
+    /// LibreOffice's own output, not this engine's.
+    const ODS: &[u8] =
+        include_bytes!("../../../crates/casual-calc-ods/tests/fixtures/libreoffice-basic.ods");
+
+    let (src, host) = wopi_host_holding("Books.ods", ODS).await;
+    let at = adapter().await;
+    let client = reqwest::Client::new();
+
+    let page = client
+        .get(format!("{at}/wopi/edit"))
+        .query(&[("WOPISrc", src.as_str()), ("access_token", "host-token")])
+        .send()
+        .await
+        .expect("the action URL answered");
+    assert!(
+        page.status().is_success(),
+        "a .ods was refused: {}",
+        page.status()
+    );
+    let id = session_id(&page.text().await.unwrap());
+
+    let info: serde_json::Value = client
+        .get(format!("{at}/wopi/session/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["format"], "ods", "the session forgot what it opened");
+
+    // 1. The collaboration server is handed a package, which is the only thing
+    //    it can open.
+    let package = client
+        .get(format!("{at}/wopi/content/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    let mut session = WorkbookSession::open(package).expect("the package we served opens");
+    assert_eq!(
+        session.workbook().sheets[0].name,
+        "seed",
+        "the .ods was not read into the package"
+    );
+
+    // 2. It edits and posts the finished package back, exactly as it would for
+    //    an `.xlsx`. Nothing about the server knows this file is ODF.
+    session
+        .edit(casual_calc_sdk::EditOperation::SetValue {
+            sheet: 0,
+            at: casual_calc_sdk::CellRef::new(1, 1),
+            value: casual_calc_sdk::CellValue::Number(7.0),
+        })
+        .expect("edited");
+    let finished = session.save().expect("the server writes a package");
+
+    let saved = client
+        .post(format!("{at}/wopi/callback/{id}"))
+        .body(finished)
+        .send()
+        .await
+        .unwrap();
+    assert!(saved.status().is_success(), "{}", saved.status());
+
+    // 3. The host's file is still an ODF document, and carries the edit.
+    let written = host.content();
+    assert!(
+        String::from_utf8_lossy(&written[..written.len().min(128)])
+            .contains("application/vnd.oasis.opendocument.spreadsheet"),
+        "the host's .ods was overwritten with something else: {:?}",
+        String::from_utf8_lossy(&written[..written.len().min(64)])
+    );
+    assert_eq!(
+        host.put_type().as_deref(),
+        Some("application/vnd.oasis.opendocument.spreadsheet"),
+        "the bytes were ODF and the header said they were an OOXML package"
+    );
+    let reopened = WorkbookSession::open_as(written, SessionFormat::Ods).expect("the host's file");
+    assert_eq!(
+        reopened.workbook().sheets[0]
+            .cells
+            .get(casual_calc_sdk::CellRef::new(1, 1))
+            .map(|c| c.value.clone()),
+        Some(casual_calc_sdk::CellValue::Number(7.0)),
+        "the edit did not reach the host's file"
+    );
+    // And it is still a spreadsheet rather than a table of constants: the
+    // fixture's `=SUM(D2:D3)` has been through ODF, OOXML and back.
+    assert!(
+        reopened.workbook().sheets[0]
+            .cells
+            .get(casual_calc_sdk::CellRef::new(3, 3))
+            .and_then(|c| c.formula)
+            .is_some(),
+        "the round trip turned the document's formulas into their answers"
+    );
+}
+
+/// **Reading a `.ods` into a package names what the reader could not model.**
+///
+/// The half of the round trip that is easy to forget: a LibreOffice document
+/// carries styles, column widths and merges this engine's ODF reader does not
+/// model, and they are gone from the package the editor works on — so they are
+/// gone from whatever is written back, however good the writer is. Counted on
+/// the way *in*, where an administrator can still tell somebody to keep the
+/// original, rather than discovered from the saved file.
+///
+/// Asserted on the pure pair rather than through the socket: what is being
+/// checked is the report, and a log line read back out of a subscriber is a
+/// test of `tracing`.
+#[test]
+fn reading_an_ods_names_what_this_engine_does_not_model() {
+    const ODS: &[u8] =
+        include_bytes!("../../../crates/casual-calc-ods/tests/fixtures/libreoffice-basic.ods");
+
+    let (package, loss) = to_package(ODS.to_vec(), SessionFormat::Ods).expect("converts");
+    assert_eq!(&package[..2], b"PK");
+    let loss = loss.expect("a LibreOffice document carried styles, and nothing said so");
+    assert!(loss.contains("styles"), "{loss}");
+
+    // An `.xlsx` is handed through untouched and must not cry wolf: a warning on
+    // every file is a warning nobody reads on the one that matters.
+    let session = WorkbookSession::blank();
+    let package = session.save_as(SessionFormat::Xlsx).unwrap();
+    assert_eq!(to_package(package, SessionFormat::Xlsx).unwrap().1, None);
+}
+
 /// **A file this service cannot save back in its own format is refused before
 /// it is locked.**
 ///
 /// Discovery only advertises what the save leg can write, so a host following
-/// it never asks. A hand-written link, a stale host configuration or an `.ods`
-/// does — and the old behaviour was to assume `.xlsx`, edit it, and write a
-/// package over it under its original name.
+/// it never asks. A hand-written link, a stale host configuration or an old
+/// binary `.xls` does — and the old behaviour was to assume `.xlsx`, edit it,
+/// and write a package over it under its original name.
 #[tokio::test]
 async fn a_format_this_service_cannot_write_is_never_opened() {
-    let (src, host) = wopi_host_holding("Notes.ods", b"PK\x03\x04...").await;
+    let (src, host) = wopi_host_holding("Notes.numbers", b"PK\x03\x04...").await;
     let at = adapter().await;
 
     let refused = reqwest::Client::new()

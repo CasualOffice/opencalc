@@ -72,7 +72,7 @@ fn writing_needs_both_permission_and_a_host_that_accepts_it() {
 /// format at all** (`WOPI-05`).
 ///
 /// `None` is the load-bearing half. Defaulting to `.xlsx` is what let a session
-/// open somebody's `.ods` and write a package back over it under its own name;
+/// open somebody's file and write a package back over it under its own name;
 /// the caller refuses on `None` before it locks anything.
 #[test]
 fn a_filename_names_the_format_and_an_unknown_one_names_nothing() {
@@ -96,7 +96,9 @@ fn a_filename_names_the_format_and_an_unknown_one_names_nothing() {
         "a compressed csv is not a csv, and writing one back as text destroys it"
     );
 
-    for refused in ["Notes.ods", "Old.xls", "README", "", ".csvx", "trailing."] {
+    assert_eq!(format_for("Books.ODS"), Some(SessionFormat::Ods));
+
+    for refused in ["Old.xls", "Flat.fods", "README", "", ".csvx", "trailing."] {
         assert_eq!(
             format_for(refused),
             None,
