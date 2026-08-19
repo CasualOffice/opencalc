@@ -6118,11 +6118,102 @@ function setCalculationMode(mode) {
     : "automatic calculation";
 }
 
+// --- Stopping a long job (`SEC-017`) ---------------------------------------
+//
+// The engine can be stopped mid-job; until now nothing here asked it to, so a
+// workbook that was inside every admission bound and simply enormous held the
+// tab's one thread until it finished.
+//
+// **The limit is a number set up front, not a Stop button, and that is forced
+// rather than chosen.** JavaScript and WebAssembly share the one thread a tab
+// has: while the engine runs, no click handler runs, so a Stop button's
+// listener could not fire until the job it was meant to stop had already
+// returned. What the editor can do is bound the job before starting it and
+// hand the choice back afterwards — which is what "Keep waiting" is.
+
+/// How long an open may hold the thread before it is stopped.
+let openBudgetMs = 10_000;
+/// The same for a full recalculation (F9), which is the other long job.
+let recalcBudgetMs = 5_000;
+
+/// Set both limits, for the browser gate.
+///
+/// Exported because the only honest test of a cancellation is one that provokes
+/// it, and provoking a ten-second limit for real would mean a ten-second test
+/// and a workbook big enough to need one. A negative value means no limit.
+export function setTimeBudgetsForTest(openMs, recalcMs) {
+  openBudgetMs = openMs;
+  recalcBudgetMs = recalcMs;
+}
+
+/// Whether an engine error is "this job was stopped" rather than "this file is
+/// bad".
+///
+/// Matched on the stable diagnostic code (docs/20) rather than the prose: the
+/// sentence is allowed to be reworded, the code is not.
+function wasStopped(err) {
+  return /OC-IMP-0007/.test(String(err && err.message ? err.message : err));
+}
+
+/// Take away any outstanding "Keep waiting" offer.
+function clearKeepWaiting() {
+  byId("keep-waiting")?.remove();
+}
+
+/// Offer to re-run `again` with no limit at all.
+///
+/// A limit the user cannot overrule is not a limit, it is a refusal: a workbook
+/// that genuinely takes twenty seconds is still that user's workbook, and this
+/// is the whole of the "cancel" affordance a single-threaded host can honestly
+/// offer — the choice comes *after* the stop, because nothing the user does can
+/// arrive during one.
+///
+/// The button is a sibling of the status text rather than a child of it: the
+/// status bar is one ellipsised line with a `max-width`, so a control inside it
+/// is a control clipped out of reach.
+function offerKeepWaiting(what, again) {
+  const bar = byId("tb-status");
+  if (!bar || !bar.parentNode) return;
+  clearKeepWaiting();
+  const note = document.createElement("span");
+  note.className = "warn";
+  note.textContent = ` — stopped ${what} before it finished`;
+  bar.append(note);
+  const btn = document.createElement("button");
+  btn.id = "keep-waiting";
+  btn.className = "oc-btn keep-waiting";
+  btn.textContent = "Keep waiting";
+  btn.addEventListener("click", () => { btn.remove(); again(); });
+  bar.parentNode.insertBefore(btn, bar.nextSibling);
+}
+
 // F9: recompute everything, and reseed first so RAND rerolls — Excel does the
 // same. Not an undoable edit and it does not dirty the document: the values it
 // produces are the ones the formulas already imply.
-function recalculateNow() {
-  tryEdit(() => { syncClock(true); wasm.session_recalculate(); });
+//
+// `budgetMs` is how long it may run; a negative one means no limit, which is
+// what "Keep waiting" retries with.
+function recalculateNow(budgetMs = undefined) {
+  let outcome = "full";
+  clearKeepWaiting();
+  tryEdit(() => {
+    syncClock(true);
+    wasm.session_set_time_budget_ms(budgetMs === undefined ? recalcBudgetMs : budgetMs);
+    try {
+      outcome = wasm.session_recalculate();
+    } finally {
+      wasm.session_clear_time_budget();
+    }
+  });
+  if (outcome === "cancelled" || outcome === "over-budget") {
+    // Not "recalculated": a stopped pass keeps what it computed, so the sheet
+    // is a mixture of fresh and stale values. Saying it finished would be the
+    // one thing a host must not do with a cancelled recalculation — the
+    // workbook still reports itself as needing one, and so does this.
+    statusError("calculation stopped — some values are still out of date");
+    offerKeepWaiting("calculating", () => recalculateNow(-1));
+    return;
+  }
   status.textContent = "recalculated";
 }
 
@@ -7465,11 +7556,41 @@ async function doSaveDelimited(delim, ext) {
   const text = wasm.session_save_delimited(state.sheet, delim);
   // A BOM so spreadsheet apps open it as UTF-8 rather than guessing a codepage
   // and turning every accented character into mojibake.
-  download("\ufeff" + text, "opencalc." + ext, "text/csv;charset=utf-8");
+  //
+  // The type comes from the engine: `text/csv` was written here for all three,
+  // and it is the right answer for exactly one of them.
+  download("\ufeff" + text, "opencalc." + ext, wasm.format_content_type(ext));
+  return true;
+}
+// Download in the format the session was **opened from**, under that format's
+// own extension and content type.
+//
+// The engine has known all three since `WOPI-05` — `session_save_native`
+// follows the format, `session_format` and `session_format_content_type` name
+// it, and `session_save_loss` says what it cannot carry — and nothing on this
+// page asked any of them (`WASM-01`). So a `.csv` could only leave the editor
+// through an explicit "CSV" export that writes whichever tab is in front and
+// labels every delimited file `text/csv`, which is the wrong type for two of
+// the three.
+async function doSaveNative() {
+  const ext = wasm.session_format();
+  // Said before the download, because afterwards the file is already on disk.
+  const loss = wasm.session_save_loss();
+  if (loss) {
+    const ok = await confirmModal(
+      `.${ext} cannot carry all of this`,
+      `${loss}. The download will hold everything a ${ext.toUpperCase()} file can, and nothing else.`,
+      `Download .${ext}`,
+    );
+    if (!ok) return false;
+  }
+  download(wasm.session_save_native(), `opencalc.${ext}`, wasm.session_format_content_type());
+  status.textContent = "downloaded ." + ext;
   return true;
 }
 async function saveAs(fmt) {
   try {
+    if (fmt === "native") { await doSaveNative(); return; }
     if (fmt === "xlsx") { doSave(); status.textContent = "downloaded .xlsx"; return; }
     const delim = fmt === "csv" ? 44 : fmt === "tsv" ? 9 : 124;
     if (await doSaveDelimited(delim, fmt)) status.textContent = "downloaded ." + fmt;
@@ -8429,6 +8550,13 @@ function decodeTextBytes(bytes) {
 // Turn an engine error into something that says what to do about it.
 function friendlyOpenError(err, name, isText) {
   const text = String(err && err.message ? err.message : err);
+  // Checked first, and by code: a stopped open is not a complaint about the
+  // file, and telling someone their perfectly good workbook is unreadable
+  // because it was large is worse than saying nothing.
+  if (wasStopped(err)) {
+    return `${name} was taking too long, so it was stopped — nothing was loaded`;
+  }
+  if (/is not a format this build can open/.test(text)) return text;
   if (/zip|central directory|not a valid/i.test(text)) {
     return `${name} is not a readable .xlsx — if it is an older .xls, re-save it as .xlsx first`;
   }
@@ -10980,6 +11108,19 @@ function wireEvents() {
       setFontSize(Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0);
     },
   });
+  // What the picker offers is the engine's list, not the markup's. The static
+  // one in `editor.html` is a second table of supported formats and drifted
+  // from the first — it omitted `.tab`, which the engine has always read — and
+  // a format the engine grows would be unpickable until somebody remembered to
+  // edit the HTML too (`WASM-01`).
+  try {
+    const offered = JSON.parse(wasm.openable_extensions());
+    if (offered.length) {
+      byId("tb-open").accept = offered.join(",");
+      // The tooltip was a third copy of the same list.
+      byId("hdr-open")?.setAttribute("title", `Open a file (${offered.join(", ")})`);
+    }
+  } catch {}
   byId("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -11204,6 +11345,11 @@ function wireEvents() {
         ["New", () => { stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs(); }],
         ["Open…", clickEl("#tb-open")],
         { sub: "Download", items: [
+          // First, and named for what it does rather than for a format: it is
+          // the only one of these that gives back the kind of file that was
+          // opened. The others are conversions, and a conversion chosen by
+          // accident is how a `.csv` becomes a package under its own name.
+          ["Same format as opened", () => saveAs("native")],
           ["Excel (.xlsx)", () => saveAs("xlsx")],
           ["CSV (.csv)", () => saveAs("csv")],
           ["Tab-separated (.tsv)", () => saveAs("tsv")],
@@ -11754,24 +11900,52 @@ function bindElements() {
 /// Extracted from the file-input handler so an embedded editor opens a
 /// workbook by the same path a picked file does — two implementations of
 /// "open" is two places for the post-load bookkeeping below to be forgotten.
-export function openBytes(raw, name = "workbook.xlsx") {
+///
+/// `budgetMs` is how long the engine may hold the thread before the open is
+/// stopped; a negative one means "no limit", which is what "Keep waiting"
+/// retries with.
+export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   let bytes = raw;
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  // Delimiter byte by extension: tab=9, pipe=124, comma=44 (null → .xlsx).
-  const delim = ext === "tsv" || ext === "tab" ? 9 : ext === "psv" ? 124 : ext === "csv" ? 44 : null;
+  const dot = name.lastIndexOf(".");
+  // No extension at all means a package — `openBytes(bytes)` names nothing and
+  // that is what it has always meant. An extension the engine does *not* know
+  // is a different thing and is refused below rather than guessed at: guessing
+  // is how a file gets opened as a package and saved back under its own name.
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "xlsx";
+  // Which format an extension names is the SDK's answer, asked for here rather
+  // than copied into a table of the page's own. The copy is the defect
+  // (`WASM-01`): it opened exactly the formats it was last told about, so a
+  // `.csv` was openable through the WOPI service and not in the editor.
+  let canonical = "";
+  let isText = false;
+  try {
+    canonical = wasm.format_for_extension(ext);
+    isText = !!canonical && wasm.format_is_text(ext);
+  } catch {}
   let ok = true;
+  let stopped = false;
+  clearKeepWaiting();
   try {
     stopMarch();
-    if (delim !== null) {
-      bytes = decodeTextBytes(bytes);
-      wasm.session_open_delimited(bytes, delim);
-    } else {
-      wasm.session_open(bytes);
+    if (!canonical) throw new Error(`.${ext} is not a format this build can open`);
+    // Delimited text carries no encoding declaration, so it is decoded here; a
+    // package declares its own and must be handed over byte for byte.
+    if (isText) bytes = decodeTextBytes(bytes);
+    // A wall-clock limit, so a workbook that is inside every admission bound
+    // and simply enormous cannot hold the tab's one thread until it finishes
+    // (`SEC-017`). Cleared afterwards: the budget bounds this job, not the
+    // next one.
+    wasm.session_set_time_budget_ms(budgetMs === undefined ? openBudgetMs : budgetMs);
+    try {
+      wasm.session_open_as(ext, bytes);
+    } finally {
+      wasm.session_clear_time_budget();
     }
     status.textContent = `opened ${name}`;
     reportImportIssues();
   } catch (err) {
-    status.textContent = friendlyOpenError(err, name, delim !== null);
+    status.textContent = friendlyOpenError(err, name, isText);
+    stopped = wasStopped(err);
     ok = false;
   }
   invalidateGrowth();
@@ -11787,6 +11961,11 @@ export function openBytes(raw, name = "workbook.xlsx") {
   state.scrollX = state.scrollY = 0;
   renderTabs();
   select(0, 0);
+  // After the bookkeeping, so the offer is appended to the message that is
+  // actually left standing. A stopped open loaded nothing, so what is on screen
+  // is still whole — this hands back the choice the limit took, rather than
+  // leaving a big file permanently unopenable.
+  if (stopped) offerKeepWaiting(`opening ${name}`, () => openBytes(raw, name, -1));
   return ok;
 }
 
