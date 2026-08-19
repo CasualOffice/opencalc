@@ -85,6 +85,7 @@
         <a href="#tls">TLS</a>
         <a href="#health">Health and metrics</a>
         <a href="#backup">Storage and backup</a>
+        <a href="#sizing">Sizing and performance</a>
         <h4>Integrations</h4>
         <a href="#wopi">Nextcloud, SharePoint, Moodle</a>
         <h4>Notes</h4>
@@ -392,6 +393,104 @@ POST /api/documents/{id}/versions/{at}/restore</pre>
           retention and restore become whatever your product already does, and the callback
           is where each finished version arrives.
         </p>
+
+        <h2 id="sizing">Sizing and performance</h2>
+        <p class="lede">
+          Measured, not modelled — and labelled where the two differ.
+        </p>
+        <div class="callout">
+          <p>
+            <b>Two machines, and they are not the same one.</b> Memory comes from the
+            Linux CI runner, which is the only machine here with <code>/proc</code>. The
+            timings come from an Apple&nbsp;M-series laptop in a release build. Treat the
+            timings as shape and headroom rather than as a spec for your hardware.
+          </p>
+        </div>
+
+        <h3>What the engine costs, per operation</h3>
+        <table>
+          <tr><th>Operation</th><th>Measured</th><th>Budget</th><th>Headroom</th></tr>
+          <tr><td>Cell edit, kept dependency graph</td><td><b>0.13 – 0.25 µs</b></td><td>—</td><td>—</td></tr>
+          <tr><td>Range edit, kept graph</td><td>1.5 – 2.0 µs</td><td>—</td><td>—</td></tr>
+          <tr><td>Visible-window repaint (1600×900)</td><td><b>0.09 ms</b></td><td>≤ 8 ms engine-side</td><td>~86×</td></tr>
+          <tr><td>Recalc, cold first edit</td><td>2.2 ms</td><td>&lt; 50 ms</td><td>~23×</td></tr>
+          <tr><td>Recalc, adversarial chain + fan-out</td><td><b>3.1 ms</b></td><td>&lt; 50 ms (T3 cap)</td><td>~16×</td></tr>
+          <tr><td>Snapshot round trip, 10 000 cells</td><td>2.9 ms</td><td>not interactive</td><td>—</td></tr>
+          <tr><td>Open a small <code>.xlsx</code> package</td><td>9 µs</td><td>—</td><td>—</td></tr>
+        </table>
+        <p>
+          The adversarial recalc case is the one that matters: a deep dependency chain
+          <i>and</i> a wide fan-out, which is the shape a worst case takes. At 3.1&nbsp;ms
+          against a 50&nbsp;ms cap, recalculation is not close to being the limit.
+        </p>
+
+        <h3>What a sheet costs in memory</h3>
+        <p>
+          <b>83.64 bytes per cell</b>, measured as the peak resident-set delta for a
+          50 000-cell build on the CI runner.
+        </p>
+        <table>
+          <tr><th>Sheet</th><th>Memory</th></tr>
+          <tr><td>1 000 cells</td><td>~84 KB</td></tr>
+          <tr><td>10 000 cells</td><td>~0.8 MB</td></tr>
+          <tr><td>100 000 cells</td><td>~8.4 MB</td></tr>
+          <tr><td>1 000 000 cells</td><td>~84 MB</td></tr>
+        </table>
+        <div class="callout warn">
+          <p>
+            <b>That figure is numeric cells.</b> Text interns, so repeated strings are
+            cheap — but a formula holds an AST per cell, and a formula-heavy sheet costs
+            materially more. How much more is <b>not yet measured</b>. Size from your own
+            documents if they are formula-dense.
+          </p>
+        </div>
+
+        <h3>Nodes, sheets and people</h3>
+        <p>
+          At <b>three concurrent editors per sheet</b>, and with the default
+          <code>OPENCALC_MAX_DOCUMENTS</code> of 1 000 per node:
+        </p>
+        <table>
+          <tr><th>RAM for documents</th><th>10k-cell sheets</th><th>100k-cell sheets</th><th>1M-cell sheets</th></tr>
+          <tr><td>4 GB</td><td>capped at 1 000 · 3 000 users</td><td>~490 · 1 460 users</td><td>~49 · 145 users</td></tr>
+          <tr><td>8 GB</td><td>capped at 1 000 · 3 000 users</td><td>~975 · <b>2 900 users</b></td><td>~98 · 290 users</td></tr>
+          <tr><td>16 GB</td><td>capped at 1 000 · 3 000 users</td><td>capped at 1 000 · 3 000 users</td><td>~195 · 585 users</td></tr>
+        </table>
+        <p>
+          <b>The crossover is around 100 000 cells a sheet.</b> Below it the document cap
+          binds before memory does — an 8&nbsp;GB node running ordinary 10k-cell sheets is
+          limited by configuration, and you should raise <code>OPENCALC_MAX_DOCUMENTS</code>
+          rather than buy RAM. Above it, memory binds and the cap is irrelevant.
+        </p>
+        <p>
+          Rule of thumb: <b>8 GB ≈ 1 000 sheets ≈ 3 000 concurrent editors</b>, if sheets
+          average 100k cells or fewer. It scales by adding nodes — a document is owned by
+          exactly one node at a time, so nodes do not contend for it.
+        </p>
+
+        <h3>The engine is not what runs out first</h3>
+        <p>
+          Worth stating plainly, because it is where sizing intuition usually goes wrong.
+          Three thousand editors each committing two edits a second is 6 000 edits a
+          second; at 0.25&nbsp;µs of engine time each, that is <b>1.5 ms of CPU per wall
+          second</b> — about a sixth of one percent of a single core.
+        </p>
+        <p>
+          What you will actually run out of is <b>memory</b>, and then socket and broadcast
+          work. Provision for resident documents and connection count, not for calculation.
+        </p>
+
+        <div class="callout warn">
+          <p>
+            <b>What is not measured, and so is not claimed.</b> There is no server-side
+            load harness: the numbers above are the engine measured directly, not a node
+            under sustained multi-user load. Per-document overhead in the collaboration
+            server — the operation log, participant state — is on top of the per-cell
+            figure and is unmeasured. Nothing here is a substitute for watching
+            <code>opencalc_documents</code> and <code>opencalc_participants</code> on your
+            own traffic.
+          </p>
+        </div>
 
         <h2 id="wopi">Nextcloud, SharePoint, Moodle, ownCloud, Alfresco</h2>
         <p>
