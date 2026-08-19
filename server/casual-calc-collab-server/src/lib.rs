@@ -29,6 +29,7 @@ pub mod config;
 pub mod document;
 pub mod http;
 pub mod lifecycle;
+pub mod memory;
 pub mod net;
 pub mod presence;
 pub mod relay;

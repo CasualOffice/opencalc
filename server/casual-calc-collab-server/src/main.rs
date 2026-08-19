@@ -443,6 +443,22 @@ fn read_limits() -> Limits {
             "OPENCALC_MAX_PENDING_CONNECTIONS",
             d.max_pending_connections as u64,
         ) as usize,
+        // The ceiling is the container's, discovered rather than configured —
+        // a node with a 2 GB cgroup limit on a 64 GB host is a 2 GB node, and
+        // sizing from the host is how a container is killed while `free` looks
+        // healthy. `OPENCALC_MEMORY_LIMIT_BYTES` overrides it for a deployment
+        // that knows better than its cgroup.
+        memory_budget: env_u64("OPENCALC_MEMORY_LIMIT_BYTES", 0)
+            .checked_sub(0)
+            .filter(|v| *v > 0)
+            .or_else(casual_calc_collab_server::memory::container_limit_bytes)
+            .map(
+                |limit_bytes| casual_calc_collab_server::memory::MemoryBudget {
+                    limit_bytes,
+                    high_water_percent: env_u64("OPENCALC_MEMORY_HIGH_WATER_PERCENT", 85)
+                        .clamp(50, 95),
+                },
+            ),
         join_timeout_ms: env_u64("OPENCALC_JOIN_TIMEOUT_MS", d.join_timeout_ms),
         drain_timeout_ms: env_u64("OPENCALC_DRAIN_TIMEOUT_MS", d.drain_timeout_ms),
         // Must fit the orchestrator's stop grace. Named so an operator who
