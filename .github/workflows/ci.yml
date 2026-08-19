@@ -128,7 +128,7 @@ jobs:
                  and .memory.workbookBytes > 0
                  and .memory.centiBytesPerCell > 0' report.json \
             || { jq '.memory' report.json; echo "::error::the memory measurement did not run"; exit 1; }
-          jq -r '"a million cells cost \(.memory.workbookBytes) bytes, \(.memory.centiBytesPerCell / 100) bytes per cell"' report.json
+          jq -r '"\(.memory.cells) cells cost \(.memory.workbookBytes) bytes, \(.memory.centiBytesPerCell / 100) bytes per cell"' report.json
 
   # The SDK's published surface, compiled the way an integrator compiles it.
   #
