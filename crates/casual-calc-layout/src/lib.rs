@@ -35,7 +35,7 @@ pub use numfmt::{
 };
 
 use casual_calc_model::{
-    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, Sheet, Style, Workbook,
+    BorderEdge, Borders, Cell, CellRange, CellRef, CellValue, Emu, Sheet, Style, Workbook,
 };
 
 /// A scrolled viewport rectangle, in twips.
@@ -290,7 +290,106 @@ fn layout_range(
         let effect = effect_at(at, cell);
         push_cell(&mut list, workbook, cell, rect, Background::Paint, &effect);
     }
+
+    // Pictures last, because they float over the grid rather than sitting in
+    // it: a drawing anchored across four cells covers whatever those cells
+    // hold. Emitted with the cells they overlap, they would be painted away by
+    // the next cell's background.
+    push_images(&mut list, sheet, geometry, range);
     list
+}
+
+/// EMUs in one twip: 914,400 to the inch against 1,440, which divides exactly.
+const EMU_PER_TWIP: i64 = 635;
+
+/// A drawing offset in twips. Truncating toward zero, deterministically — the
+/// remainder is at most a twip, which is 1/20 of a point and below any device
+/// this renders to.
+fn emu_to_twips(emu: i64) -> i64 {
+    emu / EMU_PER_TWIP
+}
+
+/// The twip rectangle a drawing frame occupies, from its anchor cells **and**
+/// its EMU offsets.
+///
+/// The offsets are not decoration. A picture's edges land wherever they were
+/// dragged, which is almost never on a gridline; a rectangle taken from the
+/// anchor cells alone snaps every drawing to whole cells, which moves it and
+/// resizes it at once.
+///
+/// [`ImageView::anchor`](casual_calc_model::ImageView::anchor) is inclusive
+/// while OOXML's `<xdr:to>` is exclusive, so the far edge is the leading edge of
+/// the line *after* the last covered one — and
+/// [`to_offset`](casual_calc_model::ImageView::to_offset) is measured from
+/// exactly there, which is why it is added to `offset(end + 1)` rather than to
+/// `offset(end)`.
+fn frame_rect(geometry: &GridGeometry, anchor: &CellRange, from: Emu, to: Emu) -> Rect {
+    let x = geometry
+        .columns
+        .offset(anchor.start.col)
+        .saturating_add(emu_to_twips(from.x));
+    let y = geometry
+        .rows
+        .offset(anchor.start.row)
+        .saturating_add(emu_to_twips(from.y));
+    let right = geometry
+        .columns
+        .offset(anchor.end.col.saturating_add(1))
+        .saturating_add(emu_to_twips(to.x));
+    let bottom = geometry
+        .rows
+        .offset(anchor.end.row.saturating_add(1))
+        .saturating_add(emu_to_twips(to.y));
+    Rect {
+        x,
+        y,
+        w: right.saturating_sub(x).max(0),
+        h: bottom.saturating_sub(y).max(0),
+    }
+}
+
+/// Emit the sheet's pictures whose frames reach into `range`.
+///
+/// Filtered by the **frame**, not by the anchor cell: a picture is routinely
+/// larger than the window, so its anchor is off screen precisely when it is
+/// most visible. Testing containment instead would make a large drawing
+/// disappear as it was scrolled into.
+///
+/// A frame with no area is skipped rather than emitted and reported as undrawn.
+/// That is not loss — it is a picture on rows or columns the author hid, and
+/// Excel does not draw it either; naming it would fill a compatibility report
+/// with things nobody asked to see.
+fn push_images(
+    list: &mut DisplayList,
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    range: VisibleRange,
+) {
+    if sheet.images.is_empty() {
+        return;
+    }
+    let win_x0 = geometry.columns.offset(range.cols.0);
+    let win_x1 = geometry.columns.offset(range.cols.1.saturating_add(1));
+    let win_y0 = geometry.rows.offset(range.rows.0);
+    let win_y1 = geometry.rows.offset(range.rows.1.saturating_add(1));
+
+    for image in &sheet.images {
+        let rect = frame_rect(geometry, &image.anchor, image.from_offset, image.to_offset);
+        if rect.w == 0 || rect.h == 0 {
+            continue;
+        }
+        let intersects = rect.x < win_x1
+            && rect.x.saturating_add(rect.w) > win_x0
+            && rect.y < win_y1
+            && rect.y.saturating_add(rect.h) > win_y0;
+        if !intersects {
+            continue;
+        }
+        list.items.push(PaintItem::Image {
+            rect,
+            part: image.part.clone(),
+        });
+    }
 }
 
 /// Whether `at` falls inside `merge`.
