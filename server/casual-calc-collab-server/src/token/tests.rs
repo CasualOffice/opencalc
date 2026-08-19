@@ -170,9 +170,10 @@ fn a_url_outside_the_allow_list_is_refused() {
     });
     assert_eq!(
         c.validate("doc-1-rev-9", &p, 1_500),
-        Err(TokenError::ForbiddenUrl(
-            "https://attacker.example/collect".into()
-        ))
+        Err(TokenError::ForbiddenUrl {
+            url: "https://attacker.example/collect".into(),
+            hint: None,
+        })
     );
 }
 
@@ -210,12 +211,58 @@ fn plain_http_is_refused_unless_it_was_asked_for() {
     });
     assert!(matches!(
         c.validate("doc-1-rev-9", &policy(), 1_500),
-        Err(TokenError::ForbiddenUrl(_))
+        Err(TokenError::ForbiddenUrl { .. })
     ));
 
     let mut p = policy();
     p.require_https = false;
     assert_eq!(c.validate("doc-1-rev-9", &p, 1_500), Ok(()));
+}
+
+/// The one misconfiguration the allow-list cannot express, said out loud.
+///
+/// `check_url` compares the host with the port stripped, so a natural-looking
+/// `127.0.0.1:8080` never matches anything. The refusal used to name only the
+/// URL, which reads as "your token is wrong" when the configuration is wrong —
+/// and the operator is looking at an allow-list that appears to contain exactly
+/// the host being refused.
+#[test]
+fn an_allowed_host_that_names_a_port_says_that_is_why_it_matched_nothing() {
+    let mut p = policy();
+    p.allowed_hosts.insert("127.0.0.1:8080".into());
+
+    let refusal = check_url("https://127.0.0.1:8080/files/1", &p)
+        .expect_err("the port is stripped, so this cannot match")
+        .to_string();
+    assert!(
+        refusal.contains("port"),
+        "the refusal has to name the reason, not only the url: {refusal}"
+    );
+    assert!(
+        refusal.contains("127.0.0.1:8080"),
+        "and the entry that can never match: {refusal}"
+    );
+}
+
+/// The other half, which is what keeps the hint honest.
+///
+/// A hint printed on every refusal is not a diagnosis, it is noise — and it
+/// would send an operator whose allow-list is fine to change it.
+#[test]
+fn an_ordinary_refusal_does_not_blame_a_port() {
+    let mut p = policy();
+    p.allowed_hosts.insert("host.example".into());
+    // An IPv6 literal is nothing but colons and none of them is a port.
+    p.allowed_hosts.insert("::1".into());
+    p.allowed_hosts.insert("2001:db8::1".into());
+
+    let refusal = check_url("https://attacker.example/collect", &p)
+        .expect_err("not on the list")
+        .to_string();
+    assert!(
+        !refusal.contains("port"),
+        "nothing here names a port; the hint fired on an allow-list that is fine: {refusal}"
+    );
 }
 
 #[test]

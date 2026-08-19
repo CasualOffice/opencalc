@@ -253,6 +253,14 @@ jobs:
       # The warm-up absorbs that; this asserts no cargo job is added without it.
       - name: Every cargo job warms the registry with retries
         run: python3 tools/check-ci-retry.py
+      # DOC-025's acceptance is "no doc claims a gate CI does not run", and for
+      # a long time nothing enforced it -- docs/67 stated DOC-025's own gate as
+      # a documentation consistency check that had never been written, so the
+      # row meant to catch unbacked gate claims was itself one. A document
+      # promising a check nobody wrote is worse than one promising nothing,
+      # because it is read as assurance.
+      - name: No document claims a gate CI does not run
+        run: python3 tools/check-doc-claims.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a

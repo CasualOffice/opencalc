@@ -356,7 +356,19 @@ pub enum TokenError {
     /// The token is for a different document than the one being joined.
     WrongDocument,
     /// A URL the token names is one this server will not contact.
-    ForbiddenUrl(String),
+    ForbiddenUrl {
+        /// The URL the token named.
+        url: String,
+        /// Why the allow-list could not have matched it, when the *configuration*
+        /// is the reason rather than the URL.
+        ///
+        /// `None` unless there is something to say. An operator reading
+        /// "forbidden url" about a URL they can see in their own allow-list has
+        /// no next step, and the commonest way to get there — writing
+        /// `host:port` in `OPENCALC_ALLOWED_HOSTS`, which the comparison strips
+        /// the port from and so can never match — is invisible from both ends.
+        hint: Option<String>,
+    },
     /// A required field was empty.
     Incomplete(&'static str),
 }
@@ -368,7 +380,13 @@ impl core::fmt::Display for TokenError {
             TokenError::NotYetValid => f.write_str("the token is not valid yet"),
             TokenError::WrongAudience => f.write_str("the token names a different audience"),
             TokenError::WrongDocument => f.write_str("the token is for a different document"),
-            TokenError::ForbiddenUrl(url) => write!(f, "the token names a forbidden url: {url}"),
+            TokenError::ForbiddenUrl { url, hint: None } => {
+                write!(f, "the token names a forbidden url: {url}")
+            }
+            TokenError::ForbiddenUrl {
+                url,
+                hint: Some(hint),
+            } => write!(f, "the token names a forbidden url: {url} — {hint}"),
             TokenError::Incomplete(what) => write!(f, "the token is missing {what}"),
         }
     }
@@ -437,7 +455,10 @@ impl Claims {
 
 /// Whether the server may contact `url`.
 fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
-    let forbidden = || TokenError::ForbiddenUrl(url.to_owned());
+    let forbidden = || TokenError::ForbiddenUrl {
+        url: url.to_owned(),
+        hint: None,
+    };
     let rest = match url.split_once("://") {
         Some(("https", rest)) => rest,
         Some(("http", rest)) if !policy.require_https => rest,
@@ -461,7 +482,45 @@ fn check_url(url: &str, policy: &TokenPolicy) -> Result<(), TokenError> {
     if policy.allowed_hosts.is_empty() || policy.allowed_hosts.contains(host) {
         return Ok(());
     }
-    Err(forbidden())
+    // Refused, and the refusal says so — but if the allow-list itself contains
+    // an entry that cannot match anything, say that too. It is the difference
+    // between an operator checking their token and an operator fixing their
+    // configuration.
+    Err(TokenError::ForbiddenUrl {
+        url: url.to_owned(),
+        hint: names_a_port(policy).map(|entry| {
+            format!(
+                "the host is compared as {host:?} with the port stripped, and the allowed host \
+                 {entry:?} names a port, so it can never match"
+            )
+        }),
+    })
+}
+
+/// An allow-list entry that names a port, and therefore matches nothing.
+///
+/// [`check_url`] compares the host **without** its port, deliberately: a port
+/// is not a trust boundary and requiring one would refuse the same host reached
+/// on 443 implicitly. The consequence is that `127.0.0.1:8080` in
+/// `OPENCALC_ALLOWED_HOSTS` is not a stricter rule, it is a dead one — and
+/// nothing said so, which cost real time in a first deployment.
+///
+/// Only an unambiguous `host:port` counts. An IPv6 literal is full of colons
+/// and none of them is a port, so `::1` and `2001:db8::1` are left alone.
+fn names_a_port(policy: &TokenPolicy) -> Option<&str> {
+    policy
+        .allowed_hosts
+        .iter()
+        .find(|entry| {
+            let Some((host, port)) = entry.split_once(':') else {
+                return false;
+            };
+            !host.is_empty()
+                && !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit())
+                && !host.contains([':', '[', ']'])
+        })
+        .map(String::as_str)
 }
 
 #[cfg(test)]
