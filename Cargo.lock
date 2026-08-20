@@ -281,6 +281,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-formula",
  "casual-calc-model",
+ "casual-calc-ods",
  "casual-calc-sdk",
  "serde",
  "serde_json",

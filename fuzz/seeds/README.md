@@ -21,6 +21,13 @@ cargo +nightly fuzz run ooxml_xml corpus/ooxml_xml seeds/ooxml_xml
 which is small, checksummed and produced by this project — so a seed changing is
 a fixture changing, and both are visible in review.
 
+`ods/` is a real LibreOffice `.ods` for the whole-package pass, that same
+document's `content.xml` for the element-walk pass, and five small documents
+aimed at what the reader gets wrong: repeat runs, escaped text, every value
+type, the constructs that must be *reported* rather than dropped, and a
+document with no sheets at all. `amplifier.xml` is a committed reproducer for
+`ODS-03` — see the crash policy in [`../README.md`](../README.md).
+
 `token_verify/` is a valid token plus the near misses worth starting adjacent
 to: `alg: none`, a header claiming RS256 against a shared secret, a `kid`
 carrying a path, a signature made with the wrong key, an expired token, and one

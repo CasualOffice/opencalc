@@ -261,6 +261,14 @@ jobs:
       # because it is read as assurance.
       - name: No document claims a gate CI does not run
         run: python3 tools/check-doc-claims.py
+      # `docs/00-README.md` calls itself the map, and AGENTS.md sends every
+      # agent there first -- so a document missing from it is a document
+      # nobody finds. Eight of them accumulated (69..75 and the 14a archive)
+      # because writing a new document never forces this file to change, and a
+      # review diff shows the document being added, not the index that failed
+      # to mention it (DOC-033).
+      - name: Every document is in the documentation index
+        run: python3 tools/check-doc-index.py
       # The browser suite speaks the wire protocol over a raw socket, so it
       # carries its own copy of the version number. Bumping the engine and
       # forgetting this one turned three collaboration tests red *after* a
@@ -454,6 +462,14 @@ jobs:
       # mistakes an "it opened" check cannot.
       - name: Validate the package LibreOffice gets
         run: cargo run -q -p casual-calc-fidelity -- --validate-package --json package-report.json
+      # ODS-02: the `.ods` reader had no oracle at all. Its tests read documents
+      # this repository wrote, which proves the reader agrees with the writer
+      # and nothing about whether either agrees with LibreOffice -- the
+      # application that actually makes `.ods` files, and now an upload path
+      # into this engine. The corpus is LibreOffice-authored: its repeat runs,
+      # its escaping, its element order.
+      - name: Diff the .ods corpus against LibreOffice Calc
+        run: cargo run -q -p casual-calc-fidelity -- --ods --json ods-report.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -461,6 +477,7 @@ jobs:
           path: |
             oracle-report.json
             package-report.json
+            ods-report.json
           retention-days: 14
 
   fuzz-build:
@@ -491,7 +508,7 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify; do
+          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify ods; do
             seeds="seeds/$target"
             echo "::group::$target"
             # Created, not assumed. `fuzz/corpus/` is gitignored, so on a fresh

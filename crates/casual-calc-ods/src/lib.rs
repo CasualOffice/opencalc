@@ -129,7 +129,7 @@ const MAX_REPEAT: u32 = 4096;
 /// OOXML reader has enforced since `SEC-011`. Two readers admitting different
 /// amounts of the same workbook is its own defect, so this is deliberately the
 /// same number rather than a fresh judgement.
-const MAX_POPULATED_CELLS: usize = 8_000_000;
+pub const MAX_POPULATED_CELLS: usize = 8_000_000;
 
 /// Read a `.ods` into a workbook, with a report of everything not carried.
 ///
@@ -523,6 +523,33 @@ fn read_content(xml: &str) -> Result<(Workbook, CompatibilityReport), OdsError> 
                             )?);
                         } else {
                             pending = Some(cell);
+                        }
+                    }
+                    // **Runs of spaces are elements, not text.** ODF collapses
+                    // whitespace in `<text:p>`, so LibreOffice writes a leading,
+                    // trailing or repeated space as `<text:s text:c="N"/>` — and
+                    // this reader walked straight past it, so `"  padded  "`
+                    // came back as `"padded"` and a space-only cell came back
+                    // empty. A silent change to ordinary documents, on the most
+                    // ordinary content there is (`ODS-04`).
+                    //
+                    // `text:c` defaults to 1 and counts the spaces *this*
+                    // element stands for.
+                    "s" if in_text => {
+                        if let Some(p) = pending.as_mut() {
+                            let n: usize = attr(e, "text:c")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(1)
+                                // A repeat count is attacker-controlled like any
+                                // other; bounded for the same reason.
+                                .min(MAX_REPEAT as usize);
+                            p.text.push_str(&" ".repeat(n));
+                        }
+                    }
+                    // The sibling ODF uses for a tab stop, for the same reason.
+                    "tab" if in_text => {
+                        if let Some(p) = pending.as_mut() {
+                            p.text.push('\t');
                         }
                     }
                     "p" => {
@@ -1369,6 +1396,40 @@ fn escape(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Padding is elements, not text** (`ODS-04`).
+    ///
+    /// ODF collapses whitespace inside `<text:p>`, so LibreOffice writes a
+    /// leading, trailing or repeated space as `<text:s text:c="N"/>`. This
+    /// reader walked past those elements, so `"  padded  "` came back as
+    /// `"padded"` and a cell holding a single space came back empty — a silent
+    /// change to the most ordinary content there is.
+    ///
+    /// The fixture is **written by LibreOffice**, not by the writer below, and
+    /// that is the whole point: nothing this repository writes emits
+    /// `<text:s>`, so a round trip through our own writer could never have
+    /// exercised this. It is the same circularity that hid `ODS-06`.
+    #[test]
+    fn a_libreoffice_documents_padding_is_not_silently_trimmed() {
+        let bytes = include_bytes!("../tests/fixtures/libreoffice-spaces.ods");
+        let (wb, _) = import_ods(bytes).expect("read the LibreOffice document");
+        let text = |r: u32| {
+            wb.sheets[0]
+                .cells
+                .get(CellRef::new(r, 0))
+                .map(|c| match &c.value {
+                    CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                        wb.strings.get(*id).unwrap_or_default().to_owned()
+                    }
+                    other => format!("{other:?}"),
+                })
+                .unwrap_or_default()
+        };
+
+        assert_eq!(text(1), "  padded  ", "the padding was trimmed away");
+        assert_eq!(text(2), " ", "a cell holding one space came back empty");
+        assert_eq!(text(3), "plain", "an ordinary cell was disturbed");
+    }
 
     /// **A few hundred bytes must not become gigabytes.**
     ///
