@@ -36,9 +36,27 @@ runs:
       run: |
         set -uo pipefail
         attempts="${{ inputs.attempts }}"
+        log="$(mktemp)"
         for attempt in $(seq 1 "$attempts"); do
-          if cargo fetch --locked --manifest-path "${{ inputs.manifest-path }}"; then
+          if cargo fetch --locked --manifest-path "${{ inputs.manifest-path }}" 2>&1 | tee "$log"; then
             exit 0
+          fi
+          # **Only retry what a retry can fix.**
+          #
+          # This warm-up once reported "the crates.io registry was unreachable
+          # after 5 attempts" for a stale lockfile — a one-line, entirely local
+          # error, retried five times and then blamed on the network. That is
+          # worse than not retrying at all: it hides the real message behind a
+          # confident wrong one, and the person reading it goes looking at
+          # GitHub's status page.
+          #
+          # So a failure that is plainly not the network fails immediately,
+          # carrying cargo's own words.
+          if grep -qE "because --locked was passed|failed to select a version|no matching package|which `[^`]+` depends on" "$log"; then
+            echo "::error::this is not a network failure, so retrying will not help:"
+            grep -E "^error" "$log" | head -3
+            echo "::error::run 'cargo update --manifest-path ${{ inputs.manifest-path }} --workspace' and commit the lockfile"
+            exit 1
           fi
           if [ "$attempt" -eq "$attempts" ]; then break; fi
           # Linear rather than exponential: a registry blip clears in seconds,
