@@ -261,6 +261,11 @@ jobs:
       # because it is read as assurance.
       - name: No document claims a gate CI does not run
         run: python3 tools/check-doc-claims.py
+      # The owner's hold on publishing is kept by the trigger, not by anybody
+      # remembering it: a release workflow must fire on a component-scoped tag
+      # or a deliberate manual run, never on a merge.
+      - name: A release cannot publish by accident
+        run: python3 tools/check-release-hold.py
       # `docs/00-README.md` calls itself the map, and AGENTS.md sends every
       # agent there first -- so a document missing from it is a document
       # nobody finds. Eight of them accumulated (69..75 and the 14a archive)
