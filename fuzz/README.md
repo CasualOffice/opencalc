@@ -17,7 +17,7 @@ list has a row here.
 | `ooxml_xml` | `.rels` and `workbook.xml` | the two OPC helpers return rather than hang or panic |
 | `xlsx` | a whole SpreadsheetML package | the importer returns, and an admitted document is inside the budget it was given (`SEC-002`) |
 | `ods` | an OpenDocument spreadsheet | reads or refuses, never panics, hangs or exhausts memory; what it writes, it reads back; a document is inside `MAX_POPULATED_CELLS` (`ODS-05`) |
-| `delimited` | CSV / TSV / PSV | the reader returns, and a parse → write → parse round trip settles, keeps every cell, its kind and its number format |
+| `delimited` | CSV / TSV / PSV | the reader returns, a parse → write → parse round trip settles, keeps every cell, its kind and its number format, and turns no non-zero number into zero (`IO-01`); a save is on the order of what it read (`IO-02`) |
 | `snapshot` | the model as JSON | an admitted snapshot re-serializes to the same structure and the same bytes |
 | `formula_parse` | a formula | the parser returns |
 | `number_format` | a number-format code | the formatter returns |
@@ -79,15 +79,19 @@ reader materialise 16.7 M cells; `ODS-05` bounded the repeat *product*, the hold
 came out, and the same measurement is now `within_its_own_bound` — the seed runs
 and is refused in about a millisecond.
 
-Two holds are open, both found by the targets added for `PROD-08`:
+`delimited` reached the same end state. Its hold was `IO-01` —
+`write_delimited` wrote any number with `|n| < 5e-16` as `0`, not rounded but
+erased, and `-1e-300` as `-0` and then `0`, so the file was not a fixed point
+after one round trip and the sign left one save after the magnitude. With the
+row fixed, `held_underflow` and its `continue` are gone;
+`seeds/delimited/underflow.csv` now runs against every assertion in the target,
+and the *settling* one is what a regression trips first. `IO-02` — the
+bounding-box writer — went the way of the ODS amplifier: the new seed
+`extent.csv` is 2 002 bytes that used to write 1 001 003, and the measurement
+is now `MAX_AMPLIFICATION`, which no longer skips a large extent but bounds it.
 
-- **`delimited`** — `casual_calc_io::write_delimited` writes any number with
-  `|n| < 5e-16` as `0`. Not rounded, erased: `1e-16` in a `.csv` is `0` after
-  one save. The negative side is worse — `-1e-300` writes as `-0`, which the
-  *next* save writes as `0`, so the file is not a fixed point after one round
-  trip and the documented "parse → write → parse settles" claim fails in its
-  strongest form. Reproducer `seeds/delimited/underflow.csv`; the hold is
-  `held_underflow`, one predicate, one `continue`.
+One hold is open, found by a target added for `PROD-08`:
+
 - **`snapshot`** — `casual-calc-model` uses `serde_json` without the
   `float_roundtrip` feature, so its float reader is a fast approximation while
   its writer (`ryu`) is exact. `to_snapshot` then `from_snapshot` moves
