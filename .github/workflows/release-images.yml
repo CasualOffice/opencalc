@@ -68,6 +68,14 @@ jobs:
           - image: wopi
             dockerfile: server/casual-calc-wopi/Dockerfile
             description: "OpenCalc WOPI adapter"
+          # The document store and editor host. It calls itself the demo
+          # integrator, and it is also what serves the editor and keeps the
+          # documents — so without it the standalone quick start needs a
+          # `docker compose build` rather than a `docker run`, which is a
+          # worse first five minutes than the small public surface was worth.
+          - image: calc-host
+            dockerfile: server/casual-calc-host/Dockerfile
+            description: "OpenCalc document host and editor"
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
