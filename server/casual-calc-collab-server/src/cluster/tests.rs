@@ -22,6 +22,13 @@ use super::*;
 
 const TTL: u64 = 1_000;
 
+/// A lease for a test that does enough work to outrun the ordinary one.
+///
+/// Ten minutes: far past anything a loaded runner can take for ten thousand
+/// round trips, and still an expiry rather than none, so a test that leaks a
+/// lease does not leave one behind for ever.
+const SLOW_WORK_TTL: u64 = 600_000;
+
 /// Run one rule against both backends.
 ///
 /// The Redis run gets a **fresh key prefix per test** by way of the document
@@ -331,7 +338,22 @@ contract!(the_log_is_bounded_rather_than_growing_forever, |c| {
     //
     // Deliberately more entries than the window, so the assertion is about the
     // bound rather than about a number that happens to fit.
-    let lease = claim(c, "bounded", "node-a", 0).await;
+    // **A lease that outlives the work by construction** (`SRV-07`).
+    //
+    // Every other test here does a handful of appends inside the shared
+    // one-second `TTL`, which is fine. This one does ten thousand two hundred
+    // and fifty, and under a loaded machine that outran the lease's key
+    // expiry: the append came back `Unled` and the failure read as a fencing
+    // defect rather than as a stopwatch.
+    //
+    // A test whose result depends on how busy the machine is teaches people to
+    // re-run rather than to read, and this project has already paid for that
+    // habit. The bound being asserted has nothing to do with time, so the
+    // lease is simply made long enough that no amount of load can reach it.
+    let lease = c
+        .claim("bounded".to_owned(), "node-a".to_owned(), SLOW_WORK_TTL, 0)
+        .await
+        .expect("the store answered");
     let over = crate::cluster::redis::LOG_MAX_ENTRIES + 250;
     for i in 0..over {
         append(c, "bounded", lease.epoch, i, format!("op{i}").as_bytes(), 0)
