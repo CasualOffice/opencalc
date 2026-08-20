@@ -117,7 +117,12 @@
   // never probes for one — a host that does not run one would get a 404 in
   // its console on every boot — so saying so is the host's job, and this host
   // does run one.
-  frame.src = "/editor/editor.html?fonts=/api/fonts";
+  // `?hide=header` because this page renders its own — the title, the
+  // participant name, Share/Download/History. Without it the editor's header
+  // stacks under ours and a user sees two, which is what running the Docker
+  // stack looks like today. `<opencalc-sheet>` hides the header by default for
+  // the same reason; an iframe had no way to ask until now.
+  frame.src = "/editor/editor.html?fonts=/api/fonts&hide=header";
   frame.addEventListener("load", async () => {
     const win = frame.contentWindow;
     // Wait for the engine, which the editor signals by writing its version into

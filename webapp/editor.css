@@ -80,7 +80,7 @@
   --oc-border-hover-color: #c9cfd9;
   --oc-surface-color: #f6f7f9;     /* toolbar pill groups, name box */
   --oc-popover-background-color: #ffffff;        /* popovers, panels */
-  --oc-gridline-color: #f0f1f4;        /* light interior gridlines */
+  --oc-gridline-color: #d3d7de;        /* interior gridlines — see the contrast note */
   --oc-accent-color: #2f6df6;
   --oc-accent-hover-color: #1f56cf;
   --oc-accent-contrast-color: #ffffff;
@@ -138,7 +138,7 @@
   --oc-border-hover-color: #3a434f;
   --oc-surface-color: #1a1f27;
   --oc-popover-background-color: #171b21;
-  --oc-gridline-color: #20262f;
+  --oc-gridline-color: #333b46;
   --oc-accent-color: #5b8bff;
   --oc-accent-hover-color: #7aa0ff;
   --oc-accent-contrast-color: #0b0d12;
@@ -183,7 +183,7 @@
     --oc-border-hover-color: #3a434f;
     --oc-surface-color: #1a1f27;
     --oc-popover-background-color: #171b21;
-    --oc-gridline-color: #20262f;
+    --oc-gridline-color: #333b46;
     --oc-accent-color: #5b8bff;
     --oc-accent-hover-color: #7aa0ff;
     --oc-accent-contrast-color: #0b0d12;
@@ -1380,4 +1380,39 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 .filter-scope + .panel-hint {
   padding: 0 10px 6px 28px;
   margin: 0;
+}
+
+/* Gridlines, and honouring somebody who has asked for more contrast.
+ *
+ * The default was `#f0f1f4`, which is **1.13:1** against the canvas — lighter
+ * than both Google Sheets (1.32:1) and Excel (~1.45:1), and far under the 3:1
+ * WCAG 2.1 asks for a graphical object you need in order to understand the
+ * content. A spreadsheet's grid is exactly that: it is what tells you which
+ * cell you are looking at. Reported by somebody running the stack and finding
+ * the grid hard to see, which is the only way this was ever going to surface —
+ * no test asserts on how visible a hairline is.
+ *
+ * The default is now 1.44:1, in line with the category. It is deliberately not
+ * 3:1: a hairline at 3:1 reads as a heavy table border and fights the data for
+ * attention, which is why no spreadsheet ships one.
+ *
+ * So the accessible answer is not a darker default for everybody — it is
+ * honouring the person who has said they want more. `prefers-contrast: more`
+ * is that request, and here it clears 3:1 in both schemes.
+ */
+@media (prefers-contrast: more) {
+  :root {
+    --oc-gridline-color: #8b94a1;  /* 3.07:1 on #ffffff */
+    --oc-border-color: #9aa2ae;
+  }
+  :root[data-theme="dark"] {
+    --oc-gridline-color: #5b6675;  /* 3.22:1 on #0f1216 */
+    --oc-border-color: #6b7686;
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --oc-gridline-color: #5b6675;
+    --oc-border-color: #6b7686;
+  }
 }

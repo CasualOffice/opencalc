@@ -31,6 +31,29 @@ const ACCENT = /^#[0-9a-f]{3,8}$|^[a-z]{3,20}$/i.test(PARAMS.get("accent") || ""
   ? PARAMS.get("accent")
   : null;
 
+/// Chrome regions to hide, from `?hide=header,statusbar`.
+///
+/// The regions and the `oc-hide-*` classes are **the same ones `embed.js`
+/// uses** — not a second vocabulary. `<opencalc-sheet>` already hides the
+/// header by default, on the stated grounds that "an embedded editor is the
+/// host's product, not ours". A host that iframes `editor.html` directly had
+/// no way to say the same thing, so `casual-calc-host` rendered its own header
+/// *and* got this one: two headers stacked, which is what a user running the
+/// Docker stack sees. The comment in that page even claims it "can keep its
+/// own chrome without forking the editor's HTML" — the intent was right and
+/// nothing implemented it.
+///
+/// Filtered against the known list rather than trusted: this arrives on a URL,
+/// so anybody who can hand somebody a link chooses it, and an unfiltered value
+/// would be an arbitrary class on the document root.
+const CHROME_REGIONS = [
+  "header", "menubar", "toolbar", "formulabar", "tabs", "statusbar", "localepicker",
+];
+const HIDDEN_CHROME = (PARAMS.get("hide") || "")
+  .split(",")
+  .map((name) => name.trim().toLowerCase())
+  .filter((name) => CHROME_REGIONS.includes(name));
+
 /// Text that is about to become markup.
 function htmlText(raw) {
   return String(raw).replace(/[&<>"']/g, (c) =>
@@ -43,6 +66,13 @@ if (BRAND !== "OpenCalc") {
   for (const node of document.querySelectorAll(".tb-brand")) node.textContent = BRAND;
 }
 if (ACCENT) document.documentElement.style.setProperty("--oc-accent-color", ACCENT);
+
+// Applied to the root, because `.oc-hide-header` and its siblings are written
+// as descendant selectors and the header is a child of `<body>` here where in
+// the embed element it is a child of the shell.
+for (const region of HIDDEN_CHROME) {
+  document.documentElement.classList.add(`oc-hide-${region}`);
+}
 
 // --- Mount root -------------------------------------------------------------
 //
