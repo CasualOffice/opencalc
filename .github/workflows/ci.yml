@@ -65,7 +65,15 @@ jobs:
       - name: Redis binaries, for the tests that run their own cluster
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq redis-server
+          # **Both packages.** `redis-sentinel` is not shipped by
+          # `redis-server` on Debian or Ubuntu — it is its own package, which
+          # depends on the server. Installing only the server gave
+          # `redis-sentinel: command not found` and a job that failed at the
+          # version check rather than deep inside a test, which is the one
+          # good thing about checking versions here.
+          sudo apt-get install -y -qq redis-server redis-sentinel
+          # Both, by name: a missing binary fails on this line, where the
+          # message says which, and not thirty tests later as a skip.
           redis-server --version
           redis-sentinel --version
 
