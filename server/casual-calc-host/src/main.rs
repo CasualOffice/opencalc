@@ -263,6 +263,86 @@ async fn load_meta(config: &Config, id: &str) -> Option<DocumentMeta> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// What a restored store looks like, when it does not look right.
+///
+/// A document is **three files**: `<id>.xlsx`, `<id>.json` and an optional
+/// `<id>.versions/`. They are written one at a time — the document first, so a
+/// crash between them leaves an *invisible* document rather than a listed one
+/// whose bytes are gone. `DEP-12` made each individual write atomic, and that
+/// is as far as one file at a time can take you.
+///
+/// **A backup taken while the host is running is a set of atomic files, not an
+/// atomic set of files.** Copy the volume mid-upload and the copy can hold the
+/// document without its metadata, or the reverse. Neither is corruption — both
+/// are recoverable — but nothing detected them, so a restore looked complete
+/// and was quietly short.
+///
+/// This is that detection. It is deliberately a *report* rather than a repair:
+/// the two cases want opposite treatment and only an operator knows which,
+/// since an orphaned document may be somebody's only copy.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+struct Integrity {
+    /// Bytes with no metadata: the document exists and nothing lists it.
+    invisible: Vec<String>,
+    /// Metadata with no bytes: it is listed and opening it fails.
+    dangling: Vec<String>,
+    /// A `.part` left by a write that did not finish its rename.
+    unfinished: Vec<String>,
+    /// Versions belonging to a document that is no longer there.
+    stranded: Vec<String>,
+}
+
+impl Integrity {
+    /// Whether the store is exactly what it should be.
+    fn is_sound(&self) -> bool {
+        self.invisible.is_empty()
+            && self.dangling.is_empty()
+            && self.unfinished.is_empty()
+            && self.stranded.is_empty()
+    }
+}
+
+/// Walk the store and report what does not line up.
+///
+/// Sorted, because an operator comparing two runs needs the same order twice,
+/// and because a test that has to sort the answer itself is a test that has
+/// already accepted an unstable one.
+async fn scan_integrity(config: &Config) -> Integrity {
+    let mut found = Integrity::default();
+    let Ok(mut entries) = tokio::fs::read_dir(&config.store).await else {
+        return found;
+    };
+
+    let mut documents = std::collections::BTreeSet::new();
+    let mut metadata = std::collections::BTreeSet::new();
+    let mut versions = std::collections::BTreeSet::new();
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match name.rsplit_once('.') {
+            Some((stem, "xlsx")) => {
+                documents.insert(stem.to_owned());
+            }
+            Some((stem, "json")) => {
+                metadata.insert(stem.to_owned());
+            }
+            Some((stem, "versions")) => {
+                versions.insert(stem.to_owned());
+            }
+            // A `.part` is a write that did not finish. It is named for the
+            // target, so it says which document was being written.
+            Some((stem, "part")) => found.unfinished.push(stem.to_owned()),
+            _ => {}
+        }
+    }
+
+    found.invisible = documents.difference(&metadata).cloned().collect();
+    found.dangling = metadata.difference(&documents).cloned().collect();
+    found.stranded = versions.difference(&documents).cloned().collect();
+    found.unfinished.sort();
+    found
+}
+
 /// Where a document's previous versions live.
 ///
 /// A directory beside the document, one file per version, named for the moment
@@ -1051,6 +1131,31 @@ async fn main() {
         ),
         faces => tracing::info!(dir = ?fonts, count = faces.len(), "fonts supplied"),
     }
+    // **Say what the store looks like, once, at startup.**
+    //
+    // This is when it matters: the moment after a restore, when somebody wants
+    // to know whether the copy they took while the host was running caught a
+    // document mid-write. Every individual file is atomic (`DEP-12`), so
+    // nothing here is corrupt — but a backup of a running store is a set of
+    // atomic files, not an atomic set of files, and the difference is a
+    // document that exists and is listed by nothing.
+    //
+    // Reported, never repaired: an invisible document may be somebody's only
+    // copy, and a dangling entry may be the record of one that should be
+    // hunted down. Those want opposite treatment and only an operator knows
+    // which.
+    match scan_integrity(&config).await {
+        sound if sound.is_sound() => tracing::info!(store = ?config.store, "store is consistent"),
+        found => tracing::warn!(
+            store = ?config.store,
+            invisible = ?found.invisible,
+            dangling = ?found.dangling,
+            unfinished = ?found.unfinished,
+            stranded = ?found.stranded,
+            "the store does not line up; see docs/65 on restoring a backup"
+        ),
+    }
+
     let app = Router::new()
         .route("/", get(index))
         .route("/d/{id}", get(open_doc))
@@ -1647,5 +1752,120 @@ mod version_tests {
             live, good,
             "the live document was replaced with rubbish anyway"
         );
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    /// A store of its own, named for the test so two cannot collide.
+    ///
+    /// Same shape as the versions tests above rather than a new dependency:
+    /// this crate has no `tempfile`, and adding one for four assertions is a
+    /// dependency somebody has to audit forever.
+    fn store(name: &str) -> Config {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-integrity-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Config {
+            store: dir,
+            secret: "s".into(),
+            internal_base: "http://host:8080".into(),
+            max_upload: 1 << 20,
+            max_versions: 3,
+            collab_ws: String::new(),
+            audience: "a".into(),
+            admin_token: None,
+        }
+    }
+
+    /// **A store where every document is whole reports nothing.**
+    ///
+    /// The positive control: without it, a scan that always returned an empty
+    /// report would pass every test below.
+    #[tokio::test]
+    async fn a_whole_store_is_sound() {
+        let config = store("a_whole_store_is_sound");
+        std::fs::write(config.store.join("alpha.xlsx"), b"x").unwrap();
+        std::fs::write(config.store.join("alpha.json"), b"{}").unwrap();
+        std::fs::create_dir(config.store.join("alpha.versions")).unwrap();
+
+        let found = scan_integrity(&config).await;
+        assert!(
+            found.is_sound(),
+            "a whole store was reported as broken: {found:?}"
+        );
+    }
+
+    /// **A document with no metadata is invisible, and now says so.**
+    ///
+    /// This is what a backup taken mid-upload captures: the bytes were written
+    /// first — deliberately, so a crash leaves an unlisted document rather than
+    /// a listed one whose bytes are gone — and the metadata had not landed. It
+    /// is recoverable and nothing found it.
+    #[tokio::test]
+    async fn a_document_with_no_metadata_is_named() {
+        let config = store("a_document_with_no_metadata_is_named");
+        std::fs::write(config.store.join("orphan.xlsx"), b"x").unwrap();
+
+        let found = scan_integrity(&config).await;
+        assert_eq!(found.invisible, vec!["orphan".to_owned()]);
+        assert!(found.dangling.is_empty());
+        assert!(!found.is_sound());
+    }
+
+    /// **Metadata with no document is listed and cannot be opened.**
+    ///
+    /// The mirror case, and the one that looks fine until somebody clicks it.
+    #[tokio::test]
+    async fn metadata_with_no_document_is_named() {
+        let config = store("metadata_with_no_document_is_named");
+        std::fs::write(config.store.join("ghost.json"), b"{}").unwrap();
+
+        let found = scan_integrity(&config).await;
+        assert_eq!(found.dangling, vec!["ghost".to_owned()]);
+        assert!(found.invisible.is_empty());
+    }
+
+    /// **A leftover `.part` is a write that never finished its rename.**
+    ///
+    /// It is named for its target, so it says which document was being written
+    /// when the process stopped — which is the question an operator has.
+    #[tokio::test]
+    async fn an_unfinished_write_is_named() {
+        let config = store("an_unfinished_write_is_named");
+        std::fs::write(config.store.join("half.xlsx"), b"x").unwrap();
+        std::fs::write(config.store.join("half.json"), b"{}").unwrap();
+        std::fs::write(config.store.join("half.part"), b"partial").unwrap();
+
+        let found = scan_integrity(&config).await;
+        assert_eq!(found.unfinished, vec!["half".to_owned()]);
+    }
+
+    /// **Versions of a document that is gone are stranded, not silently kept.**
+    ///
+    /// Every previous version of a deleted document, still on the disk, costing
+    /// space nobody has accounted for and holding content somebody may have
+    /// asked to be rid of.
+    #[tokio::test]
+    async fn versions_of_a_missing_document_are_named() {
+        let config = store("versions_of_a_missing_document_are_named");
+        std::fs::create_dir(config.store.join("deleted.versions")).unwrap();
+
+        let found = scan_integrity(&config).await;
+        assert_eq!(found.stranded, vec!["deleted".to_owned()]);
+    }
+
+    /// **The report is ordered**, so two runs can be compared.
+    #[tokio::test]
+    async fn the_report_is_in_a_stable_order() {
+        let config = store("the_report_is_in_a_stable_order");
+        for id in ["zulu", "alpha", "mike"] {
+            std::fs::write(config.store.join(format!("{id}.xlsx")), b"x").unwrap();
+        }
+        let found = scan_integrity(&config).await;
+        assert_eq!(found.invisible, vec!["alpha", "mike", "zulu"]);
     }
 }
