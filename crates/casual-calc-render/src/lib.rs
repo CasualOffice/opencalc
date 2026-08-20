@@ -314,6 +314,51 @@ fn draw_image(
 const DEFAULT_FONT_PT: f32 = 11.0;
 /// A data bar's inset from the cell's left/right edge, in pixels, so the bar
 /// reads as sitting inside the cell rather than as the cell's own fill.
+/// Whether this build can shape text.
+///
+/// `ADR-018` gates shaping behind a Cargo feature — on for native, off for
+/// WebAssembly, where the browser has a shaper already and the bundle does not
+/// need a second one. [`64`](../../../docs/64-TEXT-SHAPING.md) promises that a
+/// build without it **says so** "rather than silently producing wrong output …
+/// a caller rendering a thumbnail can then decide, rather than discovering it
+/// from a customer".
+///
+/// Nothing could be asked until now (`DOC-031`). A caller that renders Arabic,
+/// Hebrew, Devanagari or Thai on an unshaped build gets a picture with the
+/// glyphs in the wrong order and no indication of it, which is the one outcome
+/// that promise rules out.
+///
+/// `const`, so a host can branch on it without a call and a test can assert it
+/// against the feature it was built with.
+#[must_use]
+pub const fn shaping_available() -> bool {
+    cfg!(feature = "shaping")
+}
+
+/// Whether `text` is written in a script that needs shaping to be correct.
+///
+/// Latin, Greek, Cyrillic and CJK render acceptably glyph-by-glyph. Arabic and
+/// Hebrew are cursive or right-to-left; Devanagari, Bengali, Tamil, Thai and
+/// Khmer reorder and combine. Drawing those per `char` does not produce
+/// slightly-worse text — it produces text a reader of that script cannot read.
+///
+/// Deliberately a *script* question and not a font question: it is answerable
+/// from the string alone, so a caller can ask it before rendering anything.
+#[must_use]
+pub fn needs_shaping(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(u32::from(c),
+            // Arabic, Hebrew, Syriac, Thaana, N'Ko.
+            0x0590..=0x08FF
+            // Devanagari through Malayalam, Sinhala, Thai, Lao, Tibetan.
+            | 0x0900..=0x0FFF
+            // Khmer, Myanmar.
+            | 0x1000..=0x109F | 0x1780..=0x17FF
+            // Arabic Presentation Forms.
+            | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF)
+    })
+}
+
 pub const DATA_BAR_PAD_X: f32 = 1.0;
 /// A data bar's inset from the cell's top/bottom edge, in pixels.
 pub const DATA_BAR_PAD_Y: f32 = 2.0;

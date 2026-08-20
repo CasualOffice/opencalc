@@ -92,6 +92,17 @@ jobs:
           echo "not checked for wasm: ${EXCLUDES[*]}"
           cargo check --target wasm32-unknown-unknown --workspace "${EXCLUDES[@]}"
 
+      # **The browser profile is also a profile that must pass its tests.**
+      #
+      # `ADR-018` turns text shaping off for WebAssembly, and docs/64 promises
+      # such a build "reports that it lacks it rather than silently producing
+      # wrong output". The test asserting that is only meaningful where the
+      # feature is off — with it on, a hardcoded `true` agrees with the build
+      # and the test passes while proving nothing. Which is exactly what it did
+      # until this step existed (`DOC-031`).
+      - name: The unshaped build says so
+        run: cargo test -p casual-calc-render --no-default-features
+
   benchmark-smoke:
     runs-on: ubuntu-latest
     steps:
