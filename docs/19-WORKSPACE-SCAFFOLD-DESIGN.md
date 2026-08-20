@@ -145,9 +145,8 @@ The bridge split reflects this:
 - **Web** consumes `casual-calc-wasm`.
 
 Both bridges compose the *same* core crates, including `casual-calc-eval`. The
-engine never calls the platform directly; anything platform-specific (threads,
-clock, parallelism) goes through a **host capability trait** each bridge
-implements. This is the boundary that keeps native and WASM from forking.
+engine never calls the platform directly; anything platform-specific enters as
+**a value or a predicate the host supplies**, one seam per capability rather than one combined trait (`ADR-019`): the clock is a value, so it cannot change mid-recalculation; cancellation is any `Fn() -> bool`, so a browser closes over `performance.now()` and no engine crate has to name a clock type — `Instant::now` *panics* on wasm32, which is the target that needs cancellation most. There is no threading seam because nothing is parallel yet, and an interface designed against no caller is a guess. Enforced rather than promised: `tools/check-host-seams.py` fails on a `cfg(target_*)` in `crates/`. This is the boundary that keeps native and WASM from forking.
 
 ## Boundary invariants (the rules that prevent do-overs)
 

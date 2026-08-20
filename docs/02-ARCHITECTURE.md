@@ -77,10 +77,8 @@ native and to `wasm32-unknown-unknown`; only the thin bridge layer differs.
 
 Design rules this imposes (enforced from day one):
 
-- **No `#[cfg]` forks in the engine.** Platform-specific needs (threads, clock,
-  parallelism) go through a **host-provided capability trait** the bridge
-  implements — native supplies real threads/clock; WASM supplies a
-  single-thread/worker + host clock. See [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md).
+- **No `#[cfg]` forks in the engine.** Platform-specific needs enter as
+  **a value or a predicate the host supplies**, one seam per capability rather than one combined trait (`ADR-019`): the clock is a value, so it cannot change mid-recalculation; cancellation is any `Fn() -> bool`, so a browser closes over `performance.now()` and no engine crate has to name a clock type — `Instant::now` *panics* on wasm32, which is the target that needs cancellation most. There is no threading seam because nothing is parallel yet, and an interface designed against no caller is a guess. Enforced rather than promised: `tools/check-host-seams.py` fails on a `cfg(target_*)` in `crates/`. See [78](78-HOST-CAPABILITY-SEAMS.md).
 - **The tight target defines the budget.** The <50 ms recalc and 60 fps budgets
   ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)) are set on the WASM path; the
   Tauri-native path has more headroom but must produce **identical results**.

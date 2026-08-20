@@ -28,11 +28,9 @@ the *host bridge* differs:
 Consequences the design accounts for from the start:
 
 - **No `#[cfg]` forks in the engine.** `casual-calc-eval` compiles unchanged to
-  native and `wasm32-unknown-unknown`. Anything that can't (threads, timers,
-  SIMD intrinsics, `std::time`) is behind a **host-provided capability trait**
-  the bridge implements — native uses real threads/clock; WASM uses a
-  single-thread/worker + host clock. The engine never calls the platform
-  directly.
+  native and `wasm32-unknown-unknown`. Anything that cannot — timers,
+  `std::time` — enters as **a value or a predicate the host supplies**, one seam per capability rather than one combined trait (`ADR-019`): the clock is a value, so it cannot change mid-recalculation; cancellation is any `Fn() -> bool`, so a browser closes over `performance.now()` and no engine crate has to name a clock type — `Instant::now` *panics* on wasm32, which is the target that needs cancellation most. There is no threading seam because nothing is parallel yet, and an interface designed against no caller is a guess. Enforced rather than promised: `tools/check-host-seams.py` fails on a `cfg(target_*)` in `crates/`. The engine never calls the platform directly.
+  See [78](78-HOST-CAPABILITY-SEAMS.md).
 - **The T3 budget (<50 ms worst-case recalc, [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md))
   is defined on the WASM path** (the tighter environment). Native (Tauri) has
   more headroom and may enable parallel recalc where the graph allows; both paths
