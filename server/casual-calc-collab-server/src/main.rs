@@ -233,7 +233,11 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
                 // fail, which is why nothing else would mention it.
                 tracing::warn!("{warning}");
             }
-            let store = Redis::connect_secured(&url, &namespace, &tls)
+            let policy = casual_calc_collab_server::cluster::redis::LinkPolicy {
+                tls,
+                min_replicas: read_min_replicas()?,
+            };
+            let store = Redis::connect_under(&url, &namespace, &policy)
                 .await
                 .map_err(|e| format!("{e}; set OPENCALC_REDIS_URL to a reachable server"))?;
             Ok(Some(Membership {
@@ -257,6 +261,34 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
                 .to_owned(),
         ),
         (None, None) => Ok(None),
+    }
+}
+
+/// How much redundancy this node insists its coordinator is configured for.
+///
+/// **Unset means unchecked**, which is the pre-ADR-020 behaviour and stays the
+/// default: a single-node coordinator has no replicas to be in sync with, and
+/// refusing to start against one would replace a named risk with a new outage.
+///
+/// Set to `1` on a replicated coordinator and the node refuses to use a primary
+/// that is not itself configured with `min-replicas-to-write` at least that
+/// high — at startup **and after every failover**, because the setting is per
+/// server and the mistake it catches is the one where only the original primary
+/// was configured. Without it, Redis's asynchronous replication means a
+/// promotion can silently drop an append this node already told a client was
+/// saved, which is the one thing ADR-014 §4 promises will not happen.
+fn read_min_replicas() -> Result<u32, String> {
+    match std::env::var("OPENCALC_REDIS_MIN_REPLICAS") {
+        Err(_) => Ok(0),
+        // Refused rather than defaulted. Every other numeric setting here warns
+        // and carries on, and that is right for a budget; this one decides
+        // whether a durability floor is enforced at all, and "0 because it was
+        // misspelt" is the failure it exists to prevent.
+        Ok(raw) => raw.trim().parse::<u32>().map_err(|_| {
+            format!(
+                "OPENCALC_REDIS_MIN_REPLICAS is {raw:?}, which is not a number of replicas;                  unset it to leave the coordinator's durability unchecked"
+            )
+        }),
     }
 }
 

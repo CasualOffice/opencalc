@@ -288,9 +288,13 @@ pub trait Coordinator: Send + Sync {
     /// silent divergence into `Fenced`, which DEP-04 already reports to the
     /// client as `NotSaving`.
     ///
-    /// This does **not** make a failover safe — see
-    /// [77](../../../docs/77-COORDINATOR-AVAILABILITY.md), which is the open
-    /// design question. It makes the unsafe case visible instead of silent.
+    /// This does **not** make a failover safe. It makes the unsafe case visible
+    /// instead of silent, which is one layer of the answer; the rest is
+    /// [ADR-020](../../../docs/77-COORDINATOR-AVAILABILITY.md) — sentinel
+    /// resolution so the promotion is *found*, and a verified
+    /// `min-replicas-to-write` so the window a promotion could lose an
+    /// acknowledged append in is a refusal rather than a loss. Even together
+    /// they make the coordinator survivable rather than the log durable.
     ///
     /// # Errors
     ///
@@ -492,6 +496,7 @@ pub fn elect(peers: &[Peer]) -> Option<&Peer> {
 }
 
 pub mod redis;
+pub mod sentinel;
 
 #[cfg(test)]
 mod tests;
