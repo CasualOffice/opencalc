@@ -328,6 +328,21 @@ class OpenCalcSheet extends HTMLElement {
   }
 
   /// Every command id in this build.
+  /// Run a command by id, as if the user had used our own control for it.
+  ///
+  /// The missing third of the command surface. A host could already ask which
+  /// commands exist and hide the ones its product has no use for; this is how
+  /// it puts one on a button of its own — which is what an embedder with its
+  /// own toolbar actually needs (`SDK-010`).
+  ///
+  /// Rejects an unknown or disabled id rather than resolving quietly, so a
+  /// mistyped id is an error at the call rather than a button that does
+  /// nothing and says nothing.
+  async run(id) {
+    const editor = await this.ready;
+    return editor.runCommand(id);
+  }
+
   async listCommands() {
     const editor = await this.ready;
     return editor.listCommands();

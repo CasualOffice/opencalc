@@ -6061,6 +6061,35 @@ export function listCommands() {
   return [...qsa("[data-oc-command]")].map((n) => n.dataset.ocCommand).filter((v, i, a) => a.indexOf(v) === i).sort();
 }
 
+/// Run a command by id.
+///
+/// The SDK could **list** commands and **hide or disable** them, and never run
+/// one — so a host with its own toolbar could discover our commands, suppress
+/// ours, and had no way to put one on its own button. That is the case an
+/// embedder actually has: a product that already owns its chrome (`SDK-010`).
+///
+/// A command *is* its control, so running one is activating that control rather
+/// than a second dispatch table beside the first. Two tables drift, and the
+/// drift shows up as a menu item that works and a host button that does
+/// nothing.
+///
+/// Refuses an unknown id rather than doing nothing quietly: a host that
+/// mistypes learns at the call, not from a user reporting a dead button.
+/// Refuses a *disabled* one too, because `commands({ disabled })` is a promise
+/// the host made to itself and honouring it only in the menu would be no
+/// promise at all.
+export function runCommand(id) {
+  const node = qsa(`[data-oc-command="${CSS.escape(String(id))}"]`)[0];
+  if (!node) {
+    throw new Error(`unknown OpenCalc command "${id}" — listCommands() has the ids this build has`);
+  }
+  if (node.disabled || node.getAttribute("aria-disabled") === "true") {
+    throw new Error(`the command "${id}" is disabled`);
+  }
+  node.click();
+  return true;
+}
+
 /// Hide or disable commands by id.
 export function setCommandRules(rules) {
   commandRules = {
