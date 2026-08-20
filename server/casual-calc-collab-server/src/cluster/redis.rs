@@ -47,10 +47,12 @@
 //! caller's clock is also what lets the same tests run against both backends.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
+use super::sentinel::{self, Resolver, Target};
 use super::{Answer, AppendError, Coordinator, Lease, Logged, Peer, Unavailable};
 
 /// The default prefix every key sits under.
@@ -238,7 +240,30 @@ impl LinkTls {
 ///
 /// A description of the misconfiguration, in the operator's terms.
 pub fn link_problems(url: &str, tls: &LinkTls) -> Result<(), String> {
-    let secured = url.starts_with("rediss://");
+    let secured = url.starts_with("rediss://") || url.starts_with(sentinel::SECURED_SCHEME);
+    if sentinel::is_sentinel_url(url) {
+        // Parsed here as well as at connection time, so a URL that names no
+        // service — the mistake that reads as "the sentinels are down" — is a
+        // refusal at startup with the form printed.
+        Target::parse(url)?;
+        if !tls.is_empty() {
+            // **Silently ignored is the outcome being refused.** `redis` 0.27
+            // builds the connection to the resolved primary through
+            // `Client::open`, which takes no certificates: the only TLS the
+            // sentinel path can express is "verify against the system trust
+            // store". A private CA or a client certificate configured here would
+            // be read, validated, and then never used, leaving a link that reads
+            // as mutually authenticated and is not.
+            return Err(format!(
+                "certificates are configured for the coordinator link but OPENCALC_REDIS_URL is \
+                 a sentinel URL, and sentinel resolution in this build dials the primary through \
+                 the system trust store only — the certificates would be silently ignored. Use a \
+                 direct rediss:// URL for a private CA or for mutual TLS, or remove the \
+                 certificates and use {} with a publicly issued certificate",
+                sentinel::SECURED_SCHEME
+            ));
+        }
+    }
     // The *fragment*, not a substring anywhere in the URL: a password is part of
     // this string, and refusing to start because somebody's password happened to
     // contain the word would be a refusal nobody could diagnose.
@@ -276,7 +301,7 @@ pub fn link_problems(url: &str, tls: &LinkTls) -> Result<(), String> {
 #[must_use]
 pub fn link_warnings(url: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if !url.starts_with("rediss://") {
+    if !url.starts_with("rediss://") && !url.starts_with(sentinel::SECURED_SCHEME) {
         out.push(
             "the coordinator link is plaintext: the lease that decides which node may write \
              a document, and every operation appended to the log, travel in clear between \
@@ -298,13 +323,47 @@ pub fn link_warnings(url: &str) -> Vec<String> {
     out
 }
 
-/// A cluster's shared state, in Redis.
-pub struct Redis {
+/// How much redundancy a coordinator must be *configured* to insist on.
+///
+/// Zero — the default — means the node does not check, which is the behaviour
+/// every deployment had before ADR-020 and is left alone deliberately: a
+/// single-node coordinator has no replicas to be in sync with and refusing to
+/// start against one would be a new outage in place of an old risk.
+///
+/// A positive value is checked against the primary's own
+/// `min-replicas-to-write` — at startup **and again on every failover**, because
+/// the setting is per server and the mistake this catches is the one where only
+/// the original primary was configured. A primary below the floor is not
+/// adopted: the node keeps refusing rather than quietly resuming against a
+/// coordinator that will accept writes it can lose.
+///
+/// See [ADR-020](../../../../docs/77-COORDINATOR-AVAILABILITY.md) §2b.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkPolicy {
+    /// What this node presents to, and accepts from, the coordinator.
+    pub tls: LinkTls,
+    /// The `min-replicas-to-write` a primary must already be configured with
+    /// before this node will use it. Zero means unchecked.
+    pub min_replicas: u32,
+}
+
+/// The live connection, and the generation of resolution that produced it.
+///
+/// The generation is what stops a failover from being re-resolved once per
+/// caller: everything reads it before issuing a command and hands it back when
+/// the command fails, so a hundred documents failing at the same instant ask the
+/// sentinels once between them.
+struct Live {
+    /// Kept because a **subscription needs its own connection**: a Redis
+    /// connection in subscribe mode accepts almost nothing else, so sharing the
+    /// multiplexed one would take the coordinator offline the moment anything
+    /// subscribed.
+    client: redis::Client,
     /// A multiplexed connection **that re-dials**.
     ///
     /// The plain multiplexed connection does not: the task driving the socket
     /// ends when the socket does, and every later command on it — and on every
-    /// clone, which is what [`Redis::connection`] hands out — fails for the life
+    /// clone, which is what [`Link::commands`] hands out — fails for the life
     /// of the process. A coordinator restart therefore cost a restart of every
     /// node in the cluster, which is most of what "a single Redis failure stops
     /// ordering cluster-wide" meant (DEP-13).
@@ -314,11 +373,157 @@ pub struct Redis {
     /// `append`'s conditional-on-revision shape needs — a silently retried
     /// append is a second write nobody asked for.
     connection: ConnectionManager,
-    /// Kept because a **subscription needs its own connection**: a Redis
-    /// connection in subscribe mode accepts almost nothing else, so sharing the
-    /// multiplexed one would take the coordinator offline the moment anything
-    /// subscribed.
-    client: redis::Client,
+    generation: u64,
+}
+
+/// How the coordinator's address is arrived at.
+enum Dial {
+    /// The URL *is* the address, and re-dialling it is the whole recovery
+    /// story. Nothing to re-ask, so nothing here changes for a deployment that
+    /// was working before ADR-020.
+    Direct,
+    /// The URL names sentinels, and the address is whatever they say **now**.
+    ///
+    /// Boxed only to keep the two variants a similar size: a [`Resolver`] holds
+    /// a cached connection per sentinel, and there is exactly one [`Dial`] per
+    /// process either way.
+    Sentinel(Box<tokio::sync::Mutex<Resolver>>),
+}
+
+/// The coordinator link: a connection, and the means of getting another one.
+///
+/// Behind an [`Arc`] because the subscription tasks outlive the call that
+/// spawned them and must re-resolve on their own — a pub/sub socket is a second
+/// connection with a second, quieter way of dying (see [`Redis::subscribe`]).
+struct Link {
+    dial: Dial,
+    live: tokio::sync::RwLock<Live>,
+    min_replicas: u32,
+}
+
+impl Link {
+    /// The connection to issue a command on, and the generation it belongs to.
+    async fn commands(&self) -> (ConnectionManager, u64) {
+        // Cloned rather than borrowed: a `ConnectionManager` is a handle to a
+        // multiplexed connection, designed to be used from many places at once,
+        // and every command below wants it `&mut`. The clone is an `Arc` bump —
+        // the connection underneath is shared, including the re-dial, so a
+        // reconnection is seen by every caller rather than by one of them.
+        let live = self.live.read().await;
+        (live.connection.clone(), live.generation)
+    }
+
+    /// The client to open a *subscription* through, and its generation.
+    async fn client(&self) -> (redis::Client, u64) {
+        let live = self.live.read().await;
+        (live.client.clone(), live.generation)
+    }
+
+    /// Pass an outcome through, re-asking the sentinels if it says the primary
+    /// moved.
+    ///
+    /// The command is **not** retried. A command that failed against a coordinator
+    /// that has gone away may or may not have been applied, and the callers are
+    /// built for that answer — `append`'s conditional-on-revision shape exists
+    /// precisely so a retry is the submitter's decision and not this layer's.
+    async fn recover<T>(&self, at: u64, outcome: redis::RedisResult<T>) -> redis::RedisResult<T> {
+        if let Err(why) = &outcome
+            && moved_primary(why)
+        {
+            self.resolve_again(at).await;
+        }
+        outcome
+    }
+
+    /// Ask the sentinels where the primary is, and adopt the answer.
+    ///
+    /// `at` is the generation the caller was using. A resolution that has
+    /// already happened since then is left alone, which is what keeps a cluster
+    /// of documents from producing one sentinel query each.
+    async fn resolve_again(&self, at: u64) {
+        let Dial::Sentinel(resolver) = &self.dial else {
+            // A direct URL has nothing to re-ask: `ConnectionManager` is already
+            // re-dialling the one address there is.
+            return;
+        };
+        // Held across the resolution on purpose — this is the serialization.
+        // Nothing takes this lock while holding `live`, in either order, so the
+        // pair cannot deadlock.
+        let mut resolver = resolver.lock().await;
+        let current = self.live.read().await.generation;
+        if current != at {
+            return;
+        }
+
+        let client = match resolver.primary().await {
+            Ok(client) => client,
+            Err(why) => {
+                tracing::warn!(service = resolver.service(), %why, "the coordinator's primary could not be found");
+                return;
+            }
+        };
+        let connection = match manager(&client).await {
+            Ok(connection) => connection,
+            Err(why) => {
+                tracing::warn!(service = resolver.service(), %why, "the coordinator's primary was named but could not be dialled");
+                return;
+            }
+        };
+        if let Err(why) = durability_floor(&mut connection.clone(), self.min_replicas).await {
+            // **Not adopted.** A promoted replica that is not configured to
+            // require redundancy will accept writes it can lose on the next
+            // failover, and resuming against it is exactly the silent loss
+            // ADR-020 exists to convert into a refusal. Refusing to adopt it
+            // leaves this node reporting `NotSaving` and answering 503, which is
+            // an answer.
+            tracing::error!(
+                service = resolver.service(),
+                %why,
+                "the coordinator's new primary is below the required replica floor and was not adopted"
+            );
+            return;
+        }
+
+        let mut live = self.live.write().await;
+        live.client = client;
+        live.connection = connection;
+        live.generation = live.generation.wrapping_add(1);
+        tracing::info!(
+            service = resolver.service(),
+            "the sentinels named a new coordinator primary"
+        );
+    }
+}
+
+/// Whether an error means the node this link is dialling is no longer the
+/// primary.
+///
+/// Two shapes, and the second is the one a re-dial cannot fix:
+///
+/// - the connection died, which is a primary that was killed;
+/// - **`READONLY`**, which is a primary that was *demoted* — the socket is
+///   healthy, the node answers reads, and every write fails. `redis`
+///   classifies `READONLY` as `NoRetry`, so a `ConnectionManager` pointed at a
+///   demoted primary re-dials nothing and refuses every claim and every append
+///   for the life of the process. That is the original DEP-13 defect wearing a
+///   healthy connection.
+///
+/// `NOREPLICAS` is deliberately **not** here. A primary refusing writes because
+/// its in-sync set has collapsed is the right primary doing the right thing, and
+/// re-asking the sentinels would only find the same node.
+fn moved_primary(why: &redis::RedisError) -> bool {
+    matches!(
+        why.kind(),
+        redis::ErrorKind::ReadOnly | redis::ErrorKind::MasterDown
+    ) || why.is_io_error()
+        || why.is_connection_refusal()
+        || why.is_timeout()
+        || why.is_unrecoverable_error()
+}
+
+/// A cluster's shared state, in Redis.
+pub struct Redis {
+    link: Arc<Link>,
     namespace: String,
     claim: redis::Script,
     append: redis::Script,
@@ -347,7 +552,7 @@ impl Redis {
     /// node under test and wins whenever the machine is busy.
     #[cfg(test)]
     pub(crate) async fn holder_of(&self, document: &str) -> Option<String> {
-        let mut c = self.connection();
+        let (mut c, _) = self.link.commands().await;
         let raw: Option<String> = redis::cmd("GET")
             .arg(self.lease_key(document))
             .query_async(&mut c)
@@ -359,7 +564,7 @@ impl Redis {
 
     #[cfg(test)]
     pub(crate) async fn log_ttl_ms(&self, document: &str) -> i64 {
-        let mut c = self.connection();
+        let (mut c, _) = self.link.commands().await;
         redis::cmd("PTTL")
             .arg(self.log_key(document))
             .query_async(&mut c)
@@ -404,30 +609,73 @@ impl Redis {
         namespace: &str,
         tls: &LinkTls,
     ) -> Result<Self, Unavailable> {
-        link_problems(url, tls).map_err(Unavailable)?;
-        let client = if tls.is_empty() {
-            redis::Client::open(url).map_err(|e| Unavailable(e.to_string()))?
-        } else {
-            redis::Client::build_with_tls(url, certificates(tls)?)
-                .map_err(|e| Unavailable(e.to_string()))?
-        };
-
-        let connection = ConnectionManager::new_with_config(
-            client.clone(),
-            redis::aio::ConnectionManagerConfig::new()
-                .set_exponent_base(2)
-                .set_factor(RECONNECT_BACKOFF_MS)
-                .set_number_of_retries(RECONNECT_ATTEMPTS)
-                .set_max_delay(RECONNECT_MAX_DELAY_MS)
-                .set_response_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS))
-                .set_connection_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS)),
+        Self::connect_under(
+            url,
+            namespace,
+            &LinkPolicy {
+                tls: tls.clone(),
+                min_replicas: 0,
+            },
         )
         .await
-        .map_err(|e| Unavailable(e.to_string()))?;
+    }
+
+    /// Connect to `url` under `namespace`, holding `policy`.
+    ///
+    /// The one entry point that understands the **sentinel** form of the URL:
+    /// `redis+sentinel://host:26379,host:26379/service` is resolved to whichever
+    /// node the sentinels currently call the primary, and re-resolved whenever
+    /// that answer stops working. See [`super::sentinel`].
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the URL is unusable, a certificate cannot be read, no
+    /// sentinel answers, the server cannot be reached, or the primary is below
+    /// the policy's replica floor. Failing at startup is the point: a node that
+    /// comes up believing it is in a cluster it cannot reach will take
+    /// leadership of everything it is asked about, and be wrong about all of it.
+    pub async fn connect_under(
+        url: &str,
+        namespace: &str,
+        policy: &LinkPolicy,
+    ) -> Result<Self, Unavailable> {
+        link_problems(url, &policy.tls).map_err(Unavailable)?;
+        let (dial, client) = if sentinel::is_sentinel_url(url) {
+            let mut resolver = Target::parse(url)
+                .map_err(Unavailable)?
+                .resolver()
+                .map_err(Unavailable)?;
+            let client = resolver.primary().await?;
+            (
+                Dial::Sentinel(Box::new(tokio::sync::Mutex::new(resolver))),
+                client,
+            )
+        } else if policy.tls.is_empty() {
+            (
+                Dial::Direct,
+                redis::Client::open(url).map_err(|e| Unavailable(e.to_string()))?,
+            )
+        } else {
+            (
+                Dial::Direct,
+                redis::Client::build_with_tls(url, certificates(&policy.tls)?)
+                    .map_err(|e| Unavailable(e.to_string()))?,
+            )
+        };
+
+        let connection = manager(&client).await?;
+        durability_floor(&mut connection.clone(), policy.min_replicas).await?;
 
         Ok(Self {
-            connection,
-            client,
+            link: Arc::new(Link {
+                dial,
+                live: tokio::sync::RwLock::new(Live {
+                    client,
+                    connection,
+                    generation: 0,
+                }),
+                min_replicas: policy.min_replicas,
+            }),
             namespace: namespace.to_owned(),
             claim: redis::Script::new(CLAIM),
             append: redis::Script::new(APPEND),
@@ -449,11 +697,12 @@ impl Redis {
     /// node will notice as a gap and read from the log — which is correct, and
     /// slower, and worth knowing about.
     pub async fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), Unavailable> {
-        let mut c = self.connection();
-        let _: () = c
-            .publish(channel, payload)
+        let (mut c, at) = self.link.commands().await;
+        let sent = c.publish::<_, _, ()>(channel, payload).await;
+        self.link
+            .recover(at, sent)
             .await
-            .map_err(|e| Unavailable(e.to_string()))?;
+            .map_err(|e| Unavailable(explain(&e)))?;
         Ok(())
     }
 
@@ -501,7 +750,7 @@ impl Redis {
         // stopping, since a missed batch is a gap the receiver detects and
         // closes from the log, whereas unbounded growth is the node dying.
         let (out, into) = tokio::sync::mpsc::channel(256);
-        let client = self.client.clone();
+        let link = Arc::clone(&self.link);
         let channel = channel.to_owned();
         tokio::spawn(async move {
             use futures_util::StreamExt as _;
@@ -528,9 +777,17 @@ impl Redis {
                     if out.is_closed() {
                         return;
                     }
+                    // Which client, not merely another attempt at the same one.
+                    // A failover moves the primary, and a subscription reopened
+                    // against the node that used to be it hears a channel
+                    // nobody publishes to any more. The generation is what keeps
+                    // a node holding a hundred documents from asking the
+                    // sentinels a hundred times for the same answer.
+                    let (client, at) = link.client().await;
                     match Self::open_subscription(&client, &channel).await {
                         Ok(fresh) => break fresh,
                         Err(why) => {
+                            link.resolve_again(at).await;
                             tracing::warn!(
                                 %channel,
                                 %why,
@@ -548,7 +805,8 @@ impl Redis {
     }
 
     async fn subscription(&self, channel: &str) -> Result<redis::aio::PubSub, Unavailable> {
-        Self::open_subscription(&self.client, channel).await
+        let (client, _) = self.link.client().await;
+        Self::open_subscription(&client, channel).await
     }
 
     async fn open_subscription(
@@ -565,15 +823,124 @@ impl Redis {
             .map_err(|e| Unavailable(e.to_string()))?;
         Ok(pubsub)
     }
+}
 
-    fn connection(&self) -> ConnectionManager {
-        // Cloned rather than borrowed: a `ConnectionManager` is a handle to a
-        // multiplexed connection, designed to be used from many places at once,
-        // and every command below wants it `&mut`. The clone is an `Arc` bump —
-        // the connection underneath is shared, including the re-dial, so a
-        // reconnection is seen by every caller rather than by one of them.
-        self.connection.clone()
+/// The re-dialling multiplexed connection every command goes through.
+///
+/// One place rather than two, because a connection built on the failover path
+/// with a different retry budget from the one built at startup is a difference
+/// nobody would find until a failover.
+async fn manager(client: &redis::Client) -> Result<ConnectionManager, Unavailable> {
+    ConnectionManager::new_with_config(
+        client.clone(),
+        redis::aio::ConnectionManagerConfig::new()
+            .set_exponent_base(2)
+            .set_factor(RECONNECT_BACKOFF_MS)
+            .set_number_of_retries(RECONNECT_ATTEMPTS)
+            .set_max_delay(RECONNECT_MAX_DELAY_MS)
+            .set_response_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS))
+            .set_connection_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS)),
+    )
+    .await
+    .map_err(|e| Unavailable(e.to_string()))
+}
+
+/// Refuse a primary that is not configured to require `wanted` in-sync replicas.
+///
+/// **Why a node checks its coordinator's configuration at all.** Redis
+/// replication is asynchronous: a primary acknowledges a write before any
+/// replica has it, so a promoted replica can be missing appends the old primary
+/// accepted. ADR-014 §4 makes one durability promise — an operation is written to
+/// the log before the client is told it was accepted — and that promise is only
+/// as strong as the log. `min-replicas-to-write` is what converts the loss window
+/// into a **refusal**: below the threshold the primary stops accepting writes,
+/// which this node already reports as `Refused { NotSaving }` and a 503 on
+/// `/readyz`.
+///
+/// A deployment that asks for that promise and gets a primary without the
+/// setting has the promise silently withdrawn, and would not find out until a
+/// failover ate an acknowledged edit. So the node checks, and refuses.
+///
+/// Zero means unchecked, which is the default and the pre-ADR-020 behaviour.
+///
+/// # Errors
+///
+/// [`Unavailable`] when the setting is below `wanted`, or when it cannot be
+/// read. **Unreadable is a failure rather than a pass**: `CONFIG GET` is
+/// routinely renamed or disabled on a managed Redis, and treating "I could not
+/// check" as "it is fine" is how the check would silently stop being one.
+async fn durability_floor(
+    connection: &mut ConnectionManager,
+    wanted: u32,
+) -> Result<(), Unavailable> {
+    if wanted == 0 {
+        return Ok(());
     }
+    let setting: Vec<String> = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg(MIN_REPLICAS_SETTING)
+        .query_async(connection)
+        .await
+        .map_err(|e| {
+            Unavailable(format!(
+                "this node requires the coordinator to be configured with \
+                 {MIN_REPLICAS_SETTING} {wanted}, and asking it could not be done ({e}); \
+                 unset OPENCALC_REDIS_MIN_REPLICAS if this coordinator does not allow \
+                 CONFIG GET"
+            ))
+        })?;
+    // `CONFIG GET` answers with a flat name/value pair, and an unknown setting
+    // answers with an empty list rather than an error — which is a Redis old
+    // enough not to have it, and is not a pass.
+    let held = setting
+        .chunks_exact(2)
+        .find(|pair| pair[0] == MIN_REPLICAS_SETTING)
+        .and_then(|pair| pair[1].parse::<u32>().ok());
+    match held {
+        Some(held) if held >= wanted => Ok(()),
+        Some(held) => Err(Unavailable(format!(
+            "the coordinator is configured with {MIN_REPLICAS_SETTING} {held}, and this node \
+             requires at least {wanted}: below that, a failover can lose an append this node \
+             already told a client was saved"
+        ))),
+        None => Err(Unavailable(format!(
+            "the coordinator does not report {MIN_REPLICAS_SETTING} at all, so it cannot be \
+             the {wanted} this node requires"
+        ))),
+    }
+}
+
+/// The Redis setting that turns an asynchronous-replication loss window into a
+/// refusal.
+const MIN_REPLICAS_SETTING: &str = "min-replicas-to-write";
+
+/// The error code a primary answers with when its in-sync set has collapsed.
+///
+/// Established by running it rather than by reading about it: on Redis 8.6 a
+/// `SET`, a `ZADD` and a write from inside a Lua script all come back
+/// `NOREPLICAS Not enough good replicas to write.` — the script form with the
+/// sha appended — and the write does **not** happen. `redis` has no
+/// `ErrorKind` for it, so it arrives as an extension error whose `code()` is
+/// this string.
+const NOREPLICAS: &str = "NOREPLICAS";
+
+/// Say what a coordinator error means, in the terms an operator can act on.
+///
+/// Only `NOREPLICAS` needs the translation, and it needs it badly: the answer
+/// is a **refusal**, not a network failure, and its raw form
+/// (`An error was signalled by the server`) sends whoever reads it to look at
+/// the network. What actually happened is that the primary is holding ADR-014's
+/// durability promise — refusing a write it would not be able to keep — and the
+/// operator's next move is to look at the replicas, not at the link.
+fn explain(why: &redis::RedisError) -> String {
+    if why.code() == Some(NOREPLICAS) {
+        return format!(
+            "the coordinator refused the write: fewer replicas are in sync than its \
+             {MIN_REPLICAS_SETTING} requires, so it is refusing writes rather than accepting \
+             ones a failover would lose. The write did not happen. Redis said: {why}"
+        );
+    }
+    why.to_string()
 }
 
 /// Read the PEM files a [`LinkTls`] names.
@@ -637,10 +1004,10 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<(), Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection();
+            let (mut c, at) = self.link.commands().await;
             let body = serde_json::to_string(&(&peer.advertise, peer.load))
                 .map_err(|e| Unavailable(e.to_string()))?;
-            redis::pipe()
+            let announced = redis::pipe()
                 .atomic()
                 // Scored by *now*, so a stale entry is found by score rather
                 // than waited out — expiry on read, as `Memory` does it.
@@ -652,31 +1019,43 @@ impl Coordinator for Redis {
                         .with_expiration(redis::SetExpiry::PX(ttl_ms.max(1))),
                 )
                 .query_async::<()>(&mut c)
+                .await;
+            self.link
+                .recover(at, announced)
                 .await
-                .map_err(|e| Unavailable(e.to_string()))?;
+                .map_err(|e| Unavailable(explain(&e)))?;
             Ok(())
         })
     }
 
     fn peers(&self, now_ms: u64) -> Answer<'_, Result<Vec<Peer>, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection();
+            let (mut c, at) = self.link.commands().await;
             let oldest = now_ms.saturating_sub(super::PEER_TTL_MS);
-            let ids: Vec<String> = c
-                .zrangebyscore(self.nodes_key(), oldest as isize, "+inf")
+            // One `recover` around the whole read rather than one per command:
+            // the three of them are a single question, and a primary that moved
+            // between the first and the second has moved for all of them.
+            let read = async {
+                let ids: Vec<String> = c
+                    .zrangebyscore(self.nodes_key(), oldest as isize, "+inf")
+                    .await?;
+                let mut raw = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let seen: Option<f64> = c.zscore(self.nodes_key(), &id).await?;
+                    let body: Option<String> = c.get(self.node_key(&id)).await?;
+                    raw.push((id, seen, body));
+                }
+                Ok::<_, redis::RedisError>(raw)
+            }
+            .await;
+            let raw = self
+                .link
+                .recover(at, read)
                 .await
-                .map_err(|e| Unavailable(e.to_string()))?;
+                .map_err(|e| Unavailable(explain(&e)))?;
 
-            let mut peers = Vec::with_capacity(ids.len());
-            for id in ids {
-                let seen: Option<f64> = c
-                    .zscore(self.nodes_key(), &id)
-                    .await
-                    .map_err(|e| Unavailable(e.to_string()))?;
-                let body: Option<String> = c
-                    .get(self.node_key(&id))
-                    .await
-                    .map_err(|e| Unavailable(e.to_string()))?;
+            let mut peers = Vec::with_capacity(raw.len());
+            for (id, seen, body) in raw {
                 // A node in the set whose details have expired is one that
                 // stopped announcing itself mid-window. Skipped rather than
                 // guessed at: an address is the one field that must not be
@@ -706,16 +1085,20 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<Lease, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection();
-            let answer: (String, String, String) = self
+            let (mut c, at) = self.link.commands().await;
+            let taken = self
                 .claim
                 .key(self.lease_key(&document))
                 .arg(&node)
                 .arg(ttl_ms)
                 .arg(now_ms)
-                .invoke_async(&mut c)
+                .invoke_async::<(String, String, String)>(&mut c)
+                .await;
+            let answer = self
+                .link
+                .recover(at, taken)
                 .await
-                .map_err(|e| Unavailable(e.to_string()))?;
+                .map_err(|e| Unavailable(explain(&e)))?;
             // Numbers come back as strings on purpose: Lua's only number is a
             // double, and a revision or an epoch that has passed through one
             // has quietly lost precision above 2^53.
@@ -739,8 +1122,8 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<u64, AppendError>> {
         Box::pin(async move {
-            let mut c = self.connection();
-            let answer: (String, String) = self
+            let (mut c, at) = self.link.commands().await;
+            let written = self
                 .append
                 .key(self.lease_key(&document))
                 .key(self.log_key(&document))
@@ -751,9 +1134,22 @@ impl Coordinator for Redis {
                 .arg(now_ms)
                 .arg(LOG_MAX_ENTRIES)
                 .arg(LOG_TTL_MS)
-                .invoke_async(&mut c)
+                .invoke_async::<(String, String)>(&mut c)
+                .await;
+            // **The in-sync set collapsing arrives here**, as `NOREPLICAS`, and
+            // it is the one refusal this file has to name itself: the script
+            // never reached its `RPUSH`, so nothing was written and nothing was
+            // lost — but the raw error reads as a network fault and would send
+            // an operator to look at the link rather than at the replicas.
+            // `AppendError::Unavailable` is the right existing home for it: the
+            // caller must not treat it as "it did not land" and must not retry
+            // blindly, which is exactly the contract that variant carries, and
+            // `order()` already turns any `Err` here into `Refused { NotSaving }`.
+            let answer = self
+                .link
+                .recover(at, written)
                 .await
-                .map_err(|e| AppendError::Unavailable(e.to_string()))?;
+                .map_err(|e| AppendError::Unavailable(explain(&e)))?;
             let detail = answer
                 .1
                 .parse::<u64>()
@@ -776,17 +1172,21 @@ impl Coordinator for Redis {
         revision: u64,
     ) -> Answer<'_, Result<Vec<Logged>, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection();
+            let (mut c, at) = self.link.commands().await;
             // The whole log, then filtered on each entry's own revision.
             // Slicing by index is what this used to do and it was only ever
             // right while a revision and an entry were the same thing; an entry
             // carrying three operations advances the revision by three, so its
             // position stops predicting its revision at the first real chunk.
             // The log is compacted, which is what keeps this bounded.
-            let entries: Vec<Vec<u8>> = c
-                .lrange(self.log_key(&document), 0, -1)
+            let read = c
+                .lrange::<_, Vec<Vec<u8>>>(self.log_key(&document), 0, -1)
+                .await;
+            let entries = self
+                .link
+                .recover(at, read)
                 .await
-                .map_err(|e| Unavailable(e.to_string()))?;
+                .map_err(|e| Unavailable(explain(&e)))?;
             Ok(entries
                 .into_iter()
                 .filter_map(|entry| {

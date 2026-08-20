@@ -1,10 +1,10 @@
 # 77 — Surviving the coordinator: sentinel, cluster mode, and what a node may do without Redis
 
-**Status: Proposed** (triggers **ADR-020**). Written for
+**Status: Accepted as ADR-020, and built.** Written for
 [`DEP-13`](14-EXECUTION-TRACKER.md) — *"Redis itself is still a single
 unreplicated box"* — which is three questions wearing one row.
 
-> **Proposed decision.** Replication and failover of the coordinator are
+> **ADR-020 — Accepted.** Replication and failover of the coordinator are
 > **Sentinel**, not Cluster mode: this system needs one available logical
 > primary, never sharding, and Cluster charges a keyspace migration for
 > availability it does not actually provide. A node **may not** hold ordering
@@ -13,7 +13,10 @@ unreplicated box"* — which is three questions wearing one row.
 > not about the node. And a Sentinel failover **can still lose an acknowledged
 > append**, because Redis replication is asynchronous; that is the residual
 > risk, it is named rather than papered over, and `min-replicas-to-write` is how
-> a deployment converts it from silent loss into a visible refusal.
+> a deployment converts it from silent loss into a visible refusal. That last
+> clause is not advice: `OPENCALC_REDIS_MIN_REPLICAS` makes the node **check**
+> the setting is really there, at startup and after every failover, and refuse a
+> primary that is below it.
 
 ## Outcome
 
@@ -22,7 +25,7 @@ Three separable things sit in `DEP-13`, and they are not the same size.
 | | Question | Status |
 | --- | --- | --- |
 | 1 | TLS on the coordinator link | **Done** — shipped under `DEP-13`, no ADR needed |
-| 2 | Sentinel or Cluster mode | **Proposed here.** ADR-020, not yet built |
+| 2 | Sentinel or Cluster mode | **Decided and built.** ADR-020: Sentinel |
 | 3 | May a node hold ordering through a brief outage? | **Answered here: no.** The code already refuses; what shipped is the reasoning, a tightened fence and a link that re-dials |
 
 What shipped under `DEP-13` without needing ADR-020, because none of it changes
@@ -46,6 +49,62 @@ what the cluster promises:
   its lease and reading its inbox while the node went on serving it.
 - **The fence is an equality.** `epoch ~= held.epoch`, not `epoch < held.epoch`.
   See §3.
+
+## The decision, in one place
+
+**Accepted, and what was built for it:**
+
+1. **Sentinel, not Cluster mode.** `OPENCALC_REDIS_URL` gains
+   `redis+sentinel://h1:26379,h2:26379/service` (and `rediss+sentinel://`),
+   resolved through `redis`'s `Sentinel` to whichever node leads now. Cluster
+   mode is **rejected**, and the reasoning is §2: it is a sharding answer to a
+   question this system does not ask, it costs a keyspace migration and a worse
+   fan-out story, and — the point that decides it — *it does not make a failover
+   any safer*, because each shard is a primary with asynchronous replicas and
+   the same loss window.
+2. **The address is re-asked, not merely re-dialled.** This is the half that is
+   code rather than configuration. `DEP-13`'s `ConnectionManager` re-dials one
+   address, which is right for a coordinator that restarted and useless for one
+   that moved. Worse, the *demotion* case looks healthy: a sentinel can promote
+   the replica without anything dying, and the old primary then answers every
+   write `READONLY` on a socket that never closes — which `redis` classifies
+   `NoRetry`, so the connection reconnects to nothing and refuses every claim
+   and every append for the life of the process. So the link re-resolves on a
+   connection failure **and on `READONLY`**, with a generation counter so a node
+   holding a hundred documents asks the sentinels once between them rather than
+   once each.
+3. **A durability floor that is checked, not recommended.**
+   `OPENCALC_REDIS_MIN_REPLICAS=n` refuses a coordinator whose own
+   `min-replicas-to-write` is below `n` — at startup, and again on every
+   resolution. The second half is the one worth having: the setting is per
+   server, and the standard mistake is setting it on the primary and nowhere
+   else, which passes the startup check and fails at exactly the moment it was
+   set for. A promoted primary below the floor is **not adopted**, so the node
+   keeps reporting `NotSaving` and answering 503 rather than resuming against a
+   coordinator that will accept writes it can lose. Unset is unchecked, which is
+   the pre-ADR-020 behaviour and is correct for a single-box coordinator.
+4. **`NOREPLICAS` maps onto the existing vocabulary, and no new one is
+   invented.** A collapsed in-sync set arrives as `AppendError::Unavailable`,
+   which `order()` already turns into `Refused { seq, reason: NotSaving }` and
+   which `/readyz` already answers 503 for. That variant's contract — *the caller
+   must not treat this as "it did not land" and must not retry blindly* — is
+   exactly right here. What was added is the **explanation**: the raw driver
+   error reads as a network fault and sends an operator to look at the link,
+   where what happened is the primary holding ADR-014's promise. The text now
+   says the write did not happen and names the replicas as the thing to look at.
+5. **`WAIT n timeout` is rejected**, as §2b prices it: it narrows the window
+   rather than closing it, Redis says so itself, and it costs a round trip on
+   every edit on top of a setting that already turns the window into a refusal.
+6. **A Raft-backed store behind `Coordinator` is a road not taken, not a
+   supported second backend.** The trait makes it cheap and it remains the only
+   option that closes the window, so it is recorded here as the answer for a
+   deployment that needs one — but nothing in this repository implements, tests
+   or ships it, and claiming it as "supported" would be a promise with no code
+   under it.
+
+**What this does not decide, said plainly:** Sentinel makes the coordinator
+survivable; it does not make the log durable. The windows that stay open are
+named under "Failure modes & limits".
 
 ## Research
 
@@ -126,19 +185,46 @@ multi-key scripts unchanged, ordinary pub/sub unchanged, the same
 that is missing: something that promotes a replica when the primary goes, and
 tells clients where the primary is now.
 
-**Proposed: Sentinel.** Cluster mode is recorded here as the thing to revisit
+**Accepted: Sentinel.** Cluster mode is recorded here as the thing to revisit
 *if sharding ever becomes the question*, which it is not; and if it does, the
 hash-tag migration above is the price, known in advance.
 
-The shape it would take:
+The shape it took — as built, and it is the shape this section predicted, with
+one addition §2 did not foresee:
 
 - `OPENCALC_REDIS_URL` gains a sentinel form —
-  `redis+sentinel://host1:26379,host2:26379/<service-name>` is the convention
-  `redis-rs` and most clients use — resolved through `SentinelClient` to
-  whichever node is currently primary, and **re-resolved on a connection
-  failure** rather than only at startup. The re-dial delivered under `DEP-13` is
-  the hook that goes in: today it re-dials the same address, and against
-  Sentinel it would re-ask which address.
+  `redis+sentinel://host1:26379,host2:26379/<service-name>`, and
+  `rediss+sentinel://` for TLS — resolved through `redis`'s `Sentinel` to
+  whichever node is currently primary, and **re-resolved on failure** rather
+  than only at startup. The re-dial delivered under `DEP-13` is the hook it went
+  into: it re-dials the same address, and against Sentinel the link re-asks
+  *which* address.
+- **Re-resolution triggers on `READONLY` as well as on a dead socket**, and that
+  is the addition. A sentinel failover need not kill anything: `SENTINEL
+  FAILOVER` promotes the replica and demotes the old primary in place. The
+  connection to it stays up, reads keep working, and every write comes back
+  `READONLY` — which `redis` classifies as `NoRetry`, so `ConnectionManager`
+  re-dials nothing and the node refuses every edit forever while looking
+  perfectly healthy. That is `DEP-13`'s original defect wearing a live
+  connection, and a re-dial cannot reach it. `NOREPLICAS` deliberately does
+  **not** trigger it: a primary refusing writes because its in-sync set has
+  collapsed is the right primary doing the right thing, and re-asking would find
+  the same node.
+- The subscription connection re-resolves too. A pub/sub socket is a second
+  connection with a quieter failure, and one reopened against the node that used
+  to be the primary is subscribed to a channel nobody publishes on any more.
+- **A generation counter serialises it.** Every command carries the generation
+  of the connection it used and hands it back on failure, so a node holding a
+  hundred documents that all fail at the same instant asks the sentinels once
+  between them rather than a hundred times.
+- **A private CA cannot be carried on a sentinel URL, and that is refused rather
+  than ignored.** `redis` 0.27 builds the connection to the resolved primary
+  through `Client::open`, which takes no certificates — `build_with_tls` takes a
+  *URL*, and the URL here names sentinels rather than the primary. A `root_ca`
+  or client certificate configured alongside a sentinel URL would be read,
+  validated and never used, leaving a link that reads as pinned and is not. That
+  is the same shape as certificates against a `redis://` URL, and it is refused
+  the same way.
 - Everything below `Coordinator` is unchanged. That is the point of the trait,
   and it is why this is a contained change rather than a rewrite.
 
@@ -165,23 +251,43 @@ So adopting Sentinel does not merely add infrastructure: it changes what *"the
 log said yes"* means. That is an ordering-and-durability guarantee, which is
 why this is ADR-020 and not a pull request.
 
-Two narrowings, both configuration, both with a cost worth stating:
+Two narrowings were priced. **The first is accepted and the second rejected:**
 
-- **`min-replicas-to-write 1` (with `min-replicas-max-lag`) on the primary.** The
-  primary refuses writes when redundancy is below the threshold, so the loss
-  window becomes a visible refusal — which the node already reports to the
-  client as `Refused { NotSaving }` and to the orchestrator as a 503 on
-  `/readyz`. ADR-012 already describes this mechanism ("a minimum in-sync count
-  enforced separately"), and ADR-014 §4 already explains why it is not the
-  default: refusing writes is a visible outage, and most integrators would
-  rather have the log. For a deployment that wants ADR-014's promise to hold
-  across a failover, **this is the setting that makes it hold**, and it should
-  be the documented recommendation rather than a footnote.
-- **`WAIT n timeout` between the append and the acknowledgement.** Converts
-  "probably replicated" into "at least *n* replicas said so", at one more round
-  trip on the edit path. It is not consensus and Redis says so; it narrows the
-  window rather than closing it. Worth pricing in ADR-020; not obviously worth
-  paying for on top of `min-replicas-to-write`.
+- **`min-replicas-to-write 1` (with `min-replicas-max-lag`) on the primary —
+  accepted, and checked.** The primary refuses writes when redundancy is below
+  the threshold, so the loss window becomes a visible refusal — which the node
+  already reports to the client as `Refused { NotSaving }` and to the
+  orchestrator as a 503 on `/readyz`. ADR-012 already describes this mechanism
+  ("a minimum in-sync count enforced separately"), and ADR-014 §4 already
+  explains why it is not the default: refusing writes is a visible outage, and
+  most integrators would rather have the log.
+
+  What ADR-020 adds beyond recommending it is that a deployment can make the
+  node **enforce that the recommendation was followed**.
+  `OPENCALC_REDIS_MIN_REPLICAS=n` refuses a coordinator configured below `n`, at
+  startup and on every resolution. A recommendation in a document is followed
+  once, on the primary, by whoever read the document; the failover then promotes
+  a node nobody configured, and the promise quietly stops holding at the exact
+  moment it was supposed to hold. Verified beats documented here, and verifying
+  costs one `CONFIG GET`.
+
+  Its price is real and is the reason it is not the default: with the floor set,
+  a failover that leaves no replica in sync is a **visible write outage** until
+  one returns. That is the trade — a refusal you can see instead of a loss you
+  cannot.
+
+  Empirically, on Redis 8.6: a `SET`, a `ZADD` and a write from inside a Lua
+  script all answer `NOREPLICAS Not enough good replicas to write.` and the
+  write does not happen; reads and read-only scripts keep working, so
+  `since()` and the health probes are unaffected. `redis` has no `ErrorKind` for
+  it, so it arrives as an extension error whose `code()` is `NOREPLICAS`.
+- **`WAIT n timeout` between the append and the acknowledgement — rejected.**
+  It converts "probably replicated" into "at least *n* replicas said so", at one
+  more round trip on the edit path. It is not consensus and Redis says so; it
+  narrows the window rather than closing it. On top of `min-replicas-to-write`
+  it buys a narrower version of a window that is already a refusal, and it buys
+  that on the hot path of every keystroke batch. Rejected on that ratio, and
+  recorded so it is not rediscovered as a fix.
 
 Neither makes the coordinator CP. The honest one-line summary, which ADR-020
 should state in as many words:
@@ -295,6 +401,28 @@ configuration variable. Nothing above `Coordinator` needs to know.
 
 ### Failure modes & limits
 
+- **The demotion window is not closed.** A sentinel promotes the replica and
+  only *then* reconfigures the old primary, and the gap is seconds. In it the old
+  primary is still `role:master` and still accepts writes — writes it is about to
+  have rewound, and which nothing on the client side can distinguish from any
+  other successful append. `min-replicas-to-write` narrows it, since the old
+  primary loses its replicas as they follow the new one; nothing here closes it.
+  This window is also what made the first version of the failover test unable to
+  fail, which is recorded under "Acceptance gates" because the same trap is
+  waiting for whoever writes the next one.
+- **Sentinel credentials cannot differ from the data nodes'.** The URL's
+  userinfo is applied to both. A deployment that puts a different `requirepass`
+  on its sentinels is not expressible, and would fail as an authentication error
+  against whichever half was not configured. Named rather than silently
+  half-applied; the fix is a second variable if anybody needs one.
+- **A private CA is unavailable on the sentinel path**, and refused rather than
+  ignored (§2). A deployment needing both a private CA and failover has to wait
+  for a `redis` release that can build the resolved primary's client with
+  certificates, or terminate TLS in front of Redis.
+- **The floor is only as good as `CONFIG GET`.** A managed Redis that renames or
+  disables it makes the check impossible; that is reported as a refusal to start
+  rather than treated as a pass, because "I could not check" quietly becoming
+  "it is fine" is how the check would stop being one.
 - **A resubscribe loses whatever was published during the gap.** Acceptable for
   the reason the channel was fire-and-forget to begin with: the log is the
   record, and `catch_up` reads from where the node actually is on every lease
@@ -308,9 +436,12 @@ configuration variable. Nothing above `Coordinator` needs to know.
   and CI's coordinator is a service container without one. That half of the
   coverage therefore skips in CI and says so. Closing it means adding
   `redis-server` to the test runner — a new row, not a silent gap.
-- **Nothing here is exercised against a real failover**, because nothing here
-  performs one. The Sentinel work in §2 is what a failover test would be for,
-  and its acceptance gate is below.
+- **The failover harness is local.** It starts two `redis-server`s and three
+  `redis-sentinel`s from the test itself, and skips where neither binary is on
+  the path — which is CI today, whose coordinator is a service container. Closing
+  that is the same row as the TLS gap above: `redis-server` **and**
+  `redis-sentinel` on the test runner. Until then the failover half runs on a
+  developer's machine and says so when it does not run.
 
 ## Alternatives considered
 
@@ -327,11 +458,13 @@ configuration variable. Nothing above `Coordinator` needs to know.
 - **In-process Raft.** Rejected by ADR-014 and still rejected: it makes this a
   consensus system somebody has to operate and debug.
 - **A Raft-backed store behind `Coordinator` (etcd, or a CP Redis-compatible
-  store).** The only option that actually closes the durability window. Not
-  proposed as the default — it is a second dependency for most deployments to
-  run — but ADR-020 should say explicitly whether it is a supported backend or a
-  road not taken, because the trait makes it cheap and silence here is how it
-  gets rediscovered.
+  store).** The only option that actually closes the durability window.
+  **ADR-020 records it as a road not taken, not a supported backend.** The trait
+  makes it cheap to add, and that is exactly why the distinction has to be
+  written down: nothing in this repository implements it, nothing tests it, and
+  calling it "supported" would be a promise with no code under it. It stays the
+  recorded answer for a deployment that cannot live with the window, and
+  building it is a row rather than a footnote.
 - **Dual-writing the log to two independent Redises from the node.** Rejected
   outright: two logs is two orders, and reconciling them is the consensus
   problem with extra steps.
@@ -353,33 +486,77 @@ Shipped with `DEP-13`, in `server/casual-calc-collab-server/src/cluster/tests.rs
 | `a_coordinator_that_never_returns_produces_an_error_rather_than_a_hang` | The retry budget is bounded, so `/readyz` still answers. |
 | `an_append_from_ahead_of_the_stores_epoch_is_refused` (both backends) | The equality fence. |
 
-Required before ADR-020 can be Accepted, and **not** built here:
+Shipped with ADR-020, in the same file. The harness starts two `redis-server`s
+and three `redis-sentinel`s per test and kills them with it; the tests skip, and
+say so, where those binaries are not on the path.
 
-- A Sentinel harness — one primary, one replica, three sentinels — that kills the
-  primary and asserts that a node whose document was mid-edit resumes ordering
-  after promotion, with no revision seen by a client absent from the log
-  afterwards.
-- The same harness with `min-replicas-to-write` set, asserting that a write
-  during a collapsed in-sync set is **refused** rather than accepted and lost.
+| Test | What it establishes |
+| --- | --- |
+| `a_sentinel_url_names_its_sentinels_and_its_service` | The URL form, including the default port, the percent-decoded password, and the shapes refused rather than guessed at. `redis` has no sentinel URL form of its own, so every field this drops fails later as "the sentinels are down". |
+| `a_private_ca_cannot_be_hidden_behind_a_sentinel_url` | Certificates that this build cannot use on the sentinel path are refused rather than read and ignored. |
+| `a_sentinel_link_is_warned_about_by_the_same_rule` | `rediss+sentinel://` is encrypted and is not warned about; the plaintext form is. |
+| `ordering_survives_a_coordinator_failover` | **The gate.** Three sentinels, a real `SENTINEL FAILOVER`, and the primary **demoted rather than killed** — the case a re-dial cannot survive. Asserts both halves: ordering resumes, and every revision acknowledged before the failover is still in the log. |
+| `ordering_resumes_after_the_coordinator_primary_is_killed` | The same gate taken literally: the primary process is killed, the sentinels promote, and the node finds the new address without a restart. |
+| `a_write_with_the_in_sync_set_collapsed_is_refused_rather_than_lost` | **The durability gate.** A primary with `min-replicas-to-write 1` and its replica killed: the append is refused, the log is unchanged, the refusal names the setting, and ordering resumes when redundancy does — so the refusal is a state and not a wedge. |
+| `a_coordinator_below_the_required_replica_floor_is_refused` | `OPENCALC_REDIS_MIN_REPLICAS` against a coordinator that does not hold the floor: refused at startup, naming the setting. Unset stays unchecked. |
+| `a_promoted_primary_below_the_replica_floor_is_not_adopted` | The floor is re-checked after a failover, so "configured on the primary and nowhere else" is caught at the moment it matters rather than believed. |
+
+**A trap worth recording, because it cost two green runs that proved nothing.**
+The first version of `ordering_survives_a_coordinator_failover` passed with
+re-resolution disabled. Two reasons, and both are the same mistake in different
+clothes — asserting on a state the system had not reached yet:
+
+- **`SENTINEL get-master-addr-by-name` changes seconds before the old primary is
+  told.** In that gap the old primary is still `role:master` and still accepts
+  writes, so the test was "recovering" by writing to the node it was supposed to
+  have stopped using. The harness now waits for the old node's own `ROLE` to say
+  `slave`.
+- **Redis waits five seconds before a diskless full sync**
+  (`repl-diskless-sync-delay`), and the whole failover happened inside that
+  window. The replica was promoted with an **empty dataset**, and the assertion
+  that the lease survived passed *vacuously*, because a claim against an empty
+  store simply takes a fresh lease that looks exactly like the old one. The
+  harness now sets the delay to zero and waits for `master_link_status:up`
+  before it will hand a cluster to a test.
+
+Still open, and a row rather than a silent gap:
+
+- **CI has no `redis-sentinel`**, so the failover half skips there. Same runner
+  change as the TLS half already needs.
 
 ## ADRs triggered
 
-**ADR-020 — coordinator replication and what a failover may lose.** Triggered on
-two counts: a dependency choice (Sentinel, and whether a CP store is a supported
-second backend), and the cluster's ordering/durability guarantee, since a
-failover changes what a successful append means.
+**ADR-020 — coordinator replication and what a failover may lose. Accepted.**
+Triggered on two counts: a dependency choice (Sentinel, and whether a CP store is
+a supported second backend — it is not), and the cluster's ordering/durability
+guarantee, since a failover changes what a successful append means. Registered in
+[08](08-ADR-REGISTER.md).
 
 ## Tracker IDs
 
-- `DEP-13` — the row this was written for. Items 1 and 3 are delivered; item 2 is
-  proposed here and is not built.
+- `DEP-13` — the row this was written for. All three items are now delivered:
+  TLS and the re-dial under `DEP-13` itself, and Sentinel plus the durability
+  floor under ADR-020.
 - Proposed new rows, so that nothing lives only in this document:
-  - **Sentinel support and ADR-020** — the work in §2, gated by the harness
-    above.
-  - **`redis-server` on the CI runner** — so the TLS half of the coordinator-link
-    suite stops skipping.
+  - **`redis-server` and `redis-sentinel` on the CI runner** — so the TLS half
+    *and* the failover half of the coordinator suite stop skipping. This is now
+    the larger of the two gaps: the failover behaviour is the one ADR-020 exists
+    for and it is unexercised in CI.
   - **A leader that is fenced has no resync** — `order()` commits into the local
     session *before* appending, so a `Fenced` or `Stale` refusal leaves that node
     diverged from the log with only a log line to say so. Named in
-    `net.rs` as "the recovery is a resync, which is not built"; the equality
+    `net.rs` as "the recovery is a resync, which is not built". The equality
     fence makes it reachable more often, which is an argument for building it.
+  - **`the_log_is_bounded_rather_than_growing_forever::in_redis` is
+    wall-clock-flaky** — it takes a lease with a 1 s TTL (so a 4 s key expiry)
+    and then issues 10 250 appends, which under full-suite load exceeds it and
+    fails as `Unled`. Reproduced on unmodified `main`, so it predates ADR-020 and
+    is not caused by it; it fails perhaps one full run in two on a busy machine.
+  - **Sentinel credentials that differ from the data nodes'** — the URL's
+    userinfo is applied to both, which is the common deployment and not the only
+    one. A second variable if anybody needs it; named in "Failure modes" rather
+    than left to be discovered.
+  - **A private CA on the sentinel path** — refused today because `redis` 0.27
+    cannot build the resolved primary's client with certificates. Worth
+    revisiting when it can, since "encrypted coordinator link" and "replicated
+    coordinator" should not be mutually exclusive.

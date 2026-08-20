@@ -35,6 +35,11 @@ redis = { version = "0.27", default-features = false, features = [
     "tokio-rustls-comp",
     "connection-manager",
     "script",
+    # ADR-020. `SentinelClient` is what turns `OPENCALC_REDIS_URL` from an
+    # address into a question, so a promoted replica is found rather than
+    # configured in by hand. Without it the coordinator is one box and losing it
+    # stops ordering cluster-wide until somebody edits a URL.
+    "sentinel",
 ] }
 # For the pub/sub message stream. Already a dev-dependency; the relay needs it
 # at runtime too.

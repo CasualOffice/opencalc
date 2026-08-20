@@ -934,6 +934,10 @@ struct OwnRedis {
     child: std::process::Child,
     port: u16,
     dir: std::path::PathBuf,
+    /// Kept so a restart is the *same* server: a durability floor that was set
+    /// on the first start and not the second is a harness that quietly stops
+    /// testing what it was written for.
+    extra: Vec<String>,
 }
 
 impl Drop for OwnRedis {
@@ -955,11 +959,38 @@ impl OwnRedis {
             child: Self::spawn(port, &dir)?,
             port,
             dir,
+            extra: Vec::new(),
+        };
+        started.wait_for_port().await.then_some(started)
+    }
+
+    /// The same, with extra `redis-server` arguments — a durability floor, or a
+    /// `--replicaof` that makes this one a replica of another.
+    async fn start_as(name: &str, extra: &[&str]) -> Option<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-redis-own-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let port = free_port().await?;
+        let extra = extra.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let mut started = Self {
+            child: Self::spawn_with(port, &dir, &extra)?,
+            port,
+            dir,
+            extra,
         };
         started.wait_for_port().await.then_some(started)
     }
 
     fn spawn(port: u16, dir: &std::path::Path) -> Option<std::process::Child> {
+        Self::spawn_with(port, dir, &[])
+    }
+
+    fn spawn_with(
+        port: u16,
+        dir: &std::path::Path,
+        extra: &[String],
+    ) -> Option<std::process::Child> {
         std::process::Command::new("redis-server")
             .args(["--port", &port.to_string()])
             // Persistence off, as the cluster compose runs it: what is in here
@@ -967,10 +998,26 @@ impl OwnRedis {
             .args(["--save", ""])
             .args(["--appendonly", "no"])
             .args(["--dir", dir.to_str()?])
+            .args(extra)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .ok()
+    }
+
+    /// Stop it and leave it stopped.
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Start it again on the same port, with whatever it was started with.
+    async fn restart(&mut self) -> bool {
+        let Some(child) = Self::spawn_with(self.port, &self.dir, &self.extra) else {
+            return false;
+        };
+        self.child = child;
+        self.wait_for_port().await
     }
 
     async fn wait_for_port(&mut self) -> bool {
@@ -1359,5 +1406,830 @@ async fn a_coordinator_that_never_returns_produces_an_error_rather_than_a_hang()
     assert!(
         outcome.is_err(),
         "and the answer must be that it is unreachable, not a silent success"
+    );
+}
+
+// --- Coordinator replication and failover (ADR-020) -------------------------
+//
+// Two properties, and the second is the one the ADR exists for:
+//
+// - **a failover is survived**, so losing the coordinator's primary is a pause
+//   rather than a cluster-wide stop that needs a human;
+// - **the window a failover could lose an acknowledged append in produces a
+//   refusal**, because Redis replication is asynchronous and ADR-014 §4 promises
+//   an operation is in the log before a client is told it was accepted.
+
+/// A sentinel URL is a question — whom to ask, and what to ask about.
+///
+/// Parsed here rather than handed to `redis` whole, because `redis` has no URL
+/// form for sentinel at all: `SentinelClient::build` takes the addresses and the
+/// service name as separate arguments. Every field this drops is a field that
+/// fails later as "the sentinels are down".
+#[test]
+fn a_sentinel_url_names_its_sentinels_and_its_service() {
+    use crate::cluster::sentinel::Target;
+
+    let plain = Target::parse("redis+sentinel://10.0.0.1:26379,10.0.0.2:26379/opencalc")
+        .expect("the ordinary form");
+    assert_eq!(plain.sentinels, ["10.0.0.1:26379", "10.0.0.2:26379"]);
+    assert_eq!(plain.service, "opencalc");
+    assert_eq!(plain.db, 0);
+    assert!(!plain.secured);
+    assert_eq!(plain.password, None);
+
+    // A missing port is the one default worth supplying: 26379 is what every
+    // sentinel deployment uses, and getting it wrong reads as "they are down".
+    let bare = Target::parse("redis+sentinel://sentinel-a,sentinel-b/mymaster/3").expect("parsed");
+    assert_eq!(bare.sentinels, ["sentinel-a:26379", "sentinel-b:26379"]);
+    assert_eq!(bare.db, 3);
+
+    // Credentials, with the password percent-decoded: a Redis password
+    // routinely contains the characters a URL reserves, and handing the escapes
+    // to Redis verbatim is an authentication failure nobody can read.
+    let secured =
+        Target::parse("rediss+sentinel://user:p%40ss%2Fword@s1:26379/mymaster").expect("parsed");
+    assert!(secured.secured);
+    assert_eq!(secured.username.as_deref(), Some("user"));
+    assert_eq!(secured.password.as_deref(), Some("p@ss/word"));
+    assert_eq!(secured.sentinels, ["s1:26379"]);
+
+    // And the shapes that must not be guessed at.
+    let no_service = Target::parse("redis+sentinel://s1:26379")
+        .expect_err("a sentinel URL without a service names no primary");
+    assert!(
+        no_service.contains("mymaster"),
+        "and it shows the form: {no_service}"
+    );
+    assert!(
+        Target::parse("redis+sentinel://s1:26379/mymaster?failover=fast").is_err(),
+        "a query parameter nothing reads must be refused rather than ignored"
+    );
+    assert!(
+        Target::parse("redis://one-box:6379/").is_err(),
+        "a direct URL is not a sentinel URL"
+    );
+}
+
+/// A private CA behind a sentinel URL would be read and never used.
+///
+/// `redis` 0.27 dials the resolved primary through `Client::open`, which takes
+/// no certificates — `build_with_tls` takes a *URL*, and the URL here names
+/// sentinels rather than the primary. So a deployment that points
+/// `OPENCALC_REDIS_CA` at its internal CA and sets a sentinel URL gets a link
+/// verified against the system trust store, under a configuration that reads as
+/// pinned to its own CA. That is the same shape as certificates against a
+/// `redis://` URL, which is already refused, and it is refused for the same
+/// reason: nothing downstream can tell.
+#[test]
+fn a_private_ca_cannot_be_hidden_behind_a_sentinel_url() {
+    let tls = crate::cluster::redis::LinkTls {
+        root_ca: Some("/etc/opencalc/redis-ca.pem".into()),
+        client: None,
+    };
+    let why =
+        crate::cluster::redis::link_problems("rediss+sentinel://s1:26379,s2:26379/mymaster", &tls)
+            .expect_err("a CA that cannot be used must not be accepted as though it were");
+    assert!(
+        why.contains("silently ignored"),
+        "and it says what would have happened: {why}"
+    );
+
+    assert!(
+        crate::cluster::redis::link_problems(
+            "rediss+sentinel://s1:26379/mymaster",
+            &crate::cluster::redis::LinkTls::default()
+        )
+        .is_ok(),
+        "the same URL with no certificates is the intended encrypted shape"
+    );
+    // And a sentinel URL that cannot be parsed is refused at startup rather
+    // than at the first failover.
+    assert!(
+        crate::cluster::redis::link_problems(
+            "redis+sentinel://s1:26379",
+            &crate::cluster::redis::LinkTls::default()
+        )
+        .is_err(),
+        "a sentinel URL naming no service must not start"
+    );
+}
+
+/// The plaintext warning knows the sentinel schemes too.
+///
+/// `rediss+sentinel://` is encrypted and must not be warned about; a warning
+/// that cries wolf on the correct configuration is a warning operators learn to
+/// ignore on the incorrect one.
+#[test]
+fn a_sentinel_link_is_warned_about_by_the_same_rule() {
+    let plain = crate::cluster::redis::link_warnings("redis+sentinel://s1:26379/mymaster");
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    assert!(plain[0].contains("clear"));
+
+    assert!(
+        crate::cluster::redis::link_warnings("rediss+sentinel://s1:26379/mymaster").is_empty(),
+        "an encrypted sentinel link has nothing to say"
+    );
+}
+
+/// One primary, one replica and three sentinels, started for one test.
+///
+/// Three rather than one because a sentinel failover needs a **quorum** to
+/// declare the primary down, and a single sentinel would test a code path
+/// nobody deploys. The whole thing is killed with the test, including the
+/// sentinels, which do not stop on their own.
+///
+/// Returns `None` when there is no `redis-server` or `redis-sentinel` on the
+/// path, which is a hole and says so.
+struct SentinelCluster {
+    nodes: Vec<OwnRedis>,
+    sentinels: Vec<std::process::Child>,
+    sentinel_ports: Vec<u16>,
+    service: String,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for SentinelCluster {
+    fn drop(&mut self) {
+        for sentinel in &mut self.sentinels {
+            let _ = sentinel.kill();
+            let _ = sentinel.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl SentinelCluster {
+    /// `extra` is passed to **both** data nodes, so a durability floor set here
+    /// survives the promotion — which is the case a floor set on the original
+    /// primary alone would miss.
+    async fn start(name: &str, extra: &[&str]) -> Option<Self> {
+        Self::start_split(name, extra, extra).await
+    }
+
+    /// The same, with different arguments for the node that starts as the
+    /// replica — which is how "only the original primary was configured" is
+    /// modelled.
+    async fn start_split(name: &str, primary: &[&str], replica: &[&str]) -> Option<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-sentinel-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+
+        // **`repl-diskless-sync-delay` is why the first version of this could not
+        // fail.** Redis waits five seconds before starting a diskless full sync,
+        // to batch replicas that arrive together. The whole failover here happens
+        // inside that window, so the replica sat in `wait_bgsave` with an empty
+        // dataset, was promoted with nothing in it, and the test that asserted
+        // "the log survived" passed against a store where *nothing* had survived
+        // — because a claim on an empty store simply takes a fresh lease that
+        // looks exactly like the old one.
+        let mut prompt = vec!["--repl-diskless-sync-delay", "0"];
+        prompt.extend(primary);
+        let first = OwnRedis::start_as(&format!("{name}-a"), &prompt).await?;
+        let mut following = vec!["--repl-diskless-sync-delay", "0"];
+        following.extend(replica);
+        let port = first.port.to_string();
+        following.extend(["--replicaof", "127.0.0.1", &port]);
+        let second = OwnRedis::start_as(&format!("{name}-b"), &following).await?;
+
+        let service = format!("opencalc-{name}");
+        let mut sentinels = Vec::new();
+        let mut sentinel_ports = Vec::new();
+        for which in 0..3 {
+            let at = free_port().await?;
+            let home = dir.join(format!("s{which}"));
+            std::fs::create_dir_all(&home).ok()?;
+            let conf = home.join("sentinel.conf");
+            // Its own file per sentinel, because a sentinel **rewrites** its
+            // configuration — it stores the id it generated and everything it
+            // learns — and three processes sharing one file corrupt each
+            // other's view of the cluster.
+            std::fs::write(
+                &conf,
+                format!(
+                    "port {at}\n\
+                     dir {}\n\
+                     sentinel monitor {service} 127.0.0.1 {} 2\n\
+                     sentinel down-after-milliseconds {service} 1000\n\
+                     sentinel failover-timeout {service} 5000\n\
+                     sentinel parallel-syncs {service} 1\n",
+                    home.display(),
+                    first.port
+                ),
+            )
+            .ok()?;
+            sentinels.push(
+                std::process::Command::new("redis-sentinel")
+                    .arg(&conf)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok()?,
+            );
+            sentinel_ports.push(at);
+        }
+
+        let cluster = Self {
+            nodes: vec![first, second],
+            sentinels,
+            sentinel_ports,
+            service,
+            dir,
+        };
+        // Not merely started: every sentinel must agree on the primary and see
+        // the replica, or a failover triggered a moment later has no quorum and
+        // no candidate, and the test fails as a timeout that reads like a bug
+        // in the code under test.
+        cluster.settled().await.then_some(cluster)
+    }
+
+    async fn settled(&self) -> bool {
+        for _ in 0..300 {
+            let mut agreed = 0;
+            for at in &self.sentinel_ports {
+                if self.master_seen_by(*at).await.is_some() && self.replicas_seen_by(*at).await >= 1
+                {
+                    agreed += 1;
+                }
+            }
+            // **Sentinel seeing a replica is not the replica having the data.**
+            // A replica appears in `SENTINEL replicas` the moment it announces
+            // itself, which is before its first full sync has run — and a
+            // failover in that window promotes an empty node. Asked of the
+            // replica itself, because `master_link_status:up` is the state that
+            // means "everything the primary has, I have".
+            let synced = self.linked_up(self.nodes[1].port).await;
+            if agreed == self.sentinel_ports.len() && synced {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Whether the node at `port` is a replica whose link to its primary is up.
+    async fn linked_up(&self, port: u16) -> bool {
+        let info: Option<String> =
+            Self::ask(port, &mut ::redis::cmd("INFO").arg("replication").clone())
+                .await
+                .and_then(|v| ::redis::FromRedisValue::from_owned_redis_value(v).ok());
+        info.is_some_and(|info| {
+            info.lines()
+                .any(|line| line.trim() == "master_link_status:up")
+        })
+    }
+
+    async fn ask(at: u16, cmd: &mut ::redis::Cmd) -> Option<::redis::Value> {
+        Self::ask_for(at, cmd).await.ok()
+    }
+
+    /// The same, keeping the refusal — which some of these commands answer with
+    /// meaningfully.
+    async fn ask_for(at: u16, cmd: &mut ::redis::Cmd) -> Result<::redis::Value, String> {
+        let client =
+            ::redis::Client::open(format!("redis://127.0.0.1:{at}")).map_err(|e| e.to_string())?;
+        let mut c = client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| e.to_string())?;
+        cmd.query_async(&mut c).await.map_err(|e| e.to_string())
+    }
+
+    async fn master_seen_by(&self, at: u16) -> Option<u16> {
+        let answer: Option<(String, u16)> = Self::ask(
+            at,
+            ::redis::cmd("SENTINEL")
+                .arg("get-master-addr-by-name")
+                .arg(&self.service),
+        )
+        .await
+        .and_then(|v| ::redis::FromRedisValue::from_owned_redis_value(v).ok());
+        answer.map(|(_, port)| port)
+    }
+
+    async fn replicas_seen_by(&self, at: u16) -> usize {
+        let answer: Option<Vec<::redis::Value>> = Self::ask(
+            at,
+            ::redis::cmd("SENTINEL").arg("replicas").arg(&self.service),
+        )
+        .await
+        .and_then(|v| ::redis::FromRedisValue::from_owned_redis_value(v).ok());
+        answer.map_or(0, |seen| seen.len())
+    }
+
+    /// Whichever node the sentinels currently call the primary.
+    async fn primary(&self) -> Option<u16> {
+        self.master_seen_by(*self.sentinel_ports.first()?).await
+    }
+
+    /// The URL a node is configured with. Note what is **not** in it: the
+    /// address of any data node.
+    fn url(&self) -> String {
+        let hosts = self
+            .sentinel_ports
+            .iter()
+            .map(|p| format!("127.0.0.1:{p}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("redis+sentinel://{hosts}/{}", self.service)
+    }
+
+    /// Ask a sentinel to promote the replica **without anything dying**.
+    ///
+    /// The interesting half of a failover, and the half a re-dial cannot
+    /// survive: the old primary stays up, healthy and reachable, and is demoted
+    /// to a replica. Every write to it answers `READONLY`, which `redis`
+    /// classifies as `NoRetry`, so a connection pointed at it reconnects to
+    /// nothing and fails forever while looking perfectly alive.
+    /// **Retried, because the refusals are transient and say so.** A sentinel
+    /// answers `NOGOODSLAVE` while it considers the replica subjectively down —
+    /// which a `down-after-milliseconds` of one second reaches on a machine
+    /// running the rest of this suite in parallel — and `INPROGRESS` if another
+    /// sentinel got there first. Taking the first refusal as final made this
+    /// fail under load as "asked for a failover", which reads like a bug in the
+    /// thing under test and is not one.
+    async fn promote_the_replica(&self) -> Result<(), String> {
+        let mut last = "no sentinel was asked".to_owned();
+        for _ in 0..200 {
+            for at in &self.sentinel_ports {
+                match Self::ask_for(
+                    *at,
+                    ::redis::cmd("SENTINEL").arg("FAILOVER").arg(&self.service),
+                )
+                .await
+                {
+                    Ok(_) => return Ok(()),
+                    Err(why) => last = why,
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Err(last)
+    }
+
+    /// Kill whichever node is primary now, and say which port that was.
+    async fn kill_the_primary(&mut self) -> Option<u16> {
+        let port = self.primary().await?;
+        let node = self.nodes.iter_mut().find(|n| n.port == port)?;
+        node.kill();
+        Some(port)
+    }
+
+    /// Wait until `port` has actually been told it is a replica now.
+    ///
+    /// **Not the same moment as the sentinels agreeing**, and the difference is
+    /// what made the first version of the failover test unable to fail. A
+    /// sentinel promotes the replica and only then reconfigures the old primary,
+    /// which takes seconds — and in between, the old primary is still
+    /// `role:master` and still accepts writes. A test that asserted recovery in
+    /// that window passed by writing to the node it was supposed to have stopped
+    /// using, with re-resolution disabled.
+    ///
+    /// It is also the honest shape of the risk ADR-020 names: writes taken in
+    /// that window are accepted by a node that is about to be rewound, and
+    /// nothing on the client side can see it. What closes it is
+    /// `min-replicas-to-write`, not this code.
+    async fn demoted(&self, port: u16) -> bool {
+        for _ in 0..300 {
+            let role: Option<Vec<::redis::Value>> = Self::ask(port, &mut ::redis::cmd("ROLE"))
+                .await
+                .and_then(|v| ::redis::FromRedisValue::from_owned_redis_value(v).ok());
+            let says = role.as_ref().and_then(|r| r.first()).and_then(|first| {
+                ::redis::FromRedisValue::from_owned_redis_value(first.clone()).ok()
+            });
+            if says == Some("slave".to_owned()) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Wait until the sentinels agree the primary is somewhere other than
+    /// `was`.
+    async fn moved_away_from(&self, was: u16) -> Option<u16> {
+        for _ in 0..300 {
+            match self.primary().await {
+                Some(now) if now != was => return Some(now),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+        None
+    }
+}
+
+/// Retry `claim` until the link finds the coordinator again, or give up.
+///
+/// The first failures are expected and are DEP-04's business — the client is
+/// told `NotSaving` and `/readyz` answers 503. What must not happen is that it
+/// never stops failing.
+async fn coordinates_again(
+    store: &crate::cluster::redis::Redis,
+    document: &str,
+    now: u64,
+) -> Option<Lease> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Ok(lease) = store
+                .claim(document.to_owned(), "node-a".to_owned(), 60_000, now)
+                .await
+            {
+                return lease;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .ok()
+}
+
+/// **The gate: killing one Redis leaves ordering working — through a real
+/// failover.**
+///
+/// The primary is not killed here; it is **demoted**, which is the case the
+/// re-dial delivered by `DEP-13` cannot survive and the case that makes ADR-020
+/// a change rather than a configuration note. The socket stays up, the node goes
+/// on answering reads, and every write comes back `READONLY` forever.
+///
+/// What is asserted is both halves: that ordering resumes, and that **nothing a
+/// client was already told about is missing from the log afterwards** — three
+/// appends acknowledged before the failover are still there, and the next append
+/// follows them rather than overwriting them.
+#[tokio::test]
+async fn ordering_survives_a_coordinator_failover() {
+    let Some(cluster) = SentinelCluster::start("promote", &[]).await else {
+        eprintln!("skipped: needs `redis-server` and `redis-sentinel` on PATH");
+        return;
+    };
+    let store =
+        crate::cluster::redis::Redis::connect_within(&cluster.url(), "opencalc-test:promote")
+            .await
+            .expect("the sentinels named a primary");
+
+    let before = store
+        .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+        .await
+        .expect("a lease before the failover");
+    for at in 0..3u64 {
+        assert_eq!(
+            store
+                .append(
+                    "doc".to_owned(),
+                    before.epoch,
+                    at,
+                    at + 1,
+                    format!("before-{at}").into_bytes(),
+                    0,
+                )
+                .await,
+            Ok(at + 1),
+            "the log must be working before anything is taken away"
+        );
+    }
+
+    let was = cluster.primary().await.expect("a primary to start with");
+    if let Err(why) = cluster.promote_the_replica().await {
+        panic!("no sentinel would start a failover, so there is nothing to survive: {why}");
+    }
+    let now = cluster
+        .moved_away_from(was)
+        .await
+        .expect("the sentinels never promoted the replica, so this is not a failover test");
+    assert_ne!(now, was);
+    assert!(
+        cluster.demoted(was).await,
+        "the old primary was never reconfigured as a replica, so this test would be \
+         asserting against a node that is still accepting writes"
+    );
+
+    let after = coordinates_again(&store, "doc", 1)
+        .await
+        .expect("the link never found the new primary, so this node can never order again");
+    assert_eq!(
+        (after.node.as_str(), after.epoch),
+        (before.node.as_str(), before.epoch),
+        "the lease is the coordinator's memory of who leads, and a failover must not \
+         invent a new one"
+    );
+
+    // **No revision a client was given is absent from the log.** A promoted
+    // replica missing the last appends is precisely the loss ADR-020 names, and
+    // asserting only that ordering resumed would pass straight through it.
+    assert_eq!(
+        store.since("doc".to_owned(), 0).await,
+        Ok(vec![
+            (1, b"before-0".to_vec()),
+            (2, b"before-1".to_vec()),
+            (3, b"before-2".to_vec()),
+        ]),
+        "the new primary is missing appends this node already acknowledged"
+    );
+    assert_eq!(
+        store
+            .append("doc".to_owned(), after.epoch, 3, 4, b"after".to_vec(), 1)
+            .await,
+        Ok(4),
+        "and appending works again — which is ordering working"
+    );
+}
+
+/// The same gate with the primary **killed**, which is what actually happens.
+///
+/// Demotion is the subtler case; this is the literal one. The sentinels notice,
+/// promote, and the node has to find the new address without anybody restarting
+/// it — the thing a `ConnectionManager` alone cannot do, because it re-dials the
+/// address it was given and that address is a corpse.
+#[tokio::test]
+async fn ordering_resumes_after_the_coordinator_primary_is_killed() {
+    let Some(mut cluster) = SentinelCluster::start("killed", &[]).await else {
+        eprintln!("skipped: needs `redis-server` and `redis-sentinel` on PATH");
+        return;
+    };
+    let store =
+        crate::cluster::redis::Redis::connect_within(&cluster.url(), "opencalc-test:killed")
+            .await
+            .expect("the sentinels named a primary");
+
+    let before = store
+        .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+        .await
+        .expect("a lease before the kill");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), before.epoch, 0, 1, b"before".to_vec(), 0)
+            .await,
+        Ok(1)
+    );
+
+    let was = cluster.kill_the_primary().await.expect("a primary to kill");
+    cluster
+        .moved_away_from(was)
+        .await
+        .expect("the sentinels never promoted anything, so there was no failover to survive");
+
+    let after = coordinates_again(&store, "doc", 1).await.expect(
+        "the link never found the promoted primary, so every edit this node takes \
+         is one it must refuse for the rest of its life",
+    );
+    assert_eq!(after.node, "node-a");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), after.epoch, 1, 2, b"after".to_vec(), 1)
+            .await,
+        Ok(2),
+        "and appending works again — which is ordering working"
+    );
+}
+
+/// **A write with the in-sync set collapsed is refused, not accepted and lost.**
+///
+/// This is the half of ADR-020 that is not about availability. Redis replication
+/// is asynchronous: without `min-replicas-to-write` the primary acknowledges an
+/// append no replica has, and a promotion a moment later loses it — from a
+/// screen that shows it as saved, which is the "silent data loss with a receipt"
+/// ADR-014 refuses.
+///
+/// With the setting, the same moment is a **refusal**: the primary answers
+/// `NOREPLICAS`, the script never reaches its `RPUSH`, and the node reports
+/// `Refused { NotSaving }` (DEP-04). Three things are asserted, and the second is
+/// the one that makes it a durability test rather than an error-message test:
+///
+/// 1. the append is refused;
+/// 2. the log did **not** grow — nothing was written that could be lost;
+/// 3. the refusal is a *state*, not a wedge: redundancy returns and so does
+///    ordering.
+#[tokio::test]
+async fn a_write_with_the_in_sync_set_collapsed_is_refused_rather_than_lost() {
+    // `min-replicas-max-lag` is generous because it is not what this exercises:
+    // the replica is killed outright, so the primary loses the connection and
+    // its count of good replicas drops at once rather than by lag.
+    let floor = [
+        "--min-replicas-to-write",
+        "1",
+        "--min-replicas-max-lag",
+        "10",
+        // Redis waits five seconds before a diskless full sync, to batch
+        // replicas arriving together. Nothing here is about that wait.
+        "--repl-diskless-sync-delay",
+        "0",
+    ];
+    let Some(primary) = OwnRedis::start_as("insync-primary", &floor).await else {
+        eprintln!("skipped: needs a `redis-server` on PATH");
+        return;
+    };
+    let port = primary.port.to_string();
+    let Some(mut replica) = OwnRedis::start_as(
+        "insync-replica",
+        &[
+            "--repl-diskless-sync-delay",
+            "0",
+            "--replicaof",
+            "127.0.0.1",
+            &port,
+        ],
+    )
+    .await
+    else {
+        eprintln!("skipped: needs a `redis-server` on PATH");
+        return;
+    };
+
+    let store =
+        crate::cluster::redis::Redis::connect_within(&primary.url(), "opencalc-test:insync")
+            .await
+            .expect("connected");
+    // The floor is met while the replica is up, so the ordinary path works —
+    // without which "refused" below would prove only that the server was broken.
+    let lease = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Ok(lease) = store
+                .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+                .await
+            {
+                return lease;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the replica never came into sync, so the floor was never met");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), lease.epoch, 0, 1, b"in-sync".to_vec(), 0)
+            .await,
+        Ok(1),
+        "with redundancy in place the append is ordinary"
+    );
+
+    replica.kill();
+
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let outcome = store
+                .append("doc".to_owned(), lease.epoch, 1, 2, b"alone".to_vec(), 1)
+                .await;
+            match outcome {
+                Ok(_) => panic!(
+                    "the append was ACCEPTED with no replica in sync: this is the write a \
+                     failover loses, acknowledged to a client that will stop resending it"
+                ),
+                Err(AppendError::Unavailable(why)) if why.contains("min-replicas-to-write") => {
+                    return why;
+                }
+                // The primary has not noticed the replica is gone yet. It is a
+                // socket close rather than a lag window, so this is a moment.
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect(
+        "no refusal naming min-replicas-to-write arrived: either the coordinator is accepting \
+         writes with no replica in sync, or the refusal is reaching an operator as an \
+         unexplained server error",
+    );
+    assert!(
+        refused.contains("did not happen"),
+        "an operator reading this must learn the write did not land and that the replicas \
+         are what to look at — not be sent to chase a network fault: {refused}"
+    );
+
+    // **Nothing was written.** The refusal is only worth having if the log is
+    // where it was; a refusal on top of a write that landed would be the same
+    // loss with a louder log line.
+    assert_eq!(
+        store.since("doc".to_owned(), 0).await,
+        Ok(vec![(1, b"in-sync".to_vec())]),
+        "the refused append reached the log after all"
+    );
+
+    // And it is a state, not a wedge: redundancy returns, ordering returns.
+    assert!(replica.restart().await, "the replica came back");
+    let resumed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Ok(revision) = store
+                .append("doc".to_owned(), lease.epoch, 1, 2, b"together".to_vec(), 2)
+                .await
+            {
+                return revision;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("ordering never resumed once the replica was back, so the refusal was a wedge");
+    assert_eq!(resumed, 2);
+}
+
+/// A coordinator that is not configured to hold the floor is refused at startup.
+///
+/// The failure this prevents has no symptom until it is too late: a deployment
+/// sets `OPENCALC_REDIS_MIN_REPLICAS=1`, believes ADR-014 §4's promise holds
+/// across a failover, and is pointed at a primary where nobody set
+/// `min-replicas-to-write`. Every append is then accepted, and the first
+/// failover eats whichever ones had not replicated — with receipts.
+#[tokio::test]
+async fn a_coordinator_below_the_required_replica_floor_is_refused() {
+    let Some(server) = OwnRedis::start("floor").await else {
+        eprintln!("skipped: needs a `redis-server` on PATH");
+        return;
+    };
+    let wanted = crate::cluster::redis::LinkPolicy {
+        tls: crate::cluster::redis::LinkTls::default(),
+        min_replicas: 1,
+    };
+    let why = crate::cluster::redis::Redis::connect_under(&server.url(), "floor-test", &wanted)
+        .await
+        .expect_err(
+            "a coordinator that will accept writes it can lose must not be adopted by a node \
+             that asked for the opposite",
+        );
+    assert!(
+        why.0.contains("min-replicas-to-write"),
+        "and it names the setting to change: {why}"
+    );
+
+    // Unset is unchecked, which is the default and the behaviour every
+    // deployment had before ADR-020 — the check must not become a new way to
+    // fail to start.
+    assert!(
+        crate::cluster::redis::Redis::connect_under(
+            &server.url(),
+            "floor-test",
+            &crate::cluster::redis::LinkPolicy::default()
+        )
+        .await
+        .is_ok(),
+        "an unset floor must leave a single-node coordinator working"
+    );
+}
+
+/// A promoted primary that does not hold the floor is **not adopted**.
+///
+/// The mistake this catches is the common one: `min-replicas-to-write` set on
+/// the primary and nowhere else. The startup check passes, the deployment
+/// believes it is safe, and the first failover promotes a node that will happily
+/// accept writes it can lose — silently, because from the node's side the
+/// failover looks like a success.
+///
+/// So the floor is re-checked on every resolution, and a primary below it leaves
+/// the node refusing. Refusing is an answer; `NotSaving` and a 503 are what
+/// DEP-04 built for exactly this.
+#[tokio::test]
+async fn a_promoted_primary_below_the_replica_floor_is_not_adopted() {
+    let Some(mut cluster) = SentinelCluster::start_split(
+        "floor-failover",
+        &[
+            "--min-replicas-to-write",
+            "1",
+            "--min-replicas-max-lag",
+            "10",
+        ],
+        &[],
+    )
+    .await
+    else {
+        eprintln!("skipped: needs `redis-server` and `redis-sentinel` on PATH");
+        return;
+    };
+    let wanted = crate::cluster::redis::LinkPolicy {
+        tls: crate::cluster::redis::LinkTls::default(),
+        min_replicas: 1,
+    };
+    let store = crate::cluster::redis::Redis::connect_under(
+        &cluster.url(),
+        "opencalc-test:floor-failover",
+        &wanted,
+    )
+    .await
+    .expect("the original primary holds the floor");
+
+    let was = cluster.kill_the_primary().await.expect("a primary to kill");
+    cluster
+        .moved_away_from(was)
+        .await
+        .expect("the sentinels never promoted anything");
+
+    // Long enough that a link which *was* going to adopt the new primary has
+    // done so several times over: the resolution happens on the first failed
+    // command, and commands are being issued in this loop.
+    let adopted = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if store
+                .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        adopted.is_err(),
+        "the node resumed against a promoted primary with no durability floor, so it is \
+         acknowledging appends the next failover can lose — which is the silent loss this \
+         setting exists to refuse"
     );
 }
