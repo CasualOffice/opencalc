@@ -1157,3 +1157,275 @@ fn the_pair_identifies_a_picture_that_would_be_wrong() {
         "the two answers do not compose into the decision they exist for"
     );
 }
+
+/// Charts reaching the raster (`RND-11`).
+///
+/// Every assertion here is a **colour at a named coordinate**, for the reason
+/// `RND-06` had to learn twice: "the PNG is not blank" passes against a
+/// mirrored plot, a plot with no scale, and a pie that goes round the wrong
+/// way. Each fixture is built so that the wrong picture puts a different
+/// colour under at least one of these points.
+mod charts {
+    use casual_calc_layout::{GridGeometry, Viewport, layout_full};
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, ChartKind, ChartSeries, ChartView, Id, Sheet, SheetId,
+        Workbook,
+    };
+
+    use crate::render_pixmap;
+
+    /// The workbook's first four theme accents, which is where a chart's series
+    /// colours come from. Stock Office, since these fixtures carry no theme.
+    const ACCENT1: (u8, u8, u8) = (0x44, 0x72, 0xC4);
+    const ACCENT2: (u8, u8, u8) = (0xED, 0x7D, 0x31);
+    const ACCENT3: (u8, u8, u8) = (0xA5, 0xA5, 0xA5);
+    const ACCENT4: (u8, u8, u8) = (0xFF, 0xC0, 0x00);
+    /// The chart frame's ground.
+    const GROUND: (u8, u8, u8) = (255, 255, 255);
+
+    /// A sheet whose column A holds `values`, with one chart of `kind` over
+    /// `A1:F10` — 384x200 device pixels at 96 dpi with the default geometry.
+    fn sheet_with_chart(kind: ChartKind, values: &[f64]) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for (i, v) in values.iter().enumerate() {
+            sheet.cells.set(
+                CellRef::new(i as u32, 0),
+                Cell::value(CellValue::Number(*v)),
+            );
+        }
+        let mut chart =
+            ChartView::new(CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)), kind);
+        chart.series = vec![ChartSeries {
+            name: String::new(),
+            categories: None,
+            values: format!("$A$1:$A${}", values.len()),
+        }];
+        sheet.charts.push(chart);
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn render(wb: &Workbook) -> tiny_skia::Pixmap {
+        let geo = GridGeometry::default();
+        let list = layout_full(wb, 0, &geo);
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 10 * 960,
+            height: 12 * 300,
+        };
+        render_pixmap(&list, &geo, &vp, 96).unwrap()
+    }
+
+    #[track_caller]
+    fn assert_pixel(pixmap: &tiny_skia::Pixmap, x: u32, y: u32, expect: (u8, u8, u8), what: &str) {
+        let p = pixmap.pixel(x, y).expect("pixel out of surface");
+        let got = (p.red(), p.green(), p.blue());
+        let close = |a: u8, b: u8| a.abs_diff(b) <= 3;
+        assert!(
+            close(got.0, expect.0) && close(got.1, expect.1) && close(got.2, expect.2),
+            "{what}: pixel ({x},{y}) is {got:?}, expected {expect:?}"
+        );
+    }
+
+    /// **A column chart's bars are where their values put them.**
+    ///
+    /// Values 1 and 2 over an extent of 0..2, so the first bar fills the lower
+    /// half of the plot and the second fills all of it. The plot is x = 34px,
+    /// y = 6px, 340x176px, with the zero line at its foot (y = 182px); the
+    /// bars are x 59.5..177.5 and x 229.5..347.5.
+    ///
+    /// The four points are chosen so that the pictures which "not blank" would
+    /// accept all fail: an upside-down plot fills (100, 50) and empties
+    /// (100, 140); a plot with no scale fills both bars to the same height and
+    /// empties (280, 50) or fills (100, 50).
+    #[test]
+    fn a_column_charts_bars_stand_at_the_height_of_their_values() {
+        let pixmap = render(&sheet_with_chart(ChartKind::Column, &[1.0, 2.0]));
+
+        assert_pixel(&pixmap, 100, 140, ACCENT1, "inside the first bar");
+        assert_pixel(&pixmap, 100, 50, GROUND, "above the first bar");
+        assert_pixel(&pixmap, 280, 140, ACCENT1, "inside the second bar");
+        assert_pixel(
+            &pixmap,
+            280,
+            50,
+            ACCENT1,
+            "the second bar is twice the first, so it reaches here",
+        );
+        assert_pixel(&pixmap, 360, 100, GROUND, "right of the last bar");
+    }
+
+    /// Whether anything at all was painted at `(x, y)`.
+    fn ink(pixmap: &tiny_skia::Pixmap, x: u32, y: u32) -> bool {
+        let p = pixmap.pixel(x, y).expect("pixel out of surface");
+        (p.red(), p.green(), p.blue()) != GROUND
+    }
+
+    /// **The zero line is stroked, and it is at zero.**
+    ///
+    /// A [`PaintItem::Polyline`] one pixel wide lands on two half-covered rows
+    /// whatever colour it is, so this asserts *position* rather than a colour:
+    /// there is ink where the axis belongs and none twelve pixels above it,
+    /// inside the plot and between the two bars where nothing else is drawn.
+    /// An axis that was never stroked, or one placed at the top of the plot,
+    /// fails.
+    #[test]
+    fn the_zero_line_is_stroked_where_the_extent_puts_it() {
+        let pixmap = render(&sheet_with_chart(ChartKind::Column, &[1.0, 2.0]));
+
+        // x = 200px is the gap between the bars (they end at 177.5 and start
+        // at 229.5), so only the axis can put ink here.
+        assert!(
+            ink(&pixmap, 200, 181) || ink(&pixmap, 200, 182),
+            "no ink on the zero line at y = 182"
+        );
+        assert!(!ink(&pixmap, 200, 170), "ink above the zero line");
+        // And the value axis down the plot's left edge, at x = 34px.
+        assert!(
+            ink(&pixmap, 33, 100) || ink(&pixmap, 34, 100),
+            "no ink on the value axis at x = 34"
+        );
+        assert!(!ink(&pixmap, 45, 100), "ink right of the value axis");
+    }
+
+    /// **A pie starts at twelve o'clock and runs clockwise**, in four equal
+    /// quarters coloured by the workbook's first four accents.
+    ///
+    /// The plot is 340x176px at (34, 6), so the pie is centred at (204, 94)
+    /// with radius 84px. Each assertion is 46px diagonally from the centre —
+    /// 65px out, inside the pie and well away from every slice edge.
+    ///
+    /// This is the four-quadrant discipline `RND-06` used for pictures: a pie
+    /// swept counter-clockwise swaps the two off-diagonal quadrants, one
+    /// started at three o'clock rotates all four, and either passes a
+    /// non-blank check.
+    #[test]
+    fn a_pies_slices_are_where_their_order_puts_them() {
+        let pixmap = render(&sheet_with_chart(ChartKind::Pie, &[1.0, 1.0, 1.0, 1.0]));
+
+        assert_pixel(&pixmap, 250, 48, ACCENT1, "first slice, top-right");
+        assert_pixel(&pixmap, 250, 140, ACCENT2, "second slice, bottom-right");
+        assert_pixel(&pixmap, 158, 140, ACCENT3, "third slice, bottom-left");
+        assert_pixel(&pixmap, 158, 48, ACCENT4, "fourth slice, top-left");
+        // Solid to the middle: a pie has no hole, and this is the point the
+        // doughnut below proves is empty.
+        assert_pixel(&pixmap, 214, 84, ACCENT1, "a pie is filled to its centre");
+    }
+
+    /// **A doughnut is the same picture with the middle cut out** — and the
+    /// hole is a hole in the geometry, so the frame's ground shows through it.
+    #[test]
+    fn a_doughnut_has_a_hole_and_keeps_its_slices() {
+        let pixmap = render(&sheet_with_chart(
+            ChartKind::Doughnut,
+            &[1.0, 1.0, 1.0, 1.0],
+        ));
+
+        // Radius 65px: outside the hole (46px) and inside the ring (84px).
+        assert_pixel(&pixmap, 250, 48, ACCENT1, "first slice, top-right");
+        assert_pixel(&pixmap, 250, 140, ACCENT2, "second slice, bottom-right");
+        assert_pixel(&pixmap, 158, 140, ACCENT3, "third slice, bottom-left");
+        assert_pixel(&pixmap, 158, 48, ACCENT4, "fourth slice, top-left");
+        // The same point that is solid in the pie above, 14px from the centre.
+        assert_pixel(&pixmap, 214, 84, GROUND, "inside the hole");
+        assert_pixel(&pixmap, 204, 94, GROUND, "the centre itself");
+    }
+
+    /// A chart is drawn **over** the cells it is anchored across, not behind
+    /// them.
+    ///
+    /// Proved against a control rather than against white: A1 is given a red
+    /// fill, so the same point is red with the chart removed and the frame's
+    /// ground with it there. Asserting only that the point is white would pass
+    /// on a sheet where nothing was drawn at all.
+    #[test]
+    fn a_chart_frame_covers_the_cells_underneath_it() {
+        let mut wb = sheet_with_chart(ChartKind::Column, &[1.0, 2.0]);
+        let red = wb.intern_style(casual_calc_model::Style {
+            fill_color: Some("FF0000".to_owned()),
+            ..casual_calc_model::Style::default()
+        });
+        let mut a1 = Cell::value(CellValue::Number(1.0));
+        a1.style = Some(red);
+        wb.sheets[0].cells.set(CellRef::new(0, 0), a1);
+
+        // A1 is 64x20px, and this point is inside it.
+        assert_pixel(&render(&wb), 30, 10, GROUND, "A1 is under the chart");
+
+        wb.sheets[0].charts.clear();
+        assert_pixel(
+            &render(&wb),
+            30,
+            10,
+            (255, 0, 0),
+            "without the chart the cell's own fill is there",
+        );
+    }
+
+    /// **`Align::Center` centres.**
+    ///
+    /// `draw_glyphs` places a run **twice** — once on the shaped path and once
+    /// on the per-`char` fallback — and which one runs is decided by a Cargo
+    /// feature (ADR-018), so one test can only ever exercise the build it was
+    /// compiled for. Breaking the unshaped arm alone was invisible on a default
+    /// build; this passes under both `--features shaping` and
+    /// `--no-default-features --features all-fonts`, and goes red under either
+    /// arm broken in its own configuration. Worth stating because the trap is
+    /// silent: a new `Align` variant handled in one of the two arms renders
+    /// correctly for everybody who tests natively.
+    ///
+    /// A chart title is centred over its frame; the cell path has never needed
+    /// it, so nothing else in this crate exercises it. Asserted by where the
+    /// ink starts: the same string in the same box, left-aligned, begins at the
+    /// box's left edge, and centred begins far to the right of it. An
+    /// implementation that fell through to `Left` would put ink in the same
+    /// place both times, which is exactly the mistake a new match arm invites.
+    #[test]
+    fn centred_text_is_centred_and_not_left_aligned() {
+        use casual_calc_layout::{Align, DisplayList, PaintItem, Rect};
+
+        let geo = GridGeometry::default();
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            width: 300 * 15,
+            height: 20 * 15,
+        };
+        let paint =
+            |items: Vec<PaintItem>| render_pixmap(&DisplayList { items }, &geo, &vp, 96).unwrap();
+        // The grid's own lines are painted whatever the display list says, so
+        // "the first column with ink in it" would always be zero. The text's
+        // ink is what this render has and an empty one does not.
+        let bare = paint(Vec::new());
+        let ink_starts_at = |align: Align| -> u32 {
+            let pixmap = paint(vec![PaintItem::Text {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 300 * 15,
+                    h: 20 * 15,
+                },
+                content: "Hi".to_owned(),
+                align,
+                color: Some("000000".to_owned()),
+                bold: false,
+                italic: false,
+                font_name: None,
+                font_pt: Some(11.0),
+            }]);
+            (0..300)
+                .find(|x| (0..20).any(|y| pixmap.pixel(*x, y) != bare.pixel(*x, y)))
+                .expect("the string left no ink at all")
+        };
+
+        let left = ink_starts_at(Align::Left);
+        let centre = ink_starts_at(Align::Center);
+        assert!(left < 10, "left-aligned ink starts at {left}");
+        assert!(
+            centre > 130 && centre < 160,
+            "centred ink starts at {centre}, not near the middle of a 300px box"
+        );
+    }
+}

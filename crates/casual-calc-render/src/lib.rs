@@ -22,13 +22,14 @@ mod shape;
 
 use casual_calc_layout::visible_range;
 use casual_calc_layout::{
-    Align, BorderLine, DisplayList, GridGeometry, PaintItem, Pane, Rect as LayoutRect, Viewport,
+    Align, BorderLine, DisplayList, GridGeometry, PaintItem, Pane, Point as LayoutPoint,
+    Rect as LayoutRect, Viewport,
 };
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, MetadataProvider};
 use tiny_skia::{
-    Color, FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, Rect, SpreadMode,
+    Color, FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, Rect, SpreadMode, Stroke,
     Transform,
 };
 
@@ -224,6 +225,36 @@ fn draw_item(
                 dpi,
             );
         }
+        PaintItem::Polyline {
+            points,
+            width,
+            color,
+        } => {
+            draw_polyline(pixmap, points, *width, color, viewport, dpi);
+        }
+        PaintItem::Polygon { points, fill } => {
+            draw_polygon(pixmap, points, fill, viewport, dpi);
+        }
+        PaintItem::Wedge {
+            center,
+            radius,
+            inner_radius,
+            from,
+            sweep,
+            fill,
+        } => {
+            draw_wedge(
+                pixmap,
+                *center,
+                *radius,
+                *inner_radius,
+                *from,
+                *sweep,
+                fill,
+                viewport,
+                dpi,
+            );
+        }
         PaintItem::Image { rect, part } => {
             draw_image(pixmap, rect, part, viewport, dpi, images, report);
         }
@@ -237,6 +268,213 @@ fn draw_item(
             draw_borders(pixmap, rect, viewport, dpi, left, right, top, bottom);
         }
     }
+}
+
+/// A display-list point in device pixels.
+fn to_screen_point(p: LayoutPoint, viewport: &Viewport, dpi: u32) -> (f32, f32) {
+    (
+        twips_to_px(p.x - viewport.x, dpi),
+        twips_to_px(p.y - viewport.y, dpi),
+    )
+}
+
+/// Stroke an open path. Fewer than two points is not a line and draws nothing.
+fn draw_polyline(
+    pixmap: &mut Pixmap,
+    points: &[LayoutPoint],
+    width: i64,
+    color: &str,
+    viewport: &Viewport,
+    dpi: u32,
+) {
+    let Some(color) = parse_hex_color(color) else {
+        return;
+    };
+    if points.len() < 2 {
+        return;
+    }
+    let mut builder = PathBuilder::new();
+    for (i, p) in points.iter().enumerate() {
+        let (x, y) = to_screen_point(*p, viewport, dpi);
+        if i == 0 {
+            builder.move_to(x, y);
+        } else {
+            builder.line_to(x, y);
+        }
+    }
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    // A width the device cannot render is drawn as the thinnest line it can,
+    // rather than as nothing: a zero-width axis is an axis nobody can see.
+    let stroke = Stroke {
+        width: twips_to_px(width, dpi).max(1.0),
+        ..Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+/// Fill a closed polygon. Fewer than three points encloses nothing.
+fn draw_polygon(
+    pixmap: &mut Pixmap,
+    points: &[LayoutPoint],
+    fill: &str,
+    viewport: &Viewport,
+    dpi: u32,
+) {
+    let Some(color) = parse_hex_color(fill) else {
+        return;
+    };
+    if points.len() < 3 {
+        return;
+    }
+    let mut builder = PathBuilder::new();
+    for (i, p) in points.iter().enumerate() {
+        let (x, y) = to_screen_point(*p, viewport, dpi);
+        if i == 0 {
+            builder.move_to(x, y);
+        } else {
+            builder.line_to(x, y);
+        }
+    }
+    builder.close();
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+}
+
+/// A point on the circle at `angle` **degrees clockwise from twelve o'clock**.
+///
+/// The whole conversion from the display list's convention to the device's
+/// lives here and in [`arc_tangent`], so a backend author reads it once.
+/// Screen y grows downward, so twelve o'clock is `cy - r` and increasing the
+/// angle sweeps to the right — clockwise, as the display list promises.
+fn arc_point(cx: f32, cy: f32, r: f32, angle_deg: f64) -> (f32, f32) {
+    let t = angle_deg.to_radians();
+    (cx + r * t.sin() as f32, cy - r * t.cos() as f32)
+}
+
+/// The unit tangent at `angle`, in the sweep's direction.
+fn arc_tangent(angle_deg: f64) -> (f32, f32) {
+    let t = angle_deg.to_radians();
+    (t.cos() as f32, t.sin() as f32)
+}
+
+/// Append an arc of `r` about `(cx, cy)` from `from` through `sweep` degrees to
+/// a builder already positioned at its first point.
+///
+/// Cubic Béziers, split so no segment exceeds a quarter turn — past that the
+/// approximation's error becomes visible, and `tiny-skia` has no arc primitive
+/// to defer to. `sweep` may be negative, which traces the arc backwards; that
+/// is what closes a doughnut's inner edge.
+fn arc_to(builder: &mut PathBuilder, cx: f32, cy: f32, r: f32, from: f64, sweep: f64) {
+    if sweep == 0.0 || r <= 0.0 {
+        return;
+    }
+    let segments = (sweep.abs() / 90.0).ceil().max(1.0);
+    let step = sweep / segments;
+    // The control-point distance for a cubic that approximates `step`: the
+    // standard (4/3)·tan(step/4)·r.
+    let k = (4.0 / 3.0) * (step.to_radians() / 4.0).tan() * f64::from(r);
+    let k = k as f32;
+    let mut a0 = from;
+    for _ in 0..(segments as u32) {
+        let a1 = a0 + step;
+        let (x0, y0) = arc_point(cx, cy, r, a0);
+        let (x1, y1) = arc_point(cx, cy, r, a1);
+        let (tx0, ty0) = arc_tangent(a0);
+        let (tx1, ty1) = arc_tangent(a1);
+        builder.cubic_to(
+            x0 + k * tx0,
+            y0 + k * ty0,
+            x1 - k * tx1,
+            y1 - k * ty1,
+            x1,
+            y1,
+        );
+        a0 = a1;
+    }
+}
+
+/// Fill one pie or doughnut slice.
+///
+/// A doughnut's hole is cut from the path rather than painted over: the outline
+/// runs out along the start edge, round the outer arc, in along the end edge
+/// and back round the inner arc. Painting a background disc on top instead —
+/// which is what the canvas does — needs an opaque background whose colour the
+/// backend knows, and a headless backend knows neither.
+#[allow(clippy::too_many_arguments)]
+fn draw_wedge(
+    pixmap: &mut Pixmap,
+    center: LayoutPoint,
+    radius: i64,
+    inner_radius: i64,
+    from: f64,
+    sweep: f64,
+    fill: &str,
+    viewport: &Viewport,
+    dpi: u32,
+) {
+    let Some(color) = parse_hex_color(fill) else {
+        return;
+    };
+    if radius <= 0 || !from.is_finite() || !sweep.is_finite() || sweep == 0.0 {
+        return;
+    }
+    // A hole wider than the slice is empty rather than inverted.
+    let inner = inner_radius.clamp(0, radius);
+    let (cx, cy) = to_screen_point(center, viewport, dpi);
+    let r = twips_to_px(radius, dpi);
+    let ri = twips_to_px(inner, dpi);
+    if r <= 0.0 {
+        return;
+    }
+    // More than a full turn is a full turn; a slice cannot overlap itself.
+    let sweep = sweep.clamp(-360.0, 360.0);
+    let to = from + sweep;
+
+    let mut builder = PathBuilder::new();
+    if ri > 0.0 {
+        let (sx, sy) = arc_point(cx, cy, ri, from);
+        builder.move_to(sx, sy);
+    } else {
+        builder.move_to(cx, cy);
+    }
+    let (ox, oy) = arc_point(cx, cy, r, from);
+    builder.line_to(ox, oy);
+    arc_to(&mut builder, cx, cy, r, from, sweep);
+    if ri > 0.0 {
+        let (ix, iy) = arc_point(cx, cy, ri, to);
+        builder.line_to(ix, iy);
+        arc_to(&mut builder, cx, cy, ri, to, -sweep);
+    }
+    builder.close();
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Paint one picture into its frame, or record why it could not be.
@@ -517,6 +755,9 @@ fn draw_glyphs(
     let mut pen_x = match align {
         Align::Left => x0 + pad,
         Align::Right => x0 + w - pad - total,
+        // No padding: a centred run is centred on the box, and subtracting a
+        // pad from both sides of a centre moves it nowhere.
+        Align::Center => x0 + (w - total) / 2.0,
     };
     // Vertically center the ascent/descent band within the cell.
     let text_h = metrics.ascent - metrics.descent;
@@ -538,6 +779,7 @@ fn draw_glyphs(
         let mut x = match align {
             Align::Left => x0 + pad,
             Align::Right => x0 + w - pad - total_shaped,
+            Align::Center => x0 + (w - total_shaped) / 2.0,
         };
         for glyph in &shaped {
             if let Some(outline) = shaped_outlines.get(skrifa::GlyphId::from(glyph.id)) {
