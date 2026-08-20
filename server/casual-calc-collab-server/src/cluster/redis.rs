@@ -46,9 +46,10 @@
 //! renewed against another expires at a moment neither agrees on. Keeping the
 //! caller's clock is also what lets the same tests run against both backends.
 
+use std::path::{Path, PathBuf};
+
 use redis::AsyncCommands;
-use redis::aio::MultiplexedConnection;
-use tokio::sync::Mutex;
+use redis::aio::ConnectionManager;
 
 use super::{Answer, AppendError, Coordinator, Lease, Logged, Peer, Unavailable};
 
@@ -107,12 +108,15 @@ return {node, tostring(epoch), tostring(expires)}
 /// typing produces — was refused forever. Each entry now records the revision it
 /// carried the document to, as a decimal prefix ahead of a newline, and the gate
 /// reads the last one. See [`Coordinator::append`](crate::cluster::Coordinator::append).
+///
+/// The comparison is `~=` rather than `<`, and that is the coordinator-failover
+/// case: see [`Coordinator::append`](crate::cluster::Coordinator::append).
 const APPEND: &str = r"
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {'unled', '0'} end
 local held = cjson.decode(raw)
 local epoch, after, revision = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
-if epoch < held.epoch then return {'fenced', tostring(held.epoch)} end
+if epoch ~= held.epoch then return {'fenced', tostring(held.epoch)} end
 local last = redis.call('LINDEX', KEYS[2], -1)
 local current = 0
 if last then current = tonumber(string.match(last, '^(%d+)')) end
@@ -152,9 +156,164 @@ pub(crate) const LOG_MAX_ENTRIES: u64 = 10_000;
 /// fires no node holds the document and the next open fetches it from the host.
 pub(crate) const LOG_TTL_MS: u64 = 60 * 60 * 1000;
 
+/// How many times a lost coordinator connection is re-dialled before a command
+/// gives up.
+///
+/// **Bounded on purpose, and the bound is the interesting half.** Reconnecting
+/// fixes the case where the coordinator comes back; it introduces the opposite
+/// hazard when it does not, because a command that waits for a connection that
+/// will never be established is a command that never returns — and `/readyz` is
+/// a `peers()` call, so an unbounded wait turns DEP-04's prompt 503 into a probe
+/// that hangs and a node that is neither drained nor restarted.
+///
+/// Four attempts at [`RECONNECT_BACKOFF_MS`] doubling to at most
+/// [`RECONNECT_MAX_DELAY_MS`] is under two seconds of trying, against a renewal
+/// tick of a few seconds. A coordinator that is back answers on the first
+/// attempt; one that is not is reported as unreachable, which is an answer.
+const RECONNECT_ATTEMPTS: usize = 4;
+
+/// The first re-dial delay, in milliseconds, doubling on each attempt.
+const RECONNECT_BACKOFF_MS: u64 = 100;
+
+/// The longest a re-dial waits between attempts.
+const RECONNECT_MAX_DELAY_MS: u64 = 500;
+
+/// The longest a *subscription* waits between attempts to re-establish itself.
+///
+/// Longer than [`RECONNECT_MAX_DELAY_MS`], and unbounded in count where commands
+/// are bounded, because the two failures are not alike. A command has a caller
+/// waiting on an answer, and "unreachable" is one. A subscription has nobody
+/// waiting: it retries until the document is evicted, so the ceiling only has to
+/// keep a long outage from becoming a re-dial storm across every document on
+/// every node.
+const RESUBSCRIBE_MAX_DELAY_MS: u64 = 5_000;
+
+/// How long one command may take before it is called unreachable.
+///
+/// Distinct from the re-dial budget: this bounds a connection that is *up* and
+/// not answering, which is what a coordinator under memory pressure looks like.
+const COMMAND_TIMEOUT_MS: u64 = 5_000;
+
+/// What this node presents, and what it will accept, on the coordinator link.
+///
+/// Separate from [`crate::config::Endpoint`]'s TLS because the direction is the
+/// other way round: there this node is the server proving who it is, and here it
+/// is the client deciding whom to believe.
+///
+/// Both fields are `None` in the ordinary public-CA case, where the system trust
+/// store already answers. Neither is a way to *disable* verification: this build
+/// does not compile `redis`'s insecure mode, so `rediss://…/#insecure` fails
+/// rather than quietly accepting anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkTls {
+    /// A CA the coordinator's certificate must chain to, instead of the system
+    /// trust store.
+    ///
+    /// The case that matters in practice: an internal Redis is not issued a
+    /// certificate by a public authority, so a client that can only trust the
+    /// system roots can only be pointed at a plaintext port.
+    pub root_ca: Option<PathBuf>,
+    /// This node's own certificate and key, when the coordinator requires one.
+    ///
+    /// Mutual TLS, for the same reason the internal endpoint offers it: the
+    /// nodes are a known, operator-controlled set, and a password proves a
+    /// secret was copied where a certificate proves which node is speaking.
+    pub client: Option<crate::config::TlsFiles>,
+}
+
+impl LinkTls {
+    /// Whether anything here needs a certificate to be read.
+    fn is_empty(&self) -> bool {
+        self.root_ca.is_none() && self.client.is_none()
+    }
+}
+
+/// Why a coordinator link could not be built, if it could not.
+///
+/// Checked before the connection is attempted, because every one of these fails
+/// later as something that reads like a network problem — and an operator
+/// chasing a network problem will not find a misspelled scheme.
+///
+/// # Errors
+///
+/// A description of the misconfiguration, in the operator's terms.
+pub fn link_problems(url: &str, tls: &LinkTls) -> Result<(), String> {
+    let secured = url.starts_with("rediss://");
+    // The *fragment*, not a substring anywhere in the URL: a password is part of
+    // this string, and refusing to start because somebody's password happened to
+    // contain the word would be a refusal nobody could diagnose.
+    if url
+        .split_once('#')
+        .is_some_and(|(_, tail)| tail == "insecure")
+    {
+        return Err(
+            "the coordinator URL asks for #insecure, which turns off certificate \
+             verification entirely — an encrypted link to whoever answers the port is \
+             not an encrypted link to your coordinator. This build does not offer it; \
+             point OPENCALC_REDIS_CA at the CA that issued the certificate instead."
+                .to_owned(),
+        );
+    }
+    if !secured && !tls.is_empty() {
+        // The dangerous shape: an operator who supplied certificates believes
+        // the link is encrypted. Starting anyway would carry every lease token
+        // and every operation in clear under a configuration that says
+        // otherwise.
+        return Err(format!(
+            "certificates are configured for the coordinator link but OPENCALC_REDIS_URL is \
+             {url:?}, which is plaintext: use rediss:// or remove the certificates"
+        ));
+    }
+    Ok(())
+}
+
+/// What is worth saying out loud at startup about the coordinator link.
+///
+/// The same job [`crate::config::Exposure::warnings`] does for the listeners,
+/// for the one connection that is not a listener. Nothing here will ever
+/// *fail* — a plaintext coordinator link works perfectly — which is exactly why
+/// nothing else would mention it.
+#[must_use]
+pub fn link_warnings(url: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if !url.starts_with("rediss://") {
+        out.push(
+            "the coordinator link is plaintext: the lease that decides which node may write \
+             a document, and every operation appended to the log, travel in clear between \
+             this node and Redis"
+                .to_owned(),
+        );
+        // Worse than the operations, and quieter: a password sent over a
+        // plaintext link is readable by anything on the path, and it is the
+        // credential for the whole cluster's coordination state.
+        if url.contains('@') {
+            out.push(
+                "the coordinator URL carries a password over a plaintext link, so the \
+                 credential for the cluster's leases and op log is sent in clear on every \
+                 connection"
+                    .to_owned(),
+            );
+        }
+    }
+    out
+}
+
 /// A cluster's shared state, in Redis.
 pub struct Redis {
-    connection: Mutex<MultiplexedConnection>,
+    /// A multiplexed connection **that re-dials**.
+    ///
+    /// The plain multiplexed connection does not: the task driving the socket
+    /// ends when the socket does, and every later command on it — and on every
+    /// clone, which is what [`Redis::connection`] hands out — fails for the life
+    /// of the process. A coordinator restart therefore cost a restart of every
+    /// node in the cluster, which is most of what "a single Redis failure stops
+    /// ordering cluster-wide" meant (DEP-13).
+    ///
+    /// It re-dials; it does **not** re-send. A command that was in flight comes
+    /// back as an error, which is what the callers already handle and what
+    /// `append`'s conditional-on-revision shape needs — a silently retried
+    /// append is a second write nobody asked for.
+    connection: ConnectionManager,
     /// Kept because a **subscription needs its own connection**: a Redis
     /// connection in subscribe mode accepts almost nothing else, so sharing the
     /// multiplexed one would take the coordinator offline the moment anything
@@ -188,7 +347,7 @@ impl Redis {
     /// node under test and wins whenever the machine is busy.
     #[cfg(test)]
     pub(crate) async fn holder_of(&self, document: &str) -> Option<String> {
-        let mut c = self.connection().await;
+        let mut c = self.connection();
         let raw: Option<String> = redis::cmd("GET")
             .arg(self.lease_key(document))
             .query_async(&mut c)
@@ -200,7 +359,7 @@ impl Redis {
 
     #[cfg(test)]
     pub(crate) async fn log_ttl_ms(&self, document: &str) -> i64 {
-        let mut c = self.connection().await;
+        let mut c = self.connection();
         redis::cmd("PTTL")
             .arg(self.log_key(document))
             .query_async(&mut c)
@@ -222,17 +381,52 @@ impl Redis {
 
     /// Connect to `url`, keeping every key under `namespace`.
     ///
+    /// Trusts the system certificate store when `url` is `rediss://`. Use
+    /// [`Self::connect_secured`] for a private CA or for mutual TLS.
+    ///
     /// # Errors
     ///
     /// [`Unavailable`] if the URL is unusable or the server cannot be reached.
     pub async fn connect_within(url: &str, namespace: &str) -> Result<Self, Unavailable> {
-        let client = redis::Client::open(url).map_err(|e| Unavailable(e.to_string()))?;
-        let connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| Unavailable(e.to_string()))?;
+        Self::connect_secured(url, namespace, &LinkTls::default()).await
+    }
+
+    /// Connect to `url` under `namespace`, presenting and trusting `tls`.
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] if the URL is unusable, a certificate cannot be read, or
+    /// the server cannot be reached. Failing at startup is the point: a node
+    /// that comes up believing it is in a cluster it cannot reach will take
+    /// leadership of everything it is asked about, and be wrong about all of it.
+    pub async fn connect_secured(
+        url: &str,
+        namespace: &str,
+        tls: &LinkTls,
+    ) -> Result<Self, Unavailable> {
+        link_problems(url, tls).map_err(Unavailable)?;
+        let client = if tls.is_empty() {
+            redis::Client::open(url).map_err(|e| Unavailable(e.to_string()))?
+        } else {
+            redis::Client::build_with_tls(url, certificates(tls)?)
+                .map_err(|e| Unavailable(e.to_string()))?
+        };
+
+        let connection = ConnectionManager::new_with_config(
+            client.clone(),
+            redis::aio::ConnectionManagerConfig::new()
+                .set_exponent_base(2)
+                .set_factor(RECONNECT_BACKOFF_MS)
+                .set_number_of_retries(RECONNECT_ATTEMPTS)
+                .set_max_delay(RECONNECT_MAX_DELAY_MS)
+                .set_response_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS))
+                .set_connection_timeout(std::time::Duration::from_millis(COMMAND_TIMEOUT_MS)),
+        )
+        .await
+        .map_err(|e| Unavailable(e.to_string()))?;
+
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection,
             client,
             namespace: namespace.to_owned(),
             claim: redis::Script::new(CLAIM),
@@ -255,7 +449,7 @@ impl Redis {
     /// node will notice as a gap and read from the log — which is correct, and
     /// slower, and worth knowing about.
     pub async fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), Unavailable> {
-        let mut c = self.connection().await;
+        let mut c = self.connection();
         let _: () = c
             .publish(channel, payload)
             .await
@@ -270,16 +464,98 @@ impl Redis {
     /// being evicted also close its subscription, rather than leaving a task
     /// per document this node has ever held.
     ///
+    /// # A subscription that ends is not a subscription that was cancelled
+    ///
+    /// A pub/sub connection is a second socket, and it dies the same way the
+    /// first one does — but far more quietly. The message stream simply *ends*,
+    /// which is indistinguishable at the type level from "nothing more will be
+    /// published". The receiver closes, and the per-document attendant in
+    /// `net.rs` breaks out of its loop: that document stops renewing its lease
+    /// and stops reading its inbox, while the node goes on serving everybody
+    /// connected to it, as though it were still in the cluster (DEP-13).
+    ///
+    /// So the task re-dials and re-subscribes, and only stops when the
+    /// **receiver** is gone, which is the one signal that really does mean
+    /// nobody wants this any more.
+    ///
+    /// A resubscribe loses whatever was published during the gap, and that is
+    /// acceptable for exactly the reason the channel was fire-and-forget to
+    /// begin with: the log is the record. `catch_up` runs on every lease tick
+    /// and reads from where the node actually is, so a gap here costs latency
+    /// rather than correctness.
+    ///
     /// # Errors
     ///
     /// [`Unavailable`] if the connection cannot be opened or the subscription
-    /// refused.
+    /// refused. The **first** subscription is awaited and its failure returned,
+    /// because a document that opens without one is a document this node cannot
+    /// hear about the changes to.
     pub async fn subscribe(
         &self,
         channel: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<Vec<u8>>, Unavailable> {
-        let mut pubsub = self
-            .client
+        let mut pubsub = self.subscription(channel).await?;
+
+        // Bounded. A subscriber that stops reading must not let the channel
+        // grow without limit — and dropping the oldest would be worse than
+        // stopping, since a missed batch is a gap the receiver detects and
+        // closes from the log, whereas unbounded growth is the node dying.
+        let (out, into) = tokio::sync::mpsc::channel(256);
+        let client = self.client.clone();
+        let channel = channel.to_owned();
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            loop {
+                {
+                    let mut stream = pubsub.on_message();
+                    while let Some(message) = stream.next().await {
+                        let Ok(payload) = message.get_payload::<Vec<u8>>() else {
+                            continue;
+                        };
+                        if out.send(payload).await.is_err() {
+                            // The receiver is gone: the document was evicted, or
+                            // the node is shutting down. Either way there is
+                            // nobody to deliver to and the connection should be
+                            // released.
+                            return;
+                        }
+                    }
+                }
+                // The stream ended, which means the connection did. Re-dial,
+                // giving up only when there is nobody left to deliver to.
+                let mut delay = RECONNECT_BACKOFF_MS;
+                pubsub = loop {
+                    if out.is_closed() {
+                        return;
+                    }
+                    match Self::open_subscription(&client, &channel).await {
+                        Ok(fresh) => break fresh,
+                        Err(why) => {
+                            tracing::warn!(
+                                %channel,
+                                %why,
+                                "the coordinator's channel is unreachable; retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            delay = (delay * 2).min(RESUBSCRIBE_MAX_DELAY_MS);
+                        }
+                    }
+                };
+                tracing::info!(%channel, "resubscribed to the coordinator's channel");
+            }
+        });
+        Ok(into)
+    }
+
+    async fn subscription(&self, channel: &str) -> Result<redis::aio::PubSub, Unavailable> {
+        Self::open_subscription(&self.client, channel).await
+    }
+
+    async fn open_subscription(
+        client: &redis::Client,
+        channel: &str,
+    ) -> Result<redis::aio::PubSub, Unavailable> {
+        let mut pubsub = client
             .get_async_pubsub()
             .await
             .map_err(|e| Unavailable(e.to_string()))?;
@@ -287,36 +563,47 @@ impl Redis {
             .subscribe(channel)
             .await
             .map_err(|e| Unavailable(e.to_string()))?;
-
-        // Bounded. A subscriber that stops reading must not let the channel
-        // grow without limit — and dropping the oldest would be worse than
-        // stopping, since a missed batch is a gap the receiver detects and
-        // closes from the log, whereas unbounded growth is the node dying.
-        let (out, into) = tokio::sync::mpsc::channel(256);
-        tokio::spawn(async move {
-            use futures_util::StreamExt as _;
-            let mut stream = pubsub.on_message();
-            while let Some(message) = stream.next().await {
-                let Ok(payload) = message.get_payload::<Vec<u8>>() else {
-                    continue;
-                };
-                if out.send(payload).await.is_err() {
-                    // The receiver is gone: the document was evicted, or the
-                    // node is shutting down. Either way there is nobody to
-                    // deliver to and the connection should be released.
-                    break;
-                }
-            }
-        });
-        Ok(into)
+        Ok(pubsub)
     }
 
-    async fn connection(&self) -> MultiplexedConnection {
-        // Cloned rather than held: a multiplexed connection is designed to be
-        // used from many places at once, and holding the lock across the round
-        // trip would serialise every node's coordination behind one command.
-        self.connection.lock().await.clone()
+    fn connection(&self) -> ConnectionManager {
+        // Cloned rather than borrowed: a `ConnectionManager` is a handle to a
+        // multiplexed connection, designed to be used from many places at once,
+        // and every command below wants it `&mut`. The clone is an `Arc` bump —
+        // the connection underneath is shared, including the re-dial, so a
+        // reconnection is seen by every caller rather than by one of them.
+        self.connection.clone()
     }
+}
+
+/// Read the PEM files a [`LinkTls`] names.
+///
+/// Read here rather than at first use, so an unreadable certificate stops the
+/// process at startup instead of appearing as an unreachable coordinator an hour
+/// later.
+fn certificates(tls: &LinkTls) -> Result<redis::TlsCertificates, Unavailable> {
+    let read = |what: &str, path: &Path| {
+        std::fs::read(path).map_err(|e| {
+            Unavailable(format!(
+                "the coordinator link's {what} at {}: {e}",
+                path.display()
+            ))
+        })
+    };
+    let client = match &tls.client {
+        None => None,
+        Some(files) => Some(redis::ClientTlsConfig {
+            client_cert: read("certificate", &files.certificate)?,
+            client_key: read("private key", &files.key)?,
+        }),
+    };
+    Ok(redis::TlsCertificates {
+        client_tls: client,
+        root_cert: match &tls.root_ca {
+            None => None,
+            Some(path) => Some(read("CA certificate", path)?),
+        },
+    })
 }
 
 impl Redis {
@@ -350,7 +637,7 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<(), Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection().await;
+            let mut c = self.connection();
             let body = serde_json::to_string(&(&peer.advertise, peer.load))
                 .map_err(|e| Unavailable(e.to_string()))?;
             redis::pipe()
@@ -373,7 +660,7 @@ impl Coordinator for Redis {
 
     fn peers(&self, now_ms: u64) -> Answer<'_, Result<Vec<Peer>, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection().await;
+            let mut c = self.connection();
             let oldest = now_ms.saturating_sub(super::PEER_TTL_MS);
             let ids: Vec<String> = c
                 .zrangebyscore(self.nodes_key(), oldest as isize, "+inf")
@@ -419,7 +706,7 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<Lease, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection().await;
+            let mut c = self.connection();
             let answer: (String, String, String) = self
                 .claim
                 .key(self.lease_key(&document))
@@ -452,7 +739,7 @@ impl Coordinator for Redis {
         now_ms: u64,
     ) -> Answer<'_, Result<u64, AppendError>> {
         Box::pin(async move {
-            let mut c = self.connection().await;
+            let mut c = self.connection();
             let answer: (String, String) = self
                 .append
                 .key(self.lease_key(&document))
@@ -489,7 +776,7 @@ impl Coordinator for Redis {
         revision: u64,
     ) -> Answer<'_, Result<Vec<Logged>, Unavailable>> {
         Box::pin(async move {
-            let mut c = self.connection().await;
+            let mut c = self.connection();
             // The whole log, then filtered on each entry's own revision.
             // Slicing by index is what this used to do and it was only ever
             // right while a revision and an entry were the same thing; an entry

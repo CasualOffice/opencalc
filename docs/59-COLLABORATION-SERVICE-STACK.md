@@ -352,6 +352,16 @@ to `livenessProbe` and `readinessProbe` respectively.
 Redis itself is still a single node (DEP-13). This section makes its loss
 *visible and safe*, not survivable.
 
+What has since changed, and what has not
+([77](77-COORDINATOR-AVAILABILITY.md)): the coordinator **link** is now
+survivable — it can be encrypted (`rediss://`, with `OPENCALC_REDIS_CA` for a
+private CA), and it re-dials, so a Redis that restarts no longer costs a restart
+of every node in the cluster. The coordinator **itself** is still one box:
+replication and failover are proposed as Sentinel in ADR-019 and are not built.
+A Sentinel failover would not close §4's promise either, because Redis
+replication is asynchronous — `min-replicas-to-write` is what converts that loss
+window into a refusal, which is the mechanism §4 already describes.
+
 ## Consequences
 
 - The server gains an async runtime, an HTTP stack, a JWT verifier and an

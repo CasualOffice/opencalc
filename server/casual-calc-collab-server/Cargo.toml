@@ -22,7 +22,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 # Multiplexed connection rather than a pool: every command here is small and
 # the coordination path is latency-sensitive, so one connection pipelining
 # concurrent callers beats a pool taking a round trip to hand one out.
-redis = { version = "0.27", default-features = false, features = ["tokio-comp", "script"] }
+#
+# `connection-manager` is that same multiplexed connection with a re-dial behind
+# it. Without it a coordinator that restarts leaves every node holding a socket
+# to something that is gone, and no command on it ever succeeds again (DEP-13).
+#
+# `tokio-rustls-comp` is what makes `rediss://` a URL this build can dial, and
+# rustls rather than native-tls to keep one TLS implementation in the process —
+# the feature pulls `rustls/ring`, which is what the listener already uses.
+redis = { version = "0.27", default-features = false, features = [
+    "tokio-comp",
+    "tokio-rustls-comp",
+    "connection-manager",
+    "script",
+] }
 # For the pub/sub message stream. Already a dev-dependency; the relay needs it
 # at runtime too.
 futures-util = "0.3"
@@ -34,6 +47,9 @@ rustls-pki-types = { version = "1", features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 
 [dev-dependencies]
+# `copy_bidirectional`, for the forwarder the coordinator-link tests put in
+# front of Redis so they can sever the connection without stopping the server.
+tokio = { version = "1", features = ["io-util"] }
 rcgen = "0.13"
 tokio-tungstenite = "0.24"
 serde_json = "1"

@@ -245,6 +245,7 @@ GET  /api/documents/{id}/download    <span class="c"># what a user takes away</s
           <tr><td><code>OPENCALC_TLS</code>, <code>OPENCALC_TLS_CERT</code>, <code>OPENCALC_INTERNAL_TLS</code></td><td>Terminate TLS in the process rather than at a proxy.</td></tr>
           <tr><td><code>OPENCALC_TRUSTED_PROXIES</code>, <code>OPENCALC_TRUST_ANY_PROXY</code></td><td>Whose <code>X-Forwarded-*</code> headers to believe. Believing anybody's is how a client picks its own address.</td></tr>
           <tr><td><code>OPENCALC_REDIS_URL</code>, <code>OPENCALC_REDIS_NAMESPACE</code>, <code>OPENCALC_NODE_ID</code>, <code>OPENCALC_ADVERTISE</code>, <code>OPENCALC_LEASE_MS</code></td><td>Cluster only: coordination, identity and how long a node's lease on a document lives.</td></tr>
+          <tr><td><code>OPENCALC_REDIS_CA</code>, <code>OPENCALC_REDIS_CLIENT_CERT</code>, <code>OPENCALC_REDIS_CLIENT_KEY</code></td><td>Encrypting the coordinator link. Use a <code>rediss://</code> URL, and <code>OPENCALC_REDIS_CA</code> for a private CA — which is the normal case, since an internal Redis has no public certificate. The two client settings are mutual TLS and are both-or-neither. Certificates configured against a plain <code>redis://</code> URL are <strong>refused at startup</strong>: that shape reads as encrypted and is not.</td></tr>
         </table>
         <div class="callout">
           <p>

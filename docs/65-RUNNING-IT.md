@@ -255,6 +255,36 @@ The demo defaults are demo defaults, and the ones that matter are:
   pretend to.
 - **Share links are bearer tokens.** Anyone with the link can edit, which is
   what the share dialog says.
+- **The coordinator link is plaintext unless you say otherwise.** In a cluster,
+  `OPENCALC_REDIS_URL` carries the lease that decides which node may write a
+  document and every operation appended to the log. `redis://` sends all of it
+  in clear, and the server says so once at startup. See below.
+
+### The coordinator link, in a cluster
+
+Only relevant when `OPENCALC_REDIS_URL` is set; standalone has no coordinator.
+
+| Setting | What it is |
+| --- | --- |
+| `OPENCALC_REDIS_URL` | `redis://host:6379` for plaintext, **`rediss://host:6380` for TLS**. |
+| `OPENCALC_REDIS_CA` | A PEM CA the coordinator's certificate must chain to, instead of the system trust store. This is the usual case: an internal Redis is not issued a certificate by a public authority. |
+| `OPENCALC_REDIS_CLIENT_CERT` / `OPENCALC_REDIS_CLIENT_KEY` | This node's own certificate and key, when the coordinator requires one (`tls-auth-clients yes`). Both or neither. |
+| `OPENCALC_REDIS_NAMESPACE` | The prefix every key and channel sits under. Change it when one Redis is shared between deployments — two sharing a prefix share leases, and a staging node will take leadership of a production document and be believed. |
+| `OPENCALC_LEASE_MS` | How long a node's claim on a document lasts before it must be renewed (6000 by default). Longer means a node stays certain of ownership through a longer coordinator hiccup, and takes correspondingly longer to replace one that has genuinely died. |
+
+Two shapes are **refused at startup** rather than started:
+
+- certificates configured against a `redis://` URL, because that is a
+  configuration that reads as encrypted and is not;
+- `rediss://…/#insecure`, which encrypts the link to whoever answers the port
+  rather than to your coordinator. Point `OPENCALC_REDIS_CA` at the CA instead.
+
+Redis is not replicated: it is still one box, and losing it stops *ordering*
+cluster-wide for as long as it is away, which clients are told about
+(`NotSaving`) and which takes the node out of the pool (`/readyz` answers 503).
+It comes back on its own when Redis does — nodes re-dial and re-claim, with no
+restart needed. Replication and failover are designed in
+[77](77-COORDINATOR-AVAILABILITY.md) and not built.
 
 ## Data
 
@@ -267,3 +297,8 @@ cluster, holds leases and the operation log for documents currently open — not
 the documents themselves, which is why it runs with persistence off. Losing
 Redis costs in-flight coordination, which nodes recover by re-claiming; it does
 not cost anybody's spreadsheet.
+
+That last sentence was not true until `DEP-13`, and the reason is worth
+recording: the connection to Redis never re-dialled, so a node that lost it
+never got it back and refused every edit for the rest of its life. "Recovered by
+re-claiming" described the design and not the code. It re-dials now.

@@ -38,6 +38,16 @@ decision is marked `Superseded by ADR-NNN`, not edited away.
 
 ## Pending / to be written
 
+- ADR-020 for **coordinator availability**: Sentinel over Cluster mode, and
+  what an asynchronous-replication failover can still lose. Proposed in
+  [77](77-COORDINATOR-AVAILABILITY.md) by `DEP-13`, which delivered the client
+  half — the link re-dials, subscriptions re-subscribe, the epoch fence is an
+  equality — and stopped short of replication on purpose: Redis replication is
+  asynchronous, so a failover can lose an append that was already acknowledged,
+  which contradicts ADR-014 §4's one durability promise. Shipping Sentinel
+  without deciding that would make `DEP-13` look finished while leaving a
+  silent-loss path open.
+
 - ~~ADR for the **dual-host capability trait**~~ — written as `ADR-019`, which
   proposes **rejecting** the single trait in favour of capability-per-seam. The
   four documents that state the trait in the present tense

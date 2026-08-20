@@ -226,7 +226,14 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
             let namespace = std::env::var("OPENCALC_REDIS_NAMESPACE").unwrap_or_else(|_| {
                 casual_calc_collab_server::cluster::redis::DEFAULT_NAMESPACE.to_owned()
             });
-            let store = Redis::connect_within(&url, &namespace)
+            let tls = read_link_tls()?;
+            for warning in casual_calc_collab_server::cluster::redis::link_warnings(&url) {
+                // The same treatment `Exposure::warnings` gets, for the one
+                // connection that is not a listener. Nothing here will ever
+                // fail, which is why nothing else would mention it.
+                tracing::warn!("{warning}");
+            }
+            let store = Redis::connect_secured(&url, &namespace, &tls)
                 .await
                 .map_err(|e| format!("{e}; set OPENCALC_REDIS_URL to a reachable server"))?;
             Ok(Some(Membership {
@@ -251,6 +258,36 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
         ),
         (None, None) => Ok(None),
     }
+}
+
+/// What this node presents to, and accepts from, the coordinator.
+///
+/// Three variables and one rule between two of them, which is the same rule
+/// [`endpoint`] enforces for a listener's certificate: a keypair is both files
+/// or neither, because starting without a client certificate because its path
+/// was misspelled is the failure nobody notices until the coordinator starts
+/// refusing this node.
+fn read_link_tls() -> Result<casual_calc_collab_server::cluster::redis::LinkTls, String> {
+    let cert = std::env::var("OPENCALC_REDIS_CLIENT_CERT").ok();
+    let key = std::env::var("OPENCALC_REDIS_CLIENT_KEY").ok();
+    let client = match (cert, key) {
+        (Some(cert), Some(key)) => Some(casual_calc_collab_server::config::TlsFiles {
+            certificate: cert.into(),
+            key: key.into(),
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "OPENCALC_REDIS_CLIENT_CERT and OPENCALC_REDIS_CLIENT_KEY must be set \
+                 together, or neither"
+                    .to_owned(),
+            );
+        }
+    };
+    Ok(casual_calc_collab_server::cluster::redis::LinkTls {
+        root_ca: std::env::var("OPENCALC_REDIS_CA").ok().map(Into::into),
+        client,
+    })
 }
 
 fn read_exposure() -> Result<Exposure, String> {
