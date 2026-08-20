@@ -17,6 +17,20 @@ pub struct Rect {
     pub h: i64,
 }
 
+/// A point in twips, in the same sheet space as [`Rect`].
+///
+/// Exists because the geometry variants ([`PaintItem::Polyline`],
+/// [`PaintItem::Polygon`]) describe shapes a rectangle cannot: a display list
+/// that could only carry rectangles could not carry a line chart at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Point {
+    /// Horizontal position.
+    pub x: i64,
+    /// Vertical position.
+    pub y: i64,
+}
+
 /// Horizontal text alignment within a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +39,15 @@ pub enum Align {
     Left,
     /// Right-aligned (default for numbers).
     Right,
+    /// Centred within the rectangle.
+    ///
+    /// No cell asks for this yet — the cell path emits `Left` or `Right` from
+    /// the value's type. It is here for the **chart** text a plot places by a
+    /// point rather than by a cell: a title over the middle of a frame, an axis
+    /// title under the middle of a plot. Those are centred in the canvas, and a
+    /// display list that could only left- or right-align them would put them
+    /// somewhere else in the PNG (`RND-11`).
+    Center,
 }
 
 /// One border edge resolved for painting: a pixel `width` (derived from the
@@ -116,6 +139,83 @@ pub enum PaintItem {
         /// The bar colour as `RRGGBB` hex. Empty, or anything that is not valid
         /// hex, means the backend's own default bar colour.
         color: String,
+    },
+    /// A stroked open path through `points`, in twips.
+    ///
+    /// **Open, and not closed for you.** A closed outline repeats its first
+    /// point as its last; leaving that to the backend would make a rectangle
+    /// border and a three-sided bracket the same display list.
+    ///
+    /// Fewer than two points draws nothing. `width` is a twip stroke width
+    /// centred on the path, so a backend converts it to whatever its device
+    /// calls for; zero or negative means the thinnest line the device can draw.
+    ///
+    /// This is **general geometry**, unlike [`DataBar`](Self::DataBar) or
+    /// [`Image`](Self::Image), which name a thing layout had already resolved
+    /// and left the shape to the backend. See ADR-021
+    /// (`docs/80-CHART-DISPLAY-LIST.md`).
+    Polyline {
+        /// The vertices, in order.
+        points: Vec<Point>,
+        /// Stroke width in twips.
+        width: i64,
+        /// Stroke colour as `RRGGBB` hex.
+        color: String,
+    },
+    /// A filled polygon through `points`, in twips.
+    ///
+    /// **Implicitly closed**: the last point joins the first, because an open
+    /// filled path is not a thing anyone wants to describe. Fewer than three
+    /// points fills nothing. Filled by the non-zero winding rule, which is what
+    /// every backend this targets does by default; no path layout emits
+    /// self-intersects, so the choice is not observable today and is stated so
+    /// that it cannot quietly become observable.
+    ///
+    /// Carries bars, area fills and legend swatches. A rectangle is expressible
+    /// here and also by [`CellBackground`](Self::CellBackground) — they are not
+    /// duplicates: that one is a *cell*, addressed by the grid, and this one is
+    /// four points that happen to be square.
+    Polygon {
+        /// The vertices, in order.
+        points: Vec<Point>,
+        /// Fill colour as `RRGGBB` hex.
+        fill: String,
+    },
+    /// A filled circular sector: pie and doughnut slices.
+    ///
+    /// Angles are **degrees clockwise from twelve o'clock**, which is where
+    /// Excel starts a pie and which way round it goes. Not radians, and not
+    /// counter-clockwise-from-three-o'clock as most raster APIs measure: a
+    /// display list is read by people as well as by backends, and the
+    /// convention that matches the picture is the one that survives being
+    /// ported. A backend converts, and the conversion is in one place.
+    ///
+    /// `sweep` is an extent rather than an end angle, so a slice knows how big
+    /// it is without knowing where the next one starts — a full circle is
+    /// `sweep = 360.0`, not `from == to`, which would otherwise be
+    /// indistinguishable from an empty slice.
+    ///
+    /// `inner_radius` of zero is a solid pie slice; anything larger is an
+    /// annular sector, which is what a doughnut is made of. **The hole is a
+    /// hole**, not a disc painted in the background colour on top: the canvas
+    /// covers its pie with a background-coloured circle, which is the same
+    /// picture only as long as the background is opaque and known, and a
+    /// headless backend knows neither.
+    Wedge {
+        /// The centre of the circle the sector is cut from.
+        center: Point,
+        /// The outer radius in twips. Zero or less draws nothing.
+        radius: i64,
+        /// The inner radius in twips; zero for a solid slice. Clamped to
+        /// `radius` by the backend, so a wider hole than slice is empty rather
+        /// than inverted.
+        inner_radius: i64,
+        /// Where the slice starts, in degrees clockwise from twelve o'clock.
+        from: f64,
+        /// How far it extends, in degrees; positive is clockwise.
+        sweep: f64,
+        /// Fill colour as `RRGGBB` hex.
+        fill: String,
     },
     /// Cell text to be shaped and painted, clipped to `rect`.
     Text {

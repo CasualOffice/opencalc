@@ -8,6 +8,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# The formula *language* only: a chart series names its values with a
+# reference string, and `chart_data` has to parse one. `casual-calc-formula`
+# has no dependencies of its own and sits in the bedrock beside the model
+# (docs/19), so this is a downward edge and not a new layer.
+casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-model = { path = "../casual-calc-model" }
 serde = { version = "1", features = ["derive"] }
 

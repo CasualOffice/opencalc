@@ -16,6 +16,8 @@
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
 mod axis;
+pub mod chart;
+pub mod chart_data;
 pub mod conditional;
 mod display;
 pub mod font_substitution;
@@ -24,7 +26,7 @@ mod numfmt;
 pub mod table_style;
 
 pub use axis::Axis;
-pub use display::{Align, BorderLine, DisplayList, PaintItem, Rect};
+pub use display::{Align, BorderLine, DisplayList, PaintItem, Point, Rect};
 pub use font_substitution::{
     BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, substitute,
 };
@@ -296,6 +298,11 @@ fn layout_range(
     // hold. Emitted with the cells they overlap, they would be painted away by
     // the next cell's background.
     push_images(&mut list, sheet, geometry, range);
+    // Charts after pictures, matching the canvas, which draws `drawImages`
+    // before `drawCharts`. Two drawings overlapping is rare and their order is
+    // not recorded anywhere in the file, so the one thing that matters is that
+    // both renderers pick the same one.
+    push_charts(&mut list, workbook, sheet_index, sheet, geometry, range);
     list
 }
 
@@ -414,6 +421,48 @@ fn push_images(
             rect,
             part: image.part.clone(),
         });
+    }
+}
+
+/// Emit the sheet's charts whose frames reach into `range`.
+///
+/// The window test is the frame's, for the reason [`push_images`] gives: a
+/// chart is routinely larger than the viewport, so its anchor cell is off
+/// screen exactly when the chart is most visible.
+///
+/// A chart's frame comes from the anchor **and** its EMU offsets, like a
+/// picture's — and unlike a picture's, it is never taken from an authored
+/// extent, because a chart has none: it redraws itself into whatever box it
+/// lands in, which is the difference `RND-13` turned on.
+fn push_charts(
+    list: &mut DisplayList,
+    workbook: &Workbook,
+    sheet_index: usize,
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    range: VisibleRange,
+) {
+    if sheet.charts.is_empty() {
+        return;
+    }
+    let win_x0 = geometry.columns.offset(range.cols.0);
+    let win_x1 = geometry.columns.offset(range.cols.1.saturating_add(1));
+    let win_y0 = geometry.rows.offset(range.rows.0);
+    let win_y1 = geometry.rows.offset(range.rows.1.saturating_add(1));
+
+    for chart in &sheet.charts {
+        let rect = frame_rect(geometry, &chart.anchor, chart.from_offset, chart.to_offset);
+        if rect.w == 0 || rect.h == 0 {
+            continue;
+        }
+        let intersects = rect.x < win_x1
+            && rect.x.saturating_add(rect.w) > win_x0
+            && rect.y < win_y1
+            && rect.y.saturating_add(rect.h) > win_y0;
+        if !intersects {
+            continue;
+        }
+        chart::push_chart(list, workbook, sheet_index, chart, rect);
     }
 }
 

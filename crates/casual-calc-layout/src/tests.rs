@@ -563,14 +563,20 @@ mod merges {
     fn rects(list: &crate::DisplayList) -> Vec<Rect> {
         list.items
             .iter()
-            .map(|item| match item {
+            .filter_map(|item| match item {
                 PaintItem::CellBackground { rect, .. }
                 | PaintItem::GridLine { rect }
                 | PaintItem::MergedRegion { rect, .. }
                 | PaintItem::DataBar { rect, .. }
                 | PaintItem::Text { rect, .. }
                 | PaintItem::Image { rect, .. }
-                | PaintItem::CellBorder { rect, .. } => *rect,
+                | PaintItem::CellBorder { rect, .. } => Some(*rect),
+                // The geometry variants are not addressed by a rectangle at
+                // all — that is what makes them a different kind of item
+                // (ADR-021) — so there is nothing for this helper to collect.
+                PaintItem::Polyline { .. }
+                | PaintItem::Polygon { .. }
+                | PaintItem::Wedge { .. } => None,
             })
             .collect()
     }
@@ -1235,5 +1241,340 @@ mod images {
             height: 2 * DEFAULT_ROW_HEIGHT,
         };
         assert_eq!(images_of(&layout_viewport(&wb, 0, &geo, &vp)).len(), 1);
+    }
+}
+
+/// Charts reaching the display list as geometry (`RND-11`).
+///
+/// The series resolution these lean on used to live in `casual-calc-wasm`, so
+/// none of it could be tested from here at all — the render path could not
+/// reach it, which is exactly why the headless PNG had no charts in it.
+mod charts {
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, ChartKind, ChartSeries, ChartView, Id, Sheet, SheetId,
+        Workbook,
+    };
+
+    use crate::chart::{PX, resolve, series_colors, value_extent};
+    use crate::chart_data::{ref_cells, ref_numbers, ref_text};
+    use crate::{GridGeometry, PaintItem, Point, layout_full};
+
+    /// `A1:A3` holding 1, "two", 3 on `S`, and a second sheet `T` holding 9 in
+    /// `A1`, so a cross-sheet reference has somewhere to point.
+    fn wb() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let two = wb.intern_string("two");
+        let mut s = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        s.cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(1.0)));
+        s.cells.set(
+            CellRef::new(1, 0),
+            Cell::value(CellValue::SharedString(two)),
+        );
+        s.cells
+            .set(CellRef::new(2, 0), Cell::value(CellValue::Number(3.0)));
+        wb.sheets.push(s);
+        let mut t = Sheet::new(SheetId(Id::from_parts(2, 2)), "T");
+        t.cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(9.0)));
+        wb.sheets.push(t);
+        wb
+    }
+
+    #[test]
+    fn a_range_resolves_to_its_cells_in_reading_order() {
+        let wb = wb();
+        let cells = ref_cells(&wb, 0, "Nope!$A$1:$B$2");
+        // An unknown sheet name resolves to nothing rather than to the default.
+        assert!(cells.is_empty(), "unknown sheet resolved: {cells:?}");
+
+        let cells = ref_cells(&wb, 0, "$A$1:$B$2");
+        assert_eq!(
+            cells,
+            vec![
+                (0, CellRef::new(0, 0)),
+                (0, CellRef::new(0, 1)),
+                (0, CellRef::new(1, 0)),
+                (0, CellRef::new(1, 1)),
+            ]
+        );
+    }
+
+    /// **A non-numeric cell is a gap, not a zero.** The distinction is the
+    /// whole reason `ref_numbers` returns options: a chart of flat zeroes looks
+    /// like data.
+    #[test]
+    fn a_non_numeric_cell_is_a_gap_and_not_a_zero() {
+        let wb = wb();
+        assert_eq!(
+            ref_numbers(&wb, 0, "$A$1:$A$3"),
+            vec![Some(1.0), None, Some(3.0)]
+        );
+        // Cross-sheet, by name, case-insensitively.
+        assert_eq!(ref_numbers(&wb, 0, "t!$A$1"), vec![Some(9.0)]);
+        // Not a reference at all: no cells, no guess.
+        assert!(ref_numbers(&wb, 0, "1+1").is_empty());
+        assert_eq!(ref_text(&wb, 0, "$A$1:$A$2"), vec!["1", "two"]);
+    }
+
+    /// The extent always contains zero, so a bar's length is proportional to
+    /// its value rather than to its distance from the smallest one.
+    #[test]
+    fn the_value_extent_always_includes_zero() {
+        let wb = wb();
+        let chart = column_chart(&["$A$1:$A$3"]);
+        let (_, series) = resolve(&wb, 0, &chart);
+        assert_eq!(value_extent(&series), (0.0, 3.0));
+    }
+
+    /// Series colours come from the workbook's own theme accents, and cycle.
+    #[test]
+    fn series_colours_are_the_workbook_theme_accents() {
+        let mut wb = wb();
+        assert_eq!(series_colors(&wb, 2), vec!["4472C4", "ED7D31"]);
+        assert_eq!(series_colors(&wb, 7)[6], "4472C4", "the palette cycles");
+        wb.theme_colors = vec![
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "AA0000".to_owned(),
+        ];
+        assert_eq!(series_colors(&wb, 1), vec!["AA0000"], "this file's accent");
+    }
+
+    /// A chart over `A1:F10` — 384x200 px at 96 dpi with the default geometry,
+    /// which is room enough for a plot.
+    fn column_chart(values: &[&str]) -> ChartView {
+        let mut ch = ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            ChartKind::Column,
+        );
+        ch.series = values
+            .iter()
+            .map(|v| ChartSeries {
+                name: String::new(),
+                categories: None,
+                values: (*v).to_owned(),
+            })
+            .collect();
+        ch
+    }
+
+    fn polygons(list: &crate::DisplayList) -> Vec<(Vec<Point>, String)> {
+        list.items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Polygon { points, fill } => Some((points.clone(), fill.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A column chart's bars land at the twip rectangle the canvas puts them
+    /// at, and **the taller value gets the taller bar measured from the same
+    /// zero line**.
+    ///
+    /// Asserted as exact geometry rather than as "some polygons were emitted":
+    /// a plot that scaled every bar to the same height, or that measured them
+    /// from the top of the frame, would emit exactly the same number of
+    /// polygons.
+    #[test]
+    fn a_column_charts_bars_are_scaled_from_the_zero_line() {
+        let mut wb = wb();
+        // 1, a gap, then 3 — so a gap is also shown to draw nothing rather
+        // than a zero-height bar sitting on the axis.
+        wb.sheets[0].charts.push(column_chart(&["$A$1:$A$3"]));
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let bars = polygons(&list);
+        // The frame's own ground is the first polygon; the bars follow.
+        assert_eq!(bars.len(), 3, "ground plus two bars: {bars:?}");
+        assert_eq!(bars[0].1, "FFFFFF", "the frame's ground");
+
+        // Plot: x = 34px, y = 6px, w = 384-44 = 340px, h = 200-6-18 = 176px.
+        // The extent is 0..3, so the zero line is at the plot's foot, y = 182px.
+        let px = |v: f64| (v * PX).round() as i64;
+        let group_w = 340.0 / 3.0;
+        let bar_w = group_w * 0.7;
+
+        // The first value, 1 of 3: a third of the plot's height.
+        let x0 = 34.0 + group_w * 0.15;
+        let top0 = 6.0 + 176.0 * (2.0 / 3.0);
+        assert_eq!(bars[1].1, "4472C4");
+        assert_eq!(
+            bars[1].0,
+            vec![
+                Point {
+                    x: px(x0),
+                    y: px(top0)
+                },
+                Point {
+                    x: px(x0 + bar_w - 1.0),
+                    y: px(top0)
+                },
+                Point {
+                    x: px(x0 + bar_w - 1.0),
+                    y: px(182.0)
+                },
+                Point {
+                    x: px(x0),
+                    y: px(182.0)
+                },
+            ],
+            "first bar"
+        );
+
+        // The third value, 3 of 3: the whole plot height, and in the third
+        // group — the gap in between drew nothing at all.
+        let x2 = 34.0 + 2.0 * group_w + group_w * 0.15;
+        assert_eq!(
+            bars[2].0,
+            vec![
+                Point {
+                    x: px(x2),
+                    y: px(6.0)
+                },
+                Point {
+                    x: px(x2 + bar_w - 1.0),
+                    y: px(6.0)
+                },
+                Point {
+                    x: px(x2 + bar_w - 1.0),
+                    y: px(182.0)
+                },
+                Point {
+                    x: px(x2),
+                    y: px(182.0)
+                },
+            ],
+            "third bar"
+        );
+    }
+
+    /// A pie's slices start at twelve o'clock and run clockwise, and their
+    /// sweeps are proportional to the values and sum to a full turn.
+    #[test]
+    fn a_pie_starts_at_twelve_oclock_and_sweeps_clockwise() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.kind = ChartKind::Pie;
+        wb.sheets[0].charts.push(chart);
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let wedges: Vec<_> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Wedge {
+                    from,
+                    sweep,
+                    inner_radius,
+                    ..
+                } => Some((*from, *sweep, *inner_radius)),
+                _ => None,
+            })
+            .collect();
+        // 1 and 3 of a total of 4 — the gap is not a slice.
+        assert_eq!(wedges.len(), 2, "{wedges:?}");
+        assert_eq!(wedges[0].0, 0.0, "the first slice starts at twelve");
+        assert_eq!(wedges[0].1, 90.0, "1 of 4 is a quarter turn");
+        assert_eq!(wedges[1].0, 90.0, "the second starts where the first ends");
+        assert_eq!(wedges[1].1, 270.0);
+        assert_eq!(wedges[0].2, 0, "a pie has no hole");
+    }
+
+    /// A doughnut is the same slices with a hole cut out of them, and the hole
+    /// is **in the geometry** rather than a disc painted over it.
+    #[test]
+    fn a_doughnut_carries_its_hole_in_the_wedge() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.kind = ChartKind::Doughnut;
+        wb.sheets[0].charts.push(chart);
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let holes: Vec<(i64, i64)> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Wedge {
+                    radius,
+                    inner_radius,
+                    ..
+                } => Some((*radius, *inner_radius)),
+                _ => None,
+            })
+            .collect();
+        assert!(!holes.is_empty());
+        for (r, inner) in holes {
+            assert!(inner > 0, "a doughnut with no hole is a pie");
+            assert_eq!(inner, ((r as f64) * 0.55).round() as i64);
+        }
+    }
+
+    /// A chart whose series resolve to nothing says so in the picture rather
+    /// than leaving a blank frame — the canvas's rule, kept.
+    #[test]
+    fn a_chart_whose_data_does_not_resolve_says_no_data() {
+        let mut wb = wb();
+        wb.sheets[0].charts.push(column_chart(&["$Z$1:$Z$9"]));
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let texts: Vec<&str> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"no data"), "{texts:?}");
+        assert!(
+            !list
+                .items
+                .iter()
+                .any(|i| matches!(i, PaintItem::Wedge { .. })),
+            "nothing was plotted"
+        );
+    }
+
+    /// A chart kind this does not draw is **named in the picture**, not
+    /// silently absent — which is what `ChartKind::Unsupported` is documented
+    /// to be, and what the display list previously had no way to express.
+    #[test]
+    fn an_unsupported_kind_is_named_rather_than_left_blank() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.kind = ChartKind::Unsupported;
+        wb.sheets[0].charts.push(chart);
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        assert!(
+            list.items.iter().any(|i| matches!(
+                i,
+                PaintItem::Text { content, .. } if content == "unsupported chart not drawn"
+            )),
+            "{:?}",
+            list.items
+        );
+    }
+
+    /// The geometry variants survive the display list's serialization, which is
+    /// what keeps it golden-testable (ADR-008).
+    #[test]
+    fn the_geometry_variants_round_trip_through_json() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.kind = ChartKind::Line;
+        wb.sheets[0].charts.push(chart);
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        assert!(
+            list.items
+                .iter()
+                .any(|i| matches!(i, PaintItem::Polyline { .. })),
+            "a line chart draws a polyline"
+        );
+        let json = serde_json::to_string(&list).expect("serializes");
+        let back: crate::DisplayList = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, list);
     }
 }

@@ -1,7 +1,10 @@
 # 76 — Drawing charts in the headless renderer
 
-**Status:** design note, not yet decided. **Needs an ADR before implementation**
-— see §"Why this needs an ADR".
+**Status:** decided — **Option C**, recorded as `ADR-021` in
+[80](80-CHART-DISPLAY-LIST.md) (Proposed) and built by `RND-11`. This note is
+kept as the analysis that led there; the decision, the display-list contract
+and the list of what is drawn and what is not all live in
+[80](80-CHART-DISPLAY-LIST.md).
 **Relates to** `RND-06` (headless render omits charts and images), `RND-05`
 (the same shape, for conditional formatting), `RND-10` (no display list across
 the WebAssembly boundary), ADR-008 (display list), ADR-018 (what may go into
@@ -160,12 +163,15 @@ to what the display list *is*, so it is decided in an ADR before it is built.
 
 ## What is true today, so nobody has to rediscover it
 
-- A chart in a headless PNG is **absent, and not reported**. The pictures half
-  of `RND-06` is done and reports what it cannot draw
-  (`casual-calc-render::ImageReport`); charts have no display-list
-  representation at all, so there is nothing to report from. Until Option C
-  lands, a host rendering a sheet with charts should count `sheet.charts` itself
-  and say so.
+- ~~A chart in a headless PNG is **absent, and not reported**.~~ **Fixed by
+  `RND-11`.** It was absent and unreportable because charts had no display-list
+  representation at all, so there was nothing to report from. They now have one:
+  a chart is geometry, and the two conditions a chart can be in that the
+  picture cannot show — an unresolvable series, and a `ChartKind` this does not
+  draw — write themselves into the picture as the canvas writes them ("no data",
+  "unsupported chart not drawn"). What is still *not* drawn is the legend and
+  the rotated y-axis title, named in [80](80-CHART-DISPLAY-LIST.md) §"What is
+  actually built".
 - The chart *part* is retained byte for byte and written back
   (`ChartView::part`), so nothing is lost from the **file**. What is lost is the
   picture, and only in the headless path.

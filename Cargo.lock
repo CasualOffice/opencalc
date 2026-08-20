@@ -346,6 +346,7 @@ dependencies = [
 name = "casual-calc-layout"
 version = "0.0.0"
 dependencies = [
+ "casual-calc-formula",
  "casual-calc-model",
  "serde",
  "serde_json",
