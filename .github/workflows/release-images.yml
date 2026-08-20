@@ -1,0 +1,166 @@
+name: release-images
+
+# Publishes the server images to Docker Hub.
+#
+# Triggered by a **component-scoped tag**, the namespace `release-sdk` already
+# reserved for exactly this:
+#
+#   sdk-v0.0.0        the npm packages
+#   server-v0.0.0     this workflow — the server images
+#   desktop-v0.0.0    reserved — the Tauri app
+#
+# The scoping is not tidiness. Once two release workflows watch one tag
+# namespace, tagging either fires both, and the image and the SDK release on
+# their own schedules.
+#
+#   git tag server-v0.1.0 && git push origin server-v0.1.0
+#
+# **Nothing publishes without such a tag.** `workflow_dispatch` defaults to a
+# dry run, so the manual path builds and reports and pushes nothing unless a
+# human sets `dry_run: false`. The hold on publishing is enforced here, by the
+# trigger, rather than by anybody remembering it.
+
+on:
+  push:
+    tags:
+      - "server-v*"
+      - "server_v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and report, but do not push"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # For the build provenance attestation: the registry records which repository,
+  # which workflow and which commit produced these layers. Without it, a
+  # consumer's only evidence that `casualoffice/calc` came from this repository
+  # is that its own metadata says so — the same argument CI-005 makes for npm.
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-images
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    # DOCKER_USERNAME / DOCKER_SECRET live here.
+    environment: release
+    strategy:
+      # One failing image must not cancel the other: a half-published release
+      # is worse than a failed one, because the half that landed is already
+      # public and someone may already be running it.
+      fail-fast: false
+      matrix:
+        include:
+          # The collaboration server: the piece an operator actually scales,
+          # and the one ADR-012/014 keep stateless so a node can be added.
+          - image: calc
+            dockerfile: server/casual-calc-collab-server/Dockerfile
+            description: "OpenCalc collaboration server"
+          # The WOPI adapter: mints tokens and holds a per-file lock, which is
+          # exactly what the collaboration server must not do, so it is its own
+          # image rather than a role inside the other.
+          - image: wopi
+            dockerfile: server/casual-calc-wopi/Dockerfile
+            description: "OpenCalc WOPI adapter"
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Decide the version, and refuse a nonsense one
+        id: version
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF#refs/tags/}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="0.0.0-dispatch.${GITHUB_SHA::7}"
+          else
+            version="${ref#server-v}"
+            version="${version#server_v}"
+          fi
+          # A tag that is not a version would publish `:latest` pointing at
+          # something nobody can name. Refuse before anything is built.
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] &&
+             ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$ref' does not name a semantic version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A prerelease must not move `latest`: somebody pulling the bare name
+          # is asking for the version to run in production.
+          if printf '%s' "$version" | grep -q -- '-'; then
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "publishing $version (latest=$(grep latest= "$GITHUB_OUTPUT" | cut -d= -f2))"
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Sign in to Docker Hub
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_SECRET }}
+
+      - name: Build ${{ matrix.image }}
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # amd64 because that is what servers are; arm64 because that is
+          # increasingly what they are, and because a developer on an Apple
+          # machine running the quick start should not be emulating.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.latest == 'true' && format('{0}/{1}:latest', secrets.DOCKER_USERNAME, matrix.image) || '' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.description }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Attest what produced these layers
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v2
+        with:
+          subject-name: docker.io/${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # The registry page is written here and reviewed like anything else,
+      # rather than pasted into a web form on release day and never seen again.
+      - name: Publish the registry overview
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_SECRET }}
+          repository: ${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}
+          short-description: ${{ matrix.description }}
+          readme-filepath: docs/registry/${{ matrix.image }}.md
+
+      - name: Say what happened
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "### Dry run: ${{ matrix.image }} built, nothing pushed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Published \`${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- version \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- digest \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- platforms \`linux/amd64, linux/arm64\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
