@@ -23,6 +23,7 @@ the record rather than a hole.
 
 import pathlib
 import re
+import subprocess
 import sys
 
 # A path a document names on purpose, which does not exist on purpose.
@@ -32,6 +33,10 @@ NAMED_BUT_ABSENT = {
     "sdk/examples/host-toolbar": "SDK-010 — promised in docs/55 and never built. "
                                  "Named here so the promise stays visible; delete "
                                  "this line when the sample lands",
+    "webapp/pkg/": "the wasm bundle: built by CI and never committed, so it is "
+                   "absent from a clean checkout by design",
+    "webapp/pkg": "as above",
+    "crates/casual-calc-wasm/pkg/": "wasm-pack's output directory, generated",
 }
 
 # `docs` is deliberately absent: `docs/65` is how this project *cites* a
@@ -47,21 +52,42 @@ DOCS = sorted(pathlib.Path("docs").glob("*.md")) + [
 ]
 
 
+def _parents(path):
+    """Every directory a tracked file sits under."""
+    parts = path.split("/")[:-1]
+    for i in range(1, len(parts) + 1):
+        yield "/".join(parts[:i])
+
+
 def main():
     named, missing = {}, {}
     for doc in DOCS:
         for match in PATH.finditer(doc.read_text()):
             named.setdefault(match.group(1), set()).add(doc.name)
 
+    # **Asked of git, not of the filesystem.**
+    #
+    # The first version asked the disk, passed here and failed in CI:
+    # `webapp/pkg/` is the wasm bundle, built by the job and never committed,
+    # so it exists locally the moment anybody runs `wasm-pack` and never exists
+    # on a clean checkout. A gate whose answer depends on what you last built
+    # reports on your machine rather than on the repository.
+    tracked = set(
+        subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=False)
+        .stdout.split()
+    )
+    directories = {parent for f in tracked for parent in _parents(f)}
+
+    def is_in_the_repository(path):
+        bare = path.rstrip("/")
+        return bare in tracked or bare in directories
+
     for path, where in named.items():
-        if path in NAMED_BUT_ABSENT or pathlib.Path(path).exists():
-            continue
-        # A trailing slash is a directory; without one it may be either.
-        if pathlib.Path(path.rstrip("/")).exists():
+        if path in NAMED_BUT_ABSENT or is_in_the_repository(path):
             continue
         missing[path] = where
 
-    stale = [p for p in NAMED_BUT_ABSENT if pathlib.Path(p.rstrip("/")).exists()]
+    stale = [p for p in NAMED_BUT_ABSENT if is_in_the_repository(p)]
     if stale:
         print("exemptions that are no longer needed — the path now exists:", file=sys.stderr)
         for path in stale:
