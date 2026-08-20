@@ -1228,3 +1228,78 @@ mod cancellation {
         assert_eq!(plain.workbook.sheets[0].cells.len(), ROWS as usize);
     }
 }
+
+/// **A one-cell anchor's authored size survives, instead of a nominal guess.**
+///
+/// `oneCellAnchor` and `absoluteAnchor` carry `<xdr:ext cx cy>` rather than a
+/// second cell, and this reader discarded it and substituted eight columns by
+/// fifteen rows. Its own comment admitted the frame was a guess, on the
+/// reasonable grounds that a chart drawn a column out beats one not drawn.
+///
+/// That reasoning holds for a chart, which redraws itself into whatever box it
+/// lands in. It fails for a **picture**, which is scaled to fill its frame: a
+/// guessed frame is a fabricated aspect ratio, so every one-cell-anchored
+/// photograph rendered visibly squashed (`RND-13`).
+///
+/// The numbers here are a deliberately un-square 3:1 — a nominal 8x15 frame is
+/// tall, so a guess and the truth cannot be confused.
+#[test]
+fn a_one_cell_anchor_keeps_the_size_the_file_states() {
+    const EMU_PER_TWIP: i64 = 635;
+    let xml = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" \
+xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
+<xdr:oneCellAnchor>\
+<xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff>\
+<xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\
+<xdr:ext cx="{cx}" cy="{cy}"/>\
+<xdr:pic><xdr:blip r:embed="rId7"/></xdr:pic>\
+</xdr:oneCellAnchor></xdr:wsDr>"#,
+        cx = 900 * EMU_PER_TWIP,
+        cy = 300 * EMU_PER_TWIP,
+    );
+
+    let anchors = crate::chart::parse_drawing(xml.as_bytes()).expect("parse the drawing");
+    assert_eq!(anchors.len(), 1, "the anchor was not read at all");
+    let extent = anchors[0]
+        .extent
+        .expect("the file states its size and the reader discarded it");
+    assert_eq!(
+        extent.x,
+        900 * EMU_PER_TWIP,
+        "the width was not the authored one"
+    );
+    assert_eq!(
+        extent.y,
+        300 * EMU_PER_TWIP,
+        "the height was not the authored one"
+    );
+    // Three times as wide as it is tall — the shape a nominal 8x15 frame is not.
+    assert_eq!(extent.x / extent.y, 3);
+}
+
+/// **A two-cell anchor's own rectangle wins, even over a stray `<xdr:ext>`.**
+///
+/// Its `<xdr:to>` *is* the picture's far corner, including a distortion the
+/// author made by dragging a handle without shift — which has to be
+/// reproduced, not corrected.
+///
+/// The document below carries **both**, which a well-formed file does not. That
+/// is the point: the first version of this test used an ordinary two-cell
+/// anchor, and a real one has no `<xdr:ext>` at all — so removing the guard
+/// changed nothing and the test passed against the mutation. It was asserting a
+/// property of the *input*, not of the code.
+#[test]
+fn a_two_cell_anchors_own_rectangle_wins_over_a_stray_extent() {
+    let xml = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:ext cx="99999" cy="11111"/><xdr:pic><xdr:blip r:embed="rId8"/></xdr:pic></xdr:twoCellAnchor></xdr:wsDr>"#;
+    let anchors = crate::chart::parse_drawing(xml).expect("parse");
+    assert_eq!(anchors.len(), 1);
+    assert!(
+        anchors[0].extent.is_none(),
+        "a stray extent overrode the author's own rectangle: {:?}",
+        anchors[0].extent
+    );
+    // And the rectangle it did keep is the one the cells describe.
+    assert_eq!(anchors[0].range.end.col, 2, "<xdr:to> is exclusive");
+    assert_eq!(anchors[0].range.end.row, 3);
+}
