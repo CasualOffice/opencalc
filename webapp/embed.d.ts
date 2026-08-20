@@ -165,6 +165,11 @@ export declare class OpenCalcSheet extends HTMLElement {
   /// Hide or disable individual commands by id.
   commands(rules: CommandRules): Promise<this>;
 
+  /// Run a command by id, as if the user had used the editor's own control.
+  ///
+  /// Rejects an unknown or disabled id rather than resolving quietly.
+  run(id: string): Promise<boolean>;
+
   /// Every command id this build has, so the list can be discovered rather
   /// than read from documentation that may have moved on.
   listCommands(): Promise<string[]>;

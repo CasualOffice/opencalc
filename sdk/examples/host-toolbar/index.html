@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenCalc — our commands, their toolbar</title>
+    <style>
+      body { margin: 0; padding: 28px; font: 15px/1.6 system-ui, sans-serif; background: #f7f8fa; color: #0b0d12; }
+      .wrap { max-width: 1100px; margin: 0 auto; }
+      h1 { font-size: 20px; margin-bottom: 4px; }
+      p.lede { margin: 0 0 18px; color: #5b6270; font-size: 14px; }
+      .app { background: #fff; border: 1px solid #e4e7ec; border-radius: 14px; overflow: hidden; }
+      /* Deliberately not our toolbar: a host's product has its own. */
+      .bar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #e4e7ec; background: #fbfcfd; }
+      .bar .name { font-weight: 600; margin-right: auto; font-size: 14px; }
+      button { font: inherit; font-size: 13px; padding: 5px 11px; border: 1px solid #d3d8e0; border-radius: 8px; background: #fff; color: inherit; cursor: pointer; }
+      button:hover:not(:disabled) { background: #f2f4f7; }
+      button:disabled { opacity: .45; cursor: default; }
+      opencalc-sheet { display: block; height: 460px; }
+      .note { margin-top: 18px; font-size: 13px; color: #5b6270; }
+      code { background: #eef1f5; padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Our commands, their toolbar</h1>
+      <p class="lede">
+        The case an embedder actually has: a product that already owns its
+        chrome. Every button below is the host's own markup, and every one of
+        them runs an OpenCalc command by id.
+      </p>
+
+      <div class="app">
+        <div class="bar">
+          <span class="name">Acme Reports</span>
+          <button data-command="edit.undo" disabled>Undo</button>
+          <button data-command="edit.redo" disabled>Redo</button>
+          <button data-command="format.bold">Bold</button>
+          <button data-command="format.italic">Italic</button>
+          <button data-command="insert.rowAbove">Insert row</button>
+          <button id="save">Save</button>
+        </div>
+        <opencalc-sheet id="sheet"></opencalc-sheet>
+      </div>
+
+      <p class="note">
+        The editor's own chrome is off — every region, not a stylesheet override.
+        Hiding chrome with CSS leaves it focusable and reachable by keyboard,
+        which is a menu your users can open and you cannot see.
+      </p>
+    </div>
+
+    <script type="module">
+      import "../../../webapp/embed.js";
+
+      const sheet = document.getElementById("sheet");
+
+      // Every region off. `chrome()` names regions rather than taking selectors
+      // on purpose: a host reaching into the shadow root would break the moment
+      // that markup moved, and this contract does not.
+      sheet.chrome({
+        header: false,
+        toolbar: false,
+        formulaBar: false,
+        statusbar: false,
+        sheetTabs: false,
+      });
+
+      await sheet.ready;
+
+      // **Ask which commands this build has, rather than hard-coding a list.**
+      // A host that guesses gets a button that does nothing the day an id
+      // changes, and no error to explain it. `listCommands()` is the contract.
+      const available = new Set(await sheet.listCommands());
+      for (const button of document.querySelectorAll("[data-command]")) {
+        const id = button.dataset.command;
+        if (!available.has(id)) {
+          // Removed, not disabled: a control for a capability this build does
+          // not have is not "temporarily unavailable", it is not a thing.
+          button.remove();
+          console.warn(`[host] this build has no command "${id}"`);
+          continue;
+        }
+        button.addEventListener("click", async () => {
+          // Rejects an unknown or disabled id, so a mistake is an error here
+          // rather than a button that does nothing and says nothing.
+          try {
+            await sheet.run(id);
+          } catch (why) {
+            console.error(`[host] ${id}`, why);
+          }
+        });
+      }
+
+      // Undo and redo start disabled and follow the engine, because a host
+      // cannot know from the outside whether there is anything to undo.
+      await sheet.on("undoStateChanged", ({ canUndo, canRedo }) => {
+        const set = (id, on) => {
+          const b = document.querySelector(`[data-command="${id}"]`);
+          if (b) b.disabled = !on;
+        };
+        set("edit.undo", canUndo);
+        set("edit.redo", canRedo);
+      });
+
+      // Saving is the host's job. `source` matters: `"api"` is this page's own
+      // write coming back, and a host that saves without checking saves its own
+      // echo, forever.
+      let dirty = false;
+      await sheet.on("cellsChanged", ({ source }) => {
+        if (source !== "api") dirty = true;
+      });
+      document.getElementById("save").addEventListener("click", async () => {
+        const bytes = await sheet.save();
+        dirty = false;
+        console.log(`[host] ${bytes.length} bytes to store wherever you keep them`);
+      });
+      addEventListener("beforeunload", (e) => {
+        if (dirty) e.preventDefault();
+      });
+    </script>
+  </body>
+</html>
