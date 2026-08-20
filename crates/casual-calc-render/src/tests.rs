@@ -3,7 +3,7 @@
 use casual_calc_layout::{GridGeometry, Viewport, layout_full};
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
-use crate::{render_pixmap, render_png};
+use crate::{needs_shaping, render_pixmap, render_png, shaping_available};
 
 fn sample() -> Workbook {
     let mut wb = Workbook::new(Id::from_parts(1, 1));
@@ -1095,4 +1095,64 @@ mod images {
             }]
         );
     }
+}
+
+/// **A build says whether it can shape.**
+///
+/// `docs/64` promises that a build without shaping "reports that it lacks it
+/// rather than silently producing wrong output", so that "a caller rendering a
+/// thumbnail can then decide, rather than discovering it from a customer".
+/// Nothing could be asked until `DOC-031` — the render surface exposed the
+/// entry points, the data-bar style and its constants, and no way to put the
+/// question.
+///
+/// Asserted against the feature this build was compiled with rather than
+/// against a literal, so it is the *answer* being checked and not a constant
+/// agreeing with itself.
+#[test]
+fn a_build_reports_whether_it_can_shape() {
+    assert_eq!(
+        shaping_available(),
+        cfg!(feature = "shaping"),
+        "the reported capability disagrees with the build"
+    );
+}
+
+/// **The scripts that need shaping are the ones that say so.**
+///
+/// Not a font question — answerable from the string alone, so a caller can ask
+/// before rendering anything.
+#[test]
+fn the_scripts_that_need_shaping_are_named() {
+    // Cursive, right-to-left, reordering: unreadable drawn per `char`.
+    for text in ["مرحبا", "שלום", "नमस्ते", "สวัสดี", "ជំរាបសួរ"]
+    {
+        assert!(
+            needs_shaping(text),
+            "{text:?} needs shaping and was not named"
+        );
+    }
+    // Rendered acceptably glyph-by-glyph.
+    for text in ["Total", "Итого", "合計", "Σύνολο", "1 234,56 €", ""] {
+        assert!(
+            !needs_shaping(text),
+            "{text:?} does not need shaping and was named"
+        );
+    }
+}
+
+/// **The two answers together are what a caller acts on.**
+///
+/// Neither alone decides anything: a build without shaping is fine until the
+/// document contains Arabic, and Arabic is fine on a build that shapes. The
+/// combination is the thumbnail that is silently wrong.
+#[test]
+fn the_pair_identifies_a_picture_that_would_be_wrong() {
+    let arabic = "مرحبا";
+    let would_be_wrong = needs_shaping(arabic) && !shaping_available();
+    assert_eq!(
+        would_be_wrong,
+        !cfg!(feature = "shaping"),
+        "the two answers do not compose into the decision they exist for"
+    );
 }
