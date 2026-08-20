@@ -1576,6 +1576,10 @@ mod delimited_sessions {
     }
 
     /// The tab and pipe separators are remembered too, and each writes its own.
+    ///
+    /// The edited row holds one cell and is written as one field: a trailing
+    /// separator would be padding out to the widest row, which is `IO-02` and
+    /// which `read_delimited` discards on the way back in anyway.
     #[test]
     fn a_tsv_session_saves_tabs_and_a_psv_pipes() {
         for (delimiter, source) in [(TAB, "a\tb\r\n"), (PIPE, "a|b\r\n")] {
@@ -1592,7 +1596,7 @@ mod delimited_sessions {
             let saved = String::from_utf8(session.save().expect("saves")).unwrap();
             assert_eq!(
                 saved,
-                format!("a{d}b\r\n1{d}\r\n", d = delimiter as char),
+                format!("a{d}b\r\n1\r\n", d = delimiter as char),
                 "delimiter {delimiter} was not the one written back"
             );
         }

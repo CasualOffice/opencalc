@@ -37,8 +37,11 @@
 //!   not come back as text, nor text as a number.
 //! * **The number-format code survives**, because losing it is how a date
 //!   silently becomes `45356`.
-//! * **A non-zero number does not come back as zero.** This one is
-//!   [held](held_underflow); see below.
+//! * **A non-zero number does not come back as zero.** This was `IO-01`, held
+//!   here by a predicate and a `continue` until the row was fixed; both are
+//!   gone and the assertion is now the regression proof.
+//! * **A save is not much larger than what it read.** See
+//!   [`MAX_AMPLIFICATION`] — this was `IO-02`.
 //!
 //! Deliberately *not* asserted: that a number comes back bit-identical.
 //! `format_number` rounds to 15 significant digits on purpose, to hide binary
@@ -54,29 +57,33 @@ use casual_calc_io::{COMMA, PIPE, TAB, read_delimited, write_delimited};
 use casual_calc_model::{CellValue, Workbook};
 use libfuzzer_sys::fuzz_target;
 
-/// How large a sheet's **extent** may be before the round-trip is skipped.
+/// How many times its own input a save may be, before the fixed slack.
 ///
-/// Not a property and not a bound on the reader: a cost control on this
-/// harness, of the same kind and for the same reason as `ROUND_TRIP_CELLS` in
-/// `ods.rs`. [`write_delimited`] walks the full rectangle from `A1` to the
-/// furthest populated cell — every row × every column, populated or not — so
-/// three cells can cost their bounding box. A run that entered one of those
-/// would spend its whole budget inside the *writer* and never mutate the
-/// *reader*, which is the surface under test.
+/// A property, not a cost control on this harness — the shape `ods.rs` reached
+/// with `within_its_own_bound` once `ODS-05` was fixed, and the reason this one
+/// no longer skips a large extent. Every cell in the model had to be *said* in
+/// the input: a field at column `c` needed `c` delimiters on its line and a
+/// cell at row `r` needed `r` line breaks above it. So a writer that emits the
+/// sheet's populated cells writes on the order of what the reader was given,
+/// and one that emits its bounding box does not.
 ///
-/// The skipped case is not a case nobody should care about — it is a case this
-/// harness is the wrong instrument for, and it is reported separately as an
-/// unfixed finding (proposed row `IO-EXTENT`). Three cells, at `A1`, at row 0
-/// column *n*-1, and at row *n* column 0, need `2n + 3` bytes of input and cost
-/// `n²` cell visits and at least `n²` bytes of output, because every visited
-/// cell writes at least its delimiter:
+/// The factor is slack for a field whose text legitimately grows — `1e20` is
+/// four bytes in and twenty-one out — not a tolerance for amplification. What
+/// it caught, `IO-02`, missed it by orders of magnitude rather than by a
+/// margin: three cells at `A1`, `(0, n-1)` and `(n, 0)` need `2n + 3` bytes of
+/// input, and the bounding-box writer spent `n²` cell lookups and at least `n²`
+/// bytes on them, because every visited position writes at least its delimiter.
 ///
 /// | input | extent | |
 /// | --- | --- | --- |
 /// | 8 002 B | 1.6 × 10⁷ | measured here at 1.44 s, under ASan |
 /// | 16 002 B | 6.4 × 10⁷ | measured here as an OOM at libFuzzer's 2 GiB `-rss_limit_mb` |
 /// | 64 002 B | 1.0 × 10⁹ | ≥ 1 GB of `String` by the bound above, not run |
-const MAX_EXTENT: u64 = 1 << 16;
+const MAX_AMPLIFICATION: usize = 16;
+
+/// Bytes a save may add on top of [`MAX_AMPLIFICATION`], for the CRLF a
+/// one-field input still ends with.
+const AMPLIFICATION_SLACK: usize = 64;
 
 fuzz_target!(|data: &[u8]| {
     // The one refusal this reader has, and it does not depend on the delimiter.
@@ -86,30 +93,23 @@ fuzz_target!(|data: &[u8]| {
 
     for delimiter in [COMMA, TAB, PIPE] {
         let first = read_delimited(data, delimiter).expect("valid UTF-8 is admitted");
-        if extent(&first) > MAX_EXTENT {
-            continue;
-        }
 
         let once = write_delimited(&first, 0, delimiter);
+        assert!(
+            once.len() <= MAX_AMPLIFICATION * data.len() + AMPLIFICATION_SLACK,
+            "saving {} bytes of delimiter {:?} wrote {} bytes, from {} cells",
+            data.len(),
+            delimiter as char,
+            once.len(),
+            first.sheets[0].cells.len()
+        );
+
         let second = read_delimited(once.as_bytes(), delimiter)
             .expect("the writer produced text its own reader refuses");
         let twice = write_delimited(&second, 0, delimiter);
 
         let before = values(&first);
         let after = values(&second);
-
-        // **HELD** — see `held_underflow`. Checked on what came back, once,
-        // before anything is asserted: this defect makes the round trip fail
-        // in three different ways at once and holding each of them separately
-        // would leave three places to remember to delete.
-        if before.len() == after.len()
-            && before
-                .iter()
-                .zip(after.iter())
-                .any(|(cell, next)| held_underflow(&cell.2, &next.2))
-        {
-            continue;
-        }
 
         assert!(
             once == twice,
@@ -154,70 +154,12 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// **HELD — a defect this target found, not a property being waived.**
-///
-/// `format_number` renders a value by rounding to 15 significant *decimal
-/// places relative to its magnitude*, then reparsing:
-///
-/// ```text
-/// let decimals = (14 - magnitude).clamp(0, 15) as usize;
-/// let rounded: f64 = format!("{n:.decimals$}").parse().unwrap_or(n);
-/// ```
-///
-/// The `clamp(0, 15)` is the whole defect. For any `|n| < 5e-16` the magnitude
-/// wants more than 15 decimals, the clamp refuses, `format!("{n:.15}")` is
-/// `"0.000000000000000"`, and the cell is written **`0`**. Not rounded —
-/// erased. `1e-16` is an ordinary number in a scientific data set, and this is
-/// silent total data loss on the "open a CSV, save it" path, and on any
-/// `.xlsx` → `.csv` export.
-///
-/// Measured, from `seeds/delimited/underflow.csv`:
-///
-/// | field | after one save and reopen | and a second save |
-/// | --- | --- | --- |
-/// | `1e-16` | `0` | `0` |
-/// | `1e-300` | `0` | `0` |
-/// | `5e-324` | `0` | `0` |
-/// | `5e-16` | `1e-15` | `1e-15` |
-/// | `-1e-300` | `-0` | **`0`** |
-///
-/// The last row is the same clamp seen from the other side, and it breaks the
-/// documented property in its strongest form: `format!("{:.15}", -1e-300)`
-/// parses back as `-0.0`, which is written `-0`; on the *next* save
-/// `format_number`'s `if n == 0.0` branch — true for `-0.0` — writes `0`. So
-/// the file is not a fixed point after one round trip, it is one after two,
-/// and the sign disappears in between. That is the claim the reader's whole
-/// conservative typing policy is justified by.
-///
-/// Held rather than silenced, and held as narrowly as it can be stated: this
-/// predicate matches *only* a non-zero number that came back exactly zero, and
-/// only an input that actually exhibits it is skipped. **When the row is
-/// fixed, delete this function and the one `continue` that calls it** — every
-/// assertion in this target then becomes the regression proof, and
-/// `seeds/delimited/underflow.csv` is the input that proves it.
-fn held_underflow(before: &Field, after: &Field) -> bool {
-    lost_to_zero(before, after)
-}
-
 /// A number that was not zero and came back zero.
 ///
 /// `-0.0` is not "not zero": `-0.0 != 0.0` is false, so a `-0` written back as
 /// `0` is equal here and correctly raises nothing.
 fn lost_to_zero(before: &Field, after: &Field) -> bool {
     matches!((before, after), (Field::Number(a), Field::Number(b)) if *a != 0.0 && *b == 0.0)
-}
-
-/// The rectangle [`write_delimited`] will walk, saturating rather than wrapping.
-fn extent(workbook: &Workbook) -> u64 {
-    let Some(sheet) = workbook.sheets.first() else {
-        return 0;
-    };
-    let (mut rows, mut cols) = (0u64, 0u64);
-    for (at, _) in sheet.cells.iter() {
-        rows = rows.max(u64::from(at.row) + 1);
-        cols = cols.max(u64::from(at.col) + 1);
-    }
-    rows.saturating_mul(cols)
 }
 
 /// A cell's value as this target compares it.

@@ -100,33 +100,68 @@ fn date_style(workbook: &mut Workbook, code: &str) -> StyleId {
 /// Serialize a sheet's populated grid to delimited text (RFC 4180 quoting,
 /// CRLF line endings). Cells use their cached value, so formulas export as their
 /// computed result.
+///
+/// # What a sparse sheet exports
+///
+/// A delimited field's *position* is its address: the third field of the fifth
+/// line is `C5`, and nothing else in the file says so. So a sheet's cells are
+/// written where they are — never compacted towards `A1`, which would move
+/// every one of them and is the one transformation that would make a
+/// parse → write → parse round trip stop being a fixed point.
+///
+/// A row index is an address in the same way, so an empty row still costs its
+/// line break. What an empty *column* position costs is a delimiter, and only
+/// while a further field on that line still has to be placed: trailing empty
+/// fields place nothing, and `a,,,` and `a` read back as the same row holding
+/// the same one cell. They are padding, not data.
+///
+/// This is the whole of `IO-02`. Walking the bounding box — every row of the
+/// extent by every column of it — pads every line out to the widest, so three
+/// cells at `A1`, `(0, n-1)` and `(n, 0)` cost `n²` cell lookups and `n²`
+/// bytes: 16 KiB of input exhausted 2 GiB. Walking the populated cells instead,
+/// in the row-major order [`casual_calc_model::CellStore`] already iterates in,
+/// costs one delimiter per column position actually crossed and one line break
+/// per row. For a sheet that came from delimited text that is bounded by the
+/// input, since a field at column `c` needed `c` delimiters to say so; for one
+/// that came from a `.xlsx` it is bounded by the widest populated row rather
+/// than by the product of the extents.
 pub fn write_delimited(workbook: &Workbook, sheet_index: usize, delimiter: u8) -> String {
     let Some(sheet) = workbook.sheets.get(sheet_index) else {
-        return String::new();
-    };
-    let (mut max_row, mut max_col) = (None, None);
-    for (at, _) in sheet.cells.iter() {
-        max_row = Some(max_row.map_or(at.row, |m: u32| m.max(at.row)));
-        max_col = Some(max_col.map_or(at.col, |m: u32| m.max(at.col)));
-    }
-    let (Some(max_row), Some(max_col)) = (max_row, max_col) else {
         return String::new();
     };
 
     let delim = delimiter as char;
     let mut out = String::new();
-    for r in 0..=max_row {
-        for c in 0..=max_col {
-            if c > 0 {
-                out.push(delim);
-            }
-            let field = sheet
-                .cells
-                .get(CellRef::new(r, c))
-                .map(|cell| field_text(workbook, &cell.value, cell.style))
-                .unwrap_or_default();
-            push_quoted(&mut out, &field, delimiter);
+    // The row the line in progress belongs to, and how many delimiters it
+    // carries so far — which is exactly the column index of the next field
+    // position that has not been passed.
+    let (mut row, mut delims) = (0u32, 0u32);
+    let mut started = false;
+
+    for (at, cell) in sheet.cells.iter() {
+        let field = field_text(workbook, &cell.value, cell.style);
+        // A cell whose value renders as nothing is indistinguishable from an
+        // empty position on the way back in, so it neither opens a line nor
+        // holds a column open behind it.
+        if field.is_empty() {
+            continue;
         }
+        started = true;
+        for _ in row..at.row {
+            out.push_str("\r\n");
+        }
+        if at.row != row {
+            row = at.row;
+            delims = 0;
+        }
+        for _ in delims..at.col {
+            out.push(delim);
+        }
+        delims = at.col;
+        push_quoted(&mut out, &field, delimiter);
+    }
+
+    if started {
         out.push_str("\r\n");
     }
     out
@@ -262,6 +297,35 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 /// Format a number the way a spreadsheet's "General" format does: round to 15
 /// significant digits (hiding binary-float tails like `43.480000000000004`) then
 /// use the shortest exact representation.
+///
+/// # Significant digits, not decimal places
+///
+/// The rounding is done in **exponential** form — `{n:.14e}` is one digit before
+/// the point and fourteen after it, which is fifteen significant digits at any
+/// magnitude — and the result is reparsed, so what is written back is the
+/// nearest `f64` to those fifteen digits. Rust's `{}` and `{:e}` both print the
+/// shortest decimal that reads back as the same `f64`, so nothing beyond the
+/// deliberate rounding is lost.
+///
+/// Deriving decimal *places* from the magnitude instead is `IO-01`. It cannot
+/// express the digits a small value needs — `(14 - magnitude).clamp(0, 15)`
+/// asked for sixteen or more and was given fifteen — so `format!("{n:.15}")`
+/// rendered `1e-16` as `0.000000000000000` and the cell was written **`0`**.
+/// Not rounded, erased; and `-1e-300` became `-0`, which the `n == 0.0` branch
+/// above then wrote as `0` on the *next* save, so the sign left one save after
+/// the magnitude did. At the other end the same clamp asked for **zero**
+/// decimal places above `1e15`, which is rounding to the integer rather than to
+/// fifteen digits, so the binary tail it exists to hide was written out in full.
+///
+/// # Which notation
+///
+/// Positional up to `1e21` and down to `1e-6`, exponential outside that — the
+/// rule `f64`'s own shortest-round-trip printers in other languages use, and
+/// close to where Excel's General switches. Both forms read back as the same
+/// number here and in Excel, so the choice is only about which is not mostly
+/// padding: `1e300` positional is 301 digits of which 300 say nothing, and
+/// `5e-324` is 324. Every value that had a reasonable positional form before
+/// still gets one.
 fn format_number(n: f64) -> String {
     if n == 0.0 {
         return "0".to_owned();
@@ -269,10 +333,30 @@ fn format_number(n: f64) -> String {
     if !n.is_finite() {
         return format!("{n}");
     }
-    let magnitude = n.abs().log10().floor() as i32;
-    let decimals = (14 - magnitude).clamp(0, 15) as usize;
-    let rounded: f64 = format!("{n:.decimals$}").parse().unwrap_or(n);
-    format!("{rounded}")
+    // Fifteen significant digits, and the decimal exponent that goes with them.
+    let significant = format!("{n:.14e}");
+    let exponent: i32 = significant
+        .rsplit('e')
+        .next()
+        .and_then(|e| e.parse().ok())
+        .unwrap_or(0);
+    let rounded = match significant.parse::<f64>() {
+        // Rounding up at the top of the range leaves `f64`: `f64::MAX` rounds
+        // to `1.79769313486232e308`, which parses back as infinity, and `inf`
+        // is a number leaving the file as text — `read_delimited` types only
+        // finite fields. That half is reached, by `seeds/delimited/
+        // magnitudes.psv`. The other half cannot be, since a mantissa of at
+        // least 1 cannot round to zero; it is stated because turning a value
+        // into zero is the whole of `IO-01`, and a guard against it does not
+        // belong in the reader alone.
+        Ok(rounded) if rounded.is_finite() && rounded != 0.0 => rounded,
+        _ => n,
+    };
+    if (-6..21).contains(&exponent) {
+        format!("{rounded}")
+    } else {
+        format!("{rounded:e}")
+    }
 }
 
 /// The text form of a cell value for export. A number under a date or time
