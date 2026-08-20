@@ -9789,7 +9789,23 @@ fn build_set_op(
     }
 
     let value = match trimmed.parse::<f64>() {
-        Ok(n) if !text_formatted && !has_leading_zero(trimmed) => CellValue::Number(n),
+        // **`is_finite`, and the reason is a round trip rather than taste**
+        // (`WASM-02`). `f64::from_str` accepts `1e400` and answers `inf`, so
+        // typing it stored `Number(inf)`. There is no CSV spelling of infinity
+        // that reads back as a number — `casual_calc_io::type_field` requires
+        // finite, correctly — so the value left the editor as a number, was
+        // written as `inf`, and returned as **text**. A cell that changes kind
+        // by being saved.
+        //
+        // The model should not hold one at all: `inf` propagates through every
+        // arithmetic it touches, and `.xlsx` cannot spell it either.
+        //
+        // Kept as what was typed, which is what the reader does with anything
+        // it will not type as a number. The person sees their own text back
+        // rather than a number they did not write.
+        Ok(n) if n.is_finite() && !text_formatted && !has_leading_zero(trimmed) => {
+            CellValue::Number(n)
+        }
         _ => CellValue::InlineString(session.workbook_mut().intern_string(trimmed)),
     };
     EditOperation::SetValue { sheet, at, value }
