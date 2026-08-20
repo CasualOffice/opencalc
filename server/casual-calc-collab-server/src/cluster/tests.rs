@@ -257,6 +257,52 @@ contract!(an_append_to_a_document_nobody_leads_is_refused, |c| {
     );
 });
 
+contract!(an_append_from_ahead_of_the_stores_epoch_is_refused, |c| {
+    // **The fence has two sides, and only one of them used to bite.**
+    //
+    // Epochs only ever rise while one store keeps its memory, so an appender
+    // whose epoch is *higher* than the store's looks impossible — and it is
+    // exactly what a coordinator failover produces. Replication to a Redis
+    // replica is asynchronous, so a promoted replica can be missing the last
+    // writes the old master accepted, including the lease that raised the epoch.
+    // The store then remembers an older generation than the leader is carrying.
+    //
+    // While the test was `epoch < held.epoch`, that leader was **believed**. So
+    // was whoever the rewound store thinks holds the lease, because their lower
+    // epoch is not less than itself either — two live leaders, each committing
+    // into its own copy before appending, and the one that loses the revision
+    // CAS is diverged from the log permanently with no resync to recover it.
+    //
+    // A lease this store never issued is not a lease. `!=` rather than `<`, so
+    // an epoch from a store that has forgotten it is refused in the same breath
+    // as one that has been superseded — and DEP-04 tells the client `NotSaving`
+    // instead of silently building on a rewound log.
+    let held = claim(c, "doc", "node-a", 0).await;
+    assert_eq!(held.epoch, 1, "the store's own generation");
+
+    assert_eq!(
+        append(
+            c,
+            "doc",
+            held.epoch + 1,
+            0,
+            b"from a lease this store never issued",
+            0
+        )
+        .await,
+        Err(AppendError::Fenced {
+            current: held.epoch
+        }),
+        "an epoch the store has no memory of must be refused, not believed"
+    );
+    // And the holder is unaffected: the log is still where it was, so the node
+    // whose epoch the store *does* recognise carries on.
+    assert_eq!(
+        append(c, "doc", held.epoch, 0, b"the real one", 0).await,
+        Ok(1)
+    );
+});
+
 // --- Conditional append: why divergence is impossible -----------------------
 
 contract!(
@@ -645,4 +691,673 @@ async fn a_forwarded_submission_survives_the_wire() {
     let json = serde_json::to_vec(&forwarded).unwrap();
     let back: crate::relay::Forwarded = serde_json::from_slice(&json).unwrap();
     assert_eq!(back, forwarded);
+}
+
+// --- The coordinator link (DEP-13) ------------------------------------------
+//
+// Two properties, and they are the two halves of "a single Redis failure still
+// stops ordering cluster-wide":
+//
+// - the link can be **encrypted**, because it carries document operations and
+//   the lease tokens that decide who may write them;
+// - the link **comes back**, because a coordinator that restarts — or a replica
+//   promoted in its place — leaves every node holding a socket to something
+//   that no longer exists.
+
+/// The link must be one this *build* can dial, not merely one the URL syntax
+/// admits.
+///
+/// Always runs, because it is the failure with no symptom to look for: the
+/// `redis` dependency's TLS support is a Cargo feature, and without it every
+/// `rediss://` URL is refused at parse time with
+/// `can't connect with TLS, the feature is not enabled`. A node configured for
+/// an encrypted coordinator link then does not start at all, and the only
+/// configuration that *does* start is the one that carries lease tokens and
+/// document operations in clear.
+///
+/// Asserted against a port nothing serves, so what is being established is which
+/// kind of failure comes back — a connection that could not be made, rather than
+/// a client that was never built to try.
+#[tokio::test]
+async fn a_secured_coordinator_url_is_one_this_build_can_dial() {
+    let why = crate::cluster::redis::Redis::connect_within("rediss://127.0.0.1:1/", "unused")
+        .await
+        .expect_err("nothing serves port 1");
+    assert!(
+        !why.0.contains("feature is not enabled"),
+        "this build cannot speak TLS to a coordinator at all, so every deployment \
+         that wants one runs in clear instead: {why}"
+    );
+}
+
+/// Certificates plus a plaintext URL is the shape that must not start.
+///
+/// It is the one misconfiguration here that *works*: the node comes up, joins
+/// the cluster, orders edits, and carries every one of them in clear — under a
+/// configuration that names a CA and a client certificate and so reads, to
+/// whoever wrote it, as an encrypted link. Nothing downstream can tell, which is
+/// why this is refused at startup rather than warned about.
+#[test]
+fn certificates_configured_against_a_plaintext_coordinator_url_are_refused() {
+    let tls = crate::cluster::redis::LinkTls {
+        root_ca: Some("/etc/opencalc/redis-ca.pem".into()),
+        client: None,
+    };
+    let why = crate::cluster::redis::link_problems("redis://coordinator:6379", &tls)
+        .expect_err("certificates with a plaintext URL cannot both be meant");
+    assert!(why.contains("rediss://"), "and it says what to do: {why}");
+
+    assert!(
+        crate::cluster::redis::link_problems("rediss://coordinator:6380", &tls).is_ok(),
+        "the same certificates against an encrypted URL are the intended shape"
+    );
+    assert!(
+        crate::cluster::redis::link_problems(
+            "redis://coordinator:6379",
+            &crate::cluster::redis::LinkTls::default()
+        )
+        .is_ok(),
+        "and a plaintext link with no certificates is a decision, not an error"
+    );
+}
+
+/// Turning verification off is not on offer, and saying so beats failing oddly.
+///
+/// `rediss://…/#insecure` encrypts the link to whoever answers the port, which
+/// is not the same as encrypting the link to your coordinator — it is the
+/// property TLS exists to provide, discarded. This build does not compile
+/// `redis`'s insecure mode at all, so the fragment would otherwise surface as an
+/// unexplained handshake failure that reads like a certificate problem.
+#[test]
+fn a_coordinator_url_that_turns_verification_off_is_refused_by_name() {
+    let why = crate::cluster::redis::link_problems(
+        "rediss://coordinator:6380/#insecure",
+        &crate::cluster::redis::LinkTls::default(),
+    )
+    .expect_err("#insecure must not be accepted");
+    assert!(
+        why.contains("OPENCALC_REDIS_CA"),
+        "and it points at the setting that solves the problem it was reached for: {why}"
+    );
+}
+
+/// A plaintext coordinator link is said out loud, once, at startup.
+///
+/// The link carries the lease that decides which node may write a document and
+/// every operation appended to the log. It will never *fail*, which is exactly
+/// why nothing else would mention it — the same reason
+/// [`crate::config::Exposure::warnings`] exists.
+#[test]
+fn a_plaintext_coordinator_link_is_warned_about() {
+    let warnings = crate::cluster::redis::link_warnings("redis://coordinator:6379");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("clear"));
+
+    assert!(
+        crate::cluster::redis::link_warnings("rediss://coordinator:6380").is_empty(),
+        "an encrypted link has nothing to say"
+    );
+
+    // A password on a plaintext link is worse and quieter: the credential for
+    // the cluster's whole coordination state, readable by anything on the path.
+    let with_password =
+        crate::cluster::redis::link_warnings("redis://default:hunter2@coordinator:6379");
+    assert_eq!(with_password.len(), 2, "{with_password:?}");
+    assert!(
+        with_password.iter().any(|w| w.contains("password")),
+        "{with_password:?}"
+    );
+    assert!(
+        !with_password.iter().any(|w| w.contains("hunter2")),
+        "and the warning must not print the password it is warning about: {with_password:?}"
+    );
+}
+
+/// A `redis-server` speaking TLS, started for one test and killed with it.
+///
+/// A real server rather than a stub, because the thing being established is that
+/// a handshake completes against the implementation operators actually run —
+/// the same reason `--healthcheck` fetches over TLS rather than opening a
+/// socket. Returns `None` when there is no `redis-server` on the path or the one
+/// there was not built with TLS, which is a hole and says so.
+struct SecuredRedis {
+    child: std::process::Child,
+    port: u16,
+    ca: std::path::PathBuf,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for SecuredRedis {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl SecuredRedis {
+    /// A CA, a certificate for `127.0.0.1`, and a server that requires TLS.
+    async fn start(name: &str) -> Option<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-redis-tls-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+
+        // A CA and a leaf under it, rather than one self-signed certificate
+        // used as its own trust anchor: webpki will not accept a trust anchor
+        // without `basicConstraints: CA`, so the shortcut fails for a reason
+        // that has nothing to do with what is being tested.
+        let ca_key = rcgen::KeyPair::generate().ok()?;
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).ok()?;
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "opencalc coordinator test ca");
+        let ca_cert = ca_params.self_signed(&ca_key).ok()?;
+
+        let leaf_key = rcgen::KeyPair::generate().ok()?;
+        let mut leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).ok()?;
+        leaf.distinguished_name
+            .push(rcgen::DnType::CommonName, "coordinator");
+        let leaf_cert = leaf.signed_by(&leaf_key, &ca_cert, &ca_key).ok()?;
+
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("server.pem");
+        let key = dir.join("server.key");
+        std::fs::write(&ca, ca_cert.pem()).ok()?;
+        std::fs::write(&cert, leaf_cert.pem()).ok()?;
+        std::fs::write(&key, leaf_key.serialize_pem()).ok()?;
+
+        let port = free_port().await?;
+        let child = std::process::Command::new("redis-server")
+            // Plain disabled outright: if the TLS port were somehow not
+            // listening, a test that fell back to `redis://` would pass while
+            // proving nothing.
+            .args(["--port", "0"])
+            .args(["--tls-port", &port.to_string()])
+            .args(["--tls-cert-file", cert.to_str()?])
+            .args(["--tls-key-file", key.to_str()?])
+            .args(["--tls-ca-cert-file", ca.to_str()?])
+            .args(["--tls-auth-clients", "no"])
+            .args(["--save", ""])
+            .args(["--appendonly", "no"])
+            .args(["--dir", dir.to_str()?])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+
+        let mut started = Self {
+            child,
+            port,
+            ca,
+            dir,
+        };
+        for _ in 0..100 {
+            if started.child.try_wait().ok()?.is_some() {
+                // It exited: this build has no TLS support, which is a skip
+                // rather than a failure.
+                return None;
+            }
+            if tokio::net::TcpStream::connect(("127.0.0.1", started.port))
+                .await
+                .is_ok()
+            {
+                return Some(started);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    fn url(&self) -> String {
+        format!("rediss://127.0.0.1:{}", self.port)
+    }
+}
+
+/// A port nothing is listening on, by binding one and letting it go.
+async fn free_port() -> Option<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+    listener.local_addr().ok().map(|a| a.port())
+}
+
+/// A plaintext `redis-server` of this test's own, which it may kill.
+///
+/// The forwarder above models a *connection* going away, which is the common
+/// case and runs anywhere. This is the row's gate taken literally — the process
+/// is killed and started again — and it reaches one thing the forwarder cannot:
+/// a restarted Redis has an **empty script cache**, so the first `claim` after
+/// it comes back is `NOSCRIPT`. If that were not recovered from, a node would
+/// re-dial successfully and then fail every claim and every append for the rest
+/// of its life, which is the original defect with a healthy-looking connection.
+struct OwnRedis {
+    child: std::process::Child,
+    port: u16,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for OwnRedis {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl OwnRedis {
+    async fn start(name: &str) -> Option<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("opencalc-redis-own-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let port = free_port().await?;
+        let mut started = Self {
+            child: Self::spawn(port, &dir)?,
+            port,
+            dir,
+        };
+        started.wait_for_port().await.then_some(started)
+    }
+
+    fn spawn(port: u16, dir: &std::path::Path) -> Option<std::process::Child> {
+        std::process::Command::new("redis-server")
+            .args(["--port", &port.to_string()])
+            // Persistence off, as the cluster compose runs it: what is in here
+            // is coordination for documents currently open, not the documents.
+            .args(["--save", ""])
+            .args(["--appendonly", "no"])
+            .args(["--dir", dir.to_str()?])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+    }
+
+    async fn wait_for_port(&mut self) -> bool {
+        for _ in 0..100 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return false;
+            }
+            if tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Kill it, and bring it back on the same port with nothing remembered.
+    async fn kill_and_restart(&mut self) -> bool {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let Some(child) = Self::spawn(self.port, &self.dir) else {
+            return false;
+        };
+        self.child = child;
+        self.wait_for_port().await
+    }
+
+    fn url(&self) -> String {
+        format!("redis://127.0.0.1:{}", self.port)
+    }
+}
+
+/// **Killing one Redis leaves ordering working** — the row's gate, literally.
+///
+/// The process is killed and started again on the same port. The node's
+/// connection must re-dial, and its scripts must reload into a cache that is now
+/// empty, without anybody restarting the node.
+///
+/// The lease and the log are gone, which is correct and is what
+/// docs/65 already says: Redis runs with persistence off and holds coordination
+/// for documents currently open, not the documents. What must survive is the
+/// node's **ability to coordinate at all**.
+#[tokio::test]
+async fn ordering_works_again_after_the_coordinator_is_killed_and_restarted() {
+    let Some(mut server) = OwnRedis::start("restart").await else {
+        eprintln!("skipped: needs a `redis-server` on PATH");
+        return;
+    };
+    let store = crate::cluster::redis::Redis::connect_within(&server.url(), "restart-test")
+        .await
+        .expect("connected");
+
+    let before = store
+        .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+        .await
+        .expect("a lease before the kill");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), before.epoch, 0, 1, b"before".to_vec(), 0)
+            .await,
+        Ok(1)
+    );
+
+    assert!(server.kill_and_restart().await, "the coordinator came back");
+
+    let after = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            // A claim is a Lua script, so this is also the `NOSCRIPT` path: the
+            // restarted server has never seen it.
+            if let Ok(lease) = store
+                .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 1)
+                .await
+            {
+                return lease;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the node never coordinated again, so every edit it takes is one it must refuse");
+
+    assert_eq!(after.node, "node-a");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), after.epoch, 0, 1, b"after".to_vec(), 1)
+            .await,
+        Ok(1),
+        "and appending works again — which is ordering working"
+    );
+}
+
+/// The coordinator link, end to end, over TLS against a private CA.
+///
+/// The private CA is the case that matters: an internal Redis is not issued a
+/// certificate by a public authority, so a client that can only trust the system
+/// roots can only be pointed at a plaintext port.
+#[tokio::test]
+async fn the_coordinator_link_can_be_encrypted_against_a_private_ca() {
+    let Some(server) = SecuredRedis::start("link").await else {
+        eprintln!(
+            "skipped: needs a `redis-server` on PATH built with TLS support \
+             (`brew install redis`, or `--tls-port` on the distribution's build)"
+        );
+        return;
+    };
+
+    let tls = crate::cluster::redis::LinkTls {
+        root_ca: Some(server.ca.clone()),
+        client: None,
+    };
+    let store = crate::cluster::redis::Redis::connect_secured(&server.url(), "tls-test", &tls)
+        .await
+        .expect("an encrypted coordinator link");
+
+    // Not merely a handshake: the three things the link exists to carry.
+    let lease = store
+        .claim("doc".to_owned(), "node-a".to_owned(), 5_000, 0)
+        .await
+        .expect("a lease over TLS");
+    assert_eq!(lease.node, "node-a");
+    assert_eq!(
+        store
+            .append("doc".to_owned(), lease.epoch, 0, 1, b"secret".to_vec(), 0)
+            .await,
+        Ok(1),
+        "and an append over TLS"
+    );
+    assert_eq!(
+        store.since("doc".to_owned(), 0).await,
+        Ok(vec![(1, b"secret".to_vec())]),
+        "and the log reads back"
+    );
+}
+
+/// Trusting a private CA must be a decision, not a default.
+///
+/// Without the CA the same server must be **refused**. Otherwise the test above
+/// would pass against a client that verifies nothing, which is the failure it is
+/// meant to rule out.
+#[tokio::test]
+async fn an_untrusted_coordinator_certificate_is_refused() {
+    let Some(server) = SecuredRedis::start("untrusted").await else {
+        eprintln!("skipped: needs a `redis-server` on PATH built with TLS support");
+        return;
+    };
+
+    let why = crate::cluster::redis::Redis::connect_within(&server.url(), "tls-test")
+        .await
+        .expect_err("a certificate from an unknown CA must not be accepted");
+    assert!(
+        why.0.contains("certificate"),
+        "refused, but not over the certificate — so the test above proves a handshake \
+         completed rather than that it was checked: {why}"
+    );
+}
+
+/// A TCP forwarder whose connections can be severed on demand.
+///
+/// This is how a coordinator restart looks to a node: the socket dies and the
+/// address is dialable again a moment later. Doing it this way rather than by
+/// killing a server means the test runs anywhere `OPENCALC_TEST_REDIS` points —
+/// including CI, where the coordinator is a service container the suite has no
+/// business stopping.
+struct Interruptible {
+    port: u16,
+    cut: tokio::sync::broadcast::Sender<()>,
+    accepting: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Interruptible {
+    fn drop(&mut self) {
+        // Both, and in this order: aborting the accept loop drops the listener
+        // so the port stops answering, and the signal drops the connections
+        // already forwarded through it. Either alone leaves a coordinator that
+        // is half gone, which is not a state this models.
+        self.accepting.abort();
+        self.sever();
+    }
+}
+
+impl Interruptible {
+    async fn in_front_of(upstream: &str) -> Option<Self> {
+        // Only the address, because what is forwarded is bytes: any credentials
+        // in the URL travel through untouched.
+        let upstream = upstream
+            .trim_start_matches("redis://")
+            .trim_end_matches('/')
+            .to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let port = listener.local_addr().ok()?.port();
+        let (cut, _) = tokio::sync::broadcast::channel(8);
+        let signal = cut.clone();
+        let accepting = tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let Ok(mut server) = tokio::net::TcpStream::connect(&upstream).await else {
+                    continue;
+                };
+                let mut severed = signal.subscribe();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                        // Both halves are dropped here, which is the whole point:
+                        // the node's connection goes away without warning.
+                        _ = severed.recv() => {}
+                    }
+                });
+            }
+        });
+        Some(Self {
+            port,
+            cut,
+            accepting,
+        })
+    }
+
+    fn url(&self) -> String {
+        format!("redis://127.0.0.1:{}", self.port)
+    }
+
+    fn sever(&self) {
+        let _ = self.cut.send(());
+    }
+}
+
+/// **The gate: killing one Redis leaves ordering working.**
+///
+/// A coordinator that restarts, or a replica promoted in its place, leaves every
+/// node holding a socket to something that is gone. A multiplexed connection
+/// does not re-dial: the task driving the socket ends, and every later command
+/// on that connection — and on every clone of it, which is what `connection()`
+/// hands out — fails forever. The node stays up, keeps refusing every edit for
+/// the rest of its life, and the only recovery is a restart of every node in the
+/// cluster.
+///
+/// The first command after the cut is allowed to fail; that is DEP-04's business
+/// and the client is told. What must not happen is that it never stops failing.
+#[tokio::test]
+async fn the_link_recovers_when_the_coordinator_connection_is_lost() {
+    let Some(url) = std::env::var("OPENCALC_TEST_REDIS").ok() else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let proxy = Interruptible::in_front_of(&url)
+        .await
+        .expect("a forwarder in front of the coordinator");
+    let store =
+        crate::cluster::redis::Redis::connect_within(&proxy.url(), "opencalc-test:reconnect")
+            .await
+            .expect("connected through the forwarder");
+
+    let before = store
+        .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 0)
+        .await
+        .expect("a lease before the coordinator goes away");
+
+    proxy.sever();
+
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Ok(lease) = store
+                .claim("doc".to_owned(), "node-a".to_owned(), 60_000, 1)
+                .await
+            {
+                return lease;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the coordinator link never came back, so this node can never order again");
+
+    // The same lease, not a new one: what came back is a connection, and the
+    // coordinator's memory of who leads is untouched by it.
+    assert_eq!(recovered.node, before.node);
+    assert_eq!(recovered.epoch, before.epoch);
+}
+
+/// A subscription is a second connection, and it dies the same way.
+///
+/// Worse, quietly: the message stream simply ends, the channel closes, and the
+/// per-document attendant in `net.rs` breaks out of its loop — so the document
+/// stops renewing its lease and stops reading its inbox while the node goes on
+/// serving the people connected to it.
+#[tokio::test]
+async fn a_subscription_survives_the_coordinator_going_away() {
+    let Some(url) = std::env::var("OPENCALC_TEST_REDIS").ok() else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let proxy = Interruptible::in_front_of(&url)
+        .await
+        .expect("a forwarder in front of the coordinator");
+    let store =
+        crate::cluster::redis::Redis::connect_within(&proxy.url(), "opencalc-test:resubscribe")
+            .await
+            .expect("connected through the forwarder");
+
+    let channel = crate::relay::committed_channel(store.namespace(), "doc");
+    let mut inbox = store.subscribe(&channel).await.expect("subscribed");
+
+    assert_eq!(
+        heard(&store, &channel, &mut inbox, b"before")
+            .await
+            .expect("a live subscription"),
+        b"before"
+    );
+
+    proxy.sever();
+
+    assert_eq!(
+        heard(&store, &channel, &mut inbox, b"after")
+            .await
+            .expect("the subscription never came back, so this node hears nothing further"),
+        b"after"
+    );
+}
+
+/// Publish until the subscriber hears it, or give up.
+///
+/// Retried rather than slept past, because subscribing is asynchronous on
+/// Redis's side and a publish that races it is dropped without anything saying
+/// so — the same shape as `a_published_batch_reaches_a_subscriber`.
+async fn heard(
+    store: &crate::cluster::redis::Redis,
+    channel: &str,
+    inbox: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    what: &[u8],
+) -> Result<Vec<u8>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let _ = store.publish(channel, what.to_vec()).await;
+            if let Ok(Some(payload)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), inbox.recv()).await
+            {
+                return payload;
+            }
+        }
+    })
+    .await
+}
+
+/// A coordinator that is gone **for good** must still produce an answer.
+///
+/// The hazard in reconnecting is the opposite of the one it fixes: a client that
+/// waits for a connection that will never be established turns `/readyz` — which
+/// is a call to `peers()` — from a 503 into a probe that hangs, and DEP-04's
+/// whole point is that a node which cannot reach the coordinator leaves the pool
+/// promptly. So the retry budget is bounded, and this is that bound asserted
+/// rather than assumed.
+#[tokio::test]
+async fn a_coordinator_that_never_returns_produces_an_error_rather_than_a_hang() {
+    let Some(url) = std::env::var("OPENCALC_TEST_REDIS").ok() else {
+        eprintln!("skipped: set OPENCALC_TEST_REDIS to a reachable server to run it");
+        return;
+    };
+    let proxy = Interruptible::in_front_of(&url)
+        .await
+        .expect("a forwarder in front of the coordinator");
+    let store = crate::cluster::redis::Redis::connect_within(&proxy.url(), "opencalc-test:gone")
+        .await
+        .expect("connected through the forwarder");
+    store.peers(0).await.expect("reachable to begin with");
+
+    // Not merely severed: the forwarder stops answering at all, so every
+    // re-dial is refused. This is a node whose Redis is not coming back.
+    drop(proxy);
+
+    // **The first failure is not the one to measure**, and writing this test
+    // without that distinction made it unable to fail. A command that is in
+    // flight when the socket dies comes back with its error at once and starts
+    // the re-dial *behind* it; a command issued after that is the one that waits
+    // on the re-dial, and so the one that can hang. Raising the retry budget to
+    // forty attempts an hour apart left the first version green in ten
+    // milliseconds, which is precisely the shape of a test that asserts nothing.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), store.peers(0)).await;
+
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(10), store.peers(0)).await;
+    let Ok(outcome) = answered else {
+        panic!(
+            "a command against a coordinator that is gone waited past the retry budget, \
+             so /readyz hangs instead of answering 503"
+        );
+    };
+    assert!(
+        outcome.is_err(),
+        "and the answer must be that it is unreachable, not a silent success"
+    );
 }

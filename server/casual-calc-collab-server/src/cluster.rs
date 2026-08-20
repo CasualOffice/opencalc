@@ -264,6 +264,34 @@ pub trait Coordinator: Send + Sync {
     /// So the caller passes both ends: `after` is where it believed the
     /// document was, and `revision` is where these operations leave it.
     ///
+    /// # The fence is an equality, not an ordering
+    ///
+    /// `epoch` must be **the** epoch the store currently records for this
+    /// document. An older one is a zombie leader and is refused; a *newer* one
+    /// is refused too, and that second half is not paranoia.
+    ///
+    /// Epochs only rise while one store keeps its memory, so an appender ahead
+    /// of the store looks impossible — and it is what a coordinator failover
+    /// produces. Replication to a Redis replica is asynchronous, so a promoted
+    /// replica can be missing the last writes the old primary accepted,
+    /// including the claim that raised the epoch. The store then remembers an
+    /// older generation than the leader is carrying.
+    ///
+    /// While this was `epoch < current`, that leader was believed — and so was
+    /// whoever the rewound store thinks holds the lease, since their lower epoch
+    /// is not less than itself either. Two live leaders, each of which commits
+    /// into its own copy of the document *before* appending, and the one that
+    /// loses the conditional append is diverged from the log permanently, with
+    /// no resync built to recover it.
+    ///
+    /// A lease this store never issued is not a lease. Refusing it turns a
+    /// silent divergence into `Fenced`, which DEP-04 already reports to the
+    /// client as `NotSaving`.
+    ///
+    /// This does **not** make a failover safe — see
+    /// [77](../../../docs/77-COORDINATOR-AVAILABILITY.md), which is the open
+    /// design question. It makes the unsafe case visible instead of silent.
+    ///
     /// # Errors
     ///
     /// [`AppendError`] when the epoch has been superseded, the revision has
@@ -399,7 +427,9 @@ impl Coordinator for Memory {
         // The fence, and it is checked **before** the revision: a zombie whose
         // revision happens to line up must still be refused, and telling it
         // "stale" would send it to re-read the log and try again forever.
-        if epoch < lease.epoch {
+        //
+        // `!=` rather than `<`, which is the failover case — see the trait.
+        if epoch != lease.epoch {
             let current = lease.epoch;
             return Box::pin(async move { Err(AppendError::Fenced { current }) });
         }
