@@ -204,6 +204,8 @@ GET  /api/documents/{id}/download    <span class="c"># what a user takes away</s
           <tr><th>Variable</th><th>Meaning</th></tr>
           <tr><td><code>OPENCALC_SHARED_SECRET</code></td><td>HS256, the same string on both sides. <b>Fine for a demo.</b> It means the collaboration server can mint tokens as well as check them, and it says so loudly at boot.</td></tr>
           <tr><td><code>OPENCALC_JWKS_URL</code></td><td><b>What a real deployment should use.</b> The server fetches your public keys and can verify a token without being able to forge one. Keys are re-read periodically, and a token naming an unknown <code>kid</code> prompts one refresh — throttled, so an invented <code>kid</code> cannot make the server hammer your endpoint.</td></tr>
+          <tr><td><code>OPENCALC_ISSUERS</code></td><td><b>Multi-tenant.</b> <code>issuer=https://…/jwks.json</code>, comma-separated. Each tenant gets <b>its own key set</b>, and a token is checked against the keys of the issuer it names. This is the only configuration in which the issuer is a boundary: with one shared key set, any tenant holding a trusted key can mint a token naming any other tenant.</td></tr>
+          <tr><td><code>OPENCALC_ISSUER</code></td><td>Pins the expected <code>iss</code> for a single-tenant deployment. Refuses a token the same signer minted for somebody else. It does <em>not</em> make the deployment multi-tenant — one key set cannot.</td></tr>
           <tr><td><code>OPENCALC_AUDIENCE</code></td><td>The audience a token must name. Any string, the same on both sides.</td></tr>
           <tr><td><code>OPENCALC_TOKEN_LEEWAY_SECS</code></td><td>Clock skew allowed when checking expiry. Defaults to 60.</td></tr>
         </table>
@@ -224,6 +226,7 @@ GET  /api/documents/{id}/download    <span class="c"># what a user takes away</s
           <tr><td><code>OPENCALC_COLLAB_WS</code></td><td>derived</td><td>What the browser dials. Usually unset.</td></tr>
           <tr><td><code>OPENCALC_MAX_UPLOAD_BYTES</code></td><td><code>67108864</code> (64&nbsp;MB)</td><td>Largest workbook accepted. The web framework's own default is 2&nbsp;MB, which is smaller than many real spreadsheets.</td></tr>
           <tr><td><code>OPENCALC_ADMIN_TOKEN</code></td><td>unset</td><td>Switches <code>/admin</code> on. Unset means there is no admin page at all.</td></tr>
+          <tr><td><code>&lt;NAME&gt;_FILE</code></td><td>Any secret can be read from a file instead: <code>OPENCALC_SHARED_SECRET_FILE</code>, <code>OPENCALC_ADMIN_TOKEN_FILE</code>, <code>OPENCALC_REDIS_URL_FILE</code>. Use it. An environment variable is readable in <code>docker inspect</code>, in <code>/proc/1/environ</code>, and in whatever your process manager logs. Setting both forms is <b>refused</b>, not ranked — a silent precedence rule is how a deployment that believes it moved to files keeps running on the variable it forgot to delete.</td></tr>
           <tr><td><code>OPENCALC_FONT_DIR</code></td><td>unset</td><td>Extra faces for the headless renderer. See <a href="#fonts">Fonts</a>.</td></tr>
           <tr><td><code>OPENCALC_EDITOR_DIR</code></td><td><code>/editor</code></td><td>Where the editor bundle is served from.</td></tr>
         </table>

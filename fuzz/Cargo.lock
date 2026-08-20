@@ -183,10 +183,12 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "axum-server",
+ "base64",
  "casual-calc-eval",
  "casual-calc-export",
  "casual-calc-import",
  "casual-calc-model",
+ "casual-calc-secrets",
  "casual-calc-transaction",
  "futures-util",
  "jsonwebtoken",
@@ -307,6 +309,10 @@ version = "0.0.0"
 dependencies = [
  "zip",
 ]
+
+[[package]]
+name = "casual-calc-secrets"
+version = "0.0.0"
 
 [[package]]
 name = "casual-calc-transaction"

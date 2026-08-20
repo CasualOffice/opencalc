@@ -218,42 +218,50 @@ impl JwksSource {
     }
 }
 
-/// Checks a token against a key set and a policy.
+/// One issuer and the keys that are allowed to speak for it.
+///
+/// The binding is the point. A deployment serving two tenants holds two
+/// trusts, and a token is checked against **the key set of the issuer it
+/// names** — never against every key the process happens to hold. Without that
+/// binding, `iss` is a label rather than a boundary: a tenant whose signing key
+/// is in the one shared set can mint a token naming the other tenant's issuer
+/// and it verifies, which is exactly the hole `DEP-10` records.
 ///
 /// The key set is behind a lock because it is **replaceable**: see
 /// [`JwksSource`].
 #[derive(Debug)]
-pub struct Verifier {
-    /// What this server accepts about the claims themselves.
-    pub policy: TokenPolicy,
+pub struct Trust {
+    /// The `iss` these keys may sign for. Empty trusts any issuer, which is
+    /// the single-tenant case and the historical behaviour.
+    pub issuer: String,
     /// The keys, and the algorithms they may be used with.
     keys: RwLock<KeySet>,
     /// Where to read them again, when they are fetched rather than configured.
     jwks: Option<JwksSource>,
 }
 
-impl Verifier {
-    /// A verifier over a fixed key set — a shared secret, or a test.
+impl Trust {
+    /// A trust over a fixed key set — a shared secret, or a test.
     #[must_use]
-    pub fn fixed(policy: TokenPolicy, keys: KeySet) -> Self {
+    pub fn fixed(issuer: impl Into<String>, keys: KeySet) -> Self {
         Self {
-            policy,
+            issuer: issuer.into(),
             keys: RwLock::new(keys),
             jwks: None,
         }
     }
 
-    /// A verifier whose keys are re-read from `url`.
+    /// A trust whose keys are re-read from `url`.
     #[must_use]
     pub fn refreshing(
-        policy: TokenPolicy,
+        issuer: impl Into<String>,
         keys: KeySet,
         url: String,
         accepted: Vec<Signing>,
         min_interval_ms: u64,
     ) -> Self {
         Self {
-            policy,
+            issuer: issuer.into(),
             keys: RwLock::new(keys),
             jwks: Some(JwksSource {
                 url,
@@ -264,13 +272,13 @@ impl Verifier {
         }
     }
 
-    /// Where the keys are re-read from, if anywhere.
+    /// Where these keys are re-read from, if anywhere.
     #[must_use]
     pub fn jwks(&self) -> Option<&JwksSource> {
         self.jwks.as_ref()
     }
 
-    /// Replace the key set.
+    /// Replace this issuer's key set.
     ///
     /// Only ever called with a set that parsed. A fetch that failed leaves the
     /// old keys in place on purpose: docs/59 says *"a cached key set keeps
@@ -281,11 +289,155 @@ impl Verifier {
         *self.keys.write().unwrap_or_else(|e| e.into_inner()) = keys;
     }
 
-    /// How many named keys are currently held.
+    /// How many named keys this issuer currently has.
     #[must_use]
     pub fn key_count(&self) -> usize {
         self.keys.read().unwrap_or_else(|e| e.into_inner()).len()
     }
+}
+
+/// Checks a token against the keys of the issuer it names, and a policy.
+#[derive(Debug)]
+pub struct Verifier {
+    /// What this server accepts about the claims themselves.
+    pub policy: TokenPolicy,
+    /// One entry per issuer this server will accept a token from.
+    trusts: Vec<Trust>,
+}
+
+impl Verifier {
+    /// A verifier over a fixed key set, trusting any issuer.
+    #[must_use]
+    pub fn fixed(policy: TokenPolicy, keys: KeySet) -> Self {
+        Self {
+            policy,
+            trusts: vec![Trust::fixed(String::new(), keys)],
+        }
+    }
+
+    /// A verifier whose keys are re-read from `url`, trusting any issuer.
+    #[must_use]
+    pub fn refreshing(
+        policy: TokenPolicy,
+        keys: KeySet,
+        url: String,
+        accepted: Vec<Signing>,
+        min_interval_ms: u64,
+    ) -> Self {
+        Self {
+            policy,
+            trusts: vec![Trust::refreshing(
+                String::new(),
+                keys,
+                url,
+                accepted,
+                min_interval_ms,
+            )],
+        }
+    }
+
+    /// A verifier over one key set per issuer.
+    ///
+    /// # Panics
+    ///
+    /// If `trusts` is empty, or if any two name the same issuer, or if a named
+    /// issuer sits beside the trust-anybody entry. Each is a configuration
+    /// error that would otherwise make the boundary silently ambiguous, and
+    /// this is called once at startup.
+    #[must_use]
+    pub fn tenanted(policy: TokenPolicy, trusts: Vec<Trust>) -> Self {
+        assert!(!trusts.is_empty(), "a verifier needs at least one trust");
+        let named = trusts.iter().filter(|t| !t.issuer.is_empty()).count();
+        assert!(
+            named == trusts.len() || named == 0,
+            "a named issuer cannot sit beside a trust that accepts any issuer: \
+             the unnamed one would accept the named one's tokens too"
+        );
+        let mut seen = BTreeMap::new();
+        for trust in &trusts {
+            assert!(
+                seen.insert(trust.issuer.clone(), ()).is_none(),
+                "two trusts name the same issuer {:?}",
+                trust.issuer
+            );
+        }
+        Self { policy, trusts }
+    }
+
+    /// Every issuer this server accepts, and its keys.
+    #[must_use]
+    pub fn trusts(&self) -> &[Trust] {
+        &self.trusts
+    }
+
+    /// Whether any issuer's keys are re-readable.
+    #[must_use]
+    pub fn refreshable(&self) -> bool {
+        self.trusts.iter().any(|t| t.jwks().is_some())
+    }
+
+    /// The trust whose keys must have signed `token`, by the `iss` it names.
+    ///
+    /// Shared with [`Verifier::verify`] rather than reimplemented beside it: a
+    /// refresh that re-read a *different* issuer's keys than the one being
+    /// verified would fetch forever and never fix anything.
+    #[must_use]
+    pub fn trust_for(&self, token: &str) -> Option<&Trust> {
+        match self.trusts.as_slice() {
+            // With one trust there is nothing to route: the token is checked
+            // against the only keys there are, and if that trust names an
+            // issuer the *verified* `iss` is what refuses a token minted for
+            // somebody else. Routing on the unverified value here would refuse
+            // it earlier and say less about why.
+            [only] => Some(only),
+            trusts => {
+                let named = unverified_issuer(token)?;
+                trusts.iter().find(|t| t.issuer == named)
+            }
+        }
+    }
+
+    /// The sole trust, when there is exactly one.
+    ///
+    /// The single-tenant path stays as direct as it was; multi-tenant callers
+    /// iterate [`Verifier::trusts`].
+    #[must_use]
+    pub fn sole(&self) -> Option<&Trust> {
+        match self.trusts.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    /// How many named keys are currently held, across every issuer.
+    #[must_use]
+    pub fn key_count(&self) -> usize {
+        self.trusts.iter().map(Trust::key_count).sum()
+    }
+}
+
+/// The `iss` a token claims, read **without** checking the signature.
+///
+/// Used only to decide which trusted key set must have signed it. That is safe
+/// and is how every multi-issuer verifier works: naming another tenant's issuer
+/// selects that tenant's keys, which the caller cannot sign for. The value is
+/// never trusted — [`Verifier::verify`] compares the *verified* `iss` against
+/// the trust that accepted it before returning.
+fn unverified_issuer(token: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    #[derive(serde::Deserialize)]
+    struct JustIssuer {
+        iss: String,
+    }
+
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<JustIssuer>(&bytes)
+        .ok()
+        .map(|j| j.iss)
 }
 
 /// Read a JWKS document and parse it into a key set.
@@ -314,6 +466,11 @@ pub enum VerifyError {
     UnacceptableAlgorithm,
     /// No key matched the token's `kid`.
     UnknownKey,
+    /// The token names an `iss` this server holds no keys for.
+    ///
+    /// Distinct from [`VerifyError::UnknownKey`]: the key set was never
+    /// consulted, because there is no key set for that issuer to consult.
+    UnknownIssuer,
     /// The signature did not check out.
     BadSignature,
     /// It was signed correctly and says something unacceptable.
@@ -328,6 +485,9 @@ impl core::fmt::Display for VerifyError {
                 f.write_str("the token names an algorithm this server does not accept")
             }
             VerifyError::UnknownKey => f.write_str("no key matches the token's kid"),
+            VerifyError::UnknownIssuer => {
+                f.write_str("the token names an issuer this server holds no keys for")
+            }
             VerifyError::BadSignature => f.write_str("the signature did not verify"),
             VerifyError::Claims(e) => write!(f, "{e}"),
         }
@@ -362,7 +522,14 @@ impl Verifier {
     ) -> Result<Claims, VerifyError> {
         let header = jsonwebtoken::decode_header(token).map_err(|_| VerifyError::Malformed)?;
 
-        let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
+        // Which issuer's keys must have signed this. Read from the unverified
+        // payload, because `iss` is inside the signature it selects the key
+        // for — there is no other order available. Naming somebody else's
+        // issuer therefore selects *their* keys, which is a harder problem for
+        // a forger than the one they started with, not an easier one.
+        let trust = self.trust_for(token).ok_or(VerifyError::UnknownIssuer)?;
+
+        let keys = trust.keys.read().unwrap_or_else(|e| e.into_inner());
 
         // The header is checked against configuration and never consulted to
         // decide what to do. This is the whole defence against algorithm
@@ -391,6 +558,14 @@ impl Verifier {
             jsonwebtoken::errors::ErrorKind::InvalidSignature => VerifyError::BadSignature,
             _ => VerifyError::Malformed,
         })?;
+
+        // The signature checked out, so `iss` is now trustworthy — and is
+        // checked again against the trust that accepted it. The first read was
+        // unverified, and a check that relies on an unverified value is not a
+        // check. This is what makes the issuer a boundary rather than a label.
+        if !trust.issuer.is_empty() && data.claims.iss != trust.issuer {
+            return Err(VerifyError::Claims(TokenError::WrongIssuer));
+        }
 
         data.claims
             .validate(document_key, &self.policy, now_secs)

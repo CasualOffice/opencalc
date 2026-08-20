@@ -23,6 +23,7 @@ members = [
     # may depend on the crates; nothing under `crates/` may depend on it, which
     # is what keeps an async runtime and an HTTP stack out of a library that
     # has neither. Enforced by the `repository-policy` CI job.
+    "server/casual-calc-secrets",
     "server/casual-calc-collab-server",
     "server/casual-calc-host",
     # The WOPI adapter: a WOPI *client* on one side and an ordinary OpenCalc

@@ -353,6 +353,12 @@ pub enum TokenError {
     NotYetValid,
     /// `aud` is not this server's.
     WrongAudience,
+    /// `iss` is not the issuer whose keys verified the signature.
+    ///
+    /// Only reachable when the signature checked out, so it means a trusted
+    /// issuer signed a token naming a *different* issuer — which is either a
+    /// misconfigured minter or a tenant reaching across a boundary.
+    WrongIssuer,
     /// The token is for a different document than the one being joined.
     WrongDocument,
     /// A URL the token names is one this server will not contact.
@@ -379,6 +385,9 @@ impl core::fmt::Display for TokenError {
             TokenError::Expired => f.write_str("the token has expired"),
             TokenError::NotYetValid => f.write_str("the token is not valid yet"),
             TokenError::WrongAudience => f.write_str("the token names a different audience"),
+            TokenError::WrongIssuer => {
+                f.write_str("the token names a different issuer than the keys that signed it")
+            }
             TokenError::WrongDocument => f.write_str("the token is for a different document"),
             TokenError::ForbiddenUrl { url, hint: None } => {
                 write!(f, "the token names a forbidden url: {url}")

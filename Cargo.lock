@@ -243,11 +243,13 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "axum-server",
+ "base64",
  "casual-calc-eval",
  "casual-calc-export",
  "casual-calc-formula",
  "casual-calc-import",
  "casual-calc-model",
+ "casual-calc-secrets",
  "casual-calc-transaction",
  "futures-util",
  "jsonwebtoken",
@@ -312,6 +314,7 @@ dependencies = [
  "casual-calc-export",
  "casual-calc-import",
  "casual-calc-model",
+ "casual-calc-secrets",
  "jsonwebtoken",
  "serde",
  "serde_json",
@@ -431,6 +434,10 @@ dependencies = [
  "casual-calc-transaction",
  "tiny-skia",
 ]
+
+[[package]]
+name = "casual-calc-secrets"
+version = "0.0.0"
 
 [[package]]
 name = "casual-calc-selection"
