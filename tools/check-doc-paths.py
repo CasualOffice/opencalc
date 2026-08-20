@@ -30,9 +30,6 @@ import sys
 NAMED_BUT_ABSENT = {
     "fuzz/.cargo/": "CI-007 names it as the fix it rejected: a second copy of the "
                     "advisory decisions would fix today and drift tomorrow",
-    "sdk/examples/host-toolbar": "SDK-010 — promised in docs/55 and never built. "
-                                 "Named here so the promise stays visible; delete "
-                                 "this line when the sample lands",
     "webapp/pkg/": "the wasm bundle: built by CI and never committed, so it is "
                    "absent from a clean checkout by design",
     "webapp/pkg": "as above",
