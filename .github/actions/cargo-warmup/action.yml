@@ -52,7 +52,7 @@ runs:
           #
           # So a failure that is plainly not the network fails immediately,
           # carrying cargo's own words.
-          if grep -qE "because --locked was passed|failed to select a version|no matching package|which `[^`]+` depends on" "$log"; then
+          if grep -qE 'because --locked was passed|failed to select a version|no matching package|unable to get packages from source' "$log"; then
             echo "::error::this is not a network failure, so retrying will not help:"
             grep -E "^error" "$log" | head -3
             echo "::error::run 'cargo update --manifest-path ${{ inputs.manifest-path }} --workspace' and commit the lockfile"
