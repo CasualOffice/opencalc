@@ -112,6 +112,7 @@ the other way around. This index is the map.
 | 74 | [WOPI Integration](74-WOPI-INTEGRATION.md) | Opening and saving through a WOPI host: the discovery surface, the lock protocol, and the upload boundary |
 | 75 | [Relative Formula Sharing](75-RELATIVE-FORMULA-SHARING-DESIGN.md) | One AST for a filled column: the shared-formula representation `PERF-11` needs |
 | 76 | [Drawing charts in the headless renderer](76-CHART-RENDERING-BACKEND.md) | Why the plot backend already exists in the editor, and what `RND-11` actually needs |
+| 78 | [How the engine reaches the platform](78-HOST-CAPABILITY-SEAMS.md) | `ADR-019`: why the capability trait was never written, and why what grew instead is better |
 
 ### Measured gap trackers (50–53, 73)
 

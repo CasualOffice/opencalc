@@ -266,6 +266,11 @@ jobs:
       # or a deliberate manual run, never on a merge.
       - name: A release cannot publish by accident
         run: python3 tools/check-release-hold.py
+      # Boundary invariant 7: the browser build and the native build compile the
+      # same engine. Kept by care until now; the failure mode is one
+      # `cfg(target_os)` added to make a build pass, which review does not see.
+      - name: The engine does not fork on the platform
+        run: python3 tools/check-host-seams.py
       # `docs/00-README.md` calls itself the map, and AGENTS.md sends every
       # agent there first -- so a document missing from it is a document
       # nobody finds. Eight of them accumulated (69..75 and the 14a archive)
