@@ -551,6 +551,7 @@ fn read_sheet_drawings(
                 anchor: anchor.range,
                 from_offset: anchor.from_offset,
                 to_offset: anchor.to_offset,
+                extent: anchor.extent,
                 part: target,
             });
         }

@@ -29,6 +29,13 @@ pub struct DrawingAnchor {
     pub to_offset: Emu,
     /// `r:id` of the referenced part, when the anchor frames one.
     pub rel_id: Option<String>,
+    /// `<xdr:ext cx cy>`, when the anchor states its size that way.
+    ///
+    /// A `twoCellAnchor` describes its size with the second cell and has none.
+    /// The other two carry this instead, and it used to be read past: `range`
+    /// was filled with a nominal span, and a guessed frame is a fabricated
+    /// aspect ratio for anything scaled into it (`RND-13`).
+    pub extent: Option<Emu>,
 }
 
 /// Parse a drawing part's anchors.
@@ -60,6 +67,7 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
     let (mut fcx, mut fcy, mut tcx, mut tcy) = (0i64, 0i64, 0i64, 0i64);
     let mut have_to = false;
     let mut rel_id: Option<String> = None;
+    let mut extent: Option<Emu> = None;
     let mut open = false;
 
     loop {
@@ -70,6 +78,7 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                     open = true;
                     have_to = false;
                     rel_id = None;
+                    extent = None;
                     (fc, fr, tc, tr) = (0, 0, 0, 0);
                     (fcx, fcy, tcx, tcy) = (0, 0, 0, 0);
                 }
@@ -96,6 +105,15 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                 }
                 // `<c:chart r:id>` inside `<a:graphicData>`, and the same
                 // attribute on a picture's `<a:blip r:embed>`.
+                // `<xdr:ext cx cy>`: the picture's own size, which a
+                // one-cell or absolute anchor uses in place of a second cell.
+                b"ext" => {
+                    let cx = read_attr(e, b"cx")?.and_then(|v| v.parse().ok());
+                    let cy = read_attr(e, b"cy")?.and_then(|v| v.parse().ok());
+                    if let (Some(x), Some(y)) = (cx, cy) {
+                        extent = Some(Emu { x, y });
+                    }
+                }
                 b"chart" | b"blip" => {
                     if let Some(id) = read_attr(e, b"id")?.or(read_attr(e, b"embed")?) {
                         rel_id = Some(id);
@@ -160,6 +178,10 @@ pub fn parse_drawing(xml: &[u8]) -> Result<Vec<DrawingAnchor>, ImportError> {
                         } else {
                             Emu { x: tcx, y: tcy }
                         },
+                        // Carried only when the file stated one, which is
+                        // exactly the case where `range` above is a nominal
+                        // guess rather than something the author wrote.
+                        extent: if have_to { None } else { extent },
                         rel_id: rel_id.take(),
                     });
                     open = false;

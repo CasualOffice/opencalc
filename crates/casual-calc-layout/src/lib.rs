@@ -374,7 +374,32 @@ fn push_images(
     let win_y1 = geometry.rows.offset(range.rows.1.saturating_add(1));
 
     for image in &sheet.images {
-        let rect = frame_rect(geometry, &image.anchor, image.from_offset, image.to_offset);
+        // **An authored size beats a measured one, and only one anchor kind
+        // measures.** A `twoCellAnchor` says where the far corner is, and that
+        // rectangle *is* the picture — including a distortion the author made
+        // by dragging a handle, which must be reproduced. `oneCellAnchor` and
+        // `absoluteAnchor` carry `<xdr:ext>` instead, and the importer used to
+        // discard it and substitute a nominal eight columns by fifteen rows.
+        //
+        // Scaling a picture to fill a *guessed* rectangle applies a fabricated
+        // aspect ratio: tolerable for a chart, which redraws itself into
+        // whatever box it lands in, and visibly wrong for a photograph
+        // (`RND-13`). So where the file stated a size, that is the size.
+        let rect = match image.extent {
+            Some(ext) => Rect {
+                x: geometry
+                    .columns
+                    .offset(image.anchor.start.col)
+                    .saturating_add(emu_to_twips(image.from_offset.x)),
+                y: geometry
+                    .rows
+                    .offset(image.anchor.start.row)
+                    .saturating_add(emu_to_twips(image.from_offset.y)),
+                w: emu_to_twips(ext.x).max(0),
+                h: emu_to_twips(ext.y).max(0),
+            },
+            None => frame_rect(geometry, &image.anchor, image.from_offset, image.to_offset),
+        };
         if rect.w == 0 || rect.h == 0 {
             continue;
         }

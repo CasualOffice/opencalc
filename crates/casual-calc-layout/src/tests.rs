@@ -1095,6 +1095,7 @@ mod images {
                 y: 7 * 635,
             },
             part: "xl/media/image1.png".to_owned(),
+            extent: None,
         });
         wb.sheets.push(sheet);
         wb
@@ -1191,6 +1192,7 @@ mod images {
             from_offset: Emu::default(),
             to_offset: Emu::default(),
             part: "xl/media/faraway.png".to_owned(),
+            extent: None,
         });
         let geo = GridGeometry::default();
         // A window over A1:E5 — the first picture is inside it, the second is
@@ -1221,6 +1223,7 @@ mod images {
             from_offset: Emu::default(),
             to_offset: Emu::default(),
             part: "xl/media/big.png".to_owned(),
+            extent: None,
         });
         wb.sheets.push(sheet);
         let geo = GridGeometry::default();

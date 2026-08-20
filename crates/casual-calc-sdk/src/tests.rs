@@ -2311,6 +2311,7 @@ mod images {
             from_offset: Emu::default(),
             to_offset: Emu::default(),
             part: PART.to_owned(),
+            extent: None,
         });
         wb.sheets.push(sheet);
         if let Some(bytes) = media {

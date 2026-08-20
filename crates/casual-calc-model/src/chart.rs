@@ -244,4 +244,22 @@ pub struct ImageView {
     pub to_offset: Emu,
     /// The package path of its media part, e.g. `xl/media/image1.png`.
     pub part: String,
+    /// The picture's own size in EMUs, when the file states one.
+    ///
+    /// **Only a `twoCellAnchor` describes its size with cells.** `oneCellAnchor`
+    /// and `absoluteAnchor` carry an `<xdr:ext cx cy>` instead, and the importer
+    /// used to discard it and substitute a nominal 8 columns by 15 rows — its
+    /// own comment admitted the frame was a guess, on the reasonable grounds
+    /// that a chart drawn a column out beats one not drawn.
+    ///
+    /// That is fine for a chart, whose contents are redrawn to whatever box
+    /// they land in. It is wrong for a **picture**, which gets scaled to fill
+    /// its frame: a guessed frame means a fabricated aspect ratio, so every
+    /// one-cell-anchored photograph rendered visibly squashed (`RND-13`).
+    ///
+    /// Additive by ADR-010 — defaulted in, skipped out when absent — so
+    /// `SCHEMA_VERSION` does not move and a workbook without one serializes to
+    /// the bytes it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<Emu>,
 }
