@@ -607,11 +607,17 @@ wrapper right now:
 ## 8. What ships where
 
 - **`sdk/` in this repo** — runnable samples, one directory each:
-  `sdk/examples/vanilla`, `sdk/examples/react`, `sdk/examples/next`,
-  `sdk/examples/readonly-viewer`, `sdk/examples/host-toolbar` (our commands on
-  their buttons, all our chrome off). Small enough to read, complete enough to
-  copy. They double as integration tests for the packaging.
-- **A documentation page on the marketing site** — `webapp/docs/` : install,
+  `sdk/examples/vanilla`, `sdk/examples/react`, `sdk/examples/next` and
+  `sdk/examples/viewer` (view-only and preview on one page, because the
+  difference is easier to see than to explain). Small enough to read, complete
+  enough to copy. They double as integration tests for the packaging.
+
+  A fifth was named here and never built: a host-toolbar sample putting *our*
+  commands on *their* buttons with all our chrome off. `commands()` and
+  `chrome()` both exist, so it is buildable — it is tracked as `SDK-010` rather
+  than quietly dropped from this list, because an integrator reading it was
+  promised something.
+- **A documentation page on the marketing site** — `webapp/docs.html` : install,
   quick start, configuration, theming, events, API reference, framework guides,
   the wasm-serving recipes per bundler. Generated from the same source as this
   design where it can be, so the two cannot drift.

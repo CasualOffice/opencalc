@@ -319,6 +319,12 @@ jobs:
       # failed fuzz-build on main. Seconds here beats minutes there.
       - name: The fuzz lockfile is not stale
         run: python3 tools/check-fuzz-lock.py
+      # DOC-025's "142 stale claims" had no list behind it. This is one thing
+      # that *is* enumerable: a document naming a path is making a checkable
+      # claim, and an integrator who follows it and finds nothing has been
+      # misled by prose that read as fact.
+      - name: Every code path a document names exists
+        run: python3 tools/check-doc-paths.py
       # Boundary invariant 7: the browser build and the native build compile the
       # same engine. Kept by care until now; the failure mode is one
       # `cfg(target_os)` added to make a build pass, which review does not see.
