@@ -153,6 +153,41 @@ jobs:
             || { jq '.memory' report.json; echo "::error::the memory measurement did not run"; exit 1; }
           jq -r '"\(.memory.cells) cells cost \(.memory.workbookBytes) bytes, \(.memory.centiBytesPerCell / 100) bytes per cell"' report.json
 
+          # **Bounded, on thirteen observations from this runner** (`PERF-10`).
+          #
+          # The row said an uncalibrated gate is worse than none, and it was
+          # right: the threshold could only come from the runner, and no
+          # machine here has /proc. Thirteen successful runs give
+          #
+          #     82.32 x2   82.41 x2   83.64 x4   83.72 x5
+          #
+          # a spread of 1.40 bytes, or 1.7%. The measurement is very nearly
+          # deterministic, which is what makes an absolute ceiling honest.
+          #
+          # 88 gives 4.28 bytes over the highest seen -- 3.1x the observed
+          # spread, so it does not flake -- while still catching one extra
+          # pointer per cell (+8 bytes, 91.7), which is the smallest change
+          # that would actually matter.
+          #
+          # The floor is the other half, and it is the one worth explaining: a
+          # sudden *drop* is far more likely to mean the measurement broke than
+          # that the engine got 16% smaller. A gate that only has a ceiling
+          # passes forever once it starts measuring the wrong thing -- which is
+          # exactly how four counters on this project reported zero while being
+          # scraped.
+          CEILING=88
+          FLOOR=70
+          jq -e --argjson c "$CEILING" --argjson f "$FLOOR" \
+             '(.memory.centiBytesPerCell / 100) as $b | $b <= $c and $b >= $f' report.json >/dev/null || {
+            actual=$(jq -r '.memory.centiBytesPerCell / 100' report.json)
+            echo "::error::a cell costs ${actual} bytes; the band is ${FLOOR}-${CEILING}."
+            echo "::error::over the ceiling is a memory regression: 13 runs on this runner"
+            echo "::error::ranged 82.32-83.72, so this is outside 3x the observed spread."
+            echo "::error::under the floor means the measurement is no longer measuring"
+            echo "::error::the workbook -- check that before celebrating."
+            exit 1
+          }
+
   # The SDK's published surface, compiled the way an integrator compiles it.
   #
   # `@opencalc/sheet` and `@opencalc/react` shipped no declarations at all
