@@ -129,7 +129,7 @@ const MAX_REPEAT: u32 = 4096;
 /// OOXML reader has enforced since `SEC-011`. Two readers admitting different
 /// amounts of the same workbook is its own defect, so this is deliberately the
 /// same number rather than a fresh judgement.
-const MAX_POPULATED_CELLS: usize = 8_000_000;
+pub const MAX_POPULATED_CELLS: usize = 8_000_000;
 
 /// Read a `.ods` into a workbook, with a report of everything not carried.
 ///

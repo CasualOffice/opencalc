@@ -94,19 +94,35 @@ fuzz_target!(|data: &[u8]| {
     // Kept rather than deleted because a bound with nothing watching it is a
     // bound that comes back off. `seeds/ods/amplifier.xml` is refused in ~1 ms
     // where it once took 16 seconds and 1.5 GB.
-    if declared_cells(data) > AMPLIFICATION_CEILING {
-        // Asserted on the **wrapped** package, not on `data`. A seed is an XML
-        // fragment, so `import_ods(data)` is `NotAPackage` whatever the reader
-        // does — the first version of this assertion could never fail, and did
-        // not when the bound was reverted to check. The amplification lives
-        // behind the container, which is what pass 2 exists to reach.
+    let declared = declared_cells(data);
+
+    // **Two thresholds, because they answer different questions.** The first
+    // version of this used one, and CI found the gap in four minutes: it
+    // asserted refusal above `AMPLIFICATION_CEILING`, which is eight times
+    // stricter than what the reader actually enforces — so a document
+    // declaring two million cells was materialised, correctly, and the
+    // assertion called that a defect. The fuzzer was right; the assertion was
+    // wrong.
+    //
+    // Above the reader's own bound, refusal is the contract, so assert it.
+    // Using the reader's exported constant rather than a copy, because a copy
+    // is a number that drifts and this is the second time that has cost a run.
+    if declared > casual_calc_ods::MAX_POPULATED_CELLS as u64 {
         if let Some(package) = as_package(data) {
             assert!(
                 casual_calc_ods::import_ods(&package).is_err(),
-                "a document declaring more than {AMPLIFICATION_CEILING} cells was \
-                 materialised rather than refused: the repeat-product bound is gone"
+                "a document declaring more than {} cells was materialised rather \
+                 than refused: the repeat-product bound is gone",
+                casual_calc_ods::MAX_POPULATED_CELLS
             );
         }
+        return;
+    }
+
+    // Between the ceiling and the bound the reader legitimately materialises,
+    // and doing so is merely slow. Nothing to prove, and every second here is a
+    // second not spent finding the next defect.
+    if declared > AMPLIFICATION_CEILING {
         return;
     }
 
@@ -226,7 +242,12 @@ fn declared_cells(xml: &[u8]) -> u64 {
             }
             _ => {}
         }
-        if total > AMPLIFICATION_CEILING {
+        // Counted up to the **reader's** bound, not to the ceiling. Stopping
+        // at `AMPLIFICATION_CEILING` would cap this below
+        // `MAX_POPULATED_CELLS`, making the refusal assertion above
+        // unreachable — a guard that can never fire, which is worse than none
+        // because it reads as covered.
+        if total > casual_calc_ods::MAX_POPULATED_CELLS as u64 {
             break;
         }
         buf.clear();
