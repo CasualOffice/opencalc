@@ -10,7 +10,24 @@ publish = false
 [dependencies]
 casual-calc-formula = { path = "../casual-calc-formula" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is not optional here, and the reason is not obvious.
+#
+# serde_json writes with `ryu` — exact and shortest — and by default *reads*
+# with a fast approximation. So `from_str(&to_string(x))` is not `x`:
+# measured at **10.97% of values** at ordinary spreadsheet magnitudes, one ULP
+# out. `12.805579049246651` is one of them. `f64::from_str` on the same string
+# is correct every time, so this is the reader alone.
+#
+# A snapshot crosses a resume, a cluster hand-off and a save back to the host.
+# A double-digit percentage of a document's numbers changing in the last bit on
+# that path breaks the project's first two priorities outright: never produce a
+# wrong cell value, and identical input gives an identical model.
+#
+# Declared per crate rather than relied on through feature unification, because
+# unification does not apply to a crate built on its own — `cargo test -p
+# casual-calc-model` would silently lose it, which is exactly where the drift
+# would be tested for.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [lints]
 workspace = true

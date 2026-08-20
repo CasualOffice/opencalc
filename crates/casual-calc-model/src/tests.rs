@@ -854,3 +854,88 @@ mod protection_flags {
         assert!(!protection.permits("formatRows"));
     }
 }
+
+/// **A snapshot round trip changes no number, in any bit.**
+///
+/// `serde_json` writes with `ryu` — exact and shortest — and by **default reads
+/// with a fast approximation**, so `from_snapshot(to_snapshot(w))` was not `w`.
+/// Measured at **10.97%** of values at ordinary spreadsheet magnitudes, one ULP
+/// out; `12.805579049246651` is one of them. `f64::from_str` on the same string
+/// is correct every time, so the writer and the format were never at fault —
+/// only the reader.
+///
+/// A snapshot crosses a resume, a cluster hand-off and a save back to the host.
+/// A tenth of a document's numbers changing on that path breaks the first two
+/// priorities outright: never produce a wrong cell value, and identical input
+/// gives an identical model.
+///
+/// Compared on **bits**, not with `==`: two doubles one ULP apart are not equal,
+/// but they also are not far enough apart for any tolerance-based check to
+/// notice, and a spreadsheet that quietly rewrites the last bit of every tenth
+/// number is wrong whether or not the difference is visible.
+///
+/// Found by the `snapshot` fuzz target (`PROD-08`), which is the first thing
+/// that ever compared a workbook to itself across that boundary.
+#[test]
+fn a_snapshot_round_trip_changes_no_number() {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "S");
+
+    // Ordinary magnitudes, generated rather than hand-picked so this is not a
+    // test that agrees with the one example that motivated it.
+    let mut bits = 0x2545_F491_4F6C_DD1Du64;
+    let mut written = Vec::new();
+    for row in 0..2_000u32 {
+        bits ^= bits << 13;
+        bits ^= bits >> 7;
+        bits ^= bits << 17;
+        let mantissa = 1.0 + f64::from((bits >> 40) as u32) / f64::from(u32::MAX);
+        let value = mantissa * 10f64.powi(i32::try_from(bits % 16).unwrap_or(0) - 6)
+            / f64::from(u32::try_from(bits % 7 + 1).unwrap_or(1));
+        if !value.is_finite() {
+            continue;
+        }
+        sheet
+            .cells
+            .set(CellRef::new(row, 0), Cell::value(CellValue::Number(value)));
+        written.push((row, value));
+    }
+    // The one that started it, exactly.
+    sheet.cells.set(
+        CellRef::new(9_000, 0),
+        Cell::value(CellValue::Number(12.805_579_049_246_651)),
+    );
+    written.push((9_000, 12.805_579_049_246_651));
+    workbook.sheets.push(sheet);
+
+    let bytes = workbook.to_snapshot().expect("write the snapshot");
+    let back = Workbook::from_snapshot(&bytes).expect("read it back");
+
+    let mut drifted = Vec::new();
+    for (row, want) in &written {
+        let got = match back.sheets[0]
+            .cells
+            .get(CellRef::new(*row, 0))
+            .map(|c| &c.value)
+        {
+            Some(CellValue::Number(n)) => *n,
+            other => panic!("row {row} came back as {other:?}"),
+        };
+        if got.to_bits() != want.to_bits() {
+            drifted.push((*row, *want, got));
+        }
+    }
+
+    assert!(
+        drifted.is_empty(),
+        "{} of {} numbers changed across a snapshot; first: row {} wrote {:?} ({:#x}) and read \
+         {:?} ({:#x})",
+        drifted.len(),
+        written.len(),
+        drifted[0].0,
+        drifted[0].1,
+        drifted[0].1.to_bits(),
+        drifted[0].2,
+        drifted[0].2.to_bits(),
+    );
+}

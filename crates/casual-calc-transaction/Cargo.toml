@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }  # see casual-calc-model
 
 [lints]
 workspace = true
