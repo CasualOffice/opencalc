@@ -20,6 +20,13 @@ casual-calc-collab-server = { path = "../server/casual-calc-collab-server" }
 casual-calc-model = { path = "../crates/casual-calc-model" }
 casual-calc-ods = { path = "../crates/casual-calc-ods" }
 casual-calc-transaction = { path = "../crates/casual-calc-transaction" }
+# The two readers `PROD-08` found unfuzzed. Neither adds a third-party crate:
+# `casual-calc-import` depends on `casual-calc-{formula,model,ooxml}` and
+# `quick-xml`, and `casual-calc-io` on `casual-calc-{model,layout}` — all of
+# which this lockfile already carries, so `cargo audit --file fuzz/Cargo.lock`
+# has nothing new to judge.
+casual-calc-import = { path = "../crates/casual-calc-import" }
+casual-calc-io = { path = "../crates/casual-calc-io" }
 serde_json = "1"
 # Both already in this lockfile, at these versions, via `casual-calc-package`
 # and `casual-calc-ods` — so the fuzz dependency set gains no third-party crate
@@ -85,6 +92,27 @@ bench = false
 [[bin]]
 name = "ods"
 path = "fuzz_targets/ods.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xlsx"
+path = "fuzz_targets/xlsx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "delimited"
+path = "fuzz_targets/delimited.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
 test = false
 doc = false
 bench = false
