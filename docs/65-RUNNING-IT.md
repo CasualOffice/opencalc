@@ -248,6 +248,25 @@ The demo defaults are demo defaults, and the ones that matter are:
   key and either could mint a token. A real deployment should use
   `OPENCALC_JWKS_URL` instead, where the server can verify a token and cannot
   make one. The server warns at startup when it is given a shared secret.
+- **Secrets belong in a file, not the environment.** Every secret has a
+  `_FILE` form — `OPENCALC_SHARED_SECRET_FILE`, `OPENCALC_ADMIN_TOKEN_FILE`,
+  `OPENCALC_REDIS_URL_FILE` — naming a path to read instead. An environment
+  variable is readable in `docker inspect`, in `/proc/1/environ` by anything
+  sharing the namespace, and in whatever a process manager logs; a signing key
+  held that way leaks through four mechanisms nobody thinks of as a disclosure.
+  Setting both forms is **refused**, not ranked, because a silent precedence
+  rule is how a deployment that believes it moved to files keeps running on the
+  variable it forgot to delete. A `_FILE` variable no server reads — the plural
+  typo is the common one — is named in the log at startup, since a mount that is
+  present, correct and ignored otherwise looks exactly like a missing secret.
+- **One key set per tenant, or the issuer is only a label.** With
+  `OPENCALC_ISSUERS=a=https://a/jwks.json,b=https://b/jwks.json` a token is
+  checked against **the keys of the issuer it names**. Sharing one key set
+  between tenants and checking `iss` against a policy does not work: the claim
+  is filled in by whoever mints the token, so any tenant holding a trusted key
+  can mint for any other tenant's documents. A single-tenant deployment can pin
+  its issuer with `OPENCALC_ISSUER`, which refuses a token the same signer
+  minted for somebody else — but cannot make one key set into a boundary.
 - **`OPENCALC_ALLOW_PLAIN_CALLBACKS=1`** lets the document travel in clear. It
   is off by default and on in the demo because the demo is loopback.
 - **The host has no authentication.** Anybody who can reach it can open any

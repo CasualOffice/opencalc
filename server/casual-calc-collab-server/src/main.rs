@@ -22,7 +22,7 @@ use casual_calc_collab_server::http::{HttpConfig, HttpTransport};
 use casual_calc_collab_server::lifecycle::SavePolicy;
 use casual_calc_collab_server::net::{Limits, Membership, ServiceConfig, serve};
 use casual_calc_collab_server::token::TokenPolicy;
-use casual_calc_collab_server::verify::{KeySet, Signing, Verifier};
+use casual_calc_collab_server::verify::{KeySet, Signing, Trust, Verifier};
 use casual_calc_transaction::session::SnapshotPolicy;
 
 #[tokio::main]
@@ -188,6 +188,8 @@ async fn start() -> Result<(), String> {
         )),
     };
 
+    warn_unread_secret_files();
+
     let config = ServiceConfig {
         bind: exposure.public.bind,
         tls,
@@ -220,7 +222,10 @@ async fn start() -> Result<(), String> {
 /// agree with itself would be pure cost — so no Redis is entirely normal and
 /// says so quietly.
 async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membership>, String> {
-    let url = std::env::var("OPENCALC_REDIS_URL").ok();
+    // A secret, not merely a setting: `redis://user:pass@host` puts the
+    // password in the URL, so this needs the same `_FILE` form as the signing
+    // key (`DEP-11`).
+    let url = casual_calc_secrets::env_secret("OPENCALC_REDIS_URL").map_err(|w| w.to_string())?;
     match (url, node) {
         (Some(url), node) => {
             let namespace = std::env::var("OPENCALC_REDIS_NAMESPACE").unwrap_or_else(|_| {
@@ -425,6 +430,31 @@ const PLACEHOLDER_SECRETS: &[&str] = &[
     "browser-tests-shared-secret",
 ];
 
+/// The secrets this server reads, in their file form.
+///
+/// Literal rather than built from the base names, for two reasons: the
+/// deployment page is checked against the strings that appear in server
+/// sources, and a `_FILE` variable nobody names is one an operator can be told
+/// about only by accident.
+const SECRET_FILES: &[&str] = &["OPENCALC_SHARED_SECRET_FILE", "OPENCALC_REDIS_URL_FILE"];
+
+/// Say so when the environment holds a `_FILE` variable nothing here reads.
+///
+/// A mount that is present, correct and ignored otherwise looks exactly like a
+/// server that was never given a secret.
+fn warn_unread_secret_files() {
+    for name in casual_calc_secrets::unknown_secret_files(
+        std::env::vars().map(|(name, _)| name),
+        SECRET_FILES,
+    ) {
+        tracing::warn!(
+            %name,
+            reads = ?SECRET_FILES,
+            "a *_FILE variable is set that this server does not read; check the spelling"
+        );
+    }
+}
+
 async fn read_verifier() -> Result<Verifier, String> {
     let policy = TokenPolicy {
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_default(),
@@ -439,6 +469,40 @@ async fn read_verifier() -> Result<Verifier, String> {
         require_https: !env_flag("OPENCALC_ALLOW_PLAIN_CALLBACKS"),
     };
 
+    // Multi-tenant first, because it is the only configuration in which the
+    // issuer is a *boundary*: one key set per issuer, and a token is checked
+    // against the keys of the issuer it names. With a single shared key set,
+    // `iss` is a label — any tenant holding a key in that set can sign a token
+    // naming any other tenant, which is what `DEP-10` records.
+    if let Ok(spec) = std::env::var("OPENCALC_ISSUERS") {
+        let accepted = vec![Signing::Rs256, Signing::Es256];
+        let mut trusts = Vec::new();
+        for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            let Some((issuer, url)) = entry.split_once('=') else {
+                return Err(format!(
+                    "OPENCALC_ISSUERS entry {entry:?} is not `issuer=https://…/jwks.json`"
+                ));
+            };
+            let (issuer, url) = (issuer.trim(), url.trim());
+            if issuer.is_empty() {
+                return Err(format!("OPENCALC_ISSUERS entry {entry:?} names no issuer"));
+            }
+            let keys = casual_calc_collab_server::verify::fetch_keys(url, &accepted).await?;
+            tracing::info!(keys = keys.len(), %url, %issuer, "loaded signing keys");
+            trusts.push(Trust::refreshing(
+                issuer,
+                keys,
+                url.to_owned(),
+                accepted.clone(),
+                env_u64("OPENCALC_JWKS_MIN_REFRESH_MS", 10_000),
+            ));
+        }
+        if trusts.is_empty() {
+            return Err("OPENCALC_ISSUERS is set but names no issuer".to_owned());
+        }
+        return Ok(Verifier::tenanted(policy, trusts));
+    }
+
     // Asymmetric first, because it is the one to use: this server can then
     // verify a token and cannot mint one.
     if let Ok(url) = std::env::var("OPENCALC_JWKS_URL") {
@@ -447,16 +511,28 @@ async fn read_verifier() -> Result<Verifier, String> {
         tracing::info!(keys = keys.len(), %url, "loaded signing keys");
         // Refreshing, not fixed. The first fetch is a starting point, not the
         // answer for the life of the process — see `JwksSource`.
-        return Ok(Verifier::refreshing(
-            policy,
-            keys,
-            url,
-            accepted,
-            env_u64("OPENCALC_JWKS_MIN_REFRESH_MS", 10_000),
-        ));
+        let min_refresh = env_u64("OPENCALC_JWKS_MIN_REFRESH_MS", 10_000);
+        // One key set, but the issuer can still be pinned. That does not make
+        // the deployment multi-tenant — it cannot, with one key set — it only
+        // refuses a token minted for somebody else by the same signer.
+        return Ok(match std::env::var("OPENCALC_ISSUER") {
+            Ok(issuer) if !issuer.trim().is_empty() => Verifier::tenanted(
+                policy,
+                vec![Trust::refreshing(
+                    issuer.trim(),
+                    keys,
+                    url,
+                    accepted,
+                    min_refresh,
+                )],
+            ),
+            _ => Verifier::refreshing(policy, keys, url, accepted, min_refresh),
+        });
     }
 
-    if let Ok(secret) = std::env::var("OPENCALC_SHARED_SECRET") {
+    if let Some(secret) =
+        casual_calc_secrets::env_secret("OPENCALC_SHARED_SECRET").map_err(|why| why.to_string())?
+    {
         // Refused rather than warned about. With a shared secret the holder can
         // *mint* tokens, not merely check them — so a placeholder that appears
         // in a public compose file is a key to every document of every
@@ -482,10 +558,13 @@ async fn read_verifier() -> Result<Verifier, String> {
             "using a shared secret: this process can mint tokens as well as check them, \
              which is what OPENCALC_JWKS_URL avoids"
         );
-        return Ok(Verifier::fixed(
-            policy,
-            KeySet::shared_secret(secret.as_bytes()),
-        ));
+        let keys = KeySet::shared_secret(secret.as_bytes());
+        return Ok(match std::env::var("OPENCALC_ISSUER") {
+            Ok(issuer) if !issuer.trim().is_empty() => {
+                Verifier::tenanted(policy, vec![Trust::fixed(issuer.trim(), keys)])
+            }
+            _ => Verifier::fixed(policy, keys),
+        });
     }
 
     Err(
@@ -586,6 +665,15 @@ mod secret_tests {
                 let Some((_, rest)) = line.split_once("OPENCALC_SHARED_SECRET") else {
                     continue;
                 };
+                // The *variable*, not anything merely prefixed by it.
+                // `OPENCALC_SHARED_SECRET_FILE` names a path to read the secret
+                // from, and a path is not a secret — matching on the prefix
+                // read `/run/secrets/…` as a published signing key. Narrowing
+                // this does not narrow what it catches: an assignment still has
+                // a separator straight after the name.
+                if !rest.starts_with(['=', ':', ' ']) {
+                    continue;
+                }
                 let value = rest
                     .trim_start_matches(['=', ':', ' '])
                     .split(['#', '}'])

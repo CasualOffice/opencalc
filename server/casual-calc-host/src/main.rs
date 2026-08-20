@@ -1109,10 +1109,30 @@ async fn main() {
         // configuration and was one only for a browser on the Docker host.
         collab_ws: std::env::var("OPENCALC_COLLAB_WS").unwrap_or_default(),
         audience: std::env::var("OPENCALC_AUDIENCE").unwrap_or_else(|_| "opencalc-demo".to_owned()),
-        admin_token: std::env::var("OPENCALC_ADMIN_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty()),
+        // `_FILE` as well as the variable: an admin token in the environment
+        // is readable in `docker inspect` and /proc/1/environ (`DEP-11`). The
+        // file form is named literally in `SECRET_FILES` so an operator who
+        // misspells it is told, rather than left with a mount that is present,
+        // correct and ignored.
+        admin_token: match casual_calc_secrets::env_secret("OPENCALC_ADMIN_TOKEN") {
+            Ok(token) => token,
+            Err(why) => {
+                tracing::error!(%why, "cannot read the admin token");
+                std::process::exit(1);
+            }
+        },
     });
+    for name in casual_calc_secrets::unknown_secret_files(
+        std::env::vars().map(|(name, _)| name),
+        SECRET_FILES,
+    ) {
+        tracing::warn!(
+            %name,
+            reads = ?SECRET_FILES,
+            "a *_FILE variable is set that this server does not read; check the spelling"
+        );
+    }
+
     if let Err(why) = std::fs::create_dir_all(&config.store) {
         tracing::error!(?why, store = ?config.store, "cannot use the document store");
         std::process::exit(1);
@@ -1869,3 +1889,7 @@ mod integrity_tests {
         assert_eq!(found.invisible, vec!["alpha", "mike", "zulu"]);
     }
 }
+
+/// The secrets this server reads, in their file form. See the collaboration
+/// server's `SECRET_FILES` for why these are literal.
+const SECRET_FILES: &[&str] = &["OPENCALC_ADMIN_TOKEN_FILE"];

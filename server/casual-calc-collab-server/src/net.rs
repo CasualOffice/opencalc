@@ -793,7 +793,7 @@ pub async fn serve_on_with_shutdown(
     // them while the process runs. Without this a scheduled rotation locks
     // every user out of every document until an operator restarts every node,
     // and revoking a compromised key has no effect at all — see `JwksSource`.
-    if state.config.verifier.jwks().is_some() {
+    if state.config.verifier.refreshable() {
         tokio::spawn(refresh_keys(Arc::clone(&state), shutdown.clone()));
     }
 
@@ -993,25 +993,36 @@ async fn refresh_keys(state: Arc<Service>, shutdown: Shutdown) {
             _ = ticker.tick() => {}
             () = shutdown.wait() => return,
         }
-        let Some(source) = state.config.verifier.jwks() else {
-            return;
-        };
-        match crate::verify::fetch_keys(&source.url, &source.accepted).await {
-            Ok(keys) => {
-                let before = state.config.verifier.key_count();
-                let after = keys.len();
-                state.config.verifier.install(keys);
-                if before != after {
-                    tracing::info!(
-                        url = %source.url,
-                        before,
-                        after,
-                        "the signing key set changed"
-                    );
+        // Every issuer, not "the" issuer: a multi-tenant deployment holds one
+        // key set per tenant, and refreshing only the first would leave the
+        // rest frozen at boot — the very defect `SRV-02` fixed, reintroduced
+        // one tenant along.
+        for trust in state.config.verifier.trusts() {
+            let Some(source) = trust.jwks() else {
+                continue;
+            };
+            match crate::verify::fetch_keys(&source.url, &source.accepted).await {
+                Ok(keys) => {
+                    let before = trust.key_count();
+                    let after = keys.len();
+                    trust.install(keys);
+                    if before != after {
+                        tracing::info!(
+                            url = %source.url,
+                            issuer = %trust.issuer,
+                            before,
+                            after,
+                            "the signing key set changed"
+                        );
+                    }
                 }
-            }
-            Err(why) => {
-                tracing::warn!(%why, "could not refresh the signing keys; keeping the ones held")
+                Err(why) => {
+                    tracing::warn!(
+                        %why,
+                        issuer = %trust.issuer,
+                        "could not refresh the signing keys; keeping the ones held"
+                    )
+                }
             }
         }
     }
@@ -1919,14 +1930,19 @@ async fn authorise(
     //
     // Retried once. If the freshly-read set still has no such key, the answer
     // was already correct.
+    //
+    // Only the issuer the token names is re-read. Fetching every tenant's key
+    // endpoint because one token carried an unknown `kid` would turn one
+    // client's bad token into a request aimed at every integrator at once.
     if matches!(outcome, Err(crate::verify::VerifyError::UnknownKey))
-        && let Some(source) = state.config.verifier.jwks()
+        && let Some(trust) = state.config.verifier.trust_for(&token)
+        && let Some(source) = trust.jwks()
         && source.may_attempt(now_ms())
     {
         match crate::verify::fetch_keys(&source.url, &source.accepted).await {
             Ok(keys) => {
-                tracing::info!(url = %source.url, keys = keys.len(), "re-read the signing keys for an unknown kid");
-                state.config.verifier.install(keys);
+                tracing::info!(url = %source.url, issuer = %trust.issuer, keys = keys.len(), "re-read the signing keys for an unknown kid");
+                trust.install(keys);
                 outcome = state.config.verifier.verify(&token, document_key, now_secs);
             }
             Err(why) => {

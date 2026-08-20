@@ -340,7 +340,7 @@ fn installing_a_new_key_set_lets_a_rotated_key_in() {
     );
 
     // The integrator publishes k2 beside k1; the server re-reads.
-    verifier.install(KeySet {
+    verifier.sole().expect("one tenant").install(KeySet {
         keys: [
             ("k1".to_owned(), DecodingKey::from_secret(SECRET)),
             ("k2".to_owned(), DecodingKey::from_secret(NEXT)),
@@ -359,7 +359,7 @@ fn installing_a_new_key_set_lets_a_rotated_key_in() {
 
     // Revocation is the mirror image, and is why a clock is needed as well as
     // the on-demand path: nothing presents a token for a key being withdrawn.
-    verifier.install(KeySet {
+    verifier.sole().expect("one tenant").install(KeySet {
         keys: [("k2".to_owned(), DecodingKey::from_secret(NEXT))]
             .into_iter()
             .collect(),
@@ -393,7 +393,10 @@ fn an_unknown_kid_cannot_be_used_to_hammer_the_key_endpoint() {
         vec![Signing::Rs256],
         10_000,
     );
-    let source = verifier.jwks().expect("this one refreshes");
+    let source = verifier
+        .sole()
+        .and_then(Trust::jwks)
+        .expect("this one refreshes");
 
     assert!(source.may_attempt(50_000), "the first attempt runs");
     assert!(!source.may_attempt(50_001), "an immediate second does not");
@@ -407,7 +410,140 @@ fn an_unknown_kid_cannot_be_used_to_hammer_the_key_endpoint() {
     // pretend otherwise.
     assert!(
         Verifier::fixed(policy(), KeySet::shared_secret(SECRET))
-            .jwks()
+            .sole()
+            .and_then(Trust::jwks)
             .is_none()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tenant isolation (DEP-10).
+//
+// One `Verifier` held one key set and never looked at `iss`, so every issuer a
+// deployment trusted could mint for every other issuer's documents. Checking
+// `iss` against a policy would not have fixed it: with one shared key set the
+// claim is a label the minter fills in. The boundary has to be the *binding* —
+// a token is checked against the keys of the issuer it names, and no others.
+// ---------------------------------------------------------------------------
+
+const TENANT_A: &[u8] = b"tenant a's signing secret, 32+ bytes";
+const TENANT_B: &[u8] = b"tenant b's signing secret, 32+ bytes";
+
+/// Two tenants, each with its own key set.
+fn tenanted() -> Verifier {
+    Verifier::tenanted(
+        policy(),
+        vec![
+            Trust::fixed("https://a.example", KeySet::shared_secret(TENANT_A)),
+            Trust::fixed("https://b.example", KeySet::shared_secret(TENANT_B)),
+        ],
+    )
+}
+
+fn claims_from(issuer: &str, document_key: &str) -> Claims {
+    Claims {
+        iss: issuer.into(),
+        ..claims(document_key)
+    }
+}
+
+fn signed_with(secret: &[u8], claims: &Claims) -> String {
+    jsonwebtoken::encode(
+        &Header::new(Algorithm::HS256),
+        claims,
+        &EncodingKey::from_secret(secret),
+    )
+    .unwrap()
+}
+
+/// **A tenant cannot mint for another tenant's issuer.**
+///
+/// The whole of `DEP-10` in one assertion. Tenant A holds a real signing key
+/// this server trusts, and names tenant B — so every check that looks only at
+/// "is this signed by a key we trust" passes. It is refused because naming B
+/// selects *B's* keys, which A cannot sign for.
+#[test]
+fn one_tenant_cannot_mint_for_another() {
+    let forged = signed_with(TENANT_A, &claims_from("https://b.example", "doc-1"));
+    assert_eq!(
+        tenanted().verify(&forged, "doc-1", 1_500),
+        Err(VerifyError::BadSignature),
+        "a key this server trusts minted a token for a document it does not own"
+    );
+}
+
+/// And each tenant still works, so the test above cannot pass by refusing
+/// everything.
+#[test]
+fn each_tenant_verifies_against_its_own_keys() {
+    let verifier = tenanted();
+    for (issuer, secret) in [
+        ("https://a.example", TENANT_A),
+        ("https://b.example", TENANT_B),
+    ] {
+        let token = signed_with(secret, &claims_from(issuer, "doc-1"));
+        let out = verifier
+            .verify(&token, "doc-1", 1_500)
+            .unwrap_or_else(|e| panic!("{issuer} could not verify its own token: {e}"));
+        assert_eq!(out.iss, issuer);
+    }
+}
+
+/// An issuer the deployment has never heard of is refused before any key is
+/// consulted — rather than being tried against the first tenant's keys.
+#[test]
+fn an_unknown_issuer_is_refused() {
+    let token = signed_with(TENANT_A, &claims_from("https://elsewhere.example", "doc-1"));
+    assert_eq!(
+        tenanted().verify(&token, "doc-1", 1_500),
+        Err(VerifyError::UnknownIssuer)
+    );
+}
+
+/// A single-tenant deployment can still pin its issuer. One key set, so the
+/// signature proves nothing about *who* the token was minted for; the verified
+/// `iss` is what refuses it.
+#[test]
+fn a_pinned_issuer_refuses_a_token_minted_for_someone_else() {
+    let verifier = Verifier::tenanted(
+        policy(),
+        vec![Trust::fixed(
+            "https://host.example",
+            KeySet::shared_secret(SECRET),
+        )],
+    );
+
+    let ours = signed(&claims_from("https://host.example", "doc-1"));
+    assert!(
+        verifier.verify(&ours, "doc-1", 1_500).is_ok(),
+        "the pinned issuer's own token was refused"
+    );
+
+    // Same key, same signature check, different `iss`.
+    let theirs = signed(&claims_from("https://other.example", "doc-1"));
+    assert_eq!(
+        verifier.verify(&theirs, "doc-1", 1_500),
+        Err(VerifyError::Claims(TokenError::WrongIssuer))
+    );
+}
+
+/// Unpinned stays unpinned: a deployment that names no issuer accepts any, as
+/// it always has. Guards against the fix being a silent breaking change for
+/// every existing single-tenant install.
+#[test]
+fn an_unnamed_issuer_still_accepts_any() {
+    let token = signed(&claims_from("https://anything.example", "doc-1"));
+    assert!(verifier().verify(&token, "doc-1", 1_500).is_ok());
+}
+
+/// The refresh path and the verify path must pick the same tenant, or an
+/// unknown `kid` re-reads keys that were never going to help.
+#[test]
+fn the_refresh_path_picks_the_same_tenant_as_verification() {
+    let verifier = tenanted();
+    let token = signed_with(TENANT_B, &claims_from("https://b.example", "doc-1"));
+    assert_eq!(
+        verifier.trust_for(&token).map(|t| t.issuer.as_str()),
+        Some("https://b.example")
     );
 }
