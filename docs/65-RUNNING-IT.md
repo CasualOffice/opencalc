@@ -286,6 +286,61 @@ It comes back on its own when Redis does — nodes re-dial and re-claim, with no
 restart needed. Replication and failover are designed in
 [77](77-COORDINATOR-AVAILABILITY.md) and not built.
 
+## Backing it up, and what you get back
+
+**The recovery point is your backup interval, and nothing shortens it.** There
+is no continuous archive and no point-in-time recovery: whatever was edited
+between your last copy and the failure is gone. Say that number out loud before
+choosing an interval, because it is the whole guarantee.
+
+### What a document is
+
+Three things, in the store directory:
+
+    <id>.xlsx        the document
+    <id>.json        its metadata — title, timestamps
+    <id>.versions/   previous versions, one file each, named for the moment
+
+They are written **one at a time**, document first, so an interruption leaves an
+*unlisted* document rather than a listed one whose bytes are gone. Each
+individual write is atomic — written beside the target and renamed — so no
+single file is ever half-written (`DEP-12`).
+
+### The thing to understand about a live copy
+
+> A backup of a running store is a set of atomic files, not an atomic set of
+> files.
+
+Copy the volume while somebody is uploading and the copy can hold the document
+without its metadata, or the metadata without the document. Neither is
+corruption and both are recoverable — but a restore of that copy looks complete
+and is quietly short.
+
+**Two options, and the first is free:**
+
+- **Stop the host, copy, start it.** A few seconds of downtime buys a copy with
+  nothing in flight. For most deployments this is the right answer.
+- **Copy live and check afterwards.** The host scans its store at startup and
+  says what does not line up:
+
+      WARN store is consistent
+      WARN the store does not line up  invisible=["k3f9"] dangling=[] …
+
+  `invisible` is a document nothing lists — its bytes are there and it will not
+  appear. `dangling` is an entry that lists a document whose bytes are gone.
+  `unfinished` is a `.part` from a write interrupted before its rename.
+  `stranded` is a versions directory whose document is gone.
+
+  It **reports and does not repair**, deliberately: an invisible document may be
+  somebody's only copy and a dangling entry may be the record of one that should
+  be hunted down. Those want opposite treatment, and only you know which.
+
+### Restoring
+
+Stop the host, replace the store directory, start it, and **read the first
+warning line**. A restore that says `store is consistent` is complete. One that
+does not has told you exactly which ids to look at.
+
 ## Data
 
 Documents live in a named volume. `docker compose down` keeps it; `down -v`
