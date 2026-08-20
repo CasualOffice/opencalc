@@ -312,6 +312,13 @@ jobs:
       # or a deliberate manual run, never on a merge.
       - name: A release cannot publish by accident
         run: python3 tools/check-release-hold.py
+      # fuzz/ is its own workspace with its own lockfile, path-depending on
+      # crates in the main one — so a dependency change there invalidates it
+      # without the main --locked build noticing. That has cost two incidents:
+      # a vulnerable h2 that only fuzz/ still pinned, and a stale lock that
+      # failed fuzz-build on main. Seconds here beats minutes there.
+      - name: The fuzz lockfile is not stale
+        run: python3 tools/check-fuzz-lock.py
       # Boundary invariant 7: the browser build and the native build compile the
       # same engine. Kept by care until now; the failure mode is one
       # `cfg(target_os)` added to make a build pass, which review does not see.
@@ -564,8 +571,26 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify ods; do
+          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify ods xlsx delimited snapshot; do
             seeds="seeds/$target"
+            extra=""
+            flags="-max_total_time=60 -rss_limit_mb=4096"
+            # `xlsx` reads the rights-reviewed fixture corpus **in place**
+            # rather than carrying a second copy of it: five producers (Excel,
+            # LibreOffice, openpyxl, XlsxWriter, this repository), already
+            # checksummed by `repository-policy`, so a seed cannot drift from
+            # the fixture it came from. `-max_len` is explicit because the
+            # largest fixture is 934 KB and libFuzzer sizes its mutations from
+            # the largest corpus entry when not told otherwise.
+            #
+            # These are named **after** `corpus/$target`, and that order is not
+            # cosmetic: libFuzzer writes what it finds into the *first*
+            # directory, so naming a tracked one there fills `fixtures/` with a
+            # thousand fuzzer artefacts.
+            if [ "$target" = xlsx ]; then
+              extra="seeds/ooxml_xml ../fixtures/corpus ../fixtures/generated"
+              flags="$flags -max_len=65536"
+            fi
             echo "::group::$target"
             # Created, not assumed. `fuzz/corpus/` is gitignored, so on a fresh
             # checkout it does not exist — and libFuzzer treats a named corpus
@@ -575,8 +600,8 @@ jobs:
             # working tree where earlier runs had already created one.
             mkdir -p "corpus/$target"
             cargo +nightly-2026-07-20 fuzz run "$target" \
-              "corpus/$target" $([ -d "$seeds" ] && echo "$seeds" || true) \
-              -- -max_total_time=60 -rss_limit_mb=4096
+              "corpus/$target" $([ -d "$seeds" ] && echo "$seeds" || true) $extra \
+              -- $flags
             echo "::endgroup::"
           done
 

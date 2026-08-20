@@ -1,0 +1,4 @@
+name,qty,price,flag,when,at,zip
+widget,7,3.5,TRUE,2024-03-05,13:45,007
+gasket,-12,0.125,false,1900-02-28 09:00,23:59:59,0042
+bolt,1e6,-0.0,True,9999-12-31,00:00:00,+0080
