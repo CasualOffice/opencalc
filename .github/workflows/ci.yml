@@ -50,9 +50,44 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/cargo-warmup
-      - run: cargo test --workspace --all-features --locked
+
+      # **The service container is not enough** (`CI-012`).
+      #
+      # It gives a Redis on 6379, which is what `OPENCALC_TEST_REDIS` points
+      # at. But the coordinator tests start their *own* servers and sentinels —
+      # a failover needs two primaries and three sentinels it can promote and
+      # kill — and for that they need the binaries on PATH. Without them they
+      # printed "skipped" and passed.
+      #
+      # So the behaviour `ADR-020` exists for, and that this project has now
+      # decided to depend on, was asserted nowhere that gates a merge. Same
+      # shape as a metric that is scraped and always zero.
+      - name: Redis binaries, for the tests that run their own cluster
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server
+          redis-server --version
+          redis-sentinel --version
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked 2>&1 | tee /tmp/test.log
         env:
           OPENCALC_TEST_REDIS: redis://127.0.0.1:6379
+
+      # **A skipped test that passes is the thing this row is about.**
+      #
+      # Installing the binaries fixes it today. Nothing stops a runner image
+      # changing, or a test growing a new precondition, and going quiet again —
+      # and a green job would say nothing either time. So the skips are the
+      # assertion: if the coordinator tests announce they were skipped, the job
+      # fails and says which.
+      - name: No coordinator test skipped itself
+        run: |
+          if grep -nE "skipped: (needs a .redis-server|set OPENCALC_TEST_REDIS)" /tmp/test.log; then
+            echo "::error::a coordinator test skipped and passed — the behaviour above is untested here"
+            exit 1
+          fi
+          echo "no coordinator test skipped"
 
   docs:
     runs-on: ubuntu-latest
