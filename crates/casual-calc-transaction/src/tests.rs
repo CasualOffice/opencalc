@@ -2208,3 +2208,301 @@ mod defined_names_shift {
         );
     }
 }
+
+// --- The rest of the position-indexed state (MNT/structural) ---------------
+//
+// `sheet.tables` was "the one position-indexed thing this function never
+// touched". It was not the only one. `shift_metadata_insert` moves merges, the
+// autofilter, filter-hidden rows, sizing, hidden lines, the freeze boundary,
+// the outline and now tables — and the sheet also holds `validations`,
+// `conditional_formats`, `charts` and `pivots`, every one of them a *range*
+// that stops describing its data the moment rows move under it.
+//
+// The failure is the same shape as the table one and just as quiet: no error,
+// no entry in the compatibility report, and a saved file that looks right.
+
+/// A validation over rows `r0..=r1` in column A.
+fn validation_over(r0: u32, r1: u32) -> casual_calc_model::DataValidation {
+    casual_calc_model::DataValidation {
+        range: merge(r0, 0, r1, 0),
+        values: Vec::new(),
+        kind: Default::default(),
+        operator: Default::default(),
+        formula1: String::new(),
+        formula2: String::new(),
+        allow_blank: true,
+        error_style: None,
+        hide_dropdown: false,
+        ime_mode: None,
+        error_title: String::new(),
+        error_text: String::new(),
+        prompt_title: String::new(),
+        prompt_text: String::new(),
+    }
+}
+
+/// **A validation follows its rows.**
+///
+/// Otherwise a list restricted to `A5:A8` goes on policing `A5:A8` after a row
+/// is inserted above it — so the row that moved *out* keeps the rule and the
+/// row that moved *in* is unguarded. A person typing into the cell they just
+/// created is refused, and the cell they meant is not.
+#[test]
+fn inserting_rows_moves_a_data_validation() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .validations
+        .push(casual_calc_model::DataValidation {
+            range: merge(4, 0, 7, 0),
+            values: Vec::new(),
+            kind: Default::default(),
+            operator: Default::default(),
+            formula1: String::new(),
+            formula2: String::new(),
+            allow_blank: true,
+            error_style: None,
+            hide_dropdown: false,
+            ime_mode: None,
+            error_title: String::new(),
+            error_text: String::new(),
+            prompt_title: String::new(),
+            prompt_text: String::new(),
+        });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    let moved = &wb.sheets[0].validations[0].range;
+    assert_eq!(
+        (moved.start.row, moved.end.row),
+        (5, 8),
+        "the validation stayed on the rows its data left"
+    );
+}
+
+/// **A conditional format follows its rows**, for the same reason: the
+/// highlight is a property of the data, and data that moves takes it along.
+#[test]
+fn inserting_rows_moves_a_conditional_format() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .conditional_formats
+        .push(casual_calc_model::ConditionalFormat {
+            range: merge(4, 0, 7, 0),
+            rule: casual_calc_model::CfRule::GreaterThan(1.0),
+            fill: String::new(),
+            font_color: None,
+            bold: false,
+            priority: 1,
+            stop_if_true: false,
+        });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    let moved = &wb.sheets[0].conditional_formats[0].range;
+    assert_eq!(
+        (moved.start.row, moved.end.row),
+        (5, 8),
+        "the highlight stayed on the rows its data left"
+    );
+}
+
+/// And a delete brings them back, so the pair is symmetric rather than
+/// one-directional — an insert that moves and a delete that does not is a
+/// range that drifts every time somebody edits above it.
+#[test]
+fn deleting_rows_moves_them_back() {
+    let mut wb = workbook();
+    wb.sheets[0]
+        .validations
+        .push(casual_calc_model::DataValidation {
+            range: merge(4, 0, 7, 0),
+            values: Vec::new(),
+            kind: Default::default(),
+            operator: Default::default(),
+            formula1: String::new(),
+            formula2: String::new(),
+            allow_blank: true,
+            error_style: None,
+            hide_dropdown: false,
+            ime_mode: None,
+            error_title: String::new(),
+            error_text: String::new(),
+            prompt_title: String::new(),
+            prompt_text: String::new(),
+        });
+    wb.sheets[0]
+        .conditional_formats
+        .push(casual_calc_model::ConditionalFormat {
+            range: merge(4, 0, 7, 0),
+            rule: casual_calc_model::CfRule::GreaterThan(1.0),
+            fill: String::new(),
+            font_color: None,
+            bold: false,
+            priority: 1,
+            stop_if_true: false,
+        });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        (
+            wb.sheets[0].validations[0].range.start.row,
+            wb.sheets[0].conditional_formats[0].range.start.row
+        ),
+        (4, 4),
+        "a round trip left them somewhere else"
+    );
+}
+
+/// **A comment follows its cell.**
+///
+/// A note is attached to the cell, not to the address — leave it behind and it
+/// annotates whatever moved into that row instead, which is worse than losing
+/// it because it reads as though it belongs.
+#[test]
+fn inserting_rows_moves_a_comment_and_deleting_takes_it_with_the_row() {
+    let mut wb = workbook();
+    wb.sheets[0].comments.push(casual_calc_model::CellComment {
+        at: CellRef::new(5, 0),
+        text: "check this".to_owned(),
+        author: None,
+        created: None,
+        resolved: false,
+        replies: Vec::new(),
+    });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0].comments[0].at.row, 6,
+        "the note stayed on the row its cell left"
+    );
+
+    // Deleting the row the comment is on takes the comment with it.
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 6,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert!(
+        wb.sheets[0].comments.is_empty(),
+        "the note outlived the cell it annotates"
+    );
+}
+
+/// **A hyperlink follows its range**, and a delete that swallows the range
+/// takes the link with it rather than leaving one pointed at other data.
+#[test]
+fn inserting_rows_moves_a_hyperlink_and_a_delete_can_remove_it() {
+    let mut wb = workbook();
+    wb.sheets[0].hyperlinks.push(casual_calc_model::Hyperlink {
+        range: merge(4, 0, 4, 0),
+        target: Some("https://example.invalid/".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0].hyperlinks[0].range.start.row, 5,
+        "the link stayed on the row its cell left"
+    );
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 5,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert!(
+        wb.sheets[0].hyperlinks.is_empty(),
+        "a link survived the cells it covered"
+    );
+}
+
+/// A delete that swallows a validated block drops the rule — and **undo puts
+/// it back**, because the delete's inverse carries the whole metadata
+/// snapshot. That is why this shift belongs in the bundle rather than beside
+/// it: the restore was already there, only the movement was missing.
+#[test]
+fn a_delete_that_drops_a_validation_is_undone_by_its_inverse() {
+    let mut wb = workbook();
+    wb.sheets[0].validations.push(validation_over(4, 7));
+
+    let inverse = apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 4,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].validations.is_empty(), "the delete kept it");
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(
+        wb.sheets[0]
+            .validations
+            .first()
+            .map(|v| (v.range.start.row, v.range.end.row)),
+        Some((4, 7)),
+        "undo did not bring the validation back"
+    );
+}
