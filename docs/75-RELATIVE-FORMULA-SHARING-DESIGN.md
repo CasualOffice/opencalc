@@ -210,6 +210,31 @@ Stated so the answer is not assumed:
 - If real workbooks turn out not to be dominated by filled-down columns, the
   win is theoretical. `PERF-10` measuring resident memory first would tell us,
   and is the cheaper thing to do.
+
+  **Measured, and it is not theoretical.** The benchmark now reports an
+  `arena` block, counted rather than sampled — nodes times `size_of::<Expr>()`,
+  which is exact and works on a machine with no `/proc`:
+
+  | | |
+  |---|---|
+  | cells in a filled-down `=A1*2` column | 5 000 |
+  | distinct trees the arena holds | **5 000** |
+  | `size_of::<Expr>()` | 80 bytes |
+  | arena bytes per formula cell | **240** |
+  | a cell's own cost (`PERF-10`, on the runner) | ~83 |
+
+  So a filled column costs about **323 bytes a cell, of which 240 — three
+  quarters — is the tree**, and sharing it would take that to 83. A nine-node
+  formula like `IF(A1>0,SUM($B$1:B1)*C1,0)` is 720 bytes of tree against the
+  same 83, where sharing removes nine tenths.
+
+  It also confirms the premise directly: `distinctTrees` equals `cells`, so
+  `PERF-09`'s interning collapses **none** of a filled column, exactly as this
+  note argued it could not.
+
+  The figure is reproducible — `cargo run -p casual-calc-benchmark` — and
+  pinned by a test that fails when a filled column starts sharing trees, which
+  is to say when stage 3 lands.
 - If the typed migration cannot be completed in one series, a half-migrated
   codebase — some sites typed, some not — is **worse than not starting**,
   because the convention it leaves behind is exactly the silent-wrong-answer

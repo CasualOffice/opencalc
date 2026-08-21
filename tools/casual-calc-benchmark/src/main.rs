@@ -43,7 +43,52 @@ struct Report {
     scaling: Vec<ScalingReport>,
     /// What a million cells cost in resident memory — see [`MemoryReport`].
     memory: MemoryReport,
+    /// What a filled-down column's formula trees cost — see [`ArenaReport`].
+    arena: ArenaReport,
     cases: Vec<CaseReport>,
+}
+
+/// What the formula arena costs for a filled-down column.
+///
+/// The number `PERF-11` turns on. `docs/75` asks whether the win is theoretical
+/// — "if real workbooks turn out not to be dominated by filled-down columns" —
+/// and nothing measured it, so the migration was going to be judged on an
+/// intuition.
+///
+/// **Counted, not sampled.** Nodes times `size_of::<Expr>()` is exact and
+/// deterministic, so unlike [`MemoryReport`] this works on a machine with no
+/// `/proc` — which is every developer machine here. It also isolates the arena
+/// from everything else in the workbook, which resident set cannot.
+///
+/// It understates rather than flatters: heap held *inside* a node — the
+/// `Option<String>` sheet name on a reference, a `Text` literal — is not
+/// counted, so the real arena is at least this big.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArenaReport {
+    /// Cells in the filled-down column measured.
+    cells: u64,
+    /// Distinct trees the arena holds for them.
+    ///
+    /// **The figure `PERF-11` moves**: one shape filled down a column is one
+    /// tree once references are stored relative, and `cells` of them until
+    /// then. `PERF-09` already collapses *identical* trees, which a filled
+    /// column does not produce — the references shift, so every row is a
+    /// different tree.
+    distinct_trees: u64,
+    /// Total `Expr` nodes across those trees.
+    nodes: u64,
+    /// `nodes * size_of::<Expr>()`.
+    arena_bytes: u64,
+    /// What one `Expr` occupies, so the arithmetic above can be checked.
+    expr_bytes: u64,
+    /// Arena bytes per formula cell, in hundredths so the report stays integers.
+    ///
+    /// Compare against `memory.centiBytesPerCell`: that is what a *cell* costs,
+    /// and this is what its formula costs on top. When the second is several
+    /// times the first, a filled column is dominated by its trees and `PERF-11`
+    /// is worth its risk.
+    centi_arena_bytes_per_cell: u64,
 }
 
 #[derive(Serialize)]
@@ -336,6 +381,57 @@ fn measure_memory(cells: u32) -> MemoryReport {
     let held = workbook.sheets.len();
     debug_assert!(held > 0 || cells == 0);
     classify_memory(baseline, peak, cells)
+}
+
+/// Count what a filled-down column's formula trees cost.
+///
+/// The column is `=A1*2`, `=A2*2`, … — one *shape*, filled down, which is the
+/// case `docs/40` promised would share a tree and `PERF-09` cannot collapse
+/// because the references shift and every row is therefore a different tree.
+fn measure_arena(cells: u32) -> ArenaReport {
+    let mut workbook = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Filled");
+    for row in 0..cells {
+        sheet
+            .cells
+            .set(CellRef::new(row, 0), Cell::value(CellValue::Number(1.0)));
+        let mut cell = Cell::value(CellValue::Number(0.0));
+        cell.formula = Some(workbook.store_formula(
+            casual_calc_formula::parse(&format!("A{}*2", row + 1)).expect("parses"),
+        ));
+        sheet.cells.set(CellRef::new(row, 1), cell);
+    }
+    workbook.sheets.push(sheet);
+
+    let nodes: u64 = workbook.formulas.iter().map(|e| expr_nodes(e) as u64).sum();
+    let expr_bytes = core::mem::size_of::<casual_calc_formula::Expr>() as u64;
+    let arena_bytes = nodes * expr_bytes;
+    ArenaReport {
+        cells: u64::from(cells),
+        distinct_trees: workbook.formulas.len() as u64,
+        nodes,
+        arena_bytes,
+        expr_bytes,
+        centi_arena_bytes_per_cell: if cells == 0 {
+            0
+        } else {
+            arena_bytes * 100 / u64::from(cells)
+        },
+    }
+}
+
+/// Nodes in a tree, counted structurally.
+fn expr_nodes(e: &casual_calc_formula::Expr) -> usize {
+    use casual_calc_formula::Expr;
+    1 + match e {
+        Expr::Binary { left, right, .. } => expr_nodes(left) + expr_nodes(right),
+        Expr::Unary { operand, .. } => expr_nodes(operand),
+        Expr::Function { args, .. } => args.iter().map(expr_nodes).sum(),
+        Expr::Call { callee, args } => {
+            expr_nodes(callee) + args.iter().map(expr_nodes).sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// Twenty-five times, for ten times the work.
@@ -863,6 +959,7 @@ fn main() {
     // build cannot cost zero bytes, so CI asserts the number is positive and
     // caught this on the first run rather than reporting a comforting zero.
     let memory = measure_memory(if smoke { 50_000 } else { 1_000_000 });
+    let arena = measure_arena(if smoke { 5_000 } else { 100_000 });
 
     let cases = build_cases()
         .iter()
@@ -890,6 +987,7 @@ fn main() {
         cases,
         scaling: measure_all_scaling(if smoke { 3 } else { 20 }),
         memory,
+        arena,
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
@@ -1008,5 +1106,60 @@ mod gate_tests {
         // allows. Pinned exactly, so widening it back is an edit somebody makes
         // rather than a multiplier that drifts.
         assert_eq!(FRAME_BUDGET_NS, 8_333_333);
+    }
+}
+
+#[cfg(test)]
+mod arena_tests {
+    use super::*;
+
+    /// **A filled-down column is one shape and N trees** — the premise `PERF-11`
+    /// rests on, measured rather than assumed.
+    ///
+    /// `PERF-09` collapses *identical* trees, and a filled column produces none:
+    /// the references shift, so `A1*2` and `A2*2` are different trees that
+    /// dedup cannot touch. If this ever reports fewer trees than cells,
+    /// something has started sharing them and the row's premise has moved.
+    ///
+    /// **This assertion inverts when stage 3 lands** — one tree for the whole
+    /// column — and it is written to fail loudly at that moment rather than to
+    /// quietly keep passing, because the number it guards is the whole point of
+    /// the work.
+    #[test]
+    fn a_filled_column_holds_one_tree_per_cell_today() {
+        let report = measure_arena(500);
+        assert_eq!(
+            report.distinct_trees, report.cells,
+            "a filled column shares trees already — PERF-11's premise has changed"
+        );
+        assert_eq!(report.nodes, report.cells * 3, "`A1*2` is three nodes");
+    }
+
+    /// The arithmetic is checkable, so the headline figure cannot drift from
+    /// what it claims to be.
+    #[test]
+    fn the_reported_bytes_follow_from_the_nodes() {
+        let report = measure_arena(200);
+        assert_eq!(report.arena_bytes, report.nodes * report.expr_bytes);
+        assert_eq!(
+            report.centi_arena_bytes_per_cell,
+            report.arena_bytes * 100 / report.cells
+        );
+        // The comparison that decides the row: an `Expr` is 80 bytes and a cell
+        // is ~83 (PERF-10), so three nodes per cell is roughly three times the
+        // cell's own cost. Asserted as a floor, not a fixed number, because the
+        // node size is allowed to change and the *conclusion* is what matters.
+        assert!(
+            report.centi_arena_bytes_per_cell >= 15_000,
+            "the arena is no longer several times the cell: {report:?} — recheck \
+             whether PERF-11 is still worth its risk"
+        );
+    }
+
+    /// An empty sheet does not divide by zero.
+    #[test]
+    fn no_cells_is_not_a_panic() {
+        let report = measure_arena(0);
+        assert_eq!(report.centi_arena_bytes_per_cell, 0);
     }
 }
