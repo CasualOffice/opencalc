@@ -10,10 +10,12 @@
 //!
 //! See `docs/42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md`.
 
-mod fonts;
+use casual_calc_text::faces as fonts;
 mod images;
 
-pub use fonts::{MissingScript, missing_scripts, register_face, registered_count};
+pub use casual_calc_text::faces::{
+    MissingScript, missing_scripts, register_face, registered_count,
+};
 pub use images::{
     ImageReport, ImageSource, MAX_IMAGE_PIXELS, NoImages, UndrawnImage, UndrawnReason,
 };

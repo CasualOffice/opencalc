@@ -20,14 +20,17 @@ pub mod chart;
 pub mod chart_data;
 pub mod conditional;
 mod display;
-pub mod font_substitution;
 mod geometry;
 mod numfmt;
 pub mod table_style;
 
 pub use axis::Axis;
 pub use display::{Align, BorderLine, DisplayList, PaintItem, Point, Rect};
-pub use font_substitution::{
+// Moved to `casual-calc-text` (`RND-11`) and re-exported unchanged, so it is
+// still reached as `casual_calc_layout::substitute` by everything that already
+// did — and is still the one substitution table, now somewhere the faces
+// themselves can see it.
+pub use casual_calc_text::substitution::{
     BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, substitute,
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};

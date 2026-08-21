@@ -351,6 +351,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-formula",
  "casual-calc-model",
+ "casual-calc-text",
  "serde",
  "serde_json",
 ]
@@ -412,6 +413,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-layout",
  "casual-calc-model",
+ "casual-calc-text",
  "rustybuzz",
  "skrifa",
  "tiny-skia",
@@ -442,6 +444,13 @@ version = "0.0.0"
 [[package]]
 name = "casual-calc-selection"
 version = "0.0.0"
+
+[[package]]
+name = "casual-calc-text"
+version = "0.0.0"
+dependencies = [
+ "skrifa",
+]
 
 [[package]]
 name = "casual-calc-transaction"

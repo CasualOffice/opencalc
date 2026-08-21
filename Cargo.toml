@@ -12,6 +12,7 @@ members = [
     "crates/casual-calc-transaction",
     "crates/casual-calc-selection",
     "crates/casual-calc-eval",
+    "crates/casual-calc-text",
     "crates/casual-calc-layout",
     "crates/casual-calc-render",
     "crates/casual-calc-sdk",

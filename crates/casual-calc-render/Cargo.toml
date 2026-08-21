@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 casual-calc-layout = { path = "../casual-calc-layout" }
+# The bundled faces and their advances, which moved below layout so the
+# chart legend could be measured there too (`RND-11`).
+casual-calc-text = { path = "../casual-calc-text" }
 tiny-skia = "0.11"
 skrifa = "0.43"
 # Shaping, behind a feature that is off for WebAssembly — see ADR-018. A pure
@@ -26,7 +29,7 @@ shaping = ["dep:rustybuzz"]
 # Every bundled family. On for native, off for WebAssembly, where the faces were
 # 72% of the bundle and the editor never touches them — it draws with
 # `ctx.fillText` and the browser supplies the fonts.
-all-fonts = []
+all-fonts = ["casual-calc-text/all-fonts"]
 
 [dev-dependencies]
 casual-calc-model = { path = "../casual-calc-model" }

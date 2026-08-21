@@ -1,0 +1,24 @@
+[package]
+name = "casual-calc-text"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Outlines and metrics from the bundled face bytes. The crate ttf-parser's own
+# advisory recommends (see DEP-14).
+skrifa = "0.43"
+
+[features]
+# Off by default, and that default matters. `casual-calc-layout` depends on this
+# crate for advance widths alone, and Cargo unifies features across a build — so
+# a default that switched every family on would put all of them back into the
+# WebAssembly bundle through layout, undoing the 72% this was trimmed by.
+# `casual-calc-render` turns it on for native builds; nothing else does.
+default = []
+all-fonts = []

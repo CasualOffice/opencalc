@@ -13,6 +13,11 @@ publish = false
 # has no dependencies of its own and sits in the bedrock beside the model
 # (docs/19), so this is a downward edge and not a new layer.
 casual-calc-formula = { path = "../casual-calc-formula" }
+# Advance widths, for geometry decided by how wide a string is — a chart
+# legend box, and the plot rectangle left over from it (`RND-11`). Also the
+# home of the font substitution table, which moved down with it because the
+# faces need it and it needs nothing.
+casual-calc-text = { path = "../casual-calc-text", default-features = false }
 casual-calc-model = { path = "../casual-calc-model" }
 serde = { version = "1", features = ["derive"] }
 

@@ -1371,6 +1371,188 @@ mod charts {
             .collect()
     }
 
+    // --- The legend (RND-11) -------------------------------------------
+    //
+    // Layout had no text advances, so it could not size a legend box; and the
+    // plot is *what is left over* from that box, so it could not place the plot
+    // either. It left the legend out entirely and gave the plot the whole
+    // frame, which made every chart with a legend render with a plot the width
+    // of the legend too wide. `casual-calc-text` measures it now.
+
+    /// Every text item's content, in the order they were emitted.
+    fn labels(list: &crate::DisplayList) -> Vec<String> {
+        list.items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Text { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bars of a two-series column chart, with `legend` set or not.
+    fn bars_with_legend(legend: Option<&str>) -> Vec<(Vec<Point>, String)> {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.legend = legend.map(str::to_owned);
+        wb.sheets[0].charts.push(chart);
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        polygons(&list)
+    }
+
+    /// **The plot is narrower with a legend than without one.**
+    ///
+    /// The defect stated exactly. Asserted against the *same chart* with the
+    /// legend turned off, so it cannot pass by the bars being any particular
+    /// width — only by their being narrower than they are with no legend.
+    #[test]
+    fn a_legend_takes_its_side_out_of_the_plot() {
+        let without = bars_with_legend(None);
+        let with = bars_with_legend(Some("r"));
+
+        // The frame's ground is polygon 0 and is the full frame either way; the
+        // bars follow. The last bar is the rightmost, so its right edge is how
+        // far the plot reaches.
+        let right_edge = |bars: &[(Vec<Point>, String)]| {
+            bars.last()
+                .expect("bars")
+                .0
+                .iter()
+                .map(|p| p.x)
+                .max()
+                .expect("a bar has corners")
+        };
+        let plain = right_edge(&without);
+        let legended = right_edge(&with);
+        assert!(
+            legended < plain,
+            "the plot reached just as far with a legend ({legended}) as without ({plain}) — \
+             the legend took nothing out of it"
+        );
+    }
+
+    /// A swatch and a name for each series, and the names are the ones a series
+    /// with no name of its own is given.
+    #[test]
+    fn a_legend_names_every_series() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3", "$A$1:$A$3"]);
+        chart.legend = Some("r".to_owned());
+        wb.sheets[0].charts.push(chart);
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        let found = labels(&list);
+        assert!(
+            found.contains(&"Series 1".to_owned()) && found.contains(&"Series 2".to_owned()),
+            "a series with no name of its own must be labelled by its position: {found:?}"
+        );
+
+        // One swatch per series, on top of the frame's ground and the bars.
+        let swatches = polygons(&list);
+        assert!(
+            swatches.len() >= 2,
+            "a legend with no swatches is a list of words: {swatches:?}"
+        );
+    }
+
+    /// A named series is named, rather than numbered.
+    #[test]
+    fn a_named_series_keeps_its_name() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3"]);
+        chart.series[0].name = "Revenue".to_owned();
+        chart.legend = Some("r".to_owned());
+        wb.sheets[0].charts.push(chart);
+
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        assert!(labels(&list).contains(&"Revenue".to_owned()));
+    }
+
+    /// **Left and right are different places.** A legend that ignored its side
+    /// would pass every test above.
+    #[test]
+    fn a_legend_sits_on_the_side_it_names() {
+        let left_bars = bars_with_legend(Some("l"));
+        let right_bars = bars_with_legend(Some("r"));
+
+        let left_edge = |bars: &[(Vec<Point>, String)]| {
+            bars.last()
+                .expect("bars")
+                .0
+                .iter()
+                .map(|p| p.x)
+                .min()
+                .expect("corners")
+        };
+        assert!(
+            left_edge(&left_bars) > left_edge(&right_bars),
+            "a legend on the left must push the plot right, not shrink it from the right"
+        );
+    }
+
+    /// A legend along the foot takes *height*, not width — so the bars stay as
+    /// wide as they were and get shorter instead.
+    #[test]
+    fn a_legend_below_takes_height_rather_than_width() {
+        let plain = bars_with_legend(None);
+        let below = bars_with_legend(Some("b"));
+
+        let right_edge = |bars: &[(Vec<Point>, String)]| {
+            bars.last()
+                .expect("bars")
+                .0
+                .iter()
+                .map(|p| p.x)
+                .max()
+                .expect("corners")
+        };
+        let bottom_edge = |bars: &[(Vec<Point>, String)]| {
+            bars.last()
+                .expect("bars")
+                .0
+                .iter()
+                .map(|p| p.y)
+                .max()
+                .expect("corners")
+        };
+        assert_eq!(
+            right_edge(&plain),
+            right_edge(&below),
+            "a legend along the foot narrowed the plot"
+        );
+        assert!(
+            bottom_edge(&below) < bottom_edge(&plain),
+            "a legend along the foot took no height out of the plot"
+        );
+    }
+
+    /// A frame too small to hold both is a frame that keeps its plot. A legend
+    /// that leaves no room for the chart has cost more than it explains.
+    #[test]
+    fn a_legend_that_would_leave_no_plot_is_refused() {
+        let mut wb = wb();
+        // Two columns by two rows, which is nowhere near enough.
+        let mut chart = ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            ChartKind::Column,
+        );
+        chart.series = vec![ChartSeries {
+            name: "A series with a very long name indeed".to_owned(),
+            categories: None,
+            values: "$A$1:$A$3".to_owned(),
+        }];
+        chart.legend = Some("r".to_owned());
+        wb.sheets[0].charts.push(chart);
+
+        // The point is that this does not panic and does not emit a legend it
+        // has no room for.
+        let list = layout_full(&wb, 0, &GridGeometry::default());
+        assert!(
+            !labels(&list).contains(&"A series with a very long name indeed".to_owned()),
+            "a legend was drawn into a frame with no room for one"
+        );
+    }
+
     /// A column chart's bars land at the twip rectangle the canvas puts them
     /// at, and **the taller value gets the taller bar measured from the same
     /// zero line**.
