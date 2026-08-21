@@ -2225,11 +2225,24 @@ async fn answering_keeps_a_participant_in_the_roster_rather_than_expiring_their_
     let (addr, _shutdown, _serving) = start_stoppable_with(
         Arc::new(Collected::default()),
         Limits {
-            tick_ms: 10,
+            tick_ms: 20,
             // A presence TTL far shorter than the idle limit, so the roster
             // would expire first if nothing refreshed it.
-            presence_ttl_ms: 60,
-            client_ping_ms: 20,
+            //
+            // **Sized against the coarsest clock this runs on, not the
+            // finest.** These were 60 ms of TTL against a 20 ms ping — three
+            // pings of headroom — and Windows' default timer granularity is
+            // about 16 ms, so two delayed slots on a loaded runner expired a
+            // participant who *was* answering and failed the build for a
+            // property that held. A margin below the platform's own resolution
+            // is not a tight test, it is a coin flip.
+            //
+            // Five pings of TTL and a wait of three whole TTLs keeps what is
+            // being asserted — a roster that would expire this participant if
+            // nothing refreshed it — while leaving the scheduler room to be
+            // late.
+            presence_ttl_ms: 400,
+            client_ping_ms: 80,
             client_idle_ms: 10_000,
             ..Limits::default()
         },
@@ -2241,9 +2254,11 @@ async fn answering_keeps_a_participant_in_the_roster_rather_than_expiring_their_
         .await
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    // Three whole TTLs: long enough that a roster which did not refresh would
+    // certainly have dropped this participant by now.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_200);
     while std::time::Instant::now() < deadline {
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(20), socket.next()).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(40), socket.next()).await;
     }
 
     assert_eq!(
