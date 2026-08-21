@@ -122,17 +122,81 @@ the evaluator still visits every cell. What improves is resident memory and the
 cost of interning, which is what `PERF-10` will be able to measure once it can
 measure memory at all.
 
+## The reader this design missed: the snapshot
+
+Found while starting stage 3, and it changes the plan.
+
+`Workbook::formulas: Vec<Expr>` is **serialised**. Snapshots are durable and
+they are on the wire — `casual-calc-collab-server` holds one per document as
+`snapshot: Vec<u8>` and hands it to joining clients. The list of readers above
+names the parser, the evaluator, the shifter, import, export, the structural
+rewrite and the cut path. It does not name the snapshot, and the snapshot is the
+one that breaks worst.
+
+A relative `A1` serialises today as:
+
+```json
+{"reference":{"col":0,"row":0}}
+```
+
+Bare `col` and `row` — the anchor flags are `skip_serializing_if` and absent
+when false. The instant `Expr` holds a `StoredRef` of the same shape, that same
+JSON reads back as **offset zero**: the cell itself. An existing `B1 = A1*2`
+comes back as `B1 = B1*2`, a circular reference. Every relative reference in
+every saved document, silently, and `ADR-010` closes the usual escape by saying
+`SCHEMA_VERSION` must not move.
+
+Proved rather than reasoned about: adding the derive and feeding a real
+serialised formula back through it is a two-line test, and it was.
+
+### The decision: the format does not change
+
+**Relativity is an in-memory representation only.** On write, each shared tree
+is resolved back to an absolute one per cell; on read, each cell's tree is
+stored relative at its own origin and re-interned. Nothing about the bytes
+changes, so there is no migration, no version bump, and a mixed-version cluster
+keeps working — which matters because a snapshot travels between nodes that may
+not be running the same build.
+
+What it costs is honest and worth stating: a snapshot of a 100 000-cell filled
+column expands to 100 000 trees again, so **snapshot size and collaboration
+payloads keep their present cost while resident memory gets the win**. The win
+this row is for is memory, and that is the one that is kept.
+
+What it implies for the code: `Expr` can no longer be serialised on its own,
+because a shared tree has no single origin to resolve against. The arena's
+serialisation moves up to `Workbook`, which walks cells — the only place that
+knows which origin belongs to which tree.
+
 ## Staging
 
 Deliberately not one change:
 
 1. Introduce `StoredRef`/`ResolvedRef` with `store`/`resolve`, unused. Pure
-   addition, fully testable on its own.
+   addition, fully testable on its own. **Landed.**
 2. Move the evaluator to resolve at read. No storage change yet — the trees are
    still absolute, so this is behaviour-preserving and provable.
+
+   **Cheaper than this note assumed.** `Evaluator` already carries
+   `current: Option<(usize, CellRef)>` — the cell whose formula is being
+   evaluated, saved and restored around each one, because `ROW()` and `COLUMN()`
+   with no argument need exactly that. The origin is already threaded and
+   already correct; stage 2 is to *use* it for references rather than to
+   introduce it.
+
+2a. **Serialise the arena from `Workbook`, not from `Expr`.** New, and it comes
+   before stage 3 rather than with it: see "the reader this design missed"
+   above. Absolute on the way out, relative on the way in, with the cell
+   supplying the origin. Behaviour-preserving and testable on its own — a
+   snapshot written before it must read back byte-identical after it, which is
+   the assertion that makes it safe to build stage 3 on.
 3. Switch `store_formula` to normalise. Interning collapses the column; the cut
    path is fixed in the same commit as this one, because it is the step that
-   breaks it.
+   breaks it. **Also the `Expr` shape**: one tree type holding `StoredRef`, with
+   entry points taking an `Origin`, rather than a generic `Expr<R>`. The
+   compiler still finds every call site — `.row` stops being a `u32` address —
+   so the mitigation this design turns on is kept without a type parameter
+   through every signature that touches an expression.
 4. Move import, export and the structural rewrites onto the typed API, deleting
    the absolute paths as each is proved.
 
