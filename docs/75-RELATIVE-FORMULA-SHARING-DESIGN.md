@@ -201,18 +201,42 @@ all — they move with their cell for free, which is the win — and `$`-anchore
 ones are addresses that the existing rewrite already handles unchanged. It is
 the crossing case that needs both origins.
 
-### What has to be decided
+### Resolved: neither, and the order stays as it is
 
-Either **rewrite before moving**, so the rewrite sees the old origin and stores
-against the new one it can compute; or **give the rewrite both origins**,
-leaving the order alone. The first is a smaller diff and a larger behavioural
-risk, since `rewrite_all_formulas` currently reads a workbook whose cells are
-already in their final places and several of its helpers may assume that. The
-second is honest about what the operation now needs.
+Both options first considered are wrong, and working the cases out on paper is
+what shows it.
 
-Not decided here, deliberately: this is the operation where getting it wrong
-means a formula that points one row off after an insert — silently, in a
-spreadsheet, which is the failure this design exists to prevent.
+**Rewriting before the move does not help.** Take `B5 = A2*2` and insert at row
+3. The rewrite asks whether the *reference's* coordinate is at or past the
+insertion — 2 is not past 3 — so it leaves the tree alone, correctly. Then the
+cell moves to `B6` and the untouched offset, three rows up, resolves to `A3`.
+The rewrite ran at the right time and still produced the wrong answer, because
+what changed the meaning was the **move**, not the rewrite.
+
+**The move is the operation that has to account for itself.** A cell carrying a
+relative tree that moves is a cell whose references now measure from somewhere
+else — which is the same thing a *cut* does, and `restore_at` is already the
+primitive for it. So `shift_cells_insert` and `shift_cells_delete` re-store any
+formula they move, from its old origin to its new one, and the tree goes on
+meaning exactly what it meant.
+
+The existing address-based rewrite then runs afterwards, **completely
+unchanged**, and applies the semantic part. The two compose:
+
+| | after the move re-stores | after the rewrite | Excel |
+|---|---|---|---|
+| `B5 = A5*2`, insert at 3 | still `A5` | `A6` (5 ≥ 3, so shifted) | `A6` |
+| `B5 = A2*2`, insert at 3 | still `A2` | `A2` (2 < 3, untouched) | `A2` |
+
+The first step makes a tree's meaning **invariant under the move**; the second
+applies the change the insertion actually implies. Neither can be dropped, and
+neither belongs in the other: preserving targets across a move is a property of
+moving, and shifting references past an insertion point is a property of
+inserting.
+
+That also removes the last unknown. `restore_at` already exists and is tested,
+the rewrite needs no change at all, and the ordering the code already has is the
+correct one.
 
 ## Staging
 
