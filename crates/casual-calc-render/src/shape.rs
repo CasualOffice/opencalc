@@ -7,13 +7,21 @@
 //!
 //! # Why the glyph ids are safe to hand to `skrifa`
 //!
-//! `rustybuzz` parses the font to shape it and `skrifa` parses it to outline
-//! it, which sounds like two sources of truth and is not: a glyph id is an index
-//! into the font's own tables, so the same bytes give the same ids to both. The
+//! The shaper turns text into glyph *ids* and `skrifa` outlines them. That
+//! sounds like two sources of truth and is not: a glyph id is an index into the
+//! font's own tables, so the same bytes give the same ids to both. The
 //! alternative — shaping to characters and mapping them back — is what loses
 //! ligatures, because the ligature has no character.
+//!
+//! It used to be two *parsers* that happened to agree: `rustybuzz` read the
+//! font with `ttf-parser` while `skrifa` read it with `read-fonts`. Both of
+//! those crates are unmaintained (`DEP-14`), and `harfrust` — the same shaping
+//! algorithm, maintained under the harfbuzz organisation — is built on
+//! `read-fonts` itself. So the agreement is now structural: one parser, one set
+//! of tables, and a single `read-fonts` in the lock file rather than two
+//! libraries kept in step by luck.
 
-use rustybuzz::{Face, UnicodeBuffer};
+use harfrust::{FontRef, ShapeOptions, ShaperData, UnicodeBuffer};
 
 /// One glyph, placed.
 ///
@@ -43,12 +51,22 @@ pub struct Placed {
 /// what makes Arabic render as words rather than as letters in reverse.
 #[must_use]
 pub fn run(bytes: &[u8], text: &str, size_px: f32) -> Option<Vec<Placed>> {
-    let face = Face::from_slice(bytes, 0)?;
-    let upem = face.units_per_em() as f32;
-    if upem <= 0.0 {
+    let font = FontRef::from_index(bytes, 0).ok()?;
+
+    // Built per call rather than cached. The tables it derives are a real cost
+    // and caching them is a real optimisation — and it is one to make against a
+    // measurement, not on the way past: this path is off entirely in the
+    // browser, and the native one draws a viewport of cells rather than a book.
+    let data = ShaperData::new(&font);
+    let shaper = data.shaper(&font).build();
+
+    // From the shaper rather than the font, because it is the shaper's own
+    // notion of the design grid that its advances are expressed in.
+    let upem = shaper.units_per_em();
+    if upem <= 0 {
         return None;
     }
-    let scale = size_px / upem;
+    let scale = size_px / upem as f32;
 
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(text);
@@ -57,7 +75,7 @@ pub fn run(bytes: &[u8], text: &str, size_px: f32) -> Option<Vec<Placed>> {
     // visible while an unset field is not.
     buffer.guess_segment_properties();
 
-    let shaped = rustybuzz::shape(&face, &[], buffer);
+    let shaped = shaper.shape(buffer, ShapeOptions::new());
     let positions = shaped.glyph_positions();
     let infos = shaped.glyph_infos();
     Some(
