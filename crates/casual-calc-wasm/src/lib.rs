@@ -8722,6 +8722,15 @@ struct Clip {
     sheet: usize,
     cut: bool,
     cells: Vec<ClipCell>,
+    /// The source columns' widths in twips, by offset from the copied range's
+    /// first column, for a paste that asks for them (`UX-CLIP-02`).
+    ///
+    /// Captured on copy rather than read on paste, because by then the source
+    /// may have been resized — or, after a cut, may not be there at all. Only
+    /// columns with an *explicit* width are listed: a column at the sheet
+    /// default has no width to carry, and writing the default onto the
+    /// destination would silently pin a column that was following it.
+    widths: Vec<(u32, i64)>,
 }
 thread_local! {
     static CLIP: RefCell<Option<Clip>> = const { RefCell::new(None) };
@@ -8771,7 +8780,24 @@ pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: 
             return;
         };
         let cells = clip_capture(wb, sh, r0, c0, r1, c1);
-        CLIP.with(|cl| *cl.borrow_mut() = Some(Clip { sheet, cut, cells }));
+        let widths = (c0..=c1)
+            .filter(|c| !sh.hidden_cols.contains(c))
+            .enumerate()
+            .filter_map(|(offset, c)| {
+                sh.columns
+                    .sizes
+                    .get(&c)
+                    .map(|w| (u32::try_from(offset).unwrap_or(0), *w))
+            })
+            .collect();
+        CLIP.with(|cl| {
+            *cl.borrow_mut() = Some(Clip {
+                sheet,
+                cut,
+                cells,
+                widths,
+            });
+        });
     });
 }
 
@@ -8807,7 +8833,8 @@ pub fn session_clip_paste(sheet: usize, row: u32, col: u32) -> Result<(), JsErro
 /// `"values"` (the cached value only, keeping the target's formatting),
 /// `"formats"` (the source style only, keeping the target's value),
 /// `"formulas"` (value + formula, reference-shifted, keeping the target's
-/// formatting), or `"transpose"` (a full paste with rows and columns swapped).
+/// formatting), `"transpose"` (a full paste with rows and columns swapped), or
+/// `"widths"` (the source columns' widths and nothing else — `UX-CLIP-02`).
 /// A cut only takes effect for `"all"` (Excel disables cut with paste-special).
 #[wasm_bindgen]
 pub fn session_clip_paste_mode(
@@ -8827,6 +8854,26 @@ pub fn session_clip_paste_mode(
             };
             let cut = clip.cut && mode == "all";
             let mut ops = Vec::new();
+
+            // **Column widths, and nothing else** (`UX-CLIP-02`). Excel's
+            // Paste Special has this as its own option because a plain paste
+            // must not reshape the sheet it lands in — a person pasting three
+            // cells does not expect their columns to move. Asked for
+            // explicitly, it is exactly what they want.
+            //
+            // Widths only. A row's height is a property of the row, and a
+            // paste that also set those would resize rows the copied block
+            // merely passed through.
+            if mode == "widths" {
+                for (offset, twips) in &clip.widths {
+                    ops.push(EditOperation::SetColumnWidth {
+                        sheet,
+                        col: col.saturating_add(*offset),
+                        width: Some(*twips),
+                    });
+                }
+                return (ops, false, clip.widths.is_empty());
+            }
             // Where the block landed, learned from the first cell placed. A cut
             // is never tiled or transposed, so one delta describes the move.
             let mut move_delta: Option<(i64, i64)> = None;
@@ -11278,6 +11325,92 @@ mod retained_part_tests {
             after_undo.retained_parts[0].bytes,
             b"<chartSpace/>".to_vec(),
             "restored, but not the same bytes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paste_widths_tests {
+    use super::{
+        session_clip_copy, session_clip_paste_mode, session_col_width, session_new,
+        session_set_cell, session_set_col_width,
+    };
+
+    /// **Paste Special carries column widths, and only when asked** (`UX-CLIP-02`).
+    ///
+    /// Reported from a running stack as "copy-paste does not keep width and
+    /// height". It does not, deliberately: a plain paste that reshaped the
+    /// sheet it landed in would move columns somebody else's data sits under,
+    /// and Excel's plain `Ctrl+V` does not do it either. What Excel *does*
+    /// have is this — an explicit option — and now so does this.
+    #[test]
+    fn a_widths_paste_carries_the_source_columns_and_leaves_the_cells_alone() {
+        session_new();
+        session_set_cell(0, 0, 0, "wide").unwrap();
+        session_set_col_width(0, 0, 300).unwrap();
+        let source = session_col_width(0, 0);
+        assert!(source > 0.0, "the source column has an explicit width");
+
+        // Somewhere else, at the default width and with content of its own.
+        session_set_cell(0, 0, 4, "keep me").unwrap();
+        let before = session_col_width(0, 4);
+        assert_ne!(
+            before, source,
+            "the destination starts at a different width"
+        );
+
+        session_clip_copy(0, 0, 0, 0, 0, false);
+        session_clip_paste_mode(0, 0, 4, "widths").unwrap();
+
+        assert_eq!(
+            session_col_width(0, 4),
+            source,
+            "the column width did not travel"
+        );
+        // **And nothing else did.** A widths paste that also wrote the cell
+        // would be an ordinary paste wearing a different name.
+        assert_eq!(
+            super::session_cell_input(0, 0, 4),
+            "keep me",
+            "a widths paste overwrote the destination's contents"
+        );
+    }
+
+    /// A plain paste still does *not* carry them, which is the behaviour the
+    /// explicit option exists to leave alone.
+    #[test]
+    fn an_ordinary_paste_does_not_reshape_the_sheet_it_lands_in() {
+        session_new();
+        session_set_cell(0, 0, 0, "wide").unwrap();
+        session_set_col_width(0, 0, 300).unwrap();
+        let before = session_col_width(0, 4);
+
+        session_clip_copy(0, 0, 0, 0, 0, false);
+        session_clip_paste_mode(0, 0, 4, "all").unwrap();
+
+        assert_eq!(
+            session_col_width(0, 4),
+            before,
+            "a plain paste moved a column the person did not ask it to"
+        );
+    }
+
+    /// A column at the sheet default has no width to carry, and writing the
+    /// default onto the destination would pin a column that was following it.
+    #[test]
+    fn a_source_column_with_no_explicit_width_carries_nothing() {
+        session_new();
+        session_set_cell(0, 0, 0, "plain").unwrap();
+        session_set_col_width(0, 4, 300).unwrap();
+        let destination = session_col_width(0, 4);
+
+        session_clip_copy(0, 0, 0, 0, 0, false);
+        session_clip_paste_mode(0, 0, 4, "widths").unwrap();
+
+        assert_eq!(
+            session_col_width(0, 4),
+            destination,
+            "a default-width source overwrote a destination that had been set"
         );
     }
 }
