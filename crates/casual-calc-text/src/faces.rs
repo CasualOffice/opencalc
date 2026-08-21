@@ -4,7 +4,7 @@
 //! for the deterministic PNG/raster path, which must outline glyphs from bundled
 //! bytes so output is identical on every machine. Each bundled family carries its
 //! four faces (regular, bold, italic, bold-italic). Requested families are mapped
-//! to a bundled family by [`casual_calc_layout::substitute`] (the shared single
+//! to a bundled family by [`crate::substitution::substitute`] (the shared single
 //! source of truth); this module turns the chosen family + bold/italic into the
 //! concrete face bytes skrifa outlines.
 //!
