@@ -267,6 +267,16 @@ The demo defaults are demo defaults, and the ones that matter are:
   can mint for any other tenant's documents. A single-tenant deployment can pin
   its issuer with `OPENCALC_ISSUER`, which refuses a token the same signer
   minted for somebody else — but cannot make one key set into a boundary.
+- **A full node can point somewhere better, if you let it.** Set
+  `OPENCALC_PUBLIC_URL` per node — `wss://node-2.example/collab`, the address a
+  *browser* uses — and a node at its document cap answers with the least-loaded
+  peer that has room rather than only refusing. It is deliberately not
+  `OPENCALC_ADVERTISE`: that is a service name on the cluster network, which is
+  exactly the address a client cannot reach. Leave it unset behind a single load
+  balancer, where a redirect would return through the balancer to an arbitrary
+  node. Watch `opencalc_joins_redirected_total` against
+  `opencalc_joins_refused_capacity_total`: refusals that name nowhere mean the
+  cluster is full, or that placement is silently doing nothing.
 - **`OPENCALC_ALLOW_PLAIN_CALLBACKS=1`** lets the document travel in clear. It
   is off by default and on in the demo because the demo is loopback.
 - **The host has no authentication.** Anybody who can reach it can open any

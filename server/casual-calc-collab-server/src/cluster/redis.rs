@@ -994,6 +994,20 @@ impl Redis {
     fn node_key(&self, id: &str) -> String {
         format!("{}:node:{id}", self.namespace)
     }
+
+    /// Where a browser reaches that node.
+    ///
+    /// A **sibling key** rather than a third element of the body, and that is
+    /// the whole design. `peers` reads the body with
+    /// `from_str::<(String, u32)>` and `continue`s on an error — so a node
+    /// running the previous build, meeting a three-element body, would not fail
+    /// loudly; it would silently drop the new node from its peer list and
+    /// quietly stop relaying to it. A separate key is invisible to a reader
+    /// that does not ask for it, which makes a mixed-version cluster during a
+    /// rolling upgrade a non-event.
+    fn node_public_key(&self, id: &str) -> String {
+        format!("{}:node:{id}:public", self.namespace)
+    }
 }
 
 impl Coordinator for Redis {
@@ -1007,8 +1021,8 @@ impl Coordinator for Redis {
             let (mut c, at) = self.link.commands().await;
             let body = serde_json::to_string(&(&peer.advertise, peer.load))
                 .map_err(|e| Unavailable(e.to_string()))?;
-            let announced = redis::pipe()
-                .atomic()
+            let mut pipe = redis::pipe();
+            pipe.atomic()
                 // Scored by *now*, so a stale entry is found by score rather
                 // than waited out — expiry on read, as `Memory` does it.
                 .zadd(self.nodes_key(), &peer.id, now_ms)
@@ -1017,9 +1031,27 @@ impl Coordinator for Redis {
                     body,
                     redis::SetOptions::default()
                         .with_expiration(redis::SetExpiry::PX(ttl_ms.max(1))),
-                )
-                .query_async::<()>(&mut c)
-                .await;
+                );
+            // The same TTL as the body, so the two cannot disagree about
+            // whether this node is still here.
+            match &peer.public_url {
+                Some(url) => {
+                    pipe.set_options(
+                        self.node_public_key(&peer.id),
+                        url,
+                        redis::SetOptions::default()
+                            .with_expiration(redis::SetExpiry::PX(ttl_ms.max(1))),
+                    );
+                }
+                // Deleted rather than left: an operator who *removes*
+                // OPENCALC_PUBLIC_URL and restarts is saying "stop sending
+                // people here", and a stale key would go on doing it for as
+                // long as the node kept announcing.
+                None => {
+                    pipe.del(self.node_public_key(&peer.id));
+                }
+            }
+            let announced = pipe.query_async::<()>(&mut c).await;
             self.link
                 .recover(at, announced)
                 .await
@@ -1043,7 +1075,8 @@ impl Coordinator for Redis {
                 for id in ids {
                     let seen: Option<f64> = c.zscore(self.nodes_key(), &id).await?;
                     let body: Option<String> = c.get(self.node_key(&id)).await?;
-                    raw.push((id, seen, body));
+                    let public: Option<String> = c.get(self.node_public_key(&id)).await?;
+                    raw.push((id, seen, body, public));
                 }
                 Ok::<_, redis::RedisError>(raw)
             }
@@ -1055,7 +1088,7 @@ impl Coordinator for Redis {
                 .map_err(|e| Unavailable(explain(&e)))?;
 
             let mut peers = Vec::with_capacity(raw.len());
-            for (id, seen, body) in raw {
+            for (id, seen, body, public_url) in raw {
                 // A node in the set whose details have expired is one that
                 // stopped announcing itself mid-window. Skipped rather than
                 // guessed at: an address is the one field that must not be
@@ -1069,6 +1102,7 @@ impl Coordinator for Redis {
                 peers.push(Peer {
                     id,
                     advertise,
+                    public_url: public_url.filter(|u| !u.is_empty()),
                     load,
                     seen_ms: seen as u64,
                 });

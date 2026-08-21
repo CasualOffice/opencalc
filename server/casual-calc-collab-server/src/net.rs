@@ -252,6 +252,14 @@ pub struct Membership {
     /// announcing the public one would have peers discover an address that
     /// routes back through the proxy they are behind.
     pub advertise: String,
+    /// Where a *browser* reaches this node, when the operator has said.
+    ///
+    /// The address `advertise` deliberately is not — see [`crate::cluster::Peer`].
+    /// Optional because a deployment behind a single load balancer has no
+    /// per-node public address and does not want one: there, a redirect would
+    /// come straight back through the balancer to an arbitrary node. Placement
+    /// simply does nothing, which is the honest outcome rather than a guess.
+    pub public_url: Option<String>,
 }
 
 impl core::fmt::Debug for Membership {
@@ -1179,6 +1187,9 @@ fn act_on_follow_up(live: &Arc<Live>, action: Option<Action>) {
                 Audience::OthersThan(ClientId(0)),
                 ServerMessage::Stopped {
                     reason: Refusal::NotSaving,
+                    // Nowhere else to go: this document's saves are failing, and
+                    // another node would fail to save it in exactly the same way.
+                    elsewhere: None,
                 },
             ));
         }
@@ -1273,6 +1284,13 @@ pub struct Metrics {
     pub refused_pending: AtomicU64,
     /// Joins refused because a cap was reached.
     pub refused_capacity: AtomicU64,
+    /// Of those, the ones told which node to try instead.
+    ///
+    /// A subset of `refused_capacity`, not a separate outcome: the client is
+    /// still refused. The gap between the two is the thing worth alerting on —
+    /// refusals that name nowhere mean the cluster is full, or that nobody set
+    /// `OPENCALC_PUBLIC_URL` and placement is silently doing nothing.
+    pub redirected_capacity: AtomicU64,
     /// Clients dropped for falling too far behind the broadcast. Survivable —
     /// Resume exists — but silent, which is why it is counted.
     pub slow_consumers: AtomicU64,
@@ -1346,6 +1364,11 @@ impl Metrics {
             "opencalc_joins_refused_capacity_total",
             "Joins refused because a document or node cap was reached.",
             self.refused_capacity.load(Relaxed),
+        );
+        counter(
+            "opencalc_joins_redirected_total",
+            "Capacity refusals that named a node with room. A subset of the above.",
+            self.redirected_capacity.load(Relaxed),
         );
         counter(
             "opencalc_slow_consumers_total",
@@ -1567,8 +1590,15 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
 
     let live = match obtain(&state, &claims).await {
         Ok(live) => live,
-        Err(reason) => {
-            let _ = send(&mut socket, &ServerMessage::Stopped { reason }).await;
+        Err(denial) => {
+            let _ = send(
+                &mut socket,
+                &ServerMessage::Stopped {
+                    reason: denial.reason,
+                    elsewhere: denial.elsewhere,
+                },
+            )
+            .await;
             return;
         }
     };
@@ -1603,6 +1633,12 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
             &mut socket,
             &ServerMessage::Stopped {
                 reason: Refusal::NotSaving,
+                // Not a placement decision. The document is already open *here*,
+                // and this node leads it; sending the arrival to a peer would
+                // not move the document, it would only move the same refusal one
+                // hop away. Placement decides where a document is opened, which
+                // is `obtain`.
+                elsewhere: None,
             },
         )
         .await;
@@ -1707,6 +1743,7 @@ async fn connection(state: Arc<Service>, document_key: String, mut socket: WebSo
                 &mut socket,
                 &ServerMessage::Stopped {
                     reason: Refusal::NotSaving,
+                    elsewhere: None,
                 },
             )
             .await;
@@ -1959,6 +1996,9 @@ async fn authorise(
                 socket,
                 &ServerMessage::Stopped {
                     reason: refusal.refusal(),
+                    // A token this server will not accept is not a capacity
+                    // problem, and no peer would accept it either.
+                    elsewhere: None,
                 },
             )
             .await;
@@ -1996,8 +2036,39 @@ fn loggable(url: &str) -> String {
     out
 }
 
+/// The public URL of a peer with room, if this node knows of one.
+///
+/// Advisory and cheap: the peer list is whatever the coordinator last heard,
+/// up to [`PEER_TTL_MS`](crate::cluster) old. A coordinator that is unreachable
+/// answers nothing, which is the same as having no peer to suggest — a node
+/// that has lost the cluster must still be able to refuse a client cleanly.
+async fn elsewhere_with_room(state: &Arc<Service>) -> Option<String> {
+    let membership = state.config.membership.as_ref()?;
+    let peers = membership.store.peers(now_ms()).await.ok()?;
+    crate::cluster::place(&peers, &membership.node, state.config.limits.max_documents)
+        .and_then(|peer| peer.public_url.clone())
+}
+
+/// A refusal, and where the client should go instead if anywhere.
+///
+/// Separate from [`Refusal`] because "no" and "not here" are different answers
+/// and only one of them is the client's problem.
+struct Denial {
+    reason: Refusal,
+    elsewhere: Option<String>,
+}
+
+impl From<Refusal> for Denial {
+    fn from(reason: Refusal) -> Self {
+        Self {
+            reason,
+            elsewhere: None,
+        }
+    }
+}
+
 /// Find the document, or open it from the URL the token named.
-async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refusal> {
+async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Denial> {
     let key = claims.document.key.clone();
     if let Some(live) = lock(&state.registry.live).get(&key) {
         return Ok(Arc::clone(live));
@@ -2013,12 +2084,27 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
             .metrics
             .refused_capacity
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Where to instead. `announce` has been publishing this node's load
+        // since the cluster was built and nothing had ever read it back
+        // (`DEP-09`): a full node refused, and the client had no way to learn
+        // that the node beside it was idle.
+        let elsewhere = elsewhere_with_room(state).await;
         tracing::warn!(
             documents = lock(&state.registry.live).len(),
             limit = state.config.limits.max_documents,
+            elsewhere = ?elsewhere,
             "refused a join: this node will not open another document"
         );
-        return Err(Refusal::NotSaving);
+        if elsewhere.is_some() {
+            state
+                .metrics
+                .redirected_capacity
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return Err(Denial {
+            reason: Refusal::NotSaving,
+            elsewhere,
+        });
     }
 
     // One cell per document key, so everybody who wants this document waits on
@@ -2067,7 +2153,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                         reason = %why,
                         "refused a join: the document could not be fetched"
                     );
-                    return Err(Refusal::NotSaving);
+                    return Err(Refusal::NotSaving.into());
                 }
             };
 
@@ -2098,49 +2184,69 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
                         reason = %why,
                         "refused a join: the document was fetched but could not be opened"
                     );
-                    return Err(Refusal::NotSaving);
+                    return Err(Refusal::NotSaving.into());
                 }
             };
 
-            let mut registry = lock(&state.registry.live);
-            // `registry` is held here, so the count comes from the guard and
-            // the check that must not lock is the one that is called.
-            if !registry.contains_key(&key)
-                && (over_count(registry.len(), state.config.limits.max_documents)
-                    || !state.admits_memory())
+            // Scoped so the guard is *dropped* before the redirect is looked
+            // up: `elsewhere_with_room` awaits the coordinator, and holding a
+            // `std::sync::Mutex` across an await is how a runtime deadlocks.
             {
+                let mut registry = lock(&state.registry.live);
+                // `registry` is held here, so the count comes from the guard and
+                // the check that must not lock is the one that is called.
+                if !registry.contains_key(&key)
+                    && (over_count(registry.len(), state.config.limits.max_documents)
+                        || !state.admits_memory())
+                {
+                    state
+                        .metrics
+                        .refused_capacity
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        documents = registry.len(),
+                        limit = state.config.limits.max_documents,
+                        "refused a join: the node filled up while the document was being fetched"
+                    );
+                } else {
+                    // `entry` rather than `insert`: a document evicted and
+                    // reopened between the two checks would otherwise be
+                    // replaced under the people still in it. Two sessions over
+                    // one document is the one outcome that must not happen.
+                    return Ok(Arc::clone(registry.entry(key.clone()).or_insert_with(
+                        || {
+                            Arc::new(Live {
+                                overrides: Mutex::new(BTreeMap::new()),
+                                session: Mutex::new(session),
+                                roster: Mutex::new(Roster::new(
+                                    state.config.limits.presence_ttl_ms,
+                                )),
+                                fan_out: broadcast::channel(256).0,
+                                next_client: Mutex::new(0),
+                                callback: claims.callback.clone(),
+                                title: claims.document.title.clone(),
+                                idle_since: std::sync::atomic::AtomicU64::new(0),
+                                writing: tokio::sync::Mutex::default(),
+                                leader: Mutex::default(),
+                                resumes: Mutex::default(),
+                            })
+                        },
+                    )));
+                }
+            }
+
+            // Full, and the guard is gone. Ask the coordinator who has room.
+            let elsewhere = elsewhere_with_room(state).await;
+            if elsewhere.is_some() {
                 state
                     .metrics
-                    .refused_capacity
+                    .redirected_capacity
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    documents = registry.len(),
-                    limit = state.config.limits.max_documents,
-                    "refused a join: the node filled up while the document was being fetched"
-                );
-                return Err(Refusal::NotSaving);
             }
-            // `entry` rather than `insert`: a document evicted and reopened
-            // between the two checks would otherwise be replaced under the
-            // people still in it. Two sessions over one document is the one
-            // outcome that must not happen.
-            Ok(Arc::clone(registry.entry(key.clone()).or_insert_with(
-                || {
-                    Arc::new(Live {
-                        overrides: Mutex::new(BTreeMap::new()),
-                        session: Mutex::new(session),
-                        roster: Mutex::new(Roster::new(state.config.limits.presence_ttl_ms)),
-                        fan_out: broadcast::channel(256).0,
-                        next_client: Mutex::new(0),
-                        callback: claims.callback.clone(),
-                        title: claims.document.title.clone(),
-                        idle_since: std::sync::atomic::AtomicU64::new(0),
-                        writing: tokio::sync::Mutex::default(),
-                        leader: Mutex::default(),
-                        resumes: Mutex::default(),
-                    })
-                },
-            )))
+            Err(Denial {
+                reason: Refusal::NotSaving,
+                elsewhere,
+            })
         })
         .await
         .map(Arc::clone);
@@ -2163,7 +2269,7 @@ async fn obtain(state: &Arc<Service>, claims: &Claims) -> Result<Arc<Live>, Refu
             Err(why) => {
                 tracing::error!(%why, "could not subscribe: this node cannot serve this document");
                 lock(&state.registry.live).remove(&claims.document.key);
-                return Err(Refusal::NotSaving);
+                return Err(Refusal::NotSaving.into());
             }
         }
     }
@@ -2926,6 +3032,7 @@ async fn announce(state: Arc<Service>) {
         let peer = crate::cluster::Peer {
             id: membership.node.clone(),
             advertise: membership.advertise.clone(),
+            public_url: membership.public_url.clone(),
             // Read afresh each round rather than cached: the number this is
             // announcing is the one placement will act on, and a stale count
             // sends work to a node that filled up a minute ago.

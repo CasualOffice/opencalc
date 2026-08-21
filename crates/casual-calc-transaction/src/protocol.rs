@@ -472,6 +472,19 @@ pub enum ServerMessage {
     Stopped {
         /// Why.
         reason: Refusal,
+        /// A node with room, when this one is full and knows of one.
+        ///
+        /// **A field rather than a new [`Refusal`] variant, deliberately.**
+        /// [ADR-016](../../../docs/62-COLLABORATION-PIPELINING.md) says to move
+        /// `PROTOCOL_VERSION` when an old and a new client would read the same
+        /// message *differently*. A new `Refusal` variant is worse than that: a
+        /// client that has never heard of it cannot read the message at all,
+        /// and would show nothing where it used to show "this node is full".
+        /// An unknown *field* is skipped — no `deny_unknown_fields` here — and
+        /// the refusal underneath still means exactly what it always did. So an
+        /// old client keeps today's behaviour and the version does not move.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<String>,
     },
     /// Yes.
     ///
@@ -503,6 +516,7 @@ impl ServerMessage {
     #[must_use]
     pub fn version_mismatch(client: u32) -> Self {
         Self::Stopped {
+            elsewhere: None,
             reason: Refusal::ProtocolVersion {
                 server: PROTOCOL_VERSION,
                 client,
@@ -651,6 +665,11 @@ mod tests {
             },
             ServerMessage::Stopped {
                 reason: Refusal::NotSaving,
+                elsewhere: None,
+            },
+            ServerMessage::Stopped {
+                reason: Refusal::NotSaving,
+                elsewhere: Some("wss://node-b.example/collab".to_owned()),
             },
             ServerMessage::version_mismatch(99),
         ];
@@ -968,6 +987,73 @@ mod tests {
         // And a short one is left exactly as it was typed.
         let short = Draft::new(0, 0, "hello");
         assert_eq!(short.text, "hello");
+    }
+
+    /// **An old client must still read a stop that names somewhere else.**
+    ///
+    /// The same question as the draft field below, and the reason `DEP-09` adds
+    /// a *field* rather than a new [`Refusal`] variant. A variant an old client
+    /// has never heard of makes the whole message unreadable — a tagged enum
+    /// with an unknown tag is a deserialization error — so a client that used
+    /// to show "this node is full" would show nothing at all. That is strictly
+    /// worse than the behaviour being replaced.
+    ///
+    /// Verified against the shape an old client actually has: a `Stopped` with
+    /// no `elsewhere` in it. The extra key is skipped, the refusal underneath
+    /// still means what it always did, nothing is read as something else — so
+    /// `PROTOCOL_VERSION` does not move.
+    #[test]
+    fn a_client_that_has_never_heard_of_a_redirect_still_reads_the_refusal() {
+        /// `ServerMessage::Stopped` as it stood before `DEP-09`.
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldStopped {
+            reason: Refusal,
+        }
+
+        let json = serde_json::to_string(&ServerMessage::Stopped {
+            reason: Refusal::NotSaving,
+            elsewhere: Some("wss://node-b.example/collab".to_owned()),
+        })
+        .expect("serialize");
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let old: OldStopped = serde_json::from_value(value["reason"].clone())
+            .map(|reason| OldStopped { reason })
+            .expect("an old client must be able to read this");
+        assert_eq!(
+            old.reason,
+            Refusal::NotSaving,
+            "the refusal an old client acts on changed meaning"
+        );
+
+        // And the whole message, not just the reason: this is the shape the old
+        // client's `serde` actually meets.
+        let whole: OldStopped = serde_json::from_str(
+            &serde_json::to_string(&serde_json::json!({
+                "type": "stopped",
+                "reason": { "reason": "notSaving" },
+                "elsewhere": "wss://node-b.example/collab",
+            }))
+            .unwrap(),
+        )
+        .expect("an unknown field must be skipped, not refused");
+        assert_eq!(whole.reason, Refusal::NotSaving);
+    }
+
+    /// A stop that names nowhere does not carry the key at all, so nothing on
+    /// the wire changes for the deployments that are not clustered.
+    #[test]
+    fn a_stop_that_names_nowhere_is_byte_identical_to_before() {
+        let json = serde_json::to_string(&ServerMessage::Stopped {
+            reason: Refusal::NotSaving,
+            elsewhere: None,
+        })
+        .expect("serialize");
+        assert!(
+            !json.contains("elsewhere"),
+            "an absent redirect still costs every non-clustered deployment a key: {json}"
+        );
     }
 
     /// **An old peer must be able to read a message carrying a draft.**
