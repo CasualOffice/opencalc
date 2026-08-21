@@ -350,6 +350,15 @@ jobs:
       # because it is read as assurance.
       - name: No document claims a gate CI does not run
         run: python3 tools/check-doc-claims.py
+      # A decision record's status is load-bearing: `Proposed` means nobody has
+      # committed, and a reader deciding whether to follow it reads that word
+      # before the argument. `ADR-021` sat at `Proposed` while `RND-11` was
+      # built to it, shipped and closed -- and `RND-11`'s own row said
+      # "Proposed" in the same sentence that recorded the work as done. Review
+      # cannot catch that: the two live in different files and neither diff is
+      # wrong on its own.
+      - name: A finished row's ADR is not still proposed
+        run: python3 tools/check-adr-status.py
       # The owner's hold on publishing is kept by the trigger, not by anybody
       # remembering it: a release workflow must fire on a component-scoped tag
       # or a deliberate manual run, never on a merge.
