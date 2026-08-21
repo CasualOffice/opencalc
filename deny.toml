@@ -5,25 +5,18 @@ yanked = "deny"
 # **Individually listed, each with a reason and a row — never a category.**
 #
 # Relaxing `unmaintained` wholesale would be how a supply-chain gate stops
-# being one: the next unmaintained crate would arrive silently. These two are
-# named one at a time so that adding a third is a deliberate edit somebody has
-# to justify in review, and so an entry that stops being needed shows up as
-# unused rather than living here forever.
+# being one: the next unmaintained crate would arrive silently. Each entry is
+# named one at a time so that adding one is a deliberate edit somebody has to
+# justify in review, and so an entry that stops being needed shows up as unused
+# rather than living here forever.
 #
-# Both are the text-shaping stack, both are unmaintained with **no upgrade
-# available**, and neither is a vulnerability — they are "the author has
-# stopped", not "this crate is exploitable". Migration is tracked as `DEP-14`:
-# the destination is already half-built, since this crate ships `skrifa` (the
-# crate ttf-parser's own advisory recommends) for outlines and only uses
-# rustybuzz for glyph ids. Moving the shaper too also amends ADR-018, which is
-# why it is a row rather than a line in a CI fix.
-ignore = [
-    # `rustybuzz` is unmaintained. Latest published (0.20.1) is what we are on.
-    "RUSTSEC-2026-0206",
-    # `ttf-parser` is unmaintained; reached only through `rustybuzz`, so it
-    # leaves when the shaper does.
-    "RUSTSEC-2026-0192",
-]
+# **Empty, and that is the point.** It held the text-shaping stack —
+# `rustybuzz` and its `ttf-parser` — for as long as there was nowhere to go.
+# `DEP-14` moved the shaper to `harfrust`, which is the same algorithm
+# maintained under the harfbuzz organisation and built on `read-fonts`, so both
+# entries were deleted rather than renewed. An ignore list that empties is one
+# that was being read.
+ignore = []
 
 [bans]
 multiple-versions = "warn"

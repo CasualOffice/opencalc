@@ -158,7 +158,32 @@ with a size cost rather than something noticed in a screenshot.
 **The existing PNG fidelity tests**, unchanged and now running with shaping on.
 Latin must render exactly as it did or every reference image is wrong; it does.
 
-**The dependency graph**, checked with `cargo tree`: `rustybuzz` is present for
+**The dependency graph**, checked with `cargo tree`: the shaper is present for
 native builds and absent from the WebAssembly one. That is the decision above,
 and it is the kind that quietly stops being true — a crate added later with
 default features would undo it without a word.
+
+## Amendment: which shaper (`DEP-14`)
+
+The shaper was `rustybuzz`. It and its `ttf-parser` are both unmaintained
+(`RUSTSEC-2026-0206`, `RUSTSEC-2026-0192`) — "the author has stopped", not "this
+is exploitable" — and for a while there was nowhere to go, so both sat in
+`deny.toml` as individually named ignores with reasons.
+
+It is now **`harfrust`**: the same HarfBuzz shaping algorithm, maintained under
+the harfbuzz organisation, and built on `read-fonts` — which is what `skrifa`
+is built on.
+
+That second part is the reason this is an amendment rather than a version bump.
+The argument above for handing shaped glyph *ids* straight to `skrifa` was that
+"a glyph id is an index into the font's own tables, so the same bytes give the
+same ids to both". That was true, and it was true of **two different parsers**
+that happened to agree: `rustybuzz` read the font with `ttf-parser` while
+`skrifa` read it with `read-fonts`. Now there is one parser and one set of
+tables, and the agreement is structural rather than fortunate. `skrifa` moved
+0.43 → 0.46 so that both resolve to a single `read-fonts` in the lock file; two
+versions of it would have left the same two-parser argument in place wearing a
+different name.
+
+Both `deny.toml` ignores are deleted, which was the acceptance for the row. An
+ignore list that empties is one that was being read.

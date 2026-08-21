@@ -25,19 +25,26 @@ image = { version = "0.25", optional = true, default-features = false, features 
     "webp",
     "tiff",
 ] }
-skrifa = "0.43"
+skrifa = "0.46"
 # Shaping, behind a feature that is off for WebAssembly — see ADR-018. A pure
 # Rust HarfBuzz port: it turns a run of text into positioned glyph *ids*, which
 # `skrifa` then outlines from the same font bytes, so the two agree by
 # construction rather than by a mapping kept in step by hand.
-rustybuzz = { version = "0.20", optional = true }
+#
+# `harfrust` rather than `rustybuzz` (`DEP-14`): rustybuzz and its `ttf-parser`
+# are both unmaintained, and rustybuzz parsed the font with a *different*
+# library than the one outlining it. This is maintained under the harfbuzz
+# organisation and reads the font with `read-fonts` — what `skrifa` is built on
+# — so "the same bytes give the same ids to both" is now one parser rather than
+# two that happen to agree.
+harfrust = { version = "0.13", optional = true }
 
 [features]
 # On by default: a native build should be correct for every script. The
 # WebAssembly build turns it off, because the browser already shapes the text a
 # user actually looks at and this crate is in a bundle nobody wants larger.
 default = ["shaping", "all-fonts", "raster"]
-shaping = ["dep:rustybuzz"]
+shaping = ["dep:harfrust"]
 # Every bundled family. On for native, off for WebAssembly, where the faces were
 # 72% of the bundle and the editor never touches them — it draws with
 # `ctx.fillText` and the browser supplies the fonts.

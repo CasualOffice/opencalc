@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 # Outlines and metrics from the bundled face bytes. The crate ttf-parser's own
 # advisory recommends (see DEP-14).
-skrifa = "0.43"
+skrifa = "0.46"
 
 [features]
 # Off by default, and that default matters. `casual-calc-layout` depends on this

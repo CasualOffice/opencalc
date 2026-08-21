@@ -20,12 +20,4 @@ ignore = [
     # collaboration server, never from workbook bytes. Removing it means moving
     # the whole TLS stack forward, which is its own change.
     "RUSTSEC-2025-0134",
-    # rustybuzz: unmaintained, and the shaper the renderer depends on for
-    # correct complex-script layout (docs/64). There is no drop-in replacement
-    # in Rust; the alternative is HarfBuzz over FFI, which would put C in a
-    # workspace that currently has none.
-    "RUSTSEC-2026-0206",
-    # ttf-parser: unmaintained, and rustybuzz's own dependency — so it cannot
-    # be dropped separately from the entry above.
-    "RUSTSEC-2026-0192",
 ]
