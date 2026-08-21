@@ -115,6 +115,14 @@ pub struct Peer {
     pub id: String,
     /// Where to reach it — the **internal** address, not the public one.
     pub advertise: String,
+    /// Where a *browser* can reach it, if the operator said.
+    ///
+    /// Distinct from `advertise` and not derivable from it: `advertise` is a
+    /// service name on the cluster network, which is exactly the address a
+    /// client cannot use. A node with no public URL is never redirected to —
+    /// sending somebody to `http://collab-2:8080/` is worse than refusing them,
+    /// because it fails in the browser with nothing to explain it.
+    pub public_url: Option<String>,
     /// How loaded it is, for election. Lower leads.
     pub load: u32,
     /// When it last said it was alive.
@@ -493,6 +501,38 @@ pub fn elect(peers: &[Peer]) -> Option<&Peer> {
     peers
         .iter()
         .min_by(|a, b| a.load.cmp(&b.load).then_with(|| a.id.cmp(&b.id)))
+}
+
+/// Where to send a client this node has no room for.
+///
+/// The consumer `elect` never had (`DEP-09`). Load was announced every five
+/// seconds from the day the cluster was built and read back by nothing, so a
+/// full node refused an arrival while the node beside it sat idle.
+///
+/// Three filters, each of which is a way to make things worse rather than
+/// better:
+///
+/// - **Not this node.** Redirecting somebody to the node that just refused them
+///   is a loop, and a client that obeys it is a client that never stops.
+/// - **Only a node with a public URL.** See [`Peer::public_url`].
+/// - **Only a node under the cap.** `capacity` is *this* node's limit, used for
+///   a peer because the cluster is configured alike; a peer already at it would
+///   refuse in turn. Announcements are up to five seconds old, so this is a
+///   good guess and never a guarantee — which is why the answer is advisory and
+///   the client still handles being refused again.
+///
+/// Ties break on id, through [`elect`], so two nodes refusing at the same
+/// moment send their clients to the same place rather than splitting them.
+#[must_use]
+pub fn place<'a>(peers: &'a [Peer], me: &str, capacity: usize) -> Option<&'a Peer> {
+    let capacity = u32::try_from(capacity).unwrap_or(u32::MAX);
+    let candidates: Vec<Peer> = peers
+        .iter()
+        .filter(|p| p.id != me && p.public_url.is_some() && p.load < capacity)
+        .cloned()
+        .collect();
+    let chosen = elect(&candidates)?.id.clone();
+    peers.iter().find(|p| p.id == chosen)
 }
 
 pub mod redis;

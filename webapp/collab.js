@@ -67,6 +67,17 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
   let socket = null;
   let closed = false;
   let retryMs = RETRY_FLOOR_MS;
+  /// Where this transport is connecting. Not the parameter, because a full node
+  /// can name another one to try — see `redirect`.
+  let endpoint = url;
+  /// Whether a redirect has already been followed.
+  ///
+  /// **Exactly one, per session.** Two nodes that are both full would otherwise
+  /// name each other and bounce a client between them for as long as it had the
+  /// patience to keep asking. One hop reaches a node with room whenever one
+  /// exists, because placement picks the least loaded of *all* peers rather
+  /// than the next one along.
+  let redirected = false;
   let heartbeat = null;
   let flusher = null;
   // Set once a Welcome or a Resumed has arrived. Until then nothing may be
@@ -115,7 +126,7 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
 
   function open() {
     if (closed) return;
-    const target = new URL(url);
+    const target = new URL(endpoint);
     target.searchParams.set("doc", documentKey);
     socket = new WebSocket(target);
 
@@ -304,7 +315,10 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         break;
       case "stopped":
         // The server is finished with this session. Reconnecting would be
-        // refused for the same reason, so stop rather than loop.
+        // refused for the same reason, so stop rather than loop — *unless* it
+        // named somewhere else, which is the one case where the same request
+        // to a different node gets a different answer (`DEP-09`).
+        if (redirect(message.elsewhere)) break;
         status("stopped", why(message.reason));
         close();
         break;
@@ -425,6 +439,25 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
     return reason?.reason ?? "unknown";
   }
 
+  /// Follow a node's suggestion of somewhere with room. True if it was taken.
+  function redirect(elsewhere) {
+    if (redirected || closed) return false;
+    const target = redirectTarget(endpoint, elsewhere);
+    if (!target) return false;
+
+    redirected = true;
+    endpoint = target;
+    status("connecting", "this server is full — trying another");
+    // The old socket is finished with; the engine's session is not started
+    // yet, so there is nothing to tear down beyond the transport itself.
+    stopTimers();
+    joined = false;
+    socket?.close();
+    socket = null;
+    open();
+    return true;
+  }
+
   function close() {
     closed = true;
     stopTimers();
@@ -460,4 +493,37 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
 
   open();
   return { present, close, flush, reconnect, latency, ping };
+}
+
+/// Where a `stopped` may send a client, or `null` if it may not (`DEP-09`).
+///
+/// The address comes from this deployment's own coordinator and is set by the
+/// operator, so it is not attacker-supplied — but it is checked anyway, on the
+/// principle that a value deciding where a *token* gets sent should never be
+/// used unexamined:
+///
+/// - **A WebSocket URL**, so nothing else can be dialled. A `stopped` naming
+///   `https://…` or `file:///…` is refused rather than followed.
+/// - **No downgrade.** A session on `wss://` does not follow a redirect to
+///   plain `ws://`. The browser would refuse it as mixed content anyway; being
+///   refused here says why, instead of failing later with nothing to read.
+///
+/// Exported because these are the rules worth testing, and they are the part
+/// with nothing to do with sockets. The "only once" bound lives with the
+/// connection state that owns it.
+export function redirectTarget(current, elsewhere) {
+  if (!elsewhere) return null;
+  let target;
+  try {
+    target = new URL(elsewhere, current);
+  } catch {
+    return null;
+  }
+  if (target.protocol !== "ws:" && target.protocol !== "wss:") return null;
+  try {
+    if (new URL(current).protocol === "wss:" && target.protocol !== "wss:") return null;
+  } catch {
+    return null;
+  }
+  return target.href;
 }

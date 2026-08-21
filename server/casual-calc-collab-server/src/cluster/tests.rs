@@ -171,8 +171,18 @@ fn peer(id: &str, load: u32) -> Peer {
     Peer {
         id: id.to_owned(),
         advertise: format!("10.0.0.1:944{}", id.len()),
+        // Reachable by a browser. `public` below is the one without.
+        public_url: Some(format!("wss://{id}.example/collab")),
         load,
         seen_ms: 0,
+    }
+}
+
+/// A peer the operator gave no public address, so no client can be sent to it.
+fn unreachable(id: &str, load: u32) -> Peer {
+    Peer {
+        public_url: None,
+        ..peer(id, load)
     }
 }
 
@@ -2254,4 +2264,77 @@ async fn a_promoted_primary_below_the_replica_floor_is_not_adopted() {
          acknowledging appends the next failover can lose — which is the silent loss this \
          setting exists to refuse"
     );
+}
+
+// --- Placement (DEP-09) -----------------------------------------------------
+//
+// `announce` published this node's load every five seconds from the day the
+// cluster was built, and nothing ever read it back. A full node refused an
+// arrival while the node beside it sat idle.
+
+#[test]
+fn the_least_loaded_peer_with_room_takes_the_client() {
+    let peers = vec![peer("node-a", 9), peer("node-b", 2), peer("node-c", 7)];
+    assert_eq!(place(&peers, "node-a", 10).unwrap().id, "node-b");
+}
+
+/// **Never back to the node that just refused.**
+///
+/// A client that obeys a redirect to the node it came from is a client that
+/// never stops. `node-a` is the least loaded here, and is still not the answer.
+#[test]
+fn a_node_never_redirects_to_itself() {
+    let peers = vec![peer("node-a", 0), peer("node-b", 4)];
+    assert_eq!(
+        place(&peers, "node-a", 10).unwrap().id,
+        "node-b",
+        "the refusing node sent the client back to itself"
+    );
+}
+
+/// A node with no public address is not somewhere a browser can go. Sending
+/// somebody to a service name on the cluster network is worse than refusing
+/// them: it fails in the browser with nothing to explain it.
+#[test]
+fn a_peer_with_no_public_address_is_never_named() {
+    let peers = vec![unreachable("node-b", 0), peer("node-c", 8)];
+    assert_eq!(
+        place(&peers, "node-a", 10).unwrap().id,
+        "node-c",
+        "the idle node has no public address and cannot be the answer"
+    );
+    // And when it is the *only* peer, the answer is nobody rather than it.
+    assert!(place(&[unreachable("node-b", 0)], "node-a", 10).is_none());
+}
+
+/// A peer already at the cap would refuse in turn, so it is not an answer.
+#[test]
+fn a_peer_that_is_also_full_is_not_an_answer() {
+    let peers = vec![peer("node-b", 10), peer("node-c", 10)];
+    assert!(place(&peers, "node-a", 10).is_none());
+    // One under the cap is.
+    let peers = vec![peer("node-b", 10), peer("node-c", 9)];
+    assert_eq!(place(&peers, "node-a", 10).unwrap().id, "node-c");
+}
+
+/// Two nodes refusing at the same moment send their clients to the *same*
+/// place, rather than splitting them across a tie by iteration order.
+#[test]
+fn a_tie_places_deterministically() {
+    let forwards = vec![peer("node-b", 3), peer("node-c", 3), peer("node-d", 3)];
+    let mut backwards = forwards.clone();
+    backwards.reverse();
+    assert_eq!(
+        place(&forwards, "node-a", 10).unwrap().id,
+        place(&backwards, "node-a", 10).unwrap().id
+    );
+    assert_eq!(place(&forwards, "node-a", 10).unwrap().id, "node-b");
+}
+
+/// A single-node deployment has nowhere to send anybody, and must say so
+/// rather than naming itself.
+#[test]
+fn a_lone_node_places_nobody() {
+    assert!(place(&[peer("node-a", 99)], "node-a", 10).is_none());
+    assert!(place(&[], "node-a", 10).is_none());
 }

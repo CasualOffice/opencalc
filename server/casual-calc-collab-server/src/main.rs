@@ -254,6 +254,14 @@ async fn read_membership(node: Option<&NodeIdentity>) -> Result<Option<Membershi
                 store: Arc::new(store),
                 lease_ms: env_u64("OPENCALC_LEASE_MS", 6_000),
                 advertise: node.map_or_else(String::new, |n| n.advertise.to_string()),
+                // Optional, and doing nothing without it is the honest
+                // outcome: a deployment behind one load balancer has no
+                // per-node public address, and a redirect would come back
+                // through the balancer to an arbitrary node (`DEP-09`).
+                public_url: std::env::var("OPENCALC_PUBLIC_URL")
+                    .ok()
+                    .map(|u| u.trim().to_owned())
+                    .filter(|u| !u.is_empty()),
             }))
         }
         // A node with an identity and nowhere to announce it is not in a

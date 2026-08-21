@@ -577,7 +577,8 @@ async fn a_token_for_another_document_is_refused() {
         matches!(
             answer,
             Some(ServerMessage::Stopped {
-                reason: Refusal::NotAuthorised
+                reason: Refusal::NotAuthorised,
+                ..
             })
         ),
         "got {answer:?}"
@@ -607,7 +608,8 @@ async fn a_badly_signed_token_is_refused() {
     assert!(matches!(
         hear(&mut socket).await,
         Some(ServerMessage::Stopped {
-            reason: Refusal::NotAuthorised
+            reason: Refusal::NotAuthorised,
+            ..
         })
     ));
 }
@@ -632,6 +634,7 @@ async fn a_mismatched_protocol_is_told_so_at_once() {
     // accept it.
     let Some(ServerMessage::Stopped {
         reason: Refusal::ProtocolVersion { server, client },
+        ..
     }) = answer
     else {
         panic!(
@@ -1458,6 +1461,7 @@ async fn a_host_that_refuses_gets_the_participants_warned() {
             }))
             | Ok(Some(ServerMessage::Stopped {
                 reason: Refusal::NotSaving,
+                ..
             })) => {
                 warned = true;
                 break;
@@ -1601,15 +1605,26 @@ async fn a_full_node_turns_a_new_document_away_rather_than_degrading() {
         "the first document should have been admitted, got {welcomed:?}"
     );
 
-    let mut second = connect(addr).await;
+    // `connect_to_document`, not `connect`. This said `connect(addr)`, which
+    // asks for `DOC` while the token names `other-document` — so the join was
+    // refused as **`NotAuthorised`** and the node's cap was never reached. The
+    // assertion below was `matches!(answer, Stopped { .. })` with no reason in
+    // it, so it passed on the wrong refusal for as long as it has existed: a
+    // capacity test that never tested capacity. Found by `DEP-09`, which needed
+    // this exact scenario and got `NotAuthorised` from it.
+    let mut second = connect_to_document(addr, "other-document").await;
     let answer = join(
         &mut second,
         &claims_for("Bob", "other-document", Access::Edit),
     )
     .await;
-    assert!(
-        matches!(answer, Some(ServerMessage::Stopped { .. })),
-        "a second document was admitted past a cap of one: {answer:?}"
+    let Some(ServerMessage::Stopped { reason, .. }) = answer else {
+        panic!("a second document was admitted past a cap of one: {answer:?}");
+    };
+    assert_eq!(
+        reason,
+        Refusal::NotSaving,
+        "refused, but not for being full — this test used to accept any refusal"
     );
 }
 
@@ -3084,12 +3099,47 @@ async fn start_clustered_watching(
     Some((addr, delivered))
 }
 
+/// A clustered node with a document cap, for placement (`DEP-09`).
+///
+/// Its own entry point rather than a parameter on `start_clustered`, so the
+/// twenty tests that do not care about capacity keep reading as they did.
+async fn start_clustered_capped(
+    node: &str,
+    namespace: &str,
+    max_documents: usize,
+) -> Option<SocketAddr> {
+    let url = std::env::var("OPENCALC_TEST_REDIS").ok()?;
+    start_clustered_limited(
+        &url,
+        node,
+        namespace,
+        SavePolicy::default(),
+        Collected::default(),
+        Limits {
+            max_documents,
+            ..Limits::default()
+        },
+    )
+    .await
+}
+
 async fn start_clustered_with(
     url: &str,
     node: &str,
     namespace: &str,
     save: SavePolicy,
     delivered: Collected,
+) -> Option<SocketAddr> {
+    start_clustered_limited(url, node, namespace, save, delivered, Limits::default()).await
+}
+
+async fn start_clustered_limited(
+    url: &str,
+    node: &str,
+    namespace: &str,
+    save: SavePolicy,
+    delivered: Collected,
+    limits: Limits,
 ) -> Option<SocketAddr> {
     let store = crate::cluster::redis::Redis::connect_within(url, namespace)
         .await
@@ -3111,7 +3161,7 @@ async fn start_clustered_with(
         snapshots: SnapshotPolicy::default(),
         fetch: Arc::new(Canned(package())),
         deliver: Arc::new(delivered),
-        limits: Limits::default(),
+        limits,
         membership: Some(Membership {
             node: node.to_owned(),
             store: Arc::new(store),
@@ -3119,6 +3169,7 @@ async fn start_clustered_with(
             // a production-sized lease.
             lease_ms: 1_000,
             advertise: format!("10.0.0.1:9443/{node}"),
+            public_url: Some(format!("wss://{node}.example/collab")),
         }),
         tls: None,
     };
@@ -3980,4 +4031,99 @@ async fn a_message_that_cannot_be_parsed_is_not_called_a_merge_failure() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+/// DEP-09. **A full node names one with room, instead of only refusing.**
+///
+/// The acceptance criterion, end to end and over a real socket. `announce` had
+/// published this node's load every five seconds since the cluster was built,
+/// and `elect` — the function that reads it — was called from nothing but its
+/// own tests. So a node at its cap refused an arrival while the node beside it
+/// sat idle, and the client had no way to find that out.
+///
+/// A peer is registered directly rather than by starting a second server: what
+/// is under test is the *decision*, and a second process would add a second
+/// thing that can be flaky without testing anything more.
+#[tokio::test]
+async fn a_full_node_tells_the_client_where_there_is_room() {
+    let space = namespace("placement");
+    let Some(url) = std::env::var("OPENCALC_TEST_REDIS").ok() else {
+        return;
+    };
+    let Some(addr) = start_clustered_capped("node-one", &space, 1).await else {
+        return;
+    };
+
+    // A peer with room, and a public address a browser could actually use.
+    let store = crate::cluster::redis::Redis::connect_within(&url, &space)
+        .await
+        .expect("a coordinator for the peer");
+    store
+        .register(
+            crate::cluster::Peer {
+                id: "node-two".to_owned(),
+                advertise: "10.0.0.2:9443".to_owned(),
+                public_url: Some("wss://node-two.example/collab".to_owned()),
+                load: 0,
+                seen_ms: now_ms(),
+            },
+            30_000,
+            now_ms(),
+        )
+        .await
+        .expect("register the peer");
+
+    // Fill this node.
+    let mut first = connect(addr).await;
+    let welcomed = join(&mut first, &claims("Ada", Access::Edit)).await;
+    assert!(
+        matches!(welcomed, Some(ServerMessage::Welcome { .. })),
+        "the first document should have been admitted, got {welcomed:?}"
+    );
+
+    // Knock.
+    let mut second = connect_to_document(addr, "other-document").await;
+    let answer = join(
+        &mut second,
+        &claims_for("Bob", "other-document", Access::Edit),
+    )
+    .await;
+
+    let Some(ServerMessage::Stopped { reason, elsewhere }) = answer else {
+        panic!("a second document was admitted past a cap of one: {answer:?}");
+    };
+    assert_eq!(reason, Refusal::NotSaving, "still refused, and rightly");
+    assert_eq!(
+        elsewhere.as_deref(),
+        Some("wss://node-two.example/collab"),
+        "the node beside it was idle and the client was not told"
+    );
+}
+
+/// And with no peer to name, the refusal is exactly what it always was — so a
+/// single-node deployment sees no change at all.
+#[tokio::test]
+async fn a_full_node_with_no_peer_refuses_as_it_always_did() {
+    let space = namespace("placement-alone");
+    let Some(addr) = start_clustered_capped("node-one", &space, 1).await else {
+        return;
+    };
+
+    let mut first = connect(addr).await;
+    let _ = join(&mut first, &claims("Ada", Access::Edit)).await;
+
+    let mut second = connect_to_document(addr, "other-document").await;
+    let answer = join(
+        &mut second,
+        &claims_for("Bob", "other-document", Access::Edit),
+    )
+    .await;
+    let Some(ServerMessage::Stopped { reason, elsewhere }) = answer else {
+        panic!("expected a refusal, got {answer:?}");
+    };
+    assert_eq!(reason, Refusal::NotSaving);
+    assert_eq!(
+        elsewhere, None,
+        "a node with no peers invented somewhere to send the client"
+    );
 }
