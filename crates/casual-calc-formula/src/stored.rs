@@ -31,23 +31,54 @@ use crate::reference::CellReference;
 /// `A1` stored in `B1` and `A2` stored in `B2` are the same `StoredRef` — one
 /// column left, same row — which is what lets one AST serve a whole filled-down
 /// column.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// # On the wire
+///
+/// **Encoded exactly as [`CellReference`] is** — same names, same camelCase,
+/// same omissions — and that is deliberate rather than careless.
+///
+/// A tree normalised at origin `(0, 0)` has `col`/`row` equal to the address,
+/// because storing against a zero origin subtracts nothing. So the *absolute*
+/// form and this type's serialisation are the same bytes, and a snapshot
+/// written after `PERF-11` is byte-identical to one written before it. That is
+/// what lets the format stay frozen while the in-memory representation changes
+/// underneath: no migration, no `SCHEMA_VERSION` move, and a mixed-version
+/// cluster that keeps working.
+///
+/// The price is that the same JSON means *absolute* in a snapshot and
+/// *relative* in memory — a convention, which this design otherwise argues is
+/// what the type system is for. So it is contained to one place: `to_snapshot`
+/// normalises every tree to `(0, 0)` on the way out and `from_snapshot`
+/// re-normalises to each cell's own origin on the way in. Nothing else
+/// serialises an `Expr`, and a test asserts the bytes have not moved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredRef {
     /// The qualifying sheet name, if any. Never relative: a sheet is named or
     /// it is the formula's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<String>,
     /// Columns from the holding cell, or the absolute column when anchored.
     pub col: i64,
     /// Rows from the holding cell, or the absolute row when anchored.
     pub row: i64,
     /// `$`-anchored column: `col` is an address, not an offset.
+    #[serde(default, skip_serializing_if = "is_not_set")]
     pub col_absolute: bool,
     /// `$`-anchored row: `row` is an address, not an offset.
+    #[serde(default, skip_serializing_if = "is_not_set")]
     pub row_absolute: bool,
     /// Named no row — a whole column, as in `A:A`.
+    #[serde(default, skip_serializing_if = "is_not_set")]
     pub row_implicit: bool,
     /// Named no column — a whole row, as in `$1:$2`.
+    #[serde(default, skip_serializing_if = "is_not_set")]
     pub col_implicit: bool,
+}
+
+/// `skip_serializing_if` for a flag that is off, matching [`CellReference`]'s
+/// encoding so the two produce identical bytes.
+fn is_not_set(value: &bool) -> bool {
+    !*value
 }
 
 /// A reference resolved against the cell holding it: an address on a sheet.
@@ -158,6 +189,58 @@ impl StoredRef {
             row_absolute: self.row_absolute,
             row_implicit: self.row_implicit,
             col_implicit: self.col_implicit,
+        })
+    }
+}
+
+/// The origin at which a stored reference *is* an absolute one.
+///
+/// Storing against `(0, 0)` subtracts nothing, so `col`/`row` keep the address
+/// they were written with. Every place that needs the absolute form — the
+/// parser on the way in, the printer and the snapshot on the way out — goes
+/// through this constant rather than writing `Origin::at(0, 0)` and leaving the
+/// reader to work out why.
+pub const ABSOLUTE: Origin = Origin::at(0, 0);
+
+impl StoredRef {
+    /// A stored reference for an address, in the absolute form.
+    #[must_use]
+    pub fn absolute(reference: &CellReference) -> Self {
+        ResolvedRef::from(reference).store(ABSOLUTE)
+    }
+
+    /// The address this holds, read as the absolute form.
+    ///
+    /// `None` for a genuinely relative reference pointing off the sheet, which
+    /// is `#REF!` and not an address.
+    #[must_use]
+    pub fn as_absolute(&self) -> Option<CellReference> {
+        self.resolve(ABSOLUTE).map(|r| CellReference {
+            sheet: r.sheet,
+            col: r.col,
+            row: r.row,
+            col_absolute: r.col_absolute,
+            row_absolute: r.row_absolute,
+            row_implicit: r.row_implicit,
+            col_implicit: r.col_implicit,
+        })
+    }
+
+    /// This reference as it would be written in the cell at `origin`.
+    ///
+    /// Resolve then re-store: the address is what the reader sees, and the
+    /// anchoring travels with it.
+    #[must_use]
+    pub fn at(&self, origin: Origin) -> Option<CellReference> {
+        let resolved = self.resolve(origin)?;
+        Some(CellReference {
+            sheet: resolved.sheet,
+            col: resolved.col,
+            row: resolved.row,
+            col_absolute: resolved.col_absolute,
+            row_absolute: resolved.row_absolute,
+            row_implicit: resolved.row_implicit,
+            col_implicit: resolved.col_implicit,
         })
     }
 }
@@ -342,5 +425,110 @@ mod tests {
         let there: ResolvedRef = (&original).into();
         let back: CellReference = (&there).into();
         assert_eq!(back, original);
+    }
+}
+
+#[cfg(test)]
+mod wire_identity {
+    use super::*;
+    use crate::reference::CellReference;
+
+    /// **A reference stored at origin `(0, 0)` is the absolute one, byte for
+    /// byte.**
+    ///
+    /// The invariant the whole of `PERF-11`'s compatibility story rests on. It
+    /// is what lets the in-memory representation become relative while the
+    /// snapshot format stays frozen: `to_snapshot` normalises to `(0, 0)`, and
+    /// what comes out is what came out before.
+    ///
+    /// Asserted over the shapes that differ in encoding — plain, anchored on
+    /// each axis, sheet-qualified, whole-column — because the flags are
+    /// `skip_serializing_if` and a mismatch there is exactly the kind that only
+    /// shows on the one shape nobody tried.
+    #[test]
+    fn a_reference_stored_at_the_zero_origin_serialises_as_the_absolute_one() {
+        let cases = [
+            CellReference {
+                sheet: None,
+                col: 0,
+                row: 0,
+                col_absolute: false,
+                row_absolute: false,
+                row_implicit: false,
+                col_implicit: false,
+            },
+            CellReference {
+                sheet: None,
+                col: 2,
+                row: 2,
+                col_absolute: true,
+                row_absolute: true,
+                row_implicit: false,
+                col_implicit: false,
+            },
+            CellReference {
+                sheet: None,
+                col: 5,
+                row: 9,
+                col_absolute: true,
+                row_absolute: false,
+                row_implicit: false,
+                col_implicit: false,
+            },
+            CellReference {
+                sheet: Some("Sheet2".into()),
+                col: 1,
+                row: 7,
+                col_absolute: false,
+                row_absolute: true,
+                row_implicit: false,
+                col_implicit: false,
+            },
+            CellReference {
+                sheet: None,
+                col: 3,
+                row: 0,
+                col_absolute: false,
+                row_absolute: false,
+                row_implicit: true,
+                col_implicit: false,
+            },
+            CellReference {
+                sheet: None,
+                col: 0,
+                row: 4,
+                col_absolute: false,
+                row_absolute: false,
+                row_implicit: false,
+                col_implicit: true,
+            },
+        ];
+        for absolute in cases {
+            let stored = ResolvedRef::from(&absolute).store(Origin::at(0, 0));
+            assert_eq!(
+                serde_json::to_string(&stored).unwrap(),
+                serde_json::to_string(&absolute).unwrap(),
+                "the zero-origin form must be byte-identical to the absolute one: {absolute:?}"
+            );
+        }
+    }
+
+    /// And it reads back the same way, so a snapshot written before this change
+    /// loads into the new type meaning what it meant.
+    #[test]
+    fn the_absolute_encoding_reads_back_as_the_zero_origin_form() {
+        let absolute = CellReference {
+            sheet: Some("S".into()),
+            col: 4,
+            row: 6,
+            col_absolute: true,
+            row_absolute: false,
+            row_implicit: false,
+            col_implicit: false,
+        };
+        let json = serde_json::to_string(&absolute).unwrap();
+        let stored: StoredRef = serde_json::from_str(&json).unwrap();
+        let back = stored.resolve(Origin::at(0, 0)).expect("on the sheet");
+        assert_eq!(back, ResolvedRef::from(&absolute));
     }
 }
