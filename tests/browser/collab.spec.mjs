@@ -232,6 +232,90 @@ test.describe("collaboration", () => {
     await bob.close();
   });
 
+  /// **A peer's edit cannot hold this tab (`COL-43`).**
+  ///
+  /// `collab_receive` called plain `session.recalculate()`, so a relayed edit
+  /// that triggered an expensive pass froze the browser it arrived in exactly
+  /// as an oversized open used to — and nothing the person in front of it did
+  /// could stop that. The reason it stayed unfixed is that with no budget set
+  /// the cancellable call is bit-identical, so no test could be made to fail.
+  /// This one sets a budget.
+  ///
+  /// What a cancelled pass *means* is the part that needed deciding, and both
+  /// halves are asserted here: the operation is applied and the document
+  /// converges on cell content regardless, and only derived values are left
+  /// behind — reported, rather than presented as final.
+  test("a relayed edit that runs out of recalculation budget still converges", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const alice = await browser.newPage();
+    const bob = await browser.newPage();
+    await boot(alice);
+    await boot(bob);
+
+    // Bob gives a relayed batch no time at all. Set *before* joining, because
+    // the transport captures the budget when it connects.
+    await bob.evaluate(async () => {
+      const editor = await import(window.__editorModule);
+      editor.setTimeBudgetsForTest(10_000, 0);
+    });
+
+    await join(alice, { document: key, user: { id: "u-alice", name: "Alice", color: "#c0392b" } });
+    await join(bob, { document: key, user: { id: "u-bob", name: "Bob", color: "#2980b9" } });
+
+    // Enough formulas that a recalculation has somewhere to be stopped.
+    //
+    // **Above `CANCEL_CHECK_INTERVAL`, which is 4096.** The engine asks the
+    // cancel token every few thousand evaluations rather than every cell, so a
+    // workbook of a few hundred formulas finishes without ever asking and a
+    // zero budget changes nothing. The first draft of this test used 400 and
+    // passed against the unfixed code for exactly that reason.
+    //
+    // Pasted in one operation rather than set cell by cell: 6000 separate
+    // edits would be 6000 recalculations of a growing sheet before the test
+    // even starts.
+    await alice.evaluate(() => {
+      const rows = [];
+      for (let r = 1; r <= 6000; r += 1) rows.push(`${r}\t=A${r}*2+1`);
+      window.__editor.wasmApi().session_paste_tsv(0, 0, 0, rows.join("\n"));
+    });
+    await setCellIn(alice, 7000, 0, "the edit that matters");
+
+    // **Converged**: the operation is in Bob's document, whatever became of the
+    // values. This is the half that must never regress.
+    await expect
+      .poll(() => cellIn(bob, 7000, 0), {
+        message: "a relayed edit was lost when its recalculation was cut short",
+        timeout: 20_000,
+      })
+      .toBe("the edit that matters");
+
+    // **And said so**: at least one relayed batch was reported as leaving
+    // values behind, rather than a half-fresh sheet presented as final.
+    await expect
+      .poll(
+        () =>
+          bob.evaluate(() =>
+            window.__collab.documents.some((d) => d.reason === "remote" && d.stale === true),
+          ),
+        {
+          message:
+            "no relayed batch reported stale values, so the recalculation was never cancellable",
+          timeout: 20_000,
+        },
+      )
+      .toBe(true);
+
+    // Bob is still a working editor: a tab that survived by being dead is not
+    // the outcome. Typing locally still lands.
+    await setCellIn(bob, 600, 0, "bob still works");
+    expect(await cellIn(bob, 600, 0)).toBe("bob still works");
+
+    await alice.close();
+    await bob.close();
+  });
+
   test("concurrent edits to the same cell both survive, in one order", async ({ browser }) => {
     const key = freshDocument();
     const alice = await browser.newPage();

@@ -63,7 +63,27 @@ function newKey() {
 /// how the host learns what happened; none of them is optional, because a
 /// caller that ignores a status is a caller that shows a stale document
 /// forever.
-export function collaborate({ url, token, document: documentKey, wasm, onStatus, onDocument, onPresence }) {
+export function collaborate({
+  url,
+  token,
+  document: documentKey,
+  wasm,
+  onStatus,
+  onDocument,
+  onPresence,
+  /// How long a batch of relayed edits may spend recalculating, in ms.
+  ///
+  /// **The engine's convention, not a new one**: a negative or non-finite
+  /// budget means no limit, and `0` is a real budget of no time rather than a
+  /// way of saying "unbounded". Guarding on `> 0` here quietly turned a
+  /// zero-budget test into an unbounded one, which is precisely the reading
+  /// that made this defect untestable in the first place.
+  ///
+  /// The default is no limit, which is what this did for its whole life: a
+  /// peer's edit that triggered an expensive pass held the tab, and nothing the
+  /// person in front of it could do would stop that (`COL-43`).
+  recalcBudgetMs = -1,
+}) {
   let socket = null;
   let closed = false;
   let retryMs = RETRY_FLOOR_MS;
@@ -254,9 +274,7 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         // continuous and may hold edits the server never received. Replacing it
         // would discard exactly the unsent work resuming exists to preserve.
         wasm.collab_resume(message.client, revision);
-        for (const op of message.missed) {
-          wasm.collab_receive(JSON.stringify(op), message.revision);
-        }
+        const missedLeftStale = applyRelayed(message.missed, message.revision);
         revision = message.revision;
         joined = true;
         // Now, and not before: the chunk in flight had to be rebased past what
@@ -264,6 +282,11 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
         // has moved beyond.
         mustResend = true;
         retryMs = RETRY_FLOOR_MS;
+        // Reported as a remote change, because that is what it is: the missed
+        // operations are in the document and only their values are behind.
+        if (missedLeftStale) {
+          onDocument({ reason: "remote", revision, stale: true });
+        }
         onDocument({ reason: "resumed", revision, editable: message.editable });
         status("live");
         startTimers();
@@ -293,13 +316,18 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
           status("live");
         }
         break;
-      case "apply":
-        for (const op of message.ops) {
-          wasm.collab_receive(JSON.stringify(op), message.revision);
-        }
+      case "apply": {
+        const leftStale = applyRelayed(message.ops, message.revision);
         revision = message.revision;
-        onDocument({ reason: "remote", revision: message.revision });
+        onDocument({
+          reason: "remote",
+          revision: message.revision,
+          // The edits are in the document either way; these are the values
+          // that did not finish following from them.
+          stale: leftStale,
+        });
         break;
+      }
       case "presence":
         onPresence({ kind: "here", ...message });
         break;
@@ -325,6 +353,29 @@ export function collaborate({ url, token, document: documentKey, wasm, onStatus,
       default:
         break;
     }
+  }
+
+  /// Apply relayed operations, bounded as a batch.
+  ///
+  /// **One budget for the whole batch, not one per operation.** A burst of
+  /// twenty relayed edits with a 50 ms budget each is a second of frozen tab,
+  /// which is the thing being prevented rather than a smaller version of it.
+  ///
+  /// Every operation is applied whichever way the recalculation goes: the model
+  /// converges on cell content, and only derived values are left behind. True
+  /// if anything was.
+  function applyRelayed(ops, atRevision) {
+    wasm.session_set_time_budget_ms(recalcBudgetMs);
+    let stale = false;
+    try {
+      for (const op of ops) {
+        const outcome = wasm.collab_receive(JSON.stringify(op), atRevision);
+        if (outcome && outcome !== "full" && outcome !== "none") stale = true;
+      }
+    } finally {
+      wasm.session_clear_time_budget();
+    }
+    return stale;
   }
 
   function startTimers() {

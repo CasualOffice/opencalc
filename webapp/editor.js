@@ -12212,6 +12212,9 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
     token,
     document: documentKey,
     wasm,
+    // The same budget a local recalculation gets. A peer's edit is not entitled
+    // to more of this tab than the person sitting at it (`COL-43`).
+    recalcBudgetMs,
     onStatus: (event) => {
       // The status line is the only place the editor says this out loud, and
       // "reconnecting" is the one a user needs to see before they wonder why
@@ -12721,6 +12724,17 @@ function adoptCollabDocument(event) {
   invalidateGrowth();
   renderTabs();
   draw();
+
+  // The edit itself is in the document; its recalculation ran out of budget.
+  // Said out loud and offered a way to finish, exactly as a local one is
+  // (`COL-43`): a sheet that is a mixture of fresh and stale values must not be
+  // presented as final, and the difference between "somebody else typed" and
+  // "these numbers do not follow from the formulas above them" is the whole
+  // reason the outcome is reported at all.
+  if (event.stale) {
+    statusError("calculation stopped — some values are still out of date");
+    offerKeepWaiting("calculating", () => recalculateNow(-1));
+  }
 }
 
 /// Paint the other participants — their selection, what they are typing, and a
