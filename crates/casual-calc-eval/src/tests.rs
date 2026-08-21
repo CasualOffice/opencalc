@@ -1,6 +1,7 @@
 //! Evaluation tests: build formula cells directly, recalculate, check values.
 
 use casual_calc_formula::parse;
+use casual_calc_formula::stored::Origin;
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
 use crate::{Recalculator, recalculate};
@@ -43,7 +44,11 @@ impl Builder {
 
     fn formula(&mut self, at: (u32, u32), text: &str) -> &mut Self {
         let expr = parse(text).unwrap_or_else(|e| panic!("parse {text:?}: {e}"));
-        let handle = self.wb.store_formula(expr);
+        // `store_formula_at`, not `store_formula`: a formula is stored relative
+        // to the cell that holds it (`PERF-11`), and a fixture that interned it
+        // absolutely would be evaluated at an origin it was never measured
+        // from — every reference off by the cell's own address.
+        let handle = self.wb.store_formula_at(expr, Origin::at(at.0, at.1));
         let mut cell = Cell::value(CellValue::Empty);
         cell.formula = Some(handle);
         self.sheet.cells.set(CellRef::new(at.0, at.1), cell);
@@ -742,7 +747,7 @@ fn incremental_matches_full_under_random_edits() {
 /// Replace a cell's formula, returning the key the recalculator is told about.
 fn set_formula(wb: &mut Workbook, row: u32, col: u32, formula: &str) -> (usize, CellRef) {
     let at = CellRef::new(row, col);
-    let handle = wb.store_formula(parse(formula).unwrap());
+    let handle = wb.store_formula_at(parse(formula).unwrap(), Origin::at(row, col));
     let mut cell = wb.sheets[0]
         .cells
         .get(at)
@@ -3399,7 +3404,7 @@ fn a_shrinking_spill_releases_the_cells_it_vacates() {
 
     // Re-point the formula at two cells; the third column must clear.
     let expr = parse("TRANSPOSE(A1:A2)").unwrap();
-    let handle = wb.store_formula(expr);
+    let handle = wb.store_formula_at(expr, Origin::at(0, 4));
     let mut cell = wb.sheets[0].cells.get(CellRef::new(0, 4)).unwrap().clone();
     cell.formula = Some(handle);
     wb.sheets[0].cells.set(CellRef::new(0, 4), cell);
@@ -4005,7 +4010,10 @@ mod iterative {
         sheet
             .cells
             .set(CellRef::new(0, 0), Cell::value(CellValue::Number(4.0)));
-        let handle = wb.store_formula(parse("A1*2").unwrap());
+        let handle = wb.store_formula_at(
+            parse("A1*2").unwrap(),
+            casual_calc_formula::stored::Origin::at(1, 0),
+        );
         sheet.cells.set(
             CellRef::new(1, 0),
             Cell {

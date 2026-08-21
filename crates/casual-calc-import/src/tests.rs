@@ -133,7 +133,12 @@ fn formula_cells_are_parsed_to_ast_with_cached_value() {
     // Formula parsed into the arena and referenced by the cell.
     let handle = cell.formula.expect("cell has a formula handle");
     let expr = wb.formula(handle).expect("handle resolves in the arena");
-    assert_eq!(expr.to_string(), "A1*2");
+    // Printed **at the cell**: the tree is stored relative to A2, so `Display`
+    // would show the absolute form and not what the file said (`PERF-11`).
+    assert_eq!(
+        casual_calc_formula::print_at(expr, casual_calc_formula::stored::Origin::at(1, 0)),
+        "A1*2"
+    );
 
     // Reported as mapped.
     let formula_entry = import
@@ -380,7 +385,10 @@ fn shared_formula_followers_are_expanded_from_their_master() {
     let formula_at = |row: u32| {
         let cell = sheet.cells.get(CellRef::new(row, 1)).unwrap();
         let handle = cell.formula.expect("follower kept its formula");
-        wb.formula(handle).unwrap().to_string()
+        casual_calc_formula::print_at(
+            wb.formula(handle).unwrap(),
+            casual_calc_formula::stored::Origin::at(row, 1),
+        )
     };
     // The master is unchanged; each follower is shifted by its row delta, and
     // the `$`-anchored parts stay put ($D$1 entirely, $A2's column only).

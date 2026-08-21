@@ -102,7 +102,14 @@ fn written_package_reopens_and_preserves_data() {
     // the text another spreadsheet will show.
     let a3 = sheet.cells.get(CellRef::new(2, 0)).unwrap();
     let expr = wb.formula(a3.formula.unwrap()).unwrap();
-    assert_eq!(expr.to_string(), "A1*2");
+    // Printed **at A3**, which is where it lives: a stored tree's references
+    // are offsets from the holding cell (`PERF-11`), so `Display` shows the
+    // absolute form — `#REF!*2` here, since "two rows up" from `A1` is off the
+    // sheet.
+    assert_eq!(
+        casual_calc_formula::print_at(expr, casual_calc_formula::stored::Origin::at(2, 0)),
+        "A1*2"
+    );
 
     // The number-format style survived.
     let b3 = sheet.cells.get(CellRef::new(2, 1)).unwrap();

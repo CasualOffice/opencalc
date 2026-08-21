@@ -28,9 +28,8 @@ pub use theme::stock_theme_slots;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use casual_calc_formula::{
-    Expr, FormulaError, shift_references, strip_bound_name_prefixes, strip_future_prefixes,
-};
+use casual_calc_formula::stored::{ABSOLUTE, Origin};
+use casual_calc_formula::{Expr, FormulaError, strip_bound_name_prefixes, strip_future_prefixes};
 
 /// Parse a formula **as the file writes it**, which is not quite the language.
 ///
@@ -119,18 +118,26 @@ fn note_out_of_grid<T>(report: &mut CompatibilityReport, feature: &str, parsed: 
 /// this is asked the text has already been through `_xlfn.` stripping and,
 /// for a shared-formula follower, a row/column shift that can push an in-range
 /// master out of the grid on its own.
-fn expr_within_grid(expr: &Expr) -> bool {
-    let within = |r: &casual_calc_formula::CellReference| {
-        r.row <= casual_calc_model::GRID_MAX_ROW && r.col <= casual_calc_model::GRID_MAX_COL
+fn expr_within_grid(expr: &Expr, origin: Origin) -> bool {
+    let within = |r: &casual_calc_formula::stored::StoredRef| {
+        // Resolved against the cell that will hold it: a stored reference is an
+        // offset, and a follower's offsets only name an address once its own
+        // origin is applied. One that resolves off the sheet is `#REF!` and is
+        // *not* inside the grid.
+        r.resolve(origin).is_some_and(|at| {
+            at.row <= casual_calc_model::GRID_MAX_ROW && at.col <= casual_calc_model::GRID_MAX_COL
+        })
     };
     match expr {
         Expr::Reference(r) => within(r),
         Expr::Range(a, b) => within(a) && within(b),
-        Expr::Unary { operand, .. } => expr_within_grid(operand),
-        Expr::Binary { left, right, .. } => expr_within_grid(left) && expr_within_grid(right),
-        Expr::Function { args, .. } => args.iter().all(expr_within_grid),
+        Expr::Unary { operand, .. } => expr_within_grid(operand, origin),
+        Expr::Binary { left, right, .. } => {
+            expr_within_grid(left, origin) && expr_within_grid(right, origin)
+        }
+        Expr::Function { args, .. } => args.iter().all(|a| expr_within_grid(a, origin)),
         Expr::Call { callee, args } => {
-            expr_within_grid(callee) && args.iter().all(expr_within_grid)
+            expr_within_grid(callee, origin) && args.iter().all(|a| expr_within_grid(a, origin))
         }
         // No address of its own: a literal, a name, a structured reference (the
         // evaluator resolves that against a table, and a table's range came
@@ -942,7 +949,7 @@ pub fn import_package_cancellable(
                     // unparseable-formula arm below makes, for the same reason:
                     // what the file last computed is real, and re-emitting the
                     // reference is what corrupts the package.
-                    Ok(expr) if !expr_within_grid(&expr) => {
+                    Ok(expr) if !expr_within_grid(&expr, ABSOLUTE) => {
                         report.record(
                             "f/outOfGrid",
                             ModelOutcome::Omitted,
@@ -950,7 +957,9 @@ pub fn import_package_cancellable(
                         );
                     }
                     Ok(expr) => {
-                        cell.formula = Some(workbook.store_formula(expr));
+                        cell.formula = Some(
+                            workbook.store_formula_at(expr, Origin::at(cell_ref.row, cell_ref.col)),
+                        );
                         report.record("f", ModelOutcome::Mapped, RetentionOutcome::NotApplicable);
                     }
                     Err(_) => {
@@ -958,16 +967,21 @@ pub fn import_package_cancellable(
                         report.record("f", ModelOutcome::Degraded, RetentionOutcome::NotRetained);
                     }
                 },
-                // An empty `<f>` is a shared-formula follower: rebuild it from
-                // its master, shifted by the row/column delta. `$` anchors stay
-                // put — the same copy/fill semantics the shifter gives the UI.
+                // An empty `<f>` is a shared-formula follower: it takes its
+                // master's tree unchanged.
                 Some(_) => {
+                    // **No shift.** A shared formula's master, stored against
+                    // the master's own cell, is already what every follower
+                    // needs: its references are offsets and the follower's own
+                    // origin applies them. That is what `<f t="shared">` means
+                    // in the file, and since `PERF-11` it is what the model
+                    // means too — so a whole shared group lands on *one* tree.
                     let rebuilt = raw.shared_index.and_then(|si| shared_masters.get(&si)).map(
                         |(at, expr)| {
-                            shift_references(
+                            casual_calc_formula::restore_at(
                                 expr,
-                                i64::from(cell_ref.row) - i64::from(at.row),
-                                i64::from(cell_ref.col) - i64::from(at.col),
+                                ABSOLUTE,
+                                Origin::at(at.row, at.col),
                             )
                         },
                     );
@@ -976,7 +990,9 @@ pub fn import_package_cancellable(
                     // carries them out, so the check belongs after the rebuild,
                     // not on the master. Either way the follower keeps its
                     // cached value and is reported `Degraded` below.
-                    match rebuilt.filter(expr_within_grid) {
+                    match rebuilt
+                        .filter(|e| expr_within_grid(e, Origin::at(cell_ref.row, cell_ref.col)))
+                    {
                         Some(expr) => {
                             cell.formula = Some(workbook.store_formula(expr));
                             report.record(
@@ -1407,7 +1423,7 @@ pub fn import_package_cancellable(
             // parser cannot *read* — it prints back unchanged and the file
             // survives — and the wrong one here, because printing it back
             // unchanged is precisely what writes the unopenable package.
-            Ok(formula) if !expr_within_grid(&formula) => {
+            Ok(formula) if !expr_within_grid(&formula, ABSOLUTE) => {
                 report.record(
                     "definedName/outOfGrid",
                     ModelOutcome::Omitted,

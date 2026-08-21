@@ -674,7 +674,7 @@ mod snapshot_limits {
 // --- Formula arena interning (PERF-09) ---------------------------------------
 
 mod formula_arena {
-    use crate::{Id, Workbook};
+    use crate::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
     use casual_calc_formula::parse;
 
     /// **The same formula, stored twice, is stored once.**
@@ -733,17 +733,38 @@ mod formula_arena {
     #[test]
     fn interning_survives_a_snapshot_round_trip() {
         let mut wb = Workbook::new(Id::from_parts(1, 1));
-        wb.store_formula(parse("SUM($A$1:$A$10)").unwrap());
-        wb.store_formula(parse("A1+1").unwrap());
+        // **Held by cells**, which is new and is the point. A snapshot carries
+        // formulas in the absolute form and the model holds them relative to
+        // the cell that has them (`PERF-11`), so the conversion is driven by
+        // the cells — and a tree no cell references has no origin to be
+        // converted against.
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for (row, text) in [(0u32, "SUM($A$1:$A$10)"), (1, "A1+1")] {
+            let handle = wb.store_formula_at(
+                parse(text).unwrap(),
+                casual_calc_formula::stored::Origin::at(row, 3),
+            );
+            let mut cell = Cell::value(CellValue::Empty);
+            cell.formula = Some(handle);
+            sheet.cells.set(CellRef::new(row, 3), cell);
+        }
+        wb.sheets.push(sheet);
         assert_eq!(wb.formulas.len(), 2);
 
         let bytes = wb.to_snapshot().expect("serialises");
         let mut reloaded = Workbook::from_snapshot(&bytes).expect("loads");
         assert_eq!(reloaded.formulas.len(), 2, "the arena did not survive");
 
-        // The same two formulas again: both already there.
-        reloaded.store_formula(parse("SUM($A$1:$A$10)").unwrap());
-        reloaded.store_formula(parse("A1+1").unwrap());
+        // The same two formulas again, stored where they live: both already
+        // there.
+        reloaded.store_formula_at(
+            parse("SUM($A$1:$A$10)").unwrap(),
+            casual_calc_formula::stored::Origin::at(0, 3),
+        );
+        reloaded.store_formula_at(
+            parse("A1+1").unwrap(),
+            casual_calc_formula::stored::Origin::at(1, 3),
+        );
         assert_eq!(
             reloaded.formulas.len(),
             2,
@@ -938,4 +959,131 @@ fn a_snapshot_round_trip_changes_no_number() {
         drifted[0].2,
         drifted[0].2.to_bits(),
     );
+}
+
+#[cfg(test)]
+mod arena_reclaim {
+    use crate::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+    use casual_calc_formula::parse;
+
+    /// **A snapshot round trip collects trees no cell holds.**
+    ///
+    /// A behaviour change worth naming rather than discovering. `store_formula`
+    /// interns but never reclaims — its own comment records that a thousand
+    /// edits between two formulas leaves a thousand ASTs — and until now a
+    /// round trip carried every orphan along with the rest.
+    ///
+    /// It falls out of how `PERF-11` converts: the snapshot's formulas are
+    /// rebuilt from the *cells*, because a cell is what says which origin a
+    /// tree is measured from. A tree nothing points at has no origin, cannot be
+    /// converted, and is unreachable anyway — so it goes.
+    #[test]
+    fn a_round_trip_drops_a_formula_no_cell_refers_to() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        let kept = wb.store_formula_at(
+            parse("A1+1").unwrap(),
+            casual_calc_formula::stored::Origin::at(4, 0),
+        );
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(kept);
+        sheet.cells.set(CellRef::new(4, 0), cell);
+        wb.sheets.push(sheet);
+
+        // An orphan: interned, then abandoned, exactly as an edit that replaces
+        // a formula leaves one behind.
+        wb.store_formula(parse("SUM(B1:B9)").unwrap());
+        assert_eq!(wb.formulas.len(), 2, "one held, one orphaned");
+
+        let bytes = wb.to_snapshot().expect("serialises");
+        let reloaded = Workbook::from_snapshot(&bytes).expect("loads");
+        assert_eq!(
+            reloaded.formulas.len(),
+            1,
+            "the orphan survived a round trip"
+        );
+        // And the one that is held still reads as it was written.
+        let handle = reloaded.sheets[0]
+            .cells
+            .get(CellRef::new(4, 0))
+            .unwrap()
+            .formula
+            .unwrap();
+        assert_eq!(
+            casual_calc_formula::print_at(
+                reloaded.formula(handle).unwrap(),
+                casual_calc_formula::stored::Origin::at(4, 0)
+            ),
+            "A1+1"
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_format_frozen {
+    use crate::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+    use casual_calc_formula::parse;
+    use casual_calc_formula::stored::Origin;
+
+    /// **The snapshot format did not change** (`PERF-11`).
+    ///
+    /// The decision the whole migration rests on: relativity is an in-memory
+    /// representation, and what goes on disk and on the wire is what always
+    /// went. `ADR-010` forbids moving `SCHEMA_VERSION`, and snapshots travel
+    /// between cluster nodes that may not share a build — so a byte that moves
+    /// here is a document another node reads wrongly.
+    ///
+    /// Asserted as the *literal text* a filled column produces, not against
+    /// this build's own output, so it cannot pass by both sides drifting
+    /// together.
+    #[test]
+    fn a_filled_column_serialises_as_the_absolute_formulas_it_always_did() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..3u32 {
+            let handle = wb.store_formula_at(
+                parse(&format!("A{}*2", row + 1)).unwrap(),
+                Origin::at(row, 1),
+            );
+            let mut cell = Cell::value(CellValue::Empty);
+            cell.formula = Some(handle);
+            sheet.cells.set(CellRef::new(row, 1), cell);
+        }
+        wb.sheets.push(sheet);
+
+        // One tree in memory…
+        assert_eq!(wb.formulas.len(), 1, "the column shares a tree");
+
+        // …and three absolute ones on the wire, exactly as before.
+        let json = String::from_utf8(wb.to_snapshot().unwrap()).unwrap();
+        for row in 0..3u32 {
+            let expected = format!(r#"{{"reference":{{"col":0,"row":{row}}}}}"#);
+            assert!(
+                json.contains(&expected),
+                "the snapshot no longer carries `A{}` as an absolute address: \
+                 the format moved, and a node on another build cannot read it",
+                row + 1
+            );
+        }
+        assert!(
+            !json.contains(r#""row":-"#),
+            "an offset reached the snapshot: {json}"
+        );
+
+        // And it comes back meaning the same thing — still shared.
+        let back = Workbook::from_snapshot(json.as_bytes()).unwrap();
+        assert_eq!(back.formulas.len(), 1, "sharing was lost on the way back");
+        for row in 0..3u32 {
+            let handle = back.sheets[0]
+                .cells
+                .get(CellRef::new(row, 1))
+                .unwrap()
+                .formula
+                .unwrap();
+            assert_eq!(
+                casual_calc_formula::print_at(back.formula(handle).unwrap(), Origin::at(row, 1)),
+                format!("A{}*2", row + 1)
+            );
+        }
+    }
 }

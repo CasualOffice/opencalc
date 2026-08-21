@@ -396,8 +396,12 @@ fn measure_arena(cells: u32) -> ArenaReport {
             .cells
             .set(CellRef::new(row, 0), Cell::value(CellValue::Number(1.0)));
         let mut cell = Cell::value(CellValue::Number(0.0));
-        cell.formula = Some(workbook.store_formula(
+        // `store_formula_at`, which is the whole measurement: the same *shape*
+        // filled down a column is one tree once references are stored relative
+        // to the cell holding them (`PERF-11`).
+        cell.formula = Some(workbook.store_formula_at(
             casual_calc_formula::parse(&format!("A{}*2", row + 1)).expect("parses"),
+            casual_calc_formula::stored::Origin::at(row, 1),
         ));
         sheet.cells.set(CellRef::new(row, 1), cell);
     }
@@ -1121,18 +1125,23 @@ mod arena_tests {
     /// dedup cannot touch. If this ever reports fewer trees than cells,
     /// something has started sharing them and the row's premise has moved.
     ///
-    /// **This assertion inverts when stage 3 lands** — one tree for the whole
-    /// column — and it is written to fail loudly at that moment rather than to
-    /// quietly keep passing, because the number it guards is the whole point of
-    /// the work.
+    /// **Stage 3 landed, and this is the assertion inverted.** It was written
+    /// to fail loudly at exactly this moment rather than quietly keep passing,
+    /// and it did.
     #[test]
-    fn a_filled_column_holds_one_tree_per_cell_today() {
+    fn a_filled_column_holds_one_tree() {
         let report = measure_arena(500);
         assert_eq!(
-            report.distinct_trees, report.cells,
-            "a filled column shares trees already — PERF-11's premise has changed"
+            report.distinct_trees, 1,
+            "a filled column is one shape and must be one tree (PERF-11)"
         );
-        assert_eq!(report.nodes, report.cells * 3, "`A1*2` is three nodes");
+        assert_eq!(report.nodes, 3, "`A1*2` is three nodes, once");
+        // The figure the row exists for: what a formula costs per cell, now
+        // that five hundred of them share one tree.
+        assert!(
+            report.centi_arena_bytes_per_cell < 100,
+            "a shared column costs more than a byte a cell: {report:?}"
+        );
     }
 
     /// The arithmetic is checkable, so the headline figure cannot drift from
@@ -1145,14 +1154,19 @@ mod arena_tests {
             report.centi_arena_bytes_per_cell,
             report.arena_bytes * 100 / report.cells
         );
-        // The comparison that decides the row: an `Expr` is 80 bytes and a cell
-        // is ~83 (PERF-10), so three nodes per cell is roughly three times the
-        // cell's own cost. Asserted as a floor, not a fixed number, because the
-        // node size is allowed to change and the *conclusion* is what matters.
+        // **The arena does not grow with the column.** Stronger than any
+        // per-cell figure and independent of how many cells are measured:
+        // twenty-five times the cells is the same one tree, which is the
+        // property `PERF-11` exists to create.
+        let small = measure_arena(200);
+        let large = measure_arena(5_000);
+        assert_eq!(
+            small.arena_bytes, large.arena_bytes,
+            "the arena grew with the column — the shape is no longer shared"
+        );
         assert!(
-            report.centi_arena_bytes_per_cell >= 15_000,
-            "the arena is no longer several times the cell: {report:?} — recheck \
-             whether PERF-11 is still worth its risk"
+            large.centi_arena_bytes_per_cell < small.centi_arena_bytes_per_cell,
+            "a longer column must cost *less* per cell, not the same"
         );
     }
 

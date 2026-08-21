@@ -15,7 +15,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use casual_calc_eval::{Recalculated, recalculate};
-use casual_calc_formula::{CellReference, Expr, parse, shift_references};
+use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
+use casual_calc_formula::{Expr, parse, restore_at};
 use casual_calc_layout::table_style::table_style_colors;
 use casual_calc_layout::{
     DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry, Viewport, display_color, display_text,
@@ -6205,7 +6206,13 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
             // while still showing the formula defeats the only thing it does.
             && !formula_is_hidden(wb, sheet, CellRef::new(row, col))
         {
-            return format!("={expr}");
+            // Printed **at this cell**: a stored tree's references are
+            // offsets from the cell holding it (`PERF-11`), so `Display` would
+            // show the absolute form rather than what the person typed.
+            return format!(
+                "={}",
+                casual_calc_formula::print_at(expr, Origin::at(row, col))
+            );
         }
         // A date cell edits as its date, not as serial 45356 — the serial is an
         // implementation detail, and showing it means editing a date is a
@@ -6747,10 +6754,7 @@ pub fn session_fill_mode(
                     }
                     match sh.cells.get(CellRef::new(sr as u32, sc as u32)) {
                         Some(c) => {
-                            let formula = c
-                                .formula
-                                .and_then(|h| wb.formula(h))
-                                .map(|e| shift_references(e, dr as i64 - sr, dc as i64 - sc));
+                            let formula = c.formula.and_then(|h| wb.formula(h)).cloned();
                             pending.push(Pending {
                                 at,
                                 value: c.value.clone(),
@@ -6972,7 +6976,19 @@ pub fn session_sort_range_multi(
                 let cell = row.cells[j].as_ref().map(|rc| {
                     let mut out = rc.cell.clone();
                     if let Some(expr) = &rc.formula {
-                        let shifted = sort_reanchor(expr, dr, row.src_row, c0, c1);
+                        // **In and out of the absolute form**, as the
+                        // structural rewrite does: `sort_reanchor` asks which
+                        // references sit *on* the moving row, which is a
+                        // question about addresses. The row's cells keep their
+                        // column, so only the row of the origin changes.
+                        let from = Origin::at(row.src_row, c);
+                        let to = Origin::at(r, c);
+                        let absolute = restore_at(expr, from, ABSOLUTE);
+                        let shifted = restore_at(
+                            &sort_reanchor(&absolute, dr, row.src_row, c0, c1),
+                            ABSOLUTE,
+                            to,
+                        );
                         out.formula = Some(session.workbook_mut().store_formula(shifted));
                     }
                     out
@@ -7032,13 +7048,19 @@ pub fn session_sort_range_multi(
 
 /// Whether a reference moves with a sorted row: relative, unqualified, on the
 /// source row, and inside the sorted columns.
-fn ref_moves_with_row(r: &CellReference, src_row: u32, c0: u32, c1: u32) -> bool {
-    !r.row_absolute && r.sheet.is_none() && r.row == src_row && r.col >= c0 && r.col <= c1
+fn ref_moves_with_row(r: &StoredRef, src_row: u32, c0: u32, c1: u32) -> bool {
+    // Addresses: reached with a tree in the absolute form, where a stored
+    // reference's offset from `(0, 0)` is the address it names.
+    !r.row_absolute
+        && r.sheet.is_none()
+        && r.row == i64::from(src_row)
+        && r.col >= i64::from(c0)
+        && r.col <= i64::from(c1)
 }
 
-fn shifted_row(r: &CellReference, dr: i64) -> CellReference {
+fn shifted_row(r: &StoredRef, dr: i64) -> StoredRef {
     let mut out = r.clone();
-    out.row = (r.row as i64 + dr).max(0) as u32;
+    out.row = (r.row + dr).max(0);
     out
 }
 
@@ -8895,10 +8917,11 @@ pub fn session_clip_paste_mode(
                         let mut out = cc.cell.clone();
                         out.style = target_style;
                         if let Some(expr) = &cc.formula {
-                            let dr = at.row as i64 - cc.sr as i64;
-                            let dc = at.col as i64 - cc.sc as i64;
-                            let shifted = shift_references(expr, dr, dc);
-                            out.formula = Some(session.workbook_mut().store_formula(shifted));
+                            // **No shift.** The tree is stored relative to the
+                            // cell it came from, so storing it at the
+                            // destination *is* the shift — `=A1+1` a column
+                            // over reads `=B1+1` because it is read there.
+                            out.formula = Some(session.workbook_mut().store_formula(expr.clone()));
                         }
                         ops.push(EditOperation::SetCell {
                             sheet,
@@ -8913,20 +8936,29 @@ pub fn session_clip_paste_mode(
                         // over. A **cut moves the cell**, so its formula travels
                         // verbatim: `=A1+1` cut from B1 to D5 is still `=A1+1`
                         // in Excel, because the cell did not change what it
-                        // means, only where it lives. Shifting on a cut rewrote
-                        // the formula to point somewhere it never referred to —
-                        // silent corruption on an everyday action.
+                        // means, only where it lives.
+                        //
+                        // **Since `PERF-11` the two have swapped which one does
+                        // the work.** A stored tree is relative to its cell, so
+                        // a copy shifts by being read at the destination and
+                        // needs nothing done to it; a cut has to be re-stored,
+                        // or its offsets would measure from the new cell and
+                        // point somewhere it never referred to.
                         if cut && move_delta.is_none() {
                             move_delta =
                                 Some((at.row as i64 - cc.sr as i64, at.col as i64 - cc.sc as i64));
                         }
-                        if let Some(expr) = &cc.formula
-                            && !cut
-                        {
-                            let dr = at.row as i64 - cc.sr as i64;
-                            let dc = at.col as i64 - cc.sc as i64;
-                            let shifted = shift_references(expr, dr, dc);
-                            out.formula = Some(session.workbook_mut().store_formula(shifted));
+                        if let Some(expr) = &cc.formula {
+                            let travelled = if cut {
+                                restore_at(
+                                    expr,
+                                    Origin::at(cc.sr, cc.sc),
+                                    Origin::at(at.row, at.col),
+                                )
+                            } else {
+                                expr.clone()
+                            };
+                            out.formula = Some(session.workbook_mut().store_formula(travelled));
                         }
                         ops.push(EditOperation::SetCell {
                             sheet,
@@ -9758,7 +9790,9 @@ fn build_set_op(
     if let Some(body) = trimmed.strip_prefix('=')
         && let Ok(expr) = parse(body)
     {
-        let handle = session.workbook_mut().store_formula(expr);
+        let handle = session
+            .workbook_mut()
+            .store_formula_at(expr, Origin::at(at.row, at.col));
         let mut cell = Cell::value(CellValue::Empty);
         cell.style = existing_style;
         cell.formula = Some(handle);

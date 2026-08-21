@@ -18,6 +18,7 @@ pub use error::ExportError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 
+use casual_calc_formula::stored::{ABSOLUTE, Origin};
 use casual_calc_formula::{Expr, column_to_letters, qualify_bound_names, qualify_future_functions};
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind,
@@ -259,14 +260,20 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
 /// what the formula said. Applied here rather than in the printer because it is
 /// a fact about the file, not about the expression: the same tree printed into a
 /// formula bar must not carry it.
-fn formula_text(expr: &Expr) -> String {
+/// A formula as `<f>` should carry it: the text a person wrote, at `origin`.
+///
+/// The origin matters since `PERF-11`: a stored tree's references are offsets
+/// from the cell holding it, so printing one absolutely writes a formula that
+/// names whatever those offsets happen to point at from `A1`. A defined name
+/// has no holding cell and passes [`ABSOLUTE`].
+fn formula_text(expr: &Expr, origin: Origin) -> String {
     let mut owned = expr.clone();
     // Bound names first: the pass that finds them matches `LAMBDA` and `LET`,
     // which the next pass is about to rename. (It tolerates either order, but
     // depending on that would be a coincidence rather than a decision.)
     qualify_bound_names(&mut owned);
     qualify_future_functions(&mut owned);
-    owned.to_string()
+    casual_calc_formula::print_at(&owned, origin)
 }
 
 fn package_with_retained(
@@ -975,7 +982,7 @@ fn workbook_xml(workbook: &Workbook, ids: &WorkbookRelIds) -> String {
             s.push_str(&format!(
                 "<definedName name=\"{}\"{scope}>{}</definedName>",
                 escape_attr(&name.name),
-                escape_text(&formula_text(&name.formula))
+                escape_text(&formula_text(&name.formula, ABSOLUTE))
             ));
         }
         s.push_str("</definedNames>");
@@ -2461,7 +2468,10 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
     if let Some(handle) = cell.formula
         && let Some(expr) = workbook.formula(handle)
     {
-        s.push_str(&format!("<f>{}</f>", escape_text(&formula_text(expr))));
+        s.push_str(&format!(
+            "<f>{}</f>",
+            escape_text(&formula_text(expr, Origin::at(row, col)))
+        ));
     }
 
     match effective_value {

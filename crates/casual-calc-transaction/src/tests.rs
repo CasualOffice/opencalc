@@ -1,6 +1,7 @@
 //! Transaction tests: inverses, atomic batches, undo/redo, and edit→recalc.
 
 use casual_calc_formula::parse;
+use casual_calc_formula::stored::Origin;
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Style,
     StyleId, Table, TableColumn, Workbook,
@@ -238,7 +239,10 @@ fn edit_then_recalc_updates_dependents() {
     wb.sheets[0]
         .cells
         .set(CellRef::new(0, 0), Cell::value(CellValue::Number(10.0)));
-    let handle = wb.store_formula(casual_calc_formula::parse("A1*2").unwrap());
+    let handle = wb.store_formula_at(
+        casual_calc_formula::parse("A1*2").unwrap(),
+        Origin::at(1, 0),
+    );
     let mut a2 = Cell::value(CellValue::Number(20.0));
     a2.formula = Some(handle);
     wb.sheets[0].cells.set(CellRef::new(1, 0), a2);
@@ -279,7 +283,8 @@ fn set_num(wb: &mut Workbook, sheet: usize, row: u32, col: u32, n: f64) {
 
 /// Put a formula cell (parsed from `text`) at `(row, col)` on sheet `sheet`.
 fn set_formula(wb: &mut Workbook, sheet: usize, row: u32, col: u32, text: &str) {
-    let handle = wb.store_formula(parse(text).unwrap());
+    // Relative to the cell that holds it (`PERF-11`).
+    let handle = wb.store_formula_at(parse(text).unwrap(), Origin::at(row, col));
     let mut cell = Cell::value(CellValue::Empty);
     cell.formula = Some(handle);
     wb.sheets[sheet].cells.set(CellRef::new(row, col), cell);
@@ -291,7 +296,12 @@ fn formula_text(wb: &Workbook, sheet: usize, row: u32, col: u32) -> Option<Strin
         .cells
         .get(CellRef::new(row, col))?
         .formula?;
-    Some(wb.formula(handle).unwrap().to_string())
+    // Printed **at the cell**, because a stored tree's references are offsets
+    // and `Display` prints the absolute form.
+    Some(casual_calc_formula::print_at(
+        wb.formula(handle).unwrap(),
+        Origin::at(row, col),
+    ))
 }
 
 /// The observable, arena-independent state of a workbook: per sheet, the name

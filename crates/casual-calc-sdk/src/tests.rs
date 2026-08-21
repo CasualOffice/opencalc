@@ -13,7 +13,10 @@ fn session_with_formula() -> WorkbookSession {
         CellRef::new(0, 0),
         casual_calc_model::Cell::value(CellValue::Number(10.0)),
     );
-    let handle = wb.store_formula(casual_calc_formula::parse("A1*2").unwrap());
+    let handle = wb.store_formula_at(
+        casual_calc_formula::parse("A1*2").unwrap(),
+        casual_calc_formula::stored::Origin::at(1, 0),
+    );
     let mut a2 = casual_calc_model::Cell::value(CellValue::Empty);
     a2.formula = Some(handle);
     sheet.cells.set(CellRef::new(1, 0), a2);
@@ -959,7 +962,10 @@ fn moving_a_sheet_does_not_leave_a_graph_keyed_to_the_old_order() {
             CellRef::new(0, 0),
             casual_calc_model::Cell::value(CellValue::Number(1.0)),
         );
-        let handle = wb.store_formula(casual_calc_formula::parse("A1*2").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("A1*2").unwrap(),
+            casual_calc_formula::stored::Origin::at(0, 1),
+        );
         let mut b1 = casual_calc_model::Cell::value(CellValue::Empty);
         b1.formula = Some(handle);
         first.cells.set(CellRef::new(0, 1), b1);
@@ -1031,7 +1037,10 @@ fn moving_a_sheet_recomputes_a_formula_that_reads_its_position() {
     {
         let wb = session.workbook_mut();
         let mut first = Sheet::new(SheetId(Id::from_parts(9, 1)), "First");
-        let handle = wb.store_formula(casual_calc_formula::parse("SHEET()").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SHEET()").unwrap(),
+            casual_calc_formula::stored::Origin::at(0, 0),
+        );
         let mut a1 = casual_calc_model::Cell::value(CellValue::Empty);
         a1.formula = Some(handle);
         first.cells.set(CellRef::new(0, 0), a1);
@@ -1088,7 +1097,10 @@ fn hiding_a_row_recomputes_a_subtotal_that_ignores_hidden_rows() {
             );
         }
         // 109 is SUM ignoring hidden rows.
-        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap(),
+            casual_calc_formula::stored::Origin::at(3, 0),
+        );
         let mut total = casual_calc_model::Cell::value(CellValue::Empty);
         total.formula = Some(handle);
         sheet.cells.set(CellRef::new(3, 0), total);
@@ -1147,7 +1159,10 @@ fn applying_a_filter_reaches_the_other_participant() {
                 casual_calc_model::Cell::value(CellValue::Number(n)),
             );
         }
-        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap(),
+            casual_calc_formula::stored::Origin::at(3, 0),
+        );
         let mut total = casual_calc_model::Cell::value(CellValue::Empty);
         total.formula = Some(handle);
         sheet.cells.set(CellRef::new(3, 0), total);
@@ -1651,7 +1666,10 @@ mod delimited_sessions {
         let wb = session.workbook_mut();
 
         // A formula on the sheet that will be written.
-        let handle = wb.store_formula(casual_calc_formula::parse("1+1").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("1+1").unwrap(),
+            casual_calc_formula::stored::Origin::at(2, 1),
+        );
         let mut b3 = Cell::value(CellValue::Number(2.0));
         b3.formula = Some(handle);
         // Bold: formatting a text field has nowhere to go.
@@ -1877,7 +1895,10 @@ fn sheet_with_subtotal() -> WorkbookSession {
                 casual_calc_model::Cell::value(CellValue::Number(n)),
             );
         }
-        let handle = wb.store_formula(casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SUBTOTAL(109,A1:A3)").unwrap(),
+            casual_calc_formula::stored::Origin::at(3, 0),
+        );
         let mut total = casual_calc_model::Cell::value(CellValue::Empty);
         total.formula = Some(handle);
         sheet.cells.set(CellRef::new(3, 0), total);

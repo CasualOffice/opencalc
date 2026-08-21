@@ -38,6 +38,7 @@
 use core::fmt;
 
 use crate::ast::{BinaryOp, Expr, UnaryOp};
+use crate::stored::{ABSOLUTE, Origin, StoredRef};
 
 /// The prefix operators' binding power, from [`crate::parse`].
 const PREFIX_BP: u8 = 50;
@@ -84,7 +85,13 @@ fn bp(expr: &Expr) -> (u8, u8) {
 
 /// Write `child`, bracketed only if `needs` says the parser would otherwise
 /// read it differently.
-fn write_child(f: &mut fmt::Formatter<'_>, child: &Expr, needs: bool) -> fmt::Result {
+fn write_child(
+    f: &mut fmt::Formatter<'_>,
+    child: &Expr,
+    origin: Origin,
+    needs: bool,
+) -> fmt::Result {
+    let child = At(child, origin);
     if needs {
         write!(f, "({child})")
     } else {
@@ -115,27 +122,55 @@ fn write_string_literal(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     f.write_str("\"")
 }
 
+/// A formula as it reads in the cell that holds it.
+///
+/// Printing a reference is **origin-dependent** once trees are stored relative
+/// (`PERF-11`): one shared tree reads `A1*2` in `B1` and `A2*2` in `B2`. So the
+/// printer takes an origin, and `Display for Expr` is the special case of the
+/// absolute form — what the parser produces and what a snapshot carries.
+///
+/// A caller showing a *cell's* formula wants this; a caller printing a freshly
+/// parsed tree wants `Display`.
+#[must_use]
+pub fn print_at(expr: &Expr, origin: Origin) -> String {
+    At(expr, origin).to_string()
+}
+
+/// An expression with the origin its references are measured from.
+struct At<'a>(&'a Expr, Origin);
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        write!(f, "{}", At(self, ABSOLUTE))
+    }
+}
+
+impl fmt::Display for At<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let origin = self.1;
+        match self.0 {
             Expr::Number(n) => write!(f, "{n}"),
             Expr::Bool(b) => f.write_str(if *b { "TRUE" } else { "FALSE" }),
             Expr::Text(s) => write_string_literal(f, s),
             Expr::Error(s) => f.write_str(s),
-            Expr::Reference(r) => write!(f, "{r}"),
-            Expr::Range(a, b) => write!(f, "{a}:{b}"),
+            Expr::Reference(r) => write_ref(f, r, origin),
+            Expr::Range(a, b) => {
+                write_ref(f, a, origin)?;
+                f.write_str(":")?;
+                write_ref(f, b, origin)
+            }
             // Verbatim: the point of keeping it is that it goes back out
             // exactly as it came in.
             Expr::Raw(text) => write!(f, "{text}"),
             // Prints as nothing, which is exactly how it was written.
             Expr::Empty => Ok(()),
             Expr::Call { callee, args } => {
-                write!(f, "{callee}(")?;
+                write!(f, "{}(", At(callee, origin))?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         f.write_str(",")?;
                     }
-                    write!(f, "{a}")?;
+                    write!(f, "{}", At(a, origin))?;
                 }
                 f.write_str(")")
             }
@@ -152,25 +187,25 @@ impl fmt::Display for Expr {
                 // without brackets: `-(1+2)` cannot be written `-1+2`.
                 UnaryOp::Negate => {
                     f.write_str("-")?;
-                    write_child(f, operand, bp(operand).0 < PREFIX_BP)
+                    write_child(f, operand, origin, bp(operand).0 < PREFIX_BP)
                 }
                 UnaryOp::Plus => {
                     f.write_str("+")?;
-                    write_child(f, operand, bp(operand).0 < PREFIX_BP)
+                    write_child(f, operand, origin, bp(operand).0 < PREFIX_BP)
                 }
                 // Postfix, and the parser applies it to a *primary*, so its
                 // operand must be one. `(-a)%` is not `-a%`: the second is a
                 // negated percentage.
                 UnaryOp::Percent => {
-                    write_child(f, operand, bp(operand).1 < ATOM_BP)?;
+                    write_child(f, operand, origin, bp(operand).1 < ATOM_BP)?;
                     f.write_str("%")
                 }
             },
             Expr::Binary { op, left, right } => {
                 let (lbp, rbp) = binary_bp(*op);
-                write_child(f, left, bp(left).1 <= lbp)?;
+                write_child(f, left, origin, bp(left).1 <= lbp)?;
                 f.write_str(binary_symbol(*op))?;
-                write_child(f, right, bp(right).0 < rbp)
+                write_child(f, right, origin, bp(right).0 < rbp)
             }
             Expr::Function { name, args } => {
                 f.write_str(name)?;
@@ -179,10 +214,21 @@ impl fmt::Display for Expr {
                     if i > 0 {
                         f.write_str(",")?;
                     }
-                    write!(f, "{arg}")?;
+                    write!(f, "{}", At(arg, origin))?;
                 }
                 f.write_str(")")
             }
         }
+    }
+}
+
+/// Write a stored reference as it reads at `origin`.
+///
+/// `#REF!` when it resolves off the sheet: one column left of A is what Excel
+/// calls `#REF!`, not column 4294967295.
+fn write_ref(f: &mut fmt::Formatter<'_>, reference: &StoredRef, origin: Origin) -> fmt::Result {
+    match reference.at(origin) {
+        Some(absolute) => write!(f, "{absolute}"),
+        None => f.write_str("#REF!"),
     }
 }

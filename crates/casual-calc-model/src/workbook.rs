@@ -4,12 +4,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use casual_calc_formula::Expr;
+use casual_calc_formula::stored::{ABSOLUTE, Origin};
 use serde::{Deserialize, Serialize};
 
 use crate::defined_name::DefinedName;
 use crate::error::ModelError;
 use crate::ids::{FormulaHandle, Id, StringId, StyleId};
 use crate::sheet::Sheet;
+use crate::store::CellRef;
 use crate::strings::StringTable;
 use crate::style::{Style, StyleTable};
 use crate::value::CellValue;
@@ -451,6 +453,30 @@ impl Default for SnapshotLimits {
     }
 }
 
+/// Intern `expr` into an arena and its fingerprint index.
+///
+/// Factored out of [`Workbook::store_formula`] because the snapshot conversions
+/// need the same interning against a *fresh* arena, and a second copy of this
+/// logic is a second place for the fingerprint-is-a-hint rule to be got wrong.
+fn intern_into(
+    arena: &mut Vec<Expr>,
+    index: &mut BTreeMap<u64, Vec<u32>>,
+    expr: Expr,
+) -> FormulaHandle {
+    let print = expr.fingerprint();
+    if let Some(candidates) = index.get(&print) {
+        for &i in candidates {
+            if arena.get(i as usize) == Some(&expr) {
+                return FormulaHandle(i);
+            }
+        }
+    }
+    let at = arena.len() as u32;
+    arena.push(expr);
+    index.entry(print).or_default().push(at);
+    FormulaHandle(at)
+}
+
 impl Workbook {
     /// A new, empty workbook at the current schema version.
     pub fn new(workbook_id: Id) -> Self {
@@ -513,6 +539,20 @@ impl Workbook {
     }
 
     /// Store a formula AST in the arena, returning a handle to it.
+    /// Intern a formula for the cell at `origin`, storing its references
+    /// **relative to that cell**.
+    ///
+    /// This is what collapses a filled-down column to one tree (`PERF-11`):
+    /// `A1*2` in `B1` and `A2*2` in `B2` both come out as "one column left,
+    /// same row", so the fingerprint matches and the arena keeps one of them.
+    ///
+    /// `expr` is expected in the **absolute form** — what
+    /// [`parse`](fn@casual_calc_formula::parse) produces — because a tree already
+    /// stored somewhere would be re-measured from the wrong place.
+    pub fn store_formula_at(&mut self, expr: Expr, origin: Origin) -> FormulaHandle {
+        self.store_formula(casual_calc_formula::restore_at(&expr, ABSOLUTE, origin))
+    }
+
     pub fn store_formula(&mut self, expr: Expr) -> FormulaHandle {
         // **Interned, not appended** (`PERF-09`). Two things were wrong with
         // appending, and only the first was written down:
@@ -529,18 +569,7 @@ impl Workbook {
         // spent on unique formulas exactly what this saves on repeated ones.
         // A fingerprint is a hint; equality decides, so a collision costs one
         // comparison and never a wrong handle.
-        let print = expr.fingerprint();
-        if let Some(candidates) = self.formula_index.get(&print) {
-            for &i in candidates {
-                if self.formulas.get(i as usize) == Some(&expr) {
-                    return FormulaHandle(i);
-                }
-            }
-        }
-        let index = self.formulas.len() as u32;
-        self.formulas.push(expr);
-        self.formula_index.entry(print).or_default().push(index);
-        FormulaHandle(index)
+        intern_into(&mut self.formulas, &mut self.formula_index, expr)
     }
 
     /// Plant a wrong candidate under `print`, to exercise the collision path.
@@ -568,6 +597,41 @@ impl Workbook {
                 .or_default()
                 .push(i as u32);
         }
+    }
+
+    /// Re-store every formula relative to the cell that holds it.
+    ///
+    /// The inverse of [`Self::absolute_view`], run once when a snapshot is
+    /// read. This is where a filled-down column collapses: N absolute trees
+    /// arrive, each becomes "one column left, same row", and interning keeps
+    /// **one** of them (`PERF-11`).
+    fn relativise_formulas(&mut self) {
+        let (mut arena, mut index) = (Vec::new(), BTreeMap::new());
+        let absolute = std::mem::take(&mut self.formulas);
+        for sheet in &mut self.sheets {
+            let addresses: Vec<CellRef> = sheet
+                .cells
+                .iter()
+                .filter(|(_, c)| c.formula.is_some())
+                .map(|(addr, _)| addr)
+                .collect();
+            for addr in addresses {
+                let Some(cell) = sheet.cells.get(addr) else {
+                    continue;
+                };
+                let Some(expr) = cell.formula.and_then(|h| absolute.get(h.0 as usize)) else {
+                    continue;
+                };
+                let stored =
+                    casual_calc_formula::restore_at(expr, ABSOLUTE, Origin::at(addr.row, addr.col));
+                let handle = intern_into(&mut arena, &mut index, stored);
+                let mut cell = cell.clone();
+                cell.formula = Some(handle);
+                sheet.cells.set(addr, cell);
+            }
+        }
+        self.formulas = arena;
+        self.formula_index = index;
     }
 
     /// Resolve a formula handle to its AST.
@@ -611,7 +675,50 @@ impl Workbook {
     /// Field order is fixed by declaration and cell order by the ordered store,
     /// so the same model always produces the same bytes.
     pub fn to_snapshot(&self) -> Result<Vec<u8>, ModelError> {
-        Ok(serde_json::to_vec(self)?)
+        Ok(serde_json::to_vec(&self.absolute_view())?)
+    }
+
+    /// This workbook with every formula in the **absolute form**.
+    ///
+    /// The snapshot format does not change (`PERF-11`, and `ADR-010` forbids
+    /// moving `SCHEMA_VERSION` anyway): relativity is an in-memory
+    /// representation, and what goes on the wire is what always went on it.
+    ///
+    /// A shared tree has no single origin, so this cannot be a transformation
+    /// of the arena alone — the cells are what say which origin belongs to
+    /// which tree, and each gets its own resolved copy. That un-shares what
+    /// sharing saved, which is the honest price of leaving the format alone:
+    /// **resident memory improves, snapshot size does not.**
+    fn absolute_view(&self) -> Self {
+        let mut out = self.clone();
+        out.formulas.clear();
+        out.formula_index.clear();
+        for sheet in &mut out.sheets {
+            let addresses: Vec<CellRef> = sheet
+                .cells
+                .iter()
+                .filter(|(_, c)| c.formula.is_some())
+                .map(|(addr, _)| addr)
+                .collect();
+            for addr in addresses {
+                let Some(cell) = sheet.cells.get(addr) else {
+                    continue;
+                };
+                let Some(expr) = cell.formula.and_then(|h| self.formula(h)) else {
+                    continue;
+                };
+                let absolute =
+                    casual_calc_formula::restore_at(expr, Origin::at(addr.row, addr.col), ABSOLUTE);
+                // Interned as it goes, so identical *absolute* formulas still
+                // share — which is what `PERF-09` gave the snapshot and this
+                // must not take away.
+                let handle = intern_into(&mut out.formulas, &mut out.formula_index, absolute);
+                let mut cell = cell.clone();
+                cell.formula = Some(handle);
+                sheet.cells.set(addr, cell);
+            }
+        }
+        out
     }
 
     /// Parse a snapshot and validate it, under the default limits.
@@ -656,6 +763,11 @@ impl Workbook {
         // full and the index empty, so every later formula appends — the exact
         // behaviour PERF-09 removed, restored by a round trip.
         workbook.reindex_formulas();
+        // The snapshot's formulas are absolute; the model's are relative to the
+        // cell holding them (`PERF-11`). Re-storing here is also where the
+        // sharing appears: a filled-down column arrives as N absolute trees and
+        // becomes one.
+        workbook.relativise_formulas();
         let cells: usize = workbook.sheets.iter().map(|s| s.cells.len()).sum();
         if cells > limits.max_populated_cells {
             return Err(ModelError::SnapshotTooLarge {

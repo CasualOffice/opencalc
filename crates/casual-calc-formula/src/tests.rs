@@ -223,18 +223,31 @@ fn an_unnamed_axis_spans_the_sheet_but_is_marked() {
         panic!("expected a range");
     };
     assert!(a.row_implicit && b.row_implicit);
-    assert_eq!((a.row, b.row), (0, crate::MAX_ROW));
+    // `i64` now: a stored reference carries an offset, and the parser's output
+    // is the absolute form where that offset is the address.
+    assert_eq!((a.row, b.row), (0, i64::from(crate::MAX_ROW)));
     assert_eq!((a.col, b.col), (0, 0));
 }
 
 /// Copying `A:A` down must not turn it into `A2:A1048576`.
+///
+/// Asserted through the printer since `PERF-11`, because a copy shifts by being
+/// *read* at the destination — and it caught a real defect: `StoredRef` carried
+/// over `shift_ref`'s rule for `$`-anchored axes and not its rule for
+/// **unnamed** ones, so `A:A` read six rows down came out `A6:#REF!`.
 #[test]
-fn shifting_leaves_an_unnamed_axis_alone() {
-    let shifted = crate::shift_references(&parse("SUM(A:A)").unwrap(), 5, 0);
-    assert_eq!(shifted.to_string(), "SUM(A:A)");
-    // A named axis still shifts, so the guard is not simply disabling the shift.
-    let normal = crate::shift_references(&parse("SUM(A1:A3)").unwrap(), 5, 0);
-    assert_eq!(normal.to_string(), "SUM(A6:A8)");
+fn reading_an_unnamed_axis_lower_down_leaves_it_alone() {
+    use crate::print::print_at;
+    use crate::stored::Origin;
+    assert_eq!(
+        print_at(&parse("SUM(A:A)").unwrap(), Origin::at(5, 0)),
+        "SUM(A:A)"
+    );
+    // A named axis still moves, so the guard is not simply disabling the shift.
+    assert_eq!(
+        print_at(&parse("SUM(A1:A3)").unwrap(), Origin::at(5, 0)),
+        "SUM(A6:A8)"
+    );
 }
 
 /// A formula typed the way a person writes one comes back as they wrote it.

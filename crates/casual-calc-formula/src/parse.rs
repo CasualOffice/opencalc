@@ -4,6 +4,7 @@ use crate::ast::{BinaryOp, Expr, UnaryOp};
 use crate::error::FormulaError;
 use crate::lex::{Token, tokenize};
 use crate::reference::{CellReference, parse_a1, parse_a1_axis};
+use crate::stored::StoredRef;
 
 /// How deep an expression may nest before the parser refuses it.
 ///
@@ -290,10 +291,17 @@ impl Parser {
         Ok(callee)
     }
 
+    /// A reference, or a range when a colon follows.
+    ///
+    /// Produced in the **absolute form** — stored against `(0, 0)`, where an
+    /// offset and an address are the same number — because the parser reads
+    /// text and cannot know which cell will hold it.
+    /// [`Workbook::store_formula_at`] re-stores it against the cell that does.
     fn maybe_range(&mut self, first: CellReference) -> Result<Expr, FormulaError> {
+        let first = StoredRef::absolute(&first);
         if self.peek() == Some(&Token::Colon) {
             self.advance();
-            let second = self.parse_ref_operand()?;
+            let second = StoredRef::absolute(&self.parse_ref_operand()?);
             Ok(Expr::Range(first, second))
         } else {
             Ok(Expr::Reference(first))
