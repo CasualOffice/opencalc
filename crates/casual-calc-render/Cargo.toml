@@ -13,6 +13,18 @@ casual-calc-layout = { path = "../casual-calc-layout" }
 # chart legend could be measured there too (`RND-11`).
 casual-calc-text = { path = "../casual-calc-text" }
 tiny-skia = "0.11"
+# The raster formats a browser draws and this backend could not (`RND-12`).
+# Default features off and named one by one: the full crate carries codecs
+# nobody here asks for, and every one of them is a decoder reached by a
+# workbook's own bytes. Vector formats are deliberately absent — see
+# `images::foreign_format`.
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+    "tiff",
+] }
 skrifa = "0.43"
 # Shaping, behind a feature that is off for WebAssembly — see ADR-018. A pure
 # Rust HarfBuzz port: it turns a run of text into positioned glyph *ids*, which
@@ -24,12 +36,19 @@ rustybuzz = { version = "0.20", optional = true }
 # On by default: a native build should be correct for every script. The
 # WebAssembly build turns it off, because the browser already shapes the text a
 # user actually looks at and this crate is in a bundle nobody wants larger.
-default = ["shaping", "all-fonts"]
+default = ["shaping", "all-fonts", "raster"]
 shaping = ["dep:rustybuzz"]
 # Every bundled family. On for native, off for WebAssembly, where the faces were
 # 72% of the bundle and the editor never touches them — it draws with
 # `ctx.fillText` and the browser supplies the fonts.
 all-fonts = ["casual-calc-text/all-fonts"]
+# Raster decoders beyond PNG. On for native, off for WebAssembly — and that is
+# **not** a fidelity split by deployment, because the browser never reaches this
+# code: nothing in `casual-calc-wasm` exports a PNG render, and the editor draws
+# pictures with the browser's own decoders. Compiled into the bundle it was 771
+# KB (+10.5%) of code that cannot run. Wherever the headless renderer actually
+# runs, every raster format decodes.
+raster = ["dep:image"]
 
 [dev-dependencies]
 casual-calc-model = { path = "../casual-calc-model" }
