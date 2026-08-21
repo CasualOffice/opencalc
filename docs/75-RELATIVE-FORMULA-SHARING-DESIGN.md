@@ -168,6 +168,52 @@ because a shared tree has no single origin to resolve against. The arena's
 serialisation moves up to `Workbook`, which walks cells — the only place that
 knows which origin belongs to which tree.
 
+## The second reader this design missed: the structural rewrite's *order*
+
+Found by carrying the migration as far as `casual-calc-transaction`, and it is
+not a call site — it is an ordering assumption.
+
+`insert_line` does this, in this order:
+
+```rust
+shift_cells_insert(workbook, sheet, axis, at, count);   // cells move
+rewrite_all_formulas(workbook, &target, axis, Insert, at, count);   // then formulas
+```
+
+Under absolute storage the order does not matter, because a tree's meaning does
+not depend on where its cell sits. Under relative storage it decides the answer.
+
+Take `B5 = A2*2`, and insert a row at row 3.
+
+- The cell moves to `B6`. Its stored offset is "same row, one column left"
+  measured from `B5` — that is, three rows up.
+- Resolved at `B6`, three rows up is `A3`.
+- But `A2` did not move: it is above the insertion. The formula now reads `A3`
+  and should read `A2`.
+
+The rewrite is supposed to correct exactly this, and it cannot: by the time it
+runs, `job.at` is the cell's **new** address, and the offsets it must
+re-measure were taken from the **old** one. The information needed to do the
+job correctly has already been discarded.
+
+Relative references that do *not* cross the insertion point need no rewrite at
+all — they move with their cell for free, which is the win — and `$`-anchored
+ones are addresses that the existing rewrite already handles unchanged. It is
+the crossing case that needs both origins.
+
+### What has to be decided
+
+Either **rewrite before moving**, so the rewrite sees the old origin and stores
+against the new one it can compute; or **give the rewrite both origins**,
+leaving the order alone. The first is a smaller diff and a larger behavioural
+risk, since `rewrite_all_formulas` currently reads a workbook whose cells are
+already in their final places and several of its helpers may assume that. The
+second is honest about what the operation now needs.
+
+Not decided here, deliberately: this is the operation where getting it wrong
+means a formula that points one row off after an insert — silently, in a
+spreadsheet, which is the failure this design exists to prevent.
+
 ## Staging
 
 Deliberately not one change:
