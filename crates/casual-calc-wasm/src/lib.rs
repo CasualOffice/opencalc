@@ -9574,7 +9574,7 @@ pub fn collab_acknowledge(through: f64, revision: f64) {
 /// If the JSON is not a `WireOperation`, if there is no session, or if the
 /// transform refuses the pair.
 #[wasm_bindgen]
-pub fn collab_receive(wire: &str, revision: f64) -> Result<(), JsError> {
+pub fn collab_receive(wire: &str, revision: f64) -> Result<String, JsError> {
     let incoming: casual_calc_transaction::wire::WireOperation =
         serde_json::from_str(wire).map_err(js)?;
     SESSION.with(|cell| {
@@ -9590,13 +9590,30 @@ pub fn collab_receive(wire: &str, revision: f64) -> Result<(), JsError> {
                 .map_err(js)
         })
     })?;
-    // A remote edit changes values, so the same recalculation a local one gets.
-    SESSION.with(|cell| {
-        if let Some(session) = cell.borrow_mut().as_mut() {
-            session.recalculate();
+    // A remote edit changes values, so the same recalculation a local one gets
+    // — **including the way out of it** (`COL-43`). This called plain
+    // `recalculate()`, so a peer whose edit triggered an expensive pass held
+    // this tab exactly as an oversized open used to, and nothing the person in
+    // front of it did could stop that.
+    //
+    // What a cancelled pass means here is the part that needed deciding, and it
+    // is decided on the *model*: the operation was applied and acknowledged
+    // above, before this runs, so the document converges on cell content
+    // whatever happens next. Only derived values are left behind, the session
+    // is marked stale, and the outcome is returned so the host can finish the
+    // job rather than present a half-fresh sheet as final.
+    let outcome = SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(session) = guard.as_mut() else {
+            return "none";
+        };
+        match session.recalculate_cancellable(&budget_token()) {
+            Recalculated::Fully => "full",
+            Recalculated::Cancelled => "cancelled",
+            Recalculated::OverBudget => "over-budget",
         }
     });
-    Ok(())
+    Ok(outcome.to_owned())
 }
 
 /// Run `f` with the workbook and the collaborative session, if both exist.
