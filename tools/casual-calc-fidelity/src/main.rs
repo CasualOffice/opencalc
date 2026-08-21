@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use casual_calc_formula::parse;
+use casual_calc_formula::stored::Origin;
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use casual_calc_sdk::WorkbookSession;
 
@@ -358,7 +359,13 @@ fn feature_workbook() -> Workbook {
             CellRef::new(row, 0),
             Cell::value(CellValue::Number(f64::from(row))),
         );
-        let handle = wb.store_formula(parse(&format!("A{}*2", row + 1)).unwrap());
+        // `store_formula_at`: a formula is stored relative to the cell that
+        // holds it (`PERF-11`), and a corpus built absolutely writes shifted
+        // text into the package LibreOffice is then asked to agree with.
+        let handle = wb.store_formula_at(
+            parse(&format!("A{}*2", row + 1)).unwrap(),
+            Origin::at(row, 1),
+        );
         first.cells.set(
             CellRef::new(row, 1),
             Cell {
@@ -368,7 +375,10 @@ fn feature_workbook() -> Workbook {
         );
     }
     // A future function, which is the class of thing FID-06 was about.
-    let joined = wb.store_formula(parse("TEXTJOIN(\",\",TRUE,A2:A6)").unwrap());
+    let joined = wb.store_formula_at(
+        parse("TEXTJOIN(\",\",TRUE,A2:A6)").unwrap(),
+        Origin::at(7, 0),
+    );
     first.cells.set(
         CellRef::new(7, 0),
         Cell {
@@ -396,7 +406,7 @@ fn feature_workbook() -> Workbook {
 
     // A second sheet, and a cross-sheet formula pointing back at the first.
     let mut second = Sheet::new(SheetId(Id::from_parts(2, 2)), "Summary");
-    let total = wb.store_formula(parse("SUM(Data!A2:A6)").unwrap());
+    let total = wb.store_formula_at(parse("SUM(Data!A2:A6)").unwrap(), Origin::at(0, 0));
     second.cells.set(
         CellRef::new(0, 0),
         Cell {
@@ -453,11 +463,11 @@ fn survey(ours: &Workbook, theirs: &Workbook) -> Vec<(String, String, String)> {
             format!("{:?}", other.hidden_rows),
         ));
         for (cell_ref, cell) in sheet.cells.row_band(0, u32::MAX) {
-            let mine = describe_cell(ours, cell);
-            let theirs_cell = other
-                .cells
-                .get(cell_ref)
-                .map_or_else(|| "<missing>".to_owned(), |c| describe_cell(theirs, c));
+            let mine = describe_cell(ours, cell, cell_ref);
+            let theirs_cell = other.cells.get(cell_ref).map_or_else(
+                || "<missing>".to_owned(),
+                |c| describe_cell(theirs, c, cell_ref),
+            );
             out.push((
                 format!(
                     "sheet {i} {}{}",
@@ -492,11 +502,24 @@ fn survey(ours: &Workbook, theirs: &Workbook) -> Vec<(String, String, String)> {
 
 /// A cell as its formula if it has one, else its value — the two things a
 /// re-save must not change.
-fn describe_cell(wb: &Workbook, cell: &casual_calc_model::Cell) -> String {
+fn describe_cell(
+    wb: &Workbook,
+    cell: &casual_calc_model::Cell,
+    at: casual_calc_model::CellRef,
+) -> String {
     if let Some(handle) = cell.formula
         && let Some(expr) = wb.formula(handle)
     {
-        return format!("={expr}");
+        // **Printed at the cell**, not absolutely (`PERF-11`). A stored tree's
+        // references are offsets, so `Display` renders them measured from `A1`
+        // — and a formula whose offsets reach above row 1 comes out as
+        // `#REF!`. That is not merely ugly in the report: two *different*
+        // formulas can both render `#REF!` and compare equal, so the check
+        // quietly stops catching what it exists to catch.
+        return format!(
+            "={}",
+            casual_calc_formula::print_at(expr, Origin::at(at.row, at.col))
+        );
     }
     match &cell.value {
         CellValue::Empty => "<empty>".to_owned(),
@@ -665,7 +688,11 @@ fn build_workbook(entries: &[Entry]) -> Result<Workbook, String> {
     for (row, entry) in entries.iter().enumerate() {
         let expr = parse(&entry.formula)
             .map_err(|e| format!("line {}: cannot parse {:?}: {e}", entry.line, entry.formula))?;
-        let handle = wb.store_formula(expr);
+        // **Stored at the cell it is written into** (`PERF-11`). Each corpus
+        // line lands on its own row, so a formula interned absolutely resolves
+        // `C1:C10` shifted down by that row — which is why the lookups came
+        // back empty against an oracle that had values.
+        let handle = wb.store_formula_at(expr, Origin::at(row as u32, FORMULA_COL));
         sheet.cells.set(
             CellRef::new(row as u32, FORMULA_COL),
             Cell {
