@@ -86,13 +86,27 @@ into the reserved seam). Owns the mapping and the disposition taxonomy.
 the semantic writer. Depends on `-import` (for retained source) and `-model`.
 
 **`casual-calc-ods`** — `.ods` admission + semantic import/export. Peer of the
-OOXML path under the `-io` registry.
+OOXML path, and a direct dependency of the SDK exactly as `casual-calc-export`
+is — see the amendment below.
 
-**`casual-calc-io`** — format-neutral identity/detection/dispatch and the adapter
-registry (XLSX, ODS, CSV/TSV/PSV, JSON). The single entry point hosts call to
-open/save "a spreadsheet" without naming a format. Delimited text formats
-(CSV/TSV/PSV — comma/tab/pipe) are plain-text adapters here and do **not** pass
-through `casual-calc-package`; only OPC formats (`.xlsx`, `.ods`) do.
+**`casual-calc-io`** — format **detection** and the delimited-text adapters.
+Delimited text (CSV/TSV/PSV — comma/tab/pipe) is read and written here and does
+**not** pass through `casual-calc-package`; only OPC formats (`.xlsx`, `.ods`)
+do. `detect` identifies a run of bytes as XLSX, ODS or delimited text without
+depending on any format crate, which is what keeps this crate light enough for a
+consumer that only wants the CSV reader.
+
+> **Amended by [ADR-022](08-ADR-REGISTER.md).** This crate was described as "the
+> adapter registry… the single entry point hosts call to open/save a spreadsheet
+> without naming a format". It never was: dispatch grew in `casual-calc-sdk`,
+> which is the entry point hosts actually call and the only layer that depends
+> on every format crate. Rather than restate the design as whatever the code had
+> become — which would have erased a structural decision without anybody making
+> it — the registry is split: **detection below, dispatch above**. `-io` gained
+> the detection it never had; the SDK keeps the dispatch it grew. Giving `-io`
+> dependencies on `-import`/`-export`/`-ods` so the graph matched the original
+> sentence was considered and rejected, because it would make a CSV-only
+> consumer carry the whole OOXML stack.
 
 ### Editing
 

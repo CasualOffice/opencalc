@@ -1,12 +1,21 @@
-//! Format-neutral identities, detection/dispatch, and built-in adapters.
+//! Format detection, and the delimited-text adapters.
 //!
 //! The first adapter is **delimited text** (CSV / TSV / PSV): a deterministic,
 //! RFC 4180-style reader and writer over the normalized [`Workbook`]. Fields are
 //! typed on read (number / boolean / ISO date / text) and a parse → write →
 //! parse round-trip is a model fixed point — which is what rules out Excel's
 //! habit of turning `007` into `7`, since that round-trip does not settle.
-//! XLSX/ODS live in their own crates; this crate is where the lightweight text
-//! formats and the format registry belong.
+//! XLSX and ODS live in their own crates, and this one does **not** depend on
+//! them. [`detect`] identifies their bytes anyway — a zip's first local file
+//! header names its first entry, which is all it takes — so a caller can learn
+//! what a file is here and open it a layer up, where the format crates are.
+//!
+//! That split is [ADR-022](../../../docs/08-ADR-REGISTER.md), which amends
+//! `docs/19`: this crate was once described as the adapter registry and the
+//! single entry point for opening a spreadsheet. It never was. Dispatch grew in
+//! `casual-calc-sdk`, which is the entry point hosts actually call; detection
+//! belongs down here, where it costs no dependencies. Giving this crate the
+//! whole OOXML stack so the sentence came true was considered and rejected.
 //!
 //! See `docs/19-WORKSPACE-SCAFFOLD-DESIGN.md`.
 
@@ -477,3 +486,124 @@ fn parse_records(text: &str, delim: char) -> Vec<Vec<String>> {
 
 #[cfg(test)]
 mod tests;
+
+/// What a run of bytes looks like, by its own content (`ODS-01`).
+///
+/// Deliberately **not** the same type as the SDK's `SessionFormat`: this crate
+/// knows what a file *is*, and the SDK knows what this engine will do about it.
+/// Keeping them apart is what lets detection live down here, where it needs no
+/// format crates at all, while dispatch stays where the format crates are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detected {
+    /// An OOXML package — a zip whose first entry is `[Content_Types].xml`.
+    Xlsx,
+    /// An OpenDocument spreadsheet.
+    Ods,
+    /// Delimited text, with the separator the first line is built from.
+    Delimited(u8),
+}
+
+/// The format `bytes` are, read from the bytes themselves.
+///
+/// # Why this is not the filename
+///
+/// A filename extension is the file's own claim about itself, and so is a
+/// content type. This engine believed that claim for whole documents while
+/// already refusing to for the pictures inside them — `foreign_format` in
+/// `casual-calc-render` sniffs magic numbers for exactly this reason. A `.xlsx`
+/// that is really an `.ods` opened wrong, and an upload with no filename could
+/// not be opened at all.
+///
+/// # What it will not do
+///
+/// Guess. `None` when the bytes do not clearly say, because "probably a CSV"
+/// applied to a binary file produces a sheet full of mojibake and a person
+/// wondering what happened to their document. A caller that knows the format
+/// should still say so; this is for the caller that does not.
+#[must_use]
+pub fn detect(bytes: &[u8]) -> Option<Detected> {
+    if bytes.starts_with(b"PK\x03\x04") {
+        return detect_zip(bytes);
+    }
+    detect_delimited(bytes)
+}
+
+/// An OPC package, told apart by the name of its **first** entry.
+///
+/// Read from the local file header rather than by unzipping: the name sits at a
+/// fixed offset after a 30-byte header, so this needs no zip reader and no
+/// inflation — which is what keeps this crate free of the format stack.
+///
+/// ODF requires `mimetype` to be first *and stored uncompressed*, precisely so
+/// that a reader can identify the document without decompressing it; OOXML
+/// conventionally puts `[Content_Types].xml` first. A zip that is neither is
+/// not something this engine opens, and says so rather than guessing.
+fn detect_zip(bytes: &[u8]) -> Option<Detected> {
+    const HEADER: usize = 30;
+    let name_len = usize::from(u16::from_le_bytes([*bytes.get(26)?, *bytes.get(27)?]));
+    let extra_len = usize::from(u16::from_le_bytes([*bytes.get(28)?, *bytes.get(29)?]));
+    let name = bytes.get(HEADER..HEADER.checked_add(name_len)?)?;
+
+    if name.eq_ignore_ascii_case(b"[Content_Types].xml") {
+        return Some(Detected::Xlsx);
+    }
+    if name == b"mimetype" {
+        // Stored, so themedia type is the next bytes verbatim. Bounded to the
+        // declared size rather than scanned for, so a `mimetype` entry that
+        // lies about its length cannot walk this off the end of the buffer.
+        let at = HEADER.checked_add(name_len)?.checked_add(extra_len)?;
+        let size = u32::from_le_bytes([
+            *bytes.get(18)?,
+            *bytes.get(19)?,
+            *bytes.get(20)?,
+            *bytes.get(21)?,
+        ]) as usize;
+        let media = bytes.get(at..at.checked_add(size)?)?;
+        if media == b"application/vnd.oasis.opendocument.spreadsheet" {
+            return Some(Detected::Ods);
+        }
+        // An ODF document that is not a spreadsheet — a text document, a
+        // presentation. Named as not-ours rather than opened as one.
+        return None;
+    }
+    None
+}
+
+/// Delimited text, by which separator the first line is actually built from.
+///
+/// Counted **outside quotes**, because a comma inside `"Smith, J"` is data and
+/// counting it would call a tab-separated file a CSV. Ties go to the earlier
+/// entry in the list, which is the conventional order.
+fn detect_delimited(bytes: &[u8]) -> Option<Detected> {
+    // Binary is not text. A NUL in the first kilobyte is the cheapest reliable
+    // signal, and it is what stops a `.bin` being read as a one-column sheet.
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.contains(&0) {
+        return None;
+    }
+    let text = core::str::from_utf8(head).ok()?;
+    let line = text.lines().next()?;
+    if line.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(u8, usize)> = None;
+    for sep in [b',', b'\t', b'|', b';'] {
+        let mut count = 0usize;
+        let mut quoted = false;
+        for b in line.bytes() {
+            match b {
+                b'"' => quoted = !quoted,
+                _ if b == sep && !quoted => count += 1,
+                _ => {}
+            }
+        }
+        if count > 0 && best.is_none_or(|(_, seen)| count > seen) {
+            best = Some((sep, count));
+        }
+    }
+    // `None` when nothing separated anything: one column of text is a
+    // legitimate CSV and is also every plain-text file ever written. Refused,
+    // because the caller who really meant it can still say so.
+    best.map(|(sep, _)| Detected::Delimited(sep))
+}

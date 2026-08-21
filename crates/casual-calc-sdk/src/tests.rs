@@ -2424,3 +2424,61 @@ mod images {
         );
     }
 }
+
+// --- Format detection (ODS-01) -----------------------------------------
+
+/// **What this engine writes, this engine recognises.**
+///
+/// The `casual-calc-io` tests prove the offsets against packages written by
+/// Python's `zipfile`; this proves the same detector against packages written
+/// by *our* writers, which is the pairing that matters. Either alone is a
+/// half-test: the first says the parser reads real zips, the second says the
+/// zips we produce are the shape the parser expects.
+#[test]
+fn a_saved_workbook_is_recognised_from_its_bytes_in_every_format_we_write() {
+    use crate::SessionFormat;
+
+    for format in [SessionFormat::Xlsx, SessionFormat::Ods] {
+        let session = session_with_formula();
+        let bytes = session
+            .save_as(format)
+            .unwrap_or_else(|e| panic!("save as {format:?}: {e}"));
+        assert_eq!(
+            SessionFormat::for_bytes(&bytes),
+            Some(format),
+            "a {format:?} this engine wrote was not recognised from its own bytes"
+        );
+    }
+}
+
+/// And the round trip closes: detected, then opened by what was detected.
+///
+/// The point of detecting at all. A host with an upload and no filename can
+/// open it, which it could not do before — `for_extension` was the only way in.
+#[test]
+fn bytes_with_no_filename_can_be_opened_by_what_they_are() {
+    use crate::SessionFormat;
+
+    let session = session_with_formula();
+    let bytes = session.save().unwrap();
+    let format = SessionFormat::for_bytes(&bytes).expect("a saved workbook is recognisable");
+    let reopened = WorkbookSession::open_as(bytes, format).expect("opened by detected format");
+    assert_eq!(
+        value(&reopened, CellRef::new(1, 0)),
+        CellValue::Number(20.0),
+        "the formula did not survive an open by detected format"
+    );
+}
+
+/// Refusing is part of the contract: a caller must be able to tell "I know what
+/// this is" from "I do not", or it will open nonsense as a spreadsheet.
+#[test]
+fn bytes_that_are_not_a_spreadsheet_are_refused() {
+    use crate::SessionFormat;
+
+    assert_eq!(SessionFormat::for_bytes(&[0u8, 1, 2, 3, 0xff]), None);
+    assert_eq!(
+        SessionFormat::for_bytes(b"a sentence with no separators"),
+        None
+    );
+}
