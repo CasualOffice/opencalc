@@ -8744,6 +8744,12 @@ function pasteSpecialDialog() {
   group("Paste", [
     ["all", "Everything"], ["values", "Values only"],
     ["formulas", "Formulas"], ["formats", "Formats only"],
+    // Excel has this as its own option for the reason a plain paste must not
+    // have it: pasting three cells should not reshape the sheet they land in.
+    // Asked for deliberately, it is exactly what somebody rebuilding a layout
+    // wants — and it is what a cross-application paste cannot carry, because
+    // the clipboard's HTML says nothing this engine will act on (docs/68).
+    ["widths", "Column widths only"],
   ], (v) => { what = v; });
 
   let op = "none";
