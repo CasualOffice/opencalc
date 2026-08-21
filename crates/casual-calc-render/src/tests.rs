@@ -1333,6 +1333,56 @@ mod charts {
         assert_pixel(&pixmap, 204, 94, GROUND, "the centre itself");
     }
 
+    /// **A legend reaches the PNG, and takes its side out of the plot.**
+    ///
+    /// `RND-11` shipped every chart kind but this: layout had no text advances,
+    /// so it could not size the legend box — and the plot is what is *left over*
+    /// from that box, so it gave the plot the whole frame and drew no legend at
+    /// all. Every chart with one rendered with a plot the width of the legend
+    /// too wide.
+    ///
+    /// Proved against the same chart with the legend off, so it cannot pass on
+    /// the pie being any particular size — only on its being smaller with a
+    /// legend, and on there being a swatch out where the plot no longer reaches.
+    #[test]
+    fn a_legend_is_drawn_and_narrows_the_plot() {
+        let plain = sheet_with_chart(ChartKind::Pie, &[1.0, 1.0, 1.0, 1.0]);
+        let without = render(&plain);
+        // The control: this point is the first slice with no legend.
+        assert_pixel(&without, 250, 48, ACCENT1, "first slice, no legend");
+
+        let mut legended = plain.clone();
+        legended.sheets[0].charts[0].legend = Some("r".to_owned());
+        let with = render(&legended);
+
+        // The plot narrowed, so the point that was inside the pie is not any
+        // more. Asserted as "not the slice colour" rather than as a specific
+        // colour, because what is there now is the legend's business.
+        let p = with.pixel(250, 48).expect("pixel");
+        assert_ne!(
+            (p.red(), p.green(), p.blue()),
+            ACCENT1,
+            "the pie still reaches where it did without a legend: the legend took \
+             nothing out of the plot"
+        );
+
+        // And the legend itself is there: a swatch of the first series' colour,
+        // out beyond where the narrowed plot ends.
+        let swatch = (300..380).any(|x| {
+            (10..60).any(|y| {
+                with.pixel(x, y).is_some_and(|p| {
+                    let got = (p.red(), p.green(), p.blue());
+                    let close = |a: u8, b: u8| a.abs_diff(b) <= 3;
+                    close(got.0, ACCENT1.0) && close(got.1, ACCENT1.1) && close(got.2, ACCENT1.2)
+                })
+            })
+        });
+        assert!(
+            swatch,
+            "no first-series swatch anywhere in the legend column"
+        );
+    }
+
     /// A chart is drawn **over** the cells it is anchored across, not behind
     /// them.
     ///

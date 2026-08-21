@@ -12,7 +12,7 @@
 //! and `fonts/LICENSES/`. Bytes are embedded with `include_bytes!` (not crate
 //! deps), so `cargo-deny` does not scan them.
 
-use casual_calc_layout::substitute;
+use crate::substitution::substitute;
 use skrifa::{FontRef, MetadataProvider};
 
 macro_rules! face {

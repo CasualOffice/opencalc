@@ -22,20 +22,27 @@
 //! [`PX`], so the two can be compared line by line — which is the only way a
 //! port stays faithful once somebody edits one of them.
 //!
+//! # The legend
+//!
+//! Drawn, and sized the way the canvas sizes it: the box takes the widest
+//! series name plus padding, and the plot rectangle is what is left over.
+//! Layout could not do that for a while — it had no text advances at all, so it
+//! left the legend out and gave the plot the whole frame, which rendered every
+//! chart with a legend with a plot the width of the legend too wide.
+//! [`casual_calc_text::advance_width`] measures it now (`RND-11`).
+//!
+//! The measurement is of the **bundled** face; the canvas measures the
+//! browser's `system-ui` with `measureText`, so the two do not agree exactly.
+//! That is the same disagreement the two have had about every other string
+//! since the PNG path existed, and it is a far smaller error than not
+//! reserving the box at all. What matters is that the string is measured in the
+//! face it is *drawn* in, so the box fits its contents.
+//!
 //! # What this does not draw, and why
 //!
 //! Named here because a chart the display list cannot describe has to be
 //! visible somewhere other than in a diff:
 //!
-//! - **The legend.** [`legend_box`](../../../webapp/editor.js) sizes its box
-//!   from `ctx.measureText` of the widest series name, and layout has no text
-//!   advances — it emits a string and a rectangle and leaves shaping to the
-//!   backend (ADR-008). Guessing a width would put the plot rectangle in a
-//!   different place than the canvas does, which is the one thing this port
-//!   exists to prevent, so the legend is omitted entirely and its side of the
-//!   frame is **not** reserved. A chart with a legend therefore renders with a
-//!   wider plot in the PNG than on screen. That is the largest remaining
-//!   divergence and it needs a text-advance seam in layout to close.
 //! - **The y-axis title**, which the canvas draws rotated a quarter turn.
 //!   [`PaintItem::Text`] has no rotation. The space it occupies **is** still
 //!   reserved, so the plot rectangle matches the canvas whether or not the
@@ -224,6 +231,172 @@ fn text_at(at: Line, content: String, align: Align, color: &str) -> PaintItem {
     }
 }
 
+/// The rectangle the legend gets, and how its entries run.
+#[derive(Debug, Clone, Copy)]
+struct LegendBox {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    /// Stacked down a side, rather than run across the foot.
+    rows: bool,
+}
+
+/// The point size the canvas draws legend text at, in CSS pixels.
+const LEGEND_PT: f64 = 10.0;
+
+/// A series' displayed name, which is its position when it has none.
+///
+/// The canvas's `s.name || \`Series ${i + 1}\``, kept: a blank name must
+/// measure as the text that will be drawn, or the box is sized for nothing and
+/// the label runs out of it.
+fn legend_label(series: &ResolvedSeries, index: usize) -> String {
+    if series.name.is_empty() {
+        format!("Series {}", index + 1)
+    } else {
+        series.name.clone()
+    }
+}
+
+/// How wide a legend label is, in twips.
+///
+/// `casual-calc-text` measures the bundled face; the canvas measures the
+/// browser's `system-ui` with `measureText`. They differ a little, and that is
+/// the same difference the two already have for every other string. What
+/// matters is that this is measured in the face the PNG *draws* it in, so the
+/// box fits its contents — which is what the plot rectangle is computed from.
+fn label_width(label: &str) -> f64 {
+    f64::from(casual_calc_text::advance_width(
+        label,
+        LEGEND_PT as f32,
+        false,
+        false,
+        None,
+    )) * PX
+}
+
+/// Reserve the legend's side of the frame, shrinking `plot` to what is left.
+///
+/// A line-for-line port of `legendBox` in `webapp/editor.js`, including the
+/// order it mutates `plot` in: the legend comes off the frame *before* the axis
+/// titles do, or the two disagree about what is left.
+///
+/// `None` when the frame is too small to give it one — a legend that leaves no
+/// room for the plot has cost more than it explains.
+fn legend_box(side: &str, series: &[ResolvedSeries], w: f64, plot: &mut Plot) -> Option<LegendBox> {
+    let widest = series
+        .iter()
+        .enumerate()
+        .map(|(i, s)| label_width(&legend_label(s, i)))
+        .fold(24.0 * PX, f64::max);
+
+    if side == "r" || side == "l" || side == "tr" {
+        // `Math.floor(w * 0.4)` in CSS pixels, floored there and not in twips.
+        let cap = (w / PX * 0.4).floor() * PX;
+        let width = (widest + 22.0 * PX).min(cap);
+        if plot.w - width < 40.0 * PX {
+            return None;
+        }
+        plot.w -= width;
+        let left = if side == "l" {
+            plot.x
+        } else {
+            plot.x + plot.w + 6.0 * PX
+        };
+        if side == "l" {
+            plot.x += width;
+        }
+        return Some(LegendBox {
+            x: left,
+            y: plot.y,
+            w: width,
+            h: plot.h,
+            rows: true,
+        });
+    }
+
+    let height = 14.0 * PX;
+    if plot.h - height < 40.0 * PX {
+        return None;
+    }
+    plot.h -= height;
+    let top_edge = if side == "t" {
+        plot.y
+    } else {
+        plot.y + plot.h + 2.0 * PX
+    };
+    if side == "t" {
+        plot.y += height;
+    }
+    Some(LegendBox {
+        x: plot.x,
+        y: top_edge,
+        w: plot.w,
+        h: height,
+        rows: false,
+    })
+}
+
+/// A swatch and a name per series, stacked down the side or run across the foot.
+///
+/// The port of `drawLegend`, including its overflow rule: a row past the bottom
+/// of the box stops the list rather than drawing over the plot.
+fn draw_legend(
+    list: &mut DisplayList,
+    workbook: &Workbook,
+    series: &[ResolvedSeries],
+    at: LegendBox,
+) {
+    let palette = series_colors(workbook, series.len());
+    let mut cursor_x = at.x;
+    for (i, s) in series.iter().enumerate() {
+        let label = legend_label(s, i);
+        let cy = if at.rows {
+            at.y + 8.0 * PX + (i as f64) * 14.0 * PX
+        } else {
+            at.y + at.h / 2.0
+        };
+        let cx = if at.rows { at.x } else { cursor_x };
+        if at.rows && cy > at.y + at.h {
+            return;
+        }
+        let swatch = 8.0 * PX;
+        list.items.push(PaintItem::Polygon {
+            points: vec![
+                point(cx, cy - 4.0 * PX),
+                point(cx + swatch, cy - 4.0 * PX),
+                point(cx + swatch, cy + 4.0 * PX),
+                point(cx, cy + 4.0 * PX),
+            ],
+            fill: palette
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| CHART_MUTED.to_owned()),
+        });
+        let width = label_width(&label);
+        // Never wider than the legend has. The canvas clips the chart to its
+        // frame and the display list has no clip primitive (see the module
+        // docs), so a name longer than its column would otherwise be given a
+        // box reaching over the plot. Bounding it here keeps the *geometry*
+        // honest even where the backend cannot clip.
+        let room = (at.x + at.w - (cx + 12.0 * PX)).max(1.0);
+        // `textBaseline = "middle"` on the canvas; the display list centres text
+        // in the box it is given, so the box is one line centred on `cy`.
+        list.items.push(text_at(
+            line(
+                cx + 12.0 * PX,
+                cy - LEGEND_PT * PX / 2.0,
+                width.max(1.0).min(room),
+                LEGEND_PT * PX,
+            ),
+            label,
+            Align::Left,
+            CHART_FG,
+        ));
+        cursor_x = cx + 12.0 * PX + width + 10.0 * PX;
+    }
+}
+
 /// Build one chart's geometry into `list`, inside the twip rectangle `frame`.
 ///
 /// `frame` is the anchored rectangle the caller resolved from the chart's cells
@@ -302,12 +475,19 @@ pub fn push_chart(
         w: w - 44.0 * PX,
         h: y + h - top - 18.0 * PX,
     };
-    // The legend would take its side out of the plot here. It cannot: sizing it
-    // needs text advances layout does not have (see the module docs), and a
-    // guessed width moves the plot. So the plot keeps the whole frame and the
-    // legend is not drawn.
+    // The legend takes its side out of the plot before anything is drawn, or the
+    // bars run underneath it — and before the axis titles, which is the order
+    // the canvas uses. Two or more series without one are unreadable: three
+    // rectangles and no way to tell which is which.
+    let legend = chart
+        .legend
+        .as_deref()
+        .and_then(|side| legend_box(side, &series, w, &mut plot));
     if plot.w < MIN_PLOT || plot.h < MIN_PLOT {
         return;
+    }
+    if let Some(at) = legend {
+        draw_legend(list, workbook, &series, at);
     }
     if !chart.x_title.is_empty() {
         list.items.push(text_at(
