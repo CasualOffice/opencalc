@@ -17,7 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use casual_calc_formula::{CellReference, Expr};
+use casual_calc_formula::Expr;
+use casual_calc_formula::stored::{Origin, StoredRef};
 use casual_calc_model::{CellRef, Workbook};
 
 /// `(sheet_index, row, col)`.
@@ -233,6 +234,8 @@ impl Precedents {
         let mut uses_name = false;
         collect_precedents(
             expr,
+            // The formula's own cell: what its relative references measure from.
+            Origin::at(cell.1, cell.2),
             sheet_index,
             workbook,
             &mut |p| {
@@ -429,6 +432,7 @@ pub fn precedents_of(
     let mut uses_name = false;
     collect_precedents(
         expr,
+        Origin::at(at.row, at.col),
         sheet,
         workbook,
         &mut |(si, r, c)| cells.push((si, r, c, r, c)),
@@ -462,6 +466,10 @@ pub fn dependents_of(workbook: &Workbook, sheet: usize, at: CellRef) -> Vec<(usi
             let mut uses_name = false;
             collect_precedents(
                 expr,
+                // Each candidate's *own* address: this walks every formula in
+                // the workbook asking whether it reads `at`, and each one's
+                // references measure from where it sits.
+                Origin::at(addr.row, addr.col),
                 si,
                 workbook,
                 &mut |(ps, r, c)| {
@@ -489,6 +497,7 @@ pub fn dependents_of(workbook: &Workbook, sheet: usize, at: CellRef) -> Vec<(usi
 /// precedent to `on_range`, and setting `uses_name` if a defined name appears.
 fn collect_precedents(
     expr: &Expr,
+    origin: Origin,
     ctx_sheet: usize,
     workbook: &Workbook,
     on_cell: &mut impl FnMut(CellKey),
@@ -509,14 +518,20 @@ fn collect_precedents(
         // Nothing there, so nothing to depend on.
         Expr::Empty => {}
         Expr::Call { callee, args } => {
-            collect_precedents(callee, ctx_sheet, workbook, on_cell, on_range, uses_name);
+            collect_precedents(
+                callee, origin, ctx_sheet, workbook, on_cell, on_range, uses_name,
+            );
             for a in args {
-                collect_precedents(a, ctx_sheet, workbook, on_cell, on_range, uses_name);
+                collect_precedents(a, origin, ctx_sheet, workbook, on_cell, on_range, uses_name);
             }
         }
         Expr::Reference(r) => {
-            if let Some(si) = resolve_sheet(r, ctx_sheet, workbook) {
-                on_cell((si, r.row, r.col));
+            // Resolved against the cell holding the formula. A reference that
+            // lands off the sheet is `#REF!` and depends on nothing — there is
+            // no cell to be a precedent of.
+            if let (Some(si), Some(at)) = (resolve_sheet(r, ctx_sheet, workbook), r.resolve(origin))
+            {
+                on_cell((si, at.row, at.col));
             }
         }
         Expr::Range(a, b) => {
@@ -526,7 +541,11 @@ fn collect_precedents(
             // instead: recalculate on any change. Conservative, never wrong.
             if crate::ranges::is_open(a, b) {
                 *uses_name = true;
-            } else if let Some(si) = resolve_sheet(a, ctx_sheet, workbook) {
+            } else if let (Some(si), Some(a), Some(b)) = (
+                resolve_sheet(a, ctx_sheet, workbook),
+                a.resolve(origin),
+                b.resolve(origin),
+            ) {
                 on_range(
                     si,
                     a.row.min(b.row),
@@ -537,12 +556,16 @@ fn collect_precedents(
             }
         }
         Expr::Name(_) => *uses_name = true,
-        Expr::Unary { operand, .. } => {
-            collect_precedents(operand, ctx_sheet, workbook, on_cell, on_range, uses_name)
-        }
+        Expr::Unary { operand, .. } => collect_precedents(
+            operand, origin, ctx_sheet, workbook, on_cell, on_range, uses_name,
+        ),
         Expr::Binary { left, right, .. } => {
-            collect_precedents(left, ctx_sheet, workbook, on_cell, on_range, uses_name);
-            collect_precedents(right, ctx_sheet, workbook, on_cell, on_range, uses_name);
+            collect_precedents(
+                left, origin, ctx_sheet, workbook, on_cell, on_range, uses_name,
+            );
+            collect_precedents(
+                right, origin, ctx_sheet, workbook, on_cell, on_range, uses_name,
+            );
         }
         Expr::Function { name, args } => {
             // A function whose target is computed from a string cannot have its
@@ -563,7 +586,7 @@ fn collect_precedents(
                 *uses_name = true;
             }
             for a in args {
-                collect_precedents(a, ctx_sheet, workbook, on_cell, on_range, uses_name);
+                collect_precedents(a, origin, ctx_sheet, workbook, on_cell, on_range, uses_name);
             }
         }
         Expr::Number(_) | Expr::Bool(_) | Expr::Text(_) | Expr::Error(_) => {}
@@ -577,7 +600,7 @@ fn collect_precedents(
 /// sheet — otherwise a differently-cased qualifier (e.g. `=sheet1!A1`) would be
 /// evaluated against Sheet1 but recorded as depending on nothing, leaving the
 /// dependent stale after an incremental recalc.
-fn resolve_sheet(r: &CellReference, ctx_sheet: usize, workbook: &Workbook) -> Option<usize> {
+fn resolve_sheet(r: &StoredRef, ctx_sheet: usize, workbook: &Workbook) -> Option<usize> {
     match &r.sheet {
         Some(name) => workbook
             .sheets
@@ -608,7 +631,10 @@ mod precedents_tests {
         wb.sheets.push(sheet);
 
         let put = |wb: &mut Workbook, at: CellRef, formula: &str| {
-            let handle = wb.store_formula(casual_calc_formula::parse(formula).unwrap());
+            let handle = wb.store_formula_at(
+                casual_calc_formula::parse(formula).unwrap(),
+                Origin::at(at.row, at.col),
+            );
             let mut cell = Cell::value(CellValue::Number(0.0));
             cell.formula = Some(handle);
             wb.sheets[0].cells.set(at, cell);
@@ -695,7 +721,10 @@ mod precedents_tests {
             ));
         }
         let put = |wb: &mut Workbook, sheet: usize, at: CellRef, formula: &str| {
-            let handle = wb.store_formula(casual_calc_formula::parse(formula).unwrap());
+            let handle = wb.store_formula_at(
+                casual_calc_formula::parse(formula).unwrap(),
+                Origin::at(at.row, at.col),
+            );
             let mut cell = Cell::value(CellValue::Number(0.0));
             cell.formula = Some(handle);
             wb.sheets[sheet].cells.set(at, cell);
@@ -925,7 +954,10 @@ mod precedents_tests {
     }
 
     fn put(wb: &mut Workbook, at: CellRef, formula: &str) {
-        let handle = wb.store_formula(casual_calc_formula::parse(formula).unwrap());
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse(formula).unwrap(),
+            Origin::at(at.row, at.col),
+        );
         let mut cell = Cell::value(CellValue::Number(0.0));
         cell.formula = Some(handle);
         wb.sheets[0].cells.set(at, cell);

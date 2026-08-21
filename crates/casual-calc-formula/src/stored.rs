@@ -135,12 +135,18 @@ impl ResolvedRef {
     pub fn store(&self, origin: Origin) -> StoredRef {
         StoredRef {
             sheet: self.sheet.clone(),
-            col: if self.col_absolute {
+            // An axis the reference never *named* has no coordinate to make
+            // relative: `A:A` is a whole column and its row bounds are
+            // placeholders spanning the sheet. Measuring them from the holding
+            // cell and adding them back turns `A:A` into `A6:#REF!` — the trap
+            // `shift_ref` documented, whose anchoring rule this type carried
+            // over and whose *implicit* rule it did not.
+            col: if self.col_absolute || self.col_implicit {
                 i64::from(self.col)
             } else {
                 i64::from(self.col) - i64::from(origin.col)
             },
-            row: if self.row_absolute {
+            row: if self.row_absolute || self.row_implicit {
                 i64::from(self.row)
             } else {
                 i64::from(self.row) - i64::from(origin.row)
@@ -164,12 +170,12 @@ impl StoredRef {
     /// produce an address on the wrong side of the sheet.
     #[must_use]
     pub fn resolve(&self, origin: Origin) -> Option<ResolvedRef> {
-        let col = if self.col_absolute {
+        let col = if self.col_absolute || self.col_implicit {
             self.col
         } else {
             self.col + i64::from(origin.col)
         };
-        let row = if self.row_absolute {
+        let row = if self.row_absolute || self.row_implicit {
             self.row
         } else {
             self.row + i64::from(origin.row)
@@ -530,5 +536,40 @@ mod wire_identity {
         let stored: StoredRef = serde_json::from_str(&json).unwrap();
         let back = stored.resolve(Origin::at(0, 0)).expect("on the sheet");
         assert_eq!(back, ResolvedRef::from(&absolute));
+    }
+}
+
+#[cfg(test)]
+mod implicit_axes {
+    use super::*;
+    use crate::reference::{CellReference, MAX_ROW};
+
+    /// **A whole-column reference does not move down.**
+    ///
+    /// `A:A` names no rows: its bounds are placeholders spanning the sheet.
+    /// Measuring them from the holding cell and adding them back turns `A:A`
+    /// into `A6:#REF!` six rows down — which this type did, because it carried
+    /// over `shift_ref`'s anchoring rule and not its *implicit* one.
+    #[test]
+    fn an_unnamed_axis_holds_while_a_named_one_follows() {
+        let whole_column_end = CellReference {
+            sheet: None,
+            col: 0,
+            row: MAX_ROW,
+            col_absolute: false,
+            row_absolute: false,
+            row_implicit: true,
+            col_implicit: false,
+        };
+        let stored = StoredRef::absolute(&whole_column_end);
+        for origin in [Origin::at(0, 0), Origin::at(5, 0), Origin::at(1_000, 3)] {
+            let back = stored
+                .resolve(origin)
+                .expect("a whole column is on the sheet");
+            assert_eq!(back.row, MAX_ROW, "the row placeholder moved at {origin:?}");
+            // The *column* of `A:A` is named, so it follows a copy sideways:
+            // `A:A` three columns right is `D:D`. Only the unnamed axis holds.
+            assert_eq!(back.col, origin.col, "the named axis stopped following");
+        }
     }
 }

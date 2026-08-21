@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use casual_calc_formula::{BinaryOp, CellReference, Expr, UnaryOp};
+use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
+use casual_calc_formula::{BinaryOp, Expr, UnaryOp};
 use casual_calc_model::{CellRange, CellRef, ErrorValue, Workbook};
 
 use crate::functions::call_function;
@@ -264,12 +265,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The cells of a range as an array value.
-    fn range_as_array(
-        &mut self,
-        sheet_index: usize,
-        a: &CellReference,
-        b: &CellReference,
-    ) -> Value {
+    fn range_as_array(&mut self, sheet_index: usize, a: &StoredRef, b: &StoredRef) -> Value {
         let Some(target) = self.resolve_sheet(&a.sheet, sheet_index) else {
             return Value::Error(ErrorValue::Ref);
         };
@@ -331,7 +327,22 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn eval_reference(&mut self, sheet_index: usize, reference: &CellReference) -> Value {
+    /// The cell whose formula is being evaluated, as an origin.
+    ///
+    /// `current` has tracked this since `ROW()` and `COLUMN()` needed it — a
+    /// formula's own address, saved and restored around each one. Since
+    /// `PERF-11` it is also what its references measure from, so the two
+    /// notions of "where this formula lives" are one value that cannot
+    /// disagree with itself.
+    ///
+    /// [`ABSOLUTE`] when there is no holding cell: a tree evaluated on its own
+    /// is the absolute form, which is what it was parsed as.
+    pub(crate) fn origin(&self) -> Origin {
+        self.current
+            .map_or(ABSOLUTE, |(_, at)| Origin::at(at.row, at.col))
+    }
+
+    fn eval_reference(&mut self, sheet_index: usize, reference: &StoredRef) -> Value {
         let target_sheet = match &reference.sheet {
             Some(name) => match self.sheet_index_by_name(name) {
                 Some(i) => i,
@@ -339,7 +350,12 @@ impl<'a> Evaluator<'a> {
             },
             None => sheet_index,
         };
-        self.eval_cell(target_sheet, CellRef::new(reference.row, reference.col))
+        // Off the sheet is `#REF!` — Excel's answer, and why `resolve` returns
+        // an option rather than wrapping to the far edge.
+        let Some(at) = reference.resolve(self.origin()) else {
+            return Value::Error(ErrorValue::Ref);
+        };
+        self.eval_cell(target_sheet, CellRef::new(at.row, at.col))
     }
 
     /// `LET(name1, value1, …, calculation)`.
@@ -682,17 +698,23 @@ impl<'a> Evaluator<'a> {
     pub(crate) fn range_bounds(
         &self,
         target: usize,
-        a: &CellReference,
-        b: &CellReference,
+        a: &StoredRef,
+        b: &StoredRef,
     ) -> (u32, u32, u32, u32) {
         match self.workbook.sheets.get(target) {
-            Some(sheet) => crate::ranges::range_bounds(sheet, a, b),
-            None => (
-                a.row.min(b.row),
-                a.col.min(b.col),
-                a.row.max(b.row),
-                a.col.max(b.col),
-            ),
+            Some(sheet) => crate::ranges::range_bounds(sheet, a, b, self.origin()),
+            // No such sheet, so no data to narrow an unnamed axis against. The
+            // literal bounds are the best answer — resolved against this cell,
+            // and nothing at all if an endpoint falls off the sheet.
+            None => match (a.resolve(self.origin()), b.resolve(self.origin())) {
+                (Some(a), Some(b)) => (
+                    a.row.min(b.row),
+                    a.col.min(b.col),
+                    a.row.max(b.row),
+                    a.col.max(b.col),
+                ),
+                _ => (0, 0, 0, 0),
+            },
         }
     }
 }

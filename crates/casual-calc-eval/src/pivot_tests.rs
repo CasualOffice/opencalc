@@ -5,6 +5,7 @@
 //! label repeated where it should be blank, a grand total under the wrong
 //! column — and none of those show up in a spot check of three cells.
 
+use casual_calc_formula::stored::Origin;
 use casual_calc_model::{
     Cell, CellRange, CellRef, CellValue, Id, PivotAggregate, PivotAxisField, PivotFilterField,
     PivotSort, PivotTable, PivotValueField, Sheet, SheetId, Workbook,
@@ -545,7 +546,7 @@ fn a_pivot_summarizes_formula_results_once_the_recalculation_has_run() {
     let mut wb = workbook();
     for row in 1..=8u32 {
         let expr = casual_calc_formula::parse(&format!("D{}*2", row + 1)).unwrap();
-        let handle = wb.store_formula(expr);
+        let handle = wb.store_formula_at(expr, Origin::at(row, 4));
         let mut cell = Cell::value(CellValue::Empty);
         cell.formula = Some(handle);
         wb.sheets[0].cells.set(CellRef::new(row, 4), cell);
@@ -811,10 +812,10 @@ fn with_report() -> Workbook {
 
 fn ask(wb: &mut Workbook, formula: &str) -> String {
     let expr = casual_calc_formula::parse(formula).unwrap_or_else(|e| panic!("{formula}: {e}"));
-    let handle = wb.store_formula(expr);
+    let at = CellRef::new(40, 0);
+    let handle = wb.store_formula_at(expr, Origin::at(at.row, at.col));
     let mut cell = Cell::value(CellValue::Empty);
     cell.formula = Some(handle);
-    let at = CellRef::new(40, 0);
     wb.sheets[1].cells.set(at, cell);
     crate::recalculate(wb);
     match wb.sheets[1].cells.get(at).map(|c| c.value.clone()) {

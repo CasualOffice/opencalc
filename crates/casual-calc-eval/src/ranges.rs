@@ -10,7 +10,7 @@
 //! axis is narrowed to the data that actually exists. Excel behaves the same
 //! way: `SUM(A:A)` over three populated cells costs three cells.
 
-use casual_calc_formula::CellReference;
+use casual_calc_formula::stored::{Origin, StoredRef};
 use casual_calc_model::Sheet;
 
 /// The rows and columns a range covers on `sheet`, as `(r0, c0, r1, c1)`.
@@ -19,7 +19,18 @@ use casual_calc_model::Sheet;
 /// is clamped to the populated extent. An empty sheet collapses to a single
 /// cell rather than to nothing, so callers keep a valid — if empty — range.
 #[must_use]
-pub fn range_bounds(sheet: &Sheet, a: &CellReference, b: &CellReference) -> (u32, u32, u32, u32) {
+pub fn range_bounds(
+    sheet: &Sheet,
+    a: &StoredRef,
+    b: &StoredRef,
+    origin: Origin,
+) -> (u32, u32, u32, u32) {
+    // A bound that resolves off the sheet leaves nothing to walk. Refusing the
+    // whole range is the honest answer: an aggregate over `#REF!` is `#REF!`.
+    let (a, b) = match (a.resolve(origin), b.resolve(origin)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (0, 0, 0, 0),
+    };
     let (mut r0, mut r1) = (a.row.min(b.row), a.row.max(b.row));
     let (mut c0, mut c1) = (a.col.min(b.col), a.col.max(b.col));
 
@@ -40,6 +51,6 @@ pub fn range_bounds(sheet: &Sheet, a: &CellReference, b: &CellReference) -> (u32
 /// Whether either side left an axis unnamed — i.e. the bounds came from the
 /// data rather than from the text.
 #[must_use]
-pub fn is_open(a: &CellReference, b: &CellReference) -> bool {
+pub fn is_open(a: &StoredRef, b: &StoredRef) -> bool {
     a.row_implicit || b.row_implicit || a.col_implicit || b.col_implicit
 }

@@ -1,54 +1,60 @@
-//! AST rewrites over references — used by fill/copy to adjust relative
-//! references by a row/column delta (absolute `$` anchors are preserved).
+//! AST rewrites over references.
+//!
+//! Since `PERF-11` these are the rewrites relative storage does *not* do for
+//! free: moving a formula while keeping its targets ([`restore_at`]) and
+//! following a renamed sheet ([`rename_sheet_references`]). Copy and fill need
+//! neither — resolving a shared tree at the destination is the shift.
 
 use crate::ast::Expr;
-use crate::reference::CellReference;
+use crate::stored::{Origin, StoredRef};
 
-/// Shift every **relative** reference in `expr` by `(dr, dc)` rows/columns,
-/// leaving `$`-anchored coordinates fixed. Coordinates clamp at 0. This is the
-/// copy/fill semantics: the same offset applies to bare cell references and to
-/// each endpoint of a range.
-pub fn shift_references(expr: &Expr, dr: i64, dc: i64) -> Expr {
+/// Re-store `expr` so its references point where they pointed, when the
+/// formula **moves** from `from` to `to`.
+///
+/// The cut/move rewrite — and under relative storage the only one of the pair
+/// that exists, which is the reverse of how it used to be.
+///
+/// - **Copy and fill need no rewrite at all.** A relative reference is an
+///   offset from the holding cell, so resolving the *same* tree at the
+///   destination already shifts it. The old `shift_references` did that by
+///   hand; doing both would shift twice.
+/// - **A move needs this one.** A moved formula must go on naming the cells it
+///   named — `UX-CUT-03`, a cut travels verbatim — and so must a formula
+///   carried by a row insertion, which is the same operation wearing a
+///   different name.
+///
+/// A reference that resolves off the sheet from `from` is left alone: it is
+/// already `#REF!` and there is no address to re-measure.
+#[must_use]
+pub fn restore_at(expr: &Expr, from: Origin, to: Origin) -> Expr {
+    let moved = |r: &StoredRef| -> StoredRef {
+        match r.resolve(from) {
+            Some(target) => target.store(to),
+            None => r.clone(),
+        }
+    };
     match expr {
-        Expr::Reference(r) => Expr::Reference(shift_ref(r, dr, dc)),
-        Expr::Range(a, b) => Expr::Range(shift_ref(a, dr, dc), shift_ref(b, dr, dc)),
+        Expr::Reference(r) => Expr::Reference(moved(r)),
+        Expr::Range(a, b) => Expr::Range(moved(a), moved(b)),
         Expr::Unary { op, operand } => Expr::Unary {
             op: *op,
-            operand: Box::new(shift_references(operand, dr, dc)),
+            operand: Box::new(restore_at(operand, from, to)),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
-            left: Box::new(shift_references(left, dr, dc)),
-            right: Box::new(shift_references(right, dr, dc)),
+            left: Box::new(restore_at(left, from, to)),
+            right: Box::new(restore_at(right, from, to)),
         },
         Expr::Function { name, args } => Expr::Function {
             name: name.clone(),
-            args: args.iter().map(|a| shift_references(a, dr, dc)).collect(),
+            args: args.iter().map(|a| restore_at(a, from, to)).collect(),
         },
-        // A first-class call — `LAMBDA(x,x+1)(A1)`. Its arguments are ordinary
-        // expressions and can hold references like any others; falling through
-        // to the catch-all left them unshifted, so filling such a formula down a
-        // column gave every row the first row's answer.
         Expr::Call { callee, args } => Expr::Call {
-            callee: Box::new(shift_references(callee, dr, dc)),
-            args: args.iter().map(|a| shift_references(a, dr, dc)).collect(),
+            callee: Box::new(restore_at(callee, from, to)),
+            args: args.iter().map(|a| restore_at(a, from, to)).collect(),
         },
         other => other.clone(),
     }
-}
-
-fn shift_ref(r: &CellReference, dr: i64, dc: i64) -> CellReference {
-    let mut out = r.clone();
-    // An axis the reference never named has no coordinate to move: `A:A` copied
-    // one row down is still `A:A`. Shifting the placeholder bound would turn it
-    // into `A2:A1048576`, which is a different — and wrong — range.
-    if !out.row_absolute && !out.row_implicit {
-        out.row = (out.row as i64 + dr).max(0) as u32;
-    }
-    if !out.col_absolute && !out.col_implicit {
-        out.col = (out.col as i64 + dc).max(0) as u32;
-    }
-    out
 }
 
 /// Rewrite every reference whose sheet qualifier is `old` (matched
@@ -91,7 +97,7 @@ pub fn rename_sheet_references(expr: &mut Expr, old: &str, new: &str) -> bool {
     }
 }
 
-fn rename_ref(r: &mut CellReference, old: &str, new: &str) -> bool {
+fn rename_ref(r: &mut StoredRef, old: &str, new: &str) -> bool {
     if r.sheet
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case(old))
@@ -105,27 +111,73 @@ fn rename_ref(r: &mut CellReference, old: &str, new: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::shift_references;
+    use super::restore_at;
     use crate::parse;
+    use crate::print::print_at;
+    use crate::stored::{ABSOLUTE, Origin};
 
-    fn shifted(src: &str, dr: i64, dc: i64) -> String {
-        shift_references(&parse(src).unwrap(), dr, dc).to_string()
+    /// How a *copied* formula reads, now that copying rewrites nothing: the
+    /// same tree, read at the destination.
+    fn copied(src: &str, dr: u32, dc: u32) -> String {
+        print_at(&parse(src).unwrap(), Origin::at(dr, dc))
+    }
+
+    /// **Copy shifts by being read somewhere else.**
+    #[test]
+    fn a_copied_formula_shifts_its_relative_references_and_holds_its_anchors() {
+        assert_eq!(copied("A1", 1, 0), "A2");
+        assert_eq!(copied("A1", 0, 1), "B1");
+        assert_eq!(copied("$A$1", 5, 5), "$A$1");
+        assert_eq!(copied("$A1", 2, 3), "$A3");
+        assert_eq!(copied("A$1", 2, 3), "D$1");
+        assert_eq!(copied("SUM(A1:A3)", 1, 0), "SUM(A2:A4)");
+        assert_eq!(copied("A1+$B$2*C1", 1, 1), "B2+$B$2*D2");
+    }
+
+    /// **Off the sheet is `#REF!`, not a clamp.**
+    ///
+    /// `shift_references` clamped at zero, so `=A1` in `A2` copied up became
+    /// `=A1` — a formula quietly pointing at itself. Excel says `#REF!`.
+    #[test]
+    fn a_reference_carried_off_the_sheet_is_ref_rather_than_clamped() {
+        let in_a2 = restore_at(&parse("A1").unwrap(), ABSOLUTE, Origin::at(1, 0));
+        assert_eq!(
+            print_at(&in_a2, Origin::at(1, 0)),
+            "A1",
+            "stored where it lives"
+        );
+        assert_eq!(print_at(&in_a2, ABSOLUTE), "#REF!");
+    }
+
+    /// **A moved formula keeps its targets** — the cut rewrite.
+    #[test]
+    fn a_moved_formula_names_the_same_cells() {
+        let stored = restore_at(&parse("A1").unwrap(), ABSOLUTE, Origin::at(1, 0));
+        let moved = restore_at(&stored, Origin::at(1, 0), Origin::at(4, 2));
+        assert_eq!(print_at(&moved, Origin::at(4, 2)), "A1");
+    }
+
+    /// A move to nowhere changes nothing.
+    #[test]
+    fn a_move_to_the_same_place_is_the_identity() {
+        let tree = parse("A1+$B$2*C1").unwrap();
+        assert_eq!(restore_at(&tree, ABSOLUTE, ABSOLUTE), tree);
     }
 
     #[test]
-    fn relative_refs_shift_absolute_hold() {
-        assert_eq!(shifted("A1", 1, 0), "A2");
-        assert_eq!(shifted("A1", 0, 1), "B1");
-        assert_eq!(shifted("$A$1", 5, 5), "$A$1");
-        assert_eq!(shifted("$A1", 2, 3), "$A3");
-        assert_eq!(shifted("A$1", 2, 3), "D$1");
-        assert_eq!(shifted("SUM(A1:A3)", 1, 0), "SUM(A2:A4)");
-        assert_eq!(shifted("A1+$B$2*C1", 1, 1), "B2+$B$2*D2");
-    }
-
-    #[test]
-    fn clamps_at_zero() {
-        assert_eq!(shifted("B2", -5, -5), "A1");
+    fn a_first_class_calls_arguments_shift_with_everything_else() {
+        assert_eq!(copied("LAMBDA(x,x+1)(A1)", 2, 0), "LAMBDA(x,x+1)(A3)");
+        assert_eq!(copied("LAMBDA(x,x+1)($A$1)", 2, 0), "LAMBDA(x,x+1)($A$1)");
+        assert_eq!(
+            copied("IF(TRUE,LAMBDA(x,x+A1),LAMBDA(x,x))(B1)", 1, 0),
+            "IF(TRUE,LAMBDA(x,x+A2),LAMBDA(x,x))(B2)"
+        );
+        let moved = restore_at(
+            &parse("LAMBDA(x,x+A1)(B1)").unwrap(),
+            ABSOLUTE,
+            Origin::at(3, 0),
+        );
+        assert_eq!(print_at(&moved, Origin::at(3, 0)), "LAMBDA(x,x+A1)(B1)");
     }
 
     use super::rename_sheet_references;
@@ -167,21 +219,6 @@ mod tests {
     /// used to walk straight past it.
     ///
     /// `LAMBDA(x,…)(A1)` parses as `Call { callee, args }`, which fell to the
-    /// catch-all arm in both functions. Filling such a formula down a column
-    /// therefore gave every row the first row's references, and renaming a sheet
-    /// left a stale name inside the call — which reads as `#REF!` on the next
-    /// recalculation, somewhere the user never edited.
-    #[test]
-    fn a_first_class_calls_arguments_shift_with_everything_else() {
-        assert_eq!(shifted("LAMBDA(x,x+1)(A1)", 2, 0), "LAMBDA(x,x+1)(A3)");
-        assert_eq!(shifted("LAMBDA(x,x+1)($A$1)", 2, 0), "LAMBDA(x,x+1)($A$1)");
-        // And through the callee, which can itself contain references.
-        assert_eq!(
-            shifted("IF(TRUE,LAMBDA(x,x+A1),LAMBDA(x,x))(B1)", 1, 0),
-            "IF(TRUE,LAMBDA(x,x+A2),LAMBDA(x,x))(B2)"
-        );
-    }
-
     #[test]
     fn a_first_class_calls_arguments_follow_a_sheet_rename() {
         assert_eq!(

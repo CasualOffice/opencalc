@@ -33,7 +33,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_formula::{CellReference, Expr};
+use casual_calc_formula::Expr;
+use casual_calc_formula::restore_at;
+use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
 use casual_calc_model::{
     AutoFilter, AxisSizing, CellRange, CellRef, CellStore, DefinedName, Sheet, Table, TableColumn,
     Workbook,
@@ -71,18 +73,24 @@ impl Axis {
     }
 
     /// The along-axis coordinate of a formula reference.
-    fn ref_coord(self, reference: &CellReference) -> u32 {
-        match self {
+    ///
+    /// Read from a tree in the **absolute form**, where a stored reference's
+    /// `i64` offset from `(0, 0)` is the address itself. The caller converts on
+    /// the way in and back on the way out, so everything here goes on working
+    /// in addresses.
+    fn ref_coord(self, reference: &StoredRef) -> u32 {
+        let raw = match self {
             Axis::Row => reference.row,
             Axis::Col => reference.col,
-        }
+        };
+        u32::try_from(raw).unwrap_or(0)
     }
 
     /// Set the along-axis coordinate of a formula reference in place.
-    fn set_ref_coord(self, reference: &mut CellReference, value: u32) {
+    fn set_ref_coord(self, reference: &mut StoredRef, value: u32) {
         match self {
-            Axis::Row => reference.row = value,
-            Axis::Col => reference.col = value,
+            Axis::Row => reference.row = i64::from(value),
+            Axis::Col => reference.col = i64::from(value),
         }
     }
 }
@@ -167,20 +175,76 @@ fn delete_op(sheet: usize, axis: Axis, at: u32, count: u32) -> Operation {
     }
 }
 
+/// Re-store the formulas of cells that are about to move, so each goes on
+/// naming the cells it named.
+///
+/// **A cell that moves is doing what a cut does** (`PERF-11`, and the reason
+/// this exists at all): a stored tree's references are offsets from the cell
+/// holding it, so carrying that cell somewhere else changes what they point at
+/// unless the offsets are re-measured. `restore_at` is the same primitive the
+/// clipboard uses for a cut.
+///
+/// Two passes, because re-storing needs the workbook while rebuilding needs the
+/// cell store, and they cannot both be borrowed. The map is keyed by the cell's
+/// **old** address, which is what the rebuild still has in hand.
+///
+/// Returns the new handle for each moved formula. Cells that do not move, and
+/// cells with no formula, are absent — nothing about them changes.
+fn restore_moved_formulas(
+    workbook: &mut Workbook,
+    sheet: usize,
+    moves: &[(CellRef, CellRef)],
+) -> BTreeMap<CellRef, casual_calc_model::FormulaHandle> {
+    let planned: Vec<(CellRef, Expr)> = moves
+        .iter()
+        .filter(|(from, to)| from != to)
+        .filter_map(|(from, to)| {
+            let handle = workbook.sheets[sheet].cells.get(*from)?.formula?;
+            let expr = workbook.formula(handle)?;
+            Some((
+                *from,
+                restore_at(
+                    expr,
+                    Origin::at(from.row, from.col),
+                    Origin::at(to.row, to.col),
+                ),
+            ))
+        })
+        .collect();
+
+    planned
+        .into_iter()
+        .map(|(from, expr)| (from, workbook.store_formula(expr)))
+        .collect()
+}
+
 /// Rebuild the sheet's cell store, shifting every cell on or after `at` by
 /// `+count` along `axis`. The sheet index was already validated by the caller.
 fn shift_cells_insert(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32, count: u32) {
+    let destination = |addr: CellRef| {
+        let coord = axis.coord(addr);
+        if coord >= at {
+            axis.with_coord(addr, coord.saturating_add(count))
+        } else {
+            addr
+        }
+    };
+    let moves: Vec<(CellRef, CellRef)> = workbook.sheets[sheet]
+        .cells
+        .iter()
+        .map(|(addr, _)| (addr, destination(addr)))
+        .collect();
+    let restored = restore_moved_formulas(workbook, sheet, &moves);
+
     let store = &mut workbook.sheets[sheet].cells;
     let old = std::mem::take(store);
     let mut rebuilt = CellStore::new();
     for (addr, cell) in old.iter() {
-        let coord = axis.coord(addr);
-        let new_addr = if coord >= at {
-            axis.with_coord(addr, coord.saturating_add(count))
-        } else {
-            addr
-        };
-        rebuilt.set(new_addr, cell.clone());
+        let mut cell = cell.clone();
+        if let Some(handle) = restored.get(&addr) {
+            cell.formula = Some(*handle);
+        }
+        rebuilt.set(destination(addr), cell);
     }
     *store = rebuilt;
 }
@@ -189,6 +253,14 @@ fn shift_cells_insert(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
 /// `[at, at+count)` and shifting cells past it back by `count` along `axis`.
 fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32, count: u32) {
     let end = at.saturating_add(count);
+    let moves: Vec<(CellRef, CellRef)> = workbook.sheets[sheet]
+        .cells
+        .iter()
+        .filter(|(addr, _)| axis.coord(*addr) >= end)
+        .map(|(addr, _)| (addr, axis.with_coord(addr, axis.coord(addr) - count)))
+        .collect();
+    let restored = restore_moved_formulas(workbook, sheet, &moves);
+
     let store = &mut workbook.sheets[sheet].cells;
     let old = std::mem::take(store);
     let mut rebuilt = CellStore::new();
@@ -197,8 +269,11 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
         if coord < at {
             rebuilt.set(addr, cell.clone());
         } else if coord >= end {
-            let new_addr = axis.with_coord(addr, coord - count);
-            rebuilt.set(new_addr, cell.clone());
+            let mut cell = cell.clone();
+            if let Some(handle) = restored.get(&addr) {
+                cell.formula = Some(*handle);
+            }
+            rebuilt.set(axis.with_coord(addr, coord - count), cell);
         }
         // Cells inside the deleted band are dropped.
     }
@@ -618,7 +693,15 @@ fn rewrite_all_formulas(
             at,
             count,
         };
-        let rewritten = rewrite_expr(&job.expr, &ctx);
+        // **In and out of the absolute form.** The rewrite below works in
+        // addresses — "is this reference at or past the insertion point" is a
+        // question about an address, not an offset — so the tree is resolved
+        // against its own cell first and re-stored after. The rewrite itself is
+        // unchanged by `PERF-11`, which is the point: what moving a formula
+        // does to its meaning is handled where the cells move, not here.
+        let origin = Origin::at(job.at.row, job.at.col);
+        let absolute = restore_at(&job.expr, origin, ABSOLUTE);
+        let rewritten = restore_at(&rewrite_expr(&absolute, &ctx), ABSOLUTE, origin);
         if rewritten != job.expr {
             let handle = workbook.store_formula(rewritten);
             let store = &mut workbook.sheets[job.sheet].cells;
@@ -677,6 +760,8 @@ fn rewrite_defined_names(
             at,
             count,
         };
+        // A defined name has no holding cell, so its tree is already the
+        // absolute form and needs no conversion.
         let rewritten = rewrite_expr(&expr, &ctx);
         if rewritten != expr {
             workbook.defined_names[i].formula = rewritten;
@@ -724,7 +809,7 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
 
 /// Whether a reference targets the operation's sheet: qualified with its name,
 /// or unqualified inside a formula whose home sheet is the target.
-fn targets(reference: &CellReference, ctx: &RewriteCtx) -> bool {
+fn targets(reference: &StoredRef, ctx: &RewriteCtx) -> bool {
     match &reference.sheet {
         Some(name) => name == ctx.target,
         None => ctx.home == ctx.target,
@@ -737,7 +822,7 @@ fn ref_error() -> Expr {
 }
 
 /// Rewrite a single (non-range) cell reference.
-fn rewrite_reference(reference: &CellReference, ctx: &RewriteCtx) -> Expr {
+fn rewrite_reference(reference: &StoredRef, ctx: &RewriteCtx) -> Expr {
     if !targets(reference, ctx) {
         return Expr::Reference(reference.clone());
     }
@@ -769,7 +854,7 @@ fn rewrite_reference(reference: &CellReference, ctx: &RewriteCtx) -> Expr {
 
 /// Rewrite a range. Targeting is decided from the first endpoint (the qualifier
 /// on a sheet-qualified range); both endpoints then move together.
-fn rewrite_range(a: &CellReference, b: &CellReference, ctx: &RewriteCtx) -> Expr {
+fn rewrite_range(a: &StoredRef, b: &StoredRef, ctx: &RewriteCtx) -> Expr {
     if !targets(a, ctx) {
         return Expr::Range(a.clone(), b.clone());
     }
@@ -794,7 +879,7 @@ fn rewrite_range(a: &CellReference, b: &CellReference, ctx: &RewriteCtx) -> Expr
 
 /// Shift one range endpoint for an insert: bump its along-axis coordinate if it
 /// is on or after the insertion point.
-fn shift_endpoint_insert(endpoint: &CellReference, ctx: &RewriteCtx) -> CellReference {
+fn shift_endpoint_insert(endpoint: &StoredRef, ctx: &RewriteCtx) -> StoredRef {
     let mut shifted = endpoint.clone();
     let coord = ctx.axis.ref_coord(endpoint);
     if coord >= ctx.at {
@@ -806,7 +891,7 @@ fn shift_endpoint_insert(endpoint: &CellReference, ctx: &RewriteCtx) -> CellRefe
 
 /// Rewrite a range for a delete, clamping endpoints that fall in the deleted
 /// band and collapsing to `#REF!` when nothing survives.
-fn rewrite_range_delete(a: &CellReference, b: &CellReference, ctx: &RewriteCtx) -> Expr {
+fn rewrite_range_delete(a: &StoredRef, b: &StoredRef, ctx: &RewriteCtx) -> Expr {
     let ca = ctx.axis.ref_coord(a);
     let cb = ctx.axis.ref_coord(b);
     let (lo, hi, a_is_lo) = if ca <= cb {
@@ -901,7 +986,16 @@ pub fn repointed_after_move(
             let Some(expr) = workbook.formula(handle) else {
                 continue;
             };
-            let moved = move_expr(expr, moved_sheet, &sheet.name, block, delta);
+            // **In and out of the absolute form**, as the structural rewrite
+            // does: "does this reference name a cell inside the moved block"
+            // is a question about addresses, and a stored tree holds offsets.
+            let origin = Origin::at(at.row, at.col);
+            let absolute = restore_at(expr, origin, ABSOLUTE);
+            let moved = restore_at(
+                &move_expr(&absolute, moved_sheet, &sheet.name, block, delta),
+                ABSOLUTE,
+                origin,
+            );
             if moved != *expr {
                 out.push((index, at, moved));
             }
@@ -972,12 +1066,12 @@ fn move_expr(
 /// delete rewrite uses, so the two cannot disagree about what "this sheet"
 /// means.
 fn moved_reference(
-    reference: &CellReference,
+    reference: &StoredRef,
     moved_sheet: &str,
     home: &str,
     (r0, c0, r1, c1): (u32, u32, u32, u32),
     (dr, dc): (i64, i64),
-) -> Option<CellReference> {
+) -> Option<StoredRef> {
     let reaches = match reference.sheet.as_deref() {
         Some(named) => named == moved_sheet,
         None => home == moved_sheet,
@@ -990,7 +1084,11 @@ fn moved_reference(
     if reference.row_implicit || reference.col_implicit {
         return None;
     }
-    if reference.row < r0 || reference.row > r1 || reference.col < c0 || reference.col > c1 {
+    // Compared as addresses: this is reached with a tree in the absolute form,
+    // where a stored reference's offset from `(0, 0)` is the address.
+    let (rrow, rcol) = (reference.row, reference.col);
+    if rrow < i64::from(r0) || rrow > i64::from(r1) || rcol < i64::from(c0) || rcol > i64::from(c1)
+    {
         return None;
     }
     // **`$` anchoring does not exempt it.** An absolute reference is about what
@@ -998,8 +1096,8 @@ fn moved_reference(
     // still means A1, and if A1 has gone to C3 then it means C3 now. Excel
     // moves both.
     let mut moved = reference.clone();
-    moved.row = u32::try_from(i64::from(reference.row) + dr).ok()?;
-    moved.col = u32::try_from(i64::from(reference.col) + dc).ok()?;
+    moved.row = i64::from(u32::try_from(rrow + dr).ok()?);
+    moved.col = i64::from(u32::try_from(rcol + dc).ok()?);
     Some(moved)
 }
 

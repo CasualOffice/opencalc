@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::reference::CellReference;
+use crate::stored::StoredRef;
 
 /// A prefix/postfix unary operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -60,10 +60,23 @@ pub enum Expr {
     Text(String),
     /// An error literal (`#REF!`, …).
     Error(String),
-    /// A cell reference.
-    Reference(CellReference),
-    /// A range between two references (`A1:B2`).
-    Range(CellReference, CellReference),
+    /// A cell reference **as stored**: relative to the cell holding this
+    /// formula, unless `$`-anchored (`PERF-11`).
+    ///
+    /// Relative is what lets one tree serve a whole filled-down column: `A1*2`
+    /// in `B1` and `A2*2` in `B2` are one shape — one column left — so the
+    /// arena keeps one tree rather than one per row.
+    ///
+    /// Resolve against the holding cell with [`StoredRef::resolve`] to get an
+    /// address. The type is what makes that impossible to forget, which is the
+    /// mitigation: a delta read as an address does not crash, it computes a
+    /// plausible wrong answer in a spreadsheet.
+    ///
+    /// A tree at [`ABSOLUTE`](crate::stored::ABSOLUTE) is the absolute form —
+    /// what the parser produces and what a snapshot carries.
+    Reference(StoredRef),
+    /// A range between two stored references (`A1:B2`).
+    Range(StoredRef, StoredRef),
     /// A defined name.
     Name(String),
     /// Calling the result of an expression: `LAMBDA(x, x+1)(5)`.

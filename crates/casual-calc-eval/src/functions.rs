@@ -2867,18 +2867,16 @@ fn eval_row_col(ev: &mut Evaluator<'_>, args: &[Expr], row: bool) -> Value {
             None => return Value::Error(ErrorValue::Value),
         },
         Some(Expr::Reference(r)) => {
-            if row {
-                r.row
-            } else {
-                r.col
-            }
+            let Some(at) = r.resolve(ev.origin()) else {
+                return Value::Error(ErrorValue::Ref);
+            };
+            if row { at.row } else { at.col }
         }
         Some(Expr::Range(a, _)) => {
-            if row {
-                a.row
-            } else {
-                a.col
-            }
+            let Some(at) = a.resolve(ev.origin()) else {
+                return Value::Error(ErrorValue::Ref);
+            };
+            if row { at.row } else { at.col }
         }
         Some(_) => return Value::Error(ErrorValue::Value),
     };
@@ -3309,7 +3307,10 @@ fn eval_is_formula(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value
         // since FALSE would read as "that cell has no formula".
         return Value::Error(ErrorValue::Value);
     };
-    let at = CellRef::new(reference.row, reference.col);
+    let Some(resolved) = reference.resolve(ev.origin()) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let at = CellRef::new(resolved.row, resolved.col);
     let has = ev
         .workbook()
         .sheets
@@ -3806,6 +3807,12 @@ fn eval_indirect(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
         return Value::Error(ErrorValue::Ref);
     };
     reference.sheet = sheet_name;
+    // **Stored against the cell doing the asking.** `INDIRECT("A1")` names an
+    // address, and the expression built here is evaluated at *this* cell — so
+    // an absolute-form reference would be read as an offset and land somewhere
+    // else. Storing it at the origin it will be resolved at is what makes the
+    // round trip the identity.
+    let reference = casual_calc_formula::stored::ResolvedRef::from(&reference).store(ev.origin());
     ev.eval_expr(sheet, &Expr::Reference(reference))
 }
 
@@ -3846,15 +3853,28 @@ fn eval_offset(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     if height != 1 || width != 1 {
         return Value::Error(ErrorValue::Value);
     }
-    let row = base.row as i64 + rows;
-    let col = base.col as i64 + cols;
+    // **Resolved before it is counted from.** `base.row` is an *offset* from
+    // the holding cell, not an address (`PERF-11`), and adding `rows` to it
+    // computes an offset-plus-a-count that is neither. It compiles, because
+    // both are integers — which is exactly why the design says relativity has
+    // to be in the type *and* why this one still had to be caught by a test.
+    let Some(base_at) = base.resolve(ev.origin()) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let row = i64::from(base_at.row) + rows;
+    let col = i64::from(base_at.col) + cols;
     if row < 0 || col < 0 {
         // Off the top or left edge of the grid.
         return Value::Error(ErrorValue::Ref);
     }
-    let mut target = base.clone();
-    target.row = row as u32;
-    target.col = col as u32;
+    // As `INDIRECT`: an address is computed here and read at this cell, so it
+    // is stored against this cell rather than absolutely.
+    let target = casual_calc_formula::stored::ResolvedRef {
+        row: row as u32,
+        col: col as u32,
+        ..base_at
+    }
+    .store(ev.origin());
     ev.eval_expr(sheet, &Expr::Reference(target))
 }
 
@@ -8070,8 +8090,14 @@ fn eval_cell_info(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value 
     };
     // With no reference, Excel reports on the cell holding the formula.
     let target = match args.get(1) {
-        Some(Expr::Reference(r)) => (r.sheet.clone(), r.row, r.col),
-        Some(Expr::Range(a, _)) => (a.sheet.clone(), a.row, a.col),
+        Some(Expr::Reference(r)) => match r.resolve(ev.origin()) {
+            Some(at) => (r.sheet.clone(), at.row, at.col),
+            None => return Value::Error(ErrorValue::Ref),
+        },
+        Some(Expr::Range(a, _)) => match a.resolve(ev.origin()) {
+            Some(at) => (a.sheet.clone(), at.row, at.col),
+            None => return Value::Error(ErrorValue::Ref),
+        },
         Some(_) => return Value::Error(ErrorValue::Value),
         None => match ev.current_cell() {
             Some((_, at)) => (None, at.row, at.col),
@@ -9703,6 +9729,9 @@ fn eval_getpivotdata(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Val
         return Value::Error(ErrorValue::Ref);
     };
     let Some(at_sheet) = ev.resolve_sheet(&anchor.sheet, sheet) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let Some(anchor) = anchor.resolve(ev.origin()) else {
         return Value::Error(ErrorValue::Ref);
     };
     let workbook = ev.workbook();

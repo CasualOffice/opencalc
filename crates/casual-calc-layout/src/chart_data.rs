@@ -17,6 +17,7 @@
 //! Like the rest of layout, this reads the model's **cached** cell values and
 //! never invokes the calc engine.
 
+use casual_calc_formula::stored::ABSOLUTE;
 use casual_calc_formula::{Expr, parse};
 use casual_calc_model::{CellRef, CellValue, Workbook};
 
@@ -30,12 +31,32 @@ use crate::display_text;
 /// in this workbook — resolves to no cells at all rather than to a guess.
 #[must_use]
 pub fn ref_cells(wb: &Workbook, default_sheet: usize, reference: &str) -> Vec<(usize, CellRef)> {
+    /// Give up on a reference that does not resolve.
+    macro_rules! some_or_empty {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
+        };
+    }
+
     let Ok(expr) = parse(reference.trim().trim_start_matches('=')) else {
         return Vec::new();
     };
+    // **Resolved at `ABSOLUTE`**, and not as a shrug at the origin question: a
+    // chart's series reference is stored on the *chart*, not in a cell, so it
+    // has no holding cell to be relative to. It is written absolutely and read
+    // absolutely.
     let (a, b) = match &expr {
-        Expr::Range(a, b) => (a.clone(), b.clone()),
-        Expr::Reference(r) => (r.clone(), r.clone()),
+        Expr::Range(a, b) => (
+            some_or_empty!(a.resolve(ABSOLUTE)),
+            some_or_empty!(b.resolve(ABSOLUTE)),
+        ),
+        Expr::Reference(r) => {
+            let one = some_or_empty!(r.resolve(ABSOLUTE));
+            (one.clone(), one)
+        }
         _ => return Vec::new(),
     };
     let target = match &a.sheet {
