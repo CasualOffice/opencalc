@@ -13041,6 +13041,23 @@ async function main() {
   renderTabs();
   resize();
   status.textContent = `engine v${wasm.version()}`;
+
+  // Give the grid the keyboard (`UX-FOCUS-01`).
+  //
+  // Every grid shortcut is bound on the canvas, so all of them needed it to be
+  // focused, and nothing ever focused it: the editor opened with focus on
+  // `<body>` and Ctrl/Cmd+A, Ctrl/Cmd+X, the arrows and the rest did nothing
+  // until the user happened to click a cell. On macOS Cmd+A ran the browser's
+  // own select-all over the page instead, which is how it was found. The 53
+  // `canvas.focus()` calls that put focus *back* after a dialog were all there;
+  // the one that puts it there to begin with was missing.
+  //
+  // Only when nothing else has it. An embed lives inside somebody else's page,
+  // and a component that steals focus on load moves the caret out of whatever
+  // the person was already typing in.
+  if (!document.activeElement || document.activeElement === document.body) {
+    canvas.focus();
+  }
 }
 
 /// Start the editor against the current mount root.
