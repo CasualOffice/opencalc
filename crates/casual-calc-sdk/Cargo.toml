@@ -11,8 +11,11 @@ publish = false
 # shape text; the WebAssembly build turns this off, because the browser already
 # shapes what a user looks at and a shaper in that bundle is pure weight.
 [features]
-default = ["shaping"]
+default = ["shaping", "raster"]
 shaping = ["casual-calc-render/shaping"]
+# Forwarded, so a host that renders a thumbnail decodes every raster format a
+# workbook can carry. Off in the WebAssembly build, which does not render PNGs.
+raster = ["casual-calc-render/raster"]
 
 [dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }

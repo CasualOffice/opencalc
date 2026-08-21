@@ -186,6 +186,14 @@ impl ImageReport {
 /// image, about 64 MB decoded.
 pub const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 
+/// The longest a single side may be, for the decoders that are given a limit
+/// rather than asked for dimensions.
+#[cfg(feature = "raster")]
+///
+/// A picture 16 million pixels wide and one tall is inside [`MAX_IMAGE_PIXELS`]
+/// and is not a picture. Bounding the side as well as the area refuses it.
+pub const MAX_IMAGE_SIDE: u32 = 16_000;
+
 /// The image format `bytes` look like, by magic number, or `None` for PNG —
 /// the one format this backend decodes.
 ///
@@ -197,6 +205,19 @@ fn foreign_format(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(PNG) {
         return None;
     }
+    // Raster formats are decoded now (`RND-12`), so they are not "foreign" any
+    // more — a workbook's JPEG logo draws here as it does in the browser. With
+    // the decoders compiled out they are named as they always were, so the
+    // no-silent-loss rule holds in both builds.
+    #[cfg(feature = "raster")]
+    if raster_format(bytes).is_some() {
+        return None;
+    }
+    // The full name table, in **both** feature configurations. With the
+    // decoders compiled out these are reached and reported exactly as they
+    // always were; naming a JPEG "an unrecognised format" because a decoder was
+    // not built would be a report that got worse without anybody deciding to
+    // weaken it.
     let name = if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         "jpeg"
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
@@ -217,6 +238,95 @@ fn foreign_format(bytes: &[u8]) -> Option<&'static str> {
         "an unrecognised format"
     };
     Some(name)
+}
+
+/// The raster format `bytes` look like, or `None` if they are not one this
+/// backend decodes.
+///
+/// **Sniffed here rather than left to the decoder's own guess**, for the reason
+/// the PNG path already gave: the part's extension and its content type are the
+/// file's claim about itself, and neither is what the decoder will meet. It also
+/// keeps the set of formats this accepts a list in one place rather than a
+/// property of whichever codecs a dependency happened to compile in.
+///
+/// Vector formats are **not** here and are refused by name. `emf`, `wmf` and
+/// `svg` need a renderer, not a decoder — a drawing to be executed rather than
+/// pixels to be unpacked — and half-executing one produces a picture that is
+/// wrong rather than a picture that is missing.
+#[cfg(feature = "raster")]
+fn raster_format(bytes: &[u8]) -> Option<image::ImageFormat> {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(image::ImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(image::ImageFormat::Gif)
+    } else if bytes.starts_with(b"BM") {
+        Some(image::ImageFormat::Bmp)
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some(image::ImageFormat::Tiff)
+    } else if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" {
+        Some(image::ImageFormat::WebP)
+    } else {
+        None
+    }
+}
+
+/// Decode a raster format into a pixmap, bounded before it allocates.
+///
+/// The bound is the same one the PNG path enforces and for the same reason:
+/// the dimensions are read from the header **first**, so a picture claiming to
+/// be 60000x60000 is refused for what it says it is rather than after the
+/// allocation it asked for. A picture's bytes come from a workbook somebody
+/// else wrote, which makes this the decompression-bomb seam.
+///
+/// `image` is also given its own allocation limit, because a header can lie:
+/// belt and braces on the one path in this crate that takes arbitrary
+/// compressed input.
+#[cfg(feature = "raster")]
+fn decode_raster(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<tiny_skia::Pixmap, UndrawnReason> {
+    use image::ImageDecoder as _;
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_IMAGE_PIXELS * 4);
+
+    let reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|_| UndrawnReason::Undecodable)?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(UndrawnReason::TooLarge { width, height });
+    }
+    decoder
+        .set_limits(limits)
+        .map_err(|_| UndrawnReason::TooLarge { width, height })?;
+
+    let decoded = image::DynamicImage::from_decoder(decoder)
+        .map_err(|_| UndrawnReason::Undecodable)?
+        .into_rgba8();
+
+    // Straight into tiny-skia's premultiplied buffer. `from_vec` refuses a
+    // length that does not match the dimensions, so a decoder that disagreed
+    // with its own header is caught here rather than drawn as garbage.
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or(UndrawnReason::Undecodable)?;
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(decoded.pixels()) {
+        let [r, g, b, a] = src.0;
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(
+            ((u16::from(r) * u16::from(a)) / 255) as u8,
+            ((u16::from(g) * u16::from(a)) / 255) as u8,
+            ((u16::from(b) * u16::from(a)) / 255) as u8,
+            a,
+        )
+        .unwrap_or_else(|| {
+            tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0)
+                .expect("transparent is always a valid premultiplied pixel")
+        });
+    }
+    Ok(pixmap)
 }
 
 /// The width and height a PNG's IHDR declares, without decoding it.
@@ -243,6 +353,10 @@ pub(crate) fn decode(
     };
     if let Some(format) = foreign_format(bytes) {
         return Err(UndrawnReason::UnsupportedFormat(format));
+    }
+    #[cfg(feature = "raster")]
+    if let Some(format) = raster_format(bytes) {
+        return decode_raster(bytes, format);
     }
     // Before `decode_png`, not after: the point of the limit is the allocation
     // it prevents, and asking afterwards has already made it.

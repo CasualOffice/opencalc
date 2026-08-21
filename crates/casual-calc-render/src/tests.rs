@@ -999,21 +999,162 @@ mod images {
         );
     }
 
-    /// A format this backend does not decode is named as that format, so the
-    /// report says something a person can act on.
-    #[test]
-    fn a_jpeg_is_named_as_a_format_this_does_not_decode() {
-        let jpeg = {
-            let mut b = vec![0xff, 0xd8, 0xff, 0xe0];
-            b.extend_from_slice(b"\x00\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
-            b
+    // --- The raster formats (RND-12) ------------------------------------
+    //
+    // Only PNG was decoded, because tiny-skia already could. Every other format
+    // was sniffed and named — which honoured the no-silent-loss rule and still
+    // left the canvas and the headless render disagreeing about the same
+    // document, since the browser draws all of them. A thumbnail is exactly
+    // where that shows.
+
+    /// The fixtures' quadrant colours — pure, unlike `quadrant_png`'s, so a
+    /// lossy codec's drift is measured against something unambiguous.
+    #[cfg(feature = "raster")]
+    const FIX_RED: (u8, u8, u8) = (255, 0, 0);
+    #[cfg(feature = "raster")]
+    const FIX_GREEN: (u8, u8, u8) = (0, 255, 0);
+    #[cfg(feature = "raster")]
+    const FIX_BLUE: (u8, u8, u8) = (0, 0, 255);
+    #[cfg(feature = "raster")]
+    const FIX_YELLOW: (u8, u8, u8) = (255, 255, 0);
+
+    /// Each quadrant's colour at the point of the surface it maps to.
+    ///
+    /// The assertion that matters. "It decoded without erroring" passes against
+    /// a decoder returning garbage; "it is not blank" passes against one that
+    /// flipped the image vertically, which is the classic BMP bug because BMP
+    /// stores its rows bottom-up.
+    #[cfg(feature = "raster")]
+    #[track_caller]
+    fn assert_quadrants(pixmap: &tiny_skia::Pixmap, tolerance: u8, what: &str) {
+        let check = |x: u32, y: u32, expect: (u8, u8, u8), corner: &str| {
+            let p = pixmap.pixel(x, y).expect("pixel out of surface");
+            let got = (p.red(), p.green(), p.blue());
+            let close = |a: u8, b: u8| a.abs_diff(b) <= tolerance;
+            assert!(
+                close(got.0, expect.0) && close(got.1, expect.1) && close(got.2, expect.2),
+                "{what}, {corner}: pixel ({x},{y}) is {got:?}, expected {expect:?} \
+                 within {tolerance}"
+            );
         };
+        check(48, 15, FIX_RED, "top-left");
+        check(144, 15, FIX_GREEN, "top-right");
+        check(48, 45, FIX_BLUE, "bottom-left");
+        check(144, 45, FIX_YELLOW, "bottom-right");
+    }
+
+    /// **Every lossless raster format decodes, and lands the right way up.**
+    ///
+    /// The fixtures were encoded by `sips` (Apple's ImageIO) and `cwebp`
+    /// (Google's reference encoder) — not by the crate that decodes them, so
+    /// this cannot pass by a codec agreeing with itself.
+    #[cfg(feature = "raster")]
+    #[test]
+    fn the_lossless_raster_formats_decode_and_land_the_right_way_up() {
+        for (name, bytes) in [
+            ("gif", &include_bytes!("../fixtures/quad.gif")[..]),
+            ("bmp", &include_bytes!("../fixtures/quad.bmp")[..]),
+            ("tiff", &include_bytes!("../fixtures/quad.tiff")[..]),
+            ("webp", &include_bytes!("../fixtures/quad.webp")[..]),
+        ] {
+            let (pixmap, report) = render(&sheet_with_picture(), &media(bytes.to_vec()));
+            assert_eq!(report.drawn, 1, "{name} was not drawn: {report:?}");
+            assert!(report.is_complete(), "{name}: {report:?}");
+            assert_quadrants(&pixmap, 3, name);
+        }
+    }
+
+    /// **A JPEG in a workbook renders headlessly** — the row's acceptance,
+    /// stated as itself.
+    ///
+    /// A wide tolerance because JPEG is lossy and these quadrants meet at hard
+    /// edges, which is the worst case for it. Wide enough to absorb the codec,
+    /// nowhere near wide enough to confuse red with green.
+    #[cfg(feature = "raster")]
+    #[test]
+    fn a_jpeg_in_a_workbook_renders() {
+        let jpeg = include_bytes!("../fixtures/quad.jpeg").to_vec();
+        let (pixmap, report) = render(&sheet_with_picture(), &media(jpeg));
+        assert_eq!(report.drawn, 1, "the jpeg was not drawn: {report:?}");
+        assert!(report.is_complete(), "{report:?}");
+        assert_quadrants(&pixmap, 40, "jpeg");
+    }
+
+    /// **Without the decoders, a JPEG is still called a JPEG.**
+    ///
+    /// The build the WebAssembly bundle uses. Gating the decoders out is a size
+    /// decision and must not be a *reporting* decision: the first draft of
+    /// `RND-12` moved the format names inside the `raster` feature along with
+    /// the decoding, so this build called a JPEG "an unrecognised format" — a
+    /// no-silent-loss report that got quietly worse because a codec was not
+    /// compiled in. Caught by running both configurations, which is the only
+    /// thing that can catch it.
+    #[cfg(not(feature = "raster"))]
+    #[test]
+    fn a_jpeg_is_still_named_when_the_decoders_are_compiled_out() {
+        let jpeg = include_bytes!("../fixtures/quad.jpeg").to_vec();
         let (_, report) = render(&sheet_with_picture(), &media(jpeg));
         assert_eq!(
             report.undrawn,
             vec![UndrawnImage {
                 part: PART.to_owned(),
                 reason: UndrawnReason::UnsupportedFormat("jpeg"),
+            }],
+            "a build with no decoders must still say which format it declined"
+        );
+    }
+
+    /// **Vector formats are still refused, by name.**
+    ///
+    /// Not an oversight and not a gap to be closed later with the same trick:
+    /// `emf`, `wmf` and `svg` are drawings to be *executed*, not pixels to be
+    /// unpacked, and half-executing one produces a picture that is wrong rather
+    /// than a picture that is missing. Named, so the report says something a
+    /// person can act on.
+    #[test]
+    fn vector_formats_are_named_rather_than_half_drawn() {
+        let cases: [(&str, Vec<u8>); 3] = [
+            ("emf", {
+                let mut b = vec![1u8, 0, 0, 0];
+                b.resize(40, 0);
+                b.extend_from_slice(b" EMF");
+                b
+            }),
+            ("wmf", vec![0xd7, 0xcd, 0xc6, 0x9a, 0, 0, 0, 0]),
+            (
+                "svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_vec(),
+            ),
+        ];
+        for (name, bytes) in cases {
+            let (_, report) = render(&sheet_with_picture(), &media(bytes));
+            assert_eq!(
+                report.undrawn,
+                vec![UndrawnImage {
+                    part: PART.to_owned(),
+                    reason: UndrawnReason::UnsupportedFormat(name),
+                }],
+                "{name} should be named, not drawn"
+            );
+        }
+    }
+
+    /// A raster format this *does* decode, over bytes that are not one, is
+    /// **undecodable** rather than "unsupported" — the same distinction the
+    /// corrupt-PNG test draws. It tells a host whether the file is damaged or
+    /// merely in a format this does not read, and the answer changed for JPEG
+    /// when JPEG started decoding.
+    #[cfg(feature = "raster")]
+    #[test]
+    fn a_truncated_jpeg_is_undecodable_rather_than_unsupported() {
+        let mut bytes = include_bytes!("../fixtures/quad.jpeg").to_vec();
+        bytes.truncate(20);
+        let (_, report) = render(&sheet_with_picture(), &media(bytes));
+        assert_eq!(
+            report.undrawn,
+            vec![UndrawnImage {
+                part: PART.to_owned(),
+                reason: UndrawnReason::Undecodable,
             }]
         );
     }

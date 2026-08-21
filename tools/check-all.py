@@ -14,6 +14,12 @@ prints the ones that failed at the end where they can be read.
 It deliberately does not run `cargo`. The compiler gates are slow, they belong
 in their own jobs, and mixing a four-minute build into a two-second check makes
 the two-second check something people skip.
+
+That left the slow gates to be run from memory, and `cargo doc` is the one
+people forget — it has broken `main` twice, because an unresolved intra-doc
+link is an error under rustdoc and nothing else. They have their own runner
+now: `tools/check-rust.py`. Two commands, because they have genuinely different
+costs, and both named where they can be remembered.
 """
 
 import pathlib
