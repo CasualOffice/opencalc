@@ -92,6 +92,30 @@ impl SessionFormat {
         casual_calc_io::delimiter_for_extension(ext).map(Self::Delimited)
     }
 
+    /// The format these bytes **are**, read from the bytes themselves.
+    ///
+    /// For the caller that has a file and no reliable name for it: an upload,
+    /// a clipboard drop, a blob from an API. A filename extension is the file's
+    /// own claim about itself, and this engine believed that claim for whole
+    /// documents while already refusing to for the pictures inside them
+    /// (`ODS-01`).
+    ///
+    /// `None` when the bytes do not clearly say. A caller that knows the format
+    /// should still use [`for_extension`](Self::for_extension) and say so —
+    /// guessing is how a binary file becomes a sheet full of mojibake.
+    ///
+    /// Detection lives in `casual-calc-io`, which needs no format crate to do
+    /// it; **dispatch stays here**, where the format crates are. See ADR-022 in
+    /// `docs/19`.
+    #[must_use]
+    pub fn for_bytes(bytes: &[u8]) -> Option<Self> {
+        match casual_calc_io::detect(bytes)? {
+            casual_calc_io::Detected::Xlsx => Some(Self::Xlsx),
+            casual_calc_io::Detected::Ods => Some(Self::Ods),
+            casual_calc_io::Detected::Delimited(sep) => Some(Self::Delimited(sep)),
+        }
+    }
+
     /// The extension a save in this format writes.
     ///
     /// A delimiter with no conventional extension is `txt`, which is what a

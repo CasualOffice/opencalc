@@ -360,3 +360,110 @@ fn ambiguous_and_malformed_dates_stay_text() {
         );
     }
 }
+
+// --- Detection (ODS-01) ------------------------------------------------
+//
+// docs/19 said this crate was "the adapter registry… the single entry point
+// hosts call to open/save a spreadsheet without naming a format". It was the
+// delimited-text adapter and nothing else, and the engine picked a format from
+// the **filename extension** — the file's own claim about itself, which the
+// picture path in `casual-calc-render` had already stopped believing.
+
+use crate::{Detected, detect};
+
+/// The zip fixtures are written by Python's `zipfile`, not by anything here.
+mod packages {
+    use super::*;
+
+    #[test]
+    fn an_ods_is_recognised_by_its_stored_mimetype() {
+        let bytes = include_bytes!("../fixtures/sheet.ods");
+        assert_eq!(detect(bytes), Some(Detected::Ods));
+    }
+
+    #[test]
+    fn an_xlsx_is_recognised_by_its_first_entry() {
+        let bytes = include_bytes!("../fixtures/book.xlsx");
+        assert_eq!(detect(bytes), Some(Detected::Xlsx));
+    }
+
+    /// **An ODF document that is not a spreadsheet is not a spreadsheet.**
+    ///
+    /// The case a "starts with PK, contains `mimetype`, call it ODS" reading
+    /// gets wrong. A text document has the same shape and a different media
+    /// type, and opening it as a sheet would produce a workbook of nothing.
+    #[test]
+    fn an_odf_text_document_is_refused() {
+        let bytes = include_bytes!("../fixtures/text.odt");
+        assert_eq!(detect(bytes), None);
+    }
+
+    /// A zip that is neither is refused rather than guessed at.
+    #[test]
+    fn an_unrelated_zip_is_refused() {
+        let bytes = include_bytes!("../fixtures/other.zip");
+        assert_eq!(detect(bytes), None);
+    }
+
+    /// Truncated packages must not panic. These bytes arrive from an upload.
+    #[test]
+    fn a_truncated_package_is_refused_rather_than_read_off_the_end() {
+        let full = include_bytes!("../fixtures/sheet.ods");
+        for cut in 0..full.len().min(80) {
+            // The assertion is that this returns at all.
+            let _ = detect(&full[..cut]);
+        }
+        assert_eq!(detect(&full[..20]), None);
+    }
+}
+
+mod delimited {
+    use super::*;
+
+    #[test]
+    fn a_comma_a_tab_and_a_pipe_are_each_recognised() {
+        assert_eq!(detect(b"a,b,c\n1,2,3\n"), Some(Detected::Delimited(COMMA)));
+        assert_eq!(
+            detect(b"a\tb\tc\n1\t2\t3\n"),
+            Some(Detected::Delimited(TAB))
+        );
+        assert_eq!(detect(b"a|b|c\n1|2|3\n"), Some(Detected::Delimited(PIPE)));
+    }
+
+    /// **A separator inside quotes is data, not a separator.**
+    ///
+    /// `"Smith, J"\t"x"` is tab-separated with a comma in a field. Counting
+    /// commas naively calls it a CSV and splits somebody's name in half.
+    #[test]
+    fn a_separator_inside_quotes_does_not_count() {
+        assert_eq!(
+            detect(b"\"Smith, J\"\t\"Jones, K\"\n"),
+            Some(Detected::Delimited(TAB))
+        );
+    }
+
+    /// The winner is the one there is most of, so a tab file with one comma in
+    /// it is still a tab file.
+    #[test]
+    fn the_most_frequent_separator_wins() {
+        assert_eq!(detect(b"a\tb\tc\td,e\n"), Some(Detected::Delimited(TAB)));
+    }
+
+    /// **Binary is not a one-column spreadsheet.**
+    ///
+    /// The failure this refuses to produce: a sheet full of mojibake and a
+    /// person wondering what happened to their document.
+    #[test]
+    fn binary_is_refused() {
+        assert_eq!(detect(&[0x00, 0x01, 0x02, 0xff, 0xfe]), None);
+        assert_eq!(detect(b"before\x00after\n"), None);
+    }
+
+    /// One column of text is a legitimate CSV and is also every plain-text file
+    /// ever written. Refused, because a caller who really means it can say so.
+    #[test]
+    fn text_with_no_separator_is_refused() {
+        assert_eq!(detect(b"just a sentence\nand another\n"), None);
+        assert_eq!(detect(b""), None);
+    }
+}

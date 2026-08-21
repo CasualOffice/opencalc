@@ -30,9 +30,13 @@ TOOLS = pathlib.Path("tools")
 
 
 def main():
-    gates = sorted(
-        p for p in TOOLS.glob("check-*.py") if p.name != "check-all.py"
-    )
+    # `check-rust.py` is excluded by name, not overlooked. It is the *other*
+    # runner — the slow compiler gates — and picking it up from the glob would
+    # run a four-minute build inside the two-second check, which is exactly the
+    # thing the docstring above says this must not become. Adding it to the
+    # glob is easy to do by accident: it was, in the change that created it.
+    SIBLINGS = {"check-all.py", "check-rust.py"}
+    gates = sorted(p for p in TOOLS.glob("check-*.py") if p.name not in SIBLINGS)
     if not gates:
         print("no gates found", file=sys.stderr)
         return 1
