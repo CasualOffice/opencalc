@@ -20,6 +20,11 @@ people forget — it has broken `main` twice, because an unresolved intra-doc
 link is an error under rustdoc and nothing else. They have their own runner
 now: `tools/check-rust.py`. Two commands, because they have genuinely different
 costs, and both named where they can be remembered.
+
+`check-rust.py` also runs the **oracle** when LibreOffice is installed, which
+is the other thing neither runner asked. `PERF-11` changed how every reference
+in the engine is stored, passed 1393 workspace tests and 129 browser tests, and
+broke `oracle-diff` on `main`.
 """
 
 import pathlib
