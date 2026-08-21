@@ -69,6 +69,35 @@ GATES = [
     ),
 ]
 
+# The oracle, which is not a compiler gate and belongs here anyway.
+#
+# `PERF-11` changed how every reference in the engine is stored, passed 1393
+# workspace tests and 129 browser tests, and broke `oracle-diff` on `main`. The
+# two runners had said yes, and neither of them asks LibreOffice anything — so
+# the green meant less than it looked, and a change to formula *semantics* is
+# exactly the class only the oracle sees.
+#
+# Run here when LibreOffice is installed. **Skipped loudly when it is not**: a
+# gate that quietly does nothing is how four counters on this project reported
+# zero while being scraped (`SRV-05`), and "the oracle did not run" is the one
+# thing a reader of this output must not have to infer.
+ORACLE = [
+    ("oracle: corpus", []),
+    ("oracle: package", ["--validate-package"]),
+    ("oracle: ods", ["--ods"]),
+]
+
+
+def libreoffice():
+    """Where `soffice` is, if it is anywhere."""
+    import shutil
+
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+    mac = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    return mac if os.path.exists(mac) else None
+
 
 def main() -> int:
     quick = "--quick" in sys.argv
@@ -89,11 +118,33 @@ def main() -> int:
         failed.append((name, command, done))
         print(f"  FAIL  {name}")
 
+    # The oracle, after the compiler gates: it is the slowest thing here and
+    # there is no point asking LibreOffice about a tree that does not build.
+    soffice = libreoffice()
+    if quick:
+        print("  skip  oracle                       (--quick)")
+    elif soffice is None:
+        print("  SKIP  oracle                       no LibreOffice here; CI runs it")
+    elif failed:
+        print("  skip  oracle                       (a compiler gate failed first)")
+    else:
+        for name, extra in ORACLE:
+            done = subprocess.run(
+                ["cargo", "run", "-q", "-p", "casual-calc-fidelity", "--", *extra,
+                 "--soffice", soffice],
+                capture_output=True, text=True, check=False,
+            )
+            if done.returncode == 0:
+                print(f"  ok    {name}")
+                continue
+            failed.append((name, ["cargo", "run", "-p", "casual-calc-fidelity", *extra], done))
+            print(f"  FAIL  {name}")
+
     if not failed:
-        print(f"\nall {len(GATES) - (1 if quick else 0)} compiler gates pass")
+        print("\nall gates pass")
         return 0
 
-    print(f"\n{len(failed)} of {len(GATES)} compiler gates failed:", file=sys.stderr)
+    print(f"\n{len(failed)} gate(s) failed:", file=sys.stderr)
     for name, command, done in failed:
         print(f"\n--- {name} ---", file=sys.stderr)
         print(f"    {' '.join(command)}", file=sys.stderr)
