@@ -228,13 +228,18 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         if source.is_empty() || is_workbook(source) || source.contains("/worksheets/") {
             continue; // written by root_rels / workbook_rels / sheet_rels
         }
-        // A drawing that took an authored chart already had its rels written,
-        // with the retained entries folded in. Writing them again here would
-        // put two `.rels` at one path and drop the chart relationships.
-        if chart_builds
-            .iter()
-            .any(|b| !b.chart_parts.is_empty() && b.drawing_part == source)
-        {
+        // A drawing this run rebuilt already had its rels written, with the
+        // retained entries folded in, so writing them again puts two `.rels` at
+        // one path — which the zip writer refuses, failing the whole save.
+        //
+        // The condition used to also require the build to have produced *chart
+        // parts*, and that was the bug: a sheet can contribute a rebuilt
+        // drawing with none, which is exactly what deleting an imported chart
+        // leaves behind once its dangling anchor is stripped. Saving such a
+        // workbook failed outright with `Duplicate filename`. Having a chart
+        // part was never what made the rels get written — a non-empty
+        // `drawing_part` is (`FID-30`).
+        if chart_builds.iter().any(|b| b.drawing_part == source) {
             continue;
         }
         let mut xml = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
