@@ -49,7 +49,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         def stamp(m):
             asset = m.group(1)
             try:
-                return f'{asset}?v={int(os.path.getmtime(os.path.join(ROOT, asset)))}'
+                mtime = os.path.getmtime(os.path.join(ROOT, asset))
+                # `editor.js` is the only file the page names, and it does
+                # nothing but import the rest. Its own mtime therefore says
+                # nothing about whether the editor changed, so it is stamped
+                # from the newest of every module it pulls in — otherwise
+                # editing `editor.js` would leave the tag alone and the browser
+                # would go on serving the module it had already resolved.
+                if os.path.basename(asset) == "editor.js":
+                    folder = os.path.dirname(os.path.join(ROOT, asset))
+                    mtime = max(
+                        (os.path.getmtime(os.path.join(folder, f))
+                         for f in os.listdir(folder)
+                         if f.startswith("editor") and f.endswith(".js")),
+                        default=mtime,
+                    )
+                return f'{asset}?v={int(mtime)}'
             except OSError:
                 return m.group(0)
 
