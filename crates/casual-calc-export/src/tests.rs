@@ -3593,3 +3593,131 @@ mod future_functions {
         );
     }
 }
+
+/// An imported chart is written back from its retained part, so shifting the
+/// model's series (FID-26) moved the picture on screen and left the saved file
+/// saying what it always said. Insert a row above the data and the file must
+/// name the shifted rows (FID-27).
+///
+/// The part carries a `<c:serAx>` before the series and a `<c:valAx>` after it,
+/// both holding a `<c:f>`, so that an axis definition is never rewritten as if
+/// it were data. That pair is a regression guard, not a proof: valid OOXML
+/// orders the axes outside the series, so element ordering alone would spare
+/// them even from a sloppier matcher — the guard against matching `ser` inside
+/// `serAx` is proved directly, in `chart::tests`.
+///
+/// A `<c:tx>` reference and a `<c:spPr>` fill are here to be preserved: a
+/// series *name* is not a position, and the formatting is the whole reason the
+/// part is retained at all.
+#[test]
+fn a_retained_chart_part_is_re_emitted_with_its_shifted_series() {
+    use casual_calc_model::{
+        CellRange, CellRef, ChartKind, ChartSeries, ChartView, Id, RetainedPart, Sheet, SheetId,
+        Workbook,
+    };
+
+    const PART: &str = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">"#,
+        r#"<c:chart><c:plotArea>"#,
+        r#"<c:serAx><c:f>S!$Z$1:$Z$9</c:f></c:serAx>"#,
+        r#"<c:barChart><c:barDir val="col"/><c:ser>"#,
+        r#"<c:idx val="0"/>"#,
+        r#"<c:tx><c:strRef><c:f>S!$D$1</c:f></c:strRef></c:tx>"#,
+        r#"<c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr>"#,
+        r#"<c:cat><c:strRef><c:f>S!$A$2:$A$11</c:f></c:strRef></c:cat>"#,
+        r#"<c:val><c:numRef><c:f>S!$D$2:$D$11</c:f></c:numRef></c:val>"#,
+        r#"</c:ser></c:barChart>"#,
+        r#"<c:valAx><c:f>S!$Y$1:$Y$9</c:f></c:valAx>"#,
+        r#"</c:plotArea></c:chart></c:chartSpace>"#,
+    );
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.retained_parts.push(RetainedPart {
+        path: "xl/charts/chart1.xml".into(),
+        bytes: PART.as_bytes().to_vec(),
+        content_type: Some(
+            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml".into(),
+        ),
+    });
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(0, 5), CellRef::new(9, 5)),
+        ChartKind::Column,
+    );
+    chart.part = Some("xl/charts/chart1.xml".into());
+    // What FID-26 already leaves in the model after inserting two rows at row 2.
+    chart.series.push(ChartSeries {
+        name: "Amount".into(),
+        categories: Some("S!$A$4:$A$13".into()),
+        values: "S!$D$4:$D$13".into(),
+    });
+    wb.sheets[0].charts.push(chart);
+
+    let written = write_workbook(&wb).unwrap();
+    let part = xml_of(&written, "xl/charts/chart1.xml");
+
+    assert!(
+        part.contains("<c:f>S!$D$4:$D$13</c:f>"),
+        "the saved values reference must be the shifted one: {part}"
+    );
+    assert!(
+        part.contains("<c:f>S!$A$4:$A$13</c:f>"),
+        "and so must the categories: {part}"
+    );
+    assert!(
+        part.contains("<c:f>S!$Z$1:$Z$9</c:f>") && part.contains("<c:f>S!$Y$1:$Y$9</c:f>"),
+        "an axis is not a series: `serAx` and `valAx` must be untouched: {part}"
+    );
+    assert!(
+        part.contains("<c:f>S!$D$1</c:f>"),
+        "a series name is not a position: {part}"
+    );
+    assert!(
+        part.contains(r#"<a:srgbClr val="FF0000"/>"#),
+        "the formatting the retained part exists to keep must survive: {part}"
+    );
+}
+
+/// A chart nobody moved must come back byte for byte. Re-emitting an untouched
+/// part in our own spelling would be a silent rewrite of somebody's file, and
+/// would defeat the point of retaining it.
+#[test]
+fn an_unshifted_retained_chart_part_is_written_back_unchanged() {
+    use casual_calc_model::{
+        CellRange, CellRef, ChartKind, ChartSeries, ChartView, Id, RetainedPart, Sheet, SheetId,
+        Workbook,
+    };
+
+    const PART: &str = concat!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">"#,
+        r#"<c:ser><c:val><c:numRef><c:f>S!$D$2:$D$11</c:f></c:numRef></c:val></c:ser>"#,
+        r#"</c:chartSpace>"#,
+    );
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.retained_parts.push(RetainedPart {
+        path: "xl/charts/chart1.xml".into(),
+        bytes: PART.as_bytes().to_vec(),
+        content_type: Some(
+            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml".into(),
+        ),
+    });
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(0, 5), CellRef::new(9, 5)),
+        ChartKind::Column,
+    );
+    chart.part = Some("xl/charts/chart1.xml".into());
+    chart.series.push(ChartSeries {
+        name: String::new(),
+        categories: None,
+        values: "S!$D$2:$D$11".into(),
+    });
+    wb.sheets[0].charts.push(chart);
+
+    let written = write_workbook(&wb).unwrap();
+    assert_eq!(xml_of(&written, "xl/charts/chart1.xml"), PART);
+}
