@@ -990,6 +990,93 @@ fn shift_drawings_and_pivot_sources(
     }
 }
 
+/// Shift a **pending metadata bundle's** chart series and pivot sources.
+///
+/// [`shift_metadata_insert`] and [`shift_metadata_delete`] move everything that
+/// is a position — including a chart's frame and a pivot's report block — from
+/// a lone `&mut impl Positional`. Two things need more than that: a chart's
+/// series is a reference *string*, so deciding whether `Sheet1!$D$2` names the
+/// sheet being shifted needs that sheet's **name**; and a pivot's `source` is
+/// on `source_sheet`, so deciding whether it moves needs its **id**.
+///
+/// The transform is a pure function over operations and an operation carries
+/// only a sheet *index*, which is why this was left undone by `FID-26` and
+/// filed as `FID-28`. It does not need the wire to carry identity on every
+/// operation, though — the transform's callers hold the workbook, so they pass
+/// what the index means (`target_name`, `target_id`) and the shift happens
+/// here, next to the one `apply` performs.
+pub(crate) struct BundleShift<'a> {
+    /// The sheet the structural operation ran on — what a qualified series
+    /// reference must name to be moved.
+    pub target_name: &'a str,
+    /// That sheet's identity, which is what a pivot's `source_sheet` is
+    /// compared against.
+    pub target_id: casual_calc_model::SheetId,
+    /// The sheet the bundle itself belongs to, which resolves an *unqualified*
+    /// reference.
+    pub home_name: &'a str,
+    pub axis: Axis,
+    pub inserting: bool,
+    pub at: u32,
+    pub count: u32,
+}
+
+pub(crate) fn shift_bundle_references(data: &mut crate::SheetMetadata, shift: &BundleShift<'_>) {
+    let BundleShift {
+        target_name,
+        target_id,
+        home_name,
+        axis,
+        inserting,
+        at,
+        count,
+    } = *shift;
+    let kind = if inserting {
+        ShiftKind::Insert
+    } else {
+        ShiftKind::Delete
+    };
+    let ctx = RewriteCtx {
+        target: target_name,
+        home: home_name,
+        axis,
+        kind,
+        at,
+        count,
+    };
+    for chart in data.charts.iter_mut() {
+        for series in chart.series.iter_mut() {
+            if let Some(shifted) = shift_reference_text(&series.values, &ctx) {
+                series.values = shifted;
+            }
+            if let Some(text) = series.categories.as_ref()
+                && let Some(shifted) = shift_reference_text(text, &ctx)
+            {
+                series.categories = Some(shifted);
+            }
+        }
+    }
+    for pivot in data.pivots.iter_mut() {
+        if pivot.source_sheet != target_id {
+            continue;
+        }
+        match kind {
+            ShiftKind::Insert => {
+                insert_coord(axis, &mut pivot.source.start, at, count);
+                insert_coord(axis, &mut pivot.source.end, at, count);
+            }
+            ShiftKind::Delete => {
+                let lo = axis.coord(pivot.source.start);
+                let hi = axis.coord(pivot.source.end);
+                if let Some((new_lo, new_hi)) = map_range_delete(lo, hi, at, count) {
+                    pivot.source.start = axis.with_coord(pivot.source.start, new_lo);
+                    pivot.source.end = axis.with_coord(pivot.source.end, new_hi);
+                }
+            }
+        }
+    }
+}
+
 /// Shift the reference strings naming each chart series' categories and values.
 ///
 /// A series is stored as the text OOXML uses — `Sheet1!$D$2:$D$11` — not as a

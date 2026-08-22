@@ -369,6 +369,15 @@ export function drawCategoryLabels(ch, plot, points, kind) {
 
 export function cellFg(it) {
   if (it.fc) return "#" + it.fc;
+  // A cell's own fill came from the *file*, so it is the same colour in either
+  // theme — while `colors.fg` follows the theme. Reading the ink off the theme
+  // therefore put near-white text on an authored pale fill the moment dark mode
+  // was switched on, and the cell's contents disappeared. The fill is what the
+  // text actually sits on, so that is what it has to contrast against.
+  //
+  // An explicit font colour above still wins: that pairing is the author's, and
+  // second-guessing it would repaint somebody's deliberate formatting.
+  if (it.bg) return contrastInk(it.bg);
   return tableTextAt(it.r, it.c) || colors.fg;
 }
 

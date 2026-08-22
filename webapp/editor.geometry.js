@@ -390,6 +390,25 @@ export function updateResize(px, py) {
     const top = HH + off - (state.resize.index < f.fr ? 0 : state.scrollY);
     state.resize.previewPx = Math.max(MIN_LINE, Math.round(py - top));
   }
+  // Tell the *engine* the provisional size too, not just our own geometry.
+  // Overriding `geo` alone moved the column edge while the text stayed where it
+  // was, so content only re-wrapped on release. The engine supplies the display
+  // text, so it has to know the width for the text to reflow with the drag.
+  //
+  // Unrecorded on purpose — a drag is not an edit until it is let go. Only the
+  // single-line case: `all` and `band` scopes would mean writing every line on
+  // every mouse move, which is a different cost question.
+  if (state.resize.scope === "one") {
+    try {
+      wasm.session_preview_line_size(
+        state.sheet,
+        state.resize.index,
+        state.resize.previewPx,
+        state.resize.axis === "col",
+      );
+      invalidateGrowth();
+    } catch { /* a protected sheet refuses; the drag simply shows nothing */ }
+  }
   draw();
 }
 

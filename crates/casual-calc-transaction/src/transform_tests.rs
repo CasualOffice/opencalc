@@ -262,11 +262,11 @@ fn tp1_holds_for_every_supported_pair() {
             // The two replicas must agree on *one* order before they can
             // agree on a result, so fix it here: a is ordered before b. Each
             // side then transforms with the role that order gives it.
-            let Ok(b_after_a) = transform(b, a, Side::Later) else {
+            let Ok(b_after_a) = transform(b, a, Side::Later, &[]) else {
                 skipped += 1;
                 continue;
             };
-            let Ok(a_after_b) = transform(a, b, Side::Earlier) else {
+            let Ok(a_after_b) = transform(a, b, Side::Earlier, &[]) else {
                 skipped += 1;
                 continue;
             };
@@ -315,7 +315,7 @@ fn operations_on_different_sheets_are_left_alone() {
         cell: None,
     };
     assert_eq!(
-        transform(&b, &a, Side::Later).unwrap(),
+        transform(&b, &a, Side::Later, &[]).unwrap(),
         b,
         "a different sheet cannot move"
     );
@@ -334,7 +334,7 @@ fn a_cell_inside_a_deleted_band_becomes_a_no_op() {
         cell: Some(Cell::value(CellValue::Number(1.0))),
     };
     assert!(
-        crate::transform::is_noop(&transform(&edit, &deleted, Side::Later).unwrap()),
+        crate::transform::is_noop(&transform(&edit, &deleted, Side::Later, &[]).unwrap()),
         "the cell it addressed no longer exists"
     );
 }
@@ -351,7 +351,8 @@ fn a_cell_below_a_deleted_band_moves_up() {
         at: CellRef::new(8, 1),
         cell: None,
     };
-    let Operation::SetCell { at, .. } = transform(&edit, &deleted, Side::Later).unwrap() else {
+    let Operation::SetCell { at, .. } = transform(&edit, &deleted, Side::Later, &[]).unwrap()
+    else {
         panic!("still a cell edit");
     };
     assert_eq!(at, CellRef::new(5, 1));
@@ -372,10 +373,10 @@ fn an_insert_strictly_inside_a_delete_is_swallowed_and_the_delete_widens() {
         count: 1,
     };
     assert!(crate::transform::is_noop(
-        &transform(&ins, &del, Side::Later).unwrap()
+        &transform(&ins, &del, Side::Later, &[]).unwrap()
     ));
     assert_eq!(
-        transform(&del, &ins, Side::Later).unwrap(),
+        transform(&del, &ins, Side::Later, &[]).unwrap(),
         Operation::DeleteRows {
             sheet: 0,
             at: 5,
@@ -398,9 +399,9 @@ fn an_insert_at_a_deletes_first_line_survives_and_pushes_it() {
         at: 5,
         count: 1,
     };
-    assert_eq!(transform(&ins, &del, Side::Later).unwrap(), ins);
+    assert_eq!(transform(&ins, &del, Side::Later, &[]).unwrap(), ins);
     assert_eq!(
-        transform(&del, &ins, Side::Later).unwrap(),
+        transform(&del, &ins, Side::Later, &[]).unwrap(),
         Operation::DeleteRows {
             sheet: 0,
             at: 6,
@@ -422,7 +423,7 @@ fn two_deletes_do_not_remove_the_overlap_twice() {
         count: 4,
     };
     assert_eq!(
-        transform(&a, &b, Side::Later).unwrap(),
+        transform(&a, &b, Side::Later, &[]).unwrap(),
         Operation::DeleteRows {
             sheet: 0,
             at: 2,
@@ -430,7 +431,7 @@ fn two_deletes_do_not_remove_the_overlap_twice() {
         }
     );
     assert_eq!(
-        transform(&b, &a, Side::Later).unwrap(),
+        transform(&b, &a, Side::Later, &[]).unwrap(),
         Operation::DeleteRows {
             sheet: 0,
             at: 2,
@@ -452,7 +453,7 @@ fn a_fully_covered_delete_becomes_a_no_op() {
         count: 6,
     };
     assert!(crate::transform::is_noop(
-        &transform(&inner, &outer, Side::Later).unwrap()
+        &transform(&inner, &outer, Side::Later, &[]).unwrap()
     ));
 }
 
@@ -468,7 +469,7 @@ fn a_row_band_does_not_move_a_column_width() {
         col: 2,
         width: Some(100),
     };
-    assert_eq!(transform(&width, &rows, Side::Later).unwrap(), width);
+    assert_eq!(transform(&width, &rows, Side::Later, &[]).unwrap(), width);
 }
 
 #[test]
@@ -482,7 +483,8 @@ fn an_edit_follows_its_sheet_when_another_is_inserted_before_it() {
         at: CellRef::new(0, 0),
         cell: None,
     };
-    let Operation::SetCell { sheet, .. } = transform(&edit, &insert_sheet, Side::Later).unwrap()
+    let Operation::SetCell { sheet, .. } =
+        transform(&edit, &insert_sheet, Side::Later, &[]).unwrap()
     else {
         panic!("still a cell edit");
     };
@@ -501,7 +503,7 @@ fn an_edit_on_a_removed_sheet_becomes_a_no_op() {
         cell: None,
     };
     assert!(crate::transform::is_noop(
-        &transform(&edit, &removed, Side::Later).unwrap()
+        &transform(&edit, &removed, Side::Later, &[]).unwrap()
     ));
 
     // And a sheet after it moves down rather than vanishing.
@@ -510,7 +512,7 @@ fn an_edit_on_a_removed_sheet_becomes_a_no_op() {
         color: None,
     };
     assert_eq!(
-        transform(&elsewhere, &removed, Side::Later).unwrap(),
+        transform(&elsewhere, &removed, Side::Later, &[]).unwrap(),
         Operation::SetTabColor {
             sheet: 1,
             color: None
@@ -528,7 +530,7 @@ fn an_edit_follows_a_moved_sheet() {
             color: None,
         };
         assert_eq!(
-            transform(&edit, &moved, Side::Later).unwrap(),
+            transform(&edit, &moved, Side::Later, &[]).unwrap(),
             Operation::SetTabColor {
                 sheet: after,
                 color: None
@@ -544,7 +546,7 @@ fn concurrent_sheet_reordering_is_refused_rather_than_guessed() {
     // would diverge the replicas silently.
     let a = Operation::MoveSheet { from: 0, to: 2 };
     let b = Operation::MoveSheet { from: 1, to: 0 };
-    assert!(transform(&a, &b, Side::Later).is_err());
+    assert!(transform(&a, &b, Side::Later, &[]).is_err());
 
     // An insertion *position* under a move is refused for the same reason: a
     // bare index does not record which sheets it meant to sit between.
@@ -552,7 +554,7 @@ fn concurrent_sheet_reordering_is_refused_rather_than_guessed() {
         index: 1,
         sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 1)), "new")),
     };
-    assert!(transform(&insert, &a, Side::Later).is_err());
+    assert!(transform(&insert, &a, Side::Later, &[]).is_err());
 }
 
 #[test]
@@ -570,7 +572,7 @@ fn a_pending_metadata_edit_is_rebased_across_a_structural_op() {
     let resize = Operation::set_sheet_metadata(0, data);
 
     let Operation::SetSheetMetadata { data, .. } =
-        transform(&resize, &inserted, Side::Later).unwrap()
+        transform(&resize, &inserted, Side::Later, &[]).unwrap()
     else {
         panic!("still a metadata change");
     };
@@ -590,7 +592,8 @@ fn a_metadata_edit_loses_what_a_concurrent_delete_removed() {
     data.hidden_rows.insert(9); // past it
     let hide = Operation::set_sheet_metadata(0, data);
 
-    let Operation::SetSheetMetadata { data, .. } = transform(&hide, &deleted, Side::Later).unwrap()
+    let Operation::SetSheetMetadata { data, .. } =
+        transform(&hide, &deleted, Side::Later, &[]).unwrap()
     else {
         panic!("still a metadata change");
     };
@@ -614,7 +617,7 @@ fn the_earlier_write_yields_only_the_aspect_the_later_one_takes() {
     };
 
     assert_eq!(
-        transform(&typed, &bolded, Side::Earlier).unwrap(),
+        transform(&typed, &bolded, Side::Earlier, &[]).unwrap(),
         Operation::SetValue {
             sheet: 0,
             at: CellRef::new(0, 0),
@@ -623,7 +626,7 @@ fn the_earlier_write_yields_only_the_aspect_the_later_one_takes() {
         "the value survives; only the style is conceded"
     );
     assert_eq!(
-        transform(&bolded, &typed, Side::Later).unwrap(),
+        transform(&bolded, &typed, Side::Later, &[]).unwrap(),
         bolded,
         "the later operation is untouched"
     );
@@ -641,9 +644,9 @@ fn two_writes_of_the_same_aspect_leave_only_the_later_one() {
         at: CellRef::new(1, 1),
     };
     assert!(crate::transform::is_noop(
-        &transform(&a, &b, Side::Earlier).unwrap()
+        &transform(&a, &b, Side::Earlier, &[]).unwrap()
     ));
-    assert_eq!(transform(&b, &a, Side::Later).unwrap(), b);
+    assert_eq!(transform(&b, &a, Side::Later, &[]).unwrap(), b);
 }
 
 #[test]
@@ -665,9 +668,9 @@ fn a_formula_that_cannot_be_rebased_is_refused_not_degraded() {
         at: CellRef::new(0, 0),
         style: Some(StyleId::at(1)),
     };
-    assert!(transform(&typed, &bolded, Side::Earlier).is_err());
+    assert!(transform(&typed, &bolded, Side::Earlier, &[]).is_err());
     // The other direction is fine: the style write needs no rebasing.
-    assert!(transform(&bolded, &typed, Side::Later).is_ok());
+    assert!(transform(&bolded, &typed, Side::Later, &[]).is_ok());
 }
 
 #[test]
@@ -696,12 +699,14 @@ fn metadata_edits_to_different_fields_both_survive() {
     };
 
     assert_eq!(
-        transform(&a, &b, Side::Earlier).unwrap().sheet_fields(),
+        transform(&a, &b, Side::Earlier, &[])
+            .unwrap()
+            .sheet_fields(),
         crate::SheetFields::COLUMNS,
         "the resize keeps its field"
     );
     assert_eq!(
-        transform(&b, &a, Side::Later).unwrap().sheet_fields(),
+        transform(&b, &a, Side::Later, &[]).unwrap().sheet_fields(),
         crate::SheetFields::VIEW,
         "and the view change keeps its own"
     );
@@ -728,14 +733,77 @@ fn metadata_edits_to_the_same_field_are_ordered_not_merged() {
     };
 
     assert!(
-        transform(&a, &b, Side::Earlier)
+        transform(&a, &b, Side::Earlier, &[])
             .unwrap()
             .sheet_fields()
             .is_empty(),
         "the earlier one yields the contested field"
     );
     assert_eq!(
-        transform(&b, &a, Side::Later).unwrap().sheet_fields(),
+        transform(&b, &a, Side::Later, &[]).unwrap().sheet_fields(),
         crate::SheetFields::COLUMNS,
+    );
+}
+
+/// **A pending chart edit must not reinstate a pre-insert series (FID-28).**
+///
+/// One client edits a chart while another inserts a row above the data it
+/// plots. `shift_metadata_*` moves the chart's *frame*, because a frame is a
+/// position — but a series is a reference **string**, and deciding whether
+/// `S!$D$2:$D$11` names the sheet being shifted needs that sheet's *name*.
+/// The transform is a pure function over operations and an operation carries
+/// only an index, so this went undone by `FID-26`.
+///
+/// It does not need the wire to carry identity, though: the transform's callers
+/// hold the workbook, so they pass what the indices mean. The empty slice every
+/// other test uses is exactly the "identity unknown" case, which is why this one
+/// supplies it.
+#[test]
+fn a_pending_chart_series_follows_a_concurrent_insert() {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView};
+
+    let mut data = crate::SheetMetadata::default();
+    let mut chart = ChartView::new(
+        casual_calc_model::CellRange::new(CellRef::new(0, 5), CellRef::new(9, 5)),
+        ChartKind::Column,
+    );
+    chart.series.push(ChartSeries {
+        name: "Amount".into(),
+        categories: None,
+        values: "S!$D$2:$D$11".into(),
+    });
+    data.charts.push(chart);
+
+    let bundle = Operation::SetSheetMetadata {
+        sheet: 0,
+        data: Box::new(data),
+        changed: crate::SheetFields::CHARTS,
+        restore: Default::default(),
+    };
+    let insert = Operation::InsertRows {
+        sheet: 0,
+        at: 1,
+        count: 2,
+    };
+
+    // What sheet 0's index actually names — supplied by the caller, which has
+    // the workbook.
+    let sheets = [("S".to_owned(), SheetId(Id::from_parts(2, 1)))];
+
+    let Operation::SetSheetMetadata { data, .. } =
+        transform(&bundle, &insert, Side::Later, &sheets).unwrap()
+    else {
+        panic!("a metadata bundle transforms into a metadata bundle");
+    };
+
+    assert_eq!(
+        data.charts[0].series[0].values, "S!$D$4:$D$13",
+        "the pending series must land on the rows the insert moved its data to"
+    );
+    assert_eq!(
+        data.charts[0].anchor,
+        casual_calc_model::CellRange::new(CellRef::new(0, 5), CellRef::new(11, 5)),
+        "and the frame still moves, as it already did — this one *grows*, \
+         because the insert lands inside it, exactly as a straddling merge does"
     );
 }

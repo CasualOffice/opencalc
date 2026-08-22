@@ -2506,7 +2506,18 @@ export function draw() {
   if (wasm) emitStateEvents();
 }
 
-export const FREEZE_GRAB = 4; // px proximity to the freeze divider that arms a drag
+// px proximity to the freeze divider that arms a drag.
+//
+// Was 4, which is under half a fingertip and barely a mouse's worth of slop:
+// the divider is a 1px line, so a user aiming at it missed more often than not
+// and reasonably concluded a frozen pane could not be moved or removed at all.
+// The menu's Unfreeze was the only reliable route, and it is two clicks inside
+// a popup nobody opens looking for it.
+//
+// 8 is the smallest that reliably catches a deliberate aim without stealing
+// clicks from the cell beside it — the divider sits on a gridline, so a grab
+// zone much wider starts swallowing selections.
+export const FREEZE_GRAB = 8;
 
 // Prominent, draggable freeze dividers (Sheets-style), drawn on top of the
 // headers. During a drag the line follows the pointer as a live preview.
@@ -5474,7 +5485,11 @@ function wireEvents() {
       if (state.selKind === "all") scope = "all";
       else if (hb.axis === "col" && state.selKind === "cols" && hb.index >= r.c0 && hb.index <= r.c1) { scope = "band"; b0 = r.c0; b1 = r.c1; }
       else if (hb.axis === "row" && state.selKind === "rows" && hb.index >= r.r0 && hb.index <= r.r1) { scope = "band"; b0 = r.r0; b1 = r.r1; }
-      state.resize = { axis: hb.axis, index: hb.index, previewPx: cur, scope, b0, b1 };
+      // `originPx` is what the line measured before the drag. The preview
+      // writes straight to the sheet, so this is what has to go back before
+      // the recorded edit runs — otherwise its inverse would be the last
+      // previewed size and undo would step back to a size nobody chose.
+      state.resize = { axis: hb.axis, index: hb.index, previewPx: cur, originPx: cur, scope, b0, b1 };
       return;
     }
     // Header clicks: select-all (corner), or a whole column/row — supporting
@@ -5657,6 +5672,12 @@ function wireEvents() {
       invalidateGrowth();
       const px = r.previewPx;
       try {
+        // Put the previewed line back to where the drag found it, so the
+        // operation recorded below inverts to the original size rather than to
+        // the last frame of the drag.
+        if (r.scope === "one" && r.originPx !== undefined) {
+          wasm.session_preview_line_size(state.sheet, r.index, r.originPx, r.axis === "col");
+        }
         if (r.axis === "col") {
           if (r.scope === "all") wasm.session_set_all_col_width(state.sheet, px);
           else if (r.scope === "band") wasm.session_set_col_width_range(state.sheet, r.b0, r.b1, px);
