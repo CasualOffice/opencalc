@@ -231,6 +231,16 @@ struct Outstanding {
 /// to degrade to, being what this replaced.
 const MAX_OUTSTANDING: usize = 32;
 
+/// The name and id of every sheet, by index — what an operation's sheet number
+/// means, which the transform needs and cannot look up itself (`FID-28`).
+fn sheet_names(workbook: &Workbook) -> Vec<(String, casual_calc_model::SheetId)> {
+    workbook
+        .sheets
+        .iter()
+        .map(|s| (s.name.clone(), s.id))
+        .collect()
+}
+
 /// One participant's view: its revision, what it has sent, and what it has not.
 #[derive(Debug, Clone)]
 pub struct ClientSession {
@@ -456,10 +466,13 @@ impl ClientSession {
         // sent. The order is not incidental: each chunk was written on top of
         // the one before it, so rebasing them in any other order rebases an
         // operation against coordinates it was never expressed in.
+        // What the sheet indices in these operations actually name. The
+        // transform cannot look it up, so it is handed over (`FID-28`).
+        let sheets = sheet_names(workbook);
         let outstanding = self.sent.iter_mut().flat_map(|chunk| chunk.ops.iter_mut());
         for local in outstanding.chain(self.pending.iter_mut()) {
-            let rebased_arrival = transform(&arriving, local, Side::Earlier)?;
-            *local = transform(local, &arriving, Side::Later)?;
+            let rebased_arrival = transform(&arriving, local, Side::Earlier, &sheets)?;
+            *local = transform(local, &arriving, Side::Later, &sheets)?;
             arriving = rebased_arrival;
         }
 
@@ -623,15 +636,16 @@ impl ServerSession {
             .map(|wire| wire.localise(workbook))
             .collect();
 
+        let sheets = sheet_names(workbook);
         for op in &incoming {
             let mut current = op.clone();
             for committed in &mut history {
-                let next = transform(&current, committed, Side::Later)?;
+                let next = transform(&current, committed, Side::Later, &sheets)?;
                 // The concurrent operation has to move past this one too, so
                 // the *next* operation in the chunk is rebased onto a history
                 // that has advanced. Missing this is the batch-threading bug
                 // one layer up.
-                *committed = transform(committed, &current, Side::Earlier)?;
+                *committed = transform(committed, &current, Side::Earlier, &sheets)?;
                 current = next;
             }
             // Deliberately not pushed onto `history`: the next operation in the

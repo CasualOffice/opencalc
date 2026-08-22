@@ -150,6 +150,10 @@ struct Band {
     at: u32,
     count: u32,
     inserting: bool,
+    /// The sheet the structural operation runs on. Not on the wire — derived
+    /// from the operation here, so the metadata arm can ask what that index
+    /// actually names (`FID-28`).
+    sheet: Option<usize>,
 }
 
 fn band_of(op: &Operation) -> Option<Band> {
@@ -165,6 +169,7 @@ fn band_of(op: &Operation) -> Option<Band> {
         at,
         count,
         inserting,
+        sheet: sheet_of(op),
     })
 }
 
@@ -209,10 +214,25 @@ fn shift_cell(at: CellRef, band: Band) -> Option<CellRef> {
 ///
 /// [`TransformError::Unsupported`] for the pairs listed in the module docs.
 /// Callers must treat that as "these two cannot be merged", not as "carry on".
+/// What each sheet is called and which sheet it is, indexed by sheet number.
+///
+/// The transform is a pure function over operations, and an operation carries a
+/// sheet *index*: enough to move a position, not enough to decide whether a
+/// chart's `Sheet1!$D$2:$D$11` or a pivot's `source_sheet` names the sheet a
+/// concurrent insert is shifting. Rather than make every structural operation
+/// repeat that identity on the wire, the callers — which hold the workbook —
+/// pass it in. A pure function is allowed to take more arguments; it is not
+/// allowed to go and look something up (`FID-28`).
+///
+/// An empty slice means "identity unknown", and the two shifts that need it are
+/// skipped rather than guessed.
+pub type SheetNames = [(String, casual_calc_model::SheetId)];
+
 pub fn transform(
     subject: &Operation,
     against: &Operation,
     side: Side,
+    sheets: &SheetNames,
 ) -> Result<Operation, TransformError> {
     // A batch is transformed member by member, **threading** the other side
     // through as it goes.
@@ -229,8 +249,8 @@ pub fn transform(
         let mut out = Vec::with_capacity(members.len());
         let mut other = against.clone();
         for member in members {
-            let rebased = transform(member, &other, side)?;
-            other = transform(&other, member, side.flip())?;
+            let rebased = transform(member, &other, side, sheets)?;
+            other = transform(&other, member, side.flip(), sheets)?;
             if !is_noop(&rebased) {
                 out.push(rebased);
             }
@@ -243,7 +263,7 @@ pub fn transform(
         // order is already the composition.
         let mut current = subject.clone();
         for member in members {
-            current = transform(&current, member, side)?;
+            current = transform(&current, member, side, sheets)?;
             if is_noop(&current) {
                 return Ok(noop());
             }
@@ -280,7 +300,7 @@ pub fn transform(
         return Ok(resolve_contention(subject, against, side));
     };
 
-    Ok(rebase_onto_band(subject, band))
+    Ok(rebase_onto_band(subject, band, sheets))
 }
 
 /// Whether an operation changes what a `sheet` index refers to.
@@ -460,7 +480,7 @@ fn variant_name(op: &Operation) -> &'static str {
 }
 
 /// Rebase an operation across a structural band on the same sheet.
-fn rebase_onto_band(subject: &Operation, band: Band) -> Operation {
+fn rebase_onto_band(subject: &Operation, band: Band, sheets: &SheetNames) -> Operation {
     match subject.clone() {
         // Cell-addressed operations follow their cell, or vanish with it.
         Operation::SetCell { sheet, at, cell } => match shift_cell(at, band) {
@@ -557,6 +577,28 @@ fn rebase_onto_band(subject: &Operation, band: Band) -> Operation {
                     band.at,
                     band.count,
                 ),
+            }
+            // A chart's series is a reference *string* and a pivot's source is
+            // on another sheet, so neither can be decided from a sheet index
+            // alone — which is why `shift_metadata_*` above leaves them. The
+            // caller holds the workbook and passed what the indices name, so
+            // they can be shifted here rather than reinstating a pre-insert
+            // reference when this bundle lands (`FID-28`).
+            if let (Some(target), Some(home)) =
+                (band.sheet.and_then(|i| sheets.get(i)), sheets.get(sheet))
+            {
+                crate::structural::shift_bundle_references(
+                    data.as_mut(),
+                    &crate::structural::BundleShift {
+                        target_name: &target.0,
+                        target_id: target.1,
+                        home_name: &home.0,
+                        axis: band.axis,
+                        inserting: band.inserting,
+                        at: band.at,
+                        count: band.count,
+                    },
+                );
             }
             Operation::SetSheetMetadata {
                 sheet,

@@ -447,6 +447,57 @@ pub(crate) fn axis_edit(sheet: usize, action: &str, op: EditOperation) -> Result
     })
 }
 
+/// Set a line's size for a **drag in progress**, recording nothing.
+///
+/// A resize already previewed live in the *geometry* — the client overrides the
+/// dragged line's width in its own layout — but the cell text did not move with
+/// it, because the text comes from the engine and the engine still held the old
+/// width. So the column edge slid under stationary content and everything
+/// snapped into place only on release, which is what "not fluid" meant.
+///
+/// Deliberately **not** `session_set_col_width` on every mouse move: that
+/// records an undoable transaction each time, so one drag would bury the undo
+/// stack under a hundred entries and a single Ctrl+Z would step back one pixel.
+///
+/// This writes straight to the sheet instead — no transaction, no history, and
+/// nothing to relay to a collaborator, because a drag nobody has finished is not
+/// an edit anyone else should see. The caller restores the original size before
+/// committing the real, undoable change, so the recorded operation still has the
+/// size the drag started from as its inverse.
+///
+/// Refuses on a protected sheet for the same reason the real setter does; a
+/// preview that works where the edit does not is a lie about what will happen.
+#[wasm_bindgen]
+pub fn session_preview_line_size(
+    sheet: usize,
+    index: u32,
+    px: u32,
+    columns: bool,
+) -> Result<(), JsError> {
+    let action = if columns {
+        "formatColumns"
+    } else {
+        "formatRows"
+    };
+    if axis_edit_blocked(sheet, action) {
+        return Ok(());
+    }
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let Some(sheet) = session.workbook_mut().sheets.get_mut(sheet) else {
+            return Ok(());
+        };
+        let sizing = if columns {
+            &mut sheet.columns
+        } else {
+            &mut sheet.rows
+        };
+        sizing.sizes.insert(index, resize_px_to_twips(px));
+        Ok(())
+    })
+}
+
 /// The decision behind [`edit_axis`]'s refusal, separated from it.
 ///
 /// Same reason as [`protection_blocks`]: a `JsError` cannot be constructed
