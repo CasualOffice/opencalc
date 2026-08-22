@@ -37,8 +37,8 @@ use casual_calc_formula::Expr;
 use casual_calc_formula::restore_at;
 use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, CellRange, CellRef, CellStore, DefinedName, Sheet, Table, TableColumn,
-    Workbook,
+    AutoFilter, AxisSizing, CellComment, CellRange, CellRef, CellStore, ConditionalFormat,
+    DataValidation, DefinedName, Hyperlink, Sheet, Table, TableColumn, Workbook,
 };
 
 use crate::{Operation, TxnError};
@@ -319,6 +319,20 @@ pub(crate) trait Positional {
     fn tables_mut(&mut self) -> &mut Vec<Table>;
     fn auto_filter_mut(&mut self) -> &mut Option<AutoFilter>;
     fn filter_hidden_mut(&mut self) -> &mut BTreeSet<u32>;
+    /// Validations, highlights, comments and links — **also position-indexed**,
+    /// and every one of them a range or an address that stops describing its
+    /// data the moment rows move under it.
+    ///
+    /// They were in the metadata bundle already, so a delete has always
+    /// restored them; what none of them had was a *shift*. Insert a row above a
+    /// validated block and the rule went on policing the rows the data had
+    /// left: the row that moved out kept the constraint and the row that moved
+    /// in was unguarded. Same shape as the table defect above, same silence —
+    /// no error, no compatibility report, a saved file that looks right.
+    fn validations_mut(&mut self) -> &mut Vec<DataValidation>;
+    fn conditional_formats_mut(&mut self) -> &mut Vec<ConditionalFormat>;
+    fn comments_mut(&mut self) -> &mut Vec<CellComment>;
+    fn hyperlinks_mut(&mut self) -> &mut Vec<Hyperlink>;
     /// Sizing, hidden lines, the freeze boundary, outline levels and collapse
     /// flags for one axis.
     fn axis_mut(
@@ -347,6 +361,18 @@ macro_rules! impl_positional {
             }
             fn filter_hidden_mut(&mut self) -> &mut BTreeSet<u32> {
                 &mut self.filter_hidden
+            }
+            fn validations_mut(&mut self) -> &mut Vec<DataValidation> {
+                &mut self.validations
+            }
+            fn conditional_formats_mut(&mut self) -> &mut Vec<ConditionalFormat> {
+                &mut self.conditional_formats
+            }
+            fn comments_mut(&mut self) -> &mut Vec<CellComment> {
+                &mut self.comments
+            }
+            fn hyperlinks_mut(&mut self) -> &mut Vec<Hyperlink> {
+                &mut self.hyperlinks
             }
             fn axis_mut(
                 &mut self,
@@ -399,6 +425,23 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
     for merge in sheet.merges_mut().iter_mut() {
         insert_coord(axis, &mut merge.start, at, count);
         insert_coord(axis, &mut merge.end, at, count);
+    }
+    // Validations, highlights and links are ranges and move exactly like
+    // merges; a comment names one cell and moves like one endpoint.
+    for validation in sheet.validations_mut() {
+        insert_coord(axis, &mut validation.range.start, at, count);
+        insert_coord(axis, &mut validation.range.end, at, count);
+    }
+    for format in sheet.conditional_formats_mut() {
+        insert_coord(axis, &mut format.range.start, at, count);
+        insert_coord(axis, &mut format.range.end, at, count);
+    }
+    for link in sheet.hyperlinks_mut() {
+        insert_coord(axis, &mut link.range.start, at, count);
+        insert_coord(axis, &mut link.range.end, at, count);
+    }
+    for comment in sheet.comments_mut() {
+        insert_coord(axis, &mut comment.at, at, count);
     }
     // The autofilter's header range moves like a merge: both endpoints shift
     // independently, so an insert inside the range grows it to cover the new rows.
@@ -489,6 +532,43 @@ pub(crate) fn shift_metadata_delete(sheet: &mut impl Positional, axis: Axis, at:
             }
         }
     });
+    // The same clamp-or-drop a merge gets: a range wholly inside the deleted
+    // band goes with it, one straddling it is clamped.
+    let clamp_range = |range: &mut casual_calc_model::CellRange| {
+        let lo = axis.coord(range.start);
+        let hi = axis.coord(range.end);
+        match map_range_delete(lo, hi, at, count) {
+            None => false,
+            Some((new_lo, new_hi)) => {
+                range.start = axis.with_coord(range.start, new_lo);
+                range.end = axis.with_coord(range.end, new_hi);
+                true
+            }
+        }
+    };
+    sheet
+        .validations_mut()
+        .retain_mut(|v| clamp_range(&mut v.range));
+    sheet
+        .conditional_formats_mut()
+        .retain_mut(|f| clamp_range(&mut f.range));
+    sheet
+        .hyperlinks_mut()
+        .retain_mut(|l| clamp_range(&mut l.range));
+    // A comment names one cell: it is dropped with its row and moves with the
+    // rows below.
+    let band_end = at.saturating_add(count);
+    sheet.comments_mut().retain_mut(|comment| {
+        let coord = axis.coord(comment.at);
+        if coord >= at && coord < band_end {
+            return false;
+        }
+        if coord >= band_end {
+            comment.at = axis.with_coord(comment.at, coord - count);
+        }
+        true
+    });
+
     let end = at.saturating_add(count);
     // Clamp the autofilter's range the way a straddling merge is clamped, and
     // drop the filter outright if the delete takes the whole range with it.
