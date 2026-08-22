@@ -1205,7 +1205,7 @@ async fn main() {
         // The editor itself, served from the same origin as the API so a share
         // link is one host and there is no CORS to explain to anybody.
         .route("/api/fonts", get(font_list))
-        .nest_service("/editor", tower_http::services::ServeDir::new(editor))
+        .nest_service("/editor", editor_service(&editor))
         // Served rather than embedded, and from the same origin as everything
         // else so registering one needs no CORS.
         .nest_service("/fonts", tower_http::services::ServeDir::new(fonts))
@@ -1223,10 +1223,75 @@ async fn main() {
     let _ = axum::serve(listener, app).await;
 }
 
+/// The editor's static files, with revalidation forced.
+///
+/// `Cache-Control: no-cache` means "cache it, but ask before using it".
+/// `ServeDir` already sends `Last-Modified` and answers `If-Modified-Since`,
+/// but with no `Cache-Control` at all a browser may apply *heuristic* caching
+/// and skip revalidation entirely.
+///
+/// That was survivable while `editor.js` was a single file the page named with
+/// a `?v=` tag. It is not now: the editor is an entry plus fourteen modules,
+/// and a module's sub-imports carry no query — so the tag on the entry changes
+/// while `editor.core.js` keeps its URL, and a browser holding the previous
+/// copy has no reason to ask for the new one. That is the stale-module failure
+/// the tag was introduced to prevent, one level down (`DEP-17`).
+///
+/// Revalidation costs a 304 per module. The wasm blob carries its own `?b=`
+/// and is unaffected either way.
+fn editor_service(dir: &str) -> Router {
+    Router::new()
+        .fallback_service(tower_http::services::ServeDir::new(dir))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        ))
+}
+
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    /// **A module the page does not name must still be revalidated.**
+    ///
+    /// The editor stopped being one file: it is an entry plus fourteen modules,
+    /// and only the entry's URL carries the `?v=` cache-buster because a
+    /// module's sub-imports have no query. Without `Cache-Control`, `ServeDir`
+    /// sends only `Last-Modified`, and a browser is free to reuse a cached
+    /// `editor.core.js` without asking — so a deployed build could serve the
+    /// previous editor behind a fresh entry tag.
+    ///
+    /// Asserted through `editor_service`, the same constructor `main` nests, so
+    /// the test cannot pass against a router that was never wired up.
+    #[tokio::test]
+    async fn editor_modules_are_served_with_revalidation() {
+        use tower::ServiceExt;
+
+        let dir = std::env::temp_dir().join("opencalc-dep17-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("editor.core.js"), b"export const x = 1;\n").expect("write");
+
+        let response = editor_service(dir.to_str().expect("utf-8 path"))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/editor.core.js")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache"),
+            "a sub-imported module carries no cache-buster, so it has to be revalidated"
+        );
+    }
 
     /// **A configured endpoint with no path still reaches the socket.**
     ///
