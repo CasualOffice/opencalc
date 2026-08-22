@@ -3125,7 +3125,10 @@ fn an_authored_chart_joins_a_retained_drawing_instead_of_replacing_it() {
     });
     wb.sheets[0].charts.push(chart);
 
-    let written = write_workbook(&wb).unwrap();
+    let written = match write_workbook(&wb) {
+        Ok(w) => w,
+        Err(e) => panic!("write failed: {e:?}"),
+    };
     let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
     assert!(
         drawing.contains("a text box nothing here models"),
@@ -3164,7 +3167,10 @@ fn a_frames_offsets_survive_the_round_trip_so_a_drag_lands_where_it_was_dropped(
         y: 9_525,
     };
 
-    let written = write_workbook(&wb).unwrap();
+    let written = match write_workbook(&wb) {
+        Ok(w) => w,
+        Err(e) => panic!("write failed: {e:?}"),
+    };
     let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
     assert!(
         drawing.contains("<xdr:colOff>38100</xdr:colOff>"),
@@ -3308,7 +3314,10 @@ fn deleting_an_imported_chart_takes_its_anchor_with_it() {
     wb.retained_rels
         .retain(|r| !r.target.ends_with("charts/chart1.xml"));
 
-    let written = write_workbook(&wb).unwrap();
+    let written = match write_workbook(&wb) {
+        Ok(w) => w,
+        Err(e) => panic!("write failed: {e:?}"),
+    };
     let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
     assert!(
         !drawing.contains("rId1"),
@@ -3720,4 +3729,157 @@ fn an_unshifted_retained_chart_part_is_written_back_unchanged() {
 
     let written = write_workbook(&wb).unwrap();
     assert_eq!(xml_of(&written, "xl/charts/chart1.xml"), PART);
+}
+
+/// An imported chart's *frame* lives in the retained drawing, where nothing
+/// names the chart — the link is the anchor's `r:id`. So a shifted frame never
+/// reached the file even after FID-27 fixed the series (FID-29).
+///
+/// The offsets below are non-zero so that surviving unchanged means something:
+/// a row insert moves a frame by whole rows, and where it sits *within* a row
+/// is not the insert's business.
+///
+/// This case does **not** prove that element names are matched whole rather
+/// than as a prefix, even though `<xdr:col>` sits beside `<xdr:colOff>`. A
+/// prefix matcher still lands on `col` first, because `col` precedes `colOff`
+/// in the document — the same ordering luck that spares the axes in the series
+/// test. Prefix matching only bites when the *longer* name comes first, which
+/// is the shape `chart::tests` exercises directly.
+#[test]
+fn a_retained_drawing_anchor_follows_the_frame_the_model_holds() {
+    use casual_calc_model::{
+        CellRange, CellRef, ChartKind, ChartView, Emu, Id, RetainedPart, Sheet, SheetId, Workbook,
+    };
+
+    const DRAWING: &str = concat!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+        r#"<xdr:twoCellAnchor>"#,
+        r#"<xdr:from><xdr:col>5</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>19050</xdr:rowOff></xdr:from>"#,
+        r#"<xdr:to><xdr:col>10</xdr:col><xdr:colOff>38100</xdr:colOff><xdr:row>14</xdr:row><xdr:rowOff>57150</xdr:rowOff></xdr:to>"#,
+        r#"<xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame>"#,
+        r#"<xdr:clientData/>"#,
+        r#"</xdr:twoCellAnchor>"#,
+        r#"</xdr:wsDr>"#,
+    );
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.retained_parts.push(RetainedPart {
+        path: "xl/drawings/drawing1.xml".into(),
+        bytes: DRAWING.as_bytes().to_vec(),
+        content_type: None,
+    });
+    wb.retained_parts.push(RetainedPart {
+        path: "xl/charts/chart1.xml".into(),
+        bytes: b"<c:chartSpace/>".to_vec(),
+        content_type: None,
+    });
+    // The sheet points at the drawing, and the drawing at the chart.
+    wb.retained_rels.push(casual_calc_model::RetainedRel {
+        source: "xl/worksheets/sheet1.xml".into(),
+        id: "rId9".into(),
+        rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+            .into(),
+        target: "../drawings/drawing1.xml".into(),
+        external: false,
+    });
+    wb.retained_rels.push(casual_calc_model::RetainedRel {
+        source: "xl/drawings/drawing1.xml".into(),
+        id: "rId1".into(),
+        rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+            .into(),
+        target: "../charts/chart1.xml".into(),
+        external: false,
+    });
+
+    // Where the model says the frame is now: two rows lower than the file says.
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(6, 5), CellRef::new(16, 9)),
+        ChartKind::Column,
+    );
+    chart.part = Some("xl/charts/chart1.xml".into());
+    chart.from_offset = Emu { x: 12700, y: 19050 };
+    chart.to_offset = Emu { x: 38100, y: 57150 };
+    wb.sheets[0].charts.push(chart);
+
+    let written = match write_workbook(&wb) {
+        Ok(w) => w,
+        Err(e) => panic!("write failed: {e:?}"),
+    };
+    let drawing = xml_of(&written, "xl/drawings/drawing1.xml");
+
+    assert!(
+        drawing.contains("<xdr:col>5</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>6</xdr:row>"),
+        "the `from` row must follow the model, and its offsets survive: {drawing}"
+    );
+    assert!(
+        drawing
+            .contains("<xdr:col>10</xdr:col><xdr:colOff>38100</xdr:colOff><xdr:row>17</xdr:row>"),
+        "the `to` corner is exclusive, so row 16 inclusive is 17: {drawing}"
+    );
+    assert!(
+        drawing.contains("<xdr:rowOff>19050</xdr:rowOff>")
+            && drawing.contains("<xdr:rowOff>57150</xdr:rowOff>"),
+        "a row insert moves a frame by whole rows; where it sits inside a row is untouched: {drawing}"
+    );
+}
+
+/// Deleting an imported chart makes the workbook refuse to save at all.
+///
+/// The drawing that loses a dangling anchor is rebuilt, so the sheet
+/// contributes a drawing part with **no** chart parts. Two places then write
+/// that drawing's `.rels`: the chart builder writes it for every non-empty
+/// `drawing_part`, and the retained-relationship pass writes it for every
+/// source it has not already seen — but that pass only steps aside for a build
+/// with chart parts. With none, both fire, the package gets two entries at one
+/// path, and the zip writer rejects the whole file.
+///
+/// Nothing is lost quietly here: the save fails outright. That is the only
+/// reason it went unnoticed rather than being noticed as corruption.
+#[test]
+fn a_drawing_rebuilt_without_chart_parts_does_not_write_its_rels_twice() {
+    use casual_calc_model::{Id, RetainedPart, RetainedRel, Sheet, SheetId, Workbook};
+
+    // One live anchor (rId1, an image) and one whose relationship is gone
+    // (rId2) — which is what deleting an imported chart leaves behind.
+    const DRAWING: &str = concat!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+        r#"<xdr:twoCellAnchor><xdr:pic><a:blip r:embed="rId1"/></xdr:pic></xdr:twoCellAnchor>"#,
+        r#"<xdr:twoCellAnchor><xdr:graphicFrame><c:chart r:id="rId2"/></xdr:graphicFrame></xdr:twoCellAnchor>"#,
+        r#"</xdr:wsDr>"#,
+    );
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.retained_parts.push(RetainedPart {
+        path: "xl/drawings/drawing1.xml".into(),
+        bytes: DRAWING.as_bytes().to_vec(),
+        content_type: None,
+    });
+    wb.retained_rels.push(RetainedRel {
+        source: "xl/worksheets/sheet1.xml".into(),
+        id: "rId9".into(),
+        rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+            .into(),
+        target: "../drawings/drawing1.xml".into(),
+        external: false,
+    });
+    // rId1 survives; rId2 is deliberately absent.
+    wb.retained_rels.push(RetainedRel {
+        source: "xl/drawings/drawing1.xml".into(),
+        id: "rId1".into(),
+        rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+            .into(),
+        target: "../media/image1.png".into(),
+        external: false,
+    });
+
+    let written = write_workbook(&wb).expect("a workbook with a stale anchor must still save");
+    let rels = xml_of(&written, "xl/drawings/_rels/drawing1.xml.rels");
+    assert!(
+        rels.contains(r#"Id="rId1""#),
+        "the surviving image relationship must be written: {rels}"
+    );
 }

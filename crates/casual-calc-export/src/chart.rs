@@ -204,7 +204,15 @@ pub fn build(
         .collect();
     let retained = retained_bytes(workbook, &drawing_part);
     let drawing_xml = match &retained {
-        Some(bytes) => splice(&strip_dangling_anchors(bytes, &known), &anchors),
+        Some(bytes) => splice(
+            &retune_anchors(
+                &strip_dangling_anchors(bytes, &known),
+                workbook,
+                &drawing_part,
+                sheet,
+            ),
+            &anchors,
+        ),
         None => format!(
             "{DECL}<xdr:wsDr xmlns:xdr=\"{NS_XDR}\" xmlns:a=\"{NS_A}\">{anchors}</xdr:wsDr>"
         ),
@@ -464,6 +472,118 @@ fn close_of(hay: &str, local: &str, from: usize) -> Option<usize> {
         search = lt + 2 + gt;
     }
     None
+}
+
+/// Rewrite a retained drawing's anchors to the frames the model holds.
+///
+/// The counterpart of [`retune_series`] for position (`FID-29`). A chart's
+/// series live in its own part, which `ChartView::part` names outright; its
+/// *frame* lives in the retained drawing, where nothing names the chart at all.
+/// The link is the anchor's `r:id`, so matching one to a modelled chart means
+/// resolving that id through the drawing's own relationships to a part path and
+/// comparing it with what the chart says it came from. Images work the same way
+/// through `r:embed` and their media part.
+///
+/// Only the four cell coordinates change. Offsets stay exactly as the file had
+/// them, because a row insert moves a frame by whole rows and leaves where it
+/// sits *within* a row alone — and rewriting them from the model would snap
+/// every edge that was ever dragged between gridlines.
+///
+/// `oneCellAnchor` has a `<xdr:from>` and an extent rather than a `<xdr:to>`,
+/// so only its corner moves; `absoluteAnchor` names no cells and is left alone.
+/// Anything that does not parse cleanly is left as it was, on the same rule
+/// [`strip_dangling_anchors`] follows.
+fn retune_anchors(
+    existing: &str,
+    workbook: &Workbook,
+    drawing_part: &str,
+    sheet: &Sheet,
+) -> String {
+    // What each retained part *should* be framed by, in document order. A media
+    // part may be placed twice, so this is a queue per path rather than a plain
+    // lookup: the nth anchor naming it is the nth view the importer read.
+    let mut wanted: BTreeMap<String, Vec<(u32, u32, u32, u32)>> = BTreeMap::new();
+    for chart in &sheet.charts {
+        if let Some(part) = chart.part.as_deref() {
+            let a = chart.anchor;
+            wanted.entry(part.to_owned()).or_default().push((
+                a.start.col,
+                a.start.row,
+                a.end.col + 1,
+                a.end.row + 1,
+            ));
+        }
+    }
+    for image in &sheet.images {
+        let a = image.anchor;
+        wanted.entry(image.part.clone()).or_default().push((
+            a.start.col,
+            a.start.row,
+            a.end.col + 1,
+            a.end.row + 1,
+        ));
+    }
+    if wanted.is_empty() {
+        return existing.to_owned();
+    }
+    // Consumed front to back, so a part placed twice gets its two frames in the
+    // order the anchors appear.
+    let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+
+    const OPENERS: [&str; 2] = ["twoCellAnchor", "oneCellAnchor"];
+    let mut out = String::with_capacity(existing.len());
+    let mut cursor = 0;
+    while let Some((_, body, body_end, close_end)) = OPENERS
+        .iter()
+        .filter_map(|n| element_span(existing, n, cursor))
+        .min_by_key(|(open, ..)| *open)
+    {
+        let block = &existing[body..body_end];
+        let frame = anchor_rel_ids(block).into_iter().find_map(|id| {
+            let target = workbook
+                .retained_rels
+                .iter()
+                .find(|r| r.source == drawing_part && r.id == id && !r.external)?;
+            let path = resolve_rel_target(drawing_part, &target.target);
+            let queue = wanted.get(&path)?;
+            let n = taken.entry(path).or_insert(0);
+            let frame = queue.get(*n).copied()?;
+            *n += 1;
+            Some(frame)
+        });
+        out.push_str(&existing[cursor..body]);
+        match frame {
+            Some((from_col, from_row, to_col, to_row)) => {
+                let with_from = set_corner(block, "from", from_col, from_row);
+                out.push_str(&set_corner(&with_from, "to", to_col, to_row));
+            }
+            None => out.push_str(block),
+        }
+        out.push_str(&existing[body_end..close_end]);
+        cursor = close_end;
+    }
+    out.push_str(&existing[cursor..]);
+    out
+}
+
+/// Set the `<xdr:col>` and `<xdr:row>` of one corner, leaving its offsets be.
+///
+/// `col` sits immediately beside `colOff` and `row` beside `rowOff`, so this is
+/// the case that makes [`element_span`]'s whole-name matching load-bearing
+/// rather than merely careful: a prefix match writes the frame's column into
+/// the offset that positions it inside that column.
+fn set_corner(block: &str, corner: &str, col: u32, row: u32) -> String {
+    let Some((_, body, body_end, _)) = element_span(block, corner, 0) else {
+        return block.to_owned();
+    };
+    let mut inner = block[body..body_end].to_owned();
+    for (tag, value) in [("col", col), ("row", row)] {
+        let Some((_, at, end, _)) = element_span(&inner, tag, 0) else {
+            continue;
+        };
+        inner.replace_range(at..end, &value.to_string());
+    }
+    format!("{}{inner}{}", &block[..body], &block[body_end..])
 }
 
 /// Insert `anchors` just before the drawing's closing tag.
@@ -729,6 +849,28 @@ mod tests {
         let fish = "<c:formatCode>General</c:formatCode><c:f>ref</c:f>";
         let (_, body, body_end, _) = element_span(fish, "f", 0).expect("finds the formula");
         assert_eq!(&fish[body..body_end], "ref");
+    }
+
+    /// A drawing anchor's corner, with the longer name written first.
+    ///
+    /// This is the ordering that actually bites. Where the shorter name comes
+    /// first — as it does in every anchor Excel writes — a prefix matcher lands
+    /// on the right element by luck, and no end-to-end case can tell the two
+    /// matchers apart. Kept as its own test so it is proved on its own rather
+    /// than shielded by an earlier assertion failing first.
+    #[test]
+    fn a_frame_coordinate_is_not_read_out_of_its_offset() {
+        let corner = "<xdr:colOff>12700</xdr:colOff><xdr:col>5</xdr:col>";
+        let (_, body, body_end, _) = element_span(corner, "col", 0).expect("finds the column");
+        assert_eq!(
+            &corner[body..body_end],
+            "5",
+            "the frame's column must not be read out of the offset that positions it"
+        );
+
+        let corner = "<xdr:rowOff>19050</xdr:rowOff><xdr:row>4</xdr:row>";
+        let (_, body, body_end, _) = element_span(corner, "row", 0).expect("finds the row");
+        assert_eq!(&corner[body..body_end], "4");
     }
 
     /// The closing tag has to match on the whole name too, or a span runs past
