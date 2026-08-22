@@ -8058,6 +8058,28 @@ pub fn session_cell_format(sheet: usize, row: u32, col: u32) -> String {
             if let Some(bg) = &st.fill_color {
                 parts.push(format!("\"bg\":{}", json_string(bg)));
             }
+            // The four edges, each as its OOXML line-style token. Emitted per
+            // edge because that is how the model stores them and how a paste
+            // sets them: `session_range_bordered` answers only "are all four
+            // present across this whole range", which cannot see a cell that
+            // carries a bottom rule and nothing else.
+            if let Some(border) = &st.border {
+                let edges: Vec<String> = [
+                    ("t", &border.top),
+                    ("r", &border.right),
+                    ("b", &border.bottom),
+                    ("l", &border.left),
+                ]
+                .iter()
+                .filter_map(|(name, edge)| {
+                    edge.as_ref()
+                        .map(|e| format!("{}:{}", json_string(name), json_string(&e.style)))
+                })
+                .collect();
+                if !edges.is_empty() {
+                    parts.push(format!("\"bd\":{{{}}}", edges.join(",")));
+                }
+            }
         }
         format!("{{{}}}", parts.join(","))
     })
@@ -8569,6 +8591,65 @@ struct PastedCell {
     /// A number-format code, from Excel's `mso-number-format` or LibreOffice's
     /// `sdnum`. Absent for producers that emit neither.
     number_format: Option<String>,
+    /// The edges the cell declared for itself. An absent edge is "no opinion",
+    /// not "no line" — the same rule every other field here follows.
+    borders: Option<PastedBorders>,
+}
+
+/// The four edges of one pasted cell.
+#[derive(serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PastedBorders {
+    top: Option<PastedEdge>,
+    right: Option<PastedEdge>,
+    bottom: Option<PastedEdge>,
+    left: Option<PastedEdge>,
+}
+
+/// One edge, already reduced to an OOXML line-style token by the parser.
+#[derive(serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PastedEdge {
+    style: String,
+    color: Option<String>,
+}
+
+impl PastedEdge {
+    /// Every line style OOXML defines.
+    const STYLES: [&'static str; 14] = [
+        "thin",
+        "medium",
+        "thick",
+        "double",
+        "dashed",
+        "dotted",
+        "hair",
+        "dashDot",
+        "dashDotDot",
+        "mediumDashed",
+        "mediumDashDot",
+        "mediumDashDotDot",
+        "slantDashDot",
+        "none",
+    ];
+
+    /// The model edge, or `None` when the token is not one OOXML defines.
+    ///
+    /// The parser only ever emits from a fixed set, so this cannot currently
+    /// reject anything. It is here because `style` is written into the file
+    /// verbatim: were this string ever to reach the writer unchecked, a
+    /// clipboard could put arbitrary text inside `<border style="…">` and
+    /// produce a package Excel refuses to open. Validating at the boundary
+    /// costs a lookup and removes the question.
+    fn edge(&self) -> Option<casual_calc_model::BorderEdge> {
+        if !Self::STYLES.contains(&self.style.as_str()) || self.style == "none" {
+            return None;
+        }
+        Some(casual_calc_model::BorderEdge {
+            style: self.style.clone(),
+            color: self.color.clone(),
+        })
+    }
 }
 
 /// Paste a parsed clipboard table: values, spans and the styles that survive
@@ -8671,6 +8752,28 @@ pub fn session_paste_html(sheet: usize, row: u32, col: u32, cells: &str) -> Resu
             if let Some(code) = c.number_format.as_ref() {
                 style.number_format = Some(code.clone());
                 touched = true;
+            }
+            if let Some(edges) = c.borders.as_ref() {
+                let mut border = style.border.clone().unwrap_or_default();
+                // Only the edges the clipboard declared are set. An edge it said
+                // nothing about keeps whatever the target cell already had, so
+                // pasting a bottom rule into a boxed cell does not strip the box.
+                let mut any = false;
+                for (declared, slot) in [
+                    (&edges.top, &mut border.top),
+                    (&edges.right, &mut border.right),
+                    (&edges.bottom, &mut border.bottom),
+                    (&edges.left, &mut border.left),
+                ] {
+                    if let Some(edge) = declared.as_ref().and_then(PastedEdge::edge) {
+                        *slot = Some(edge);
+                        any = true;
+                    }
+                }
+                if any {
+                    style.border = Some(border);
+                    touched = true;
+                }
             }
             if touched {
                 let id = session.workbook_mut().intern_style(style);
