@@ -37,8 +37,9 @@ use casual_calc_formula::Expr;
 use casual_calc_formula::restore_at;
 use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
 use casual_calc_model::{
-    AutoFilter, AxisSizing, CellComment, CellRange, CellRef, CellStore, ConditionalFormat,
-    DataValidation, DefinedName, Hyperlink, Sheet, Table, TableColumn, Workbook,
+    AutoFilter, AxisSizing, CellComment, CellRange, CellRef, CellStore, ChartView,
+    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, Sheet, Table,
+    TableColumn, Workbook,
 };
 
 use crate::{Operation, TxnError};
@@ -116,6 +117,8 @@ pub(crate) fn insert(
     shift_metadata_insert(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
     rewrite_defined_names(workbook, &target, axis, ShiftKind::Insert, at, count);
+    shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Insert, at, count);
+    rewrite_chart_series(workbook, &target, axis, ShiftKind::Insert, at, count);
     Ok(delete_op(sheet, axis, at, count))
 }
 
@@ -140,6 +143,8 @@ pub(crate) fn delete(
     shift_metadata_delete(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Delete, at, count);
     rewrite_defined_names(workbook, &target, axis, ShiftKind::Delete, at, count);
+    shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Delete, at, count);
+    rewrite_chart_series(workbook, &target, axis, ShiftKind::Delete, at, count);
 
     // Inverse order: re-open the band (restores cell geometry), overwrite the
     // metadata with its pre-delete snapshot, then restore the touched cells.
@@ -333,6 +338,15 @@ pub(crate) trait Positional {
     fn conditional_formats_mut(&mut self) -> &mut Vec<ConditionalFormat>;
     fn comments_mut(&mut self) -> &mut Vec<CellComment>;
     fn hyperlinks_mut(&mut self) -> &mut Vec<Hyperlink>;
+    /// Charts anchored on this sheet. Only the **frame** moves here: a chart's
+    /// series are reference strings and need a workbook to resolve sheet names
+    /// against, which this trait deliberately does not have.
+    fn charts_mut(&mut self) -> &mut Vec<ChartView>;
+    /// Pivots held by this sheet. Only `anchor` and `output` move here — they
+    /// are the two fields that live on *this* sheet. `source` lives on
+    /// `source_sheet`, which may be another one entirely, so it is shifted at
+    /// workbook level where that comparison can actually be made.
+    fn pivots_mut(&mut self) -> &mut Vec<PivotTable>;
     /// Sizing, hidden lines, the freeze boundary, outline levels and collapse
     /// flags for one axis.
     fn axis_mut(
@@ -373,6 +387,12 @@ macro_rules! impl_positional {
             }
             fn hyperlinks_mut(&mut self) -> &mut Vec<Hyperlink> {
                 &mut self.hyperlinks
+            }
+            fn charts_mut(&mut self) -> &mut Vec<ChartView> {
+                &mut self.charts
+            }
+            fn pivots_mut(&mut self) -> &mut Vec<PivotTable> {
+                &mut self.pivots
             }
             fn axis_mut(
                 &mut self,
@@ -455,6 +475,20 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
         reindex_set(sheet.filter_hidden_mut(), |k| {
             Some(if k >= at { k.saturating_add(count) } else { k })
         });
+    }
+    // A chart's frame and a pivot's report block are ranges on this sheet and
+    // move like a merge. A chart drawn over rows 5 to 10 must still be over the
+    // same data after two rows go in above it, not two rows higher than it.
+    for chart in sheet.charts_mut().iter_mut() {
+        insert_coord(axis, &mut chart.anchor.start, at, count);
+        insert_coord(axis, &mut chart.anchor.end, at, count);
+    }
+    for pivot in sheet.pivots_mut().iter_mut() {
+        insert_coord(axis, &mut pivot.anchor, at, count);
+        if let Some(output) = pivot.output.as_mut() {
+            insert_coord(axis, &mut output.start, at, count);
+            insert_coord(axis, &mut output.end, at, count);
+        }
     }
     // Tables move exactly like merges, and were the one position-indexed thing
     // this function never touched. Insert a row above a table and its range,
@@ -581,6 +615,42 @@ pub(crate) fn shift_metadata_delete(sheet: &mut impl Positional, axis: Axis, at:
                 filter.range.end = axis.with_coord(filter.range.end, new_hi);
             }
             None => *sheet.auto_filter_mut() = None,
+        }
+    }
+    // A chart whose frame is entirely inside the deleted band goes with it, the
+    // way a merge does; one that straddles the band shrinks. Same for a pivot's
+    // report block — except that losing the *extent* must not lose the pivot,
+    // which still has a definition and can be refreshed again, so `output`
+    // clears to `None` rather than dropping the whole table.
+    let clamp = |range: &mut CellRange| -> bool {
+        let lo = axis.coord(range.start);
+        let hi = axis.coord(range.end);
+        match map_range_delete(lo, hi, at, count) {
+            None => false,
+            Some((new_lo, new_hi)) => {
+                range.start = axis.with_coord(range.start, new_lo);
+                range.end = axis.with_coord(range.end, new_hi);
+                true
+            }
+        }
+    };
+    sheet
+        .charts_mut()
+        .retain_mut(|chart| clamp(&mut chart.anchor));
+    for pivot in sheet.pivots_mut().iter_mut() {
+        let coord = axis.coord(pivot.anchor);
+        if coord >= end {
+            pivot.anchor = axis.with_coord(pivot.anchor, coord - count);
+        } else if coord >= at {
+            // The anchor cell itself was deleted. The report has to start
+            // somewhere, and the band's first surviving line is where the rows
+            // below it have moved to.
+            pivot.anchor = axis.with_coord(pivot.anchor, at);
+        }
+        if let Some(output) = pivot.output.as_mut()
+            && !clamp(output)
+        {
+            pivot.output = None;
         }
     }
     // Tables are clamped the way a straddling merge is, and dropped outright
@@ -847,6 +917,132 @@ fn rewrite_defined_names(
             workbook.defined_names[i].formula = rewritten;
         }
     }
+}
+
+/// Shift what `shift_metadata_*` cannot reach from a single sheet.
+///
+/// Two things fall outside it. **Images** are on `Sheet` but not in the
+/// metadata bundle, so they have no place on [`Positional`] — the trait is
+/// implemented for both and a method one of them cannot answer would be a lie.
+/// **A pivot's `source`** lives on `source_sheet`, which is very often *not*
+/// the sheet holding the pivot; deciding whether it moves means comparing sheet
+/// identities, and a lone `&mut impl Positional` has none to compare.
+fn shift_drawings_and_pivot_sources(
+    workbook: &mut Workbook,
+    sheet: usize,
+    axis: Axis,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+) {
+    let target_id = workbook.sheets[sheet].id;
+
+    // Images sit on the sheet the insert ran on, and move exactly like a chart
+    // frame: both endpoints on an insert, clamped-or-dropped on a delete.
+    let images = &mut workbook.sheets[sheet].images;
+    match kind {
+        ShiftKind::Insert => {
+            for image in images.iter_mut() {
+                insert_coord(axis, &mut image.anchor.start, at, count);
+                insert_coord(axis, &mut image.anchor.end, at, count);
+            }
+        }
+        ShiftKind::Delete => images.retain_mut(|image| {
+            let lo = axis.coord(image.anchor.start);
+            let hi = axis.coord(image.anchor.end);
+            match map_range_delete(lo, hi, at, count) {
+                None => false,
+                Some((new_lo, new_hi)) => {
+                    image.anchor.start = axis.with_coord(image.anchor.start, new_lo);
+                    image.anchor.end = axis.with_coord(image.anchor.end, new_hi);
+                    true
+                }
+            }
+        }),
+    }
+
+    // A pivot anywhere in the workbook whose records live on the target sheet
+    // has to follow them. Miss this and the pivot still refreshes — over a
+    // rectangle that now starts on the header row, or ends one record short.
+    for other in workbook.sheets.iter_mut() {
+        for pivot in other.pivots.iter_mut() {
+            if pivot.source_sheet != target_id {
+                continue;
+            }
+            match kind {
+                ShiftKind::Insert => {
+                    insert_coord(axis, &mut pivot.source.start, at, count);
+                    insert_coord(axis, &mut pivot.source.end, at, count);
+                }
+                ShiftKind::Delete => {
+                    let lo = axis.coord(pivot.source.start);
+                    let hi = axis.coord(pivot.source.end);
+                    // A source deleted out of existence leaves the definition
+                    // in place with an empty rectangle rather than silently
+                    // removing a pivot the user still sees on the sheet.
+                    if let Some((new_lo, new_hi)) = map_range_delete(lo, hi, at, count) {
+                        pivot.source.start = axis.with_coord(pivot.source.start, new_lo);
+                        pivot.source.end = axis.with_coord(pivot.source.end, new_hi);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Shift the reference strings naming each chart series' categories and values.
+///
+/// A series is stored as the text OOXML uses — `Sheet1!$D$2:$D$11` — not as a
+/// range, so it cannot be nudged like an anchor: it is parsed, put through the
+/// same [`rewrite_expr`] every cell formula and defined name goes through, and
+/// printed back. Text that will not parse is left exactly as it was, on the
+/// same rule [`Expr::Raw`] follows: a reference that cannot be understood
+/// cannot be shifted without guessing, and a guess here corrupts a chart.
+///
+/// A chart read from a file also has a retained part holding these same
+/// references, and that part is what the writer emits. Shifting the model
+/// therefore fixes what is drawn on screen but not yet what is saved — see
+/// `FID-27`, which is that half.
+fn rewrite_chart_series(
+    workbook: &mut Workbook,
+    target: &str,
+    axis: Axis,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+) {
+    for sheet in workbook.sheets.iter_mut() {
+        let home = sheet.name.clone();
+        let ctx = RewriteCtx {
+            target,
+            home: &home,
+            axis,
+            kind,
+            at,
+            count,
+        };
+        for chart in sheet.charts.iter_mut() {
+            for series in chart.series.iter_mut() {
+                if let Some(shifted) = shift_reference_text(&series.values, &ctx) {
+                    series.values = shifted;
+                }
+                if let Some(text) = series.categories.as_ref()
+                    && let Some(shifted) = shift_reference_text(text, &ctx)
+                {
+                    series.categories = Some(shifted);
+                }
+            }
+        }
+    }
+}
+
+/// Parse `text` as a reference, shift it, and print it back — `None` when it
+/// does not parse or the shift leaves it unchanged, so an untouched series
+/// keeps its original spelling rather than being re-emitted in ours.
+fn shift_reference_text(text: &str, ctx: &RewriteCtx) -> Option<String> {
+    let expr = casual_calc_formula::parse(text).ok()?;
+    let rewritten = rewrite_expr(&expr, ctx);
+    (rewritten != expr).then(|| rewritten.to_string())
 }
 
 /// Recursively rewrite references within an expression.

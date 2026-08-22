@@ -103,14 +103,22 @@ pub struct SheetMetadata {
     pub collapsed_cols: BTreeSet<u32>,
     /// Data-validation rules.
     ///
-    /// The five fields below are not positional like the ones above; they are
-    /// here because they had **no** reversible operation at all, so editing a
-    /// validation, a conditional format, a comment, a sheet's visibility or its
-    /// protection wrote straight to the workbook. Undo then reversed whatever
-    /// preceded it — the last cell edit — which destroys work the user did not
-    /// ask to lose. Folding them into the one bundle that already has a proven
-    /// inverse fixes all five at once, rather than adding five operations that
-    /// each need their own inverse to get right.
+    /// The five fields below are here because they had **no** reversible
+    /// operation at all, so editing a validation, a conditional format, a
+    /// comment, a sheet's visibility or its protection wrote straight to the
+    /// workbook. Undo then reversed whatever preceded it — the last cell edit —
+    /// which destroys work the user did not ask to lose. Folding them into the
+    /// one bundle that already has a proven inverse fixes all five at once,
+    /// rather than adding five operations that each need their own inverse to
+    /// get right.
+    ///
+    /// This paragraph used to open by calling them "not positional", meaning
+    /// only that undo was the reason they joined the bundle. Read as a claim
+    /// about the grid it is false and was costly: a validation, a conditional
+    /// format, a comment and a hyperlink each name cells, and for as long as
+    /// the sentence stood nothing shifted them on an insert or a delete
+    /// (FID-25). Positional is what the grid says, not what the field list is
+    /// sorted by.
     pub validations: Vec<DataValidation>,
     /// Conditional-formatting rules.
     pub conditional_formats: Vec<ConditionalFormat>,

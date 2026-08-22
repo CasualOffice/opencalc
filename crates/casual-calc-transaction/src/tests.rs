@@ -2506,3 +2506,336 @@ fn a_delete_that_drops_a_validation_is_undone_by_its_inverse() {
         "undo did not bring the validation back"
     );
 }
+
+/// `top..=bottom` of one column, as a range — the shape most of the positional
+/// assertions below need.
+fn rows(top: u32, bottom: u32, col: u32) -> CellRange {
+    CellRange::new(CellRef::new(top, col), CellRef::new(bottom, col))
+}
+
+/// Charts, images and pivots are position-indexed too, and were the last three
+/// collections `structural.rs` never touched (FID-26).
+///
+/// A chart's frame is a range and moves like a merge; its series are reference
+/// **strings**, so they have to be parsed, shifted and re-emitted. An image's
+/// frame is the same range. A pivot is a third shape again: its `source` lives
+/// on `source_sheet` while its `anchor` and `output` live on the sheet holding
+/// it, so one insert shifts different fields depending on which sheet it landed
+/// on.
+#[test]
+fn insert_rows_moves_charts_images_and_pivots() {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView, Emu, ImageView};
+
+    let mut wb = workbook();
+    let sheet = &mut wb.sheets[0];
+    let mut chart = ChartView::new(rows(4, 9, 5), ChartKind::Column); // F5:F10
+    chart.series.push(ChartSeries {
+        name: "Amount".into(),
+        categories: Some("S!$A$2:$A$11".into()),
+        values: "S!$D$2:$D$11".into(),
+    });
+    sheet.charts.push(chart);
+    sheet.images.push(ImageView {
+        anchor: rows(4, 9, 8), // I5:I10
+        from_offset: Emu::default(),
+        to_offset: Emu::default(),
+        part: "xl/media/image1.png".into(),
+        extent: None,
+    });
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    let sheet = &wb.sheets[0];
+    assert_eq!(
+        sheet.charts[0].anchor,
+        rows(6, 11, 5),
+        "a chart's frame must follow the rows it sits on"
+    );
+    assert_eq!(
+        sheet.charts[0].series[0].values, "S!$D$4:$D$13",
+        "a series must follow the data it plots"
+    );
+    assert_eq!(
+        sheet.charts[0].series[0].categories.as_deref(),
+        Some("S!$A$4:$A$13"),
+        "a series' categories must follow their data too"
+    );
+    assert_eq!(
+        sheet.images[0].anchor,
+        rows(6, 11, 8),
+        "an image's frame must follow the rows it sits on"
+    );
+}
+
+/// A pivot reads one sheet and writes another, so an insert on the source sheet
+/// and an insert on the output sheet move different fields. Getting this the
+/// wrong way round is silent: the pivot still refreshes, over the wrong records.
+#[test]
+fn insert_rows_moves_a_pivot_source_and_output_independently() {
+    use casual_calc_model::PivotTable;
+
+    let mut wb = workbook();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Report"));
+    let data_sheet = wb.sheets[0].id;
+    let mut pivot = PivotTable::new(
+        1,
+        "P".into(),
+        data_sheet,
+        CellRange::new(CellRef::new(4, 0), CellRef::new(9, 3)), // A5:D10 on S
+        CellRef::new(4, 0),                                     // A5 on Report
+    );
+    pivot.output = Some(CellRange::new(CellRef::new(4, 0), CellRef::new(8, 2)));
+    wb.sheets[1].pivots.push(pivot);
+
+    // An insert on the *source* sheet moves the source and leaves the report
+    // block where it is.
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+    let pivot = &wb.sheets[1].pivots[0];
+    assert_eq!(
+        pivot.source,
+        CellRange::new(CellRef::new(6, 0), CellRef::new(11, 3)),
+        "an insert on the source sheet must move the source rectangle"
+    );
+    assert_eq!(
+        pivot.anchor,
+        CellRef::new(4, 0),
+        "it must not move the report, which is on another sheet"
+    );
+
+    // An insert on the sheet holding the pivot moves the report and leaves the
+    // source alone.
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 1,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+    let pivot = &wb.sheets[1].pivots[0];
+    assert_eq!(
+        pivot.anchor,
+        CellRef::new(5, 0),
+        "an insert above the report must move the report"
+    );
+    assert_eq!(
+        pivot.output.unwrap(),
+        CellRange::new(CellRef::new(5, 0), CellRef::new(9, 2)),
+        "and the extent the last refresh wrote, so the next one clears it"
+    );
+    assert_eq!(
+        pivot.source,
+        CellRange::new(CellRef::new(6, 0), CellRef::new(11, 3)),
+        "it must not move the source, which is on another sheet"
+    );
+}
+
+/// The delete counterpart. A frame wholly inside the band goes with it, one
+/// straddling it shrinks, and a series whose data is deleted out from under it
+/// becomes `#REF!` rather than quietly plotting the rows that moved up into
+/// its old address.
+#[test]
+fn delete_rows_clamps_charts_and_images_and_breaks_lost_series() {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView, Emu, ImageView};
+
+    let mut wb = workbook();
+    let sheet = &mut wb.sheets[0];
+    // F1:F10 straddles the band [4, 7) and must shrink by three rows.
+    let mut straddling = ChartView::new(rows(0, 9, 5), ChartKind::Column);
+    straddling.series.push(ChartSeries {
+        name: "kept".into(),
+        categories: None,
+        values: "S!$D$1:$D$20".into(),
+    });
+    sheet.charts.push(straddling);
+    // J5:J6 is wholly inside the band and goes with it.
+    let mut doomed = ChartView::new(rows(4, 5, 9), ChartKind::Pie);
+    doomed.series.push(ChartSeries {
+        name: "gone".into(),
+        categories: None,
+        values: "S!$E$5:$E$6".into(),
+    });
+    sheet.charts.push(doomed);
+    sheet.images.push(ImageView {
+        anchor: rows(4, 5, 12), // M5:M6, wholly inside
+        from_offset: Emu::default(),
+        to_offset: Emu::default(),
+        part: "xl/media/image1.png".into(),
+        extent: None,
+    });
+    sheet.images.push(ImageView {
+        anchor: rows(8, 12, 13), // N9:N13, below the band
+        from_offset: Emu::default(),
+        to_offset: Emu::default(),
+        part: "xl/media/image2.png".into(),
+        extent: None,
+    });
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 3,
+        },
+    )
+    .unwrap();
+
+    let sheet = &wb.sheets[0];
+    assert_eq!(
+        sheet.charts.len(),
+        1,
+        "a chart whose whole frame is deleted goes with it"
+    );
+    assert_eq!(
+        sheet.charts[0].anchor,
+        rows(0, 6, 5),
+        "a chart straddling the band shrinks by the rows it lost"
+    );
+    assert_eq!(
+        sheet.charts[0].series[0].values, "S!$D$1:$D$17",
+        "a series spanning the band shrinks by the rows it lost"
+    );
+    assert_eq!(
+        sheet.images.len(),
+        1,
+        "an image whose whole frame is deleted goes with it"
+    );
+    assert_eq!(
+        sheet.images[0].anchor,
+        rows(5, 9, 13),
+        "an image below the band moves up"
+    );
+}
+
+/// A pivot survives losing its output extent — the definition is still valid
+/// and a refresh will write a new one. Dropping the pivot instead would delete
+/// a report the user can still see the definition of.
+#[test]
+fn deleting_a_pivot_output_band_keeps_the_pivot() {
+    use casual_calc_model::PivotTable;
+
+    let mut wb = workbook();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Report"));
+    let data_sheet = wb.sheets[0].id;
+    let mut pivot = PivotTable::new(
+        1,
+        "P".into(),
+        data_sheet,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 3)),
+        CellRef::new(4, 0),
+    );
+    pivot.output = Some(CellRange::new(CellRef::new(4, 0), CellRef::new(6, 2)));
+    wb.sheets[1].pivots.push(pivot);
+
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 1,
+            at: 4,
+            count: 3,
+        },
+    )
+    .unwrap();
+
+    let pivot = &wb.sheets[1].pivots[0];
+    assert_eq!(pivot.output, None, "the extent it wrote is gone");
+    assert_eq!(
+        pivot.anchor,
+        CellRef::new(4, 0),
+        "but the pivot itself survives, ready to refresh again"
+    );
+    assert_eq!(
+        pivot.source,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 3)),
+        "and its source, on another sheet, is untouched"
+    );
+}
+
+/// Re-emitting a series means printing it in *our* spelling, so a sheet name
+/// that needs quoting has to come back quoted. Excel writes `'My Data'!$D$2`
+/// and reads nothing else; losing the quotes would produce a chart that is
+/// shifted correctly and refuses to load.
+#[test]
+fn a_shifted_series_keeps_the_quoting_its_sheet_name_needs() {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "My Data"));
+    let mut chart = ChartView::new(rows(0, 4, 5), ChartKind::Column);
+    chart.series.push(ChartSeries {
+        name: "Amount".into(),
+        categories: None,
+        values: "'My Data'!$D$2:$D$11".into(),
+    });
+    wb.sheets[0].charts.push(chart);
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        wb.sheets[0].charts[0].series[0].values,
+        "'My Data'!$D$4:$D$13"
+    );
+}
+
+/// A series naming a sheet the insert did not touch must be left exactly as it
+/// was — including its original spelling, because re-emitting an unchanged
+/// reference through our printer is a silent rewrite of somebody's file.
+#[test]
+fn a_series_on_another_sheet_is_not_touched_or_reformatted() {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView};
+
+    let mut wb = workbook();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Other"));
+    let mut chart = ChartView::new(rows(0, 4, 5), ChartKind::Column);
+    chart.series.push(ChartSeries {
+        name: "Amount".into(),
+        categories: None,
+        values: "Other!$D$2:$D$11".into(),
+    });
+    wb.sheets[0].charts.push(chart);
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        wb.sheets[0].charts[0].series[0].values, "Other!$D$2:$D$11",
+        "an insert on S must not move a series reading Other"
+    );
+}
