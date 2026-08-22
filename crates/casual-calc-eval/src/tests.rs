@@ -2926,7 +2926,35 @@ fn bahttext_handles_the_thai_irregular_forms() {
 /// truth, so nothing may dispatch without being in it.
 #[test]
 fn every_dispatched_function_is_in_the_catalog() {
-    let src = include_str!("functions.rs");
+    // Every module the library splits into. Listed rather than globbed because
+    // `include_str!` needs a literal — and the assertion below makes an
+    // unlisted module a failure rather than a silent hole in the coverage:
+    // dispatch arms live in the submodules too, not only in the central match.
+    const SOURCES: &[&str] = &[
+        include_str!("functions/mod.rs"),
+        include_str!("functions/aggregate.rs"),
+        include_str!("functions/datetime.rs"),
+        include_str!("functions/engineering.rs"),
+        include_str!("functions/financial.rs"),
+        include_str!("functions/info.rs"),
+        include_str!("functions/lookup.rs"),
+        include_str!("functions/math.rs"),
+        include_str!("functions/matrix.rs"),
+        include_str!("functions/special.rs"),
+        include_str!("functions/stats.rs"),
+        include_str!("functions/text.rs"),
+    ];
+    let declared = SOURCES[0]
+        .lines()
+        .filter(|l| l.starts_with("mod ") && l.ends_with(';'))
+        .count();
+    assert_eq!(
+        SOURCES.len(),
+        declared + 1,
+        "a function module was added without being scanned here, so everything \
+         it dispatches would be invisible to this test"
+    );
+    let src: String = SOURCES.join("\n");
     let catalog: std::collections::HashSet<&str> =
         crate::FUNCTIONS.iter().map(|(n, _)| *n).collect();
 
