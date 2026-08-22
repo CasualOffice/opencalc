@@ -175,6 +175,25 @@ pub fn build(
         anchors.push_str(&anchor_xml(chart, &rel_ids[i], n));
     }
 
+    // An *imported* chart is written back from its retained part, so a shift
+    // that moved its series in the model never reached the file (`FID-27`). Emit
+    // a corrected copy at the same path: the writer prefers a generated part
+    // over a retained one, so this wins without the stored part being touched.
+    // Unchanged bytes produce no part at all, which keeps an untouched chart
+    // byte-identical.
+    for chart in &sheet.charts {
+        let Some(path) = chart.part.as_deref() else {
+            continue;
+        };
+        let Some(bytes) = retained_bytes(workbook, path) else {
+            continue;
+        };
+        let tuned = retune_series(&bytes, chart);
+        if tuned != bytes {
+            chart_parts.push((path.to_owned(), tuned));
+        }
+    }
+
     // Every relationship the drawing will actually have once it is written.
     let known: Vec<String> = workbook
         .retained_rels
@@ -192,10 +211,13 @@ pub fn build(
     };
     // Nothing to add and nothing to clean up: leave the retained drawing to be
     // written back byte for byte, which is what it deserves when untouched.
-    if charts.is_empty() && retained.as_deref() == Some(drawing_xml.as_str()) {
+    if charts.is_empty()
+        && chart_parts.is_empty()
+        && retained.as_deref() == Some(drawing_xml.as_str())
+    {
         return None;
     }
-    if charts.is_empty() && retained.is_none() {
+    if charts.is_empty() && chart_parts.is_empty() && retained.is_none() {
         return None;
     }
 
@@ -327,6 +349,121 @@ fn anchor_rel_ids(block: &str) -> Vec<String> {
         }
     }
     ids
+}
+
+/// Rewrite a retained chart part's series references to match the model's.
+///
+/// A chart read from a file keeps its part, and that part — not the model — is
+/// what gets written back. So when a row insert shifts `values` and
+/// `categories` (`FID-26`), the picture on screen moves and the saved file does
+/// not. This closes that gap without touching the stored part: the corrected
+/// bytes are emitted as a *generated* part at the same path, and the writer
+/// already prefers a generated part over a retained one. `RetainedPart` stays
+/// inert, exactly as `workbook.rs` promises.
+///
+/// Only the text inside `<c:f>` changes, and only inside a series' `<c:cat>`,
+/// `<c:val>`, `<c:xVal>` or `<c:yVal>`. Every other byte survives, which is the
+/// whole point: a chart part carries hundreds of formatting elements and
+/// rebuilding it from what we model would delete all of them. `<c:tx>` is left
+/// alone — a series *name* is not a position.
+///
+/// The nth `<c:ser>` is the nth modelled series, which is how the importer read
+/// them. A part with more series than the model leaves the extras untouched
+/// rather than guessing.
+fn retune_series(existing: &str, chart: &ChartView) -> String {
+    let mut out = String::with_capacity(existing.len());
+    let mut cursor = 0;
+    for series in &chart.series {
+        let Some((_, body, body_end, _)) = element_span(existing, "ser", cursor) else {
+            break;
+        };
+        let mut inner = String::new();
+        let mut at = body;
+        // `xVal`/`yVal` are the scatter spellings of `cat`/`val`, and the
+        // importer treats them the same way, so this must too.
+        for (names, replacement) in [
+            (["cat", "xVal"], series.categories.as_deref()),
+            (["val", "yVal"], Some(series.values.as_str())),
+        ] {
+            let Some(text) = replacement else { continue };
+            let Some((_, slot_body, slot_end, _)) = names
+                .iter()
+                .filter_map(|n| element_span(&existing[..body_end], n, at))
+                .min_by_key(|(open, ..)| *open)
+            else {
+                continue;
+            };
+            let Some((_, f_body, f_end, _)) = element_span(&existing[..slot_end], "f", slot_body)
+            else {
+                continue;
+            };
+            inner.push_str(&existing[at..f_body]);
+            inner.push_str(&escape_text(text));
+            at = f_end;
+        }
+        out.push_str(&existing[cursor..body]);
+        out.push_str(&inner);
+        out.push_str(&existing[at..body_end]);
+        cursor = body_end;
+    }
+    out.push_str(&existing[cursor..]);
+    out
+}
+
+/// The span of the first element with local name `local` at or after `from`, as
+/// `(open, body_start, body_end, close_end)`.
+///
+/// Prefix-agnostic, because a chart part may spell the same element `<c:ser>`
+/// or `<ser>`. It will **not** match a longer name that merely starts the same
+/// way, which is not a hypothetical: `val` sits next to `valAx`, `ser` next to
+/// `serAx`, and `f` next to `formatCode`. Matching on a prefix instead of the
+/// whole name would rewrite an axis definition as if it were a series.
+fn element_span(hay: &str, local: &str, from: usize) -> Option<(usize, usize, usize, usize)> {
+    let mut search = from;
+    while let Some(rel) = hay[search..].find('<') {
+        let lt = search + rel;
+        let after = &hay[lt + 1..];
+        // Closing tags, comments and processing instructions are not openers.
+        if after.starts_with(['/', '!', '?']) {
+            search = lt + 1;
+            continue;
+        }
+        let name_end = after.find(|c: char| c.is_whitespace() || c == '/' || c == '>')?;
+        let qname = &after[..name_end];
+        let gt = after.find('>')?;
+        let body_start = lt + 1 + gt + 1;
+        if qname.rsplit(':').next() != Some(local) {
+            search = lt + 1;
+            continue;
+        }
+        // A self-closing element has no body and no closing tag.
+        if after[..gt].ends_with('/') {
+            return Some((lt, body_start, body_start, body_start));
+        }
+        let body_end = close_of(hay, local, body_start)?;
+        let close_gt = hay[body_end..].find('>')?;
+        return Some((lt, body_start, body_end, body_end + close_gt + 1));
+    }
+    None
+}
+
+/// Where the closing tag for local name `local` starts, at or after `from`.
+///
+/// None of the elements this is used for nest inside themselves in a chart
+/// part, so the first matching close is the right one.
+fn close_of(hay: &str, local: &str, from: usize) -> Option<usize> {
+    let mut search = from;
+    while let Some(rel) = hay[search..].find("</") {
+        let lt = search + rel;
+        let after = &hay[lt + 2..];
+        let gt = after.find('>')?;
+        let qname = after[..gt].trim();
+        if qname.rsplit(':').next() == Some(local) {
+            return Some(lt);
+        }
+        search = lt + 2 + gt;
+    }
+    None
 }
 
 /// Insert `anchors` just before the drawing's closing tag.
@@ -562,4 +699,58 @@ pub fn content_types(built: &[SheetCharts]) -> BTreeMap<String, &'static str> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_of, element_span};
+
+    /// `ser` must not match `serAx`, `val` must not match `valAx`, and `f` must
+    /// not match `formatCode`. Valid OOXML happens to order these so that a
+    /// prefix match usually lands on the right element anyway, which is exactly
+    /// why this is tested here rather than left to an end-to-end case: the bug
+    /// would be invisible until it met a file whose ordering differed.
+    #[test]
+    fn an_element_name_matches_whole_not_as_a_prefix() {
+        let xml = "<c:serAx><c:f>axis</c:f></c:serAx><c:ser><c:f>data</c:f></c:ser>";
+        let (open, body, body_end, _) = element_span(xml, "ser", 0).expect("finds the series");
+        assert_eq!(
+            &xml[open..body],
+            "<c:ser>",
+            "it must skip <c:serAx> and open the real series"
+        );
+        assert_eq!(&xml[body..body_end], "<c:f>data</c:f>");
+
+        let valish = "<c:valAx>axis</c:valAx><c:val>data</c:val>";
+        let (open, body, body_end, _) = element_span(valish, "val", 0).expect("finds the value");
+        assert_eq!(&valish[open..body], "<c:val>");
+        assert_eq!(&valish[body..body_end], "data");
+
+        let fish = "<c:formatCode>General</c:formatCode><c:f>ref</c:f>";
+        let (_, body, body_end, _) = element_span(fish, "f", 0).expect("finds the formula");
+        assert_eq!(&fish[body..body_end], "ref");
+    }
+
+    /// The closing tag has to match on the whole name too, or a span runs past
+    /// its own element and swallows whatever follows.
+    #[test]
+    fn a_closing_tag_matches_whole_not_as_a_prefix() {
+        let xml = "<c:ser>body</c:serAx></c:ser>";
+        let at = close_of(xml, "ser", 0).expect("finds a close");
+        assert_eq!(
+            &xml[at..],
+            "</c:ser>",
+            "</c:serAx> is not the close of <c:ser>"
+        );
+    }
+
+    /// A self-closing element has no body, and asking for one must not run off
+    /// looking for a closing tag that will never come.
+    #[test]
+    fn a_self_closing_element_has_an_empty_body() {
+        let xml = "<c:f/><c:v>after</c:v>";
+        let (_, body, body_end, close_end) = element_span(xml, "f", 0).expect("finds it");
+        assert_eq!(body, body_end);
+        assert_eq!(close_end, body);
+    }
 }
