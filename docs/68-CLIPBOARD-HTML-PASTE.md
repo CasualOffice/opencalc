@@ -76,21 +76,52 @@ still emit:
 Colours are normalised to six hex digits; `rgb()` and three-digit forms are
 converted, and anything else is dropped rather than guessed.
 
+## Borders
+
+Each cell's own four edges are mapped; `border-collapse` is never consulted.
+That distinction is the whole of it. The property decides which of two
+*competing* declarations paints a shared edge, and the model has no shared
+edges — every cell carries its own four. Applying what a cell declares for
+itself is therefore exact rather than approximate, which is what this was
+originally deferred over.
+
+A per-edge longhand beats the `border` shorthand, and an explicit
+`border-top: none` beats it too — so presence of the declaration is tested, not
+whether it parsed to a line.
+
+Widths map by weight: under 1.5px is `thin`, under 2.5px `medium`, above that
+`thick`, with `thin`/`medium`/`thick` keywords and `pt` units resolved first.
+`double`, `dashed` and `dotted` keep their style instead, since OOXML has those
+by name. `groove`, `ridge`, `inset` and `outset` become a solid line of the same
+weight: Excel has no such styles, and a line where a line was asked for is
+closer than nothing. `none`, `hidden` and a zero width are no edge at all.
+
+The line-style token is validated against the OOXML list on the Rust side of
+the boundary before it reaches a `Style`. The parser only ever emits from a
+fixed set, so nothing is rejected today; it is checked because the token is
+written into the file verbatim, and a value that reaches the writer unchecked
+is one a clipboard could choose.
+
+Of the three committed captures only LibreOffice carries a border at all
+(`border-bottom:1px solid #000000`). The weight, style and precedence rules
+above are therefore covered by a hand-built table as well, since no producer
+emits them all.
+
 ## What is not mapped, and why
 
 - **Formulas.** No producer puts them in the HTML flavour — Excel, LibreOffice
   and Sheets all emit the *displayed value*. A pasted `=A1+1` would therefore be
   a value that looks like a formula, which is worse than a value.
-- **Borders.** The model's `Borders` is per-edge with styles and colours, and
-  the CSS shorthand producers emit collapses several of those into one
-  declaration whose meaning depends on the table's border-collapse. Mapping it
-  approximately would produce boxes nobody asked for. Deferred, deliberately,
-  rather than half-done.
 - **Themes, gradients, rotation, indent.** Not expressible in what the clipboard
   carries.
-- **Column widths and row heights.** Excel emits them; applying them would
-  silently reshape the sheet somebody pasted *into*, which is not what a paste
-  is for.
+- **Column widths and row heights.** Excel emits them; applying them on a plain
+  paste would silently reshape the sheet somebody pasted *into*, which is not
+  what a paste is for, and is not what Excel's own `Ctrl+V` does either. Asking
+  for them explicitly is a different question, and has its own answer: Paste
+  Special carries widths for a clip copied *within* the editor (`UX-CLIP-02`).
+  That path knows the source columns because it captured them on copy; the
+  clipboard's HTML does not travel with a clip, so there is nothing here to
+  opt into yet.
 
 ## How it is verified
 

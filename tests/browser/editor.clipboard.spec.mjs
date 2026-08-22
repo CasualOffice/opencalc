@@ -103,6 +103,55 @@ for (const producer of ["excel", "libreoffice", "sheets"]) {
   });
 }
 
+test("a pasted cell keeps the edges it declared", async ({ page }) => {
+  const problems = await boot(page);
+  // LibreOffice puts `border-bottom:1px solid #000000` on the header cell and
+  // nothing on the others — the case the mapping was deferred over, and the
+  // only border any of the three captures actually carries.
+  await pasteInto(page, "A1", fixture("libreoffice"));
+
+  const header = await cell(page, 0, 0);
+  expect(header.format.bd?.b, "1px solid is a thin line").toBe("thin");
+  expect(header.format.bd?.t ?? null, "and it declared no top edge").toBeNull();
+  expect(header.format.bd?.l ?? null, "nor a left one").toBeNull();
+
+  const below = await cell(page, 1, 0);
+  expect(below.format.bd ?? null, "a cell that declared nothing gets nothing").toBeNull();
+
+  expect(problems, "pasting logged nothing").toEqual([]);
+});
+
+test("pasted edges are mapped by weight and style, and never invented", async ({ page }) => {
+  const problems = await boot(page);
+  // Hand-built rather than captured, because no producer emits all of these —
+  // and each one is a distinct branch of the mapping. `border-collapse` is on
+  // the table to prove it is not mistaken for an edge.
+  const html = `<table style="border-collapse:collapse"><tr>
+    <td style="border:2px solid #FF0000">medium</td>
+    <td style="border-bottom:3px solid #00FF00">thick</td>
+    <td style="border-left:1px dashed #0000FF">dashed</td>
+    <td style="border-top:1px double #000000">double</td>
+    <td style="border:1px solid #000;border-top:none">none beats the shorthand</td>
+    <td style="border:0px solid #000">zero width is no line</td>
+  </tr></table>`;
+  await pasteInto(page, "A1", html);
+
+  const at = async (c) => (await cell(page, 0, c)).format.bd ?? {};
+  expect((await at(0)).t, "2px is medium, and the shorthand sets all four").toBe("medium");
+  expect((await at(0)).l).toBe("medium");
+  expect((await at(1)).b, "3px is thick").toBe("thick");
+  expect((await at(2)).l, "a dashed line keeps its style, not its weight").toBe("dashed");
+  expect((await at(3)).t).toBe("double");
+
+  const overridden = await at(4);
+  expect(overridden.t ?? null, "an explicit `none` beats the shorthand").toBeNull();
+  expect(overridden.b, "while the edges it did not override survive").toBe("thin");
+
+  expect(await at(5), "a zero-width border is not a line").toEqual({});
+
+  expect(problems, "pasting logged nothing").toEqual([]);
+});
+
 test("hostile clipboard markup pastes its text and does nothing else", async ({ page }) => {
   const problems = await boot(page);
   const requests = [];

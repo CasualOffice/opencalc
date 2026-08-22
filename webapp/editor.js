@@ -7792,6 +7792,37 @@ function cellsFromClipboardHtml(html) {
     return out;
   };
 
+  // One CSS edge declaration — `1px solid #000000` — as the OOXML line-style
+  // token the model stores, or `null` for "no line here".
+  //
+  // `groove`, `ridge`, `inset` and `outset` become a solid line of the same
+  // weight. Excel has no such styles, and a line where a line was asked for is
+  // closer than nothing; only `none`, `hidden` and a zero width mean no edge.
+  const edgeFrom = (value) => {
+    const text = String(value ?? "").trim().toLowerCase();
+    if (!text) return null;
+    const kind = /\b(none|hidden|solid|double|dashed|dotted|groove|ridge|inset|outset)\b/.exec(text);
+    // A declaration with a width but no keyword is a solid line, as in CSS.
+    const line = kind ? kind[1] : "solid";
+    if (line === "none" || line === "hidden") return null;
+    let px = 1;
+    const w = /(\d+(?:\.\d+)?)\s*(px|pt)?/.exec(text);
+    if (w) px = w[2] === "pt" ? Number(w[1]) * (4 / 3) : Number(w[1]);
+    if (/\bthin\b/.test(text)) px = 1;
+    if (/\bmedium\b/.test(text)) px = 2;
+    if (/\bthick\b/.test(text)) px = 3;
+    if (!(px > 0)) return null;
+    const style =
+      line === "double" ? "double"
+      : line === "dashed" ? "dashed"
+      : line === "dotted" ? "dotted"
+      : px < 1.5 ? "thin"
+      : px < 2.5 ? "medium"
+      : "thick";
+    const colour = /#[0-9a-f]{3}(?:[0-9a-f]{3})?\b/.exec(text) ?? /rgba?\([^)]*\)/.exec(text);
+    return { style, color: colour ? hex(colour[0]) : null };
+  };
+
   const cells = [];
   const rows = [...table.querySelectorAll("tr")];
   // Rows and columns are counted, because a cell that spans rows pushes the
@@ -7817,6 +7848,21 @@ function cellsFromClipboardHtml(html) {
       const size = /^(\d+(?:\.\d+)?)pt/.exec(merged["font-size"] ?? "");
       const rs = Math.max(1, Number(td.getAttribute("rowspan") ?? 1) || 1);
       const cs = Math.max(1, Number(td.getAttribute("colspan") ?? 1) || 1);
+
+      // Per-edge longhand beats the shorthand, and an explicit `border-top:
+      // none` beats it too — which is why presence of the key is tested rather
+      // than the truthiness of what it parsed to. `border-collapse` is a
+      // different property and is never consulted: this maps the edges a cell
+      // declares for itself, which is what the model stores per cell.
+      const borders = {};
+      for (const side of ["top", "right", "bottom", "left"]) {
+        const own = `border-${side}`;
+        const edge =
+          merged[own] !== undefined ? edgeFrom(merged[own])
+          : merged.border !== undefined ? edgeFrom(merged.border)
+          : null;
+        if (edge) borders[side] = edge;
+      }
 
       cells.push({
         dr: r,
@@ -7844,6 +7890,7 @@ function cellsFromClipboardHtml(html) {
           merged["mso-number-format"]?.replace(/\\/g, "").replace(/^"|"$/g, "") ??
           td.getAttribute("sdnum")?.split(";").pop() ??
           null,
+        borders: Object.keys(borders).length ? borders : null,
       });
 
       for (let dr = 0; dr < rs; dr += 1) {
