@@ -14,7 +14,7 @@ casual-calc-import = { path = "../../crates/casual-calc-import" }
 casual-calc-model = { path = "../../crates/casual-calc-model" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonwebtoken = "9"
@@ -23,3 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
