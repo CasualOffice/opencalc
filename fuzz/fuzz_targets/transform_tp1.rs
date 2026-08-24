@@ -104,9 +104,17 @@ fuzz_target!(|data: &[u8]| {
     // One order is fixed first: two replicas must agree that `a` came before
     // `b` before they can agree on a result. Each side then transforms with the
     // role that order gives it.
+    // What each sheet index names, which is what lets the transform decide
+    // whether a chart's qualified series or a pivot's source points at the
+    // sheet being shifted (`FID-28`). Derived from the base workbook, exactly
+    // as the real callers derive it — a fuzzer that passed an empty slice would
+    // be exercising a path no client takes.
+    let sheets: Vec<(String, casual_calc_model::SheetId)> =
+        base.sheets.iter().map(|s| (s.name.clone(), s.id)).collect();
+
     let (Ok(b_after_a), Ok(a_after_b)) = (
-        transform(&b, &a, Side::Later),
-        transform(&a, &b, Side::Earlier),
+        transform(&b, &a, Side::Later, &sheets),
+        transform(&a, &b, Side::Earlier, &sheets),
     ) else {
         // Refused. An honest answer: the design refuses rather than guesses.
         return;

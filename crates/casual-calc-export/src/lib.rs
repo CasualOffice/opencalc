@@ -11,6 +11,7 @@
 
 mod chart;
 mod error;
+pub mod pivot;
 mod xml;
 
 pub use error::ExportError;
@@ -82,6 +83,17 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
 
     // Once, because `workbook.xml` and `workbook.xml.rels` have to name the
     // same id for the same sheet.
+    // Authored pivots, numbered across the workbook. An *imported* pivot keeps
+    // its retained part and is written back byte for byte, exactly as a chart
+    // is — this is only the ones created here, which until now reached the file
+    // as the cells their last refresh wrote and nothing else (`PIV-02`).
+    let mut pivot_builds: Vec<pivot::SheetPivots> = Vec::new();
+    let mut next_pivot = 1usize;
+    for sheet in &workbook.sheets {
+        let built = pivot::build(workbook, sheet, next_pivot, next_pivot);
+        next_pivot += pivot::authored(sheet).len();
+        pivot_builds.push(built);
+    }
     let workbook_rel_ids = WorkbookRelIds::mint(workbook);
     // Likewise per sheet, for `<legacyDrawing r:id>` and the worksheet `.rels`.
     let sheet_rel_ids: Vec<SheetRelIds> = (0..workbook.sheets.len())
@@ -102,12 +114,13 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 has_strings,
                 any_theme_link(workbook),
                 &chart_builds,
+                &pivot_builds,
             ),
         ),
         ("_rels/.rels".to_owned(), root_rels(workbook)),
         (
             "xl/workbook.xml".to_owned(),
-            workbook_xml(workbook, &workbook_rel_ids),
+            workbook_xml(workbook, &workbook_rel_ids, &pivot_builds),
         ),
         (
             "xl/_rels/workbook.xml.rels".to_owned(),
@@ -117,6 +130,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 has_styles,
                 has_strings,
                 any_theme_link(workbook),
+                &pivot_builds,
             ),
         ),
     ];
@@ -155,6 +169,9 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             && sheet.tables.is_empty()
             && !has_retained
             && chart_builds[i].sheet_rel.is_none()
+            // A pivot is reached through this part and nothing else, so a sheet
+            // whose only attachment is a pivot still needs one written.
+            && pivot_builds[i].sheet_rels.is_empty()
         {
             continue;
         }
@@ -183,7 +200,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
                 &(0..sheet.tables.len())
                     .map(|j| table_index(workbook, i, j))
                     .collect::<Vec<_>>(),
-                &chart_builds[i],
+                (&chart_builds[i], &pivot_builds[i]),
             ),
         ));
     }
@@ -197,6 +214,11 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
     }
     if any_threaded(workbook) {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
+    }
+
+    for built in &pivot_builds {
+        parts.extend(built.parts.iter().cloned());
+        parts.extend(built.rels.iter().cloned());
     }
 
     for built in &chart_builds {
@@ -311,6 +333,7 @@ fn content_types(
     has_strings: bool,
     has_theme: bool,
     charts: &[chart::SheetCharts],
+    pivots: &[pivot::SheetPivots],
 ) -> String {
     let any_comments = workbook.sheets.iter().any(|s| !s.comments.is_empty());
     let mut s = format!("{DECL}<Types xmlns=\"{NS_CT}\">");
@@ -365,6 +388,21 @@ fn content_types(
     // Charts made here, and the drawing part holding them when the sheet did
     // not already have one. An undeclared part is not ignored: Excel refuses
     // the package.
+    // Both new part kinds need an override: a package with an undeclared part
+    // opens as damaged rather than as a workbook without a pivot.
+    for built in pivots {
+        for (path, _) in &built.parts {
+            let ct = if path.contains("pivotCacheDefinition") {
+                pivot::CT_CACHE
+            } else {
+                pivot::CT_TABLE
+            };
+            s.push_str(&format!(
+                "<Override PartName=\"/{}\" ContentType=\"{ct}\"/>",
+                escape_attr(path)
+            ));
+        }
+    }
     for (path, content_type) in chart::content_types(charts) {
         s.push_str(&format!(
             "<Override PartName=\"/{}\" ContentType=\"{content_type}\"/>",
@@ -578,9 +616,17 @@ fn sheet_rels(
     ids: &SheetRelIds,
     retained: &[RetainedRel],
     table_part_numbers: &[usize],
-    charts: &chart::SheetCharts,
+    attached: (&chart::SheetCharts, &pivot::SheetPivots),
 ) -> String {
+    let (charts, pivots) = attached;
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
+    // A pivot table is reached through the sheet's relationships and nothing
+    // else: the worksheet XML never names one.
+    for (id, target) in &pivots.sheet_rels {
+        s.push_str(&format!(
+            "<Relationship Id=\"{id}\" Type=\"{NS_R}/pivotTable\" Target=\"{target}\"/>"
+        ));
+    }
     if !sheet.comments.is_empty() {
         s.push_str(&format!(
             "<Relationship Id=\"{}\" Type=\"{NS_R}/vmlDrawing\" Target=\"../drawings/vmlDrawing{n}.vml\"/>\
@@ -925,7 +971,34 @@ fn root_rels(workbook: &Workbook) -> String {
     s
 }
 
-fn workbook_xml(workbook: &Workbook, ids: &WorkbookRelIds) -> String {
+/// `<pivotCaches>`: the retained entries and the authored ones, in one wrapper.
+///
+/// Both kinds have to appear inside a *single* element — a second
+/// `<pivotCaches>` is a schema violation and Excel refuses the package rather
+/// than ignoring the stray one, which is the same trap `write_retained_refs`
+/// exists to avoid for external references.
+fn write_pivot_caches(s: &mut String, workbook: &Workbook, pivots: &[pivot::SheetPivots]) {
+    let authored: Vec<&(String, String, u32)> =
+        pivots.iter().flat_map(|p| p.caches.iter()).collect();
+    if authored.is_empty() {
+        write_retained_refs(s, workbook, "pivotCache", "pivotCaches");
+        return;
+    }
+    s.push_str("<pivotCaches>");
+    write_retained_refs_inner(s, workbook, "pivotCache");
+    for (id, _, cache_id) in authored {
+        s.push_str(&format!(
+            "<pivotCache cacheId=\"{cache_id}\" r:id=\"{id}\"/>"
+        ));
+    }
+    s.push_str("</pivotCaches>");
+}
+
+fn workbook_xml(
+    workbook: &Workbook,
+    ids: &WorkbookRelIds,
+    pivots: &[pivot::SheetPivots],
+) -> String {
     let mut s = format!("{DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
     // CT_Workbook's sequence: fileVersion, fileSharing, workbookPr, bookViews,
     // sheets, … calcPr. The settings travel verbatim; only `date1904` is
@@ -993,7 +1066,7 @@ fn workbook_xml(workbook: &Workbook, ids: &WorkbookRelIds) -> String {
         s.push_str("</definedNames>");
     }
     write_attr_element(&mut s, "calcPr", &workbook.settings.calc);
-    write_retained_refs(&mut s, workbook, "pivotCache", "pivotCaches");
+    write_pivot_caches(&mut s, workbook, pivots);
     s.push_str("</workbook>");
     s
 }
@@ -1011,6 +1084,18 @@ fn write_retained_refs(s: &mut String, workbook: &Workbook, element: &str, wrapp
         return;
     }
     s.push_str(&format!("<{wrapper}>"));
+    write_retained_refs_inner(s, workbook, element);
+    s.push_str(&format!("</{wrapper}>"));
+}
+
+/// The retained entries alone, with no wrapper — so a caller that has authored
+/// entries of its own can put both inside one element.
+fn write_retained_refs_inner(s: &mut String, workbook: &Workbook, element: &str) {
+    let refs: Vec<_> = workbook
+        .retained_refs
+        .iter()
+        .filter(|(name, _)| name == element)
+        .collect();
     for (name, attrs) in refs {
         s.push_str(&format!("<{name}"));
         for (k, v) in attrs {
@@ -1022,7 +1107,6 @@ fn write_retained_refs(s: &mut String, workbook: &Workbook, element: &str, wrapp
         }
         s.push_str("/>");
     }
-    s.push_str(&format!("</{wrapper}>"));
 }
 
 fn workbook_rels(
@@ -1031,8 +1115,17 @@ fn workbook_rels(
     has_styles: bool,
     has_strings: bool,
     has_theme: bool,
+    pivots: &[pivot::SheetPivots],
 ) -> String {
     let mut s = format!("{DECL}<Relationships xmlns=\"{NS_REL}\">");
+    // Every cache `<pivotCaches>` names has to resolve here, or the workbook
+    // points at a part the package cannot find and Excel calls the file
+    // unreadable rather than dropping the pivot.
+    for (id, target, _) in pivots.iter().flat_map(|p| p.caches.iter()) {
+        s.push_str(&format!(
+            "<Relationship Id=\"{id}\" Type=\"{NS_R}/pivotCacheDefinition\" Target=\"{target}\"/>"
+        ));
+    }
     for (i, id) in ids.sheets.iter().enumerate() {
         s.push_str(&format!(
             "<Relationship Id=\"{id}\" Type=\"{NS_R}/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
@@ -1807,7 +1900,7 @@ fn cell_a1(row: u32, col: u32) -> String {
     format!("{}{}", column_to_letters(col), row + 1)
 }
 
-fn range_a1(range: &CellRange) -> String {
+pub(crate) fn range_a1(range: &CellRange) -> String {
     format!(
         "{}:{}",
         cell_a1(range.start.row, range.start.col),
