@@ -106,7 +106,9 @@ cp .env.example .env
 docker compose up
 open http://localhost:8080</pre>
         <p>
-          The images are published, so this pulls rather than builds:
+          The images are published, so this pulls rather than builds
+          (<code>docker pull casualoffice/calc</code>, <code>casualoffice/calc-host</code>,
+          <code>casualoffice/wopi</code>):
           <code>casualoffice/calc</code> is the collaboration server,
           <code>casualoffice/calc-host</code> serves the editor and keeps the
           documents, and <code>casualoffice/wopi</code> is the adapter for a host
