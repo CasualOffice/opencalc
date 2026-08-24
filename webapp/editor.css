@@ -1416,3 +1416,38 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
     --oc-border-color: #6b7686;
   }
 }
+
+/* ── Narrow screens ──────────────────────────────────────────────────────────
+   The editor had no width breakpoint of any kind — only preference queries for
+   dark, reduced motion and contrast. `.menubar` and `.toolbar` are unwrapped
+   flex rows, so on a phone they simply ran past the edge and widened the whole
+   document to 779px: the page slid sideways, and half the toolbar could only be
+   reached by dragging the entire editor across (`UX-EDIT-01`).
+
+   They scroll **within themselves** rather than wrapping. Wrapping would change
+   the editor's height, and every pixel of that comes out of the grid — the one
+   part of a spreadsheet nobody wants smaller. Excel's own answer on a narrow
+   window is to collapse groups and then scroll, which is what the existing
+   `.tb-collapsed` mechanism already starts; this is the step after it runs out
+   of groups to fold.
+
+   The scrollbar is hidden because these are chrome, not content: a visible
+   track would eat 8-15px of a 48px bar on the platforms that reserve space for
+   one. Touch and trackpad scrolling still work, and so do the keyboard paths —
+   every command here is also on the menu bar or a shortcut. */
+.menubar,
+.toolbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.menubar::-webkit-scrollbar,
+.toolbar::-webkit-scrollbar { display: none; }
+
+/* A flex child's default `min-width: auto` is what let these rows push the
+   document wide in the first place; without this the overflow above never
+   engages. The buttons keep their size instead of squashing into illegibility. */
+.menubar > *,
+.toolbar > * { flex: 0 0 auto; }
+.toolbar { min-width: 0; }
