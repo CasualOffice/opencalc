@@ -4,6 +4,44 @@
 
 use super::*;
 
+/// One viewport's worth of paint instructions, as JSON.
+///
+/// **Measurement first, bridge second.** `RND-10` defers sharing the display
+/// list between the canvas and the PNG renderer on the grounds that "a naive
+/// per-frame serialisation would be slower than what it replaces". The native
+/// half of that is now measured — `display-list-frame-serialise`, a median
+/// 178 µs against a 16.67 ms frame — and the half that was still a guess is the
+/// WASM→JS crossing itself, which nothing could measure because nothing crossed.
+///
+/// This is the smallest thing that makes that measurable: the same
+/// `layout_viewport` the PNG renderer uses, serialised once. It is deliberately
+/// **not** wired into the canvas — the editor still paints from its per-cell
+/// payload, so this changes no drawing and cannot regress a frame. Whether the
+/// canvas moves onto it is the decision this exists to inform, not one it makes.
+///
+/// Pixels and a dpi rather than the layout's own units, because every other
+/// geometry binding here takes pixels and a caller that had to convert would be
+/// the one place that did.
+#[wasm_bindgen]
+pub fn session_display_list(
+    sheet: usize,
+    width_px: u32,
+    height_px: u32,
+    dpi: u32,
+) -> Result<String, JsError> {
+    with_session(|s| {
+        let workbook = s.workbook();
+        let Some(sheet_ref) = workbook.sheets.get(sheet) else {
+            return Ok(String::from(r#"{"items":[]}"#));
+        };
+        let geometry = casual_calc_layout::GridGeometry::for_sheet(sheet_ref);
+        let viewport = crate::viewport_px(width_px, height_px, dpi);
+        let list = casual_calc_layout::layout_viewport(workbook, sheet, &geometry, &viewport);
+        serde_json::to_string(&list).map_err(|why| JsError::new(&format!("display list: {why}")))
+    })
+    .unwrap_or_else(|| Ok(String::from(r#"{"items":[]}"#)))
+}
+
 /// Search a sheet — or the whole workbook — with the options a find bar offers.
 ///
 /// - `whole_cell`: the cell must equal the query, not merely contain it.

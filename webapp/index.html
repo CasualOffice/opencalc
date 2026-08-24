@@ -291,7 +291,7 @@ sheet.on(<span class="s">"cellsChanged"</span>, (e) =&gt; {
             <p>The editor, a collaboration server and a reference host. Nothing else to install.</p>
 <pre><span class="c"># change OPENCALC_SHARED_SECRET in .env</span>
 cp .env.example .env
-docker compose up --build</pre>
+docker compose up</pre>
           </article>
           <article class="step">
             <h4>Share a link</h4>
@@ -306,6 +306,20 @@ docker compose -f docker-compose.cluster.yml up</pre>
         </div>
 
         <p class="section-lede" style="margin-top:28px">
+          <strong>The images are published</strong>, so that pulls rather than builds:
+        </p>
+<pre>docker pull casualoffice/calc<span class="c">        # the collaboration server</span>
+docker pull casualoffice/calc-host<span class="c">   # the editor, and your documents</span>
+docker pull casualoffice/wopi<span class="c">        # the WOPI adapter, if you need one</span></pre>
+        <p class="section-lede">
+          Each is <code>linux/amd64</code> and <code>linux/arm64</code>, and each ships an
+          SBOM and a build-provenance attestation naming the repository, workflow and
+          commit it came from — so what you pull can be traced back to what is here.
+          Add <code>--build</code> to any compose command to build from your own checkout
+          instead.
+        </p>
+
+        <p class="section-lede">
           The two containers are the integration boundary, not a demo artefact. The
           <strong>collaboration server</strong> is what OpenCalc supplies — ordering,
           presence, the socket. The <strong>host</strong> is what your product supplies —

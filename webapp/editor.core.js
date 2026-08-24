@@ -5275,8 +5275,27 @@ export function renderTabs() {
   tabsEl.appendChild(all);
 
   // Keep the active tab in view once the strip overflows.
+  //
+  // By hand, not `scrollIntoView`. That walks **every** scrollable ancestor,
+  // and when the editor is embedded the outermost one is somebody else's page:
+  // drawing the tab strip scrolled the whole landing page down to the iframe,
+  // taking the hero with it. `block: "nearest"` bounds how far each ancestor
+  // moves, not which ancestors move (`UX-EMBED-01`).
+  //
+  // Only the strip's own `scrollLeft` is touched, so nothing outside this
+  // element can move however deeply it is nested.
   const activeTab = tabsEl.querySelector(".sheet-tab.active");
-  if (activeTab) activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (activeTab) {
+    const left = activeTab.offsetLeft;
+    const right = left + activeTab.offsetWidth;
+    const viewLeft = tabsEl.scrollLeft;
+    const viewRight = viewLeft + tabsEl.clientWidth;
+    if (left < viewLeft) {
+      tabsEl.scrollLeft = left;
+    } else if (right > viewRight) {
+      tabsEl.scrollLeft = right - tabsEl.clientWidth;
+    }
+  }
 }
 
 // Reorder sheet tabs, keeping the active sheet tracked through the shift.
@@ -7823,11 +7842,31 @@ async function main() {
   // `canvas.focus()` calls that put focus *back* after a dialog were all there;
   // the one that puts it there to begin with was missing.
   //
-  // Only when nothing else has it. An embed lives inside somebody else's page,
-  // and a component that steals focus on load moves the caret out of whatever
-  // the person was already typing in.
-  if (!document.activeElement || document.activeElement === document.body) {
-    canvas.focus();
+  // Only when nothing else has it, and only when this *is* the page.
+  //
+  // The `activeElement` check alone could never do that second part. Inside an
+  // iframe it asks about the iframe's **own** document, where nothing is
+  // focused, so it passed every time — and focusing the canvas made the parent
+  // browser scroll the frame into view. On the landing page, which embeds the
+  // editor below the fold, that scrolled the hero off the top: every visitor
+  // arrived to a page whose headline, badge and opening line had been pushed
+  // out of sight by the demo underneath them. The intent below was written
+  // down and not implemented (`UX-EMBED-01`).
+  //
+  // `window.top === window` is the question that was actually meant. An embed
+  // waits to be clicked, the way any widget in someone else's page should.
+  // `preventScroll` is belt as well as braces: it keeps a later focus from
+  // moving a host page even if this runs somewhere unforeseen.
+  const isTopLevel = (() => {
+    try {
+      return window.top === window;
+    } catch {
+      // A cross-origin parent throws on access, which is itself the answer.
+      return false;
+    }
+  })();
+  if (isTopLevel && (!document.activeElement || document.activeElement === document.body)) {
+    canvas.focus({ preventScroll: true });
   }
 }
 
