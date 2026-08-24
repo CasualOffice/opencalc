@@ -19,6 +19,14 @@
      so its ink must not either. */
   --on-ink: #ffffff;
   --on-ink-dim: rgba(255, 255, 255, .62);
+  /* Inline code, and the two callout tints. Here rather than in each page's own
+     `<style>` because that is where they were, which is why the first dark pass
+     reached the landing page and left `deploy` and `docs` painting white boxes
+     on a dark ground. A shared token cannot drift from a second copy of itself. */
+  --code-bg: #f2f4f7;
+  --code-fg: #0b0d12;
+  --note-bg: #f6f9ff;
+  --note-warn-bg: #fffaf0;
   --accent: #2f6df6;
   --accent-hover: #1f56cf;
   --ink: #0b0d12;
@@ -290,6 +298,13 @@ code { font-family: var(--mono); font-size: .88em; }
     --ink-hover: #26303e;
     --ok: #34d17e;
     --done: #34d17e;
+    --code-bg: #1c222d;
+    --code-fg: #dfe3ea;
+    /* Tinted toward the accent and the warning hue respectively, at the low
+       saturation a dark ground needs — the light values are washes on white and
+       become glare on black. */
+    --note-bg: #131b2b;
+    --note-warn-bg: #221a10;
   }
   /* Translucent white would frost the page back to light. */
   .nav { background: rgba(13, 16, 23, .78); }
