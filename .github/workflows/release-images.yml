@@ -151,7 +151,22 @@ jobs:
 
       # The registry page is written here and reviewed like anything else,
       # rather than pasted into a web form on release day and never seen again.
+      #
+      # `continue-on-error`, and the reason matters. Docker Hub's description
+      # endpoint refuses an **access token**: it wants account credentials, and
+      # `DOCKER_SECRET` is a PAT — correctly, because a password in CI is worse
+      # than a token that can only push. So `server-v0.0.0` published all three
+      # images, multi-arch, with SBOM and provenance, and then reported the
+      # whole release as *failed* because a README did not sync (`DEP-18`).
+      #
+      # A release that says it failed when the artifact is public and correct is
+      # the more dangerous report of the two: it invites a re-run of a workflow
+      # whose work is already done. The step still runs, still fails visibly,
+      # and the summary below says plainly whether the page synced — what does
+      # not happen is a green artifact being called a red release.
       - name: Publish the registry overview
+        id: overview
+        continue-on-error: true
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4
         with:
@@ -171,4 +186,9 @@ jobs:
             echo "- version \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- digest \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- platforms \`linux/amd64, linux/arm64\`" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${{ steps.overview.outcome }}" = "success" ]; then
+              echo "- registry page synced" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- **registry page NOT synced** — see DEP-18; the image itself is published and correct" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
