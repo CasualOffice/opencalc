@@ -160,11 +160,17 @@ also exposes — the command layer is a transport, not logic.
 
 ## Open decisions (to ADR before the desktop shell is built)
 
-- **The host capability trait itself** — promised by [19](19-WORKSPACE-SCAFFOLD-DESIGN.md)
-  invariant 7 and listed in [08](08-ADR-REGISTER.md) §Pending as "to be Accepted
-  at Phase 0", which has been and gone. Whether it is one trait or the two
-  separate seams that actually exist (`Environment`, `Cancel`) plus a third for
-  threads is undecided, and deciding it is what closes the pending ADR.
+- ~~**The host capability trait itself.**~~ **Decided: `ADR-019`, Accepted.** The
+  single trait was *rejected* in favour of a seam per capability, and that ADR
+  names this row as what it unblocks. A clock, a cancellation source and a thread
+  pool share only the property that the engine cannot supply them, which is not
+  enough to make them one interface — and a combined trait would force the
+  browser host to stub the third of it that has no threads. See
+  [78](78-HOST-CAPABILITY-SEAMS.md).
+
+  Left listed here as struck through rather than deleted: this section is what a
+  reader consults to know whether the shell can be started, and an open decision
+  that silently vanishes is indistinguishable from one nobody made.
 - Webview ↔ backend transport for large display lists / bitmaps (IPC vs shared
   surface) — must hold the 60 fps budget on desktop.
 - Whether `casual-calc-tauri` exists as a crate or the app wires the SDK inline.
