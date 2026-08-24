@@ -14,6 +14,7 @@ use std::hint::black_box;
 use std::io::{Cursor, Write};
 use std::time::Instant;
 
+use casual_calc_layout::{GridGeometry, Viewport, layout_viewport};
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use casual_calc_package::{Package, PackageLimits};
 use serde::Serialize;
@@ -223,7 +224,42 @@ fn build_cases() -> Vec<Bench> {
         }),
     };
 
-    vec![snapshot_case, package_case]
+    // What a frame costs to send across a host boundary.
+    //
+    // `RND-10` defers bridging the display list to JS on the grounds that "a
+    // naive per-frame serialisation of a display list would be slower than what
+    // it replaces". That is the load-bearing claim in the row and nothing had
+    // ever measured it — the canvas and the PNG renderer therefore go on
+    // implementing every primitive twice on the strength of an assumption.
+    //
+    // A viewport, not the whole sheet: the question is what one *frame* costs,
+    // and a full-sheet layout is not what a 60 fps repaint would send. Laying
+    // out and serialising together, because a bridge has to do both — timing
+    // `to_string` over a list laid out once would measure the cheaper half and
+    // call it the answer.
+    //
+    // This does not decide `RND-10`. It replaces "would be slower" with a
+    // number, which is the part that was missing.
+    let frame_workbook = build_workbook(10_000);
+    let display_list_case = Bench {
+        id: "display-list-frame-serialise",
+        max_regression_basis_points: 500,
+        op: Box::new(move || {
+            let geometry = GridGeometry::for_sheet(&frame_workbook.sheets[0]);
+            // Roughly a maximised window at 96 dpi, in the layout's own units.
+            let viewport = Viewport {
+                x: 0,
+                y: 0,
+                width: 1_920 * 15,
+                height: 1_080 * 15,
+            };
+            let list = layout_viewport(&frame_workbook, 0, &geometry, &viewport);
+            let json = serde_json::to_string(&list).unwrap();
+            fnv1a(json.as_bytes())
+        }),
+    };
+
+    vec![snapshot_case, package_case, display_list_case]
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
