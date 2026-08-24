@@ -103,8 +103,18 @@
 <pre><span class="c"># from a clone of the repository</span>
 cp .env.example .env
 <span class="c"># change OPENCALC_SHARED_SECRET — the file ships with a value the server refuses</span>
-docker compose up --build
+docker compose up
 open http://localhost:8080</pre>
+        <p>
+          The images are published, so this pulls rather than builds:
+          <code>casualoffice/calc</code> is the collaboration server,
+          <code>casualoffice/calc-host</code> serves the editor and keeps the
+          documents, and <code>casualoffice/wopi</code> is the adapter for a host
+          that speaks WOPI. Each is multi-arch, and each ships an SBOM and a
+          build-provenance attestation naming the repository, workflow and commit
+          it was built from — so what you pull can be traced to what is here.
+          Add <code>--build</code> to build from your own checkout instead.
+        </p>
         <p>
           New spreadsheet → <b>Share</b> → send the link to somebody else. You are both
           editing the same sheet. <b>Download</b> takes away an <code>.xlsx</code>
@@ -145,10 +155,10 @@ open http://localhost:8080</pre>
           Two stacks, both <code>docker compose up</code>.
         </p>
 <pre><span class="c"># one collaboration node — what most deployments should run</span>
-docker compose up --build                                   <span class="c"># :8080</span>
+docker compose up                                     <span class="c"># :8080</span>
 
 <span class="c"># two nodes behind a proxy, coordinating through Redis</span>
-docker compose -f docker-compose.cluster.yml up --build      <span class="c"># :8090</span></pre>
+docker compose -f docker-compose.cluster.yml up       <span class="c"># :8090</span></pre>
         <p>
           The cluster buys horizontal capacity, not correctness. Standalone is a
           first-class mode and not a degraded one, which is a deliberate architectural
@@ -639,7 +649,7 @@ https://your-host/hosting/discovery</pre>
           <li><b>No Helm chart or Kubernetes manifests.</b> Compose is the supported path today.</li>
           <li><b>Redis in the cluster stack is a single unreplicated instance.</b> Fine for capacity, not yet an availability story.</li>
           <li><b>Secrets are environment variables and mounted files</b> — there is no integration with a secret manager yet.</li>
-          <li><b>No published image.</b> You build from the repository; images are built in CI but not yet pushed to a registry.</li>
+
         </ul>
         <p>
           These are tracked in the open, not hidden: the execution tracker lists every one
