@@ -11,6 +11,14 @@
   --hair: #eceef2;
   --line: #f1f2f5;
   --surface: #f8f9fb;
+  /* A raised surface — cards, the editor window, the footer. Its own token
+     because in dark a panel is *lighter* than the page, which is the exact
+     inversion a hardcoded `#fff` cannot express. */
+  --panel: #ffffff;
+  /* Text on `--ink`, which is dark in both themes: the CTA band does not flip,
+     so its ink must not either. */
+  --on-ink: #ffffff;
+  --on-ink-dim: rgba(255, 255, 255, .62);
   --accent: #2f6df6;
   --accent-hover: #1f56cf;
   --ink: #0b0d12;
@@ -45,9 +53,9 @@ code { font-family: var(--mono); font-size: .88em; }
 .btn-lg { height: 46px; }
 .btn-ink { background: var(--ink); color: #fff; }
 .btn-ink:hover { background: var(--ink-hover); color: #fff; }
-.btn-outline { background: #fff; color: var(--fg); border-color: var(--border-2); }
+.btn-outline { background: var(--panel); color: var(--fg); border-color: var(--border-2); }
 .btn-outline:hover { border-color: #b6bcc7; color: var(--fg); }
-.btn-light { background: #fff; color: var(--ink); }
+.btn-light { background: var(--panel); color: var(--ink); }
 .btn-light:hover { background: #e8eaee; color: var(--ink); }
 .btn-ondark { background: transparent; color: #fff; border-color: rgba(255, 255, 255, .22); }
 .btn-ondark:hover { border-color: rgba(255, 255, 255, .5); color: #fff; }
@@ -83,17 +91,17 @@ code { font-family: var(--mono); font-size: .88em; }
 
 /* Live editor window */
 .window {
-  margin-top: 64px; border-radius: 16px; border: 1px solid var(--border); background: #fff; overflow: hidden;
+  margin-top: 64px; border-radius: 16px; border: 1px solid var(--border); background: var(--panel); overflow: hidden;
   box-shadow: 0 1px 2px rgba(11, 13, 18, .04), 0 30px 80px rgba(11, 13, 18, .13);
 }
 .window-bar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px; border-bottom: 1px solid var(--hair); background: var(--surface); }
 .wdot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
 .window-title { margin-left: 10px; color: var(--faint); font-size: 12px; font-weight: 600; }
-.window iframe { display: block; width: 100%; height: 660px; border: 0; background: #fff; }
+.window iframe { display: block; width: 100%; height: 660px; border: 0; background: var(--panel); }
 
 /* Stat strip */
 .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; margin-top: 64px; border-top: 1px solid var(--hair); border-bottom: 1px solid var(--hair); background: var(--hair); }
-.stat { background: #fff; padding: 26px 4px 26px 22px; }
+.stat { background: var(--panel); padding: 26px 4px 26px 22px; }
 .stat:first-child { padding-left: 0; }
 .stat b { display: block; font-size: 28px; font-weight: 600; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
 .stat span { display: block; font-size: 13px; color: var(--muted); margin-top: 4px; }
@@ -106,8 +114,23 @@ code { font-family: var(--mono); font-size: .88em; }
 .section-lede { font-size: 18px; color: var(--muted); margin-top: 18px; max-width: 64ch; }
 
 /* Feature grid */
-.feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 52px; background: var(--hair); border: 1px solid var(--hair); border-radius: 16px; overflow: hidden; }
-.feature { background: #fff; padding: 34px 30px 36px; }
+/* Six panes in three equal columns is two tidy rows of three: every cell the
+   same size says every claim carries the same weight, so none of them lead.
+   A six-track grid instead, each row opening with a wider pane — 3+3 is a
+   table, 4+2 has a subject and a footnote. */
+.feature-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; margin-top: 56px; background: var(--hair); border: 1px solid var(--hair); border-radius: 18px; overflow: hidden; }
+.feature-grid > :nth-child(3n+1) { grid-column: span 2; }
+.feature-grid > :nth-child(3n+2) { grid-column: span 2; }
+.feature-grid > :nth-child(3n+3) { grid-column: span 2; }
+@media (min-width: 981px) {
+  .feature-grid > :nth-child(1) { grid-column: span 3; }
+  .feature-grid > :nth-child(2) { grid-column: span 3; }
+  .feature-grid > :nth-child(3) { grid-column: span 2; }
+  .feature-grid > :nth-child(4) { grid-column: span 2; }
+  .feature-grid > :nth-child(5) { grid-column: span 2; }
+  .feature-grid > :nth-child(6) { grid-column: span 6; }
+}
+.feature { background: var(--panel); padding: 34px 30px 36px; }
 .ficon { display: inline-flex; width: 34px; height: 34px; align-items: center; justify-content: center; color: var(--fg); margin-bottom: 22px; }
 .ficon svg { width: 24px; height: 24px; }
 .feature h3 { font-size: 19px; letter-spacing: -0.02em; }
@@ -123,7 +146,7 @@ code { font-family: var(--mono); font-size: .88em; }
   display: grid; gap: 20px; margin-top: 48px;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
-.check-col { border: 1px solid var(--border); border-radius: 14px; background: #fff; padding: 28px 26px; }
+.check-col { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 28px 26px; }
 .check-col h4 { font-size: 13px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
 .check-col ul { list-style: none; margin: 0; padding: 0; }
 .check-col li { position: relative; padding: 11px 0 11px 26px; border-top: 1px solid var(--line); font-size: 15px; color: var(--fg); }
@@ -137,14 +160,14 @@ code { font-family: var(--mono); font-size: .88em; }
 
 /* Engine pipeline + hosts + code */
 .pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 44px; }
-.stage { padding: 10px 16px; border-radius: 9px; border: 1px solid var(--border); background: #fff; font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.stage { padding: 10px 16px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); font-family: var(--mono); font-size: 13px; font-weight: 600; }
 .stage.accent { border-color: var(--accent); background: rgba(47, 109, 246, .08); color: var(--accent); }
 .arrow { color: #c9cfd9; }
 .hosts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 44px; }
-.host { border: 1px solid var(--border); border-radius: 14px; padding: 26px; background: #fff; }
+.host { border: 1px solid var(--border); border-radius: 14px; padding: 26px; background: var(--panel); }
 .host h4 { font-size: 17px; }
 .host p { color: var(--muted); font-size: 15px; margin-top: 9px; }
-.code-card { margin-top: 44px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+.code-card { margin-top: 44px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--panel); }
 .code-head { display: flex; align-items: center; justify-content: space-between; height: 42px; padding: 0 16px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: 12.5px; font-weight: 600; color: var(--muted); }
 .code-crate { font-family: var(--mono); font-size: 11.5px; color: var(--faint); font-weight: 400; }
 .code-card pre { margin: 0; padding: 26px; overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.75; color: var(--fg); }
@@ -152,7 +175,7 @@ code { font-family: var(--mono); font-size: .88em; }
 
 /* Embed / SDK */
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 48px; counter-reset: step; }
-.step { position: relative; border: 1px solid var(--border); border-radius: 14px; padding: 26px 26px 28px; background: #fff; }
+.step { position: relative; border: 1px solid var(--border); border-radius: 14px; padding: 26px 26px 28px; background: var(--panel); }
 .step::before {
   counter-increment: step; content: counter(step);
   display: inline-flex; align-items: center; justify-content: center;
@@ -170,7 +193,7 @@ code { font-family: var(--mono); font-size: .88em; }
 .embed-note { margin-top: 22px; font-size: 15px; color: var(--muted); max-width: 74ch; }
 
 /* Compare table */
-.cmp { margin-top: 48px; border: 1px solid var(--border); border-radius: 14px; background: #fff; overflow: hidden; }
+.cmp { margin-top: 48px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow: hidden; }
 .cmp-row { display: grid; grid-template-columns: 1.5fr repeat(4, 1fr); border-top: 1px solid var(--line); }
 .cmp-row:first-child { border-top: 0; }
 .cmp-head { color: var(--faint); }
@@ -200,10 +223,10 @@ code { font-family: var(--mono); font-size: .88em; }
 .status.next .dot { background: #c9cfd9; }
 
 /* Dark CTA band */
-.cta-band { padding: 110px 0; background: var(--ink); color: #fff; }
+.cta-band { padding: 110px 0; background: var(--ink); color: var(--on-ink); }
 .cta-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 60px; align-items: center; }
-.cta-band h2 { font-size: clamp(32px, 4.4vw, 46px); color: #fff; }
-.cta-band p { font-size: 18px; color: rgba(255, 255, 255, .62); margin-top: 20px; max-width: 46ch; }
+.cta-band h2 { font-size: clamp(32px, 4.4vw, 46px); color: var(--on-ink); }
+.cta-band p { font-size: 18px; color: var(--on-ink-dim); margin-top: 20px; max-width: 46ch; }
 .cta-band .cta { margin-top: 32px; }
 .cta-band code { color: rgba(255, 255, 255, .9); }
 .contrib { border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 26px; background: rgba(255, 255, 255, .04); }
@@ -212,7 +235,7 @@ code { font-family: var(--mono); font-size: .88em; }
 .contrib-cmd { margin-top: 20px; padding: 14px 16px; border-radius: 10px; background: rgba(255, 255, 255, .06); font-family: var(--mono); font-size: 13px; color: rgba(255, 255, 255, .86); }
 
 /* Footer */
-.foot { padding: 56px 0 44px; border-top: 1px solid var(--hair); background: #fff; }
+.foot { padding: 56px 0 44px; border-top: 1px solid var(--hair); background: var(--panel); }
 .foot-grid { display: grid; grid-template-columns: 1.4fr repeat(4, 1fr); gap: 36px; }
 .foot .brand { font-size: 16px; }
 .foot-tag { font-size: 14px; color: var(--muted); margin-top: 14px; max-width: 34ch; }
@@ -233,4 +256,47 @@ code { font-family: var(--mono); font-size: .88em; }
   .nav-links a:not(.btn) { display: none; }
   .hero { padding: 60px 0 0; }
   .window iframe { height: 420px; }
+}
+
+/* ── Dark ────────────────────────────────────────────────────────────────────
+   The site was light-only while the editor has been theme-aware throughout —
+   and the hero *embeds* that editor, so on a dark machine the page rendered
+   white with a dark application sitting inside it.
+
+   Only tokens are redefined; every rule above already reads them, which is what
+   makes this a palette swap rather than a second stylesheet to keep in step.
+
+   Not an inversion. `--panel` is lighter than `--bg` here and darker in light,
+   because a raised surface catches more light than what it sits on — flipping
+   the values literally would make every card a hole. `--ink` stays a dark band
+   in both, because that section is deliberately dark, so it must not flip with
+   everything else. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1017;
+    --fg: #e8eaef;
+    --muted: #98a1b0;
+    --faint: #6b7484;
+    --icon: #aab2c0;
+    --border: #232936;
+    --border-2: #2b3240;
+    --hair: #1e2430;
+    --line: #171c25;
+    --surface: #141922;
+    --panel: #161b24;
+    --accent: #5b8cff;
+    --accent-hover: #7ba3ff;
+    --ink: #1c2430;
+    --ink-hover: #26303e;
+    --ok: #34d17e;
+    --done: #34d17e;
+  }
+  /* Translucent white would frost the page back to light. */
+  .nav { background: rgba(13, 16, 23, .78); }
+  .btn-outline { background: var(--panel); }
+  .btn-light { background: var(--fg); color: var(--bg); }
+  .btn-light:hover { background: #fff; color: var(--bg); }
+  /* A shadow is invisible on a dark ground; the window needs a rim. */
+  .window { box-shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 30px 80px rgba(0, 0, 0, .45); }
+  ::selection { background: rgba(91, 140, 255, .28); }
 }
