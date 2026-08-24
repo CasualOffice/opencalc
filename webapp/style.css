@@ -255,6 +255,16 @@ code { font-family: var(--mono); font-size: .88em; }
 
 /* Responsive */
 @media (max-width: 960px) {
+  /* The comparison table is five columns of real content, so collapsing it to
+     one would destroy the comparison — the whole point is reading across a row.
+     It scrolls **inside its own frame** instead, which is what a wide table
+     should do and what `overflow-x: clip` on the document would otherwise turn
+     into silently cut-off cells.
+     `.cmp` had `overflow: hidden` for its rounded corners; that has to become
+     `auto` on this axis or the scroll it now needs cannot happen. */
+  .cmp { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
+  .cmp-row { min-width: 620px; }
+
   .feature-grid, .checks, .hosts, .steps, .cta-grid, .foot-grid { grid-template-columns: 1fr; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .stat, .stat:first-child { padding: 22px; }
@@ -264,6 +274,58 @@ code { font-family: var(--mono); font-size: .88em; }
   .nav-links a:not(.btn) { display: none; }
   .hero { padding: 60px 0 0; }
   .window iframe { height: 420px; }
+}
+
+/* ── Nothing may widen the page ──────────────────────────────────────────────
+   The landing page scrolled sideways on every phone: 763px of document in a
+   390px viewport, because the `<pre>` blocks inside the step cards set their
+   own width and the cards grew to fit.
+
+   `overflow-x: auto` was already on those `<pre>`s and never engaged. A grid
+   and flex item defaults to `min-width: auto`, which means "do not shrink below
+   your content" — so the card widened, the row widened, and the scrollbar the
+   `<pre>` was supposed to grow never had a reason to appear. Declaring the
+   floor explicitly is what lets the overflow rule do its job.
+
+   Applied to the items that actually contain code rather than globally: a blunt
+   `* { min-width: 0 }` would also let genuinely fixed-width things collapse. */
+/* Every grid and flex child, not a list of them.
+   The first version of this rule named six selectors and missed `.doc`, so the
+   two documentation pages went on being 706px and 756px wide inside a 390px
+   phone — their sidebar layout *did* collapse to one column, and the column
+   still refused to shrink below its content. Enumerating the subjects of a rule
+   like this is how you ship the same bug twice. */
+:where(.steps, .feature-grid, .cta-grid, .foot-grid, .hosts, .doc, .checks, .cmp-row) > * {
+  min-width: 0;
+}
+.code-card, .host, .contrib, .step {
+  min-width: 0;
+}
+
+/* Every `<pre>`, not the classed ones.
+   The first attempt named `.step pre`, `.code-card pre` and `.contrib pre` —
+   and the blocks actually forcing the page wide were bare `<pre>`s with no
+   class at all, so none of the rules matched them. A rule that has to enumerate
+   its subjects is one enumeration away from being wrong.
+   `min-width: 0` above lets the container shrink; this is what it shrinks to. */
+pre {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* A table will not shrink below its columns, and a documentation table has real
+   columns — collapsing it to one would destroy the comparison it exists to
+   make. So it scrolls inside itself. `display: block` is what makes a table a
+   scroll container at all; `width: max-content` keeps the columns sizing to
+   their content rather than collapsing to the new block width. */
+.body table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.body table > * {
+  width: max-content;
+  min-width: 100%;
 }
 
 /* ── Dark ────────────────────────────────────────────────────────────────────
