@@ -3883,3 +3883,108 @@ fn a_drawing_rebuilt_without_chart_parts_does_not_write_its_rels_twice() {
         "the surviving image relationship must be written: {rels}"
     );
 }
+
+/// **A pivot created here is written as a pivot, not as the cells it produced.**
+///
+/// Until now only *imported* pivots reached the file, written back from their
+/// retained part; one created in the editor arrived as whatever values its last
+/// refresh happened to write, so Excel opened a block of numbers with no field
+/// list, no layout to change and nothing to refresh (`PIV-02`).
+///
+/// Read back through this project's **own importer**, which was written against
+/// real Excel files — so a shape it accepts is a shape Excel writes. That is not
+/// the same as Excel accepting ours, which is what the row's acceptance
+/// criterion asks and what no oracle here can answer.
+#[test]
+fn a_created_pivot_is_written_as_a_pivot_and_reads_back() {
+    use casual_calc_model::{
+        CellRange, CellRef, Id, PivotAggregate, PivotAxisField, PivotTable, PivotValueField, Sheet,
+        SheetId, Workbook,
+    };
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let data_id = SheetId(Id::from_parts(2, 1));
+    wb.sheets.push(Sheet::new(data_id, "Data"));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Report"));
+
+    // A header row, because that is where the cache's field names come from.
+    for (col, name) in ["Region", "Rep", "Amount"].iter().enumerate() {
+        let id = wb.strings.intern(name);
+        wb.sheets[0].cells.set(
+            CellRef::new(0, col as u32),
+            casual_calc_model::Cell {
+                value: casual_calc_model::CellValue::SharedString(id),
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut pivot = PivotTable::new(
+        7,
+        "Sales".into(),
+        data_id,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2)),
+        CellRef::new(2, 0),
+    );
+    pivot.rows.push(PivotAxisField {
+        source_column: 0,
+        sort: casual_calc_model::PivotSort::Ascending,
+        subtotal: true,
+    });
+    pivot.values.push(PivotValueField {
+        source_column: 2,
+        aggregate: PivotAggregate::Sum,
+        name: "Total".into(),
+        number_format: None,
+    });
+    pivot.output = Some(CellRange::new(CellRef::new(2, 0), CellRef::new(5, 1)));
+    wb.sheets[1].pivots.push(pivot);
+
+    let written = write_workbook(&wb).expect("a workbook with a created pivot saves");
+
+    let table = xml_of(&written, "xl/pivotTables/pivotTable1.xml");
+    assert!(table.contains(r#"name="Sales""#), "{table}");
+    assert!(
+        table.contains(r#"<rowFields count="1"><field x="0"/></rowFields>"#),
+        "the row axis names the source column it was built from: {table}"
+    );
+    assert!(
+        table.contains(r#"subtotal="sum""#),
+        "and the value field keeps its aggregate: {table}"
+    );
+
+    let cache = xml_of(&written, "xl/pivotCache/pivotCacheDefinition1.xml");
+    assert!(
+        cache.contains(r#"saveData="0""#) && cache.contains(r#"refreshOnLoad="1""#),
+        "the records are not in the file; the reader is told to fetch them: {cache}"
+    );
+    assert!(
+        cache.contains(r#"<worksheetSource ref="A1:C10" sheet="Data"/>"#),
+        "pointing at the source range on the source sheet: {cache}"
+    );
+    assert!(
+        cache.contains(r#"name="Region""#) && cache.contains(r#"name="Amount""#),
+        "with field names taken from the header row: {cache}"
+    );
+
+    // The package has to hang together: the workbook names the cache, and the
+    // sheet names the table. A part nothing points at is a part Excel ignores.
+    let wbx = xml_of(&written, "xl/workbook.xml");
+    assert!(
+        wbx.contains("<pivotCaches>") && wbx.contains(r#"cacheId="7""#),
+        "{wbx}"
+    );
+    let wbrels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert!(wbrels.contains("pivotCacheDefinition1.xml"), "{wbrels}");
+    let sheet_rels = xml_of(&written, "xl/worksheets/_rels/sheet2.xml.rels");
+    assert!(sheet_rels.contains("pivotTable1.xml"), "{sheet_rels}");
+
+    // And our own reader gets the pivot back, not a block of cells.
+    let back = import_package(written).unwrap().workbook;
+    let read = &back.sheets[1].pivots;
+    assert_eq!(read.len(), 1, "the pivot comes back as a pivot");
+    assert_eq!(read[0].name, "Sales");
+    assert_eq!(read[0].rows[0].source_column, 0);
+    assert_eq!(read[0].values[0].aggregate, PivotAggregate::Sum);
+}

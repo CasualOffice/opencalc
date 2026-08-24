@@ -67,6 +67,20 @@ GATES = [
         ["cargo", "doc", "--workspace", "--all-features", "--no-deps"],
         {"RUSTDOCFLAGS": "-D warnings"},
     ),
+    (
+        # `fuzz/` is its own Cargo workspace, so `--workspace` above never
+        # reaches it and every gate here passed while a fuzz target no longer
+        # compiled. `FID-28` changed `transform`'s signature, the whole tree was
+        # green, and `fuzz-build` broke on `main` — the one consumer that lives
+        # outside the workspace was the one nothing local built.
+        #
+        # `check`, not `build`: the failure mode is a signature that no longer
+        # matches, and type-checking catches that in seconds where a sanitizer
+        # build takes minutes.
+        "fuzz targets",
+        ["cargo", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins"],
+        None,
+    ),
 ]
 
 # The oracle, which is not a compiler gate and belongs here anyway.
