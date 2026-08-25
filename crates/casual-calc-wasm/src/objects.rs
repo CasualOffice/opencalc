@@ -5,6 +5,56 @@
 
 use super::*;
 
+/// One chart's paint items, for the frame the canvas has already computed.
+///
+/// **The point of `RND-10`, made small enough to land.** The canvas painted
+/// charts from its own JavaScript — `drawPie`, `drawBarChart`, `drawLineChart`,
+/// `drawAxes`, `drawLegend` — while the PNG renderer painted the same charts
+/// from `casual_calc_layout::chart::push_chart`. Two implementations of one
+/// picture, so every fix had to be made twice and a divergence between them was
+/// invisible until somebody compared a screen to an export.
+///
+/// The frame comes *from* the caller rather than being derived here. A chart is
+/// anchored in cells, and the canvas already resolves that to pixels every
+/// frame — including the scroll offset, the frozen panes and the zoom. Deriving
+/// it a second time in here would be a second thing to keep in step, which is
+/// the exact fault this removes.
+#[wasm_bindgen]
+pub fn session_chart_items(
+    sheet: usize,
+    index: usize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<String, JsError> {
+    with_session(|s| {
+        let workbook = s.workbook();
+        let Some(chart) = workbook
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.charts.get(index))
+        else {
+            return Ok(String::from(r#"{"items":[]}"#));
+        };
+        let mut list = casual_calc_layout::DisplayList::new();
+        casual_calc_layout::chart::push_chart(
+            &mut list,
+            workbook,
+            sheet,
+            chart,
+            casual_calc_layout::Rect {
+                x: i64::from(x),
+                y: i64::from(y),
+                w: i64::from(w),
+                h: i64::from(h),
+            },
+        );
+        serde_json::to_string(&list).map_err(|why| JsError::new(&format!("chart items: {why}")))
+    })
+    .unwrap_or_else(|| Ok(String::from(r#"{"items":[]}"#)))
+}
+
 /// A chart's definition as the host edits it. Distinct from the payload
 /// `session_charts` returns, which carries *resolved values* for drawing.
 #[derive(serde::Serialize, serde::Deserialize)]
