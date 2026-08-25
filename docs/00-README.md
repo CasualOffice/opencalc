@@ -114,6 +114,7 @@ the other way around. This index is the map.
 | 76 | [Drawing charts in the headless renderer](76-CHART-RENDERING-BACKEND.md) | Why the plot backend already exists in the editor, and what `RND-11` actually needs |
 | 77 | [Keeping the coordinator available](77-COORDINATOR-AVAILABILITY.md) | `ADR-020`: Sentinel over Cluster mode, and what an asynchronous failover can still lose |
 | 80 | [Geometry in the display list](80-CHART-DISPLAY-LIST.md) | `ADR-021`: why a chart needs shapes the display list did not have, and what that costs every backend |
+| 81 | [Desktop shell composition](81-DESKTOP-SHELL-COMPOSITION.md) | `ADR-023`: why the Tauri app depends on the SDK directly, what a separate Cargo workspace costs, and the three decisions a running shell is still needed to settle |
 | 78 | [How the engine reaches the platform](78-HOST-CAPABILITY-SEAMS.md) | `ADR-019`: why the capability trait was never written, and why what grew instead is better |
 
 ### Measured gap trackers (50–53, 73)
