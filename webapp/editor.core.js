@@ -25,6 +25,7 @@ const BUILD =
 // The imports below are what this file still calls; the re-exports keep the
 // module's public surface — `window.opencalcEditor` is this namespace — exactly
 // what it was.
+import { paintList } from "./editor.paintlist.js";
 import {
   applyChart,
   chartAt,
@@ -196,10 +197,6 @@ import {
   cellFont,
   cellLineH,
   contrastInk,
-  drawAxes,
-  drawBarChart,
-  drawCategoryLabels,
-  drawChartFrame,
   drawChartSelection,
   drawCollaboratorDraft,
   drawCollaborators,
@@ -208,16 +205,12 @@ import {
   drawFreezeDividers,
   drawFreezeHandles,
   drawImages,
-  drawLegend,
-  drawLineChart,
-  drawPie,
   drawRuns,
   drawStretched,
   drawTraceArrows,
   fontStack,
   growthBefore,
   imageFor,
-  legendBox,
   measureRowHeight,
   neededRowHeight,
   paintRefTokens,
@@ -226,7 +219,6 @@ import {
   registerSuppliedFonts,
   runFont,
   runsWidth,
-  seriesColors,
   textY,
   tintColor,
   wrapLines,
@@ -556,10 +548,6 @@ export {
   cellFont,
   cellLineH,
   contrastInk,
-  drawAxes,
-  drawBarChart,
-  drawCategoryLabels,
-  drawChartFrame,
   drawChartSelection,
   drawCollaboratorDraft,
   drawCollaborators,
@@ -568,16 +556,12 @@ export {
   drawFreezeDividers,
   drawFreezeHandles,
   drawImages,
-  drawLegend,
-  drawLineChart,
-  drawPie,
   drawRuns,
   drawStretched,
   drawTraceArrows,
   fontStack,
   growthBefore,
   imageFor,
-  legendBox,
   measureRowHeight,
   neededRowHeight,
   paintRefTokens,
@@ -586,7 +570,6 @@ export {
   registerSuppliedFonts,
   runFont,
   runsWidth,
-  seriesColors,
   textY,
   tintColor,
   wrapLines,
@@ -982,7 +965,36 @@ function drawCharts(withQuad) {
     ctx.beginPath();
     ctx.rect(x0, y0, w, h);
     ctx.clip();
-    drawChartFrame(ch, x0, y0, w, h);
+    // From the engine's own display list, which is what the PNG renderer draws
+    // from too (`RND-10`). The frame is passed in rather than derived there: a
+    // chart is anchored in cells, and the scroll offset, the frozen panes and
+    // the zoom that turn those into pixels are all resolved here, every frame.
+    // Deriving them a second time inside the engine would be a second thing to
+    // keep in step, which is the fault this removes.
+    try {
+      // The frame goes in as **twips**, because that is the unit the layout
+      // works in — `PX = 15.0` there is 1440/96. Passing CSS pixels made every
+      // chart's plot area come out negative, so `push_chart` drew its frame and
+      // returned before a single bar: an empty box where a chart had been.
+      // `paintList` converts the items back on the way out.
+      const T = 1440 / 96;
+      paintList(
+        ctx,
+        JSON.parse(
+          wasm.session_chart_items(
+            state.sheet,
+            index,
+            Math.round(x0 * T),
+            Math.round(y0 * T),
+            Math.round(w * T),
+            Math.round(h * T),
+          ),
+        ),
+      );
+    } catch {
+      // A chart that cannot be laid out is a hole in the picture; it must not
+      // take the rest of the frame with it.
+    }
     ctx.restore();
   }
   drawChartSelection();
