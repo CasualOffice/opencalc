@@ -1,0 +1,32 @@
+# Separate cargo workspace, and the reason is in ADR-023: Tauri's dependency
+# tree is large, and every `cargo build --workspace` and `cargo clippy
+# --workspace` in CI would otherwise carry it.
+#
+# `CI-014` is the standing warning that comes with that choice. `fuzz/` is a
+# separate workspace too, a signature change broke it, every local gate passed,
+# and CI found it after the merge. `tools/check-rust.py` gates this workspace
+# from the day it exists rather than after it breaks once.
+[workspace]
+
+[package]
+name = "casual-calc-desktop"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+
+[dependencies]
+# The SDK directly, with nothing of ours between (ADR-023). `WorkbookSession`
+# is the public API by design; a `casual-calc-tauri` crate would be a wrapper
+# around a wrapper and somewhere for the two sides to drift.
+casual-calc-sdk = { path = "../crates/casual-calc-sdk" }
+casual-calc-layout = { path = "../crates/casual-calc-layout" }
+# For `Id`, which the SDK does not re-export. Naming the model directly is
+# smaller than widening the SDK's surface to suit one caller.
+casual-calc-model = { path = "../crates/casual-calc-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

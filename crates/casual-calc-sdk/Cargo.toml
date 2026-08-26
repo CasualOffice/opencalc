@@ -27,13 +27,16 @@ casual-calc-model = { path = "../casual-calc-model" }
 # The OpenDocument reader and writer, so a `.ods` a host holds can be opened
 # and saved back as one (`WOPI-07`). A peer of the OOXML path rather than a
 # layer under it: the two formats share the model and nothing else.
+# For `input_edit`: deciding whether typed text is a formula means parsing it
+# (`TAURI-002`). Already in the graph beneath `-transaction`, so this adds
+# nothing to the build — it only names what this crate now uses directly.
+casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-ods = { path = "../casual-calc-ods" }
 casual-calc-ooxml = { path = "../casual-calc-ooxml" }
 casual-calc-render = { path = "../casual-calc-render", default-features = false }
 casual-calc-transaction = { path = "../casual-calc-transaction" }
 
 [dev-dependencies]
-casual-calc-formula = { path = "../casual-calc-formula" }
 # To build a picture and to read the rendered one back. Already in the graph
 # under `casual-calc-render`, so this adds nothing to the workspace — a test
 # that asserts a picture reached the surface has to look at pixels, and the

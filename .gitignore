@@ -5,6 +5,9 @@ Cargo.lock.orig
 
 # Fuzzing artifacts (the fuzz Cargo.lock IS committed)
 /fuzz/target/
+# Its own workspace, so its own line: these patterns are anchored, and a nested
+# `target/` is not covered by the root one (ADR-023).
+/desktop/target/
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/

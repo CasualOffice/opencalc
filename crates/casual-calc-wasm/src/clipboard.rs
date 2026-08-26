@@ -454,7 +454,7 @@ pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<
             }
             for (dc, field) in line.split('\t').enumerate() {
                 let at = CellRef::new(row + dr as u32, col + dc as u32);
-                ops.push(build_set_op(session, sheet, at, field));
+                ops.push(session.input_edit(sheet, at, field));
             }
         }
         if ops.is_empty() {
@@ -591,7 +591,7 @@ pub fn session_paste_html(sheet: usize, row: u32, col: u32, cells: &str) -> Resu
 
         for c in &parsed {
             let at = CellRef::new(row.saturating_add(c.dr), col.saturating_add(c.dc));
-            ops.push(build_set_op(session, sheet, at, &c.text));
+            ops.push(session.input_edit(sheet, at, &c.text));
 
             // Styles are applied over whatever the target cell already had, the
             // same way `session_set_style` does: a paste carrying no opinion
