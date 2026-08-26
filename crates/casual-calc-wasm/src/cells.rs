@@ -155,7 +155,7 @@ pub fn session_replace_all(
         // frozen as text.
         let ops: Vec<EditOperation> = edits
             .into_iter()
-            .map(|(at, input)| build_set_op(session, sheet, at, &input))
+            .map(|(at, input)| session.input_edit(sheet, at, &input))
             .collect();
         if !ops.is_empty() {
             session.edit(EditOperation::Batch(ops)).map_err(js)?;
@@ -198,7 +198,7 @@ pub fn session_replace_at(
         } else {
             ci_replace(&input, find, replace)
         };
-        let op = build_set_op(session, sheet, at, &replaced);
+        let op = session.input_edit(sheet, at, &replaced);
         session.edit(op).map_err(js)?;
         Ok(true)
     })
@@ -439,7 +439,7 @@ pub fn session_set_cell(sheet: usize, row: u32, col: u32, input: &str) -> Result
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let op = build_set_op(session, sheet, CellRef::new(row, col), input);
+        let op = session.input_edit(sheet, CellRef::new(row, col), input);
         session.edit(op).map_err(js)
     })
 }

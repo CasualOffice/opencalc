@@ -9,6 +9,8 @@
 
 use casual_calc_eval::{Recalculated, Recalculator, recalculate, recalculate_cancellable};
 use casual_calc_export::{ExportError, write_workbook};
+use casual_calc_formula::parse;
+use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
@@ -434,6 +436,30 @@ pub struct WorkbookSession {
     views: PersonalViews,
 }
 
+/// Whether a number-format code renders everything as text — OOXML's `@`.
+///
+/// Moved with [`WorkbookSession::input_edit`] (`TAURI-002`): it is part of what
+/// typed text *means*, not part of any one host.
+///
+/// A format containing `;` has sections, and only one of them may be textual,
+/// so it is not a text format in the sense that matters here — that of whether
+/// an entry should be stored verbatim rather than parsed as a number.
+fn is_text_format(code: &str) -> bool {
+    let trimmed = code.trim();
+    !trimmed.is_empty() && !trimmed.contains(';') && trimmed.contains('@')
+}
+
+/// Whether an entry has a leading zero worth preserving — `007`, `0123`.
+///
+/// Parsed as a number these lose the zero, and the entry a person typed is not
+/// the one they get back. A single `0` is not this case, which is why a second
+/// digit is required.
+fn has_leading_zero(input: &str) -> bool {
+    let digits = input.strip_prefix(['+', '-']).unwrap_or(input);
+    let mut chars = digits.chars();
+    chars.next() == Some('0') && chars.next().is_some_and(|c| c.is_ascii_digit())
+}
+
 impl WorkbookSession {
     /// A new, empty session with the default configuration.
     pub fn blank() -> Self {
@@ -840,6 +866,171 @@ impl WorkbookSession {
     /// only the changed cells' transitive dependents (incremental); pure style
     /// or geometry edits skip recalc entirely; structural edits (insert/delete
     /// rows or columns), which shift references workbook-wide, do a full recalc.
+    /// What a cell would look like in the formula bar.
+    ///
+    /// The inverse of [`Self::input_edit`], and moved here for the same reason
+    /// (`TAURI-002`): together they are the contract for what typed text means,
+    /// and a contract with one half in a host and the other in the engine is one
+    /// a second host has to guess at. A formula reads back as `=…`; everything
+    /// else reads back as it would be typed, which is what makes Find & Replace
+    /// operate on something Replace can actually rewrite.
+    pub fn cell_input(&self, sheet: usize, at: CellRef) -> String {
+        let wb = self.workbook();
+        let Some(cell) = wb.sheets.get(sheet).and_then(|s| s.cells.get(at)) else {
+            return String::new();
+        };
+        if let Some(handle) = cell.formula
+            && let Some(expr) = wb.formula(handle)
+        {
+            // `print_at`, not `Display`. A formula is stored *relative* to the
+            // cell holding it (`PERF-11`), so printing it absolutely resolves
+            // every reference against A1 — `=A1*2` in B1 reads back as
+            // `=#REF!*2`, which is what the first version of this did.
+            return format!(
+                "={}",
+                casual_calc_formula::print_at(
+                    expr,
+                    casual_calc_formula::stored::Origin::at(at.row, at.col)
+                )
+            );
+        }
+        match &cell.value {
+            CellValue::Empty => String::new(),
+            CellValue::Number(n) => format!("{n}"),
+            CellValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
+            CellValue::Error(e) => e.to_string(),
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                wb.strings.get(*id).unwrap_or_default().to_owned()
+            }
+        }
+    }
+
+    /// The edit that typing `input` into a cell makes.
+    ///
+    /// **Moved here from the WebAssembly bridge (`TAURI-002`).** It was
+    /// `pub(crate)` in `casual-calc-wasm`, which meant the rule for what typed
+    /// text *means* — when it is a formula, when it is a number, when a leading
+    /// apostrophe forces text, which number format an entry implies — lived in
+    /// one host rather than in the engine. A second host could not type into a
+    /// cell without reimplementing all of it, and the first thing it would get
+    /// wrong is the part nobody remembers.
+    ///
+    /// Nothing about it was ever WebAssembly-specific; it takes a self and
+    /// returns an `Operation`, which is this crate's own vocabulary.
+    ///
+    /// It returns the operation rather than applying it, so a caller can put it
+    /// in a batch — a paste is many of these and one undo.
+    pub fn input_edit(&mut self, sheet: usize, at: CellRef, input: &str) -> Operation {
+        let trimmed = input.trim();
+        let existing_style = self
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cells.get(at))
+            .and_then(|c| c.style);
+
+        if trimmed.is_empty() {
+            return Operation::ClearCell { sheet, at };
+        }
+
+        // A leading apostrophe forces the rest to be text, however numeric it
+        // looks, and is not part of the value. The marker has to be recorded on the
+        // style (`quotePrefix`), not merely obeyed here: without it the cell saves
+        // as a plain string and Excel re-reads `0123` as the number 123 the next
+        // time the file is opened.
+        if let Some(body) = trimmed.strip_prefix('\'') {
+            let mut style = existing_style
+                .and_then(|id| self.workbook().styles.get(id))
+                .cloned()
+                .unwrap_or_default();
+            style.quote_prefix = true;
+            let style = self.workbook_mut().intern_style(style);
+            let text = self.workbook_mut().intern_string(body);
+            let mut cell = Cell::value(CellValue::InlineString(text));
+            cell.style = Some(style);
+            return Operation::SetCell {
+                sheet,
+                at,
+                cell: Some(cell),
+            };
+        }
+
+        if let Some(body) = trimmed.strip_prefix('=')
+            && let Ok(expr) = parse(body)
+        {
+            let handle = self
+                .workbook_mut()
+                .store_formula_at(expr, Origin::at(at.row, at.col));
+            let mut cell = Cell::value(CellValue::Empty);
+            cell.style = existing_style;
+            cell.formula = Some(handle);
+            return Operation::SetCell {
+                sheet,
+                at,
+                cell: Some(cell),
+            };
+        }
+
+        // A cell formatted as Text (`@`) keeps what was typed as text — that is the
+        // entire point of the format, and coercing "007" or "1-2" to a number here
+        // is a silent edit of what the user entered.
+        let text_formatted = existing_style
+            .and_then(|id| self.workbook().styles.get(id))
+            .and_then(|st| st.number_format.as_deref())
+            .is_some_and(is_text_format);
+        // An ISO date becomes a real date, keeping the same rules the importer uses
+        // so that typing a date and pasting one from a file agree. It brings its own
+        // format, since a bare serial displayed as a number is not what was typed.
+        if !text_formatted && let Some((serial, code)) = casual_calc_io::parse_iso_datetime(trimmed)
+        {
+            // An existing date format wins — someone who set dd/mm/yyyy on the
+            // column means it, and retyping a cell should not reset the column.
+            let keep = existing_style
+                .and_then(|id| self.workbook().styles.get(id))
+                .and_then(|st| st.number_format.as_deref())
+                .is_some_and(casual_calc_io::is_date_format);
+            let style = if keep {
+                existing_style
+            } else {
+                let mut style = existing_style
+                    .and_then(|id| self.workbook().styles.get(id))
+                    .cloned()
+                    .unwrap_or_default();
+                style.number_format = Some(code.to_owned());
+                Some(self.workbook_mut().intern_style(style))
+            };
+            let mut cell = Cell::value(CellValue::Number(serial));
+            cell.style = style;
+            return Operation::SetCell {
+                sheet,
+                at,
+                cell: Some(cell),
+            };
+        }
+
+        let value = match trimmed.parse::<f64>() {
+            // **`is_finite`, and the reason is a round trip rather than taste**
+            // (`WASM-02`). `f64::from_str` accepts `1e400` and answers `inf`, so
+            // typing it stored `Number(inf)`. There is no CSV spelling of infinity
+            // that reads back as a number — `casual_calc_io::type_field` requires
+            // finite, correctly — so the value left the editor as a number, was
+            // written as `inf`, and returned as **text**. A cell that changes kind
+            // by being saved.
+            //
+            // The model should not hold one at all: `inf` propagates through every
+            // arithmetic it touches, and `.xlsx` cannot spell it either.
+            //
+            // Kept as what was typed, which is what the reader does with anything
+            // it will not type as a number. The person sees their own text back
+            // rather than a number they did not write.
+            Ok(n) if n.is_finite() && !text_formatted && !has_leading_zero(trimmed) => {
+                CellValue::Number(n)
+            }
+            _ => CellValue::InlineString(self.workbook_mut().intern_string(trimmed)),
+        };
+        Operation::SetValue { sheet, at, value }
+    }
+
     pub fn edit(&mut self, op: Operation) -> Result<(), SdkError> {
         // Before anything else, and before the history records a step: a
         // refused edit must leave no trace, or undo has an entry that undoes

@@ -665,7 +665,7 @@ pub fn session_set_totals_function(
                 c.totals_row_label = None;
             }
         }
-        let cell_op = build_set_op(session, sheet, at, &text);
+        let cell_op = session.input_edit(sheet, at, &text);
         session
             .edit(EditOperation::Batch(vec![
                 EditOperation::set_sheet_metadata(sheet, data),
@@ -894,7 +894,7 @@ pub fn session_table_totals(sheet: usize, row: u32, col: u32, on: bool) -> Resul
         for c in first_col..=last_col {
             let at = CellRef::new(totals_row, c);
             let text = if on && c == first_col { "Total" } else { "" };
-            ops.push(build_set_op(session, sheet, at, text));
+            ops.push(session.input_edit(sheet, at, text));
         }
         session.edit(EditOperation::Batch(ops)).map_err(js)
     })

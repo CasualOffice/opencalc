@@ -81,6 +81,17 @@ GATES = [
         ["cargo", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins"],
         None,
     ),
+    (
+        # The desktop shell is its own workspace too, for the reason `ADR-023`
+        # gives: Tauri's tree is large and every `--workspace` build in CI would
+        # otherwise carry it. Gated from the day it exists rather than after it
+        # breaks once — `CI-014` is what happens when a separate workspace has
+        # no gate, and adding a second one without learning from the first would
+        # be the same mistake twice.
+        "desktop shell",
+        ["cargo", "test", "--manifest-path", "desktop/Cargo.toml"],
+        None,
+    ),
 ]
 
 # The oracle, which is not a compiler gate and belongs here anyway.
