@@ -109,3 +109,88 @@ test("Ctrl+PageDown and Ctrl+PageUp move between sheets", async ({ page }) => {
   await page.keyboard.press("Control+PageUp");
   await expect.poll(tab).toBe("Sheet1");
 });
+
+test("Ctrl+Shift+L toggles the filter, as Excel does", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    const rows = [["Region", "Rep", "Units"], ["North", "Ada", "7"], ["South", "Grace", "3"]];
+    rows.forEach((row, r) => row.forEach((v, c) => a.session_set_cell(0, r, c, v)));
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  // Extend with real keys rather than a helper: there is no extendForTest, and
+  // Shift+arrow is how a user makes this selection anyway.
+  for (let i = 0; i < 2; i += 1) await page.keyboard.press("Shift+ArrowDown");
+  for (let i = 0; i < 2; i += 1) await page.keyboard.press("Shift+ArrowRight");
+
+  // It returns a JSON *string*, so "no filter" arrives as the four characters
+  // `null` — truthy, and a straight truthiness check on it passes before the
+  // shortcut has done anything at all.
+  const filter = () =>
+    page.evaluate(() => JSON.parse(window.opencalcEditor.wasmApi().session_filter_info(0) || "null"));
+  const alignOfA1 = () =>
+    page.evaluate(() => {
+      const j = window.opencalcEditor.wasmApi().session_cell_format(0, 0, 0);
+      // `al`, not `align` — the bridge emits short keys.
+      return JSON.parse(j).al ?? "";
+    });
+
+  expect(await filter(), "no filter to begin with").toBeFalsy();
+
+  await page.keyboard.press("Control+Shift+L");
+
+  // Excel's Ctrl+Shift+L is Toggle Filter, and it is among the most-used
+  // chords in daily spreadsheet work. This chord used to left-align instead —
+  // borrowed from Word, where Ctrl+Shift+L is a list style. A shortcut that
+  // does something *else* in the app being migrated from is worse than one
+  // that is missing, because the finger memory is already wrong and the user
+  // gets a silent formatting change they did not ask for and may not notice.
+  await expect.poll(filter, { message: "Ctrl+Shift+L must create a filter" }).toBeTruthy();
+  expect(await alignOfA1(), "and must not quietly re-align the cells").not.toBe("left");
+
+  // It is a toggle: pressing it again takes the filter off.
+  await page.keyboard.press("Control+Shift+L");
+  await expect.poll(filter).toBeFalsy();
+});
+
+test("Ctrl+H opens replace and puts the caret in the replacement field", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "widget");
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+
+  // Everything replace needs already exists — #replace-input, #replace-all,
+  // session_replace_all — and Ctrl+H, the only chord an Excel user will try,
+  // reached none of it. Find had Ctrl+F; replace had the same bar and no key.
+  await page.keyboard.press("Control+h");
+
+  await expect(page.locator("#find-bar")).toBeVisible();
+  // Not merely open: Excel's Ctrl+H lands the caret in "Replace with", which is
+  // the difference between the shortcut working and the user retyping a search
+  // term into the wrong box.
+  await expect(page.locator("#replace-input")).toBeFocused();
+});
+
+test("Ctrl+Enter puts the entry in every selected cell", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    // A column to reference, so the formula case proves references adjust.
+    [10, 20, 30].forEach((v, r) => a.session_set_cell(0, r, 0, String(v)));
+    window.opencalcEditor.selectForTest(0, 1);
+  });
+  for (let i = 0; i < 2; i += 1) await page.keyboard.press("Shift+ArrowDown");
+
+  await page.keyboard.type("=A1*2");
+  await page.keyboard.press("Control+Enter");
+
+  // Excel's Ctrl+Enter fills the selection, and relative references adjust per
+  // row exactly as a fill would — B2 must be =A2*2, not a copy of =A1*2.
+  const inputs = () =>
+    page.evaluate(() => {
+      const a = window.opencalcEditor.wasmApi();
+      return [0, 1, 2].map((r) => a.session_cell_input(0, r, 1));
+    });
+  await expect.poll(inputs).toEqual(["=A1*2", "=A2*2", "=A3*2"]);
+});
