@@ -125,6 +125,39 @@ introduces threads there is a second difference and still nothing forcing the
 two to agree, which is why the pending ADR has to be Accepted before, not
 alongside, `TAURI-001`.
 
+## What the webview actually asks for
+
+Measured rather than estimated, because the number changes what the remaining
+work is. The browser editor makes **229 distinct engine calls** — 101 that
+mutate (`set_*`, `insert_*`, `toggle_*`, `paste_*`, undo, redo) and about 129
+that query. Not a display list and a handful of intents: a full application API.
+
+That does not contradict *the UI shell renders a display list* — drawing really
+does go through one call now (`RND-10`). It qualifies it. **Drawing is one call;
+being an editor is 229.** Everything a toolbar, a dialog, a context menu and a
+keyboard shortcut does is in that count.
+
+So the desktop shell has three honest options, and they are not close in cost:
+
+1. **Bundle the WebAssembly build in the webview.** Reuses the editor unchanged
+   and every one of the 229 calls keeps working — at the price of the desktop
+   app calculating in WebAssembly, which is the one thing
+   [ADR-023](08-ADR-REGISTER.md) and this document exist to avoid.
+2. **Reimplement all 229 as Tauri commands.** Native calc, and a second surface
+   the size of `casual-calc-wasm` to keep in step with the first. `TAURI-002`
+   is the evidence for what that costs: one 113-line function living in one
+   host was enough for a second host to be unable to type into a cell.
+3. **Make the editor's engine handle swappable** — one binding, either the wasm
+   module or a Tauri command bridge — so the 229 calls are written once and
+   dispatched twice. The editor already funnels everything through a single
+   `wasm` binding and a `wasmApi()` accessor, so the shape is there; what is
+   not there is any guarantee that the two implementations answer alike.
+
+The third is the only one that keeps native calc *and* one editor, and it is
+the one whose risk is not visible from a diagram: two implementations of 229
+calls that must agree. That is a decision with a real cost either way, and it is
+`TAURI-003` rather than something to settle in passing.
+
 ## Command surface (illustrative)
 
 Tauri commands wrap `casual-calc-sdk` calls; results/events flow back to the
