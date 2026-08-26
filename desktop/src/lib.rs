@@ -65,27 +65,15 @@ impl Desktop {
             .map_err(|why| ShellError::Open(why.to_string()))
     }
 
-    /// An empty workbook, for a new window.
+    /// A new window's workbook: one empty sheet.
     ///
-    /// **With a sheet in it.** `WorkbookSession::blank()` returns a workbook of
-    /// *no* sheets, and the browser's `session_new` pushes a `Sheet1` straight
-    /// afterwards — so "a new workbook has one sheet, and it is called Sheet1"
-    /// is a rule every host currently rediscovers, and a host that forgets it
-    /// gets a window with nothing to draw.
-    ///
-    /// Mirrored here rather than fixed in `blank()`, because changing what a
-    /// published constructor returns would change it for every existing caller.
-    /// It is filed as `SDK-011` instead.
+    /// `with_sheet`, not `blank` plus a sheet added here. The engine now knows
+    /// that an interactive host wants a sheet to open on, so this host does not
+    /// have to (`SDK-011`).
     pub fn blank() -> Self {
-        let mut session = WorkbookSession::blank();
-        session
-            .workbook_mut()
-            .sheets
-            .push(casual_calc_model::Sheet::new(
-                casual_calc_model::SheetId(casual_calc_model::Id::from_parts(0x5344, 1)),
-                "Sheet1",
-            ));
-        Self { session }
+        Self {
+            session: WorkbookSession::with_sheet(),
+        }
     }
 
     /// What to paint for `viewport`, as JSON.
