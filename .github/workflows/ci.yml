@@ -5,9 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# A pull-request run is superseded the moment its branch moves, so cancelling it
+# saves real time and throws away nothing. A push to main is the opposite: that
+# run *is* the record of whether main is releasable, there is one per merge, and
+# cancelling it destroys the only evidence while saving almost nothing. Nineteen
+# of forty consecutive main runs were cancelled this way, which is why `ci` on
+# main was a coin flip rather than a signal. Asserted by check-workflow-concurrency.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -342,6 +348,13 @@ jobs:
       # The warm-up absorbs that; this asserts no cargo job is added without it.
       - name: Every cargo job warms the registry with retries
         run: python3 tools/check-ci-retry.py
+      # The sibling of the rule above, for the failure that looks like success.
+      # Nineteen of forty consecutive main runs were `cancelled`, so "is main
+      # green?" had no answer half the time -- not because anything broke, but
+      # because `cancel-in-progress` treated a push to main like a superseded
+      # branch. This asserts the run that is the record survives.
+      - name: A workflow that gates main keeps its run on main
+        run: python3 tools/check-workflow-concurrency.py
       # DOC-025's acceptance is "no doc claims a gate CI does not run", and for
       # a long time nothing enforced it -- docs/67 stated DOC-025's own gate as
       # a documentation consistency check that had never been written, so the
