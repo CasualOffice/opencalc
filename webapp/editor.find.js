@@ -55,6 +55,17 @@ export function navTarget() {
 
 export function openFind() { findBar.hidden = false; findInput.focus(); findInput.select(); runFind(); }
 
+// Excel's Ctrl+H. The same bar as Find, but the caret starts in "Replace with"
+// — the whole point of the separate chord is that the user already knows what
+// they are searching for and is thinking about what it becomes. Opening Find
+// and making them Tab across is the shortcut not working.
+export function openReplace() {
+  findBar.hidden = false;
+  replaceInput.focus();
+  replaceInput.select();
+  if (findInput.value) runFind();
+}
+
 export function closeFind() { findBar.hidden = true; canvas.focus(); }
 
 export function runFind() {

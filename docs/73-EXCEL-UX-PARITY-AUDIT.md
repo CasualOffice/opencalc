@@ -157,12 +157,20 @@ Which is the common case — you do not pre-select a block.
 
 Grouped, since these move together:
 
-**Keyboard.** Alt+PageDown/PageUp horizontal paging is nested inside the Ctrl
-branch and so is only reachable as Ctrl+Alt+PageDown, while plain Alt+PageDown
-pages the *wrong axis*. Shift+Enter while editing moves down where Excel moves
-up. **Ctrl+Enter** — fill the selection with the entry — is missing entirely.
-Ctrl+H does not open Replace. Ctrl+Shift+L left-aligns instead of toggling the
-filter, so Excel finger-memory silently reformats the selection.
+**Keyboard.** ~~Closed by `UX-KEY-02`.~~ Of the five defects recorded here,
+three were real and are fixed: **Ctrl+Enter** now fills the selection with the
+entry (through `session_fill`, so relative references adjust and it is one undo
+step), **Ctrl+H** opens Replace with the caret in the replacement field, and
+**Ctrl+Shift+L** toggles the filter instead of left-aligning.
+
+The other two were already stale when this audit was written, and are recorded
+as such rather than deleted, because a fixed-looking claim and a never-true one
+are worth telling apart. Alt+PageDown/PageUp is **not** nested in the Ctrl
+branch — it is handled at `editor.core.js:5930`, ahead of `if (mod)` on 5940.
+Shift+Enter moves **up**, which is Excel's behaviour: `enterStep(back)` passes
+`back ? -1 : 1` to `stepFrom`. Every one of the five is now covered by
+`editor.excel-shortcuts.spec.mjs`, so the next reader gets a red test rather
+than a paragraph to re-verify by hand.
 
 **Selection.** Go To with a range leaves the active cell at the *bottom-right*,
 so the view scrolls to the wrong corner and the first thing typed lands there.

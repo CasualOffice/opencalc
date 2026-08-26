@@ -91,6 +91,7 @@ import {
   gotoName,
   navTarget,
   openFind,
+  openReplace,
   parseA1Cell,
   parseNameRange,
   replaceAll,
@@ -286,6 +287,7 @@ import {
   clearSelection,
   commandId,
   commit,
+  commitToSelection,
   ctrlA,
   currentFnToken,
   currentTable,
@@ -443,6 +445,7 @@ export {
   gotoName,
   navTarget,
   openFind,
+  openReplace,
   parseA1Cell,
   parseNameRange,
   replaceAll,
@@ -638,6 +641,7 @@ export {
   clearSelection,
   commandId,
   commit,
+  commitToSelection,
   ctrlA,
   currentFnToken,
   currentTable,
@@ -6030,12 +6034,28 @@ function wireEvents() {
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
       if (e.shiftKey && (k === "7" || k === "&")) { toggleBorder(); e.preventDefault(); return; }
-      if (e.shiftKey && (k === "l" || k === "e" || k === "r")) {
-        setAlign(k === "l" ? "left" : k === "e" ? "center" : "right"); e.preventDefault(); return;
+      // Excel's Ctrl+Shift+L is Toggle Filter, and it is among the most-used
+      // chords in daily spreadsheet work. It used to left-align here, borrowed
+      // from Word — so the one key an Excel user hits without thinking made a
+      // silent formatting change and no filter. The rule this repository
+      // already states for Ctrl+9/0 applies with more force: a shortcut that
+      // does something *else* in the app being migrated from is worse than one
+      // that is missing, because the finger memory is already wrong.
+      if (e.shiftKey && k === "l") { toggleFilter(); e.preventDefault(); return; }
+      // Centre and right keep theirs: neither chord means anything in Excel, so
+      // neither can contradict it. Left-align has no chord rather than a made-up
+      // one — it is a toolbar button, and inventing a key to restore symmetry
+      // would be inventing exactly the problem above.
+      if (e.shiftKey && (k === "e" || k === "r")) {
+        setAlign(k === "e" ? "center" : "right"); e.preventDefault(); return;
       }
       if (e.key === " ") { if (e.shiftKey) ctrlA(); else selectColsSpan(); e.preventDefault(); return; } // Ctrl+Space cols; Ctrl+Shift+Space all
       if (k === "a") { ctrlA(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
+      // Ctrl+H is Excel's Replace. Every piece of it already existed —
+      // #replace-input, #replace-all, session_replace_all — reachable only
+      // by opening Find and tabbing across, which is not the shortcut.
+      if (k === "h") { openReplace(); e.preventDefault(); return; }
       if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
       if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
       if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
@@ -6214,6 +6234,8 @@ function wireEvents() {
         mirrorEdit();
         positionInline();
       }
+      // Ctrl+Enter fills the whole selection with the entry, as in Excel.
+      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { commitToSelection(surface.value); e.preventDefault(); }
       else if (e.key === "Enter") { commit(surface.value, true); e.preventDefault(); }
       else if (e.key === "Escape") { cancelEdit(); e.preventDefault(); }
       // Excel's "enter mode": while *typing a fresh value*, an arrow commits and

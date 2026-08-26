@@ -236,6 +236,35 @@ export function addRowRange(r) {
   draw();
 }
 
+// Excel's Ctrl+Enter: the entry lands in every selected cell at once, and the
+// selection survives it. Relative references adjust per cell exactly as a fill
+// would — typing `=A1*2` across B1:B3 gives `=A2*2` in B2, not three copies of
+// the first — which is why this goes through `session_fill` rather than writing
+// the same text N times. One engine call is also one undo step: N writes would
+// need N presses of Ctrl+Z to take back a single gesture.
+//
+// It routes through `commit` first so the entry meets the same validation rule
+// and formula guard as any other typed value. A refused entry fills nothing.
+export function commitToSelection(value) {
+  const r = effectiveRange();
+  // Captured before committing, because commit moves the selection and the
+  // block being filled is the one that was selected when the user pressed.
+  const anchor = { ...state.anchor };
+  const sel = { ...state.sel };
+  if (!commit(value, false)) return false;
+  if (r.r0 === r.r1 && r.c0 === r.c1) return true;
+  try {
+    // Source is the cell just written; it sits inside the destination, which is
+    // safe because the engine resolves every source before it writes anything.
+    wasm.session_fill(state.sheet, sel.row, sel.col, sel.row, sel.col, r.r0, r.c0, r.r1, r.c1);
+    state.anchor = anchor;
+    state.sel = sel;
+    status.textContent = `filled ${(r.r1 - r.r0 + 1) * (r.c1 - r.c0 + 1)} cells`;
+  } catch (e) { statusError(errText(e)); }
+  draw();
+  return true;
+}
+
 export function commit(value, advance, source = "user") {
   // Cancellable before it is written, and told who is writing. A host without
   // either cannot enforce its own permissions, and cannot tell its own
