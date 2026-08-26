@@ -1451,3 +1451,19 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 .menubar > *,
 .toolbar > * { flex: 0 0 auto; }
 .toolbar { min-width: 0; }
+
+/* ── Document properties ─────────────────────────────────────────────────────
+   A form and a fact list, deliberately different in weight: the top half is
+   yours to write and the bottom half is what the file says about itself, and a
+   reader has to be able to tell which is which without reading the labels. */
+.oc-props { display: grid; gap: 10px; margin-bottom: 18px; }
+.oc-props-row { display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 12px; }
+.oc-props-label { color: var(--oc-muted-text-color); font-size: 13px; }
+.oc-props .oc-input { width: 100%; }
+/* The file's own account, set apart by a rule rather than by a heading: it is a
+   different kind of thing, not a different section. */
+.oc-props-facts {
+  display: grid; gap: 8px; padding-top: 14px; margin-bottom: 18px;
+  border-top: 1px solid var(--oc-border-color);
+}
+.oc-props-fact { font-size: 13px; color: var(--oc-text-color); font-variant-numeric: tabular-nums; }

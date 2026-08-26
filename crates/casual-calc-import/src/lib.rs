@@ -44,6 +44,60 @@ fn parse_formula(text: &str) -> Result<Expr, FormulaError> {
     strip_bound_name_prefixes(&mut expr);
     Ok(expr)
 }
+
+/// Read `docProps/core.xml` into the workbook's document properties.
+///
+/// Deliberately forgiving. A `core.xml` that will not parse is a workbook whose
+/// author is unknown, not a workbook that cannot be opened — refusing a
+/// spreadsheet over its metadata would be a far worse answer, and the bytes are
+/// retained either way so nothing is lost from the file.
+///
+/// Only elements this model holds are read; the rest stay in the retained part.
+fn read_core_properties(bytes: &[u8], into: &mut casual_calc_model::DocumentProperties) {
+    use crate::read::text_of;
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut field: Option<String> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(e)) => {
+                field = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned());
+            }
+            Ok(quick_xml::events::Event::Text(e)) => {
+                let Some(name) = field.as_deref() else {
+                    continue;
+                };
+                let Ok(text) = text_of(&e) else { continue };
+                // Matched on the local name, because a producer may bind these
+                // namespaces to any prefix it likes.
+                match name.rsplit(':').next().unwrap_or(name) {
+                    "title" => into.title = text,
+                    "subject" => into.subject = text,
+                    "description" => into.description = text,
+                    "creator" => into.creator = text,
+                    "lastModifiedBy" => into.last_modified_by = text,
+                    "created" => into.created = text,
+                    "modified" => into.modified = text,
+                    "language" => into.language = text,
+                    "keywords" => {
+                        into.keywords = text
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|k| !k.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::End(_)) => field = None,
+            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
 use casual_calc_model::{
     AutoFilter, Cell, CellComment, CellRef, CellValue, CfRule, CommentReply, ConditionalFormat,
     CustomFilter, DataValidation, DefinedName, DvKind, DvOperator, ErrorValue, FilterOp,
@@ -279,6 +333,25 @@ fn retain_unmodelled(
                 continue;
             }
             let bytes = package.read_part(&target)?;
+            // `docProps/core.xml` is *also* read into the model, not only kept
+            // as bytes.
+            //
+            // Retention alone was what this did, and it is why a workbook's
+            // author and title were invisible to every host: the file carried
+            // them, the writer handed the same bytes back, and nothing in
+            // between could read one. `casual-calc-ods` had parsed the
+            // equivalent `meta.xml` since `ODS-03`, so the two formats
+            // disagreed about whether a document knows its own name
+            // (`UX-META-01`).
+            //
+            // The bytes are still retained. A `core.xml` carries producer
+            // extensions this model does not hold, and dropping them to keep
+            // only the nine fields it does would lose what retention exists to
+            // protect — the writer prefers its generated copy only when the
+            // model has something to say.
+            if target.eq_ignore_ascii_case("docProps/core.xml") {
+                read_core_properties(&bytes, &mut workbook.properties);
+            }
             workbook.retained_parts.push(RetainedPart {
                 // Carried from the file, never inferred from the extension:
                 // `.bin` is printer settings in one workbook and an OLE object

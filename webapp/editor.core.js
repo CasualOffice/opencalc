@@ -46,6 +46,7 @@ import {
 } from "./editor.clipboard.js";
 import {
   buildCfPanel,
+  documentPropertiesDialog,
   buildColorMenu,
   buildDvPanel,
   buildPagePanel,
@@ -397,6 +398,7 @@ export {
 } from "./editor.clipboard.js";
 export {
   buildCfPanel,
+  documentPropertiesDialog,
   buildColorMenu,
   buildDvPanel,
   buildPagePanel,
@@ -6829,6 +6831,10 @@ function wireEvents() {
           tryEdit(() => wasm.session_toggle_page_break(state.sheet, rowAt, colAt));
         }],
         ["Print…", () => printSheet(), "Ctrl+P"],
+        "sep",
+        // Where every spreadsheet puts it, and where somebody looking for "who
+        // wrote this" will look first (`UX-META-01`).
+        ["Properties…", () => documentPropertiesDialog()],
       ]],
       ["Edit", [
         ["Undo", doUndo, "Ctrl+Z"],
