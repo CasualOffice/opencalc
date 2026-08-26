@@ -5,6 +5,75 @@
 
 use super::*;
 
+/// The workbook's document properties, as JSON.
+///
+/// **Modelled, imported, exported — and unreachable.** `DocumentProperties`
+/// carries nine fields, `docProps/core.xml` round-trips them faithfully, and no
+/// binding existed to read one. So a workbook opened here kept its title and
+/// author perfectly while the person editing it could not see either, and a
+/// workbook created here went out with none (`UX-META-01`).
+///
+/// Dates are ISO 8601 strings exactly as the file carries them; they are not
+/// reformatted for display here, because a host that wants a local format needs
+/// the instant, not somebody else's rendering of it.
+#[wasm_bindgen]
+pub fn session_doc_properties() -> String {
+    with_session(|s| {
+        let p = &s.workbook().properties;
+        format!(
+            "{{\"title\":{},\"subject\":{},\"description\":{},\"keywords\":{},\
+\"creator\":{},\"lastModifiedBy\":{},\"created\":{},\"modified\":{},\"language\":{}}}",
+            json_string(&p.title),
+            json_string(&p.subject),
+            json_string(&p.description),
+            json_string(&p.keywords.join(", ")),
+            json_string(&p.creator),
+            json_string(&p.last_modified_by),
+            json_string(&p.created),
+            json_string(&p.modified),
+            json_string(&p.language),
+        )
+    })
+    .unwrap_or_else(|| "{}".to_owned())
+}
+
+/// Set the editable document properties.
+///
+/// Only the five a person can meaningfully author: `created` and `modified` are
+/// the file's own history, `lastModifiedBy` is set by whoever saves, and
+/// language belongs to the content. Offering those as text boxes would invite
+/// somebody to write a false history into a document, which is worse than not
+/// offering them.
+///
+/// Keywords arrive as one comma-separated string because that is how every
+/// spreadsheet asks for them, and are split here so the model keeps the list it
+/// is documented to keep.
+#[wasm_bindgen]
+pub fn session_set_doc_properties(
+    title: &str,
+    subject: &str,
+    description: &str,
+    keywords: &str,
+    creator: &str,
+) -> Result<(), JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let p = &mut session.workbook_mut().properties;
+        p.title = title.trim().to_owned();
+        p.subject = subject.trim().to_owned();
+        p.description = description.trim().to_owned();
+        p.keywords = keywords
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_owned)
+            .collect();
+        p.creator = creator.trim().to_owned();
+        Ok(())
+    })
+}
+
 /// Admit a package under whatever time budget is in force.
 ///
 /// The stateless helpers below share this so that "the landing page can be

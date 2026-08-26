@@ -2177,3 +2177,110 @@ export function headerMenu(axis, x, y) {
 export function openColumnFilterForTest(col) {
   openColumnFilter(col, 100, 100);
 }
+
+/// File → Properties: what the document says about itself.
+///
+/// `DocumentProperties` has been in the model, imported from `docProps/core.xml`
+/// and written back to it, since long before this dialog existed — nine fields
+/// round-tripping faithfully with no way for the person editing the file to see
+/// one of them. A workbook opened here kept its title and author perfectly and
+/// showed neither; one created here went out with none (`UX-META-01`).
+///
+/// Five fields are editable and four are shown read-only. `created`, `modified`
+/// and `lastModifiedBy` are the file's own history rather than opinions about
+/// it, and offering them as text boxes would invite writing a false history into
+/// a document. `language` belongs to the content.
+///
+/// The read-only half is shown rather than hidden because that is the half an
+/// enterprise reader actually came for: who touched this, and when.
+export function documentPropertiesDialog() {
+  let props = {};
+  try {
+    props = JSON.parse(wasm.session_doc_properties());
+  } catch {
+    statusError("could not read the document properties");
+    return;
+  }
+
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Document properties";
+  body.textContent = "";
+
+  const form = el("div", "oc-props");
+  const fields = [];
+  const field = (key, label, hint) => {
+    const wrap = el("label", "oc-props-row");
+    wrap.append(el("span", "oc-props-label", label));
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "oc-input";
+    input.value = props[key] ?? "";
+    if (hint) input.placeholder = hint;
+    wrap.append(input);
+    form.append(wrap);
+    fields.push([key, input]);
+    return input;
+  };
+
+  const first = field("title", "Title");
+  field("subject", "Subject");
+  field("description", "Description");
+  field("keywords", "Keywords", "comma separated");
+  field("creator", "Author");
+
+  // The file's own account of itself. Empty is stated rather than left blank:
+  // "—" says the file carries nothing, where a gap looks like a bug.
+  const facts = el("div", "oc-props-facts");
+  for (const [label, value] of [
+    ["Created", props.created],
+    ["Modified", props.modified],
+    ["Last saved by", props.lastModifiedBy],
+    ["Language", props.language],
+  ]) {
+    const row = el("div", "oc-props-row");
+    row.append(el("span", "oc-props-label", label));
+    row.append(el("span", "oc-props-fact", value && value.trim() ? value : "—"));
+    facts.append(row);
+  }
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const save = el("button", "oc-btn primary", "Save");
+  actions.append(cancel, save);
+  body.append(form, facts, actions);
+  modal.hidden = false;
+
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", close);
+    modal.removeEventListener("click", onBackdrop);
+    canvas.focus();
+  };
+  const commitProps = () => {
+    const v = Object.fromEntries(fields.map(([k, i]) => [k, i.value]));
+    try {
+      wasm.session_set_doc_properties(v.title, v.subject, v.description, v.keywords, v.creator);
+      status.textContent = "properties saved";
+    } catch (e) {
+      statusError(errText(e));
+    }
+    close();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); }
+    // Enter saves from any field, which is what a form this small should do.
+    else if (e.key === "Enter") { e.stopPropagation(); commitProps(); }
+  };
+  const onBackdrop = (e) => { if (e.target === modal) close(); };
+  document.addEventListener("keydown", onKey, true);
+  x.addEventListener("click", close);
+  modal.addEventListener("click", onBackdrop);
+  cancel.addEventListener("click", close);
+  save.addEventListener("click", commitProps);
+  first.focus();
+  first.select();
+}

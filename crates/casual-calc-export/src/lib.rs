@@ -216,6 +216,15 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
         parts.push(("xl/persons/person1.xml".to_owned(), persons_xml(workbook)));
     }
 
+    // Written from the model, and *generated* so it wins over a retained copy at
+    // the same path — the mechanism `FID-27` used for an edited chart's part.
+    if has_core_properties(workbook) {
+        parts.push((
+            "docProps/core.xml".to_owned(),
+            core_properties_part(workbook),
+        ));
+    }
+
     for built in &pivot_builds {
         parts.extend(built.parts.iter().cloned());
         parts.extend(built.rels.iter().cloned());
@@ -390,6 +399,11 @@ fn content_types(
     // the package.
     // Both new part kinds need an override: a package with an undeclared part
     // opens as damaged rather than as a workbook without a pivot.
+    if has_core_properties(workbook) {
+        s.push_str(
+            "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
+        );
+    }
     for built in pivots {
         for (path, _) in &built.parts {
             let ct = if path.contains("pivotCacheDefinition") {
@@ -950,6 +964,159 @@ fn any_threaded(workbook: &Workbook) -> bool {
 /// their parts in the zip with nothing pointing at them — which Excel reports as
 /// a package needing repair, and which loses the author, the title and the
 /// company on the read after that.
+/// `docProps/core.xml` written from the model.
+///
+/// **The reader parsed these and the writer never emitted them.** `docProps` was
+/// handled only as a *retained* part — carried through from an imported file
+/// byte for byte — so a workbook created here went out with no properties at
+/// all, and one whose title was edited here saved the title it arrived with.
+/// The dialog that edits them would have been a lie about what was stored
+/// (`UX-META-01`).
+///
+/// Emitted as a **generated** part, which the writer already prefers over a
+/// retained one at the same path — the same mechanism `FID-27` used to make an
+/// edited chart's shifted series reach the file. So an untouched workbook still
+/// round-trips its original bytes, and an edited one saves what it now says.
+///
+/// `modified` is stamped by the caller rather than read from a clock here: two
+/// builds of the same workbook must produce the same bytes, which is the
+/// property the whole writer is built on.
+fn core_properties_xml(workbook: &Workbook) -> String {
+    let p = &workbook.properties;
+    let mut s = String::from(DECL);
+    s.push_str(
+        "<cp:coreProperties \
+xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+xmlns:dcterms=\"http://purl.org/dc/terms/\" \
+xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">",
+    );
+    // Only what the model holds. An empty element is not the same as an absent
+    // one to every reader, and writing `<dc:title/>` for a workbook that has no
+    // title asserts that it has an empty one.
+    let put = |s: &mut String, tag: &str, value: &str| {
+        if !value.trim().is_empty() {
+            s.push_str(&format!("<{tag}>{}</{tag}>", escape_text(value)));
+        }
+    };
+    put(&mut s, "dc:title", &p.title);
+    put(&mut s, "dc:subject", &p.subject);
+    put(&mut s, "dc:creator", &p.creator);
+    if !p.keywords.is_empty() {
+        put(&mut s, "cp:keywords", &p.keywords.join(", "));
+    }
+    put(&mut s, "dc:description", &p.description);
+    put(&mut s, "cp:lastModifiedBy", &p.last_modified_by);
+    put(&mut s, "dc:language", &p.language);
+    // The two dates carry the `xsi:type` the schema requires; without it Excel
+    // reads them as text and shows nothing in its own properties pane.
+    for (tag, value) in [
+        ("dcterms:created", &p.created),
+        ("dcterms:modified", &p.modified),
+    ] {
+        if !value.trim().is_empty() {
+            s.push_str(&format!(
+                "<{tag} xsi:type=\"dcterms:W3CDTF\">{}</{tag}>",
+                escape_text(value)
+            ));
+        }
+    }
+    s.push_str("</cp:coreProperties>");
+    s
+}
+
+/// Whether the model holds any document property at all.
+///
+/// A workbook with none gets no part, so a file that never had properties does
+/// not gain an empty one — a difference in the bytes for no change in meaning.
+fn has_core_properties(workbook: &Workbook) -> bool {
+    let p = &workbook.properties;
+    !(p.title.is_empty()
+        && p.subject.is_empty()
+        && p.description.is_empty()
+        && p.keywords.is_empty()
+        && p.creator.is_empty()
+        && p.last_modified_by.is_empty()
+        && p.created.is_empty()
+        && p.modified.is_empty()
+        && p.language.is_empty())
+}
+
+/// The `docProps/core.xml` to write: the retained one with the model's values
+/// put back into it, or a fresh one when the file had none.
+///
+/// **Not a wholesale replacement**, which is what the first version did and what
+/// `parts_attached_at_the_package_root_survive_a_save` caught. A generated part
+/// wins over a retained one at the same path, so writing ours unconditionally
+/// swapped an imported file's metadata part for a reduction of it — `core.xml`
+/// carries producer extensions this model does not hold, and they went every
+/// time an untouched workbook was saved.
+///
+/// So the retained bytes are edited in place: each element the model holds has
+/// its text replaced, everything else survives untouched, and a workbook nobody
+/// edited produces the bytes it arrived with. That is `FID-27`'s rule and its
+/// method — the same surgical treatment a retained chart part gets.
+fn core_properties_part(workbook: &Workbook) -> String {
+    let retained = workbook
+        .retained_parts
+        .iter()
+        .find(|r| r.path.eq_ignore_ascii_case("docProps/core.xml"))
+        .and_then(|r| String::from_utf8(r.bytes.clone()).ok());
+    let Some(existing) = retained else {
+        return core_properties_xml(workbook);
+    };
+    let p = &workbook.properties;
+    let mut out = existing;
+    for (tag, value) in [
+        ("dc:title", p.title.clone()),
+        ("dc:subject", p.subject.clone()),
+        ("dc:description", p.description.clone()),
+        ("dc:creator", p.creator.clone()),
+        ("cp:lastModifiedBy", p.last_modified_by.clone()),
+        ("dc:language", p.language.clone()),
+        ("cp:keywords", p.keywords.join(", ")),
+    ] {
+        out = put_element(&out, tag, &value);
+    }
+    out
+}
+
+/// Replace one element's text, add it before the closing tag if it is absent,
+/// or remove it when the model has cleared it.
+///
+/// Prefix-agnostic on the local name, for the reason `FID-31` records: matching
+/// `title` as a prefix would also match a longer name, and OOXML orders these
+/// however the producer liked.
+fn put_element(xml: &str, qname: &str, value: &str) -> String {
+    let local = qname.rsplit(':').next().unwrap_or(qname);
+    let open = format!("<{qname}>");
+    let close = format!("</{qname}>");
+    if let (Some(a), Some(b)) = (xml.find(&open), xml.find(&close))
+        && a < b
+    {
+        let (head, tail) = (&xml[..a], &xml[b + close.len()..]);
+        if value.trim().is_empty() {
+            return format!("{head}{tail}");
+        }
+        return format!("{head}{open}{}{close}{tail}", escape_text(value));
+    }
+    if value.trim().is_empty() {
+        return xml.to_owned();
+    }
+    // Absent: insert before the root's closing tag, which is the only place a
+    // child of `coreProperties` can legally go.
+    let _ = local;
+    match xml.rfind("</cp:coreProperties>") {
+        Some(at) => format!(
+            "{}{open}{}{close}{}",
+            &xml[..at],
+            escape_text(value),
+            &xml[at..]
+        ),
+        None => xml.to_owned(),
+    }
+}
+
 fn root_rels(workbook: &Workbook) -> String {
     let retained = workbook_rels_for(&workbook.retained_rels, "");
     // Nothing numbers the root relationships, so a producer is free to have
@@ -964,8 +1131,23 @@ fn root_rels(workbook: &Workbook) -> String {
     // Ids travel verbatim for the same reason they do everywhere else: the
     // relationship is re-emitted, not re-minted, so anything naming it still
     // names the same part.
-    for rel in retained {
+    for rel in &retained {
         s.push_str(&retained_rel_xml(rel));
+    }
+    // Our own `docProps/core.xml`, when we are writing one and the file did not
+    // arrive with a relationship for it already. Two relationships to one target
+    // is a package Excel repairs.
+    if has_core_properties(workbook) && !retained.iter().any(|r| r.target.contains("core.xml")) {
+        let id = RelIdMinter::avoiding(
+            retained
+                .iter()
+                .map(|r| r.id.as_str())
+                .chain(std::iter::once(workbook_id.as_str())),
+        )
+        .mint();
+        s.push_str(&format!(
+            "<Relationship Id=\"{id}\" Type=\"{NS_R}/metadata/core-properties\" Target=\"docProps/core.xml\"/>"
+        ));
     }
     s.push_str("</Relationships>");
     s
