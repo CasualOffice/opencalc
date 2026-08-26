@@ -2503,3 +2503,67 @@ fn bytes_that_are_not_a_spreadsheet_are_refused() {
         None
     );
 }
+
+/// **A host should not have to know that a new workbook needs a sheet.**
+///
+/// `blank` returns a workbook of no sheets — correct for building one up
+/// programmatically, and wrong for every interactive host: a window whose
+/// workbook has no sheets has nothing to draw, no tab strip and no cell to put
+/// a caret in. Both hosts had worked that out separately and pushed a `Sheet1`
+/// of their own, which is a rule written down nowhere kept in two places
+/// (`SDK-011`).
+///
+/// The two are asserted together on purpose. `with_sheet` is only worth having
+/// if `blank` still does the other thing, and a test that checked one of them
+/// would pass if the constructors were merged.
+#[test]
+fn a_new_session_can_be_asked_for_a_sheet_to_open_on() {
+    let bare = WorkbookSession::blank();
+    assert_eq!(
+        bare.workbook().sheets.len(),
+        0,
+        "`blank` stays empty — thirty-six callers add their own sheets"
+    );
+
+    let ready = WorkbookSession::with_sheet();
+    assert_eq!(
+        ready.workbook().sheets.len(),
+        1,
+        "`with_sheet` gives a host something to draw"
+    );
+    assert_eq!(
+        ready.workbook().sheets[0].name,
+        "Sheet1",
+        "named what both hosts named it, and what every spreadsheet does"
+    );
+}
+
+/// The sheet a host is handed has to be usable, not merely present.
+///
+/// A sheet with an id that collides with the workbook's own would be a subtler
+/// failure than an absent one: it exists, it draws, and something further down
+/// resolves the wrong thing.
+#[test]
+fn the_opening_sheet_is_a_sheet_you_can_type_into() {
+    let mut session = WorkbookSession::with_sheet();
+    let at = CellRef::new(0, 0);
+    let op = session.input_edit(0, at, "=1+1");
+    session.edit(op).expect("typing into the opening sheet");
+
+    assert_eq!(session.cell_input(0, at), "=1+1", "it reads back as typed");
+    // A second sheet must get a distinct id — the opening one taking an id the
+    // workbook would mint again is the subtle version of this failure.
+    let before = session.workbook().sheets[0].id;
+    session
+        .workbook_mut()
+        .sheets
+        .push(casual_calc_model::Sheet::new(
+            casual_calc_model::SheetId(casual_calc_model::Id::from_parts(0x5344, 9)),
+            "Sheet2",
+        ));
+    assert_ne!(
+        before,
+        session.workbook().sheets[1].id,
+        "the opening sheet's id is its own"
+    );
+}

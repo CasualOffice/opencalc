@@ -466,6 +466,41 @@ impl WorkbookSession {
         Self::blank_with(SessionConfig::new())
     }
 
+    /// A new session with one empty sheet — what a host opens a window on.
+    ///
+    /// [`Self::blank`] returns a workbook of **no** sheets, which is right for
+    /// building one up programmatically and wrong for every interactive host:
+    /// a window whose workbook has no sheets has nothing to draw, no tab strip
+    /// and no cell to put the caret in.
+    ///
+    /// Both hosts had already worked that out separately and pushed a `Sheet1`
+    /// of their own — the browser in `session_new`, the desktop shell in its
+    /// own constructor. Two copies of a rule written down nowhere, and a third
+    /// host would have had to rediscover it or ship a blank window (`SDK-011`).
+    ///
+    /// Beside `blank` rather than replacing it: thirty-six callers use `blank`
+    /// and most add their own sheets, so changing what it returns would give
+    /// them two. A name that says which one you want costs less than a subtle
+    /// change to what an existing one means.
+    ///
+    /// The sheet is called `Sheet1`, because that is what both hosts called it
+    /// and what every spreadsheet application names a first sheet.
+    #[must_use]
+    pub fn with_sheet() -> Self {
+        Self::with_sheet_from(SessionConfig::new())
+    }
+
+    /// [`Self::with_sheet`], with a configuration.
+    #[must_use]
+    pub fn with_sheet_from(config: SessionConfig) -> Self {
+        let mut session = Self::blank_with(config);
+        session.workbook_mut().sheets.push(Sheet::new(
+            SheetId(Id::from_parts(SESSION_NAMESPACE, 2)),
+            "Sheet1",
+        ));
+        session
+    }
+
     /// A new, empty session.
     pub fn blank_with(config: SessionConfig) -> Self {
         let mut workbook = Workbook::new(Id::from_parts(SESSION_NAMESPACE, 1));

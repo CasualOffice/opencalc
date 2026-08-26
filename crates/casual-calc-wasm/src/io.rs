@@ -49,12 +49,10 @@ pub fn describe_xlsx(bytes: &[u8]) -> Result<String, JsError> {
 /// Start a new blank session with one sheet.
 #[wasm_bindgen]
 pub fn session_new() {
-    let mut session = WorkbookSession::blank();
-    session
-        .workbook_mut()
-        .sheets
-        .push(Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1"));
-    set_session(session);
+    // `with_sheet`, not `blank` plus a sheet of our own. A workbook with no
+    // sheets has nothing to draw, and both hosts had worked that out separately
+    // and written the same fix twice (`SDK-011`).
+    set_session(WorkbookSession::with_sheet());
 }
 
 /// Open an `.xlsx` into the editor session.
