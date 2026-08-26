@@ -414,6 +414,34 @@ fn feature_workbook() -> Workbook {
             ..Cell::default()
         },
     );
+    // A pivot, because `PIV-02` writes one and nothing had ever handed the
+    // result to a foreign reader. The row's acceptance is Excel opening it as a
+    // pivot; this is LibreOffice, which is weaker evidence and much stronger
+    // than none — a re-save drives its reader over `pivotCacheDefinition` and
+    // `pivotTableDefinition` and then writes back what it understood.
+    let mut report = Sheet::new(SheetId(Id::from_parts(2, 3)), "Pivot");
+    let mut pivot = casual_calc_model::PivotTable::new(
+        7,
+        "Sales".to_owned(),
+        SheetId(Id::from_parts(2, 1)),
+        CellRange::new(CellRef::new(0, 0), CellRef::new(6, 3)),
+        CellRef::new(1, 0),
+    );
+    pivot.rows.push(casual_calc_model::PivotAxisField {
+        source_column: 0,
+        sort: casual_calc_model::PivotSort::Ascending,
+        subtotal: true,
+    });
+    pivot.values.push(casual_calc_model::PivotValueField {
+        source_column: 1,
+        aggregate: casual_calc_model::PivotAggregate::Sum,
+        name: "Total".to_owned(),
+        number_format: None,
+    });
+    pivot.output = Some(CellRange::new(CellRef::new(1, 0), CellRef::new(4, 1)));
+    report.pivots.push(pivot);
+    wb.sheets.push(report);
+
     wb.sheets.push(second);
 
     wb.defined_names.push(DefinedName {

@@ -3988,3 +3988,4 @@ fn a_created_pivot_is_written_as_a_pivot_and_reads_back() {
     assert_eq!(read[0].rows[0].source_column, 0);
     assert_eq!(read[0].values[0].aggregate, PivotAggregate::Sum);
 }
+
