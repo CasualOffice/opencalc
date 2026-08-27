@@ -1237,19 +1237,25 @@ pub fn import_package_cancellable(
             }
         }
 
-        // Conditional formatting: resolve each cfRule's fill via its dxfId, its
-        // range via the sqref, and its predicate via type/operator/formulas.
-        // Rules without a solid fill (the only kind modeled) are skipped.
+        // Conditional formatting: resolve each cfRule's format via its dxfId,
+        // its range via the sqref, and its predicate via type/operator/formulas.
+        // A rule whose dxf paints nothing we model is skipped.
         for raw in worksheet.conditional_formats {
             // Colour scales and data bars carry their own colours and have no
-            // dxfId, so the fill lookup must not gate them out.
+            // dxfId, so the format lookup must not gate them out.
             let scale_or_bar = matches!(raw.kind.as_str(), "colorScale" | "dataBar");
-            let fill = match raw
+            let dxf = raw
                 .dxf_id
-                .and_then(|id| stylesheet.dxf_fills.get(id).cloned().flatten())
-            {
+                .and_then(|id| stylesheet.dxf_formats.get(id))
+                .cloned()
+                .unwrap_or_default();
+            let fill = match dxf.fill.clone() {
                 Some(f) => f,
-                None if scale_or_bar => String::new(),
+                // A dxf states only what differs, and a font is as much of a
+                // format as a fill: Excel's "Red Text" preset has no fill at
+                // all, and gating on the fill dropped the whole rule. An empty
+                // `fill` means "paint no background", not "no rule".
+                None if scale_or_bar || dxf.font_color.is_some() || dxf.bold => String::new(),
                 None => continue,
             };
             let num = |i: usize| {
@@ -1297,8 +1303,8 @@ pub fn import_package_cancellable(
                         range,
                         rule: rule.clone(),
                         fill: fill.clone(),
-                        font_color: None,
-                        bold: false,
+                        font_color: dxf.font_color.clone(),
+                        bold: dxf.bold,
                         priority: raw.priority,
                         stop_if_true: raw.stop_if_true,
                     });

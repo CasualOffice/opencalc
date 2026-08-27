@@ -917,6 +917,38 @@ fn every_cataloged_function_dispatches() {
 }
 
 #[test]
+fn every_dotted_function_is_written_with_the_xlfn_prefix() {
+    // A function whose name carries a `.` is, with one exception, a post-2007
+    // addition, and SpreadsheetML stores those only as `_xlfn.NAME`. Written
+    // bare, Excel opens the file and shows `#NAME?` in every cell that used one
+    // — so the engine can evaluate the function perfectly and still be unable
+    // to save it. That was true of every dotted name in this catalog:
+    // NETWORKDAYS.INTL and WORKDAY.INTL had been evaluable and unsaveable since
+    // they were added.
+    //
+    // Asserted against the catalog rather than against a copy of the list, so a
+    // dotted function added here and forgotten in `FUTURE_FUNCTIONS` fails a
+    // test instead of a user's file. `future.rs` says to add to it in the same
+    // change; this is what makes that instruction enforceable.
+    //
+    // `ERROR.TYPE` predates the convention and must stay undecorated.
+    const PREDATES_THE_PREFIX: &[&str] = &["ERROR.TYPE"];
+
+    let mut unsaveable: Vec<&str> = crate::FUNCTIONS
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| n.contains('.'))
+        .filter(|n| !PREDATES_THE_PREFIX.contains(n))
+        .filter(|n| !casual_calc_formula::is_future_function(n))
+        .collect();
+    unsaveable.sort_unstable();
+    assert!(
+        unsaveable.is_empty(),
+        "these evaluate but cannot be saved — add them to FUTURE_FUNCTIONS: {unsaveable:?}"
+    );
+}
+
+#[test]
 fn catalog_is_sorted_and_unique() {
     let names: Vec<&str> = crate::FUNCTIONS.iter().map(|(n, _)| *n).collect();
     for w in names.windows(2) {
@@ -4564,4 +4596,126 @@ mod cancellation {
         }
         assert_eq!(value_at(&without, FORMULAS), CellValue::Number(4.0));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Excel-2010 dotted statistical names (`FID-xx`).
+//
+// Excel renamed the statistical library in 2010 and its UI has offered only the
+// dotted spellings since; the legacy names live in a "Compatibility" category
+// and are what an old file carries. A migrating user therefore hits both
+// spellings — the one they type and the one already in their sheets — and this
+// engine knew only the legacy half, so every dotted name was `#NAME?`.
+//
+// These tests pin the dotted name to the value of its legacy twin on the same
+// input, which is the whole claim: an alias, not a re-implementation.
+// ---------------------------------------------------------------------------
+
+/// Pairs whose arguments are all scalars, checked through `num`.
+#[test]
+fn dotted_statistical_names_match_their_legacy_twins_on_scalars() {
+    for (legacy, modern) in [
+        ("NORMDIST(1.5,2,3,TRUE)", "NORM.DIST(1.5,2,3,TRUE)"),
+        ("NORMDIST(1.5,2,3,FALSE)", "NORM.DIST(1.5,2,3,FALSE)"),
+        ("NORMINV(0.9,2,3)", "NORM.INV(0.9,2,3)"),
+        ("NORMSINV(0.9)", "NORM.S.INV(0.9)"),
+        ("CHIDIST(3.84,1)", "CHISQ.DIST.RT(3.84,1)"),
+        ("CHIINV(0.05,1)", "CHISQ.INV.RT(0.05,1)"),
+        ("FDIST(4,3,10)", "F.DIST.RT(4,3,10)"),
+        ("FINV(0.05,3,10)", "F.INV.RT(0.05,3,10)"),
+        ("TINV(0.05,10)", "T.INV.2T(0.05,10)"),
+        ("BINOMDIST(3,10,0.3,TRUE)", "BINOM.DIST(3,10,0.3,TRUE)"),
+        ("POISSON(2,3,TRUE)", "POISSON.DIST(2,3,TRUE)"),
+        ("CONFIDENCE(0.05,1,100)", "CONFIDENCE.NORM(0.05,1,100)"),
+        ("WEIBULL(2,1.5,1,TRUE)", "WEIBULL.DIST(2,1.5,1,TRUE)"),
+        ("EXPONDIST(1,2,TRUE)", "EXPON.DIST(1,2,TRUE)"),
+        ("GAMMADIST(2,3,1,TRUE)", "GAMMA.DIST(2,3,1,TRUE)"),
+        ("GAMMAINV(0.5,3,1)", "GAMMA.INV(0.5,3,1)"),
+        ("BETAINV(0.5,2,3)", "BETA.INV(0.5,2,3)"),
+        ("LOGINV(0.5,0,1)", "LOGNORM.INV(0.5,0,1)"),
+    ] {
+        let a = num(legacy);
+        let b = num(modern);
+        assert_eq!(a, b, "{modern} must equal {legacy}");
+    }
+}
+
+/// Pairs that take a range, so they need a sheet with data under them.
+#[test]
+fn dotted_statistical_names_match_their_legacy_twins_over_ranges() {
+    const PAIRS: &[(&str, &str)] = &[
+        ("STDEV(A1:A5)", "STDEV.S(A1:A5)"),
+        ("STDEVP(A1:A5)", "STDEV.P(A1:A5)"),
+        ("VAR(A1:A5)", "VAR.S(A1:A5)"),
+        ("VARP(A1:A5)", "VAR.P(A1:A5)"),
+        ("MODE(A1:A5)", "MODE.SNGL(A1:A5)"),
+        ("PERCENTILE(A1:A5,0.4)", "PERCENTILE.INC(A1:A5,0.4)"),
+        ("QUARTILE(A1:A5,1)", "QUARTILE.INC(A1:A5,1)"),
+        ("RANK(4,A1:A5)", "RANK.EQ(4,A1:A5)"),
+        ("PERCENTRANK(A1:A5,4)", "PERCENTRANK.INC(A1:A5,4)"),
+        ("COVAR(A1:A5,B1:B5)", "COVARIANCE.P(A1:A5,B1:B5)"),
+        ("TTEST(A1:A5,B1:B5,2,1)", "T.TEST(A1:A5,B1:B5,2,1)"),
+        ("FTEST(A1:A5,B1:B5)", "F.TEST(A1:A5,B1:B5)"),
+        ("ZTEST(A1:A5,3)", "Z.TEST(A1:A5,3)"),
+        ("CHITEST(A1:A5,B1:B5)", "CHISQ.TEST(A1:A5,B1:B5)"),
+    ];
+
+    let mut b = Builder::new();
+    for (i, v) in [2.0, 4.0, 4.0, 4.0, 5.0].iter().enumerate() {
+        b.number((i as u32, 0), *v);
+    }
+    for (i, v) in [1.0, 3.0, 5.0, 7.0, 9.0].iter().enumerate() {
+        b.number((i as u32, 1), *v);
+    }
+    for (i, (legacy, modern)) in PAIRS.iter().enumerate() {
+        b.formula((i as u32, 3), legacy);
+        b.formula((i as u32, 4), modern);
+    }
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    for (i, (legacy, modern)) in PAIRS.iter().enumerate() {
+        let row = i as u32;
+        assert_eq!(
+            value_at(&wb, row, 3),
+            value_at(&wb, row, 4),
+            "{modern} must equal {legacy}"
+        );
+        assert!(
+            matches!(value_at(&wb, row, 3), CellValue::Number(_)),
+            "{legacy} did not produce a number"
+        );
+    }
+}
+
+/// `NORM.S.DIST` and `LOGNORM.DIST` are *not* pure aliases: 2010 made the
+/// `cumulative` flag a required argument that the legacy spelling does not
+/// take. Aliasing them would have been the dangerous kind of wrong — the
+/// helpers behind `NORMSDIST` ignore trailing arguments, so
+/// `NORM.S.DIST(z,FALSE)` would have silently returned the CDF where the
+/// density was asked for. Both branches are pinned here.
+#[test]
+fn dotted_names_that_gained_a_cumulative_flag_honour_it() {
+    // Cumulative: identical to the legacy spelling, which has no flag.
+    assert_eq!(num("NORM.S.DIST(1.5,TRUE)"), num("NORMSDIST(1.5)"));
+    assert_eq!(num("LOGNORM.DIST(2,0,1,TRUE)"), num("LOGNORMDIST(2,0,1)"));
+
+    // Non-cumulative: the density, which the legacy spelling cannot express.
+    let phi0 = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+    assert!(
+        (num("NORM.S.DIST(0,FALSE)") - phi0).abs() < 1e-12,
+        "NORM.S.DIST(0,FALSE) = {}, want {phi0}",
+        num("NORM.S.DIST(0,FALSE)")
+    );
+    // At x = 1 the lognormal density is phi(0)/1 = phi(0).
+    assert!(
+        (num("LOGNORM.DIST(1,0,1,FALSE)") - phi0).abs() < 1e-12,
+        "LOGNORM.DIST(1,0,1,FALSE) = {}, want {phi0}",
+        num("LOGNORM.DIST(1,0,1,FALSE)")
+    );
+    // The two must differ, or the flag is being ignored.
+    assert_ne!(num("NORM.S.DIST(1.5,TRUE)"), num("NORM.S.DIST(1.5,FALSE)"));
+    assert_ne!(
+        num("LOGNORM.DIST(2,0,1,TRUE)"),
+        num("LOGNORM.DIST(2,0,1,FALSE)")
+    );
 }

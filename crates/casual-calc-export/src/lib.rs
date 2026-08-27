@@ -1446,12 +1446,31 @@ fn run_font_xml(font: &RunFont) -> String {
 
 /// The deduplicated conditional-format fill colors across the workbook — each
 /// becomes one `<dxf>` (differential format), indexed by position (the dxfId).
-fn collect_dxfs(workbook: &Workbook) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// One `<dxf>`: the whole differential format a rule paints with.
+///
+/// Keyed on all three parts, not on the fill. Keying on the fill alone meant two
+/// rules sharing a colour shared one `<dxf>`, so the second silently took the
+/// first's text colour — and a rule with no fill matched nothing and fell to
+/// `unwrap_or(0)`, which is some other rule's format entirely. Excel's "Red
+/// Text" preset has no fill, so that was not an edge case.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Dxf {
+    fill: String,
+    font_color: Option<String>,
+    bold: bool,
+}
+
+fn collect_dxfs(workbook: &Workbook) -> Vec<Dxf> {
+    let mut out: Vec<Dxf> = Vec::new();
     for sheet in &workbook.sheets {
         for cf in &sheet.conditional_formats {
-            if !out.contains(&cf.fill) {
-                out.push(cf.fill.clone());
+            let dxf = Dxf {
+                fill: cf.fill.clone(),
+                font_color: cf.font_color.clone(),
+                bold: cf.bold,
+            };
+            if !out.contains(&dxf) {
+                out.push(dxf);
             }
         }
     }
@@ -1547,7 +1566,7 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
     s.push_str("/></xf>");
 }
 
-fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
+fn styles_xml(workbook: &Workbook, dxfs: &[Dxf]) -> String {
     let styles: Vec<_> = workbook.styles.iter().collect();
 
     // Deduplicate fonts, solid fills, and custom number formats, and record the
@@ -1813,10 +1832,29 @@ fn styles_xml(workbook: &Workbook, dxfs: &[String]) -> String {
     // Differential formats (conditional-format fills), after cellXfs.
     if !dxfs.is_empty() {
         s.push_str(&format!("<dxfs count=\"{}\">", dxfs.len()));
-        for fill in dxfs {
-            s.push_str(&format!(
-                "<dxf><fill><patternFill><bgColor rgb=\"FF{fill}\"/></patternFill></fill></dxf>"
-            ));
+        for dxf in dxfs {
+            s.push_str("<dxf>");
+            // Font first: OOXML's CT_Dxf sequence is font, numFmt, fill, …, and
+            // Excel rejects a dxf whose children are out of order.
+            if dxf.font_color.is_some() || dxf.bold {
+                s.push_str("<font>");
+                if dxf.bold {
+                    s.push_str("<b/>");
+                }
+                if let Some(rgb) = &dxf.font_color {
+                    s.push_str(&format!("<color rgb=\"FF{rgb}\"/>"));
+                }
+                s.push_str("</font>");
+            }
+            // A rule may legitimately have no fill — Excel's "Red Text" preset
+            // is exactly that — and writing an empty one paints the cell.
+            if !dxf.fill.is_empty() {
+                s.push_str(&format!(
+                    "<fill><patternFill><bgColor rgb=\"FF{}\"/></patternFill></fill>",
+                    dxf.fill
+                ));
+            }
+            s.push_str("</dxf>");
         }
         s.push_str("</dxfs>");
     }
@@ -2119,7 +2157,7 @@ fn fmt_half_points(size_hp: u32) -> String {
 fn worksheet_xml(
     workbook: &Workbook,
     sheet_index: usize,
-    dxfs: &[String],
+    dxfs: &[Dxf],
     charts: &chart::SheetCharts,
     ids: &SheetRelIds,
 ) -> String {
@@ -2401,7 +2439,10 @@ fn worksheet_xml(
     // Conditional formatting — one <conditionalFormatting> per rule, its <dxf>
     // referenced by the fill's index in the workbook dxfs list.
     for (i, cf) in sheet.conditional_formats.iter().enumerate() {
-        let dxf_id = dxfs.iter().position(|f| *f == cf.fill).unwrap_or(0);
+        let dxf_id = dxfs
+            .iter()
+            .position(|d| d.fill == cf.fill && d.font_color == cf.font_color && d.bold == cf.bold)
+            .unwrap_or(0);
         s.push_str(&format!(
             "<conditionalFormatting sqref=\"{}\">",
             range_a1(&cf.range)

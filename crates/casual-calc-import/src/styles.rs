@@ -24,13 +24,29 @@ pub struct StyleSheet {
     pub xf_style_refs: Vec<Option<u32>>,
     /// Named cell styles in `cellStyleXfs` order, resolved from `<cellStyles>`.
     pub cell_styles: Vec<NamedCellStyle>,
-    /// Differential-format fill color (`RRGGBB`) per `<dxf>`, by dxfId — used by
-    /// conditional formatting. `None` if the dxf carries no solid fill.
-    pub dxf_fills: Vec<Option<String>>,
+    /// The differential format per `<dxf>`, by dxfId — used by conditional
+    /// formatting.
+    pub dxf_formats: Vec<DxfFormat>,
     /// The workbook default font (name + half-point size): `<fonts>` entry 0,
     /// which OOXML treats as the default. Shown for cells with no explicit font.
     pub default_font_name: Option<String>,
     pub default_font_size_hp: Option<u32>,
+}
+
+/// One `<dxf>` (differential format), as much of it as the model paints with.
+///
+/// A dxf states only the properties that *differ*, so any of these may be
+/// absent — and a rule with a font and no fill is as ordinary as the reverse:
+/// Excel's "Red Text" preset is exactly that. Both parts live in one record so
+/// a dxfId cannot resolve to a fill from one dxf and a font from another.
+#[derive(Debug, Default, Clone)]
+pub struct DxfFormat {
+    /// Fill colour (`RRGGBB`), from the `patternFill`'s `bgColor`.
+    pub fill: Option<String>,
+    /// Font colour (`RRGGBB`) from the dxf's `<font>`.
+    pub font_color: Option<String>,
+    /// The dxf's `<font><b/>`.
+    pub bold: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -241,6 +257,18 @@ fn color_ref(
     Ok(None)
 }
 
+/// A resolved dxf colour as the `RRGGBB` the model stores: the last six hex
+/// digits, upper-cased. `None` for anything that is not a colour we could
+/// paint with — [`color_ref`] keeps a non-hex `rgb` verbatim (docs/34: preserve
+/// what we do not model), and conditional formatting is one of the consumers
+/// that has to validate it rather than hand it on.
+fn dxf_rgb(hex: &str) -> Option<String> {
+    let hex = hex.trim();
+    // All-ASCII by the hexdigit test, so the byte slice is a char boundary.
+    (hex.len() >= 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| hex[hex.len() - 6..].to_ascii_uppercase())
+}
+
 /// Parse a `styles.xml` part into the resolved per-`xf` styles, resolving theme
 /// references against the workbook's palette.
 pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, ImportError> {
@@ -263,7 +291,10 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
     let mut style_names: Vec<(String, u32, Option<u32>)> = Vec::new();
     let mut in_borders = false;
     let mut in_dxfs = false;
-    let mut dxfs: Vec<Option<String>> = Vec::new();
+    // A `<dxf>` has its own `<font>`, outside the `<fonts>` table, so the
+    // font arms below (which all guard on `in_fonts`) never see it.
+    let mut in_dxf_font = false;
+    let mut dxfs: Vec<DxfFormat> = Vec::new();
     let mut cur_edge: Option<Edge> = None;
     let mut depth = 0usize;
     let mut elements = 0usize;
@@ -298,16 +329,30 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                     b"cellXfs" => in_cellxfs = true,
                     b"cellStyleXfs" => in_style_xfs = true,
                     b"dxfs" => in_dxfs = true,
-                    b"dxf" if in_dxfs => dxfs.push(None),
+                    b"dxf" if in_dxfs => dxfs.push(DxfFormat::default()),
                     b"bgColor" if in_dxfs => {
-                        if let Some(hex) = color(e, theme)? {
-                            let hex = hex.trim();
-                            if hex.len() >= 6
-                                && hex.bytes().all(|b| b.is_ascii_hexdigit())
-                                && let Some(last) = dxfs.last_mut()
-                            {
-                                *last = Some(hex[hex.len() - 6..].to_ascii_uppercase());
-                            }
+                        if let (Some(dxf), Some(rgb)) = (
+                            dxfs.last_mut(),
+                            color(e, theme)?.as_deref().and_then(dxf_rgb),
+                        ) {
+                            dxf.fill = Some(rgb);
+                        }
+                    }
+                    // A self-closed `<font/>` has no End event to clear the
+                    // flag, and leaving it set would attach the *next* dxf's
+                    // border colour to this one's font.
+                    b"font" if in_dxfs => in_dxf_font = matches!(event, Event::Start(_)),
+                    b"color" if in_dxf_font => {
+                        if let (Some(dxf), Some(rgb)) = (
+                            dxfs.last_mut(),
+                            color(e, theme)?.as_deref().and_then(dxf_rgb),
+                        ) {
+                            dxf.font_color = Some(rgb);
+                        }
+                    }
+                    b"b" if in_dxf_font => {
+                        if let Some(dxf) = dxfs.last_mut() {
+                            dxf.bold = toggle_on(e)?;
                         }
                     }
                     b"border" if in_borders => {
@@ -601,7 +646,11 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
                 match e.local_name().as_ref() {
                     b"fonts" => in_fonts = false,
                     b"fills" => in_fills = false,
-                    b"dxfs" => in_dxfs = false,
+                    b"dxfs" => {
+                        in_dxfs = false;
+                        in_dxf_font = false;
+                    }
+                    b"font" if in_dxfs => in_dxf_font = false,
                     b"borders" => in_borders = false,
                     b"cellXfs" => in_cellxfs = false,
                     b"cellStyleXfs" => in_style_xfs = false,
@@ -699,7 +748,7 @@ pub fn parse_styles(xml: &[u8], theme: &ThemePalette) -> Result<StyleSheet, Impo
         xf_styles,
         xf_style_refs,
         cell_styles,
-        dxf_fills: dxfs,
+        dxf_formats: dxfs,
         default_font_name: default_font.and_then(|f| f.name.clone()),
         default_font_size_hp: default_font.and_then(|f| f.size_hp),
     })

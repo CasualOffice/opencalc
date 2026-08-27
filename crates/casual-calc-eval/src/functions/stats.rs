@@ -746,6 +746,62 @@ pub(crate) fn eval_lognormdist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Exp
     Value::Number(standard_normal_cdf((x.ln() - m) / sd))
 }
 
+/// `NORM.S.DIST(z, cumulative)` — the Excel-2010 spelling of `NORMSDIST`.
+///
+/// It is deliberately **not** an alias: 2010 made `cumulative` a required
+/// argument, and the legacy name has no such argument. Pointing `NORM.S.DIST`
+/// at `NORMSDIST`'s arm would have discarded the flag (`scalar` reads only the
+/// first argument) and returned the CDF where the density was asked for — the
+/// silent-wrong-number failure, which is worse than `#NAME?`.
+pub(crate) fn eval_norm_s_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let z = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[1]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    Value::Number(if cumulative {
+        standard_normal_cdf(z)
+    } else {
+        (-z * z / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    })
+}
+
+/// `LOGNORM.DIST(x, mean, standard_dev, cumulative)` — the Excel-2010 spelling
+/// of `LOGNORMDIST`, which likewise gained a required `cumulative` flag and so
+/// is not an alias either. The density carries the extra `1/x` from the change
+/// of variable.
+pub(crate) fn eval_lognorm_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let Some(v) = three_numbers(ev, sheet, &args[..3]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [x, m, sd] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let cumulative = match ev.eval_expr(sheet, &args[3]).as_bool() {
+        Ok(b) => b,
+        Err(e) => return Value::Error(e),
+    };
+    if x <= 0.0 || sd <= 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let z = (x.ln() - m) / sd;
+    Value::Number(if cumulative {
+        standard_normal_cdf(z)
+    } else {
+        (-z * z / 2.0).exp() / (x * sd * (2.0 * std::f64::consts::PI).sqrt())
+    })
+}
+
 pub(crate) fn eval_loginv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     let Some(v) = three_numbers(ev, sheet, args) else {
         return Value::Error(ErrorValue::Value);
