@@ -25,6 +25,7 @@ pub fn session_merge_cells(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
+    guard_protected(sheet, r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1))?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -89,6 +90,9 @@ pub fn session_merge_cells_discarding(
     r1: u32,
     c1: u32,
 ) -> Result<(), JsError> {
+    // The destructive form, which throws away everything but the top-left
+    // value — so if either entry point must obey protection, it is this one.
+    guard_protected(sheet, r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1))?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;

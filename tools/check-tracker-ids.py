@@ -32,6 +32,12 @@ from collections import defaultdict
 # The documents that carry `| ID | ...` rows other things cite by id.
 TRACKERS = [
     "docs/14-EXECUTION-TRACKER.md",
+    # The archive counts. Closed work keeps its id — that is the whole point of
+    # citing one — and an archived id is exactly the id a person reads as free,
+    # because it is no longer in the tracker they are looking at. Leaving this
+    # out meant the gate against reusing an id could not see the ids most likely
+    # to be reused; `SEC-004` was assigned twice before it was added.
+    "docs/14a-ARCHIVE-CLOSED-WORK.md",
     "docs/53-FEATURE-CORRECTNESS-TRACKER.md",
     "docs/67-REPOSITORY-REMEDIATION-PLAN.md",
 ]
