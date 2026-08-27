@@ -753,6 +753,84 @@ export function listCommands() {
   return [...qsa("[data-oc-command]")].map((n) => n.dataset.ocCommand).filter((v, i, a) => a.indexOf(v) === i).sort();
 }
 
+// The menu, in a shape an operating system can draw.
+//
+// A desktop app should behave like a desktop app, which means the OS draws the
+// menu bar — not an HTML strip inside the window. That needs the File/Edit/View
+// tree in a form a native menu builder can read, and it must not be a second
+// copy of it: two definitions of the same menu drift, and the one that drifts
+// is always the one nobody is looking at.
+//
+// So this is derived from the **live DOM**, not from the `MENUS` literal the
+// DOM is built from. The DOM is what `runCommand` dispatches against, and
+// `applyCommandRules()` hides items in read-only mode — a model read from the
+// literal would describe a menu the app does not currently have, and every
+// disabled or hidden entry would be wrong. Same reasoning as the engine trace
+// using a Proxy rather than 229 hand-written wrappers.
+//
+// Every leaf carries the id `runCommand` takes, so the native side holds ids
+// and nothing else: no closures, no duplicated labels, no second dispatch path.
+export function menuModel() {
+  const labelOf = (node) =>
+    node.querySelector(".mi-label")?.textContent?.trim() ||
+    node.dataset.ocLabel ||
+    node.textContent.trim();
+  const isEnabled = (node) =>
+    !node.disabled &&
+    node.getAttribute("aria-disabled") !== "true" &&
+    !node.hidden &&
+    !node.classList.contains("oc-cmd-hidden");
+  const panelFor = (id, cls) =>
+    id ? document.querySelector(`${cls}[data-oc-for="${CSS.escape(id)}"]`) : null;
+
+  const itemsOf = (container) => {
+    const out = [];
+    if (!container) return out;
+    for (const node of container.children) {
+      if (node.classList.contains("menu-sep")) {
+        // Carried, because a native menu without separators is a wall of verbs.
+        out.push({ kind: "separator" });
+        continue;
+      }
+      if (node.tagName !== "BUTTON") continue;
+      const id = node.dataset.ocCommand;
+      const sub = panelFor(id, ".menu-sub");
+      if (sub) {
+        out.push({ kind: "submenu", id, label: labelOf(node), items: itemsOf(sub) });
+        continue;
+      }
+      out.push({
+        kind: "item",
+        id,
+        label: labelOf(node),
+        // The shortcut the menu already displays, so the native menu shows the
+        // same one rather than inventing a second convention.
+        accelerator: node.querySelector(".mi-key")?.textContent?.trim() || null,
+        enabled: isEnabled(node),
+        checked: typeof node._check === "function" ? !!node._check() : undefined,
+      });
+    }
+    return out;
+  };
+
+  return [...qsa("#menubar .menu-top")]
+    // The overflow "⋯" is a bar affordance, not a menu — a native bar has no
+    // width limit and nothing to overflow into.
+    .filter((b) => b.dataset.ocCommand)
+    .map((b) => ({
+      id: b.dataset.ocCommand,
+      label: b.dataset.ocLabel || b.textContent.trim(),
+      items: itemsOf(panelFor(b.dataset.ocCommand, ".menu-drop")),
+    }));
+}
+
+// Hand the menu bar to the host. The nodes stay in the document — `runCommand`
+// dispatches by clicking them, and a detached or disabled bar would give the
+// native menu entries that throw.
+export function setNativeChrome(on) {
+  document.documentElement.classList.toggle("oc-chrome-native", !!on);
+}
+
 export function runCommand(id) {
   const node = qsa(`[data-oc-command="${CSS.escape(String(id))}"]`)[0];
   if (!node) {

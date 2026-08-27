@@ -319,6 +319,8 @@ import {
   renderAutocomplete,
   resetToOrigin,
   runCommand,
+  menuModel,
+  setNativeChrome,
   scrollStateForTest,
   seed,
   selectAll,
@@ -673,6 +675,8 @@ export {
   renderAutocomplete,
   resetToOrigin,
   runCommand,
+  menuModel,
+  setNativeChrome,
   scrollStateForTest,
   seed,
   selectAll,
@@ -8085,6 +8089,12 @@ let instanceKey = "";
 
 async function main() {
   bindElements();
+  // A desktop shell draws the menu bar itself, so the HTML one is handed over
+  // before first paint rather than hidden after it — hiding it later would show
+  // the bar for a frame and then take the space back under the user.
+  try {
+    if (new URLSearchParams(location.search).get("chrome") === "native") setNativeChrome(true);
+  } catch {}
   const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}${instanceKey}`);
   init = mod.default;
   wasm = mod;
