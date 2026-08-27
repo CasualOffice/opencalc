@@ -353,6 +353,8 @@ import {
   commentStamp,
   commitFreezeDrag,
   doSave,
+  isDirty,
+  markSaved,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -709,6 +711,8 @@ export {
   commentStamp,
   commitFreezeDrag,
   doSave,
+  isDirty,
+  markSaved,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -3166,6 +3170,12 @@ function drawFilterButtons(withQuad) {
 export let activePanel = null;        // 'dv' | 'cf' | 'note' | 'table' | 'page' | null
 export let panelRangeEls = [];        // range readouts to keep in sync on selection change
 export let panelNote = null;          // { ta, addrEl, cell } while the note panel is open
+// Half-typed replies, kept against the cell they were started on. Moving the
+// selection used to empty the textarea outright: the reasoning was right — a
+// draft belongs to its own thread and must not follow you to someone else's —
+// but the remedy destroyed it, with no undo and no prompt, for a user who
+// clicked another cell to re-read a figure they were about to quote.
+const noteDrafts = new Map();
 
 export const A1range = (s) =>
   (s.r0 === s.r1 && s.c0 === s.c1) ? A1(s.r0, s.c0) : `${A1(s.r0, s.c0)}:${A1(s.r1, s.c1)}`;
@@ -4000,10 +4010,14 @@ function refreshPanel() {
   } else if (activePanel === "note" && panelNote) {
     const addr = A1(state.sel.row, state.sel.col);
     if (addr !== panelNote.cell) {
+      // Parked, not discarded. The draft still does not follow the cursor to
+      // another thread — it waits on the one it belongs to, and comes back if
+      // the user does. An emptied box parks nothing, so posting a reply and
+      // moving on leaves no stale text to reappear later.
+      if (panelNote.ta.value.trim()) noteDrafts.set(panelNote.cell, panelNote.ta.value);
+      else noteDrafts.delete(panelNote.cell);
       panelNote.cell = addr;
-      // A half-typed reply belongs to the cell it was started on, so moving
-      // away clears it rather than carrying it to someone else's thread.
-      panelNote.ta.value = "";
+      panelNote.ta.value = noteDrafts.get(addr) ?? "";
       panelNote.refresh();
     }
   }
@@ -6805,7 +6819,18 @@ function wireEvents() {
     // backgrounded tab, so waiting on it here hung the open entirely whenever
     // the window was not in front.
     await new Promise((r) => setTimeout(r, 0));
+    if (isDirty() && !(await confirmModal(
+      "Open another workbook?",
+      "This workbook has changes that have not been downloaded. Opening another discards them, and undo will not bring them back.",
+      "Discard and open",
+    ))) {
+      e.target.value = "";
+      status.textContent = "";
+      return false;
+    }
     const ok = openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+    // Whatever was just opened is the baseline, not whatever preceded it.
+    if (ok) markSaved();
     e.target.value = ""; // allow re-opening the same file
     return ok;
   });
@@ -7062,7 +7087,18 @@ function wireEvents() {
 
     const MENUS = [
       ["File", [
-        ["New", () => { stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs(); }],
+        ["New", async () => {
+          // The most destructive verb in the application, and the only one that
+          // did not ask. `session_new` replaces the session outright and `seed`
+          // then clears the history, so Ctrl+Z recovers nothing — while merge,
+          // merge-across, delimited export and a lossy save all confirm first.
+          if (isDirty() && !(await confirmModal(
+            "Start a new workbook?",
+            "This workbook has changes that have not been downloaded. Starting a new one discards them, and undo will not bring them back.",
+            "Discard and start new",
+          ))) return;
+          stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
+        }],
         ["Open…", clickEl("#tb-open")],
         { sub: "Download", items: [
           // First, and named for what it does rather than for a format: it is
@@ -8103,6 +8139,18 @@ let instanceKey = "";
 
 async function main() {
   bindElements();
+  // The document lives in wasm memory and nowhere else — no autosave, no draft.
+  // Closing the tab, reloading, or pressing Back discarded it without a word.
+  //
+  // The browser decides the wording and ignores any we supply; all a page can
+  // do is say that there is something to lose. Nothing is shown when the
+  // document is clean, so this never becomes the dialog everybody clicks
+  // through without reading.
+  window.addEventListener("beforeunload", (e) => {
+    if (!isDirty()) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
   // A desktop shell draws the menu bar itself, so the HTML one is handed over
   // before first paint rather than hidden after it — hiding it later would show
   // the bar for a frame and then take the space back under the user.

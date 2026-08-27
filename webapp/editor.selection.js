@@ -8,6 +8,7 @@
 import {
   A1,
   A1_PART,
+  markSaved,
   HH,
   HW,
   ROW_H,
@@ -295,6 +296,11 @@ export function commit(value, advance, source = "user") {
   let advisory = "";
   if (!value.trim().startsWith("=")) {
     let bad = "";
+    // The `catch` is belt and braces, not a decision: `session_validation_error`
+    // returns a `String` rather than a `Result`, so it has no ordinary failure
+    // to report and this cannot swallow a refusal. Reported as a fail-open
+    // integrity hole and checked before being believed — the binding's return
+    // type is the answer.
     try { bad = wasm.session_validation_error(state.sheet, state.sel.row, state.sel.col, value); }
     catch {}
     if (bad) {
@@ -702,11 +708,26 @@ export function emit(name, detail) {
   if (!set || !set.size) return true;
   let prevented = false;
   const event = { ...detail, preventDefault: () => { prevented = true; } };
+  // A `before…` event asks the host for permission; anything else tells it what
+  // happened. That distinction decides what a throw means.
+  const asksPermission = name.startsWith("before");
   for (const handler of [...set]) {
     try {
       if (handler(event) === false) prevented = true;
     } catch (err) {
       console.error(`[opencalc] ${name} listener threw`, err);
+      if (asksPermission) {
+        // A permission check that threw did not say yes. Reading a crash as
+        // consent is how a host's own rule gets bypassed by a bug in it.
+        prevented = true;
+      } else {
+        // Not a veto — the edit has already happened — but not silence either.
+        // A `cellsChanged` handler that throws while writing to the host's
+        // store means the change exists here and nowhere else, which is the
+        // shape of the submission this project once dropped without a word.
+        // The console is not where a user is looking.
+        statusError(`the application's ${name} handler failed — it may not have saved this change`);
+      }
     }
   }
   return !prevented;
@@ -1332,6 +1353,10 @@ export function seed() {
   // an empty grid — and Undo starts out enabled on a document nobody has
   // touched, which is its own small lie.
   wasm.session_clear_history();
+  // The document the user was handed is the baseline: the seeding writes above
+  // are edits as far as the engine is concerned, and without this a demo sheet
+  // nobody touched would warn on close.
+  markSaved();
   select(0, 0);
 }
 
