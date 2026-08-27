@@ -1311,3 +1311,89 @@ fn a_two_cell_anchors_own_rectangle_wins_over_a_stray_extent() {
     assert_eq!(anchors[0].range.end.col, 2, "<xdr:to> is exclusive");
     assert_eq!(anchors[0].range.end.row, 3);
 }
+
+/// **A conditional format's `<dxf>` font is half of what Excel's presets say.**
+///
+/// The most-used preset in the product is "Light Red Fill with **Dark Red
+/// Text**", and its `<dxf>` states both a `patternFill` and a `<font>`. The
+/// importer read only the fill, so the text colour disappeared with nothing
+/// recorded; and the sibling preset "Red Text" — which has *no* fill at all —
+/// resolved to no fill and was dropped whole, taking the rule with it.
+///
+/// Both dxfs below are the shapes Excel actually writes, alpha pair included.
+#[test]
+fn a_conditional_formats_dxf_font_colour_and_bold_survive_import() {
+    const STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1"><xf numFmtId="0"/></cellXfs>
+        <dxfs count="2">
+            <dxf><font><b/><color rgb="FF9C0006"/></font></dxf>
+            <dxf>
+                <font><color rgb="FF9C0006"/></font>
+                <fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill>
+            </dxf>
+            <dxf>
+                <font/>
+                <border><left style="thin"><color rgb="FF00FF00"/></left></border>
+                <fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill>
+            </dxf>
+        </dxfs>
+    </styleSheet>"#;
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>9</v></c><c r="B1"><v>1</v></c></row></sheetData>
+        <conditionalFormatting sqref="A1:A9">
+            <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>5</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="B1:B9">
+            <cfRule type="cellIs" dxfId="1" priority="2" operator="lessThan"><formula>3</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="C1:C9">
+            <cfRule type="cellIs" dxfId="2" priority="3" operator="equal"><formula>7</formula></cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+        .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let sheet = &import_package(bytes).unwrap().workbook.sheets[0];
+
+    assert_eq!(
+        sheet.conditional_formats.len(),
+        3,
+        "a dxf that states a font but no fill is still a rule: {:?}",
+        sheet.conditional_formats
+    );
+
+    // "Red Text": no fill, dark red bold text.
+    let red_text = &sheet.conditional_formats[0];
+    assert_eq!(red_text.fill, "", "this preset paints no fill");
+    assert_eq!(
+        red_text.font_color.as_deref(),
+        Some("9C0006"),
+        "the dxf font colour was dropped (alpha pair must go, the colour must not)"
+    );
+    assert!(red_text.bold, "the dxf's <b/> was dropped");
+
+    // "Light Red Fill with Dark Red Text": both, and the fill still works.
+    let both = &sheet.conditional_formats[1];
+    assert_eq!(both.fill, "FFC7CE");
+    assert_eq!(both.font_color.as_deref(), Some("9C0006"));
+    assert!(
+        !both.bold,
+        "this dxf states no <b/>, so nothing may add one"
+    );
+
+    // A self-closed `<font/>` ends where it starts: the border colour that
+    // follows it belongs to the border, not to the text.
+    let green = &sheet.conditional_formats[2];
+    assert_eq!(green.fill, "C6EFCE");
+    assert_eq!(
+        green.font_color, None,
+        "a border's colour was read as the font's"
+    );
+}

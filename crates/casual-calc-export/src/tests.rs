@@ -290,6 +290,50 @@ fn data_validation_list_round_trips() {
 }
 
 #[test]
+fn conditional_formatting_keeps_its_text_colour_and_does_not_collide_on_fill() {
+    use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = |r0, c0, r1, c1| CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1));
+
+    let mut preset = ConditionalFormat::new(r(0, 0, 8, 0), CfRule::LessThan(3.0), "FFC7CE");
+    preset.font_color = Some("9C0006".into()); // "Light Red Fill with Dark Red Text"
+    // The same fill, a different text colour. `dxf_id` was chosen by
+    // `position(|f| *f == cf.fill)`, so these two shared one dxf and the second
+    // rule silently took the first one's text colour.
+    let mut same_fill = ConditionalFormat::new(r(0, 1, 8, 1), CfRule::GreaterThan(9.0), "FFC7CE");
+    same_fill.font_color = Some("006100".into());
+    same_fill.bold = true;
+    // Excel's "Red Text" preset has no fill at all. With the id keyed on fill,
+    // an empty fill matched nothing and fell to `unwrap_or(0)` — another rule's
+    // dxf entirely.
+    let mut text_only = ConditionalFormat::new(r(0, 2, 8, 2), CfRule::EqualTo(0.0), "");
+    text_only.font_color = Some("FF0000".into());
+
+    workbook.sheets[0].conditional_formats = vec![preset, same_fill, text_only];
+    let written = write_workbook(&workbook).unwrap();
+    let cfs = import_package(written).unwrap().workbook.sheets[0]
+        .conditional_formats
+        .clone();
+
+    assert_eq!(cfs.len(), 3, "all three rules survive");
+    assert_eq!(cfs[0].fill, "FFC7CE");
+    assert_eq!(
+        cfs[0].font_color.as_deref(),
+        Some("9C0006"),
+        "the text colour of Excel's most-used preset"
+    );
+    assert_eq!(cfs[1].fill, "FFC7CE");
+    assert_eq!(
+        cfs[1].font_color.as_deref(),
+        Some("006100"),
+        "a rule sharing a fill must not inherit the other's text colour"
+    );
+    assert!(cfs[1].bold, "and its bold");
+    assert_eq!(cfs[2].fill, "", "a text-only rule keeps having no fill");
+    assert_eq!(cfs[2].font_color.as_deref(), Some("FF0000"));
+}
+
+#[test]
 fn conditional_formatting_round_trips() {
     use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
     let mut workbook = import_package(sample_xlsx()).unwrap().workbook;

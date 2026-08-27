@@ -48,7 +48,20 @@ const XLWS: &str = "_XLWS.";
 /// that the evaluator does not know would make the writer decorate something it
 /// should have refused instead. Add to it in the same change that adds the
 /// function.
+///
+/// Every dotted name belongs here, and until recently none of them were: a
+/// function whose name carries a `.` is, with one exception, a post-2007
+/// addition, and SpreadsheetML stores those only as `_xlfn.NAME`. Written bare,
+/// Excel opens the file and shows `#NAME?` in every cell that used one — so the
+/// engine evaluated `NETWORKDAYS.INTL` perfectly and could not save it.
+///
+/// The exception is `ERROR.TYPE`, which predates the convention and must stay
+/// undecorated. `casual_calc_eval` asserts the rule against its own catalog
+/// rather than against a copy of this list, so a dotted function added there
+/// and forgotten here fails a test instead of a user's file.
 pub const FUTURE_FUNCTIONS: &[&str] = &[
+    "BETA.INV",
+    "BINOM.DIST",
     "BITAND",
     "BITLSHIFT",
     "BITOR",
@@ -56,24 +69,50 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "BITXOR",
     "BYCOL",
     "BYROW",
+    "CHISQ.DIST.RT",
+    "CHISQ.INV.RT",
+    "CHISQ.TEST",
     "COMBINA",
     "CONCAT",
+    "CONFIDENCE.NORM",
+    "COVARIANCE.P",
     "DAYS",
+    "ECMA.CEILING",
+    "EXPON.DIST",
+    "F.DIST.RT",
+    "F.INV.RT",
+    "F.TEST",
     "FILTER",
+    "GAMMA.DIST",
+    "GAMMA.INV",
     "IFNA",
     "IFS",
     "ISFORMULA",
+    "ISO.CEILING",
     "ISOMITTED",
     "ISOWEEKNUM",
     "LAMBDA",
     "LET",
+    "LOGNORM.DIST",
+    "LOGNORM.INV",
     "MAKEARRAY",
     "MAP",
     "MAXIFS",
     "MINIFS",
+    "MODE.SNGL",
+    "NETWORKDAYS.INTL",
+    "NORM.DIST",
+    "NORM.INV",
+    "NORM.S.DIST",
+    "NORM.S.INV",
     "NUMBERVALUE",
     "PDURATION",
+    "PERCENTILE.INC",
+    "PERCENTRANK.INC",
     "PERMUTATIONA",
+    "POISSON.DIST",
+    "QUARTILE.INC",
+    "RANK.EQ",
     "REDUCE",
     "RRI",
     "SCAN",
@@ -84,13 +123,22 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "SHEETS",
     "SORT",
     "SORTBY",
+    "STDEV.P",
+    "STDEV.S",
     "SWITCH",
+    "T.INV.2T",
+    "T.TEST",
     "TEXTJOIN",
     "UNICHAR",
     "UNICODE",
     "UNIQUE",
+    "VAR.P",
+    "VAR.S",
+    "WEIBULL.DIST",
+    "WORKDAY.INTL",
     "XLOOKUP",
     "XMATCH",
+    "Z.TEST",
 ];
 
 /// Whether `name` must be written with the `_xlfn.` prefix.

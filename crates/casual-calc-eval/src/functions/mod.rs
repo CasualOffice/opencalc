@@ -95,11 +95,16 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BESSELJ", "BESSELJ(x, n)"),
     ("BESSELK", "BESSELK(x, n)"),
     ("BESSELY", "BESSELY(x, n)"),
+    ("BETA.INV", "BETA.INV(probability, alpha, beta, [A], [B])"),
     ("BETADIST", "BETADIST(x, alpha, beta, [A], [B])"),
     ("BETAINV", "BETAINV(probability, alpha, beta, [A], [B])"),
     ("BIN2DEC", "BIN2DEC(number)"),
     ("BIN2HEX", "BIN2HEX(number, [places])"),
     ("BIN2OCT", "BIN2OCT(number, [places])"),
+    (
+        "BINOM.DIST",
+        "BINOM.DIST(number_s, trials, probability_s, cumulative)",
+    ),
     (
         "BINOMDIST",
         "BINOMDIST(number_s, trials, probability_s, cumulative)",
@@ -116,6 +121,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
     ("CHIINV", "CHIINV(probability, degrees_freedom)"),
+    ("CHISQ.DIST.RT", "CHISQ.DIST.RT(x, degrees_freedom)"),
+    ("CHISQ.INV.RT", "CHISQ.INV.RT(probability, degrees_freedom)"),
+    ("CHISQ.TEST", "CHISQ.TEST(actual, expected)"),
     ("CHITEST", "CHITEST(actual, expected)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
     ("CLEAN", "CLEAN(text)"),
@@ -128,6 +136,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CONCAT", "CONCAT(text1, …)"),
     ("CONCATENATE", "CONCATENATE(text1, …)"),
     ("CONFIDENCE", "CONFIDENCE(alpha, standard_dev, size)"),
+    (
+        "CONFIDENCE.NORM",
+        "CONFIDENCE.NORM(alpha, standard_dev, size)",
+    ),
     ("CONVERT", "CONVERT(number, from_unit, to_unit)"),
     ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
@@ -164,6 +176,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "COUPPCD(settlement, maturity, frequency, [basis])",
     ),
     ("COVAR", "COVAR(array1, array2)"),
+    ("COVARIANCE.P", "COVARIANCE.P(array1, array2)"),
     ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
@@ -216,7 +229,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
     ("EXP", "EXP(number)"),
+    ("EXPON.DIST", "EXPON.DIST(x, lambda, cumulative)"),
     ("EXPONDIST", "EXPONDIST(x, lambda, cumulative)"),
+    (
+        "F.DIST.RT",
+        "F.DIST.RT(x, degrees_freedom1, degrees_freedom2)",
+    ),
+    (
+        "F.INV.RT",
+        "F.INV.RT(probability, deg_freedom1, deg_freedom2)",
+    ),
+    ("F.TEST", "F.TEST(array1, array2)"),
     ("FACT", "FACT(number)"),
     ("FACTDOUBLE", "FACTDOUBLE(number)"),
     ("FALSE", "FALSE()"),
@@ -234,6 +257,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
     ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
+    ("GAMMA.DIST", "GAMMA.DIST(x, alpha, beta, cumulative)"),
+    ("GAMMA.INV", "GAMMA.INV(probability, alpha, beta)"),
     ("GAMMADIST", "GAMMADIST(x, alpha, beta, cumulative)"),
     ("GAMMAINV", "GAMMAINV(probability, alpha, beta)"),
     ("GAMMALN", "GAMMALN(x)"),
@@ -323,6 +348,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("LOG10", "LOG10(number)"),
     ("LOGEST", "LOGEST(known_y, [known_x], [const], [stats])"),
     ("LOGINV", "LOGINV(probability, mean, standard_dev)"),
+    (
+        "LOGNORM.DIST",
+        "LOGNORM.DIST(x, mean, standard_dev, cumulative)",
+    ),
+    (
+        "LOGNORM.INV",
+        "LOGNORM.INV(probability, mean, standard_dev)",
+    ),
     ("LOGNORMDIST", "LOGNORMDIST(x, mean, standard_dev)"),
     ("LOOKUP", "LOOKUP(value, vector, [result])"),
     ("LOWER", "LOWER(text)"),
@@ -349,6 +382,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MMULT", "MMULT(array1, array2)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
+    ("MODE.SNGL", "MODE.SNGL(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
@@ -364,6 +398,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "NETWORKDAYS.INTL(start, end, [weekend], [holidays])",
     ),
     ("NOMINAL", "NOMINAL(effect_rate, npery)"),
+    ("NORM.DIST", "NORM.DIST(x, mean, sd, cumulative)"),
+    ("NORM.INV", "NORM.INV(probability, mean, sd)"),
+    ("NORM.S.DIST", "NORM.S.DIST(z, cumulative)"),
+    ("NORM.S.INV", "NORM.S.INV(probability)"),
     ("NORMDIST", "NORMDIST(x, mean, sd, cumulative)"),
     ("NORMINV", "NORMINV(probability, mean, sd)"),
     ("NORMSDIST", "NORMSDIST(z)"),
@@ -401,12 +439,18 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PDURATION", "PDURATION(rate, pv, fv)"),
     ("PEARSON", "PEARSON(array1, array2)"),
     ("PERCENTILE", "PERCENTILE(array, k)"),
+    ("PERCENTILE.INC", "PERCENTILE.INC(array, k)"),
     ("PERCENTRANK", "PERCENTRANK(array, x, [significance])"),
+    (
+        "PERCENTRANK.INC",
+        "PERCENTRANK.INC(array, x, [significance])",
+    ),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
     ("PI", "PI()"),
     ("PMT", "PMT(rate, nper, pv, [fv], [type])"),
     ("POISSON", "POISSON(x, mean, cumulative)"),
+    ("POISSON.DIST", "POISSON.DIST(x, mean, cumulative)"),
     ("POWER", "POWER(number, power)"),
     ("PPMT", "PPMT(rate, per, nper, pv, [fv], [type])"),
     (
@@ -426,11 +470,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PROPER", "PROPER(text)"),
     ("PV", "PV(rate, nper, pmt, [fv], [type])"),
     ("QUARTILE", "QUARTILE(array, quart)"),
+    ("QUARTILE.INC", "QUARTILE.INC(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RAND", "RAND()"),
     ("RANDBETWEEN", "RANDBETWEEN(bottom, top)"),
     ("RANK", "RANK(number, ref, [order])"),
+    ("RANK.EQ", "RANK.EQ(number, ref, [order])"),
     ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
     (
         "RECEIVED",
@@ -476,6 +522,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SQRTPI", "SQRTPI(number)"),
     ("STANDARDIZE", "STANDARDIZE(x, mean, standard_dev)"),
     ("STDEV", "STDEV(number1, …)"),
+    ("STDEV.P", "STDEV.P(number1, …)"),
+    ("STDEV.S", "STDEV.S(number1, …)"),
     ("STDEVA", "STDEVA(value1, …)"),
     ("STDEVP", "STDEVP(number1, …)"),
     ("STDEVPA", "STDEVPA(value1, …)"),
@@ -496,6 +544,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
+    ("T.INV.2T", "T.INV.2T(probability, degrees_freedom)"),
+    ("T.TEST", "T.TEST(array1, array2, tails, type)"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
     ("TBILLEQ", "TBILLEQ(settlement, maturity, discount)"),
@@ -523,6 +573,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("USDOLLAR", "USDOLLAR(number, [decimals])"),
     ("VALUE", "VALUE(text)"),
     ("VAR", "VAR(number1, …)"),
+    ("VAR.P", "VAR.P(number1, …)"),
+    ("VAR.S", "VAR.S(number1, …)"),
     ("VARA", "VARA(value1, …)"),
     ("VARP", "VARP(number1, …)"),
     ("VARPA", "VARPA(value1, …)"),
@@ -534,6 +586,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
     ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
+    ("WEIBULL.DIST", "WEIBULL.DIST(x, alpha, beta, cumulative)"),
     ("WORKDAY", "WORKDAY(start, days, [holidays])"),
     (
         "WORKDAY.INTL",
@@ -563,6 +616,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "YIELDMAT",
         "YIELDMAT(settlement, maturity, issue, rate, pr, [basis])",
     ),
+    ("Z.TEST", "Z.TEST(array, x, [sigma])"),
     ("ZTEST", "ZTEST(array, x, [sigma])"),
 ];
 
@@ -790,21 +844,21 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             }
             Some(ns.len() as f64 / ns.iter().map(|n| 1.0 / n).sum::<f64>())
         }),
-        "MODE" => stat_over(ev, sheet, args, mode_of),
+        "MODE" | "MODE.SNGL" => stat_over(ev, sheet, args, mode_of),
         "SKEW" => stat_over(ev, sheet, args, skew_of),
         "KURT" => stat_over(ev, sheet, args, kurt_of),
-        "VAR" => stat_over(ev, sheet, args, |ns| variance(ns, true)),
-        "VARP" => stat_over(ev, sheet, args, |ns| variance(ns, false)),
-        "PERCENTILE" => eval_percentile(ev, sheet, args, false),
-        "QUARTILE" => eval_percentile(ev, sheet, args, true),
-        "PERCENTRANK" => eval_percentrank(ev, sheet, args),
+        "VAR" | "VAR.S" => stat_over(ev, sheet, args, |ns| variance(ns, true)),
+        "VARP" | "VAR.P" => stat_over(ev, sheet, args, |ns| variance(ns, false)),
+        "PERCENTILE" | "PERCENTILE.INC" => eval_percentile(ev, sheet, args, false),
+        "QUARTILE" | "QUARTILE.INC" => eval_percentile(ev, sheet, args, true),
+        "PERCENTRANK" | "PERCENTRANK.INC" => eval_percentrank(ev, sheet, args),
         "TRIMMEAN" => eval_trimmean(ev, sheet, args),
         "COUNTBLANK" => eval_countblank(ev, sheet, args),
         "STANDARDIZE" => eval_standardize(ev, sheet, args),
         // Paired-sample statistics: two ranges of equal length.
         "CORREL" | "PEARSON" => paired(ev, sheet, args, correlation),
         "RSQ" => paired(ev, sheet, args, |xs, ys| correlation(xs, ys).map(|r| r * r)),
-        "COVAR" => paired(ev, sheet, args, |xs, ys| {
+        "COVAR" | "COVARIANCE.P" => paired(ev, sheet, args, |xs, ys| {
             let (mx, my) = (mean(xs), mean(ys));
             Some(
                 xs.iter()
@@ -842,18 +896,23 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             }
         }),
         "NORMSDIST" => scalar(ev, sheet, args, standard_normal_cdf),
-        "NORMSINV" => checked(ev, sheet, args, |p| {
+        // 2010 made `cumulative` a *required* argument, so this is not an
+        // alias of `NORMSDIST`: `scalar` ignores trailing arguments, and
+        // aliasing would have returned the CDF where the density was asked
+        // for — a wrong number rather than a visible error.
+        "NORM.S.DIST" => eval_norm_s_dist(ev, sheet, args),
+        "NORMSINV" | "NORM.S.INV" => checked(ev, sheet, args, |p| {
             if p <= 0.0 || p >= 1.0 {
                 Value::Error(ErrorValue::Num)
             } else {
                 Value::Number(normal_quantile(p))
             }
         }),
-        "NORMDIST" => eval_normdist(ev, sheet, args),
-        "NORMINV" => eval_norminv(ev, sheet, args),
-        "EXPONDIST" => eval_expondist(ev, sheet, args),
-        "POISSON" => eval_poisson(ev, sheet, args),
-        "BINOMDIST" => eval_binomdist(ev, sheet, args),
+        "NORMDIST" | "NORM.DIST" => eval_normdist(ev, sheet, args),
+        "NORMINV" | "NORM.INV" => eval_norminv(ev, sheet, args),
+        "EXPONDIST" | "EXPON.DIST" => eval_expondist(ev, sheet, args),
+        "POISSON" | "POISSON.DIST" => eval_poisson(ev, sheet, args),
+        "BINOMDIST" | "BINOM.DIST" => eval_binomdist(ev, sheet, args),
         // The `A` variants count text as 0 and logicals as 0/1, where the plain
         // forms skip non-numbers entirely. That difference is the only reason
         // both exist, so they share nothing but the reduction.
@@ -865,12 +924,14 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "STDEVA" => stat_over_a(ev, sheet, args, |ns| variance(ns, true).map(f64::sqrt)),
         "STDEVPA" => stat_over_a(ev, sheet, args, |ns| variance(ns, false).map(f64::sqrt)),
         "LOGNORMDIST" => eval_lognormdist(ev, sheet, args),
-        "LOGINV" => eval_loginv(ev, sheet, args),
-        "WEIBULL" => eval_weibull(ev, sheet, args),
+        // Likewise gained a required `cumulative` flag in 2010.
+        "LOGNORM.DIST" => eval_lognorm_dist(ev, sheet, args),
+        "LOGINV" | "LOGNORM.INV" => eval_loginv(ev, sheet, args),
+        "WEIBULL" | "WEIBULL.DIST" => eval_weibull(ev, sheet, args),
         "NEGBINOMDIST" => eval_negbinomdist(ev, sheet, args),
         "HYPGEOMDIST" => eval_hypgeomdist(ev, sheet, args),
         "CRITBINOM" => eval_critbinom(ev, sheet, args),
-        "CONFIDENCE" => eval_confidence(ev, sheet, args),
+        "CONFIDENCE" | "CONFIDENCE.NORM" => eval_confidence(ev, sheet, args),
         // Base conversion. Each pair is (from, to) radix; the negative handling
         // lives in the helpers because it is the part that differs.
         "BIN2DEC" => base_to_dec(ev, sheet, args, 2),
@@ -988,20 +1049,20 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         }),
         // The chi-square / t / F family. All are incomplete gamma or beta
         // underneath, so they share those two rather than repeating series.
-        "CHIDIST" => eval_chidist(ev, sheet, args),
-        "CHIINV" => eval_chiinv(ev, sheet, args),
+        "CHIDIST" | "CHISQ.DIST.RT" => eval_chidist(ev, sheet, args),
+        "CHIINV" | "CHISQ.INV.RT" => eval_chiinv(ev, sheet, args),
         "TDIST" => eval_tdist(ev, sheet, args),
-        "TINV" => eval_tinv(ev, sheet, args),
-        "FDIST" => eval_fdist(ev, sheet, args),
-        "FINV" => eval_finv(ev, sheet, args),
-        "GAMMADIST" => eval_gammadist(ev, sheet, args),
-        "GAMMAINV" => eval_gammainv(ev, sheet, args),
+        "TINV" | "T.INV.2T" => eval_tinv(ev, sheet, args),
+        "FDIST" | "F.DIST.RT" => eval_fdist(ev, sheet, args),
+        "FINV" | "F.INV.RT" => eval_finv(ev, sheet, args),
+        "GAMMADIST" | "GAMMA.DIST" => eval_gammadist(ev, sheet, args),
+        "GAMMAINV" | "GAMMA.INV" => eval_gammainv(ev, sheet, args),
         "BETADIST" => eval_betadist(ev, sheet, args),
-        "BETAINV" => eval_betainv(ev, sheet, args),
-        "ZTEST" => eval_ztest(ev, sheet, args),
-        "TTEST" => eval_ttest(ev, sheet, args),
-        "FTEST" => eval_ftest(ev, sheet, args),
-        "CHITEST" => eval_chitest(ev, sheet, args),
+        "BETAINV" | "BETA.INV" => eval_betainv(ev, sheet, args),
+        "ZTEST" | "Z.TEST" => eval_ztest(ev, sheet, args),
+        "TTEST" | "T.TEST" => eval_ttest(ev, sheet, args),
+        "FTEST" | "F.TEST" => eval_ftest(ev, sheet, args),
+        "CHITEST" | "CHISQ.TEST" => eval_chitest(ev, sheet, args),
         "PROB" => eval_prob(ev, sheet, args),
         "SUBTOTAL" => eval_subtotal(ev, sheet, args),
         "SUMX2MY2" => paired(ev, sheet, args, |xs, ys| {
@@ -1114,9 +1175,9 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "MEDIAN" => eval_median(ev, sheet, args),
         "LARGE" => eval_large_small(ev, sheet, args, true),
         "SMALL" => eval_large_small(ev, sheet, args, false),
-        "RANK" => eval_rank(ev, sheet, args),
-        "STDEV" => eval_stdev(ev, sheet, args, true),
-        "STDEVP" => eval_stdev(ev, sheet, args, false),
+        "RANK" | "RANK.EQ" => eval_rank(ev, sheet, args),
+        "STDEV" | "STDEV.S" => eval_stdev(ev, sheet, args, true),
+        "STDEVP" | "STDEV.P" => eval_stdev(ev, sheet, args, false),
         "SUMPRODUCT" => eval_sumproduct(ev, sheet, args),
         // --- Multi-criteria aggregates (M6-2) ---
         "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
