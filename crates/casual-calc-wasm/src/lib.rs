@@ -792,6 +792,111 @@ mod fill_series_tests {
 }
 
 #[cfg(test)]
+mod range_list_tests {
+    use super::{
+        session_add_sheet, session_new, session_set_cell, session_set_list_validation,
+        session_set_list_validation_range, session_validation_at, session_validation_error,
+    };
+
+    /// The commonest kind of real dropdown, and the one that reached nothing.
+    ///
+    /// Excel's lists are usually a *range* kept out of the way and maintained on
+    /// its own, not an inline CSV. The importer preserved the reference and its
+    /// own comment admitted the consequence — "the rule survives even though the
+    /// editor cannot offer the dropdown yet" — because both the chevron and the
+    /// enforcement gated on the literal `values` being non-empty. So a user
+    /// opened their workbook, the dropdowns were gone, and nothing said why.
+    #[test]
+    fn a_list_backed_by_a_range_offers_and_enforces_its_values() {
+        session_new();
+        for (i, name) in ["North", "South", "East"].iter().enumerate() {
+            session_set_cell(0, i as u32, 5, name).unwrap();
+        }
+        session_set_list_validation_range(0, 0, 0, 4, 0, "$F$1:$F$3").unwrap();
+
+        assert_eq!(
+            session_validation_at(0, 0, 0),
+            r#"["North","South","East"]"#,
+            "the dropdown lists what the range holds"
+        );
+        assert_eq!(session_validation_error(0, 0, 0, "South"), "");
+        assert!(
+            session_validation_error(0, 0, 0, "Westeros").contains("must be one of"),
+            "and the rule is enforced, not merely offered"
+        );
+        // Excel matches a list case-insensitively.
+        assert_eq!(session_validation_error(0, 0, 0, "north"), "");
+    }
+
+    /// The list is live: it is resolved when asked for, not copied at set time.
+    #[test]
+    fn editing_the_source_range_changes_the_dropdown() {
+        session_new();
+        session_set_cell(0, 0, 5, "Draft").unwrap();
+        session_set_list_validation_range(0, 0, 0, 0, 0, "$F$1:$F$2").unwrap();
+        assert_eq!(session_validation_at(0, 0, 0), r#"["Draft"]"#);
+
+        session_set_cell(0, 1, 5, "Final").unwrap();
+        assert_eq!(
+            session_validation_at(0, 0, 0),
+            r#"["Draft","Final"]"#,
+            "adding a row to the source adds an option, as in Excel"
+        );
+        // And what was rejected a moment ago is now allowed.
+        assert_eq!(session_validation_error(0, 0, 0, "Final"), "");
+    }
+
+    /// A list may live on another sheet — which is the usual reason to use one.
+    #[test]
+    fn the_source_range_may_name_another_sheet() {
+        session_new();
+        session_add_sheet().unwrap();
+        session_set_cell(1, 0, 0, "Red").unwrap();
+        session_set_cell(1, 1, 0, "Blue").unwrap();
+        // Whatever the new sheet is called — the point is that the reference is
+        // resolved by name, not that the name is predictable.
+        let names: Vec<String> = serde_json::from_str(&super::session_sheet_names()).unwrap();
+        let source = format!("{}!$A$1:$A$2", names[1]);
+        session_set_list_validation_range(0, 0, 0, 0, 0, &source).unwrap();
+        assert_eq!(session_validation_at(0, 0, 0), r#"["Red","Blue"]"#);
+    }
+
+    /// Blanks in the source are not options, and an unreadable source refuses
+    /// nothing rather than refusing everything.
+    #[test]
+    fn blanks_are_skipped_and_an_unreadable_source_blocks_nothing() {
+        session_new();
+        session_set_cell(0, 0, 5, "One").unwrap();
+        // F2 left empty; F3 filled — the gap a growing list always has.
+        session_set_cell(0, 2, 5, "Three").unwrap();
+        session_set_list_validation_range(0, 0, 0, 0, 0, "$F$1:$F$3").unwrap();
+        assert_eq!(session_validation_at(0, 0, 0), r#"["One","Three"]"#);
+
+        session_set_list_validation_range(0, 1, 0, 1, 0, "Nowhere!$A$1:$A$2").unwrap();
+        assert_eq!(
+            session_validation_at(0, 1, 0),
+            "null",
+            "no list, so no chevron"
+        );
+        assert_eq!(
+            session_validation_error(0, 1, 0, "anything"),
+            "",
+            "an unreadable source is not a reason to refuse what somebody typed"
+        );
+    }
+
+    /// The inline form keeps working exactly as it did.
+    #[test]
+    fn an_inline_list_is_unchanged() {
+        session_new();
+        session_set_list_validation(0, 0, 0, 0, 0, vec!["Yes".to_owned(), "No".to_owned()])
+            .unwrap();
+        assert_eq!(session_validation_at(0, 0, 0), r#"["Yes","No"]"#);
+        assert!(session_validation_error(0, 0, 0, "Maybe").contains("must be one of"));
+    }
+}
+
+#[cfg(test)]
 mod protection_tests {
     use super::{
         EditOperation, axis_edit, axis_edit_blocked, protection_blocks, session_cell_input,

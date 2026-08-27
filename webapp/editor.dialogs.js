@@ -1352,8 +1352,21 @@ export function buildDvPanel(body) {
       const s = effectiveRange();
       try {
         if (kindSel.value === "list") {
-          const vals = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
-          wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals);
+          // Excel's own dialog takes either a comma list or a range in this one
+          // field, and a range is what most real dropdowns use — kept out of
+          // the way on another sheet and maintained on its own. A leading `=`
+          // is how Excel spells it; a bare `A1:A9` is accepted too, because
+          // that is what people type when they forget.
+          const typed = inp.value.trim();
+          const looksLikeRange =
+            typed.startsWith("=") ||
+            (!typed.includes(",") && /^(?:'[^']+'|[A-Za-z0-9_]+)?!?\$?[A-Za-z]+\$?\d+:\$?[A-Za-z]+\$?\d+$/.test(typed));
+          if (looksLikeRange) {
+            wasm.session_set_list_validation_range(state.sheet, s.r0, s.c0, s.r1, s.c1, typed);
+          } else {
+            const vals = typed.split(",").map((x) => x.trim()).filter(Boolean);
+            wasm.session_set_list_validation(state.sheet, s.r0, s.c0, s.r1, s.c1, vals);
+          }
         } else {
           wasm.session_set_validation(
             state.sheet, s.r0, s.c0, s.r1, s.c1,

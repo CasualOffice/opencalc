@@ -2696,6 +2696,23 @@ fn cf_rule_body(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> Strin
             fmt_f64(*lo),
             fmt_f64(*hi)
         ),
+        CfRule::GreaterThanOrEqual(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"greaterThanOrEqual\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::LessThanOrEqual(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"lessThanOrEqual\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::NotEqualTo(x) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"notEqual\"><formula>{}</formula></cfRule>",
+            fmt_f64(*x)
+        ),
+        CfRule::NotBetween(lo, hi) => format!(
+            "<cfRule type=\"cellIs\" dxfId=\"{dxf_id}\" priority=\"{priority}\" operator=\"notBetween\"><formula>{}</formula><formula>{}</formula></cfRule>",
+            fmt_f64(*lo),
+            fmt_f64(*hi)
+        ),
         // Colour scales and data bars carry their own presentation, so they take
         // no dxfId — the `<cfvo>` stops describe the range's own min and max.
         CfRule::ColorScale(colors) => {

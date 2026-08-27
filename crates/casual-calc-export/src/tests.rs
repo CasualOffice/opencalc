@@ -692,6 +692,41 @@ fn ranked_and_average_and_duplicate_rules_round_trip() {
     assert_eq!(back, rules);
 }
 
+/// The inclusive and negated `cellIs` operators — `>=`, `<=`, `<>` and "not
+/// between" — are everyday rules, and neither end of the pipe carried them:
+/// the writer had no arm for them and the reader dropped them on the way back.
+#[test]
+fn inclusive_and_negated_cell_is_rules_round_trip() {
+    use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};
+
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    let r = CellRange::new(CellRef::new(0, 0), CellRef::new(9, 0));
+    let rules = vec![
+        CfRule::GreaterThanOrEqual(100.0),
+        CfRule::LessThanOrEqual(3.5),
+        CfRule::NotEqualTo(7.0),
+        CfRule::NotBetween(2.0, 10.0),
+    ];
+    workbook.sheets[0].conditional_formats = rules
+        .iter()
+        .map(|rule| ConditionalFormat::new(r, rule.clone(), "FFD166"))
+        .collect();
+
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("operator=\"greaterThanOrEqual\""), "{xml}");
+    assert!(xml.contains("operator=\"lessThanOrEqual\""), "{xml}");
+    assert!(xml.contains("operator=\"notEqual\""), "{xml}");
+    assert!(xml.contains("operator=\"notBetween\""), "{xml}");
+
+    let back = import_package(written).unwrap().workbook.sheets[0]
+        .conditional_formats
+        .iter()
+        .map(|c| c.rule.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(back, rules, "a rule was lost between writing and reading");
+}
+
 #[test]
 fn rule_priority_and_stop_if_true_round_trip() {
     use casual_calc_model::{CellRange, CellRef, CfRule, ConditionalFormat};

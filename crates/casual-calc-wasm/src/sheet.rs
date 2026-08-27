@@ -192,6 +192,43 @@ pub fn session_set_tab_color(sheet: usize, hex: &str) -> Result<(), JsError> {
     })
 }
 
+/// Add a dropdown list whose options come from a **range**, the way most real
+/// Excel dropdowns are written.
+///
+/// The values are not copied. `source` is kept as the rule's `formula1` and
+/// resolved whenever the list is asked for, so editing the source range changes
+/// the dropdown — which is the reason to use a range rather than an inline list
+/// in the first place, and what Excel does.
+#[wasm_bindgen]
+pub fn session_set_list_validation_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    source: &str,
+) -> Result<(), JsError> {
+    let source = source.trim().trim_start_matches('=').trim().to_owned();
+    if source.is_empty() {
+        return Err(JsError::new("a list needs a source range"));
+    }
+    edit_sheet_metadata(sheet, move |_, data| {
+        let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+        data.validations.retain(|v| {
+            !(v.range.start.row <= rr1
+                && v.range.end.row >= rr0
+                && v.range.start.col <= cc1
+                && v.range.end.col >= cc0)
+        });
+        let mut rule = DataValidation::list(
+            CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+            Vec::new(),
+        );
+        rule.formula1 = source.clone();
+        data.validations.push(rule);
+    })
+}
+
 /// Add a dropdown-list data-validation rule over a range. Any existing rule
 /// intersecting the range is dropped first so a cell has at most one list.
 #[wasm_bindgen]

@@ -164,6 +164,43 @@ fn note_out_of_grid<T>(report: &mut CompatibilityReport, feature: &str, parsed: 
     }
 }
 
+/// The compatibility-report key for a `<cfRule>` the model cannot keep.
+///
+/// Keyed by the rule's own `type` so the host learns *which* rules it lost —
+/// "three iconSet rules" is actionable where a bare count is not. The names are
+/// an allowlist rather than the file's `type` string passed through: that
+/// attribute is attacker-controlled, and the report's own `MAX_REPORT_FEATURES`
+/// cap is a ceiling on the whole report, not a reason to let one construct spend
+/// it.
+///
+/// Unlike an autofilter refinement, which `FilterRule::Unevaluated`
+/// carries verbatim, a `cfRule` cannot simply be held and re-emitted: its
+/// presentation lives in a `<dxf>` in `styles.xml`, and the writer regenerates
+/// that part by index from the model, so a rule kept verbatim would be written
+/// back pointing at somebody else's format. Counting and naming it is what is
+/// left — `Omitted` + `NotRetained`, per docs/34.
+fn cf_report_feature(kind: &str) -> &'static str {
+    match kind {
+        // A `cellIs` whose formula is not a bare number — `>=$B$1`, `>AVERAGE(A:A)`.
+        // The operator is modelled; the operand is not.
+        "cellIs" => "conditionalFormatting/cellIs",
+        "expression" => "conditionalFormatting/expression",
+        "iconSet" => "conditionalFormatting/iconSet",
+        "timePeriod" => "conditionalFormatting/timePeriod",
+        "beginsWith" => "conditionalFormatting/beginsWith",
+        "endsWith" => "conditionalFormatting/endsWith",
+        "containsText" => "conditionalFormatting/containsText",
+        "notContainsText" => "conditionalFormatting/notContainsText",
+        "containsBlanks" => "conditionalFormatting/containsBlanks",
+        "notContainsBlanks" => "conditionalFormatting/notContainsBlanks",
+        "containsErrors" => "conditionalFormatting/containsErrors",
+        "notContainsErrors" => "conditionalFormatting/notContainsErrors",
+        "colorScale" => "conditionalFormatting/colorScale",
+        "dataBar" => "conditionalFormatting/dataBar",
+        _ => "conditionalFormatting/unsupported",
+    }
+}
+
 /// Whether every reference in `expr` is inside the addressable grid.
 ///
 /// A formula is a reference too, and one that says `SUM(A1:ZZZZ4294967295)` is
@@ -1237,27 +1274,17 @@ pub fn import_package_cancellable(
             }
         }
 
-        // Conditional formatting: resolve each cfRule's format via its dxfId,
-        // its range via the sqref, and its predicate via type/operator/formulas.
-        // A rule whose dxf paints nothing we model is skipped.
+        // Conditional formatting: resolve each cfRule's predicate via
+        // type/operator/formulas, its format via its dxfId, and its range via
+        // the sqref. Whatever cannot be kept is counted and named.
+        //
+        // The predicate is decided *before* the format, so that a rule this
+        // model cannot express at all is reported under its own type. Resolving
+        // the dxf first blamed the format for it: an `iconSet` carries no
+        // `dxfId`, so it failed the fill gate and was recorded as an
+        // unmodellable dxf — true of the lookup, and useless to a host, which
+        // needs to be told it lost an icon set.
         for raw in worksheet.conditional_formats {
-            // Colour scales and data bars carry their own colours and have no
-            // dxfId, so the format lookup must not gate them out.
-            let scale_or_bar = matches!(raw.kind.as_str(), "colorScale" | "dataBar");
-            let dxf = raw
-                .dxf_id
-                .and_then(|id| stylesheet.dxf_formats.get(id))
-                .cloned()
-                .unwrap_or_default();
-            let fill = match dxf.fill.clone() {
-                Some(f) => f,
-                // A dxf states only what differs, and a font is as much of a
-                // format as a fill: Excel's "Red Text" preset has no fill at
-                // all, and gating on the fill dropped the whole rule. An empty
-                // `fill` means "paint no background", not "no rule".
-                None if scale_or_bar || dxf.font_color.is_some() || dxf.bold => String::new(),
-                None => continue,
-            };
             let num = |i: usize| {
                 raw.formulas
                     .get(i)
@@ -1269,6 +1296,13 @@ pub fn import_package_cancellable(
                 ("cellIs", "equal") => num(0).map(CfRule::EqualTo),
                 ("cellIs", "between") => match (num(0), num(1)) {
                     (Some(a), Some(b)) => Some(CfRule::Between(a, b)),
+                    _ => None,
+                },
+                ("cellIs", "greaterThanOrEqual") => num(0).map(CfRule::GreaterThanOrEqual),
+                ("cellIs", "lessThanOrEqual") => num(0).map(CfRule::LessThanOrEqual),
+                ("cellIs", "notEqual") => num(0).map(CfRule::NotEqualTo),
+                ("cellIs", "notBetween") => match (num(0), num(1)) {
+                    (Some(a), Some(b)) => Some(CfRule::NotBetween(a, b)),
                     _ => None,
                 },
                 ("containsText", _) => raw.text.clone().map(CfRule::TextContains),
@@ -1290,25 +1324,63 @@ pub fn import_package_cancellable(
                 ("uniqueValues", _) => Some(CfRule::DuplicateValues { unique: true }),
                 _ => None,
             };
-            if let Some(rule) = rule {
-                // One rule per area of the sqref — a cfRule covering "A1:A9 C1:C9"
-                // used to apply to the first area only. Bounded as above.
-                for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
-                    let parsed = parse_range_classified(area);
-                    note_out_of_grid(&mut report, "conditionalFormatting/outOfGrid", &parsed);
-                    let Some(range) = parsed.ok() else {
-                        continue;
-                    };
-                    sheet.conditional_formats.push(ConditionalFormat {
-                        range,
-                        rule: rule.clone(),
-                        fill: fill.clone(),
-                        font_color: dxf.font_color.clone(),
-                        bold: dxf.bold,
-                        priority: raw.priority,
-                        stop_if_true: raw.stop_if_true,
-                    });
+            let Some(rule) = rule else {
+                // Every rule the model cannot represent is named here — an
+                // `iconSet`, an `expression`, a `timePeriod`, or a `cellIs`
+                // whose operand is a formula rather than a bare number. Dropping
+                // them in silence is the one thing docs/34 forbids.
+                report.record(
+                    cf_report_feature(raw.kind.as_str()),
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::NotRetained,
+                );
+                continue;
+            };
+            // Colour scales and data bars carry their own colours and have no
+            // dxfId, so the format lookup must not gate them out.
+            let scale_or_bar = matches!(raw.kind.as_str(), "colorScale" | "dataBar");
+            let dxf = raw
+                .dxf_id
+                .and_then(|id| stylesheet.dxf_formats.get(id))
+                .cloned()
+                .unwrap_or_default();
+            let fill = match dxf.fill.clone() {
+                Some(f) => f,
+                // A dxf states only what differs, and a font is as much of a
+                // format as a fill: Excel's "Red Text" preset has no fill at
+                // all, and gating on the fill dropped the whole rule. An empty
+                // `fill` means "paint no background", not "no rule".
+                None if scale_or_bar || dxf.font_color.is_some() || dxf.bold => String::new(),
+                // A dxf stating only a border or a numFmt paints nothing this
+                // model can hold, so the rule goes — but it goes counted. This
+                // is the drop that used to be indistinguishable from a file
+                // that never had the rule.
+                None => {
+                    report.record(
+                        "conditionalFormatting/dxf",
+                        ModelOutcome::Omitted,
+                        RetentionOutcome::NotRetained,
+                    );
+                    continue;
                 }
+            };
+            // One rule per area of the sqref — a cfRule covering "A1:A9 C1:C9"
+            // used to apply to the first area only. Bounded as above.
+            for area in raw.sqref.split_whitespace().take(MAX_SQREF_AREAS) {
+                let parsed = parse_range_classified(area);
+                note_out_of_grid(&mut report, "conditionalFormatting/outOfGrid", &parsed);
+                let Some(range) = parsed.ok() else {
+                    continue;
+                };
+                sheet.conditional_formats.push(ConditionalFormat {
+                    range,
+                    rule: rule.clone(),
+                    fill: fill.clone(),
+                    font_color: dxf.font_color.clone(),
+                    bold: dxf.bold,
+                    priority: raw.priority,
+                    stop_if_true: raw.stop_if_true,
+                });
             }
         }
 
