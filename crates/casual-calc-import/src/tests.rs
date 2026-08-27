@@ -1397,3 +1397,167 @@ fn a_conditional_formats_dxf_font_colour_and_bold_survive_import() {
         "a border's colour was read as the font's"
     );
 }
+
+/// **`>=` is not an exotic rule.** The importer matched four `cellIs` operators
+/// and let `greaterThanOrEqual`, `lessThanOrEqual`, `notEqual` and `notBetween`
+/// fall through to `_ => None`, where they were dropped with nothing recorded —
+/// so a file whose rules are all "at least 100" imported as a file with no
+/// conditional formatting at all.
+#[test]
+fn a_cell_is_inclusive_and_negated_operators_are_imported() {
+    use casual_calc_model::CfRule;
+    const STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1"><xf numFmtId="0"/></cellXfs>
+        <dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs>
+    </styleSheet>"#;
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData>
+        <conditionalFormatting sqref="A1:A9">
+            <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThanOrEqual"><formula>100</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="B1:B9">
+            <cfRule type="cellIs" dxfId="0" priority="2" operator="lessThanOrEqual"><formula>3</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="C1:C9">
+            <cfRule type="cellIs" dxfId="0" priority="3" operator="notEqual"><formula>7</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="D1:D9">
+            <cfRule type="cellIs" dxfId="0" priority="4" operator="notBetween"><formula>2</formula><formula>10</formula></cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+        .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let sheet = &import_package(bytes).unwrap().workbook.sheets[0];
+    let rules: Vec<CfRule> = sheet
+        .conditional_formats
+        .iter()
+        .map(|c| c.rule.clone())
+        .collect();
+    assert_eq!(
+        rules,
+        vec![
+            CfRule::GreaterThanOrEqual(100.0),
+            CfRule::LessThanOrEqual(3.0),
+            CfRule::NotEqualTo(7.0),
+            CfRule::NotBetween(2.0, 10.0),
+        ],
+        "the everyday cellIs operators were dropped on import"
+    );
+}
+
+/// **What the model cannot keep is counted and named** (docs/34, and the
+/// no-silent-data-loss rule in CLAUDE.md). An `iconSet` — and every other rule
+/// type outside the modelled set, plus a `cellIs` whose operand is a formula
+/// rather than a bare number — fell to `_ => None` and vanished with no report
+/// entry, which is indistinguishable from a file that never had the rule.
+#[test]
+fn a_unrepresentable_cf_rules_are_reported_rather_than_dropped_silently() {
+    const STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1"><xf numFmtId="0"/></cellXfs>
+        <dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs>
+    </styleSheet>"#;
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData>
+        <conditionalFormatting sqref="A1:A9">
+            <cfRule type="iconSet" priority="1"><iconSet iconSet="3TrafficLights1"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="B1:B9">
+            <cfRule type="expression" dxfId="0" priority="2"><formula>AND($A1&gt;0,$B1&lt;9)</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="C1:C9">
+            <cfRule type="cellIs" dxfId="0" priority="3" operator="greaterThanOrEqual"><formula>$B$1</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="D1:D9">
+            <cfRule type="timePeriod" dxfId="0" priority="4" timePeriod="yesterday"><formula>FLOOR(D1,1)=TODAY()-1</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="E1:E9">
+            <cfRule type="beginsWith" dxfId="0" priority="5" operator="beginsWith" text="a"><formula>LEFT(E1,1)="a"</formula></cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="F1:F9">
+            <cfRule type="containsErrors" dxfId="0" priority="6"><formula>ISERROR(F1)</formula></cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+        .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    assert!(
+        import.workbook.sheets[0].conditional_formats.is_empty(),
+        "none of these are representable, so none should have been kept: {:?}",
+        import.workbook.sheets[0].conditional_formats
+    );
+    let entries = import.report.entries();
+    for feature in [
+        "conditionalFormatting/iconSet",
+        "conditionalFormatting/expression",
+        "conditionalFormatting/cellIs",
+        "conditionalFormatting/timePeriod",
+        "conditionalFormatting/beginsWith",
+        "conditionalFormatting/containsErrors",
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| e.feature == feature)
+            .unwrap_or_else(|| {
+                panic!("{feature} was dropped with no compatibility-report entry: {entries:?}")
+            });
+        assert_eq!(entry.model, ModelOutcome::Omitted, "{feature}");
+        assert_eq!(
+            entry.retention,
+            crate::RetentionOutcome::NotRetained,
+            "{feature}"
+        );
+        assert_eq!(entry.count, 1, "{feature}");
+    }
+}
+
+/// A `<dxf>` stating only a border paints nothing this model holds, so the rule
+/// goes — but it may not go quietly.
+#[test]
+fn a_cf_rule_whose_dxf_paints_nothing_modelled_is_reported() {
+    const STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1"><xf numFmtId="0"/></cellXfs>
+        <dxfs count="1"><dxf><border><left style="thin"><color rgb="FF00FF00"/></left></border></dxf></dxfs>
+    </styleSheet>"#;
+    let sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData>
+        <conditionalFormatting sqref="A1:A9">
+            <cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>5</formula></cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+        .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let import = import_package(bytes).unwrap();
+    assert!(import.workbook.sheets[0].conditional_formats.is_empty());
+    let entry = import
+        .report
+        .entries()
+        .into_iter()
+        .find(|e| e.feature == "conditionalFormatting/dxf")
+        .expect("a rule dropped for an unmodellable dxf is reported");
+    assert_eq!(entry.model, ModelOutcome::Omitted);
+    assert_eq!(entry.retention, crate::RetentionOutcome::NotRetained);
+}

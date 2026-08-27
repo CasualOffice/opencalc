@@ -5,6 +5,88 @@
 
 use super::*;
 
+/// How many cells a range-backed list will scan, and how many values it keeps.
+///
+/// A source range is often written `$B:$B` or `$B$1:$B$10000` — the author does
+/// not know how long the list will grow. Reading a whole column literally is a
+/// million lookups on every frame the grid asks whether to draw a chevron, so
+/// the scan is bounded and the answer is the first values found. Excel's own
+/// in-cell list stops at 32,767 entries; nobody picks from a thousand.
+const LIST_SCAN_BUDGET: usize = 20_000;
+const LIST_MAX_VALUES: usize = 1_000;
+
+/// The values a list rule offers, resolved.
+///
+/// Excel's dropdowns are usually backed by a **range** — `$B$1:$B$20`, kept out
+/// of the way on another sheet and maintained on its own — rather than by an
+/// inline CSV. The importer preserves that reference in `formula1` and leaves
+/// `values` empty, and its own comment said so: *"the rule survives even though
+/// the editor cannot offer the dropdown yet."* Both the chevron and the
+/// enforcement gated on `!values.is_empty()`, so for the commonest kind of real
+/// dropdown there was no list and no rule — the user opened their workbook, the
+/// dropdowns were gone, and nothing said why.
+///
+/// Resolved on read rather than materialised at import, because the list is
+/// live: adding a row to the source range adds an option, exactly as in Excel.
+/// A rule whose source cannot be parsed returns nothing, which is the same
+/// answer as before this existed — never a wrong list.
+fn list_values(wb: &Workbook, sheet: usize, v: &DataValidation) -> Vec<String> {
+    if !v.values.is_empty() {
+        return v.values.clone();
+    }
+    let source = v.formula1.trim().trim_start_matches('=').trim();
+    if source.is_empty() {
+        return Vec::new();
+    }
+    // `Sheet2!$A$1:$A$9`, and the quoted form a sheet with a space in its name
+    // gets. The list may live anywhere, which is the point of using a range.
+    let (target, area) = match source.rsplit_once('!') {
+        Some((name, rest)) => {
+            let name = name.trim().trim_matches('\'').replace("''", "'");
+            match wb.sheets.iter().position(|sh| sh.name == name) {
+                Some(i) => (i, rest),
+                None => return Vec::new(),
+            }
+        }
+        None => (sheet, source),
+    };
+    let (from, to) = match area.split_once(':') {
+        Some((a, b)) => (a, b),
+        None => (area, area),
+    };
+    let (Some(a), Some(b)) = (
+        casual_calc_formula::parse_a1(from),
+        casual_calc_formula::parse_a1(to),
+    ) else {
+        return Vec::new();
+    };
+    let Some(sh) = wb.sheets.get(target) else {
+        return Vec::new();
+    };
+    let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
+    let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+
+    let mut out = Vec::new();
+    let mut scanned = 0usize;
+    'rows: for r in r0..=r1 {
+        for c in c0..=c1 {
+            scanned += 1;
+            if scanned > LIST_SCAN_BUDGET || out.len() >= LIST_MAX_VALUES {
+                break 'rows;
+            }
+            if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                let text = display_text(wb, cell);
+                // Blanks in the source are not options — Excel skips them, and
+                // a dropdown with empty rows in it is unusable.
+                if !text.trim().is_empty() {
+                    out.push(text);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The dropdown values for the validation covering `(row, col)` as a JSON array,
 /// or `null` if the cell has no list validation.
 #[wasm_bindgen]
@@ -21,14 +103,21 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
             .validations
             .iter()
             .find(|v| v.covers(row, col))
-            .filter(|v| v.kind == casual_calc_model::DvKind::List && !v.values.is_empty())
+            .filter(|v| v.kind == casual_calc_model::DvKind::List)
             // `showDropDown="1"` *hides* the in-cell list, as the schema
             // defines it. A file that asked for a typed-only list was still
             // getting a chevron.
             .filter(|v| !v.hide_dropdown)
         {
             Some(v) => {
-                let items: Vec<String> = v.values.iter().map(|x| json_string(x)).collect();
+                let values = list_values(s.workbook(), sheet, v);
+                // Still `null` when the list resolves to nothing: an empty array
+                // is truthy in JavaScript, so the host would draw a chevron that
+                // opens onto an empty menu.
+                if values.is_empty() {
+                    return "null".to_owned();
+                }
+                let items: Vec<String> = values.iter().map(|x| json_string(x)).collect();
                 format!("[{}]", items.join(","))
             }
             None => "null".to_owned(),
@@ -66,6 +155,33 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
         let Some(rule) = sh.validations.iter().find(|v| v.covers(row, col)) else {
             return String::new();
         };
+        // A range-backed list is decided here, because the model only knows the
+        // literal `values` and this rule's are in cells. Confined to the case
+        // where `values` is empty, so an inline list keeps exactly the
+        // semantics it had — this adds enforcement where there was none rather
+        // than changing enforcement that worked.
+        if rule.kind == casual_calc_model::DvKind::List && rule.values.is_empty() {
+            let resolved = list_values(s.workbook(), sheet, rule);
+            if resolved.is_empty() {
+                // Nothing to check against — an unreadable source is not a
+                // reason to refuse what somebody typed.
+                return String::new();
+            }
+            // Excel matches a list case-insensitively.
+            if resolved.iter().any(|v| v.eq_ignore_ascii_case(trimmed)) {
+                return String::new();
+            }
+            if !rule.error_text.is_empty() {
+                return rule.error_text.clone();
+            }
+            let shown: Vec<&str> = resolved.iter().take(6).map(String::as_str).collect();
+            let ellipsis = if resolved.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            };
+            return format!("must be one of: {}{ellipsis}", shown.join(", "));
+        }
         // The model decides; this only phrases the refusal. `None` means the
         // rule needs the formula engine, so nothing is blocked on it.
         let number = trimmed.parse::<f64>().ok();
@@ -1094,6 +1210,10 @@ pub(crate) fn describe_cf_rule(rule: &CfRule) -> String {
         CfRule::LessThan(x) => format!("less than {x}"),
         CfRule::EqualTo(x) => format!("equal to {x}"),
         CfRule::Between(a, b) => format!("between {a} and {b}"),
+        CfRule::GreaterThanOrEqual(x) => format!("greater than or equal to {x}"),
+        CfRule::LessThanOrEqual(x) => format!("less than or equal to {x}"),
+        CfRule::NotEqualTo(x) => format!("not equal to {x}"),
+        CfRule::NotBetween(a, b) => format!("not between {a} and {b}"),
         CfRule::TextContains(t) => format!("text contains \"{t}\""),
         CfRule::ColorScale(c) => format!("colour scale ({} stops)", c.len()),
         CfRule::DataBar(_) => "data bar".to_owned(),

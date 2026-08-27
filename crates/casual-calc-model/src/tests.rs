@@ -1087,3 +1087,32 @@ mod snapshot_format_frozen {
         }
     }
 }
+
+/// The inclusive and negated `cellIs` predicates decide the boundary the way
+/// their strict siblings do — a value the rule set calls equal must satisfy
+/// `>=` and `<=`, and must not satisfy `<>`.
+#[test]
+fn inclusive_and_negated_cf_rules_decide_their_boundaries() {
+    use crate::CfRule;
+
+    assert!(CfRule::GreaterThanOrEqual(100.0).matches_number(100.0));
+    assert!(CfRule::GreaterThanOrEqual(100.0).matches_number(100.5));
+    assert!(!CfRule::GreaterThanOrEqual(100.0).matches_number(99.5));
+
+    assert!(CfRule::LessThanOrEqual(3.0).matches_number(3.0));
+    assert!(CfRule::LessThanOrEqual(3.0).matches_number(2.0));
+    assert!(!CfRule::LessThanOrEqual(3.0).matches_number(3.5));
+
+    assert!(CfRule::NotEqualTo(7.0).matches_number(7.5));
+    assert!(!CfRule::NotEqualTo(7.0).matches_number(7.0));
+
+    // The exact complement of `Between`, which is inclusive on both ends.
+    for n in [1.0, 1.999, 10.001, 11.0] {
+        assert!(CfRule::NotBetween(2.0, 10.0).matches_number(n), "{n}");
+        assert!(!CfRule::Between(2.0, 10.0).matches_number(n), "{n}");
+    }
+    for n in [2.0, 5.0, 10.0] {
+        assert!(!CfRule::NotBetween(2.0, 10.0).matches_number(n), "{n}");
+        assert!(CfRule::Between(2.0, 10.0).matches_number(n), "{n}");
+    }
+}

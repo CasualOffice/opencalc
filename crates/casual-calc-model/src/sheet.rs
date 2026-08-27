@@ -889,6 +889,17 @@ pub enum CfRule {
     EqualTo(f64),
     /// Value within `[low, high]` inclusive.
     Between(f64, f64),
+    /// Value greater than or equal to the operand. OOXML `cellIs` operator
+    /// `greaterThanOrEqual`.
+    GreaterThanOrEqual(f64),
+    /// Value less than or equal to the operand. OOXML `cellIs` operator
+    /// `lessThanOrEqual`.
+    LessThanOrEqual(f64),
+    /// Value different from the operand. OOXML `cellIs` operator `notEqual`.
+    NotEqualTo(f64),
+    /// Value outside `[low, high]` — the complement of [`CfRule::Between`], and
+    /// inclusive on neither side. OOXML `cellIs` operator `notBetween`.
+    NotBetween(f64, f64),
     /// Display text contains the substring (case-insensitive).
     TextContains(String),
     /// A two- or three-stop colour scale across the range's numeric span. The
@@ -1354,6 +1365,13 @@ impl CfRule {
             CfRule::LessThan(x) => n < *x,
             CfRule::EqualTo(x) => (n - *x).abs() < 1e-9,
             CfRule::Between(lo, hi) => n >= *lo && n <= *hi,
+            // The inclusive and negated forms share `EqualTo`'s epsilon rather
+            // than comparing exactly: a value this rule set calls equal must not
+            // also be called "not equal" or fall outside `>=` by a float hair.
+            CfRule::GreaterThanOrEqual(x) => n > *x || (n - *x).abs() < 1e-9,
+            CfRule::LessThanOrEqual(x) => n < *x || (n - *x).abs() < 1e-9,
+            CfRule::NotEqualTo(x) => (n - *x).abs() >= 1e-9,
+            CfRule::NotBetween(lo, hi) => n < *lo || n > *hi,
             // Range-relative kinds are not per-cell predicates: they need the
             // range's own statistics, so a caller evaluates them with
             // `is_range_relative` and its own min/max rather than here.
