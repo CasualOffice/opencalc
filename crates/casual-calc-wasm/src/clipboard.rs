@@ -918,7 +918,13 @@ pub fn session_clip_paste_mode(
     // pressed Ctrl+V on a protected sheet and is owed the same answer either
     // way, rather than silence that depends on what they happened to copy last.
     let (dr, dc) = span.unwrap_or((0, 0));
-    guard_protected(sheet, row, col, row.saturating_add(dr), col.saturating_add(dc))?;
+    guard_protected(
+        sheet,
+        row,
+        col,
+        row.saturating_add(dr),
+        col.saturating_add(dc),
+    )?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
