@@ -6657,7 +6657,11 @@ function wireEvents() {
     }))
     .sort((a, b) => a.prio - b.prio); // lowest priority number collapses first
   const flyouts = collapsibles.map((c) => c.flyout);
-  const closeFlyouts = () => { for (const f of flyouts) f.hidden = true; };
+  const closeFlyouts = () => {
+    for (const f of flyouts) f.hidden = true;
+    const mf = byId("tb-more-flyout");
+    if (mf) mf.hidden = true;
+  };
   const expandGroup = (c) => {
     while (c.flyout.firstChild) c.groupEl.appendChild(c.flyout.firstChild);
     c.groupEl.hidden = false; c.btn.hidden = true; c.flyout.hidden = true;
@@ -6667,10 +6671,52 @@ function wireEvents() {
     c.groupEl.hidden = true; c.btn.hidden = false;
   };
   const fits = () => toolbarEl.scrollWidth <= toolbarEl.clientWidth + 1;
+  // The last stage. Collapsing every group still left the bar 791px wide, so
+  // any viewport under that clipped it with nothing left to fold — 401px of
+  // toolbar off-screen on a 390px phone, and 23px on an iPad Mini. Whatever
+  // does not fit after the groups have folded moves in here, from the trailing
+  // edge inwards, so the controls nearest the left survive longest.
+  const moreBtn = byId("tb-more");
+  const moreFlyout = byId("tb-more-flyout");
+  // Undo/redo never move: if exactly one group survives a 320px screen it has
+  // to be the one that takes back a mistake.
+  const KEEP = "tb-keep";
+  const restoreFromMore = () => {
+    while (moreFlyout.firstChild) toolbarEl.insertBefore(moreFlyout.firstChild, moreBtn);
+    moreBtn.hidden = true;
+    moreFlyout.hidden = true;
+  };
+  function overflowToMore() {
+    moreBtn.hidden = false;
+    // Guarded rather than `while (!fits())`: a layout that can never fit would
+    // otherwise spin forever, and a toolbar is not worth hanging the tab for.
+    for (let guard = 0; !fits() && guard < 60; guard += 1) {
+      const movable = [...toolbarEl.children].filter(
+        (el) => el !== moreBtn && el !== moreFlyout && !el.classList.contains(KEEP)
+          && !el.classList.contains("tb-flyout"),
+      );
+      if (!movable.length) break;
+      // Taken from the end and inserted at the front of the flyout, so the
+      // original left-to-right order is preserved both in here and on the way
+      // back out.
+      moreFlyout.insertBefore(movable[movable.length - 1], moreFlyout.firstChild);
+    }
+  }
   function reflowToolbar() {
+    restoreFromMore();
     for (const c of collapsibles) expandGroup(c); // reset to fully expanded
     for (const c of collapsibles) { if (fits()) break; collapseGroup(c); }
+    if (!fits()) overflowToMore();
   }
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = moreFlyout.hidden;
+    for (const m of menus) m.hidden = true;
+    closeFlyouts();
+    moreFlyout.hidden = !open;
+    moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) anchorMenu(moreFlyout, moreBtn);
+  });
   for (const c of collapsibles) {
     c.btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -7179,6 +7225,63 @@ function wireEvents() {
     // Labels and mnemonics together, because the second is derived from the
     // first: translating a menu changes which letters are free.
     relabelMenubar();
+
+    // --- Menu-bar overflow ---------------------------------------------------
+    // The bar had no collapse of any kind, so at 390px it sliced "Help" in half
+    // and at 320px it took "Tools" with it. A menu that is half-drawn is not a
+    // menu: there is nothing to click and nothing to say it is missing.
+    //
+    // Trailing menus move into a "⋯" list, which is the same trade the toolbar
+    // already makes — one indirection for the rarely-used end of the bar, and
+    // no scrollbar. Alt+letter keeps working throughout, because it opens the
+    // drop by index and never consults the button's position.
+    const moreMenuBtn = byId("menu-more");
+    const moreMenuDrop = byId("menu-more-drop");
+    if (moreMenuBtn && moreMenuDrop) {
+      // Markup order put it first; the menus are appended after it, so it has
+      // to be moved to the end or the overflow sits to the *left* of the bar it
+      // overflows. And its drop goes where every other drop lives, because the
+      // bar clips its own overflow and would otherwise clip the drop too.
+      bar.appendChild(moreMenuBtn);
+      ocOverlayHost.appendChild(moreMenuDrop);
+      const barFits = () => bar.scrollWidth <= bar.clientWidth + 1;
+      const openFromOverflow = (i) => {
+        moreMenuDrop.hidden = true;
+        moreMenuBtn.setAttribute("aria-expanded", "false");
+        openMenu(i);
+        // Anchored to the "⋯" rather than to a button that is not on the bar,
+        // or the drop would be positioned against a hidden element at x=0.
+        anchorMenu(drops[i], moreMenuBtn);
+      };
+      function reflowMenubar() {
+        for (const b of topBtns) b.hidden = false;
+        moreMenuBtn.hidden = true;
+        if (barFits()) return;
+        moreMenuBtn.hidden = false;
+        for (let i = topBtns.length - 1; i > 0 && !barFits(); i -= 1) topBtns[i].hidden = true;
+        moreMenuDrop.textContent = "";
+        topBtns.forEach((b, i) => {
+          if (!b.hidden) return;
+          const item = document.createElement("button");
+          item.type = "button";
+          item.setAttribute("role", "menuitem");
+          item.textContent = b.dataset.ocLabel || b.textContent.trim();
+          item.addEventListener("click", (e) => { e.stopPropagation(); openFromOverflow(i); });
+          moreMenuDrop.appendChild(item);
+        });
+      }
+      moreMenuBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const open = moreMenuDrop.hidden;
+        closeMenus();
+        moreMenuDrop.hidden = !open;
+        moreMenuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open) anchorMenu(moreMenuDrop, moreMenuBtn);
+      });
+      document.addEventListener("click", () => { moreMenuDrop.hidden = true; });
+      window.addEventListener("resize", reflowMenubar);
+      reflowMenubar();
+    }
 
     // Alt+letter opens the matching menu; holding Alt alone reveals which letter
     // each menu answers to.
