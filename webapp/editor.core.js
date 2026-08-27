@@ -6261,7 +6261,19 @@ function wireEvents() {
       if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
       if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
-      if (k === "s") { doSave(); e.preventDefault(); return; }
+      // The document's own format, not `.xlsx` regardless. `doSave` is the raw
+      // Excel path: it ignored what was opened, never asked `session_save_loss()`
+      // — whose binding says the sentence must be said *before* the download,
+      // because afterwards the file is already on disk — set no status, and had
+      // no `catch`, so inside this async listener a throw became an unhandled
+      // rejection and a failed save produced neither a file nor a message.
+      //
+      // The File menu already named the hazard: its first Download entry is
+      // "Same format as opened", because the others are conversions, and a
+      // conversion chosen by accident is how a `.csv` comes back as a package
+      // under its own name. Ctrl+S is the save nobody opens a menu for, and it
+      // was the one doing the converting.
+      if (k === "s") { await saveAs("native"); e.preventDefault(); return; }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
       if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }

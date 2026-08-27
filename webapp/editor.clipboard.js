@@ -31,12 +31,29 @@ export function download(data, name, type) {
   URL.revokeObjectURL(a.href);
 }
 
+// `clipToOS` arms the engine's own clipboard and starts the marching ants before
+// it tries the system one, and reports failure only for that last step. So a
+// refusal there does not mean the cut or copy did not happen — it means other
+// applications will not see it. Reporting "blocked" said the opposite of what
+// the engine had done: the ants were drawn, the cut was armed, and the next
+// paste moved the data. `stopMarch`'s own comment names this pairing from the
+// other side — "the visible signal said cancelled and the state said
+// otherwise, which is the worst possible pairing for an action that deletes."
+//
+// The cut is not undone, because it works: inside this application it pastes
+// exactly as it should. Only the half that failed is named.
+const OS_CLIPBOARD_REFUSED = "the system clipboard was refused — other applications will not see it";
+
 export async function doCopy() {
-  status.textContent = (await clipToOS(effectiveRange(), false)) ? "copied" : "copy blocked";
+  status.textContent = (await clipToOS(effectiveRange(), false))
+    ? "copied"
+    : `copied here — ${OS_CLIPBOARD_REFUSED}`;
 }
 
 export async function doCut() {
-  status.textContent = (await clipToOS(effectiveRange(), true)) ? "cut" : "cut blocked";
+  status.textContent = (await clipToOS(effectiveRange(), true))
+    ? "cut"
+    : `cut here — ${OS_CLIPBOARD_REFUSED}`;
 }
 
 export function doPasteMode(mode) {
