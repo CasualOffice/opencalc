@@ -27,6 +27,15 @@ pub fn session_fill_mode(
     dc1: u32,
     mode: &str,
 ) -> Result<(), JsError> {
+    // The destination is what gets written. `session_fill` delegates here, so
+    // this one guard covers Ctrl+D, Ctrl+R and the fill handle alike.
+    guard_protected(
+        sheet,
+        dr0.min(dr1),
+        dc0.min(dc1),
+        dr0.max(dr1),
+        dc0.max(dc1),
+    )?;
     let (src_rows, src_cols) = ((sr1 - sr0 + 1) as i64, (sc1 - sc0 + 1) as i64);
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -441,9 +450,25 @@ pub(crate) fn push_html_escaped(out: &mut String, text: &str) {
 /// Paste tab/newline-separated text starting at a cell (one undo step).
 #[wasm_bindgen]
 pub fn session_paste_tsv(sheet: usize, row: u32, col: u32, tsv: &str) -> Result<(), JsError> {
-    // The paste's extent is not known until it is parsed; the anchor is
-    // enough to refuse a paste onto a protected block, as Excel does.
-    guard_protected(sheet, row, col, row, col)?;
+    // Measured rather than assumed. The comment here used to say the extent
+    // was unknowable before parsing and that the anchor was therefore enough —
+    // but the parse is a split, it costs nothing to do first, and a one-cell
+    // guard let a multi-row paste land on locked cells.
+    let (mut rows, mut cols) = (0u32, 0u32);
+    for (dr, line) in tsv.split('\n').enumerate() {
+        if line.is_empty() && dr > 0 {
+            continue;
+        }
+        rows = rows.max(dr as u32);
+        cols = cols.max(line.split('\t').count().max(1) as u32 - 1);
+    }
+    guard_protected(
+        sheet,
+        row,
+        col,
+        row.saturating_add(rows),
+        col.saturating_add(cols),
+    )?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
@@ -581,7 +606,22 @@ pub fn session_paste_html(sheet: usize, row: u32, col: u32, cells: &str) -> Resu
     if parsed.is_empty() {
         return Ok(());
     }
-    guard_protected(sheet, row, col, row, col)?;
+    // Over the whole block. `parsed` already carries every `dr`/`dc` and span
+    // one line above this, so guarding a 1x1 anchor was a choice rather than a
+    // limitation — and it let a paste from Excel overwrite ten locked rows
+    // while the status bar said `pasted`.
+    let (mut last_row, mut last_col) = (0u32, 0u32);
+    for c in &parsed {
+        last_row = last_row.max(c.dr.saturating_add(c.rs.max(1) - 1));
+        last_col = last_col.max(c.dc.saturating_add(c.cs.max(1) - 1));
+    }
+    guard_protected(
+        sheet,
+        row,
+        col,
+        row.saturating_add(last_row),
+        col.saturating_add(last_col),
+    )?;
 
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -859,10 +899,35 @@ pub fn session_clip_paste_mode(
     col: u32,
     mode: &str,
 ) -> Result<(), JsError> {
+    // Guarded over the paste's whole extent, not its anchor. The extent is
+    // knowable here — it is the clipboard's own span, and CLIP is a separate
+    // thread-local, so it can be measured before SESSION is borrowed.
+    let transpose = mode == "transpose";
+    let span = CLIP.with(|cl| {
+        cl.borrow().as_ref().map(|clip| {
+            let (mut dr, mut dc) = (0, 0);
+            for c in &clip.cells {
+                dr = dr.max(c.dr);
+                dc = dc.max(c.dc);
+            }
+            if transpose { (dc, dr) } else { (dr, dc) }
+        })
+    });
+    // The anchor is guarded even when the clipboard is empty. Pasting nothing
+    // changes nothing, so letting it through would be harmless — but the user
+    // pressed Ctrl+V on a protected sheet and is owed the same answer either
+    // way, rather than silence that depends on what they happened to copy last.
+    let (dr, dc) = span.unwrap_or((0, 0));
+    guard_protected(
+        sheet,
+        row,
+        col,
+        row.saturating_add(dr),
+        col.saturating_add(dc),
+    )?;
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let transpose = mode == "transpose";
         let (ops, was_cut, empty) = CLIP.with(|cl| {
             let borrow = cl.borrow();
             let Some(clip) = borrow.as_ref() else {

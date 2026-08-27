@@ -128,7 +128,14 @@ pub fn session_replace_all(
     if find.is_empty() {
         return Ok(0);
     }
-    SESSION.with(|cell| {
+    // Replace-all writes wherever it matched, so the block it must be allowed
+    // to write is the box around those matches — which is not known until the
+    // scan has run. So the scan runs first, under its own borrow, and the guard
+    // is applied between the two. `protection_blocks` borrows SESSION itself,
+    // and re-entering a borrow that is still open would panic; splitting the
+    // pass is what lets this reuse the real guard instead of re-deriving what
+    // "locked" means, which is the sort of second definition that drifts.
+    let scanned: Vec<(CellRef, String)> = SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         // Collect (cell, replaced-input) over the editable text of every cell —
@@ -150,6 +157,25 @@ pub fn session_replace_all(
                 edits.push((at, replaced));
             }
         }
+        Ok::<_, JsError>(edits)
+    })?;
+
+    if scanned.is_empty() {
+        return Ok(0);
+    }
+    let (mut r0, mut c0, mut r1, mut c1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (at, _) in &scanned {
+        r0 = r0.min(at.row);
+        c0 = c0.min(at.col);
+        r1 = r1.max(at.row);
+        c1 = c1.max(at.col);
+    }
+    guard_protected(sheet, r0, c0, r1, c1)?;
+
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let edits = scanned;
         let count = edits.len();
         // Re-parse each replaced input so numbers/formulas are re-typed, not
         // frozen as text.
@@ -176,6 +202,7 @@ pub fn session_replace_at(
     replace: &str,
     match_case: bool,
 ) -> Result<bool, JsError> {
+    guard_protected(sheet, row, col, row, col)?;
     if find.is_empty() {
         return Ok(false);
     }
@@ -373,6 +400,7 @@ pub fn session_shift_cells(
     vertical: bool,
 ) -> Result<(), JsError> {
     let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    guard_protected(sheet, rr0, cc0, rr1, cc1)?;
     let span = if vertical {
         rr1 - rr0 + 1
     } else {
