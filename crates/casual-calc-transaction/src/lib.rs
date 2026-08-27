@@ -1126,6 +1126,18 @@ pub struct History {
     /// tweaks accumulates a copy of the sheet's tables, validations, comments
     /// and conditional formats per tweak, none of which is ever released.
     depth: Option<usize>,
+    /// How many edits have ever been applied, counting up and never down.
+    ///
+    /// A host compares this against the value it saw when it last saved, to
+    /// answer "is there unsaved work?" — the question behind a close warning.
+    ///
+    /// Deliberately **not** `undo.len()`. That stack is bounded, so past the
+    /// bound it stops growing, and a document edited past its cap would compare
+    /// equal to its save point and be reported *clean* while dirty. This can
+    /// only ever err the other way: undoing back to the save point still counts
+    /// as having edited, so the warning appears when it need not have. A
+    /// needless warning costs a click; the other mistake costs the document.
+    applied: u64,
 }
 
 impl History {
@@ -1161,6 +1173,7 @@ impl History {
         if changes_nothing(&inverse) {
             return Ok(());
         }
+        self.applied += 1;
         self.undo.push(inverse);
         // Oldest first: the entry least likely to be wanted is the one furthest
         // back. A depth of zero means no undo at all, which is a legitimate
@@ -1182,6 +1195,21 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+    }
+
+    /// How many edits have ever been applied, counting up and never down.
+    ///
+    /// A host compares this against the value it saw when it last saved, to
+    /// answer "is there unsaved work?" — the question behind a close warning.
+    ///
+    /// Deliberately not the undo stack's depth. That stack is bounded, so past
+    /// the bound it stops growing, and a document edited past its cap would
+    /// compare equal to its save point and be reported *clean* while dirty.
+    /// This can only err the other way: undo counts as an edit too, so undoing
+    /// back to the save point still reports a difference. A needless warning
+    /// costs a click; the other mistake costs the document.
+    pub fn edits_applied(&self) -> u64 {
+        self.applied
     }
 
     /// Whether there is anything to undo.
@@ -1250,6 +1278,7 @@ impl History {
         };
         let applied = op.clone();
         let inverse = apply(workbook, op)?;
+        self.applied += 1;
         self.undo.push(inverse);
         Ok(Some(applied))
     }

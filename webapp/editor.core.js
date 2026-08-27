@@ -353,6 +353,8 @@ import {
   commentStamp,
   commitFreezeDrag,
   doSave,
+  isDirty,
+  markSaved,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -709,6 +711,8 @@ export {
   commentStamp,
   commitFreezeDrag,
   doSave,
+  isDirty,
+  markSaved,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -6805,7 +6809,18 @@ function wireEvents() {
     // backgrounded tab, so waiting on it here hung the open entirely whenever
     // the window was not in front.
     await new Promise((r) => setTimeout(r, 0));
+    if (isDirty() && !(await confirmModal(
+      "Open another workbook?",
+      "This workbook has changes that have not been downloaded. Opening another discards them, and undo will not bring them back.",
+      "Discard and open",
+    ))) {
+      e.target.value = "";
+      status.textContent = "";
+      return false;
+    }
     const ok = openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+    // Whatever was just opened is the baseline, not whatever preceded it.
+    if (ok) markSaved();
     e.target.value = ""; // allow re-opening the same file
     return ok;
   });
@@ -7062,7 +7077,18 @@ function wireEvents() {
 
     const MENUS = [
       ["File", [
-        ["New", () => { stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs(); }],
+        ["New", async () => {
+          // The most destructive verb in the application, and the only one that
+          // did not ask. `session_new` replaces the session outright and `seed`
+          // then clears the history, so Ctrl+Z recovers nothing — while merge,
+          // merge-across, delimited export and a lossy save all confirm first.
+          if (isDirty() && !(await confirmModal(
+            "Start a new workbook?",
+            "This workbook has changes that have not been downloaded. Starting a new one discards them, and undo will not bring them back.",
+            "Discard and start new",
+          ))) return;
+          stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
+        }],
         ["Open…", clickEl("#tb-open")],
         { sub: "Download", items: [
           // First, and named for what it does rather than for a format: it is
@@ -8103,6 +8129,18 @@ let instanceKey = "";
 
 async function main() {
   bindElements();
+  // The document lives in wasm memory and nowhere else — no autosave, no draft.
+  // Closing the tab, reloading, or pressing Back discarded it without a word.
+  //
+  // The browser decides the wording and ignores any we supply; all a page can
+  // do is say that there is something to lose. Nothing is shown when the
+  // document is clean, so this never becomes the dialog everybody clicks
+  // through without reading.
+  window.addEventListener("beforeunload", (e) => {
+    if (!isDirty()) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
   // A desktop shell draws the menu bar itself, so the HTML one is handed over
   // before first paint rather than hidden after it — hiding it later would show
   // the bar for a frame and then take the space back under the user.

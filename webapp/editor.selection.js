@@ -8,6 +8,7 @@
 import {
   A1,
   A1_PART,
+  markSaved,
   HH,
   HW,
   ROW_H,
@@ -1332,6 +1333,10 @@ export function seed() {
   // an empty grid — and Undo starts out enabled on a document nobody has
   // touched, which is its own small lie.
   wasm.session_clear_history();
+  // The document the user was handed is the baseline: the seeding writes above
+  // are edits as far as the engine is concerned, and without this a demo sheet
+  // nobody touched would warn on close.
+  markSaved();
   select(0, 0);
 }
 
