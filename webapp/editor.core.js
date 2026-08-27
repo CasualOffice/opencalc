@@ -5923,6 +5923,15 @@ function wireEvents() {
   const LONG_PRESS_MS = 500; // a held finger is a right-click
   const GLIDE_DECAY = 0.94; // per 16ms frame
   const GLIDE_MIN = 0.04; // px/ms below which the glide has stopped
+  // How long a finger's last measured velocity stays worth throwing with. A
+  // finger that pauses produces no `touchmove`, so the only evidence of a pause
+  // is the gap before the release — which makes this gap the one signal
+  // available and a hard cut-off the wrong way to read it. Decayed rather than
+  // cut: a cut-off threw a genuine flick away whenever the release arrived late
+  // (a loaded machine, a slow phone) and kept full speed for a finger that had
+  // paused just inside it. Both errors are invisible; the first reads as "the
+  // flick did not take", which is exactly what a user calls laggy.
+  const GLIDE_STALE_MS = 300;
   let pan = null;
   let pinch = null;
   let pressTimer = null;
@@ -6063,8 +6072,13 @@ function wireEvents() {
       // land on the document and close it again immediately.
       if (pressFired) { e.preventDefault(); pressFired = false; }
       cancelPress();
-      // A finger lifted while still moving throws the sheet.
-      if (pan && pan.moved && performance.now() - pan.lastT < 90) startGlide(pan.vx, pan.vy);
+      // A finger lifted while still moving throws the sheet, in proportion to
+      // how recently it was last seen moving.
+      if (pan && pan.moved) {
+        const idle = performance.now() - pan.lastT;
+        const freshness = Math.max(0, 1 - idle / GLIDE_STALE_MS);
+        startGlide(pan.vx * freshness, pan.vy * freshness);
+      }
       pan = null;
       if (e.touches.length < 2) pinch = null;
     },

@@ -170,9 +170,12 @@ test("a flick keeps gliding after the finger lifts", async ({ page }) => {
   const x = box.x + box.width / 2;
   const y0 = box.y + box.height * 0.8;
 
-  // A fast flick, released while still moving.
+  // A fast flick, released while still moving. The steps are large because the
+  // throw is scaled by how recently the finger was last seen moving, and a CI
+  // runner delivers the release later than a phone does — a gentle flick would
+  // measure the runner's scheduling rather than the editor's inertia.
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: y0 }] });
-  for (const dy of [-40, -90, -140, -190]) {
+  for (const dy of [-60, -130, -200, -270]) {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y0 + dy }] });
     await page.waitForTimeout(16);
   }
@@ -186,4 +189,30 @@ test("a flick keeps gliding after the finger lifts", async ({ page }) => {
   // is the single thing that makes a touch surface feel like a web page rather
   // than an application.
   expect(settled, "the flick carries on after release").toBeGreaterThan(atRelease + 30);
+});
+
+test("a flick still throws when the release arrives late", async ({ page }) => {
+  await boot(page);
+  const cdp = await page.context().newCDPSession(page);
+  const box = await page.locator("#grid").boundingBox();
+  const x = box.x + box.width / 2;
+  const y0 = box.y + box.height * 0.8;
+
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: y0 }] });
+  for (const dy of [-60, -130, -200, -270]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y0 + dy }] });
+    await page.waitForTimeout(16);
+  }
+  // The release, 120ms after the last movement. This is the case that failed on
+  // CI and would fail on a slow phone: the finger was plainly still moving, but
+  // a hard 90ms cut-off decided the flick was stale and dropped it entirely.
+  // The scroll then stopped dead at the exact pixel the finger left, which a
+  // user reads as the app being laggy rather than as a threshold being missed.
+  await page.waitForTimeout(120);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const atRelease = (await scroll(page)).scrollY;
+  await page.waitForTimeout(700);
+  const settled = (await scroll(page)).scrollY;
+  expect(settled, "a late release still throws, only weaker").toBeGreaterThan(atRelease + 10);
 });
