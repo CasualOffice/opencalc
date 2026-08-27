@@ -269,12 +269,48 @@ export function clearAll() {
   draw();
 }
 
+// --- Unsaved work -----------------------------------------------------------
+//
+// The document lives in wasm memory and nowhere else: there is no autosave, no
+// draft, and until now no `beforeunload`. Closing the tab, hitting Ctrl+R, or
+// pressing Back discarded an hour of work without a word.
+//
+// The dirty check asks the engine rather than keeping a tally here. A tally in
+// the editor is a list of every mutation it can perform, and this repository has
+// already learned twice what a rule that enumerates its subjects costs: it is
+// one omission away from being wrong, and the omission is always the write path
+// somebody added last.
+let savedAtEdits = 0;
+
+function editsApplied() {
+  try {
+    return wasm ? wasm.session_edits_applied() : 0;
+  } catch {
+    // NaN compares unequal to everything, including itself, so a failed read
+    // reports *dirty*. That is the safe direction: a needless warning costs a
+    // click, and the other mistake costs the document.
+    return Number.NaN;
+  }
+}
+
+/// The document is now on disk, or freshly loaded: this is the state to compare
+/// against.
+export function markSaved() {
+  savedAtEdits = editsApplied();
+}
+
+/// Whether anything has changed since the last save or load.
+export function isDirty() {
+  return editsApplied() !== savedAtEdits;
+}
+
 export function doSave() {
   download(
     wasm.session_save(),
     "opencalc.xlsx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   );
+  markSaved();
 }
 
 export async function doSaveDelimited(delim, ext) {
@@ -299,6 +335,10 @@ export async function doSaveDelimited(delim, ext) {
   // The type comes from the engine: `text/csv` was written here for all three,
   // and it is the right answer for exactly one of them.
   download("\ufeff" + text, "opencalc." + ext, wasm.format_content_type(ext));
+  // A delimited export holds one sheet and no formatting, so it is a save point
+  // only in the sense that the user has the data — which is what the warning is
+  // about. Marking it clean is the honest reading of "you have this on disk".
+  markSaved();
   return true;
 }
 
@@ -315,6 +355,7 @@ export async function doSaveNative() {
     if (!ok) return false;
   }
   download(wasm.session_save_native(), `opencalc.${ext}`, wasm.session_format_content_type());
+  markSaved();
   status.textContent = "downloaded ." + ext;
   return true;
 }

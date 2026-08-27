@@ -4,6 +4,21 @@
 
 use super::*;
 
+/// How many edits have ever been applied, counting up and never down.
+///
+/// The host records this at each save and compares it afterwards, which is how
+/// "you have unsaved changes" is answered without the editor keeping its own
+/// tally of every mutation it can perform — a tally that would be wrong the
+/// first time somebody added a write path and forgot to touch it.
+#[wasm_bindgen]
+pub fn session_edits_applied() -> f64 {
+    // `f64` rather than `u64`: a `u64` crosses into JavaScript as a `BigInt`,
+    // which compares unequal to a `Number` under `!==` and would make every
+    // document look dirty. The count is exact to 2^53, which is more edits than
+    // a session can hold.
+    with_session(|s| s.edits_applied() as f64).unwrap_or(0.0)
+}
+
 /// What redo would reapply, or empty.
 #[wasm_bindgen]
 pub fn session_redo_label() -> String {
