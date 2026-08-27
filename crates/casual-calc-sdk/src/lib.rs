@@ -1129,6 +1129,18 @@ impl WorkbookSession {
         Ok(())
     }
 
+    /// How many edits have ever been applied to this session, counting up and
+    /// never down.
+    ///
+    /// A host records this when it saves and compares it later to answer "is
+    /// there unsaved work?". Undo and redo both count as edits, so undoing back
+    /// to the save point still reports a difference — which is the safe
+    /// direction: a needless warning costs a click, and the other mistake costs
+    /// the document.
+    pub fn edits_applied(&self) -> u64 {
+        self.history.edits_applied()
+    }
+
     /// Whether an edit can be undone.
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
