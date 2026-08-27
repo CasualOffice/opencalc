@@ -5903,6 +5903,91 @@ function wireEvents() {
     },
     { passive: false },
   );
+
+  // --- Touch: pan and pinch ------------------------------------------------
+  // The grid is a canvas this editor scrolls itself, and every ancestor is
+  // `overflow: clip`, `hidden` or `visible` — there is nothing for a browser to
+  // scroll natively. With no touch listeners either, a phone could show the
+  // first screenful of a workbook and never anything else. Tap and double-tap
+  // worked the whole time, because the browser synthesises click and dblclick,
+  // so the app looked fine until you tried to reach row 30.
+  //
+  // Deliberately touch events rather than pointer events: every selection path
+  // here is built on mouse events, and unifying them under `pointerdown` would
+  // rewrite the working half to fix the missing one.
+  const TAP_SLOP = 8; // px a finger may wander before it is a drag, not a tap
+  let pan = null;
+  let pinch = null;
+  const spread = (touches) =>
+    Math.hypot(
+      touches[0].clientX - touches[1].clientX,
+      touches[0].clientY - touches[1].clientY,
+    );
+
+  canvas.addEventListener(
+    "touchstart",
+    (e) => {
+      if (state.editing) return;
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        pan = { x: t.clientX, y: t.clientY, sx: state.scrollX, sy: state.scrollY, moved: false };
+        pinch = null;
+      } else if (e.touches.length === 2) {
+        // A second finger cancels the pan rather than fighting it: the midpoint
+        // of a pinch drifts, and panning to it makes the sheet lurch.
+        pan = null;
+        pinch = { spread: spread(e.touches), zoom: state.zoom };
+        e.preventDefault();
+      }
+    },
+    { passive: false },
+  );
+
+  canvas.addEventListener(
+    "touchmove",
+    (e) => {
+      if (pinch && e.touches.length === 2) {
+        const now = spread(e.touches);
+        if (pinch.spread > 0) setZoom(pinch.zoom * (now / pinch.spread));
+        e.preventDefault();
+        return;
+      }
+      if (!pan || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - pan.x;
+      const dy = t.clientY - pan.y;
+      // Below the slop it is still a tap, and preventing default here would stop
+      // the click the browser is about to synthesise — which is what selects a
+      // cell.
+      if (!pan.moved && Math.hypot(dx, dy) < TAP_SLOP) return;
+      pan.moved = true;
+      // The sheet follows the finger: drag up and the content comes up, which
+      // means scrolling down. Raw pixels, like the wheel handler above, and
+      // without its damping — a finger is already 1:1 with the screen.
+      state.scrollX = pan.sx - dx;
+      state.scrollY = pan.sy - dy;
+      clampScroll();
+      scheduleDraw();
+      e.preventDefault();
+    },
+    { passive: false },
+  );
+
+  canvas.addEventListener(
+    "touchend",
+    (e) => {
+      // A pan must not also select. The browser synthesises a click where the
+      // finger lifts, so without this every swipe would move the selection to
+      // wherever the drag happened to end — scrolling a sheet would silently
+      // change which cell you were on.
+      if (pan && pan.moved) e.preventDefault();
+      pan = null;
+      if (e.touches.length < 2) pinch = null;
+    },
+    { passive: false },
+  );
+  canvas.addEventListener("touchcancel", () => { pan = null; pinch = null; });
+
   canvas.addEventListener("keydown", async (e) => {
     if (state.editing) return;
     // Alt+Down opens the active cell's validation dropdown (Excel parity).
