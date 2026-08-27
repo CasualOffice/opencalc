@@ -5916,8 +5916,46 @@ function wireEvents() {
   // here is built on mouse events, and unifying them under `pointerdown` would
   // rewrite the working half to fix the missing one.
   const TAP_SLOP = 8; // px a finger may wander before it is a drag, not a tap
+  const LONG_PRESS_MS = 500; // a held finger is a right-click
+  const GLIDE_DECAY = 0.94; // per 16ms frame
+  const GLIDE_MIN = 0.04; // px/ms below which the glide has stopped
   let pan = null;
   let pinch = null;
+  let pressTimer = null;
+  let pressFired = false;
+  let glide = null;
+
+  const cancelPress = () => {
+    if (pressTimer !== null) { clearTimeout(pressTimer); pressTimer = null; }
+  };
+  const stopGlide = () => {
+    if (glide) { cancelAnimationFrame(glide.raf); glide = null; }
+  };
+  // Inertia. Without it the sheet stops dead the instant the finger leaves,
+  // which is the single thing that makes a touch surface feel like a web page
+  // rather than an application. The velocity is the finger's, so the content
+  // moves against it — the same sign as the drag itself.
+  const startGlide = (vx, vy) => {
+    stopGlide();
+    if (Math.hypot(vx, vy) < GLIDE_MIN) return;
+    let last = performance.now();
+    const step = (now) => {
+      // Clamped, because a backgrounded tab resumes with one enormous frame and
+      // would otherwise fling the sheet to its last row.
+      const dt = Math.min(32, now - last);
+      last = now;
+      state.scrollX -= vx * dt;
+      state.scrollY -= vy * dt;
+      clampScroll();
+      scheduleDraw();
+      const decay = GLIDE_DECAY ** (dt / 16);
+      vx *= decay;
+      vy *= decay;
+      if (Math.hypot(vx, vy) < GLIDE_MIN) { glide = null; return; }
+      glide.raf = requestAnimationFrame(step);
+    };
+    glide = { raf: requestAnimationFrame(step) };
+  };
   const spread = (touches) =>
     Math.hypot(
       touches[0].clientX - touches[1].clientX,
@@ -5930,12 +5968,34 @@ function wireEvents() {
       if (state.editing) return;
       if (e.touches.length === 1) {
         const t = e.touches[0];
-        pan = { x: t.clientX, y: t.clientY, sx: state.scrollX, sy: state.scrollY, moved: false };
+        // Touching a gliding sheet stops it, as it does everywhere else.
+        stopGlide();
+        pressFired = false;
+        pan = {
+          x: t.clientX, y: t.clientY, sx: state.scrollX, sy: state.scrollY, moved: false,
+          lastX: t.clientX, lastY: t.clientY, lastT: performance.now(), vx: 0, vy: 0,
+        };
         pinch = null;
+        // A held finger raises the same `contextmenu` the right button does,
+        // rather than growing a second, thinner menu that drifts from it. That
+        // handler already understands headers, the corner and cells.
+        cancelPress();
+        pressTimer = setTimeout(() => {
+          pressTimer = null;
+          if (!pan || pan.moved) return;
+          const at = { x: pan.x, y: pan.y };
+          pan = null; // the press became a menu, so the finger is no longer panning
+          pressFired = true;
+          canvas.dispatchEvent(new MouseEvent("contextmenu", {
+            bubbles: true, cancelable: true, clientX: at.x, clientY: at.y,
+          }));
+        }, LONG_PRESS_MS);
       } else if (e.touches.length === 2) {
         // A second finger cancels the pan rather than fighting it: the midpoint
         // of a pinch drifts, and panning to it makes the sheet lurch.
         pan = null;
+        cancelPress();
+        stopGlide();
         pinch = { spread: spread(e.touches), zoom: state.zoom };
         e.preventDefault();
       }
@@ -5960,7 +6020,21 @@ function wireEvents() {
       // the click the browser is about to synthesise — which is what selects a
       // cell.
       if (!pan.moved && Math.hypot(dx, dy) < TAP_SLOP) return;
+      // Past the slop it is a drag, so it is not a press however long it is
+      // held. A menu appearing mid-swipe would stop the sheet under the finger.
+      cancelPress();
       pan.moved = true;
+      // Velocity for the glide, smoothed: a single frame's delta is noisy, and
+      // the last sample before release is the one that decides the throw.
+      const now = performance.now();
+      const dt = now - pan.lastT;
+      if (dt > 0) {
+        pan.vx = pan.vx * 0.7 + ((t.clientX - pan.lastX) / dt) * 0.3;
+        pan.vy = pan.vy * 0.7 + ((t.clientY - pan.lastY) / dt) * 0.3;
+      }
+      pan.lastX = t.clientX;
+      pan.lastY = t.clientY;
+      pan.lastT = now;
       // The sheet follows the finger: drag up and the content comes up, which
       // means scrolling down. Raw pixels, like the wheel handler above, and
       // without its damping — a finger is already 1:1 with the screen.
@@ -5981,12 +6055,22 @@ function wireEvents() {
       // wherever the drag happened to end — scrolling a sheet would silently
       // change which cell you were on.
       if (pan && pan.moved) e.preventDefault();
+      // The menu is open; the click the browser is about to synthesise would
+      // land on the document and close it again immediately.
+      if (pressFired) { e.preventDefault(); pressFired = false; }
+      cancelPress();
+      // A finger lifted while still moving throws the sheet.
+      if (pan && pan.moved && performance.now() - pan.lastT < 90) startGlide(pan.vx, pan.vy);
       pan = null;
       if (e.touches.length < 2) pinch = null;
     },
     { passive: false },
   );
-  canvas.addEventListener("touchcancel", () => { pan = null; pinch = null; });
+  canvas.addEventListener("touchcancel", () => {
+    cancelPress();
+    pan = null;
+    pinch = null;
+  });
 
   canvas.addEventListener("keydown", async (e) => {
     if (state.editing) return;

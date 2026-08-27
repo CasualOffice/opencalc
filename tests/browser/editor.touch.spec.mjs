@@ -117,3 +117,73 @@ test("pinching zooms the sheet, not the page", async ({ page }) => {
   // range, so this asserts the direction and that it moved, not an exact factor.
   expect(await zoom(), "spreading two fingers zooms in").toBeGreaterThan(1.2);
 });
+
+test("a long press opens the cell menu", async ({ page }) => {
+  await boot(page);
+  const cdp = await page.context().newCDPSession(page);
+  const box = await page.locator("#grid").boundingBox();
+  const x = box.x + 220;
+  const y = box.y + 130;
+
+  // Without this there is no cut, copy, paste, insert or delete on a phone at
+  // all: every one of them lives in the context menu, and a touch device has no
+  // right button. The handler behind it already understands headers, the
+  // corner and cells — a long press raises the same event rather than growing a
+  // second, thinner menu that drifts from it.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await page.waitForTimeout(700);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  await expect(page.locator("#sheet-ctx")).toBeVisible();
+  // On the cell pressed, not on whatever was selected beforehand.
+  const sel = await page.evaluate(() => window.opencalcEditor.selectionRectForTest());
+  expect(sel.r0, "the press selects what it opened on").toBeGreaterThan(0);
+});
+
+test("a long press that turns into a drag pans instead", async ({ page }) => {
+  await boot(page);
+  const cdp = await page.context().newCDPSession(page);
+  const box = await page.locator("#grid").boundingBox();
+  const x = box.x + 220;
+  const y0 = box.y + 300;
+
+  // Holding still and then dragging is a scroll, not a menu. Getting this wrong
+  // means a menu appears mid-swipe and the sheet stops moving under the finger.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: y0 }] });
+  await page.waitForTimeout(250);
+  for (const dy of [-30, -70, -120, -170]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y0 + dy }] });
+    await page.waitForTimeout(16);
+  }
+  await page.waitForTimeout(600); // well past the press threshold
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(200);
+
+  await expect(page.locator("#sheet-ctx")).toHaveCount(0);
+  expect((await scroll(page)).scrollY, "it scrolled instead").toBeGreaterThan(50);
+});
+
+test("a flick keeps gliding after the finger lifts", async ({ page }) => {
+  await boot(page);
+  const cdp = await page.context().newCDPSession(page);
+  const box = await page.locator("#grid").boundingBox();
+  const x = box.x + box.width / 2;
+  const y0 = box.y + box.height * 0.8;
+
+  // A fast flick, released while still moving.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: y0 }] });
+  for (const dy of [-40, -90, -140, -190]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y0 + dy }] });
+    await page.waitForTimeout(16);
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const atRelease = (await scroll(page)).scrollY;
+  await page.waitForTimeout(700);
+  const settled = (await scroll(page)).scrollY;
+
+  // Without inertia the sheet stops dead the instant the finger leaves, which
+  // is the single thing that makes a touch surface feel like a web page rather
+  // than an application.
+  expect(settled, "the flick carries on after release").toBeGreaterThan(atRelease + 30);
+});
