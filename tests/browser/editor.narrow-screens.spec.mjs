@@ -73,6 +73,26 @@ test("the toolbar can be scrolled to its far end on a phone", async ({ page }) =
     return { hidden, landed: tb.scrollLeft };
   });
 
-  expect(scrolled.hidden, "there is toolbar beyond the edge to reach").toBeGreaterThan(0);
-  expect(scrolled.landed, "and it can actually be scrolled to").toBeGreaterThan(0);
+  // Superseded by UX-MOB-01, and the assertion is inverted rather than deleted
+  // so the change of mechanism is on the record.
+  //
+  // UX-EDIT-01 chose "collapse the groups, then scroll" deliberately, and ruled
+  // out wrapping for a good reason: wrapping costs height, and every pixel of it
+  // comes out of the grid. A `⋯` overflow costs no height either — the panel
+  // floats — and it does the one thing a scrollbar here could not, which is say
+  // that there is more. That row also notes the scrollbar is deliberately
+  // hidden, because chrome with a visible track loses 8-15px of a 48px bar. A
+  // hidden scrollbar on a toolbar is not an affordance: nothing on screen
+  // suggests dragging it, and on a phone the gesture competes with the grid's
+  // own horizontal pan.
+  //
+  // So the contract is now the stronger one: there is nothing past the edge to
+  // reach. Scrolling stays wired up underneath, and if anything ever does
+  // overflow again it must still be reachable — that half of UX-EDIT-01 holds.
+  expect(scrolled.hidden, "the fold leaves nothing past the edge").toBe(0);
+  if (scrolled.hidden > 0) {
+    expect(scrolled.landed, "and anything that did would still be scrollable").toBeGreaterThan(0);
+  }
+  // What used to need scrolling is in here instead, named rather than hidden.
+  await expect(page.locator("#tb-more")).toBeVisible();
 });

@@ -57,6 +57,10 @@
     <!-- Application menu bar (File/Edit/View/… ) — populated by buildMenuBar()
          in editor.js; each item delegates to an existing handler/control. -->
     <div class="menubar" id="menubar" role="menubar" aria-label="Application menu">
+      <!-- Menus that do not fit are moved in here rather than sliced. -->
+      <button id="menu-more" class="menu-top menu-more" type="button" hidden
+              title="More menus" aria-label="More menus" aria-haspopup="true" aria-expanded="false">&#8943;</button>
+      <div id="menu-more-drop" class="menu-drop popmenu" role="menu" hidden></div>
       <!-- Who else is in this document (COL-33).
            Here rather than in the app header because the header folds away
            (hdr-collapse, below) and the people you are working with should not
@@ -101,7 +105,7 @@
          toolbar; new sheets are the bottom tab-bar "+". -->
     <input id="tb-open" type="file" accept=".xlsx,.csv,.tsv,.psv" hidden />
     <div class="toolbar" role="toolbar" aria-label="Formatting">
-      <div class="tb-group">
+      <div class="tb-group tb-keep">
         <button id="tb-undo" class="tb-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
         </button>
@@ -328,6 +332,14 @@
       </div>
       <button class="tb-btn tb-collapsed" data-for="tbg-tools" title="Tools" aria-haspopup="true" hidden><span>Tools</span><svg class="tbc-caret" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg></button>
       <div class="tb-flyout popmenu" data-flyout="tbg-tools" hidden></div>
+      <!-- Final stage of the progressive collapse. The group flyouts handle a
+           narrowing window; this handles running out of groups, which is what
+           every viewport under 791px used to hit with no answer at all. -->
+      <button id="tb-more" class="tb-btn tb-more" type="button" hidden
+              title="More tools" aria-label="More tools" aria-haspopup="true" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" class="icon"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+      </button>
+      <div id="tb-more-flyout" class="tb-flyout tb-more-flyout popmenu" hidden></div>
     </div>
 
     <div class="formula-bar">

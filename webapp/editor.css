@@ -489,6 +489,14 @@ body {
   font: inherit; font-size: 13px; padding: 0 10px; border-radius: 6px;
   cursor: pointer; display: inline-flex; align-items: center;
 }
+/* `display: inline-flex` above outranks the `hidden` attribute, so a hidden
+   menu button kept its width and the bar measured 489px on a 390px screen with
+   every menu supposedly folded away. Fourth time this trap has been sprung
+   here — see .app-header (line ~399), .presence, and the overflow flyout — and
+   each time the symptom was the same: JS sets `.hidden = true`, the element
+   goes invisible-ish, and it still occupies the layout being measured. */
+.menu-top[hidden] { display: none; }
+.toolbar .tb-btn[hidden] { display: none; }
 .menu-top:hover, .menu-top[aria-expanded="true"] { background: var(--oc-surface-color); }
 /* A menu dropdown / submenu reuses .popmenu chrome. Items are full-width rows. */
 .menu-drop { min-width: 208px; }
@@ -1467,3 +1475,40 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   border-top: 1px solid var(--oc-border-color);
 }
 .oc-props-fact { font-size: 13px; color: var(--oc-text-color); font-variant-numeric: tabular-nums; }
+
+/* --- Chrome overflow: the last stage of the collapse ----------------------- */
+/* Both bars fold their trailing end into a "⋯" rather than letting the
+   viewport slice it. Neither bar may ever scroll or wrap — that rule predates
+   this and is the reason the collapse exists at all; what changed is that
+   running out of things to fold is now handled instead of ignored. */
+/* Neither bar wraps. The menubar may clip — its drops live in the overlay host
+   — but the toolbar must not: the group flyouts are its own children, and
+   `overflow: hidden` here renders them as slivers inside the toolbar band
+   instead of as panels below it. The reflow is what keeps it from overflowing;
+   clipping would only hide the evidence that it had. */
+.toolbar { flex-wrap: nowrap; }
+.menubar { flex-wrap: nowrap; overflow: hidden; }
+/* `hidden` is an attribute, and a bare `display:` rule silently outranks it —
+   which is how the overflow flyout first shipped: laid out inside the toolbar,
+   adding its own width to the very measurement that decides whether anything
+   needs to move. The `:not([hidden])` guard is the pattern .tb-flyout already
+   uses two hundred lines up, for the same reason. */
+.tb-more-flyout:not([hidden]) {
+  /* A column, like every other flyout. Laid out as a row first, which put three
+     full-width labelled buttons side by side and ran "Underline (Ctrl+U)" off
+     the panel — the labelled-list rule two hundred lines up exists precisely
+     because a collapsed group is a menu, and that applies just as much when the
+     thing collapsing is the rest of the toolbar. */
+  display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+  padding: 5px; min-width: 190px; max-width: min(92vw, 320px);
+}
+/* The groups that moved in keep their own controls on one line, wrapping rather
+   than overflowing when a group is wider than the panel. */
+.tb-more-flyout .tb-group { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.menu-more { font-size: 18px; line-height: 1; letter-spacing: 0; }
+#menu-more-drop button { display: block; width: 100%; text-align: left; }
+/* A collapsed group carries its own visible name ("Color ▾"), and the flyout's
+   injected label repeats it — "Color ▾ Color". The injected label exists for
+   icon-only buttons, which these are not. */
+.tb-more-flyout .tb-collapsed::after { content: none; }
+.tb-more-flyout .tb-collapsed { justify-content: flex-start; padding: 0 9px; }

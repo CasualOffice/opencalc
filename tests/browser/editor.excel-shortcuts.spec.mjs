@@ -194,3 +194,30 @@ test("Ctrl+Enter puts the entry in every selected cell", async ({ page }) => {
     });
   await expect.poll(inputs).toEqual(["=A1*2", "=A2*2", "=A3*2"]);
 });
+
+test("Alt opens the menus by their access keys", async ({ page }) => {
+  await boot(page);
+  const openMenu = () =>
+    page.evaluate(() => {
+      const b = [...document.querySelectorAll("button.menu-top")]
+        .find((x) => x.getAttribute("aria-expanded") === "true");
+      return b ? (b.dataset.ocLabel || b.textContent.trim()) : null;
+    });
+
+  // Claimed absent in docs/47 for months, on the strength of a grep. The
+  // binding is registered on `document`, not in the grid handler, so a search
+  // of the handler finds nothing and concludes the wrong thing.
+  for (const [key, want] of [["Alt+f", "File"], ["Alt+d", "Data"], ["Alt+h", "Help"]]) {
+    await page.keyboard.press("Escape");
+    await page.keyboard.press(key);
+    await expect.poll(openMenu, { message: `${key} must open ${want}` }).toBe(want);
+  }
+
+  // Holding Alt alone underlines each menu's letter, as on Windows.
+  await page.keyboard.press("Escape");
+  await page.keyboard.down("Alt");
+  await expect.poll(() =>
+    page.evaluate(() => document.getElementById("menubar").classList.contains("show-mnemonics")),
+  ).toBe(true);
+  await page.keyboard.up("Alt");
+});
