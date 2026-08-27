@@ -3170,6 +3170,12 @@ function drawFilterButtons(withQuad) {
 export let activePanel = null;        // 'dv' | 'cf' | 'note' | 'table' | 'page' | null
 export let panelRangeEls = [];        // range readouts to keep in sync on selection change
 export let panelNote = null;          // { ta, addrEl, cell } while the note panel is open
+// Half-typed replies, kept against the cell they were started on. Moving the
+// selection used to empty the textarea outright: the reasoning was right — a
+// draft belongs to its own thread and must not follow you to someone else's —
+// but the remedy destroyed it, with no undo and no prompt, for a user who
+// clicked another cell to re-read a figure they were about to quote.
+const noteDrafts = new Map();
 
 export const A1range = (s) =>
   (s.r0 === s.r1 && s.c0 === s.c1) ? A1(s.r0, s.c0) : `${A1(s.r0, s.c0)}:${A1(s.r1, s.c1)}`;
@@ -4004,10 +4010,14 @@ function refreshPanel() {
   } else if (activePanel === "note" && panelNote) {
     const addr = A1(state.sel.row, state.sel.col);
     if (addr !== panelNote.cell) {
+      // Parked, not discarded. The draft still does not follow the cursor to
+      // another thread — it waits on the one it belongs to, and comes back if
+      // the user does. An emptied box parks nothing, so posting a reply and
+      // moving on leaves no stale text to reappear later.
+      if (panelNote.ta.value.trim()) noteDrafts.set(panelNote.cell, panelNote.ta.value);
+      else noteDrafts.delete(panelNote.cell);
       panelNote.cell = addr;
-      // A half-typed reply belongs to the cell it was started on, so moving
-      // away clears it rather than carrying it to someone else's thread.
-      panelNote.ta.value = "";
+      panelNote.ta.value = noteDrafts.get(addr) ?? "";
       panelNote.refresh();
     }
   }

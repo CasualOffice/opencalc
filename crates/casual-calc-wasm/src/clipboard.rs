@@ -981,7 +981,13 @@ pub fn session_clip_paste_mode(
                     // turn a label into a number.
                     "add" | "subtract" | "multiply" | "divide" => {
                         let CellValue::Number(src) = cc.cell.value else {
-                            return (ops, cut, false);
+                            // `continue`, not `return`. This used to leave the
+                            // whole closure on the first non-numeric source, so
+                            // a column of figures with one heading in it pasted
+                            // as far as the heading and stopped — the cells
+                            // above updated, the ones below silently did not,
+                            // and the status bar said `pasted add` regardless.
+                            continue;
                         };
                         let target = session
                             .workbook()
@@ -998,7 +1004,11 @@ pub fn session_clip_paste_mode(
                                 "multiply" | "divide" => 1.0,
                                 _ => 0.0,
                             },
-                            _ => return (ops, cut, false),
+                            // The target is text or an error: leave it alone
+                            // and carry on, for the same reason as the source
+                            // above. Skipping a cell is what the comment three
+                            // lines up already promised.
+                            _ => continue,
                         };
                         let value = match mode {
                             "add" => base + src,
