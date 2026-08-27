@@ -1512,3 +1512,8 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    icon-only buttons, which these are not. */
 .tb-more-flyout .tb-collapsed::after { content: none; }
 .tb-more-flyout .tb-collapsed { justify-content: flex-start; padding: 0 9px; }
+
+/* The grid handles its own gestures, so the browser must not also try. Without
+   this a pan competes with the page's own panning and a pinch triggers the
+   viewport zoom instead of the sheet's. */
+#grid { touch-action: none; }
