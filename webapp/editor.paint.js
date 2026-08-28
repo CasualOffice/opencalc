@@ -178,7 +178,7 @@ export function measureRowHeight(it, colWidth) {
       needed = [...String(it.t)].length * cellLineH(it) + 6;
     } else {
       const deg = it.rot <= 90 ? it.rot : it.rot - 90;
-      needed = Math.abs(Math.sin((deg * Math.PI) / 180)) * ctx.measureText(String(it.t)).width
+      needed = Math.abs(Math.sin((deg * Math.PI) / 180)) * textWidth(ctx.font, String(it.t))
         + cellPx(it) + 6;
     }
     return Math.min(needed, 409); // Excel's row-height ceiling
@@ -251,8 +251,7 @@ export function runsWidth(it) {
   const saved = ctx.font;
   let total = 0;
   for (const run of it.runs) {
-    ctx.font = runFont(it, run);
-    total += ctx.measureText(run.t).width;
+    total += textWidth(runFont(it, run), run.t);
   }
   ctx.font = saved;
   return total;
@@ -271,7 +270,7 @@ export function drawRuns(it, x, y) {
       : run.va === "subscript" ? cellPx(it) * 0.18
       : 0;
     ctx.fillText(run.t, cursor, y + shift);
-    const w = ctx.measureText(run.t).width;
+    const w = textWidth(ctx.font, run.t);
     if (run.u || run.st) {
       const ly = run.st ? y + shift - cellPx(it) * 0.28 : y + shift + 2.5;
       ctx.fillRect(cursor, ly, w, 1);
@@ -303,11 +302,11 @@ export function wrapLines(it, maxW) {
   let line = "";
   for (const word of text.split(/\s+/)) {
     const test = line ? line + " " + word : word;
-    if (ctx.measureText(test).width <= maxW || !line) {
-      if (!line && ctx.measureText(word).width > maxW) {
+    if (textWidth(ctx.font, test) <= maxW || !line) {
+      if (!line && textWidth(ctx.font, word) > maxW) {
         let chunk = "";
         for (const ch of word) {
-          if (chunk && ctx.measureText(chunk + ch).width > maxW) { lines.push(chunk); chunk = ch; }
+          if (chunk && textWidth(ctx.font, chunk + ch) > maxW) { lines.push(chunk); chunk = ch; }
           else chunk += ch;
         }
         line = chunk;
@@ -386,6 +385,55 @@ export function drawFreezeHandles() {
 /// let go and find out. The line is drawn at the *boundary* the band drops
 /// before, in pre-move coordinates, because that is the boundary they can
 /// currently see — the same coordinate space the drop itself uses.
+/// `ctx.measureText`, remembered.
+///
+/// Text measurement was 17% of frame time on its own, because every visible
+/// label was measured again on **every frame** — the same strings, the same
+/// fonts, at 60 frames a second. Scrolling down thirty rows and back up
+/// re-measured 17 160 times what it had already measured.
+///
+/// The font string fully determines the metric, so it is the whole key
+/// alongside the text: `measureText` reports CSS pixels and ignores the canvas
+/// transform, so the `setTransform(dpr * zoom, …)` in `resize()` cannot stale
+/// an entry. A `\u0000` separator, because it cannot occur in a font string
+/// and so cannot let two different pairs collide on one key.
+///
+/// Bounded, and cleared wholesale rather than evicted one at a time: this is a
+/// frame-path cache where a miss costs one `measureText`, and an LRU's
+/// bookkeeping on every hit would cost more than it saves.
+const TEXT_WIDTH_CAP = 100_000;
+const textWidthCache = new Map();
+export const textWidthStats = { hits: 0, misses: 0 };
+
+/// The width of `text` in `font`, measured once.
+///
+/// Sets `ctx.font` itself on a miss, so a caller cannot get a width for a font
+/// the context is not actually using.
+export function textWidth(font, text) {
+  const key = font + "\u0000" + text;
+  const held = textWidthCache.get(key);
+  if (held !== undefined) {
+    textWidthStats.hits += 1;
+    return held;
+  }
+  textWidthStats.misses += 1;
+  if (textWidthCache.size >= TEXT_WIDTH_CAP) textWidthCache.clear();
+  ctx.font = font;
+  const w = ctx.measureText(text).width;
+  textWidthCache.set(key, w);
+  return w;
+}
+
+/// What the cache did, for the frame-budget gate.
+export function textWidthStatsForTest() {
+  return { ...textWidthStats, size: textWidthCache.size };
+}
+
+export function resetTextWidthStatsForTest() {
+  textWidthStats.hits = 0;
+  textWidthStats.misses = 0;
+}
+
 export function drawMoveDropIndicator(v) {
   const d = state.moveDrag;
   if (!d) return;
@@ -444,7 +492,7 @@ export function drawStretched(line, x0, width, y) {
     ctx.textAlign = prev;
     return;
   }
-  const ink = words.reduce((sum, wd) => sum + ctx.measureText(wd).width, 0);
+  const ink = words.reduce((sum, wd) => sum + textWidth(ctx.font, wd), 0);
   const gap = (width - ink) / (words.length - 1);
   if (gap <= 0) {
     ctx.fillText(String(line), x0, y);
@@ -454,7 +502,7 @@ export function drawStretched(line, x0, width, y) {
   let wx = x0;
   for (const wd of words) {
     ctx.fillText(wd, wx, y);
-    wx += ctx.measureText(wd).width + gap;
+    wx += textWidth(ctx.font, wd) + gap;
   }
   ctx.textAlign = prev;
 }
@@ -677,7 +725,7 @@ export function drawCollaborators(v, perQuad) {
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.font = "11px system-ui, sans-serif";
-      const tw = Math.ceil(ctx.measureText(name).width);
+      const tw = Math.ceil(textWidth(ctx.font, name));
       const tagW = tw + 8;
       const tagH = 15;
       // Above the range, and below it when that would leave the grid — a label
