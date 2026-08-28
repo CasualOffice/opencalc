@@ -108,9 +108,15 @@ const centre = (page, r, c) =>
 // --- the vocabulary ---------------------------------------------------------
 // Settled by the first sweep; kept so a regression shows up here rather than in
 // somebody's hands.
+// Both Excel and Sheets require the band to be selected before it can be
+// dragged — a drag from an *unselected* header is drag-to-extend, which is the
+// far commoner gesture. A probe that skips the click therefore exercises the
+// extend path and reports a working move as missing, which is how this row
+// stayed red after `MOVE-02` shipped.
 check("Selection", "drag a column header to reorder", async (page, box, hdr) => {
   const before = await cell(page, 0, 0);
   const a = await centre(page, 0, 0), c = await centre(page, 0, 2);
+  await page.mouse.click(box.x + a.x, box.y + hdr.h / 2);
   await page.mouse.move(box.x + a.x, box.y + hdr.h / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + c.x, box.y + hdr.h / 2, { steps: 12 });
@@ -122,6 +128,7 @@ check("Selection", "drag a column header to reorder", async (page, box, hdr) => 
 check("Selection", "drag a row header to reorder", async (page, box, hdr) => {
   const before = await cell(page, 0, 0);
   const a = await centre(page, 0, 0), c = await centre(page, 3, 0);
+  await page.mouse.click(box.x + hdr.w / 2, box.y + a.y);
   await page.mouse.move(box.x + hdr.w / 2, box.y + a.y);
   await page.mouse.down();
   await page.mouse.move(box.x + hdr.w / 2, box.y + c.y, { steps: 12 });
