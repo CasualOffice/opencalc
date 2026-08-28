@@ -104,6 +104,7 @@ the other way around. This index is the map.
 | 65 | [Running OpenCalc](65-RUNNING-IT.md) | Standalone, Docker and clustered operation |
 | 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
 | 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
+| 68 | [Visual audit](68-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see |
 | 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | Pasting from Excel, LibreOffice and Sheets: who parses the markup, why it is safe, and what is deliberately not mapped |
 | 69 | [Collaborative Undo Policy](69-COLLABORATIVE-UNDO-POLICY.md) | What undo *means* once somebody else has been typing — whose edit comes back, and what is refused |
 | 70 | [Comparison Semantics](70-COMPARISON-SEMANTICS.md) | What `=`, `<` and `>` mean across types, and why text and numbers never mix |

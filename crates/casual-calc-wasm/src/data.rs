@@ -293,9 +293,29 @@ pub fn session_validation_prompt(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_default()
 }
 
-/// The wording and flags on the rule covering a cell, as JSON, or `""` when the
-/// cell has no rule. The panel loads this so editing a rule keeps the author's
-/// wording instead of blanking it on the next Apply.
+/// The **whole** rule covering a cell, as JSON, or `""` when the cell has no
+/// rule. The panel loads this so reopening Data ▸ Validation shows what is
+/// already set instead of an empty dialog.
+///
+/// `{kind, operator, formula1, formula2, values, allowBlank, style, errorTitle,
+/// errorText, promptTitle, promptText, hideDropdown}`.
+///
+/// **`kind` and `operator` are the OOXML tokens**, the same spelling
+/// `session_set_validation` takes, so the panel can hand back what it was given
+/// without a translation table in the middle — one of those is one place for the
+/// two halves to disagree. `formula1`/`formula2` are the operands verbatim.
+///
+/// **A list rule's source is `values` *or* `formula1`, never both**, and the
+/// dialog needs the distinction: a literal list fills the options box, a range
+/// fills the source box. [`session_validation_at`] is not a substitute — it
+/// resolves the source down to the options the *cell's* dropdown shows, and
+/// deliberately answers `null` for a rule with `hide_dropdown` set or one whose
+/// range resolves to nothing. Both of those are rules the user can still open
+/// and must still be able to see.
+///
+/// The empty string, not an object of defaults, when there is no rule: a `none`
+/// rule the author never set is indistinguishable in the dialog from one they
+/// did.
 #[wasm_bindgen]
 pub fn session_validation_messages(sheet: usize, row: u32, col: u32) -> String {
     with_session(|s| {
@@ -306,9 +326,18 @@ pub fn session_validation_messages(sheet: usize, row: u32, col: u32) -> String {
             .validations
             .iter()
             .find(|v| v.covers(row, col))?;
+        let values: Vec<String> = r.values.iter().map(|v| json_string(v)).collect();
         Some(format!(
-            "{{\"style\":{},\"errorTitle\":{},\"errorText\":{},\
+            "{{\"kind\":{},\"operator\":{},\"formula1\":{},\"formula2\":{},\
+             \"values\":[{}],\"allowBlank\":{},\
+             \"style\":{},\"errorTitle\":{},\"errorText\":{},\
              \"promptTitle\":{},\"promptText\":{},\"hideDropdown\":{}}}",
+            json_string(r.kind.ooxml()),
+            json_string(r.operator.ooxml()),
+            json_string(&r.formula1),
+            json_string(&r.formula2),
+            values.join(","),
+            r.allow_blank,
             json_string(r.error_style.as_deref().unwrap_or("stop")),
             json_string(&r.error_title),
             json_string(&r.error_text),
@@ -2224,8 +2253,9 @@ mod filter_value_order_tests {
 mod filter_sort_range_tests {
     use super::{
         session_cells, session_create_table, session_filter_info, session_filter_regions,
-        session_new, session_set_cell, session_set_filter_range, session_sort_range_multi,
-        session_table_at, session_table_totals,
+        session_hide_rows, session_new, session_set_cell, session_set_filter_range,
+        session_set_filter_values, session_sort_range_multi, session_table_at,
+        session_table_totals, session_undo, with_session,
     };
 
     /// One cell's displayed text.
@@ -2364,5 +2394,250 @@ mod filter_sort_range_tests {
             ["n", "1", "2", "3"]
         );
         assert_eq!(shown(4, 1), totals_before, "the totals row did not move");
+    }
+
+    /// Which rows the sheet's filters currently hide, read straight off the
+    /// document rather than through a count.
+    ///
+    /// `session_filter_info` reports `hidden` as a *length*, and a length is
+    /// exactly what this defect leaves correct — one row hidden before the
+    /// sort, one row hidden after, the wrong one.
+    fn filter_hidden() -> Vec<u32> {
+        with_session(|s| {
+            s.workbook().sheets[0]
+                .filter_hidden
+                .iter()
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Whether each body row is hidden, in row order.
+    fn hidden_flags() -> Vec<bool> {
+        with_session(|s| {
+            let sh = &s.workbook().sheets[0];
+            (1..=3).map(|r| sh.is_row_hidden(r)).collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Three data rows under a heading with a `region` filter keeping `West`,
+    /// so the `East` row at index 2 is the one hidden.
+    fn filtered_grid() {
+        session_new();
+        for (r, (region, n)) in [("region", "n"), ("West", "3"), ("East", "1"), ("West", "2")]
+            .iter()
+            .enumerate()
+        {
+            session_set_cell(0, r as u32, 0, region).unwrap();
+            session_set_cell(0, r as u32, 1, n).unwrap();
+        }
+        session_set_filter_range(0, 0, 0, 3, 1).unwrap();
+        session_set_filter_values(0, 0, vec!["West".to_owned()]).unwrap();
+    }
+
+    /// **`DATA-SORT-01`: a sort under a filter still hides the excluded rows.**
+    ///
+    /// `filter_hidden` is a set of row *indices*, and nothing rebuilds it but
+    /// `commit_filter` and a load — so a sort that moved data underneath it left
+    /// it pointing at whichever row had arrived at the old index. Asserted
+    /// forward, against the sheet as it stands after the sort: a round trip
+    /// cannot see this, because stale forward state saves and reloads
+    /// symmetrically and comes back exactly as wrong as it went out.
+    #[test]
+    fn sorting_under_a_filter_keeps_hiding_the_rows_the_filter_excludes() {
+        filtered_grid();
+        assert_eq!(filter_hidden(), [2], "the East row is the one filtered out");
+
+        // Sort by the *other* column, which is what moves the East row.
+        sort_from_filter_menu(1, true);
+
+        // The invariant, stated as the filter states it: a row is hidden if and
+        // only if its region is not the one the filter kept.
+        for r in 1..=3 {
+            let region = shown(r, 0);
+            let hidden = with_session(|s| s.workbook().sheets[0].is_row_hidden(r)).unwrap();
+            assert_eq!(
+                hidden,
+                region != "West",
+                "row {r} holds {region:?} and hidden={hidden}; the filter keeps West"
+            );
+        }
+        // …and concretely: the East row never moved, because a hidden row is not
+        // part of the sort. The two visible rows sorted between themselves.
+        assert_eq!(
+            (0..4).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["region", "West", "East", "West"]
+        );
+        assert_eq!(
+            (0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(),
+            ["n", "2", "1", "3"]
+        );
+        assert_eq!(filter_hidden(), [2]);
+    }
+
+    /// **A row hidden by hand is left alone by a sort too.**
+    ///
+    /// `hidden_rows` and `filter_hidden` are separate fields with separate
+    /// reasons, and both are sets of row *indices* that a sort would otherwise
+    /// invalidate the same way. `is_row_hidden` is the one predicate that covers
+    /// both — a fix that reached only for `filter_hidden` would leave the
+    /// hand-hidden half permuted and untracked, which is the case this pins.
+    #[test]
+    fn a_row_hidden_by_hand_does_not_move_when_the_range_is_sorted() {
+        session_new();
+        for (r, (a, b)) in [("n", "tag"), ("3", "c"), ("1", "a"), ("2", "b")]
+            .iter()
+            .enumerate()
+        {
+            session_set_cell(0, r as u32, 0, a).unwrap();
+            session_set_cell(0, r as u32, 1, b).unwrap();
+        }
+        // No filter at all: the middle row is hidden the way the row header's
+        // "Hide rows" hides it.
+        session_hide_rows(0, 2, 2).unwrap();
+        session_sort_range_multi(0, 1, 0, 3, 1, vec![0], vec![1]).unwrap();
+
+        assert_eq!(
+            (0..4).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["n", "2", "1", "3"],
+            "the hidden row kept its `1`; the two visible rows sorted around it"
+        );
+        assert_eq!(
+            (0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(),
+            ["tag", "b", "a", "c"]
+        );
+        let still: Vec<bool> = with_session(|s| {
+            (1..=3)
+                .map(|r| s.workbook().sheets[0].is_row_hidden(r))
+                .collect()
+        })
+        .unwrap();
+        assert_eq!(still, [false, true, false]);
+    }
+
+    /// **Undoing that sort restores the data *and* the hidden set.**
+    ///
+    /// One Ctrl+Z, not two: the hidden set is part of the same batch as the
+    /// move, so the row order and what is hidden can never come back out of
+    /// step with each other.
+    #[test]
+    fn undoing_a_sort_under_a_filter_restores_the_order_and_the_hidden_set() {
+        filtered_grid();
+        let before: Vec<String> = (0..4).map(|r| shown(r, 1)).collect();
+        let hidden_before = hidden_flags();
+        assert_eq!(hidden_before, [false, true, false]);
+
+        sort_from_filter_menu(1, true);
+        assert_ne!(
+            (0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(),
+            before,
+            "the sort has to change something for the undo to be worth testing"
+        );
+
+        session_undo().unwrap();
+        assert_eq!((0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(), before);
+        assert_eq!(hidden_flags(), hidden_before);
+        assert_eq!(filter_hidden(), [2]);
+    }
+}
+
+/// **Reopening Data ▸ Validation shows the rule that is already there.**
+///
+/// The panel could read a rule's *wording* back and nothing else, so a cell
+/// carrying "whole number between 1 and 10" opened onto empty dropdowns: the
+/// user could neither see what they had set nor amend it, only overwrite it
+/// blind. What was missing was never model code — `DvKind::ooxml` and
+/// `DvOperator::ooxml` have always existed — but a binding that hands the kind,
+/// the operator and the operands to the host.
+///
+/// Asserted through the one call the panel makes, because a field that exists
+/// on the struct and is not in the JSON is exactly the shape of this defect.
+#[cfg(test)]
+mod validation_readback_tests {
+    use super::{
+        session_clear_validation, session_new, session_set_cell, session_set_list_validation,
+        session_set_list_validation_range, session_set_validation, session_validation_messages,
+    };
+
+    /// `session_validation_messages` parsed, as the panel parses it.
+    fn rule(row: u32, col: u32) -> serde_json::Value {
+        let raw = session_validation_messages(0, row, col);
+        assert!(!raw.is_empty(), "the cell has a rule");
+        serde_json::from_str(&raw).expect("the binding returns json")
+    }
+
+    /// **A number rule comes back with its kind, its operator and both
+    /// operands.**
+    #[test]
+    fn a_whole_number_rule_reopens_with_its_operands() {
+        session_new();
+        session_set_validation(
+            0, 0, 0, 0, 0, "whole", "between", "1", "10", true, "1 to 10",
+        )
+        .unwrap();
+        let r = rule(0, 0);
+        assert_eq!(r["kind"], "whole");
+        assert_eq!(r["operator"], "between");
+        assert_eq!(r["formula1"], "1");
+        assert_eq!(r["formula2"], "10");
+        assert_eq!(r["allowBlank"], true);
+        // The wording the panel already read is untouched by the addition.
+        assert_eq!(r["errorText"], "1 to 10");
+    }
+
+    /// **A one-operand rule reports the operator it was given**, not the
+    /// schema's `between` default — the dialog's "Data" dropdown is otherwise
+    /// wrong for every rule that is not a range.
+    #[test]
+    fn a_one_sided_rule_keeps_its_operator_and_leaves_the_second_operand_empty() {
+        session_new();
+        session_set_validation(0, 0, 0, 0, 0, "textLength", "lessThan", "5", "", false, "")
+            .unwrap();
+        let r = rule(0, 0);
+        assert_eq!(r["kind"], "textLength");
+        assert_eq!(r["operator"], "lessThan");
+        assert_eq!(r["formula1"], "5");
+        assert_eq!(r["formula2"], "");
+        assert_eq!(r["allowBlank"], false);
+    }
+
+    /// **A list rule says which of its two sources it uses.**
+    ///
+    /// `session_validation_at` resolves a list to its *options*, which is what
+    /// the cell's dropdown needs and not what the dialog needs: reopening has to
+    /// show the user the source they typed. A literal list carries `values` and
+    /// no `formula1`; a range-backed one carries `formula1` and no `values`, and
+    /// the two fill different halves of the dialog.
+    #[test]
+    fn a_list_rule_reopens_with_the_source_it_was_given() {
+        session_new();
+        session_set_list_validation(0, 0, 0, 0, 0, vec!["Yes".to_owned(), "No".to_owned()])
+            .unwrap();
+        let r = rule(0, 0);
+        assert_eq!(r["kind"], "list");
+        assert_eq!(r["values"], serde_json::json!(["Yes", "No"]));
+        assert_eq!(r["formula1"], "");
+
+        session_set_cell(0, 5, 5, "a").unwrap();
+        session_set_list_validation_range(0, 1, 0, 1, 0, "$F$1:$F$3").unwrap();
+        let r = rule(1, 0);
+        assert_eq!(r["kind"], "list");
+        assert_eq!(r["formula1"], "$F$1:$F$3");
+        assert_eq!(r["values"], serde_json::json!([]));
+    }
+
+    /// **A cell with no rule still says so.** The panel keys "is there a rule"
+    /// off the empty string, and adding fields must not turn that into a rule
+    /// made of defaults — which would be a `none` rule the user never set.
+    #[test]
+    fn a_cell_without_a_rule_returns_nothing() {
+        session_new();
+        session_set_validation(0, 0, 0, 0, 0, "whole", "between", "1", "10", true, "").unwrap();
+        assert!(!session_validation_messages(0, 0, 0).is_empty());
+        session_clear_validation(0, 0, 0, 0, 0).unwrap();
+        assert_eq!(session_validation_messages(0, 0, 0), "");
+        assert_eq!(session_validation_messages(0, 9, 9), "");
     }
 }

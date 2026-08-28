@@ -439,6 +439,8 @@ pub fn session_sort_range_multi(
             /// One sort key per key column, in `key_cols` order.
             keys: Vec<(u8, f64, String)>,
             blank: bool,
+            /// Hidden for any reason — filtered out, or hidden by hand.
+            hidden: bool,
             cells: Vec<Option<RowCell>>,
         }
         let mut rows: Vec<Row> = Vec::new();
@@ -479,6 +481,7 @@ pub fn session_sort_range_multi(
                     src_row: r,
                     keys,
                     blank: kv.is_empty(),
+                    hidden: sh.is_row_hidden(r),
                     cells,
                 });
             }
@@ -486,8 +489,26 @@ pub fn session_sort_range_multi(
             return Ok(());
         }
 
+        // **A hidden row does not take part in the sort**, which is Excel's
+        // documented behaviour and also the only version of it that keeps the
+        // grid honest. `filter_hidden` and `hidden_rows` are sets of row
+        // *indices*, rebuilt only by `commit_filter` and on load; a sort that
+        // moved data underneath them would leave them naming whichever row had
+        // arrived at the old index — so a filter keeping `West` would go on
+        // hiding row 2 while `East` sat in plain sight one row up
+        // (`DATA-SORT-01`). Leaving the hidden rows where they are means no
+        // derived state has to be recomputed at all: nothing hidden moves, and
+        // nothing visible lands on a hidden index. It also makes undo correct by
+        // construction, because the inverse of a permutation of the visible rows
+        // is a permutation of the same rows.
+        let (movable, _pinned): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| !r.hidden);
+        // The destinations, ascending: exactly the rows that were visible, so a
+        // sorted row can only ever land on one of them.
+        let slots: Vec<u32> = movable.iter().map(|r| r.src_row).collect();
+
         // Keep blanks pinned to the end (Excel behavior), sort the rest by key.
-        let (mut filled, empties): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| !r.blank);
+        let (mut filled, empties): (Vec<Row>, Vec<Row>) =
+            movable.into_iter().partition(|r| !r.blank);
         filled.sort_by(|a, b| {
             // Each key decides only if the ones before it tied, and carries its
             // own direction — "A→Z by Region, then Z→A by Total".
@@ -516,7 +537,7 @@ pub fn session_sort_range_multi(
         // up, another sheet) are pinned, exactly as Excel keeps them.
         let mut ops = Vec::with_capacity(filled.len() * (c1 - c0 + 1) as usize);
         for (i, row) in filled.into_iter().enumerate() {
-            let r = r0 + i as u32;
+            let r = slots[i];
             let dr = r as i64 - row.src_row as i64;
             for (j, c) in (c0..=c1).enumerate() {
                 let cell = row.cells[j].as_ref().map(|rc| {
