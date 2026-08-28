@@ -22,7 +22,29 @@ export function htmlText(raw) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+/// Hand a produced file to whatever can put it somewhere.
+///
+/// The five save formats all funnel through here, which is why the desktop
+/// shell is intercepted at this one point rather than at each caller: a route
+/// added later gets the native save panel without anybody remembering to wire
+/// it. In a browser tab there is no `__opencalcNative` and this is the anchor
+/// download it has always been.
+///
+/// Bytes cross to the shell, never a path — the shell owns where the file
+/// goes, and nothing in the page can ask the host process to write to a place
+/// of its choosing.
 export function download(data, name, type) {
+  const native = window.__opencalcNative;
+  if (native) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot === -1 ? "" : name.slice(dot + 1);
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+    // Deliberately not awaited: `download` is synchronous for every existing
+    // caller, and making it async would change five call sites into a shape
+    // where a forgotten `await` silently drops the save.
+    native.save(bytes, ext).catch((err) => console.error("[opencalc] save", err));
+    return;
+  }
   const blob = new Blob([data], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

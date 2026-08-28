@@ -10,9 +10,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "OpenCalc",
+        "title": "Untitled — OpenCalc",
         "width": 1280,
         "height": 800,
+        "minWidth": 640,
+        "minHeight": 400,
         "resizable": true,
         "url": "editor.html?chrome=native"
       }
@@ -22,8 +24,20 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
-    "icon": []
+    "icon": ["icons/icon.png"],
+    "category": "Productivity",
+    "copyright": "Copyright © CasualOffice. Licensed under Apache-2.0.",
+    "shortDescription": "A spreadsheet that reads and writes .xlsx.",
+    "longDescription": "OpenCalc opens, edits and saves Excel workbooks, comma-, tab- and pipe-separated text, with a calculation engine that runs entirely on this machine.",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
   }
 }

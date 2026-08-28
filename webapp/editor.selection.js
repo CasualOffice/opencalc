@@ -40,6 +40,7 @@ import {
   ensureVisible,
   enterStep,
   errText,
+  extend,
   extending,
   fInput,
   filterHidden,
@@ -131,6 +132,119 @@ export function updateStats() {
   selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
 }
 
+// --- What the whole selection carries, not just its corner -----------------
+
+// How many cells the toolbar will read before it answers "indeterminate"
+// instead of an answer it has not checked.
+//
+// This is a per-*frame* budget, not a per-click one: `refreshFormulaBar` runs
+// from `draw()`, which the copy marquee re-runs every animation frame and a
+// drag-select re-runs on every mouse move. 1024 is a 32x32 block — larger than
+// the selections people make by hand to format something, and ~1 ms of engine
+// calls in the worst case (a uniform 1024-cell block, where every cell must be
+// read before "uniform" can be claimed). The two cheap paths below mean the
+// worst case is rare: an identical serialization is compared as a string
+// without parsing, and a selection that has already disagreed about everything
+// stops early.
+//
+// Past the cap the answer is "not checked", rendered exactly like "mixed" —
+// blank boxes, unpressed toggles. Reporting the top-left cell for a range it
+// was never compared against is the defect this replaces, and a sampled answer
+// would be the same lie with more steps. Whole-row / -column /
+// select-all selections are clipped to `usedBounds()` by `effectiveRange()`,
+// so on an ordinary sheet they are usually under the cap and do get checked.
+const UNIFORM_SCAN_CAP = 1024;
+
+// The toolbar-visible slice of `session_cell_format`, flattened so two cells
+// can be compared field by field with `!==`. Keys are the engine's short ones
+// (`fn` font name, `fs` size, `nf` number format, `bg` fill, `fc` text colour)
+// plus `ov`, which is the *button's* state: #tb-wrap lights for wrap or clip.
+function toolbarStyle(raw) {
+  return {
+    fn: raw.fn || "",
+    fs: raw.fs ? String(raw.fs) : "",
+    b: !!raw.b,
+    i: !!raw.i,
+    u: !!raw.u,
+    st: !!raw.st,
+    ov: !!(raw.w || raw.cl),
+    al: raw.al || "",
+    nf: raw.nf || "",
+    bg: raw.bg || "",
+    fc: raw.fc || "",
+  };
+}
+
+const NO_KEYS = new Set();
+
+// The placeholders the markup ships ("Default" / "11"), captured before the
+// first time a mixed selection overwrites them.
+const basePlaceholder = new Map();
+
+// The formatting every selected cell agrees on, plus the set of properties they
+// do not. `style` is the representative (top-left) cell's — valid only for the
+// keys absent from `mixed`.
+function selectionStyle() {
+  const pr = selRect();
+  const headRaw = wasm.session_cell_format(state.sheet, pr.r0, pr.c0);
+  const head = toolbarStyle(JSON.parse(headRaw));
+  const keys = Object.keys(head);
+  // `allRanges()` is exactly the set of cells a toolbar command would write
+  // (`formatSel` iterates it), so the toolbar describes what it would change.
+  // A plain single-block selection is that set already, and taking it directly
+  // keeps the common case off `effectiveRange` → `usedBounds`, which is an
+  // engine call this runs on every frame of a drag.
+  const ranges = state.ranges.length === 0 && state.selKind === "cells"
+    ? [pr]
+    : allRanges();
+  let cells = 0;
+  for (const g of ranges) cells += (g.r1 - g.r0 + 1) * (g.c1 - g.c0 + 1);
+  if (cells <= 1) return { style: head, mixed: NO_KEYS, cells, scanned: true };
+  if (cells > UNIFORM_SCAN_CAP) {
+    return { style: head, mixed: new Set(keys), cells, scanned: false };
+  }
+  const mixed = new Set();
+  scan:
+  for (const g of ranges) {
+    for (let row = g.r0; row <= g.r1; row++) {
+      for (let col = g.c0; col <= g.c1; col++) {
+        if (row === pr.r0 && col === pr.c0) continue;
+        const raw = wasm.session_cell_format(state.sheet, row, col);
+        // An identical serialization is identical formatting: the engine emits
+        // these keys in a fixed order and only when set, so the uniform case
+        // costs one string compare and no parse. The converse does not hold —
+        // `qp` and the border edges are in the same string and the toolbar does
+        // not mirror them — so a *differing* string still has to be compared
+        // field by field rather than declared mixed.
+        if (raw === headRaw) continue;
+        const s = toolbarStyle(JSON.parse(raw));
+        for (const k of keys) if (s[k] !== head[k]) mixed.add(k);
+        // Nothing left to learn; the rest of the range cannot change the answer.
+        if (mixed.size === keys.length) break scan;
+      }
+    }
+  }
+  return { style: head, mixed, cells, scanned: true };
+}
+
+// Menu labels for number-format codes, read from #numfmt-menu so the toolbar
+// names a format the same way the menu that applies it does. Built once: the
+// menu is static markup.
+let numFmtLabels = null;
+function numberFormatLabel(code) {
+  if (!numFmtLabels) {
+    numFmtLabels = new Map();
+    for (const b of qsa("#numfmt-menu button[data-nf]")) {
+      if (b.dataset.nf !== "__custom__") {
+        numFmtLabels.set(b.dataset.nf, (b.textContent || "").trim());
+      }
+    }
+  }
+  // A format applied from the cell-format dialog need not be in the menu; its
+  // own code is then the most honest label available.
+  return numFmtLabels.get(code) || code || "Automatic (General)";
+}
+
 export function refreshFormulaBar() {
   if (state.editing) return;
   // Don't clobber a control the user is actively typing in. Background redraws
@@ -154,22 +268,112 @@ export function refreshFormulaBar() {
     const text = what ? `${verb} ${what} (${key})` : `${verb} (${key})`;
     setTip(btn, text);
   }
-  // Reflect formatting from the selection's top-left (the representative/active
-  // cell). For a range/row/column selection state.sel is the *moving end*, which
-  // is often an empty corner — reading that left the font/size boxes blank.
-  const pr = selRect();
-  const fmt = JSON.parse(wasm.session_cell_format(state.sheet, pr.r0, pr.c0));
-  const press = (id, on) => byId(id).setAttribute("aria-pressed", on ? "true" : "false");
-  press("tb-bold", fmt.b);
-  press("tb-italic", fmt.i);
-  press("tb-underline", fmt.u);
-  press("tb-strike", fmt.st);
-  press("tb-wrap", fmt.w || fmt.cl);
+  // Reflect the formatting of the *selection*, using its top-left (the
+  // representative/active cell) as the answer only where every selected cell
+  // agrees with it. For a range/row/column selection state.sel is the *moving
+  // end*, which is often an empty corner — reading that left the boxes blank.
+  let sel;
+  try { sel = selectionStyle(); }
+  catch { sel = { style: toolbarStyle({}), mixed: new Set(), cells: 1, scanned: true }; }
+  const f = sel.style;
+  const mixed = (k) => sel.mixed.has(k);
+  // `aria-pressed="mixed"` is the ARIA state for a toggle that is neither on
+  // nor off, which is exactly what a disagreeing selection is.
+  const press = (id, on, key) =>
+    byId(id).setAttribute("aria-pressed", mixed(key) ? "mixed" : on ? "true" : "false");
+  press("tb-bold", f.b, "b");
+  press("tb-italic", f.i, "i");
+  press("tb-underline", f.u, "u");
+  press("tb-strike", f.st, "st");
+  press("tb-wrap", f.ov, "ov");
+  // The three one-click number formats light when the selection already carries
+  // exactly the code that button applies — the same codes `toggleFormat` in
+  // editor.core.js compares against to toggle them back off, so the lit state
+  // and the second press agree about what "already applied" means.
+  press("tb-currency", f.nf === "$#,##0.00", "nf");
+  press("tb-percent", f.nf === "0%", "nf");
+  press("tb-comma", f.nf === "#,##0.00", "nf");
+  // Alignment is a radio group, not three toggles: a mixed selection lights
+  // none of them rather than marking all three indeterminate.
   for (const b of qsa(".tb-align")) {
-    b.setAttribute("aria-pressed", b.dataset.al === fmt.al ? "true" : "false");
+    b.setAttribute(
+      "aria-pressed",
+      !mixed("al") && b.dataset.al === f.al ? "true" : "false",
+    );
   }
-  byId("tb-font").value = fmt.fn || "";
-  byId("tb-size").value = fmt.fs ? String(fmt.fs) : "";
+  // Everything else a cell can be formatted with lives behind #tb-numfmt, so
+  // that button carries the rest: an accent underline when the selection has a
+  // format at all (a date, an accounting code, a custom one — none of which has
+  // a button), the format's own name in its tooltip, and a check beside it in
+  // the menu. No text on the button: it is a 30px pill and a readout inside it
+  // would resize the toolbar group.
+  const nfBtn = byId("tb-numfmt");
+  nfBtn.classList.toggle("tb-mixed", mixed("nf"));
+  nfBtn.classList.toggle("has-nf", !mixed("nf") && !!f.nf);
+  setTip(
+    nfBtn,
+    mixed("nf")
+      ? sel.scanned
+        ? "Number format — mixed across the selection"
+        : `Number format — not checked (${sel.cells} cells selected)`
+      : `Number format — ${numberFormatLabel(f.nf)}`,
+  );
+  for (const b of qsa("#numfmt-menu button[data-nf]")) {
+    const on = !mixed("nf") && b.dataset.nf !== "__custom__" && b.dataset.nf === f.nf;
+    b.classList.toggle("checked", on);
+    if (on) b.setAttribute("aria-current", "true");
+    else b.removeAttribute("aria-current");
+  }
+  // Fill and text colour, mirrored onto the buttons the same way #tb-border
+  // mirrors the chosen line colour: a CSS variable feeding a bar under the
+  // glyph (see `syncBorderPicks` in editor.core.js and `#tb-border::after` in
+  // editor.css). One mechanism, not two.
+  const paint = (id, key, prop, value, tip) => {
+    const btn = byId(id);
+    btn.classList.toggle("tb-mixed", mixed(key));
+    // Overwritten on the mixed path too, rather than just hatched over: a
+    // variable left holding the last selection's colour is a stale answer
+    // waiting for the class to come off.
+    btn.style.setProperty(prop, mixed(key) ? "transparent" : value);
+    setTip(btn, tip);
+  };
+  const colorTip = (label, key, hex, none) =>
+    mixed(key)
+      ? sel.scanned
+        ? `${label} — mixed across the selection`
+        : `${label} — not checked (${sel.cells} cells selected)`
+      : hex
+        ? `${label} — #${hex}`
+        : `${label} — ${none}`;
+  // No explicit text colour means the cell paints in the sheet's own text
+  // colour, so that is what "automatic" shows.
+  paint("tb-fontcolor", "fc", "--oc-x-font-swatch",
+    f.fc ? "#" + f.fc : "var(--oc-text-color)",
+    colorTip("Text color", "fc", f.fc, "automatic"));
+  // No fill leaves the bar empty rather than painting the page colour, which
+  // would read as "filled white".
+  paint("tb-fillcolor", "bg", "--oc-x-fill-swatch",
+    f.bg ? "#" + f.bg : "transparent",
+    colorTip("Fill color", "bg", f.bg, "none"));
+  // Font name and size: blank when the selection disagrees, as Excel does.
+  // Showing the top-left cell's 14 for a 14/9 selection is how somebody applies
+  // 14pt to a selection they had been told was already 14pt.
+  const combo = (id, key, value, base) => {
+    const box = byId(id);
+    if (basePlaceholder.get(id) === undefined) basePlaceholder.set(id, box.placeholder);
+    box.value = mixed(key) ? "" : value;
+    box.placeholder = mixed(key) ? "—" : basePlaceholder.get(id);
+    setTip(
+      box,
+      mixed(key)
+        ? sel.scanned
+          ? `${base} — mixed across the selection`
+          : `${base} — not checked (${sel.cells} cells selected)`
+        : base,
+    );
+  };
+  combo("tb-font", "fn", f.fn, "Font (type any font)");
+  combo("tb-size", "fs", f.fs, "Font size (type any size)");
 }
 
 export function stepWithin(b, axis, back) {
@@ -1069,6 +1273,12 @@ export function applyCommandRules() {
   // make — it is the honest consequence of there being nothing in it.
   const toolbar = qs(".toolbar");
   if (toolbar) toolbar.classList.toggle("oc-cmd-hidden", !anyGroup);
+  // The desktop shell builds its native menu bar from this DOM, so a rule
+  // change that hides a command has to be republished or the bar keeps
+  // offering it. Here rather than at the two callers for the reason the rest
+  // of this function is here: it is the one place the rules are applied, and a
+  // caller added later is covered without anybody remembering.
+  window.__opencalcNative?.publishMenu?.();
 }
 
 export function followHyperlink(row, col) {
@@ -1550,6 +1760,14 @@ export function scrollStateForTest() {
 
 export function selectForTest(row, col) {
   select(row, col);
+}
+
+// Shift+click without a mouse: grow the selection from wherever it is to
+// (row, col), leaving the active cell — and so the toolbar's representative
+// cell — where `selectForTest` put it. A test cannot otherwise build the
+// multi-cell selection that the "is this selection uniform?" mirror is about.
+export function extendSelectionForTest(row, col) {
+  extend(row, col);
 }
 
 export function selectionRectForTest() {

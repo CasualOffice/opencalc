@@ -8,14 +8,14 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-12 of 46 measured behaviours present.
+22 of 46 measured behaviours present.
 
 ## Selection
 
 | | behaviour |
 |---|---|
-| ❌ | drag a column header to reorder |
-| ❌ | drag a row header to reorder |
+| ✅ | drag a column header to reorder |
+| ✅ | drag a row header to reorder |
 | ❌ | drag the selection border to move a range |
 | ❌ | Ctrl+click adds a second range |
 | ✅ | double-click a column border autofits it |
@@ -28,12 +28,12 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | drag the fill handle fills |
-| ❌ | Ctrl+Backspace scrolls back to the active cell |
+| ✅ | Ctrl+Backspace scrolls back to the active cell |
 | ✅ | a CRLF paste does not leave a stray carriage return |
 | ❌ | an Alt+Enter entry undoes in one step |
 | ❌ | undo moves the view to what it just changed |
-| ❌ | filling a date increments it |
-| ❌ | filling 'Item 1' continues the number |
+| ✅ | filling a date increments it |
+| ✅ | filling 'Item 1' continues the number |
 | ❌ | Flash Fill derives a column from an example |
 | ❌ | typing offers entries already in the column |
 | ❌ | a locked cell refuses before the user types, not after |
@@ -50,9 +50,9 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | bold applies across a multi-cell selection |
-| ❌ | the toolbar shows the active cell's number format |
-| ❌ | the toolbar shows the active cell's fill colour |
-| ❌ | a mixed selection does not report as uniform |
+| ✅ | the toolbar shows the active cell's number format |
+| ✅ | the toolbar shows the active cell's fill colour |
+| ✅ | a mixed selection does not report as uniform |
 | ❌ | hovering a font previews it before committing |
 | ❌ | row height and column width are reachable from the menu bar |
 | ❌ | shrink-to-fit can be turned on |
@@ -71,8 +71,8 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | Remove Duplicates spares data outside the selection |
-| ❌ | the filter dropdown offers sorting, as Excel and Sheets do |
-| ❌ | the filter checklist orders numbers numerically |
+| ✅ | the filter dropdown offers sorting, as Excel and Sheets do |
+| ✅ | the filter checklist orders numbers numerically |
 | ❌ | Remove Duplicates lets you choose which columns count |
 | ❌ | reopening validation shows the rule that is there |
 | ❌ | deleting a sheet asks first |
@@ -108,26 +108,16 @@ are judgement and are declared in the harness; the verdict above is not.
 
 | | behaviour | met | size |
 |---|---|---|---|
-| ❌ | the toolbar shows the active cell's number format | daily | s |
-| ❌ | the toolbar shows the active cell's fill colour | daily | s |
-| ❌ | a mixed selection does not report as uniform | daily | s |
 | ❌ | the zoom level is visible without opening a menu | daily | s |
 | ❌ | undo moves the view to what it just changed | daily | s |
 | ❌ | arrowing past a hidden row skips it | daily | s |
-| ❌ | filling a date increments it | daily | s |
-| ❌ | filling 'Item 1' continues the number | daily | s |
-| ❌ | the filter dropdown offers sorting, as Excel and Sheets do | daily | s |
-| ❌ | the filter checklist orders numbers numerically | daily | s |
 | ❌ | row height and column width are reachable from the menu bar | weekly | s |
 | ❌ | a currency other than $ can be chosen | weekly | s |
 | ❌ | Ctrl+0 does what the Zoom menu says it does | weekly | s |
-| ❌ | Ctrl+Backspace scrolls back to the active cell | weekly | s |
 | ❌ | an Alt+Enter entry undoes in one step | weekly | s |
 | ❌ | a locked cell refuses before the user types, not after | weekly | s |
 | ❌ | reopening validation shows the rule that is there | weekly | s |
 | ❌ | deleting a sheet asks first | weekly | s |
-| ❌ | drag a column header to reorder | daily | m |
-| ❌ | drag a row header to reorder | daily | m |
 | ❌ | drag the selection border to move a range | daily | m |
 | ❌ | hovering a font previews it before committing | daily | m |
 | ❌ | typing offers entries already in the column | daily | m |

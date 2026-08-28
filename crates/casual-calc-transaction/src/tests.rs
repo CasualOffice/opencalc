@@ -304,8 +304,34 @@ fn formula_text(wb: &Workbook, sheet: usize, row: u32, col: u32) -> Option<Strin
     ))
 }
 
+/// A cell's formula as it is **stored**, not as it prints.
+///
+/// `CI-018`: this used to be `wb.formula(h).to_string()`, and that comparison
+/// was green over real drift. Under `PERF-11` a stored tree holds *offsets* from
+/// the cell that carries it, while `Display` renders it at origin `(0, 0)` — so
+/// the rendering is not a function of the tree alone, and it is not injective.
+/// Every negative offset resolves off-sheet and prints `#REF!`, which collapses
+/// a whole family of distinct trees onto one string: `SUM(B1:C1)` and
+/// `SUM(C1:C1)` stored in `H1` are the offsets `-6..-5` and `-5..-5`, and both
+/// print `SUM(#REF!:#REF!)`.
+///
+/// So `tree` is what equality is decided on: the offsets themselves, which is
+/// what the workbook actually holds. Comparing them is only meaningful because
+/// the address is compared alongside — the same offsets in a different cell mean
+/// something else — and `observable` keeps the two together.
+///
+/// `text` is the same tree read at its own cell, and adds no strictness at all:
+/// it is a function of `tree` and the origin, so equal trees at equal addresses
+/// always give equal text. It is here so a failure reads `SUM(C1:C1)` against
+/// `SUM(B1:C1)` rather than as two pages of `StoredRef` debug.
+#[derive(Debug, PartialEq)]
+struct StoredFormula {
+    text: String,
+    tree: casual_calc_formula::Expr,
+}
+
 /// The observable, arena-independent state of a workbook: per sheet, the name
-/// and every populated cell as (address, value, style, formula-text). Two
+/// and every populated cell as (address, value, style, stored formula). Two
 /// workbooks with this equal are indistinguishable to any reader; only the
 /// (append-only, harmless) formula arena may differ, which round-trips must
 /// ignore.
@@ -313,7 +339,7 @@ fn formula_text(wb: &Workbook, sheet: usize, row: u32, col: u32) -> Option<Strin
 struct CellSnap {
     value: CellValue,
     style: Option<StyleId>,
-    formula: Option<String>,
+    formula: Option<StoredFormula>,
 }
 
 fn observable(wb: &Workbook) -> Vec<(String, Vec<(CellRef, CellSnap)>)> {
@@ -329,7 +355,16 @@ fn observable(wb: &Workbook) -> Vec<(String, Vec<(CellRef, CellSnap)>)> {
                         CellSnap {
                             value: cell.value.clone(),
                             style: cell.style,
-                            formula: cell.formula.map(|h| wb.formula(h).unwrap().to_string()),
+                            formula: cell.formula.map(|h| {
+                                let tree = wb.formula(h).unwrap();
+                                StoredFormula {
+                                    text: casual_calc_formula::print_at(
+                                        tree,
+                                        Origin::at(addr.row, addr.col),
+                                    ),
+                                    tree: tree.clone(),
+                                }
+                            }),
                         },
                     )
                 })
@@ -3098,6 +3133,102 @@ fn a_move_never_produces_a_ref_error() {
     }
 }
 
+/// A sweep of the region `CI-018` made invisible.
+///
+/// A reference to the *left of* or *above* its own cell is a negative offset,
+/// and the old comparison rendered every one of those as `#REF!` — so an
+/// operation could put back any offsets it liked there. The formula sits at
+/// `E5`, which has cells on all four sides of it, and the references reach in
+/// every direction across every structural operation that rewrites a tree.
+#[test]
+fn round_trips_hold_for_references_read_in_every_direction() {
+    let ops = [
+        Operation::InsertRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 2,
+            count: 2,
+        },
+        Operation::MoveRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+            before: 6,
+        },
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 2,
+            before: 6,
+        },
+        Operation::MoveRows {
+            sheet: 0,
+            at: 4,
+            count: 1,
+            before: 0,
+        },
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 4,
+            count: 1,
+            before: 0,
+        },
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(2, 2), CellRef::new(3, 3)),
+            to: CellRef::new(5, 5),
+        },
+        Operation::RenameSheet {
+            index: 0,
+            name: "Renamed".to_owned(),
+        },
+    ];
+    let texts = [
+        "A1*2",         // up and left
+        "D5+F5",        // left and right on the same row
+        "E4+E6",        // above and below in the same column
+        "SUM(A1:C3)",   // wholly above-left
+        "SUM(C3:G7)",   // straddling the holding cell
+        "SUM(G7:H8)",   // wholly below-right
+        "$B$2+C3",      // one axis anchored either side
+        "SUM(B:B)",     // a whole column, left of the cell
+        "SUM(A1:A100)", // a tall span reaching past the grid
+        "T!B2+A1",      // cross-sheet, plus a local back-reference
+    ];
+
+    for text in texts {
+        for op in &ops {
+            let mut wb = workbook_two();
+            for r in 0..8u32 {
+                for c in 0..8u32 {
+                    set_num(&mut wb, 0, r, c, f64::from(r * 8 + c));
+                    set_num(&mut wb, 1, r, c, f64::from(r));
+                }
+            }
+            // E5: cells on every side of it.
+            set_formula(&mut wb, 0, 4, 4, text);
+            let before = observable(&wb);
+            let inverse = apply(&mut wb, op.clone()).unwrap();
+            apply(&mut wb, inverse).unwrap();
+            assert_eq!(observable(&wb), before, "{text} through {op:?}");
+        }
+    }
+}
+
 #[test]
 fn a_defined_name_follows_a_moved_column() {
     let mut wb = lettered_columns();
@@ -3203,9 +3334,10 @@ fn moving_columns_undoes_exactly() {
     apply(&mut wb, inverse).unwrap();
 
     assert_eq!(observable(&wb), observable(&before));
-    // Spelled out rather than left to `observable`, which compares a stored
-    // tree's *absolute* rendering: under `PERF-11` a tree is a set of offsets,
-    // and two different offset sets can render alike off their own origin.
+    // `observable` above now compares the stored offsets themselves (`CI-018`),
+    // so these no longer carry the check. They stay because they say what the
+    // answer *is*: the whole point of the case at H1 is that `SUM(B1:C1)` comes
+    // back, and a reader should not have to decode offsets to see it.
     assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("SUM(A1:C1)"));
     assert_eq!(formula_text(&wb, 0, 0, 7).as_deref(), Some("SUM(B1:C1)"));
     assert_eq!(formula_text(&wb, 0, 0, 1).as_deref(), Some("A1*2"));
@@ -3213,6 +3345,32 @@ fn moving_columns_undoes_exactly() {
     assert_eq!(wb.sheets[0].columns.sizes, before.sheets[0].columns.sizes);
     assert_eq!(wb.sheets[0].merges, before.sheets[0].merges);
     assert_eq!(wb.defined_names, before.defined_names);
+}
+
+/// The shape `observable()` used to be blind to (`CI-018`), as a round trip
+/// that leans on nothing else.
+///
+/// `SUM(B1:C1)` held in `H1` is stored as the offsets `-6..-5`. Rendered
+/// absolutely — origin `(0, 0)`, which is what `Display` does — both endpoints
+/// fall off the sheet and print `#REF!`, and so does every other pair of
+/// negative offsets. `SUM(C1:C1)` (offsets `-5..-5`) renders identically, so the
+/// old comparison could not tell the two apart and the degraded inverse that
+/// produced the second passed. Comparing the stored tree makes the offsets
+/// themselves the thing that has to match.
+#[test]
+fn moving_columns_undoes_a_span_read_from_the_left() {
+    let mut wb = lettered_columns();
+    // Deliberately to the *left* of its own cell, so the offsets are negative.
+    set_formula(&mut wb, 0, 0, 7, "SUM(B1:C1)");
+    assert_round_trip(
+        wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    );
 }
 
 #[test]

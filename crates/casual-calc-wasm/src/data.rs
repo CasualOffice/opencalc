@@ -1405,14 +1405,6 @@ pub fn session_clear_filter_rules(sheet: usize) -> Result<(), JsError> {
     commit_filter(sheet, FilterSite::Sheet, Some(f))
 }
 
-/// The distinct values to offer in column `col`'s checklist, as JSON
-/// `{"values":[{"v":…,"c":0|1}],"truncated":0|1,"custom":0|1}`.
-///
-/// `c` is whether the value is currently checked. The list reflects the rows
-/// left by the *other* columns' rules, which is what makes chained filtering
-/// behave: filtering Region to "West" leaves only West's cities on offer.
-/// `custom` flags that this column carries a condition rather than a checklist,
-/// so the host can say so instead of showing every box ticked.
 /// Which rows a value-set would hide on `col` — **without applying anything**
 /// (`COL-32`).
 ///
@@ -1456,6 +1448,68 @@ pub fn session_rows_hidden_by_values(sheet: usize, col: u32, values: &str) -> St
     out.unwrap_or_else(|| "[]".to_owned())
 }
 
+/// Which kind a checklist value belongs to, and therefore which block of the
+/// list it sits in: `0` numeric, `1` text, `2` blank.
+///
+/// A date is a number wearing a format, so it lands in the numeric block and
+/// orders by its serial — which is chronological order, for free. Anything the
+/// model does not hold as a number is text, including a number that was *typed*
+/// as text: the two are indistinguishable in the checklist (both are display
+/// strings) but not in the sheet, and putting the text "10" beside the number
+/// 10 would claim they filter the same, which they do not.
+fn filter_value_kind(text: &str, num: Option<f64>) -> u8 {
+    if text.is_empty() {
+        2
+    } else if num.is_some() {
+        0
+    } else {
+        1
+    }
+}
+
+/// A **total** order over checklist values: numbers first (ascending), then
+/// text (case-insensitive A→Z), then blanks — Excel's order, and the one the
+/// menu is read expecting.
+///
+/// Totality is the point, not a nicety. The list is rebuilt every time the
+/// dropdown opens, so any pair the comparison leaves genuinely equal is free to
+/// swap between openings and the menu flickers. Hence the two tie-breaks:
+/// `total_cmp` rather than `partial_cmp` (a NaN must still have a fixed place
+/// rather than making the sort's job undefined), a case-insensitive comparison
+/// so `apple` and `Banana` interleave the way a reader expects, and finally the
+/// raw bytes so that `apple` and `Apple` — equal case-insensitively, and two
+/// distinct entries in the list — still have a fixed order between them.
+fn filter_value_order(a: &(String, Option<f64>), b: &(String, Option<f64>)) -> Ordering {
+    let (at, an) = (a.0.as_str(), a.1);
+    let (bt, bn) = (b.0.as_str(), b.1);
+    filter_value_kind(at, an)
+        .cmp(&filter_value_kind(bt, bn))
+        .then_with(|| match (an, bn) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            _ => Ordering::Equal,
+        })
+        .then_with(|| {
+            at.chars()
+                .flat_map(char::to_lowercase)
+                .cmp(bt.chars().flat_map(char::to_lowercase))
+        })
+        .then_with(|| at.cmp(bt))
+}
+
+/// The distinct values to offer in column `col`'s checklist, as JSON
+/// `{"values":[{"v":…,"c":0|1}],"truncated":0|1,"custom":0|1}`.
+///
+/// `c` is whether the value is currently checked. The list reflects the rows
+/// left by the *other* columns' rules, which is what makes chained filtering
+/// behave: filtering Region to "West" leaves only West's cities on offer.
+/// `custom` flags that this column carries a condition rather than a checklist,
+/// so the host can say so instead of showing every box ticked.
+///
+/// The order is `filter_value_order`'s, and it is part of the contract: the
+/// host draws the array as given. It used to be the order of a
+/// `BTreeSet<String>` of display text — byte order — which is alphabetical
+/// order applied to digits, so a column holding 9, 10, 100 and 2 listed as
+/// `10, 100, 2, 9` and read as broken.
 #[wasm_bindgen]
 pub fn session_filter_values(sheet: usize, col: u32) -> String {
     let empty = "{\"values\":[],\"truncated\":0,\"custom\":0}".to_owned();
@@ -1470,7 +1524,16 @@ pub fn session_filter_values(sheet: usize, col: u32) -> String {
         };
         let custom = matches!(filter.rules.get(&off), Some(FilterRule::Custom { .. }));
 
+        // Dedup still keys on the display text — that is what a tick-box
+        // stands for, and what `session_set_filter_values` is given back — but
+        // each value now carries the number behind it, because ordering by the
+        // text alone is what put 100 before 2. The first row to show a given
+        // text supplies its number: two rows can display the same text from
+        // different values (1.0000001 and 1.0000002 under a 2-decimal format),
+        // and "first one wins" is a rule that does not depend on the scan
+        // finding them in a different order next time.
         let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut values: Vec<(String, Option<f64>)> = Vec::new();
         let mut truncated = false;
         for row in filter.body_start()..=filter.range.end.row {
             if !row_passes(wb, sh, filter, row, Some(off)) {
@@ -1480,11 +1543,15 @@ pub fn session_filter_values(sheet: usize, col: u32) -> String {
                 truncated = true;
                 break;
             }
-            seen.insert(filter_operands(wb, sh, row, col).0);
+            let (text, num) = filter_operands(wb, sh, row, col);
+            if seen.insert(text.clone()) {
+                values.push((text, num));
+            }
         }
-        let items: Vec<String> = seen
+        values.sort_by(filter_value_order);
+        let items: Vec<String> = values
             .iter()
-            .map(|v| {
+            .map(|(v, _)| {
                 // With no checklist on this column every value is on; with one,
                 // only the listed values are.
                 let on = checked.is_none_or(|c| c.iter().any(|x| x.eq_ignore_ascii_case(v)));
@@ -2039,4 +2106,263 @@ pub fn session_column_stats(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) ->
         with_session(|s| column_stats(s.workbook(), sheet, r0, c0, r1, c1, StatsLimits::default()))
             .unwrap_or_else(|| ColumnStats::over(r0, c0, r1, c1));
     serde_json::to_string(&stats).unwrap_or_else(|_| "null".to_owned())
+}
+
+#[cfg(test)]
+mod filter_value_order_tests {
+    use super::{
+        session_filter_values, session_new, session_set_cell, session_set_filter_range,
+        session_set_number_format,
+    };
+
+    /// The checklist's values, in the order the host will draw them.
+    fn listed(col: u32) -> Vec<String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(&session_filter_values(0, col)).expect("payload is json");
+        payload["values"]
+            .as_array()
+            .expect("values is an array")
+            .iter()
+            .map(|v| v["v"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// Fill column A with a header and `body`, then filter over it.
+    fn column(body: &[&str]) {
+        session_new();
+        session_set_cell(0, 0, 0, "n").unwrap();
+        for (i, v) in body.iter().enumerate() {
+            session_set_cell(0, i as u32 + 1, 0, v).unwrap();
+        }
+        session_set_filter_range(0, 0, 0, body.len() as u32, 0).unwrap();
+    }
+
+    /// **A column of numbers lists numerically, not lexicographically.**
+    ///
+    /// The whole defect in one assertion: byte order over display text is
+    /// alphabetical order over digits, so `9, 10, 100, 2` listed as
+    /// `10, 100, 2, 9`.
+    #[test]
+    fn numbers_list_in_numeric_order() {
+        column(&["9", "10", "100", "2"]);
+        assert_eq!(listed(0), ["2", "9", "10", "100"]);
+    }
+
+    /// **Numbers first, then text, then blanks — and text is case-insensitive.**
+    ///
+    /// The three kinds do not interleave: a reader scanning for a number should
+    /// not have to step over "Zebra" to reach 100. Case-insensitivity is the
+    /// other half of the same complaint — byte order puts every capital ahead
+    /// of every lowercase, so `Zebra` sorted before `apple`.
+    #[test]
+    fn kinds_do_not_interleave_and_text_ignores_case() {
+        column(&["Zebra", "9", "", "apple", "100", "Apple", "2"]);
+        assert_eq!(listed(0), ["2", "9", "100", "Apple", "apple", "Zebra", ""]);
+    }
+
+    /// **A number typed as text sorts with the text, not with the numbers.**
+    ///
+    /// `'007` is a part number, not seven. It filters as the string `007`, and
+    /// listing it beside the number 7 would claim otherwise.
+    #[test]
+    fn a_number_held_as_text_is_text() {
+        column(&["7", "'007", "2"]);
+        assert_eq!(listed(0), ["2", "7", "007"]);
+    }
+
+    /// **Dates order chronologically, because they order as their serials.**
+    ///
+    /// Nothing in the comparison knows what a date is: it is a number wearing a
+    /// format, and ordering the number gets the calendar right for free.
+    ///
+    /// Worn deliberately here. Under the default ISO rendering a byte sort of
+    /// the display text is *accidentally* chronological, so a test that used it
+    /// would pass against the old code and prove nothing; `dd/mm/yyyy` puts the
+    /// day in front, where byte order sorts `01/03/2024` (March) ahead of
+    /// `31/12/2023` (December).
+    #[test]
+    fn dates_order_chronologically() {
+        column(&["2024-03-01", "2023-12-31", "2024-01-02"]);
+        session_set_number_format(0, 1, 0, 3, 0, "dd/mm/yyyy").unwrap();
+        assert_eq!(listed(0), ["31/12/2023", "02/01/2024", "01/03/2024"]);
+    }
+
+    /// **The order is a total order, so the menu cannot flicker.**
+    ///
+    /// The list is rebuilt every time the dropdown opens. Any pair the
+    /// comparison leaves equal is free to swap between openings, which shows up
+    /// as values jumping about under the cursor — so the same sheet must give
+    /// the same list every time it is asked.
+    #[test]
+    fn the_same_column_lists_the_same_way_every_time() {
+        column(&["Apple", "apple", "10", "10.0", "", "APPLE", "2"]);
+        let first = listed(0);
+        for _ in 0..5 {
+            assert_eq!(listed(0), first);
+        }
+        // Values equal case-insensitively are still distinct entries with a
+        // fixed order between them, rather than an arbitrary one.
+        assert_eq!(
+            first
+                .iter()
+                .filter(|v| v.eq_ignore_ascii_case("apple"))
+                .count(),
+            3
+        );
+    }
+}
+
+/// The filter menu's "Sort A→Z", checked at the seam the browser cannot be
+/// asked about here: which block gets sorted, and whether the heading survives.
+///
+/// `filterSortRange` in `webapp/editor.dialogs.js` is arithmetic over three
+/// bindings' JSON, and `sortFilterColumn` hands the result to
+/// `session_sort_range_multi` with `hasHeader` true. Every one of those calls
+/// is reproduced below, in order and with the same arguments, so the range the
+/// host computes is exercised rather than asserted from reading.
+#[cfg(test)]
+mod filter_sort_range_tests {
+    use super::{
+        session_cells, session_create_table, session_filter_info, session_filter_regions,
+        session_new, session_set_cell, session_set_filter_range, session_sort_range_multi,
+        session_table_at, session_table_totals,
+    };
+
+    /// One cell's displayed text.
+    fn shown(row: u32, col: u32) -> String {
+        let cells: Vec<serde_json::Value> =
+            serde_json::from_str(&session_cells(0, row, col, row, col)).expect("cells are json");
+        cells
+            .iter()
+            .find(|c| c["r"] == row && c["c"] == col)
+            .and_then(|c| c["t"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// `filterSortRange(col)`, transcribed from `webapp/editor.dialogs.js`.
+    fn filter_sort_range(col: u32) -> Option<(u32, u32, u32, u32)> {
+        let regions: serde_json::Value =
+            serde_json::from_str(&session_filter_regions(0)).expect("regions are json");
+        let regions = regions["regions"].as_array().expect("an array").clone();
+        let num = |v: &serde_json::Value, k: &str| v[k].as_u64().unwrap_or_default() as u32;
+        let i = regions
+            .iter()
+            .position(|r| col >= num(r, "c0") && col <= num(r, "c1"))?;
+        let region = &regions[i];
+        let info = session_filter_info(0);
+        if i == 0 && info != "null" {
+            let info: serde_json::Value = serde_json::from_str(&info).expect("info is json");
+            return Some((
+                num(region, "r0"),
+                num(region, "c0"),
+                num(&info, "r1"),
+                num(region, "c1"),
+            ));
+        }
+        let table = session_table_at(0, num(region, "r0"), col);
+        if table == "null" {
+            return None;
+        }
+        let table: serde_json::Value = serde_json::from_str(&table).expect("table is json");
+        Some((
+            num(region, "r0"),
+            num(region, "c0"),
+            num(&table, "r1") - num(&table, "totals"),
+            num(region, "c1"),
+        ))
+    }
+
+    /// `sortFilterColumn(col, asc)`: the range, then the sort one row down.
+    fn sort_from_filter_menu(col: u32, asc: bool) {
+        let (r0, c0, r1, c1) = filter_sort_range(col).expect("the column is under a filter");
+        session_sort_range_multi(0, r0 + 1, c0, r1, c1, vec![col], vec![u8::from(asc)]).unwrap();
+    }
+
+    /// Two columns of three data rows under a heading.
+    fn grid() {
+        session_new();
+        for (r, (a, b)) in [("n", "tag"), ("3", "c"), ("1", "a"), ("2", "b")]
+            .iter()
+            .enumerate()
+        {
+            session_set_cell(0, r as u32, 0, a).unwrap();
+            session_set_cell(0, r as u32, 1, b).unwrap();
+        }
+    }
+
+    /// **The heading stays put, and the whole row travels with its key.**
+    ///
+    /// `hasHeader` is `true` by construction here rather than
+    /// `looksLikeHeader`'s guess. Pass `false` (sort from `r0` instead of
+    /// `r0 + 1`) and the text heading sorts after the numbers, which is what
+    /// this asserts against.
+    #[test]
+    fn a_sheet_filter_sorts_its_body_and_keeps_its_header() {
+        grid();
+        session_set_filter_range(0, 0, 0, 3, 1).unwrap();
+        assert_eq!(filter_sort_range(0), Some((0, 0, 3, 1)));
+        sort_from_filter_menu(0, true);
+        assert_eq!(
+            (0..4).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["n", "1", "2", "3"]
+        );
+        // The neighbouring column came along: sorting a key column alone would
+        // silently decouple every row from its own data.
+        assert_eq!(
+            (0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(),
+            ["tag", "a", "b", "c"]
+        );
+        sort_from_filter_menu(0, false);
+        assert_eq!(
+            (0..4).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["n", "3", "2", "1"]
+        );
+    }
+
+    /// **A table's filter sorts the table, not the block around it.**
+    ///
+    /// The row below the table is data the user put there; the surrounding
+    /// block would swallow it, and sorting would move it into the table.
+    #[test]
+    fn a_table_filter_sorts_only_the_table() {
+        grid();
+        session_set_cell(0, 4, 0, "0").unwrap();
+        session_set_cell(0, 4, 1, "outside").unwrap();
+        session_create_table(0, 0, 0, 3, 1, "T", true).unwrap();
+        // No sheet filter, so region 0 is the table's own.
+        assert_eq!(session_filter_info(0), "null");
+        assert_eq!(filter_sort_range(0), Some((0, 0, 3, 1)));
+        sort_from_filter_menu(0, true);
+        assert_eq!(
+            (0..5).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["n", "1", "2", "3", "0"]
+        );
+        assert_eq!(shown(4, 1), "outside");
+    }
+
+    /// **A totals row is not sorted with the data.**
+    ///
+    /// The table's range grows to cover it, so the end row has to come back off
+    /// again — sorting it in would rank the total among the values and leave a
+    /// SUBTOTAL sitting in the middle of the column.
+    #[test]
+    fn a_totals_row_stays_at_the_bottom() {
+        grid();
+        session_create_table(0, 0, 0, 3, 1, "T", true).unwrap();
+        session_table_totals(0, 1, 0, true).unwrap();
+        let table: serde_json::Value =
+            serde_json::from_str(&session_table_at(0, 0, 0)).expect("table is json");
+        assert_eq!(table["r1"], 4, "the totals row grew the table's range");
+        assert_eq!(table["totals"], 1);
+        // …and comes straight back off, leaving the body at rows 1..=3.
+        assert_eq!(filter_sort_range(0), Some((0, 0, 3, 1)));
+        let totals_before = shown(4, 1);
+        sort_from_filter_menu(0, true);
+        assert_eq!(
+            (0..4).map(|r| shown(r, 0)).collect::<Vec<_>>(),
+            ["n", "1", "2", "3"]
+        );
+        assert_eq!(shown(4, 1), totals_before, "the totals row did not move");
+    }
 }

@@ -205,6 +205,7 @@ import {
   drawEdge,
   drawFilterRegion,
   drawFreezeDividers,
+  drawMoveDropIndicator,
   drawFreezeHandles,
   drawImages,
   drawRuns,
@@ -360,6 +361,7 @@ import {
   moveTab,
   needsRecalc,
   openBytes,
+  documentName,
   printSheet,
   readOnly,
   readOutline,
@@ -657,6 +659,7 @@ export {
   emit,
   emitStateEvents,
   endInline,
+  extendSelectionForTest,
   fillWithin,
   followHyperlink,
   gridHandlesForTest,
@@ -718,6 +721,7 @@ export {
   moveTab,
   needsRecalc,
   openBytes,
+  documentName,
   printSheet,
   readOnly,
   readOutline,
@@ -1143,6 +1147,12 @@ export const state = {
   editing: false,
   resize: null, // active header resize: { axis:"col"|"row", index, previewPx, scope }
   freezeDrag: null, // active freeze-divider drag: { axis:"col"|"row", px, py }
+  // Dragging an already-selected header to reorder it: { axis, at, count, before }.
+  // Sheets' rule, and it is the one that leaves drag-to-extend alone — grabbing
+  // a header *outside* the selection still selects and extends, as it always
+  // did. `before` is in pre-move coordinates, which is where the indicator the
+  // user is looking at actually sits.
+  moveDrag: null,
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
@@ -2760,6 +2770,8 @@ export function draw() {
   drawOutlineGutter(v);
   } // end headers
   drawFreezeDividers(v);
+  // After the dividers, so a drop indicator over a frozen band is still visible.
+  drawMoveDropIndicator(v);
   drawFreezeHandles();
 
   // The in-cell editor is a DOM element over the canvas: keep it on its cell as
@@ -5969,6 +5981,15 @@ function wireEvents() {
     if (py < HH && px >= HW) {
       endInline();
       const c = colAtX(px);
+      const sr = selRect();
+      // Already selected, no modifier: this is a move, not a new selection.
+      if (state.selKind === "cols" && !e.shiftKey && !e.metaKey && !e.ctrlKey
+          && c >= sr.c0 && c <= sr.c1) {
+        state.moveDrag = { axis: "col", at: sr.c0, count: sr.c1 - sr.c0 + 1, before: sr.c0 };
+        state.dragging = true;
+        canvas.focus();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey) addColumnRange(c);
       else selectColumn(c, e.shiftKey);
       state.headerDrag = "col";
@@ -5979,6 +6000,14 @@ function wireEvents() {
     if (px < HW && py >= HH) {
       endInline();
       const r = rowAtY(py);
+      const sr = selRect();
+      if (state.selKind === "rows" && !e.shiftKey && !e.metaKey && !e.ctrlKey
+          && r >= sr.r0 && r <= sr.r1) {
+        state.moveDrag = { axis: "row", at: sr.r0, count: sr.r1 - sr.r0 + 1, before: sr.r0 };
+        state.dragging = true;
+        canvas.focus();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey) addRowRange(r);
       else selectRow(r, e.shiftKey);
       state.headerDrag = "row";
@@ -6001,6 +6030,23 @@ function wireEvents() {
     const py = (e.clientY - rect.top) / state.zoom;
     if (chartDrag) { chartDrag.px = px; chartDrag.py = py; draw(); return; }
     if (state.freezeDrag) { state.freezeDrag.px = px; state.freezeDrag.py = py; draw(); return; }
+    if (state.moveDrag) {
+      const d = state.moveDrag;
+      // The drop lands *before* a line, so the half of it the pointer is in
+      // decides which side — otherwise the last column on the sheet could never
+      // be dropped after.
+      if (d.axis === "col") {
+        const c = Math.max(0, colAtX(px));
+        const mid = colXAt(c) !== undefined ? colXAt(c) + colWAt(c) / 2 : px;
+        d.before = px > mid ? c + 1 : c;
+      } else {
+        const r = Math.max(0, rowAtY(py));
+        const mid = rowYAt(r) !== undefined ? rowYAt(r) + rowHAt(r) / 2 : py;
+        d.before = py > mid ? r + 1 : r;
+      }
+      draw();
+      return;
+    }
     if (state.resize) { updateResize(px, py); return; }
     if (state.fill) { updateFill(px, py); return; }
     if (formulaRefDrag) {
@@ -6116,6 +6162,31 @@ function wireEvents() {
   });
   window.addEventListener("mouseup", (e) => {
     if (chartDrag) { chartMouseUp(); return; }
+    if (state.moveDrag) {
+      const d = state.moveDrag;
+      state.moveDrag = null;
+      state.dragging = false;
+      // A drop inside the band or on either edge is a drop onto itself. The
+      // engine treats it as an empty batch, but not calling at all keeps the
+      // undo history free of a step that changed nothing.
+      const inside = d.before >= d.at && d.before <= d.at + d.count;
+      if (!inside) {
+        try {
+          if (d.axis === "col") wasm.session_move_columns(state.sheet, d.at, d.count, d.before);
+          else wasm.session_move_rows(state.sheet, d.at, d.count, d.before);
+          // The band travels, so the selection follows it to where it landed.
+          const landed = d.before < d.at ? d.before : d.before - d.count;
+          if (d.axis === "col") selectColumn(landed, false), extend(selRect().r1, landed + d.count - 1);
+          else selectRow(landed, false), extend(landed + d.count - 1, selRect().c1);
+          status.textContent = d.axis === "col"
+            ? `moved ${d.count} column${d.count === 1 ? "" : "s"}`
+            : `moved ${d.count} row${d.count === 1 ? "" : "s"}`;
+        } catch (why) { statusError(errText(why)); }
+        invalidateGrowth();
+      }
+      draw();
+      return;
+    }
     if (state.freezeDrag) {
       const d = state.freezeDrag;
       state.freezeDrag = null;
@@ -7306,6 +7377,65 @@ function wireEvents() {
       byId("hdr-open")?.setAttribute("title", `Open a file (${offered.join(", ")})`);
     }
   } catch {}
+  // Keep the desktop window's title on the document.
+  //
+  // Polled, not pushed, for the same reason `isDirty()` is derived rather than
+  // tallied: a push from every write path is a list of write paths, and the
+  // one that gets left out is always the one added last — which shows up as a
+  // window that claims to be saved while it is not. Nothing crosses the bridge
+  // unless the answer changed, so the steady state costs one comparison.
+  if (window.__opencalcNative) {
+    let lastName, lastDirty;
+    setInterval(() => {
+      const native = window.__opencalcNative;
+      if (!native) return;
+      const name = documentName();
+      const dirty = isDirty();
+      if (name === lastName && dirty === lastDirty) return;
+      lastName = name;
+      lastDirty = dirty;
+      native.setDocument(name, dirty).catch(() => {});
+    }, 250);
+  }
+
+  // The desktop shell replaces the webview's file picker with the platform's.
+  //
+  // Capture phase on `#tb-open`, because every route to File ▸ Open ends in a
+  // click on it — the menu item, the header button at :7070, the toolbar. One
+  // listener here covers all of them, and a route added later is covered too.
+  // In a browser tab `__opencalcNative` is absent and the input *is* the
+  // picker, so this does nothing.
+  byId("tb-open").addEventListener("click", (e) => {
+    const native = window.__opencalcNative;
+    if (!native) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    // The same gate the `change` handler applies, for the same reason: this is
+    // the point where a file becomes the document, and a mode where the host
+    // owns the file has to be refused here or hiding the button is decoration.
+    if (capabilityForbids("file.open")) {
+      refuse("file.open", "opening a file is the host application's — this editor does not own the document");
+      return;
+    }
+    (async () => {
+      const picked = await native.open();
+      if (!picked) return; // cancelled: the document is untouched
+      if (isDirty() && !(await confirmModal(
+        "Open another workbook?",
+        "This workbook has changes that have not been saved. Opening another discards them, and undo will not bring them back.",
+        "Discard and open",
+      ))) {
+        return;
+      }
+      status.textContent = `opening ${picked.name}…`;
+      await new Promise((r) => setTimeout(r, 0));
+      if (openBytes(picked.bytes, picked.name)) {
+        markSaved();
+        native.setDocument(picked.name, false);
+      }
+    })().catch((err) => statusError(errText(err)));
+  }, true);
+
   byId("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;

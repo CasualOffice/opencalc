@@ -667,6 +667,80 @@ export function sortDialog() {
   ok.focus();
 }
 
+/// The block a filter-menu sort acts on, as `{r0,c0,r1,c1}`, or `null` if no
+/// filter covers `col`.
+///
+/// Which filter owns the column is asked of the model, not guessed from the
+/// selection, and the question is asked the way the engine asks it: the first
+/// region in `session_filter_regions` order whose columns cover `col`, which is
+/// `filter_at_col`'s own rule (the sheet's own filter first, then each table's).
+/// Resolving it differently here would let the menu sort a different block from
+/// the one whose values it just listed.
+///
+/// A table's range is the authority when the column is in one: sorting the
+/// surrounding block would drag rows past the table's boundary, and would sweep
+/// the totals row in with the data. `session_filter_regions` does not report an
+/// end row — nothing painting buttons needs one — so it comes from the table,
+/// or from `session_filter_info` for the sheet's own filter.
+///
+/// Read from the model rather than from the cached `filterInfo`, so both facts
+/// come from the same instant: which region is the sheet's own turns on whether
+/// the sheet *has* a filter, and a cache one frame behind on that question
+/// would send a sheet-filter column down the table branch and answer "nothing
+/// to sort".
+export function filterSortRange(col) {
+  let regions = [];
+  try { regions = JSON.parse(wasm.session_filter_regions(state.sheet)).regions || []; }
+  catch { return null; }
+  const i = regions.findIndex((r) => col >= r.c0 && col <= r.c1);
+  if (i < 0) return null;
+  const region = regions[i];
+
+  // Region 0 is the sheet's own filter exactly when the sheet has one:
+  // `session_filter_regions` emits it first and the tables' after, and
+  // `session_filter_info` is null precisely when there is none.
+  let info = null;
+  try {
+    const j = wasm.session_filter_info(state.sheet);
+    if (j && j !== "null") info = JSON.parse(j);
+  } catch {}
+  if (i === 0 && info) {
+    return { r0: region.r0, c0: region.c0, r1: info.r1, c1: region.c1 };
+  }
+  let table = null;
+  try {
+    const j = wasm.session_table_at(state.sheet, region.r0, col);
+    if (j && j !== "null") table = JSON.parse(j);
+  } catch {}
+  if (!table) return null;
+  return {
+    r0: region.r0,
+    c0: region.c0,
+    r1: table.r1 - (table.totals || 0),
+    c1: region.c1,
+  };
+}
+
+/// Sort the filtered block by `col`, from the column's own filter menu.
+///
+/// The header row stays put. Deliberately *not* `looksLikeHeader`, which the
+/// Data menu uses: that heuristic exists because a bare selection cannot say
+/// whether its first row is a heading, and it answers "no" whenever no column
+/// under the heading is numeric — a filter over a single text column (Region:
+/// West, East) is exactly that shape. Here the answer is not a guess. The
+/// filter's first row *is* its header by construction: `session_set_filter_range`
+/// takes it as one, `AutoFilter::body_start` begins the body one row down, and
+/// the checklist this menu was built from never offered the header's text as a
+/// value. Asking the heuristic instead would be the two paths disagreeing, and
+/// the disagreement would sort the heading into the data.
+function sortFilterColumn(col, asc) {
+  const s = filterSortRange(col);
+  if (!s) { status.textContent = "nothing to sort"; return; }
+  // `applySort` reports what it did and redraws, and its "(header kept)" is the
+  // same sentence the Data menu prints — one vocabulary for one action.
+  applySort(s, [{ col, asc }], true);
+}
+
 export function openColumnFilter(col, x, y) {
   closeSheetMenu();
   let payload;
@@ -686,6 +760,19 @@ export function openColumnFilter(col, x, y) {
   head.className = "menu-label";
   head.textContent = `Filter ${colName(col)}`;
   menu.appendChild(head);
+
+  // Sort, first — this is where people reach for it. Excel and Sheets both put
+  // A→Z / Z→A at the top of a column's filter menu, above the conditions and
+  // the checklist, and it is used far more often than the Data menu's sort. It
+  // wears the condition button's own class rather than a new look, because it
+  // is the same kind of thing: a one-click action on this column.
+  for (const [label, asc] of [["Sort A→Z", true], ["Sort Z→A", false]]) {
+    const btn = document.createElement("button");
+    btn.className = "menu-item filter-cond filter-sort";
+    btn.textContent = label;
+    btn.addEventListener("click", () => { closeSheetMenu(); sortFilterColumn(col, asc); canvas.focus(); });
+    menu.appendChild(btn);
+  }
 
   // Conditions — the entry point to the two-comparison dialog.
   const cond = document.createElement("button");

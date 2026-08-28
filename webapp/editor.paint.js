@@ -380,6 +380,34 @@ export function drawFreezeHandles() {
   ctx.restore();
 }
 
+/// Where a dragged band of columns or rows would land.
+///
+/// A reorder without an indicator is a gesture the user performs blind: they
+/// let go and find out. The line is drawn at the *boundary* the band drops
+/// before, in pre-move coordinates, because that is the boundary they can
+/// currently see — the same coordinate space the drop itself uses.
+export function drawMoveDropIndicator(v) {
+  const d = state.moveDrag;
+  if (!d) return;
+  ctx.save();
+  ctx.strokeStyle = colors.accent || "#2563eb";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  if (d.axis === "col") {
+    // `colXAt` is undefined past the drawn range, so a drop beyond the last
+    // drawn column pins to the right edge rather than vanishing.
+    const x = colXAt(d.before) ?? v.w;
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, v.h);
+  } else {
+    const y = rowYAt(d.before) ?? v.h;
+    ctx.moveTo(0, y);
+    ctx.lineTo(v.w, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawFreezeDividers(v) {
   const F = state.freeze;
   const drag = state.freezeDrag;

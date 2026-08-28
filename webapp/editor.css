@@ -1117,6 +1117,51 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
   background: var(--oc-x-border-swatch, currentColor); border-radius: 1px;
 }
 
+/* The same mechanism, pointed the other way: these three mirror what the
+   *selection* carries rather than what the palette is set to, so the active
+   cell's fill, text colour and number format are readable without opening a
+   menu. `refreshFormulaBar` sets the variables from `session_cell_format`.
+
+   The 1px inset keeps an empty ("no fill") and a white bar distinguishable —
+   without it, "no fill" and "filled white" look identical, which is the same
+   class of lie as showing one cell's format for a whole range. */
+#tb-fontcolor, #tb-fillcolor, #tb-numfmt { position: relative; }
+#tb-fontcolor::after, #tb-fillcolor::after {
+  content: ""; position: absolute; left: 6px; right: 6px; bottom: 4px; height: 3px;
+  border-radius: 1px; box-shadow: inset 0 0 0 1px var(--oc-border-color);
+}
+#tb-fontcolor::after { background: var(--oc-x-font-swatch, var(--oc-text-color)); }
+#tb-fillcolor::after { background: var(--oc-x-fill-swatch, transparent); }
+/* #tb-numfmt has no colour to show, only "this selection has a number format at
+   all" — every format without a button of its own (dates, accounting, custom)
+   is otherwise invisible on the toolbar. Which format it is, is in the tooltip
+   and checked in the menu. */
+#tb-numfmt.has-nf::after, #tb-numfmt.tb-mixed::after {
+  content: ""; position: absolute; left: 6px; right: 6px; bottom: 4px; height: 2px;
+  border-radius: 1px; background: var(--oc-accent-color);
+}
+/* Indeterminate: the selected cells disagree, or there are more of them than
+   the toolbar will read. Hatched rather than blank, because a blank bar reads
+   as "none" — a wrong answer where this one is "not one answer". */
+#tb-fontcolor.tb-mixed::after, #tb-fillcolor.tb-mixed::after, #tb-numfmt.tb-mixed::after {
+  background: repeating-linear-gradient(
+    45deg, var(--oc-muted-text-color) 0 2px, transparent 2px 4px);
+}
+/* A toggle that is neither on nor off across the selection. Dimmer than the
+   pressed state and without its background, so "some of these are bold" cannot
+   be mistaken for "all of these are bold". */
+.toolbar .tb-btn[aria-pressed="mixed"] {
+  color: var(--oc-accent-color); background: transparent;
+  box-shadow: inset 0 0 0 1px var(--oc-border-color); opacity: .75;
+}
+/* The applied number format, checked in the menu that applies it — the same
+   affordance the font/size comboboxes use for their current value. */
+#numfmt-menu button { position: relative; padding-left: 26px; }
+#numfmt-menu button.checked::before {
+  content: "✓"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  font-size: 11px; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
+}
+
 /* One place for the whole reduced-motion contract, rather than a media query per
    animated element. The marching-ants crawl is stopped in JS, since a canvas
    animation is a timer rather than a CSS transition. */

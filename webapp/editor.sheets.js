@@ -457,6 +457,20 @@ export function renameSheet(i, tabEl) {
   input.addEventListener("dblclick", (e) => e.stopPropagation());
 }
 
+/// The name of the document that is open, or null for one that never came
+/// from a file.
+///
+/// The editor did not keep this: `openBytes` took a name and used it only to
+/// choose a reader. In a browser tab nothing needed it — the tab title is the
+/// application's. A desktop window's title bar is the document's, so the name
+/// has to outlive the open that carried it.
+let openedName = null;
+
+/// What a title bar should call the current document.
+export function documentName() {
+  return openedName;
+}
+
 export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   let bytes = raw;
   const dot = name.lastIndexOf(".");
@@ -519,6 +533,10 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // is still whole — this hands back the choice the limit took, rather than
   // leaving a big file permanently unopenable.
   if (stopped) offerKeepWaiting(`opening ${name}`, () => openBytes(raw, name, -1));
+  // Only a successful open renames the window. A failed one leaves the
+  // previous document's name in place, because the previous document is what
+  // is still on screen.
+  if (ok) openedName = name;
   return ok;
 }
 

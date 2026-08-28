@@ -108,9 +108,15 @@ const centre = (page, r, c) =>
 // --- the vocabulary ---------------------------------------------------------
 // Settled by the first sweep; kept so a regression shows up here rather than in
 // somebody's hands.
+// Both Excel and Sheets require the band to be selected before it can be
+// dragged — a drag from an *unselected* header is drag-to-extend, which is the
+// far commoner gesture. A probe that skips the click therefore exercises the
+// extend path and reports a working move as missing, which is how this row
+// stayed red after `MOVE-02` shipped.
 check("Selection", "drag a column header to reorder", async (page, box, hdr) => {
   const before = await cell(page, 0, 0);
   const a = await centre(page, 0, 0), c = await centre(page, 0, 2);
+  await page.mouse.click(box.x + a.x, box.y + hdr.h / 2);
   await page.mouse.move(box.x + a.x, box.y + hdr.h / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + c.x, box.y + hdr.h / 2, { steps: 12 });
@@ -122,6 +128,7 @@ check("Selection", "drag a column header to reorder", async (page, box, hdr) => 
 check("Selection", "drag a row header to reorder", async (page, box, hdr) => {
   const before = await cell(page, 0, 0);
   const a = await centre(page, 0, 0), c = await centre(page, 3, 0);
+  await page.mouse.click(box.x + hdr.w / 2, box.y + a.y);
   await page.mouse.move(box.x + hdr.w / 2, box.y + a.y);
   await page.mouse.down();
   await page.mouse.move(box.x + hdr.w / 2, box.y + c.y, { steps: 12 });
@@ -644,8 +651,26 @@ check("Editing", "Replace All honours the all-sheets option the Find used", asyn
 
 // --- runner -----------------------------------------------------------------
 const browser = await chromium.launch();
+// `--only <substring>` runs a subset. The full sweep takes minutes, which is
+// long enough that verifying one row by mutation — revert, watch it go red,
+// restore — stops being something anybody does. A subset run never writes the
+// map: a partial result must not be able to overwrite a measured one.
+const ONLY = (() => {
+  const i = process.argv.indexOf("--only");
+  return i === -1 ? null : process.argv[i + 1];
+})();
+if (ONLY && process.argv.includes("--write")) {
+  console.error("--only cannot be combined with --write: a subset would blank every row it did not run");
+  process.exit(2);
+}
+const SELECTED = ONLY ? CHECKS.filter((c) => c.name.includes(ONLY)) : CHECKS;
+if (ONLY && SELECTED.length === 0) {
+  console.error(`--only ${JSON.stringify(ONLY)} matched none of the ${CHECKS.length} checks`);
+  process.exit(2);
+}
+
 const results = [];
-for (const c of CHECKS) {
+for (const c of SELECTED) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const page = await ctx.newPage();
   try {

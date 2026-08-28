@@ -31,6 +31,15 @@ serde_json = "1"
 # every piece it depends on — the display list, the command ids, the menu model
 # — exists and is tested without it.
 tauri = { version = "2" }
+# The platform's own open and save panels. `File ▸ Open` raised the *webview's*
+# file picker inside a native window — a browser dialog in an application that
+# is not a browser, and the most obviously-wrong thing on screen.
+#
+# The plugin rather than `rfd` directly: a file panel is modal and must be
+# raised on the main thread, and this is the piece that already knows how to get
+# there from a command. It is used from **Rust only** — no JavaScript calls
+# `plugin:dialog|*`, so none of its ACL permissions are granted.
+tauri-plugin-dialog = { version = "2" }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
