@@ -1291,6 +1291,30 @@ pub fn session_remove_duplicates(
         if let Some(sh) = session.workbook().sheets.get(sheet) {
             let wb = session.workbook();
             for r in first_row..=r1 {
+                // **A hidden row is neither a candidate nor a key.**
+                //
+                // This scanned every row in the band, so under a filter it
+                // compared rows the user cannot see. Measured on a filter
+                // keeping `West` over `East/1`(hidden), `West/1`, `West/1`,
+                // `East/2`(hidden): the hidden `East/1` became the first
+                // occurrence, both **visible** rows were deleted as duplicates
+                // of a row that was not on screen, and both hidden rows
+                // survived. The grid emptied with no visible cause — the
+                // `no silent data loss` bound in its deleting form.
+                //
+                // Excluded as a *key* as well as a candidate, which is the
+                // half that is easy to miss: skipping only the deletion still
+                // lets an invisible row claim the first occurrence and take a
+                // visible one with it, which is exactly the measured case.
+                //
+                // `is_row_hidden`, not `filter_hidden`, so a row hidden by
+                // hand is respected too — the same predicate `DATA-SORT-01`
+                // settled on, and the one `clip_capture` already uses when it
+                // copies a filtered range. A filtered view deletes what it
+                // shows.
+                if sh.is_row_hidden(r) {
+                    continue;
+                }
                 let mut key = String::new();
                 for c in c0..=c1 {
                     if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
