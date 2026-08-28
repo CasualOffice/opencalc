@@ -800,6 +800,241 @@ for (const region of HIDDEN_CHROME) {
   document.documentElement.classList.add(`oc-hide-${region}`);
 }
 
+// --- Modes, as capabilities --------------------------------------------------
+//
+// There used to be one chrome and one flag. The same editor booted three ways
+// — page, desktop window, someone else's iframe — presented an identical 195
+// commands, `File ▸ Open` and six Download entries in every one of them, and
+// the only thing gating anything anywhere was `readOnly()`. `?embed=1` was
+// read by nothing at all.
+//
+// That is not a cosmetic gap. An **embedded** editor sits inside a page whose
+// document belongs to the *host*: `File ▸ Open` there replaces the host's
+// document from inside the host's own UI, and Download hands out a copy the
+// host never authorised. Under WOPI the host additionally owns save and
+// versioning, so the editor's own Save is not a convenience — it is a second
+// writer disagreeing with the first.
+//
+// So a mode is **a set of capabilities**, not a name with an `if` for each
+// place that cares. A capability is a question about what this deployment is
+// allowed to do; a preset is a named composition of answers; and
+// `applyCommandRules()` is the single place that turns them into chrome. There
+// is deliberately no second dispatch path and no second menu definition —
+// `TAURI-004` establishes that there is one menu model with two presentations,
+// and a mode is a third presentation of the same model, not a third model.
+//
+/// The axes. Every one is a *permission*, phrased so that `true` is the
+/// permissive answer and the standalone editor is all-`true` — which is what
+/// makes "the default changes nothing" checkable by looking rather than by
+/// remembering.
+///
+/// - `canOpen`   — may the editor replace the document it is showing? Covers
+///                 `File ▸ New` as well as `File ▸ Open`: both discard what is
+///                 on screen and put something else there, which is the thing
+///                 a host cannot allow, and calling only one of them "open"
+///                 would leave the other as a hole in the same wall.
+/// - `canSaveAs` — may the user take a copy out (the Download submenu, Ctrl+S)?
+/// - `canPrint`  — may the user put it on paper?
+/// - `ownsFile`  — does the **host** own the document? This is not a fourth
+///                 permission but a statement about who the file belongs to,
+///                 and the other three are read in its light (below).
+/// - `chrome`    — `"web"` (our page, our header and menu bar), `"native"`
+///                 (the OS draws the menu bar — `TAURI-004`), `"embedded"`
+///                 (we are inside somebody else's product, so our branding
+///                 strip is duplication rather than chrome).
+/// - `readOnly`  — the workbook cannot be edited. The *engine* is what enforces
+///                 this (`session_read_only`); the capability is how a preset
+///                 asks for it, and boot hands it to the engine so the two
+///                 cannot drift.
+export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "ownsFile", "chrome", "readOnly"];
+
+const CHROMES = ["web", "native", "embedded"];
+
+/// Named compositions. A preset is the whole answer, not a patch on another
+/// preset: reading one tells you what that mode is without chasing a chain.
+const MODE_PRESETS = {
+  // Today's editor, and the default. Every permission granted, our own chrome.
+  standalone: { canOpen: true, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "web", readOnly: false },
+  // The desktop shell. Same document ownership as standalone — the user's own
+  // file, opened by the user — but the operating system draws the menu bar.
+  desktop: { canOpen: true, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "native", readOnly: false },
+  // Inside somebody else's page. The host owns the document *and* the chrome.
+  embedded: { canOpen: false, canSaveAs: false, canPrint: true, ownsFile: true, chrome: "embedded", readOnly: false },
+  // A WOPI frame. The host owns the document — including save and versioning,
+  // which is why `canSaveAs` starts false — but the editor **is** the frame and
+  // draws its own chrome, the way Office Online does inside a WOPI host. The
+  // difference from `embedded` is one axis, which is the point of composing
+  // them rather than writing two mode branches.
+  wopi: { canOpen: false, canSaveAs: false, canPrint: true, ownsFile: true, chrome: "web", readOnly: false },
+  // A published sheet. Read-only, and a copy is still allowed: a viewer that
+  // cannot print or export is a screenshot with extra steps, and `READ_ONLY_SAFE`
+  // has always let both through.
+  viewer: { canOpen: false, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "web", readOnly: true },
+};
+
+export const MODES = Object.keys(MODE_PRESETS);
+
+/// The mode this page was booted in.
+///
+/// Filtered against the known list rather than trusted, for the same reason
+/// `?hide=` is: it arrives on a URL, so anybody who can hand somebody a link
+/// chooses it. An unknown value falls back to `standalone` rather than to
+/// something restrictive — a typo must not silently take a user's Save away,
+/// and `standalone` is what a page with no `?mode=` at all gets.
+///
+/// `?chrome=native` is kept as an alias for `?mode=desktop`. `desktop/src/main.rs`
+/// appends it and `editor.native-chrome.spec.mjs` asserts it; a URL contract a
+/// shipped host already uses is not something to break for tidiness.
+function askedMode() {
+  const asked = (PARAMS.get("mode") || "").trim().toLowerCase();
+  if (MODES.includes(asked)) return asked;
+  if (PARAMS.get("chrome") === "native") return "desktop";
+  return "standalone";
+}
+
+/// Host overrides, applied on top of the preset. Empty until a host calls
+/// `setCapabilities`.
+let capabilityOverrides = {};
+let capabilityModeName = askedMode();
+
+/// Preset + overrides, with `ownsFile` read last.
+///
+/// **`ownsFile` forces `canOpen` off and cannot be overridden back on.** There
+/// is no host use for "the document is mine, and also let the user swap it for
+/// another one from inside my page" — a host that wants a different document
+/// loads a different document. `canSaveAs` is deliberately *not* forced the
+/// same way: "download a copy" is a genuine permission a host grants per user
+/// (WOPI has a flag for exactly it), so a host may turn it back on, and doing
+/// so is that host authorising it rather than the editor assuming.
+function resolveCapabilities() {
+  const preset = MODE_PRESETS[capabilityModeName] || MODE_PRESETS.standalone;
+  const caps = { ...preset, ...capabilityOverrides };
+  if (!CHROMES.includes(caps.chrome)) caps.chrome = preset.chrome;
+  if (caps.ownsFile) caps.canOpen = false;
+  caps.mode = capabilityModeName;
+  return Object.freeze(caps);
+}
+
+let capabilities = resolveCapabilities();
+
+/// The resolved set, for a host — and for a test, which is the only way to
+/// assert a mode without reading back the chrome it produced.
+///
+/// `readOnly` is **the engine's answer or the mode's, whichever is restrictive**.
+/// The engine is the only thing that can actually refuse an edit, and a host may
+/// put a session into read-only directly through `setReadOnly` without touching
+/// a mode at all; a capability set that reported `readOnly: false` for such a
+/// session would be describing an editor that does not exist. The other way
+/// round matters too — between `resolveCapabilities()` and boot handing
+/// `readOnly` to the engine there is a window where the mode is the only thing
+/// that knows, and the menu must already be right in it.
+export function getCapabilities() {
+  let engineReadOnly = false;
+  try { engineReadOnly = readOnly(); } catch { engineReadOnly = false; }
+  if (engineReadOnly === capabilities.readOnly) return capabilities;
+  return Object.freeze({ ...capabilities, readOnly: capabilities.readOnly || engineReadOnly });
+}
+
+/// Override individual capabilities, or switch mode outright with `{ mode }`.
+///
+/// The host surface is `window.opencalcEditor`, which is this module namespace,
+/// so this *is* the existing surface rather than a new one beside it. Partial
+/// on purpose: a host that wants Download back in an embedded editor says
+/// `{ canSaveAs: true }` and does not have to restate the other five.
+export function setCapabilities(partial) {
+  const wasReadOnly = capabilities.readOnly;
+  if (partial && typeof partial === "object") {
+    if (typeof partial.mode === "string" && MODES.includes(partial.mode)) {
+      capabilityModeName = partial.mode;
+      // A new mode is a new baseline; carrying the previous mode's overrides
+      // into it is how a host ends up in a state no preset describes.
+      capabilityOverrides = {};
+    }
+    for (const key of CAPABILITIES) {
+      if (partial[key] !== undefined) capabilityOverrides[key] = partial[key];
+    }
+  }
+  capabilities = resolveCapabilities();
+  applyModeChrome();
+  // A `readOnly` capability that only changed the menu would be a viewer you
+  // could still type into — the engine is what refuses an edit. Pushed **only
+  // when this call moved it**, because `setReadOnly(false)` on every unrelated
+  // capability change would silently unlock a session a host had locked
+  // directly, which is the same class of quiet override in the other direction.
+  // `setReadOnly` applies the rules itself, so the branches do not double up.
+  if (capabilities.readOnly !== wasReadOnly) setReadOnly(capabilities.readOnly);
+  else applyCommandRules();
+  return getCapabilities();
+}
+
+/// Chrome that is decided by the mode rather than by a command.
+///
+/// `setNativeChrome` is `TAURI-004`'s, unchanged — the native bar is handed
+/// over by adding a class to the root and the nodes stay in the document.
+/// `oc-chrome-embedded` is its sibling for the third presentation.
+export function applyModeChrome() {
+  setNativeChrome(capabilities.chrome === "native");
+  document.documentElement.classList.toggle(
+    "oc-chrome-embedded",
+    capabilities.chrome === "embedded",
+  );
+}
+
+/// Which capability governs which command ids.
+///
+/// **Regexes over ids, matching `READ_ONLY_SAFE` exactly** — the mechanism
+/// `applyCommandRules()` already uses — rather than a name check inside the
+/// sweep. That is what makes "hidden because a capability says so" true by
+/// construction: there is one table, and a reader can see every command a mode
+/// takes away without reading the loop.
+///
+/// Ids come from the English label path (`File ▸ Download ▸ CSV (.csv)` →
+/// `file.download.csv-csv`), so `/^file\.download/` covers the submenu opener
+/// and all five entries under it — the six the audit counted.
+const CAPABILITY_COMMANDS = {
+  // `header.open` is the header's folder button and `toolbar.open` is the
+  // hidden `<input type=file>` both it and the menu item click. Hiding the menu
+  // item alone would leave the button, which is the one a user actually reaches
+  // for.
+  canOpen: [/^file\.new$/, /^file\.open$/, /^header\.open$/, /^toolbar\.open$/],
+  canSaveAs: [/^file\.download/],
+  canPrint: [/^file\.print$/],
+};
+
+/// True when some capability of this mode forbids the command.
+export function capabilityForbids(id) {
+  for (const [cap, patterns] of Object.entries(CAPABILITY_COMMANDS)) {
+    if (capabilities[cap] === false && patterns.some((re) => re.test(id))) return true;
+  }
+  return false;
+}
+
+/// Which capability forbade it, for a message and for the host's event.
+function forbiddenBy(id) {
+  for (const [cap, patterns] of Object.entries(CAPABILITY_COMMANDS)) {
+    if (capabilities[cap] === false && patterns.some((re) => re.test(id))) return cap;
+  }
+  return null;
+}
+
+/// Refuse a command the mode does not have, **out loud and to the host**.
+///
+/// Two audiences, and both are needed. The user gets a sentence, because a
+/// keystroke that silently does nothing reads as a broken editor rather than as
+/// a deliberate boundary. The *host* gets `commandRefused` on the existing
+/// event surface, and that is the half that makes `ownsFile` more than a
+/// prohibition: under WOPI the host owns save, so Ctrl+S is not a mistake to
+/// swallow — it is the user asking for a save the host is the one who can
+/// perform. A host with no listener loses nothing; `emit` is a no-op then.
+///
+/// Returns `true`, so a caller reads as `if (refuse(id)) return;`.
+function refuse(id, message) {
+  const capability = forbiddenBy(id);
+  emit("commandRefused", { id, capability, ownsFile: capabilities.ownsFile, mode: capabilities.mode });
+  statusError(message);
+  return true;
+}
+
 // --- Mount root -------------------------------------------------------------
 //
 // Every DOM lookup goes through here rather than through `document`, so the
@@ -1538,7 +1773,8 @@ function setHeaderCollapsed(collapsed) {
 }
 
 // Set the magnification and re-fit the canvas. Clamped to 25–200%, Excel's
-// range; 100% is exact so Ctrl+0 always lands back on crisp text.
+// range; 100% is exact so Ctrl+Alt+0 always lands back on crisp text. (Plain
+// Ctrl+0 is Excel's hide-column and is bound that way here.)
 
 
 export function draw() {
@@ -6361,7 +6597,15 @@ function wireEvents() {
       if (k === "`") { setViewOption("formulas"); e.preventDefault(); return; }
       // Print the sheet, not the app: the grid is a canvas, so the browser's
       // own print of this page would produce one clipped screenshot.
-      if (k === "p") { printSheet(); e.preventDefault(); return; }
+      // Same rule as Ctrl+S, same table: `canPrint` governs `file.print`, and
+      // the chord is that command however it is reached.
+      if (k === "p") {
+        e.preventDefault();
+        if (capabilityForbids("file.print")
+          && refuse("file.print", "printing is not available in this mode")) return;
+        printSheet();
+        return;
+      }
       // Shift extends rather than collapses. Both of these called `select`
       // unconditionally, so Ctrl+Shift+End — "select everything from here
       // down", one of the most-used keys there is — threw the selection away
@@ -6400,6 +6644,16 @@ function wireEvents() {
       // Ctrl+9 hides rows and Ctrl+0 hides columns in Excel. Zoom reset moved
       // to Ctrl+Alt+0: a shortcut that does something *else* in Excel is worse
       // than one that is missing, because the finger memory is already wrong.
+      //
+      // **That decision stands, and the menu was the thing that was wrong.**
+      // View ▸ Zoom ▸ 100% advertised `Ctrl+0` while the handler below bound
+      // that chord to hide-column, so the menu was teaching a user a keystroke
+      // that destroys the view instead of resetting it — a label promising one
+      // thing and delivering another is worse than either binding, because it
+      // is the app itself telling the user to press it. Overruling the rule
+      // above instead would trade a wrong label for a wrong *chord*, and the
+      // chord is the half that is already in an Excel user's fingers. The label
+      // now reads `Ctrl+Alt+0`, which is what actually resets the zoom.
       if (k === "0" && e.altKey) { setZoom(1); e.preventDefault(); return; }
       if (k === "9" && !e.shiftKey) {
         const r = effectiveRange();
@@ -6472,7 +6726,20 @@ function wireEvents() {
       // conversion chosen by accident is how a `.csv` comes back as a package
       // under its own name. Ctrl+S is the save nobody opens a menu for, and it
       // was the one doing the converting.
-      if (k === "s") { await saveAs("native"); e.preventDefault(); return; }
+      // Ctrl+S answers to the same capability the Download submenu does, read
+      // from the same table. A mode that takes six menu entries away and leaves
+      // the chord that does the seventh has taken nothing away — and Ctrl+S is
+      // precisely the one nobody opens a menu for. Refused out loud rather than
+      // ignored: a chord that silently does nothing reads as a broken editor,
+      // and under WOPI the honest answer is that saving belongs to the host.
+      if (k === "s") {
+        e.preventDefault();
+        if (capabilityForbids("file.download") && refuse("file.download", capabilities.ownsFile
+          ? "saving is the host application's — this editor does not own the document"
+          : "downloading is not available in this mode")) return;
+        await saveAs("native");
+        return;
+      }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
       if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }
@@ -6485,6 +6752,25 @@ function wireEvents() {
       // "+" arrives as key "+" or as "=" with Shift depending on the layout.
       if ((e.key === "+" || (k === "=" && e.shiftKey))) { insertLines(); e.preventDefault(); return; }
       if (e.key === "-" || e.key === "_") { deleteLines(); e.preventDefault(); return; }
+      // Ctrl+Backspace — scroll the view back to the active cell (Excel).
+      //
+      // This is the one binding in the file that had to be added rather than
+      // merely corrected. Unbound, the chord fell out of this branch and into
+      // the `switch` below, where `case "Backspace"` **clears the selection's
+      // contents**: a user who scrolled away, pressed the chord Excel gives
+      // them for "take me back", and got their data deleted at a cell they
+      // could not even see. A missing shortcut does nothing; an unbound chord
+      // that lands on a destructive one is worse than missing, and it is worse
+      // precisely because the user believes they pressed something safe.
+      //
+      // `ensureVisible()` with no arguments is the active cell, and it is the
+      // same call every other jump in the editor makes — the name box, find,
+      // and a peer's cursor all reach the same scroll offsets through it, so
+      // this cannot land somewhere they would not. `draw()` is its companion:
+      // `ensureVisible` only moves `state.scrollX/Y`, it paints nothing.
+      // Nothing about the selection changes, which is Excel's behaviour too —
+      // the view moves to the cell, not the cell to the view.
+      if (e.key === "Backspace") { ensureVisible(); draw(); e.preventDefault(); return; }
     }
 
     // A Shift-step continues from the corner that is travelling — which is
@@ -7023,6 +7309,18 @@ function wireEvents() {
   byId("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    // The gate, not just the button. Hiding `File ▸ Open` and the header button
+    // takes the command out of the *chrome*; this is the one place a file
+    // actually becomes the document, and a mode where the host owns the file
+    // has to be refused here or the hiding is decoration. It matters because
+    // this is a `<input type=file>` sitting in the host's own page: a stale
+    // reference, an extension, or the host's own code reaching in could still
+    // click it, and the result would be the host's document replaced.
+    if (capabilityForbids("file.open")) {
+      e.target.value = "";
+      refuse("file.open", "opening a file is the host application's — this editor does not own the document");
+      return false;
+    }
     // A large file takes a moment to parse; say so rather than appearing to
     // have ignored the click.
     status.textContent = `opening ${file.name}…`;
@@ -7397,7 +7695,10 @@ function wireEvents() {
         { sub: "Zoom", items: [
           ["50%", () => setZoom(0.5), null, () => state.zoom === 0.5],
           ["75%", () => setZoom(0.75), null, () => state.zoom === 0.75],
-          ["100%", () => setZoom(1), "Ctrl+0", () => state.zoom === 1],
+          // `Ctrl+Alt+0`, not `Ctrl+0`. Ctrl+0 is Excel's hide-column and this
+          // editor binds it that way; the label used to say Ctrl+0 and so sent
+          // users to a chord that hides their columns. See the keydown handler.
+          ["100%", () => setZoom(1), "Ctrl+Alt+0", () => state.zoom === 1],
           ["150%", () => setZoom(1.5), null, () => state.zoom === 1.5],
           ["200%", () => setZoom(2), null, () => state.zoom === 2],
         ] },
@@ -8363,12 +8664,14 @@ async function main() {
     e.preventDefault();
     e.returnValue = "";
   });
-  // A desktop shell draws the menu bar itself, so the HTML one is handed over
-  // before first paint rather than hidden after it — hiding it later would show
-  // the bar for a frame and then take the space back under the user.
-  try {
-    if (new URLSearchParams(location.search).get("chrome") === "native") setNativeChrome(true);
-  } catch {}
+  // The mode's chrome, before first paint rather than after it — hiding a bar
+  // later shows it for a frame and then takes the space back under the user.
+  // A desktop shell draws the menu bar itself; an embedded editor drops our
+  // branding strip, because inside somebody else's page it is theirs.
+  //
+  // `?chrome=native` still resolves here, via `askedMode()`, so the shipped
+  // desktop host keeps the URL it already appends.
+  try { applyModeChrome(); } catch {}
   const mod = await import(`./pkg/casual_calc_wasm.js?b=${BUILD}${instanceKey}`);
   init = mod.default;
   wasm = mod;
@@ -8410,6 +8713,12 @@ async function main() {
   for (const node of qsa("[id^='tb-']")) {
     if (!node.dataset.ocCommand) node.dataset.ocCommand = `toolbar.${node.id.slice(3)}`;
   }
+  // The header's Open button, which had no command id at all and so could not
+  // be hidden by anything. It clicks the same `#tb-open` picker `File ▸ Open`
+  // does, so hiding the menu item and leaving this one takes the command away
+  // from nobody — it is the button a user actually reaches for.
+  const hdrOpen = byId("hdr-open");
+  if (hdrOpen && !hdrOpen.dataset.ocCommand) hdrOpen.dataset.ocCommand = "header.open";
   // Tooltips are the toolbar's only text, so they are what a translated
   // toolbar translates. The English one is kept as the fallback.
   //
@@ -8426,6 +8735,17 @@ async function main() {
   seed();
   renderTabs();
   resize();
+  // The mode's commands, once the menus exist and the toolbar has reflowed —
+  // both are built by `wireEvents()` above, and `applyCommandRules()` reads the
+  // live DOM rather than the `MENUS` literal (`TAURI-004`).
+  //
+  // A `readOnly` preset is handed to the **engine**, which is the only thing
+  // that can actually refuse an edit; `setReadOnly` then applies the rules
+  // itself. Everything else takes the plain call. In `standalone` — every
+  // capability true, `readOnly` false — this hides nothing and disables
+  // nothing, which is the whole of "the default changes nothing".
+  if (getCapabilities().readOnly) setReadOnly(true);
+  else applyCommandRules();
   status.textContent = `engine v${wasm.version()}`;
 
   // Give the grid the keyboard (`UX-FOCUS-01`).
