@@ -4048,6 +4048,115 @@ async fn a_message_that_cannot_be_parsed_is_not_called_a_merge_failure() {
     }
 }
 
+/// **An edit that could not be merged is not a document that cannot be saved**
+/// (`COL-44`).
+///
+/// The same distinction `COL-38` drew, drawn wrong in the other direction. Every
+/// failure out of `commit` was answered `NotSaving`, whose documented meaning is
+/// "the document is not accepting edits — its saves are failing". A contended
+/// move is not that: the document is saving perfectly and one submission could
+/// not be rebased. `Refusal::CannotMerge` has existed since the protocol was
+/// written and **nothing ever sent it**, so the entire user-visible surface of
+/// `COL-44` — every concurrent column drag — arrived at the editor as
+/// `not saved: notSaving`.
+///
+/// The two ask the user for opposite things: one says copy your work out of a
+/// document that is losing it, the other says that one action did not take.
+/// Telling a whole room the wrong one of those is how a save panic starts.
+#[tokio::test]
+async fn an_edit_that_could_not_be_merged_is_not_a_save_failure() {
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut ada = connect(addr).await;
+    join(&mut ada, &claims("Ada", Access::Edit)).await.unwrap();
+
+    // Something to contend with, ordered first.
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 1,
+            base: Base::Revision(0),
+            ops: vec![cell_edit(42.0)],
+        }),
+    )
+    .await;
+    assert!(
+        matches!(hear(&mut ada).await, Some(ServerMessage::Ack { .. })),
+        "the first submission was not ordered"
+    );
+
+    // A column drag written against revision 0 — concurrent with the edit
+    // above, which is exactly the situation `COL-44` describes. The transform
+    // has no answer for the pair and refuses it.
+    say(
+        &mut ada,
+        &ClientMessage::Submit(Submission {
+            client: casual_calc_transaction::session::ClientId(1),
+            seq: 2,
+            base: Base::Revision(0),
+            ops: vec![WireOperation {
+                op: Operation::MoveColumns {
+                    sheet: 0,
+                    at: 0,
+                    count: 1,
+                    before: 3,
+                },
+                formulas: Default::default(),
+                styles: Default::default(),
+                strings: Default::default(),
+            }],
+        }),
+    )
+    .await;
+
+    match hear(&mut ada).await {
+        Some(ServerMessage::Refused { seq, reason }) => {
+            assert_eq!(seq, Some(2), "the refusal named the wrong submission");
+            assert_eq!(
+                reason,
+                Refusal::CannotMerge,
+                "a pair that could not be merged was reported as a failing save"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Both arms of `refusal_for`, because only one of them is reachable over a
+/// socket without a timing-dependent setup — and an untested fall-through is
+/// how this defect would come back inverted.
+///
+/// Mutating `_ => Refusal::NotSaving` to `CannotMerge` passed all 274 tests
+/// before this existed: every failing save would then have told the room its
+/// edit "could not be merged" while the document was quietly being lost, which
+/// is the same confusion as `COL-44`'s with the two words swapped.
+#[test]
+fn a_failing_save_and_an_unmergeable_edit_are_told_apart() {
+    use crate::document::ServerError;
+    use casual_calc_transaction::session::SessionError;
+    use casual_calc_transaction::transform::TransformError;
+
+    assert_eq!(
+        refusal_for(&ServerError::Session(SessionError::Transform(
+            TransformError::Unsupported {
+                subject: "MoveColumns",
+                against: "SetValue",
+            }
+        ))),
+        Refusal::CannotMerge,
+        "the transform refusing a pair is not the document failing to save"
+    );
+    assert_eq!(
+        refusal_for(&ServerError::ReadOnly),
+        Refusal::NotSaving,
+        "a session that cannot save is not a merge failure"
+    );
+    assert_eq!(
+        refusal_for(&ServerError::Write("the host refused".to_owned())),
+        Refusal::NotSaving,
+    );
+}
+
 /// DEP-09. **A full node names one with room, instead of only refusing.**
 ///
 /// The acceptance criterion, end to end and over a real socket. `announce` had

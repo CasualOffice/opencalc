@@ -2570,12 +2570,12 @@ async fn handle(
                     }
                     true
                 }
-                Err(_) => {
+                Err(why) => {
                     let _ = send(
                         socket,
                         &ServerMessage::Refused {
                             seq: Some(submission.seq),
-                            reason: Refusal::NotSaving,
+                            reason: refusal_for(&why),
                         },
                     )
                     .await;
@@ -2583,6 +2583,34 @@ async fn handle(
                 }
             }
         }
+    }
+}
+
+/// Which refusal a failed commit actually is.
+///
+/// **The distinction `COL-38` drew, drawn wrong in the other direction.** Every
+/// error out of `commit` was answered `NotSaving`, whose documented meaning is
+/// "the document is not accepting edits — its saves are failing". A pair of
+/// edits the transform could not merge is not that: the document is saving
+/// perfectly and one submission could not be rebased. `Refusal::CannotMerge`
+/// has existed since the protocol was written, and nothing in this server ever
+/// sent it — so every refusal the transform produced, which today is every
+/// contended move (`COL-44`), reached the editor as `not saved: notSaving`.
+///
+/// The two ask the user for opposite things. One says the document is losing
+/// work and to copy it out; the other says that single action did not take and
+/// can be redone. Telling a whole room the first when the second is true is how
+/// a save panic starts over a working server.
+///
+/// `NotSaving` remains the fall-through, because it is the honest answer for
+/// everything else here — a read-only session, a document that cannot be opened
+/// or written. A commit that failed for a reason with no better word is still a
+/// commit whose work is not being kept.
+fn refusal_for(error: &crate::document::ServerError) -> Refusal {
+    use casual_calc_transaction::session::SessionError;
+    match error {
+        crate::document::ServerError::Session(SessionError::Transform(_)) => Refusal::CannotMerge,
+        _ => Refusal::NotSaving,
     }
 }
 
