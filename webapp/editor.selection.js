@@ -1273,6 +1273,12 @@ export function applyCommandRules() {
   // make — it is the honest consequence of there being nothing in it.
   const toolbar = qs(".toolbar");
   if (toolbar) toolbar.classList.toggle("oc-cmd-hidden", !anyGroup);
+  // The desktop shell builds its native menu bar from this DOM, so a rule
+  // change that hides a command has to be republished or the bar keeps
+  // offering it. Here rather than at the two callers for the reason the rest
+  // of this function is here: it is the one place the rules are applied, and a
+  // caller added later is covered without anybody remembering.
+  window.__opencalcNative?.publishMenu?.();
 }
 
 export function followHyperlink(row, col) {

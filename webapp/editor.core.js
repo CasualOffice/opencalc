@@ -361,6 +361,7 @@ import {
   moveTab,
   needsRecalc,
   openBytes,
+  documentName,
   printSheet,
   readOnly,
   readOutline,
@@ -720,6 +721,7 @@ export {
   moveTab,
   needsRecalc,
   openBytes,
+  documentName,
   printSheet,
   readOnly,
   readOutline,
@@ -7375,6 +7377,65 @@ function wireEvents() {
       byId("hdr-open")?.setAttribute("title", `Open a file (${offered.join(", ")})`);
     }
   } catch {}
+  // Keep the desktop window's title on the document.
+  //
+  // Polled, not pushed, for the same reason `isDirty()` is derived rather than
+  // tallied: a push from every write path is a list of write paths, and the
+  // one that gets left out is always the one added last — which shows up as a
+  // window that claims to be saved while it is not. Nothing crosses the bridge
+  // unless the answer changed, so the steady state costs one comparison.
+  if (window.__opencalcNative) {
+    let lastName, lastDirty;
+    setInterval(() => {
+      const native = window.__opencalcNative;
+      if (!native) return;
+      const name = documentName();
+      const dirty = isDirty();
+      if (name === lastName && dirty === lastDirty) return;
+      lastName = name;
+      lastDirty = dirty;
+      native.setDocument(name, dirty).catch(() => {});
+    }, 250);
+  }
+
+  // The desktop shell replaces the webview's file picker with the platform's.
+  //
+  // Capture phase on `#tb-open`, because every route to File ▸ Open ends in a
+  // click on it — the menu item, the header button at :7070, the toolbar. One
+  // listener here covers all of them, and a route added later is covered too.
+  // In a browser tab `__opencalcNative` is absent and the input *is* the
+  // picker, so this does nothing.
+  byId("tb-open").addEventListener("click", (e) => {
+    const native = window.__opencalcNative;
+    if (!native) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    // The same gate the `change` handler applies, for the same reason: this is
+    // the point where a file becomes the document, and a mode where the host
+    // owns the file has to be refused here or hiding the button is decoration.
+    if (capabilityForbids("file.open")) {
+      refuse("file.open", "opening a file is the host application's — this editor does not own the document");
+      return;
+    }
+    (async () => {
+      const picked = await native.open();
+      if (!picked) return; // cancelled: the document is untouched
+      if (isDirty() && !(await confirmModal(
+        "Open another workbook?",
+        "This workbook has changes that have not been saved. Opening another discards them, and undo will not bring them back.",
+        "Discard and open",
+      ))) {
+        return;
+      }
+      status.textContent = `opening ${picked.name}…`;
+      await new Promise((r) => setTimeout(r, 0));
+      if (openBytes(picked.bytes, picked.name)) {
+        markSaved();
+        native.setDocument(picked.name, false);
+      }
+    })().catch((err) => statusError(errText(err)));
+  }, true);
+
   byId("tb-open").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;

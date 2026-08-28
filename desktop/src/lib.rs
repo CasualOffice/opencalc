@@ -17,7 +17,11 @@
 //! the engine says goes in it. `RND-10` made the browser editor work exactly
 //! this way, so the webview half of this app is code that already exists.
 
+pub mod assets;
+pub mod dialog;
 pub mod menu;
+pub mod session;
+pub mod title;
 
 use casual_calc_layout::Viewport;
 use casual_calc_sdk::WorkbookSession;
