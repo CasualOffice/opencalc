@@ -1789,7 +1789,18 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         // to the moved sheet stopped propagating — silently, permanently, and
         // into the saved file.
         Operation::MoveSheet { .. } => RecalcPlan::Full,
-        Operation::InsertRows { .. }
+        // A move of cells is the same class of hazard `CALC-01` found in
+        // `MoveSheet`, one level down: the kept precedent graph is keyed by
+        // `(sheet, CellRef)`, and all three of these **renumber addresses**.
+        // Classified anything but `Full`, the graph would go on describing a
+        // document that no longer exists — every later edit to a moved cell
+        // silently stopping propagating, permanently, into the saved file.
+        // References are rewritten too, so what each formula reads changes
+        // outright.
+        Operation::MoveColumns { .. }
+        | Operation::MoveRows { .. }
+        | Operation::MoveRange { .. }
+        | Operation::InsertRows { .. }
         | Operation::DeleteRows { .. }
         | Operation::InsertColumns { .. }
         | Operation::DeleteColumns { .. }

@@ -137,6 +137,9 @@ fn sheet_of(op: &Operation) -> Option<usize> {
         | Operation::InsertColumns { sheet, .. }
         | Operation::DeleteColumns { sheet, .. }
         | Operation::SetSheetMetadata { sheet, .. }
+        | Operation::MoveColumns { sheet, .. }
+        | Operation::MoveRows { sheet, .. }
+        | Operation::MoveRange { sheet, .. }
         | Operation::SetTabColor { sheet, .. } => Some(*sheet),
         _ => None,
     }
@@ -287,6 +290,19 @@ pub fn transform(
         return Err(unsupported(subject, against));
     }
 
+    // **A move has no transform, and says so rather than guessing.** Reordering
+    // a band is a delete and an insert at once on the *same* axis, and a range
+    // move is a permutation `Band` cannot express at all — so neither
+    // `band_of` nor `rebase_onto_band` has an answer, and the fall-through
+    // ("`against` moves nothing, so `subject`'s coordinates still mean what
+    // they meant") would be false. A wrong answer here is invisible divergence
+    // that never heals, which is the one outcome `docs/56` rules out; an
+    // `Unsupported` is a caller-visible refusal. Concurrency only: an
+    // uncontended move never reaches `transform` at all.
+    if is_cell_move(subject) || is_cell_move(against) {
+        return Err(unsupported(subject, against));
+    }
+
     // Different sheets never interact: no operation here addresses two.
     match (sheet_of(subject), sheet_of(against)) {
         (Some(a), Some(b)) if a != b => return Ok(subject.clone()),
@@ -301,6 +317,15 @@ pub fn transform(
     };
 
     Ok(rebase_onto_band(subject, band, sheets))
+}
+
+/// Whether an operation permutes cell addresses within a sheet — the three
+/// move operations. See the refusal in [`transform`].
+fn is_cell_move(op: &Operation) -> bool {
+    matches!(
+        op,
+        Operation::MoveColumns { .. } | Operation::MoveRows { .. } | Operation::MoveRange { .. }
+    )
 }
 
 /// Whether an operation changes what a `sheet` index refers to.
@@ -444,6 +469,9 @@ fn sheet_field_mut(op: &mut Operation) -> Option<&mut usize> {
         | Operation::InsertColumns { sheet, .. }
         | Operation::DeleteColumns { sheet, .. }
         | Operation::SetSheetMetadata { sheet, .. }
+        | Operation::MoveColumns { sheet, .. }
+        | Operation::MoveRows { sheet, .. }
+        | Operation::MoveRange { sheet, .. }
         | Operation::SetTabColor { sheet, .. } => Some(sheet),
         _ => None,
     }
@@ -473,6 +501,9 @@ fn variant_name(op: &Operation) -> &'static str {
         Operation::RemoveSheet { .. } => "RemoveSheet",
         Operation::RenameSheet { .. } => "RenameSheet",
         Operation::MoveSheet { .. } => "MoveSheet",
+        Operation::MoveColumns { .. } => "MoveColumns",
+        Operation::MoveRows { .. } => "MoveRows",
+        Operation::MoveRange { .. } => "MoveRange",
         Operation::SetTabColor { .. } => "SetTabColor",
         Operation::SetDefinedNames(_) => "SetDefinedNames",
         Operation::Batch(_) => "Batch",

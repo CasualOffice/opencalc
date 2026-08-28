@@ -8,7 +8,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-7 of 31 measured behaviours present.
+12 of 46 measured behaviours present.
 
 ## Selection
 
@@ -37,6 +37,7 @@ served tree (`python3 webapp/serve.py 8123`).
 | ❌ | Flash Fill derives a column from an example |
 | ❌ | typing offers entries already in the column |
 | ❌ | a locked cell refuses before the user types, not after |
+| ❌ | Replace All honours the all-sheets option the Find used |
 
 ## Sheets
 
@@ -70,4 +71,74 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | Remove Duplicates spares data outside the selection |
+| ❌ | the filter dropdown offers sorting, as Excel and Sheets do |
+| ❌ | the filter checklist orders numbers numerically |
+| ❌ | Remove Duplicates lets you choose which columns count |
+| ❌ | reopening validation shows the rule that is there |
+| ❌ | deleting a sheet asks first |
 
+## Navigation
+
+| | behaviour |
+|---|---|
+| ✅ | Ctrl+Arrow jumps to the edge of the data |
+| ✅ | Ctrl+End goes to the last used cell |
+| ✅ | the Name Box accepts a range and selects it |
+| ✅ | the Name Box defines a name for the selection |
+| ✅ | each sheet remembers its own scroll and selection |
+
+## Objects
+
+| | behaviour |
+|---|---|
+| ❌ | a picture can be inserted |
+
+## Analysis
+
+| | behaviour |
+|---|---|
+| ❌ | sparklines exist |
+| ❌ | Data ▸ Subtotal groups sorted rows |
+| ❌ | a quick-analysis affordance appears on a selection |
+
+## What to fix, in order
+
+Ranked by how often somebody meets it against what it costs. Those two
+are judgement and are declared in the harness; the verdict above is not.
+
+| | behaviour | met | size |
+|---|---|---|---|
+| ❌ | the toolbar shows the active cell's number format | daily | s |
+| ❌ | the toolbar shows the active cell's fill colour | daily | s |
+| ❌ | a mixed selection does not report as uniform | daily | s |
+| ❌ | the zoom level is visible without opening a menu | daily | s |
+| ❌ | undo moves the view to what it just changed | daily | s |
+| ❌ | arrowing past a hidden row skips it | daily | s |
+| ❌ | filling a date increments it | daily | s |
+| ❌ | filling 'Item 1' continues the number | daily | s |
+| ❌ | the filter dropdown offers sorting, as Excel and Sheets do | daily | s |
+| ❌ | the filter checklist orders numbers numerically | daily | s |
+| ❌ | row height and column width are reachable from the menu bar | weekly | s |
+| ❌ | a currency other than $ can be chosen | weekly | s |
+| ❌ | Ctrl+0 does what the Zoom menu says it does | weekly | s |
+| ❌ | Ctrl+Backspace scrolls back to the active cell | weekly | s |
+| ❌ | an Alt+Enter entry undoes in one step | weekly | s |
+| ❌ | a locked cell refuses before the user types, not after | weekly | s |
+| ❌ | reopening validation shows the rule that is there | weekly | s |
+| ❌ | deleting a sheet asks first | weekly | s |
+| ❌ | drag a column header to reorder | daily | m |
+| ❌ | drag a row header to reorder | daily | m |
+| ❌ | drag the selection border to move a range | daily | m |
+| ❌ | hovering a font previews it before committing | daily | m |
+| ❌ | typing offers entries already in the column | daily | m |
+| ❌ | shrink-to-fit can be turned on | rare | s |
+| ❌ | Format Cells leaves a font colour alone if untouched | weekly | m |
+| ❌ | Remove Duplicates lets you choose which columns count | weekly | m |
+| ❌ | a picture can be inserted | weekly | m |
+| ❌ | Data ▸ Subtotal groups sorted rows | weekly | m |
+| ❌ | a quick-analysis affordance appears on a selection | weekly | m |
+| ❌ | Replace All honours the all-sheets option the Find used | weekly | m |
+| ❌ | Ctrl+click adds a second range | daily | l |
+| ❌ | a banked multi-range is what operations act on | daily | l |
+| ❌ | Flash Fill derives a column from an example | weekly | l |
+| ❌ | sparklines exist | rare | l |

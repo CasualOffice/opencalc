@@ -74,13 +74,26 @@ pub fn session_fill_mode(
                         _ => None,
                     })
             };
+            // A date is a number wearing a format, and that format is the only
+            // thing that tells one from a plain number here.
+            let date_lit = |r: u32, c: u32| -> bool {
+                sh.cells.get(CellRef::new(r, c)).is_some_and(|cell| {
+                    matches!(cell.value, CellValue::Number(_))
+                        && cell.formula.is_none()
+                        && casual_calc_layout::cell_number_format(wb, cell)
+                            .is_some_and(is_day_format)
+                })
+            };
             // If the fill grows along exactly one axis and each line of the
             // source is a numeric arithmetic sequence (>=2 cells, constant
             // step), extend the sequence instead of tiling — Excel's autofill.
             let vertical = dc0 == sc0 && dc1 == sc1 && (dr1 > sr1 || dr0 < sr0);
             let horizontal = dr0 == sr0 && dr1 == sr1 && (dc1 > sc1 || dc0 < sc0);
             let growth = mode == "growth";
-            let arithmetic = |vals: &[Option<f64>]| -> Option<(f64, f64)> {
+            // `steps_alone` — whether a *single* source cell already implies a
+            // step of one. Excel's asymmetry: dragging one `5` gives `5 5 5`,
+            // dragging one `2024-01-01` gives consecutive days.
+            let arithmetic = |vals: &[Option<f64>], steps_alone: bool| -> Option<(f64, f64)> {
                 // Copy never extends, whatever the values look like.
                 if mode == "copy" || mode == "formats" {
                     return None;
@@ -112,9 +125,11 @@ pub fn session_fill_mode(
                     return Some((first, ratio));
                 }
                 if vals.len() < 2 {
-                    // An explicit "fill series" steps by one from a single cell;
-                    // auto-detection needs two to know the step.
-                    return (mode == "series").then(|| (vals[0].unwrap(), 1.0));
+                    // An explicit "fill series" steps by one from a single cell,
+                    // and so does a date — one day. For a plain number, auto
+                    // detection needs two cells to know the step, and one cell
+                    // copies.
+                    return (mode == "series" || steps_alone).then(|| (vals[0].unwrap(), 1.0));
                 }
                 let step = vals[1].unwrap() - vals[0].unwrap();
                 for w in vals.windows(2) {
@@ -128,33 +143,48 @@ pub fn session_fill_mode(
             // horizontal one.
             let col_series: Vec<Option<(f64, f64)>> = if vertical {
                 (sc0..=sc1)
-                    .map(|c| arithmetic(&(sr0..=sr1).map(|r| num_lit(r, c)).collect::<Vec<_>>()))
+                    .map(|c| {
+                        arithmetic(
+                            &(sr0..=sr1).map(|r| num_lit(r, c)).collect::<Vec<_>>(),
+                            sr0 == sr1 && date_lit(sr0, c),
+                        )
+                    })
                     .collect()
             } else {
                 Vec::new()
             };
             let row_series: Vec<Option<(f64, f64)>> = if horizontal {
                 (sr0..=sr1)
-                    .map(|r| arithmetic(&(sc0..=sc1).map(|c| num_lit(r, c)).collect::<Vec<_>>()))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            // Named-list (month/weekday) series, per line, alongside the numeric.
-            let col_text: Vec<Option<(usize, i64, i64)>> = if vertical {
-                (sc0..=sc1)
-                    .map(|c| {
-                        detect_text_series(&(sr0..=sr1).map(|r| text_lit(r, c)).collect::<Vec<_>>())
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let row_text: Vec<Option<(usize, i64, i64)>> = if horizontal {
-                (sr0..=sr1)
                     .map(|r| {
-                        detect_text_series(&(sc0..=sc1).map(|c| text_lit(r, c)).collect::<Vec<_>>())
+                        arithmetic(
+                            &(sc0..=sc1).map(|c| num_lit(r, c)).collect::<Vec<_>>(),
+                            sc0 == sc1 && date_lit(r, sc0),
+                        )
                     })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Text series, per line, alongside the numeric: a named list
+            // (month/weekday) or a trailing count (`Item 1 → Item 2`).
+            let text_fill = |vals: &[Option<String>]| -> Option<TextFill> {
+                // Copy never extends, whatever the values look like — the same
+                // rule the numeric path keeps.
+                if mode == "copy" || mode == "formats" {
+                    return None;
+                }
+                detect_text_fill(vals)
+            };
+            let col_text: Vec<Option<TextFill>> = if vertical {
+                (sc0..=sc1)
+                    .map(|c| text_fill(&(sr0..=sr1).map(|r| text_lit(r, c)).collect::<Vec<_>>()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let row_text: Vec<Option<TextFill>> = if horizontal {
+                (sr0..=sr1)
+                    .map(|r| text_fill(&(sc0..=sc1).map(|c| text_lit(r, c)).collect::<Vec<_>>()))
                     .collect()
             } else {
                 Vec::new()
@@ -202,13 +232,15 @@ pub fn session_fill_mode(
                         });
                         continue;
                     }
-                    // Named-list (month/weekday) series along the fill axis.
+                    // Text series (named list or trailing count) along the axis.
                     let text_series = if vertical {
                         col_text[(dc - sc0) as usize]
-                            .map(|(li, i0, st)| text_series_at(li, i0, st, dr as i64 - sr0 as i64))
+                            .as_ref()
+                            .and_then(|f| text_fill_at(f, dr as i64 - sr0 as i64))
                     } else if horizontal {
                         row_text[(dr - sr0) as usize]
-                            .map(|(li, i0, st)| text_series_at(li, i0, st, dc as i64 - sc0 as i64))
+                            .as_ref()
+                            .and_then(|f| text_fill_at(f, dc as i64 - sc0 as i64))
                     } else {
                         None
                     };

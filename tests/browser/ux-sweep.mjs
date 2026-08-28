@@ -28,9 +28,60 @@ const PORT = process.env.PORT || 8123;
 const EDITOR = `http://127.0.0.1:${PORT}/editor.html`;
 const MAP = new URL("../../docs/47-UX-AND-FEATURE-MAP.md", import.meta.url).pathname;
 
-/** Each check: drive the editor, then answer one yes/no about what happened. */
+/** Each check: drive the editor, then answer one yes/no about what happened.
+ *
+ * `hit` is how often a working spreadsheet user meets this — daily, weekly,
+ * rare. `size` is what fixing it costs — s, m, l. Neither is measurable, so
+ * both are judgement and are written here rather than pretending otherwise;
+ * what the harness contributes is that the *verdict* is not judgement. The
+ * pipeline is the misses ordered by hit against size, which is the only
+ * ordering that answers "what should we do next" rather than "what is wrong".
+ */
 const CHECKS = [];
-const check = (area, name, run) => CHECKS.push({ area, name, run });
+
+// How often somebody meets a behaviour, and what fixing it costs. Keyed by name
+// rather than passed at each call site, so adding a check never has to remember
+// this and a weight can never attach to the wrong row.
+const WEIGHT = {
+  "drag a column header to reorder": ["daily", "m"],
+  "drag a row header to reorder": ["daily", "m"],
+  "drag the selection border to move a range": ["daily", "m"],
+  "Ctrl+click adds a second range": ["daily", "l"],
+  "a banked multi-range is what operations act on": ["daily", "l"],
+  "the toolbar shows the active cell's number format": ["daily", "s"],
+  "the toolbar shows the active cell's fill colour": ["daily", "s"],
+  "a mixed selection does not report as uniform": ["daily", "s"],
+  "arrowing past a hidden row skips it": ["daily", "s"],
+  "undo moves the view to what it just changed": ["daily", "s"],
+  "filling a date increments it": ["daily", "s"],
+  "filling 'Item 1' continues the number": ["daily", "s"],
+  "the zoom level is visible without opening a menu": ["daily", "s"],
+  "the filter dropdown offers sorting, as Excel and Sheets do": ["daily", "s"],
+  "the filter checklist orders numbers numerically": ["daily", "s"],
+  "hovering a font previews it before committing": ["daily", "m"],
+  "typing offers entries already in the column": ["daily", "m"],
+  "an Alt+Enter entry undoes in one step": ["weekly", "s"],
+  "Ctrl+0 does what the Zoom menu says it does": ["weekly", "s"],
+  "Ctrl+Backspace scrolls back to the active cell": ["weekly", "s"],
+  "reopening validation shows the rule that is there": ["weekly", "s"],
+  "deleting a sheet asks first": ["weekly", "s"],
+  "row height and column width are reachable from the menu bar": ["weekly", "s"],
+  "a locked cell refuses before the user types, not after": ["weekly", "s"],
+  "a currency other than $ can be chosen": ["weekly", "s"],
+  "Remove Duplicates lets you choose which columns count": ["weekly", "m"],
+  "Replace All honours the all-sheets option the Find used": ["weekly", "m"],
+  "a picture can be inserted": ["weekly", "m"],
+  "Data ▸ Subtotal groups sorted rows": ["weekly", "m"],
+  "a quick-analysis affordance appears on a selection": ["weekly", "m"],
+  "Flash Fill derives a column from an example": ["weekly", "l"],
+  "shrink-to-fit can be turned on": ["rare", "s"],
+  "sparklines exist": ["rare", "l"],
+};
+
+const check = (area, name, run) => {
+  const [hit, size] = WEIGHT[name] || ["weekly", "m"];
+  CHECKS.push({ area, name, run, hit, size });
+};
 
 // --- helpers every check can use -------------------------------------------
 const seed = (page) =>
@@ -419,6 +470,178 @@ check("Data", "Remove Duplicates spares data outside the selection", async (page
   return ["1", "2", "3", "4", "5", "6"].every((v) => left.includes(v));
 });
 
+// --- navigation and the things a person does before they type anything ------
+const at = (page) => page.evaluate(() => window.opencalcEditor.scrollStateForTest());
+
+check("Navigation", "Ctrl+Arrow jumps to the edge of the data", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
+  await page.keyboard.press("Control+ArrowDown");
+  await page.waitForTimeout(150);
+  return (await at(page)).row === 11;
+});
+
+check("Navigation", "Ctrl+End goes to the last used cell", async (page) => {
+  await page.locator("#grid").focus();
+  await page.keyboard.press("Control+End");
+  await page.waitForTimeout(150);
+  const s = await at(page);
+  return s.row === 11 && s.col === 5;
+});
+
+check("Navigation", "the Name Box accepts a range and selects it", async (page) => {
+  await page.fill("#cell-ref", "B2:D4");
+  await page.press("#cell-ref", "Enter");
+  await page.waitForTimeout(200);
+  const r = await sel(page);
+  return r.r0 === 1 && r.c0 === 1 && r.r1 === 3 && r.c1 === 3;
+});
+
+check("Navigation", "the Name Box defines a name for the selection", async (page) => {
+  await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
+  await page.fill("#cell-ref", "Sales");
+  await page.press("#cell-ref", "Enter");
+  await page.waitForTimeout(250);
+  return page.evaluate(() => {
+    try { return JSON.parse(window.opencalcEditor.wasmApi().session_names() || "[]").length > 0; }
+    catch { return false; }
+  });
+});
+
+check("Navigation", "each sheet remembers its own scroll and selection", async (page) => {
+  await page.evaluate(() => {
+    const ed = window.opencalcEditor;
+    ed.wasmApi().session_add_sheet();
+    ed.selectForTest(9, 2);
+  });
+  await page.waitForTimeout(150);
+  await page.evaluate(() => window.opencalcEditor.switchSheet(1));
+  await page.waitForTimeout(150);
+  await page.evaluate(() => window.opencalcEditor.switchSheet(0));
+  await page.waitForTimeout(200);
+  const s = await at(page);
+  return s.row === 9 && s.col === 2;
+});
+
+// --- data tools -------------------------------------------------------------
+check("Data", "the filter dropdown offers sorting, as Excel and Sheets do", async (page) => {
+  await page.evaluate(() => {
+    window.opencalcEditor.selectForTest(0, 0);
+    window.opencalcEditor.runCommand("data.filter");
+  });
+  await page.waitForTimeout(250);
+  await page.evaluate(() => window.opencalcEditor.openColumnFilterForTest?.(1));
+  await page.waitForTimeout(250);
+  return page.evaluate(() => {
+    const menu = document.querySelector("#sheet-ctx");
+    return !!menu && /A\s*→\s*Z|sort/i.test(menu.textContent || "");
+  });
+});
+
+check("Data", "the filter checklist orders numbers numerically", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_new();
+    ["n", "9", "10", "100", "2"].forEach((v, r) => a.session_set_cell(0, r, 0, v));
+    window.opencalcEditor.selectForTest(0, 0);
+    window.opencalcEditor.runCommand("data.filter");
+  });
+  await page.waitForTimeout(250);
+  await page.evaluate(() => window.opencalcEditor.openColumnFilterForTest?.(0));
+  await page.waitForTimeout(250);
+  const order = await page.evaluate(() =>
+    [...document.querySelectorAll("#sheet-ctx .filter-item")].map((e) => e.textContent.trim()).filter(Boolean),
+  );
+  const nums = order.filter((t) => /^\d+$/.test(t));
+  // A BTreeSet of display text gives 10, 100, 2, 9 — which reads as broken.
+  return nums.length >= 3 && nums.every((v, i, a) => i === 0 || Number(a[i - 1]) <= Number(v));
+});
+
+check("Data", "Remove Duplicates lets you choose which columns count", async (page) => {
+  await page.evaluate(() => window.opencalcEditor.runCommand("data.remove-duplicates"));
+  await page.waitForTimeout(300);
+  return page.evaluate(() =>
+    document.querySelectorAll(".oc-modal:not([hidden]) input[type=checkbox]").length > 0,
+  );
+});
+
+check("Data", "reopening validation shows the rule that is there", async (page) => {
+  await page.evaluate(() => {
+    const ed = window.opencalcEditor;
+    ed.selectForTest(0, 0);
+    ed.wasmApi().session_set_validation(0, 0, 0, 0, 0, "whole", "between", "1", "10", true, "");
+    ed.selectForTest(5, 5);
+    ed.selectForTest(0, 0);
+    ed.runCommand("data.data-validation");
+  });
+  await page.waitForTimeout(350);
+  return page.evaluate(() => {
+    const sels = [...document.querySelectorAll("#side-panel-body select")];
+    return sels.some((s) => /whole/i.test(s.value));
+  });
+});
+
+check("Data", "deleting a sheet asks first", async (page) => {
+  await page.evaluate(() => window.opencalcEditor.wasmApi().session_add_sheet());
+  await page.waitForTimeout(150);
+  const before = await page.evaluate(() =>
+    JSON.parse(window.opencalcEditor.wasmApi().session_sheet_names()).length,
+  );
+  const ran = await page.evaluate(() => {
+    const id = window.opencalcEditor.listCommands().find((i) => /delete.*sheet|sheet.*delete/i.test(i));
+    if (!id) return false;
+    try { window.opencalcEditor.runCommand(id); } catch { /* a disabled command still counts as found */ }
+    return true;
+  });
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() =>
+    JSON.parse(window.opencalcEditor.wasmApi().session_sheet_names()).length,
+  );
+  const asked = await page.evaluate(() => !!document.querySelector(".oc-modal:not([hidden])"));
+  // Deleting a sheet other formulas point at, with no question asked, is not
+  // recoverable by anything a user would think to try.
+  //
+  // `ran` is required: without it this passes when the command simply is not
+  // found, which is the check reporting "safe" for a feature that is absent —
+  // a pass for the wrong reason is worse than a fail.
+  return ran && (asked || after === before);
+});
+
+check("Objects", "a picture can be inserted", async (page) =>
+  page.evaluate(() => window.opencalcEditor.listCommands().some((i) => /image|picture/i.test(i))),
+);
+
+check("Analysis", "sparklines exist", async (page) =>
+  page.evaluate(() => window.opencalcEditor.listCommands().some((i) => /sparkline/i.test(i))),
+);
+
+check("Analysis", "Data ▸ Subtotal groups sorted rows", async (page) =>
+  page.evaluate(() => window.opencalcEditor.listCommands().some((i) => /subtotal/i.test(i))),
+);
+
+check("Analysis", "a quick-analysis affordance appears on a selection", async (page) => {
+  await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
+  await page.waitForTimeout(200);
+  return page.evaluate(
+    () => !!document.querySelector("#quick-analysis, .quick-analysis, [data-quick-analysis]"),
+  );
+});
+
+check("Editing", "Replace All honours the all-sheets option the Find used", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_add_sheet();
+    a.session_set_cell(1, 0, 0, "findme");
+    a.session_set_cell(0, 0, 0, "findme");
+  });
+  await page.waitForTimeout(150);
+  // session_replace_all takes one sheet index and no options, so a replace
+  // launched from an all-sheets Find silently narrows to the current sheet.
+  await page.evaluate(() => window.opencalcEditor.wasmApi().session_replace_all(0, "findme", "gone", true));
+  await page.waitForTimeout(200);
+  return (await page.evaluate(() => window.opencalcEditor.wasmApi().session_cell_input(1, 0, 0))) === "gone";
+});
+
 // --- runner -----------------------------------------------------------------
 const browser = await chromium.launch();
 const results = [];
@@ -475,6 +698,16 @@ ${results.length - missing} of ${results.length} measured behaviours present.
     for (const r of rows) out += `| ${mark[r.verdict]} | ${r.name} |\n`;
     out += "\n";
   }
+  const RANK = { daily: 3, weekly: 2, rare: 1 };
+  const COST = { s: 1, m: 2, l: 4 };
+  const todo = results
+    .filter((r) => r.verdict !== "works")
+    .sort((a, b) => RANK[b.hit] / COST[b.size] - RANK[a.hit] / COST[a.size]);
+  out += `## What to fix, in order\n\n`;
+  out += `Ranked by how often somebody meets it against what it costs. Those two\n`;
+  out += `are judgement and are declared in the harness; the verdict above is not.\n\n`;
+  out += `| | behaviour | met | size |\n|---|---|---|---|\n`;
+  for (const r of todo) out += `| ${mark[r.verdict]} | ${r.name} | ${r.hit} | ${r.size} |\n`;
   writeFileSync(MAP, out);
   console.log(`\nwrote ${MAP}`);
 }

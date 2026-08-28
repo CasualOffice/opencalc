@@ -414,6 +414,140 @@ pub(crate) fn text_series_at(list_id: usize, idx0: i64, step: i64, k: i64) -> St
     list[(idx0 + step * k).rem_euclid(len) as usize].to_owned()
 }
 
+/// A trailing-integer text series: identical text with a number on the end that
+/// counts — `Item 1 → Item 2`, `Q01 → Q02`. The surrounding text is carried
+/// verbatim and the digit width is part of it, so padding survives and only
+/// grows when the number outgrows it (`Item 9 → Item 10`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SuffixSeries {
+    /// The text before the counting digits, kept exactly as it was written.
+    pub prefix: String,
+    /// How many digits the source wrote the number with (its zero padding).
+    pub width: usize,
+    /// The number the first source cell ends with, and the per-cell step.
+    pub start: i64,
+    pub step: i64,
+}
+
+/// Split text into the part before its trailing run of ASCII digits, those
+/// digits, and their value. `None` when there is no trailing digit, when the
+/// text is nothing *but* digits (a bare numeral is a number, and a lone number
+/// copies rather than counting), or when the digits are too long to hold as an
+/// integer — a twenty-digit id is a label, not a counter.
+fn split_trailing_int(text: &str) -> Option<(&str, &str, i64)> {
+    let digit_bytes = text.bytes().rev().take_while(u8::is_ascii_digit).count();
+    if digit_bytes == 0 || digit_bytes == text.len() {
+        return None;
+    }
+    // Trailing ASCII digits are one byte each, so this is a char boundary.
+    let (prefix, digits) = text.split_at(text.len() - digit_bytes);
+    let value = digits.parse::<i64>().ok()?; // rejects the absurdly long
+    Some((prefix, digits, value))
+}
+
+/// Detect whether a source line of text is "the same text with a counting
+/// number on the end". A single such cell counts by one — Excel's rule, and the
+/// reason `Item 1` must not tile. Two or more must agree on the text and on the
+/// step; anything else tiles.
+pub(crate) fn detect_suffix_series(vals: &[Option<String>]) -> Option<SuffixSeries> {
+    if vals.is_empty() || vals.iter().any(|v| v.is_none()) {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(vals.len());
+    for v in vals {
+        parsed.push(split_trailing_int(v.as_ref().unwrap())?);
+    }
+    let (prefix, first_digits, _) = parsed[0];
+    if parsed.iter().any(|(p, _, _)| *p != prefix) {
+        return None; // the text around the number has to be identical
+    }
+    // The padding is only a rule when every source cell writes it the same way;
+    // a source of `Item 9, Item 10` counts in natural width.
+    let width = if parsed.iter().all(|(_, d, _)| d.len() == first_digits.len()) {
+        first_digits.len()
+    } else {
+        1
+    };
+    let step = if parsed.len() == 1 {
+        1
+    } else {
+        let step = parsed[1].2.checked_sub(parsed[0].2)?;
+        for w in parsed.windows(2) {
+            if w[1].2.checked_sub(w[0].2) != Some(step) {
+                return None;
+            }
+        }
+        step
+    };
+    Some(SuffixSeries {
+        prefix: prefix.to_owned(),
+        width,
+        start: parsed[0].2,
+        step,
+    })
+}
+
+/// The text a suffix series produces at forward offset `k` (negative when the
+/// fill runs up or left, which counts down). `None` if the count would leave
+/// `i64` — better to tile than to wrap around.
+pub(crate) fn suffix_series_at(series: &SuffixSeries, k: i64) -> Option<String> {
+    let n = series
+        .step
+        .checked_mul(k)
+        .and_then(|delta| series.start.checked_add(delta))?;
+    let width = series.width;
+    Some(format!("{}{n:0width$}", series.prefix))
+}
+
+/// What a line of source text extends into: a built-in list (months, weekdays)
+/// or a trailing-integer count. The list is tried first, so `May` stays a month
+/// rather than becoming prefix-plus-nothing.
+pub(crate) enum TextFill {
+    List { list: usize, idx0: i64, step: i64 },
+    Suffix(SuffixSeries),
+}
+
+/// Detect the text series a source line extends into, if any.
+pub(crate) fn detect_text_fill(vals: &[Option<String>]) -> Option<TextFill> {
+    if let Some((list, idx0, step)) = detect_text_series(vals) {
+        return Some(TextFill::List { list, idx0, step });
+    }
+    detect_suffix_series(vals).map(TextFill::Suffix)
+}
+
+/// The text a detected series produces at forward offset `k` from its start.
+pub(crate) fn text_fill_at(fill: &TextFill, k: i64) -> Option<String> {
+    match fill {
+        TextFill::List { list, idx0, step } => Some(text_series_at(*list, *idx0, *step, k)),
+        TextFill::Suffix(series) => suffix_series_at(series, k),
+    }
+}
+
+/// Whether a number-format code renders a *calendar day* — as opposed to a
+/// time-only code like `hh:mm`, which [`casual_calc_io::is_date_format`] also
+/// accepts. Dragging one date cell steps by a day; a lone time has no such
+/// obvious step, so it keeps copying.
+pub(crate) fn is_day_format(code: &str) -> bool {
+    let mut in_literal = false;
+    let mut chars = code.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => in_literal = !in_literal,
+            // The same escapes `is_date_format` honours: the next char is
+            // literal text, not a placeholder.
+            '\\' | '*' | '_' => {
+                chars.next();
+            }
+            _ if in_literal => {}
+            // `m` is months or minutes depending on its neighbours, so it does
+            // not decide this on its own; `y` and `d` do.
+            'y' | 'd' | 'Y' | 'D' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Drag-fill: fill the destination box from the source box, tiling the source
 /// pattern and shifting relative formula references by each cell's offset
 /// (one undo step). Cells inside the source box are left untouched.
