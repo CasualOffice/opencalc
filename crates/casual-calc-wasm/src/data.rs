@@ -2437,6 +2437,58 @@ mod filter_sort_range_tests {
         session_set_filter_values(0, 0, vec!["West".to_owned()]).unwrap();
     }
 
+    /// **`DATA-DUP-01`: Remove Duplicates sees only the rows the filter shows.**
+    ///
+    /// It scanned every row in the band, so a filtered view compared rows that
+    /// were not on screen — and the damage ran the wrong way round. With the
+    /// filter keeping `West` over `East/1`(hidden), `West/1`, `West/1`,
+    /// `East/2`(hidden), the hidden `East/1` became the *first occurrence*, so
+    /// both **visible** rows were deleted as duplicates of a row the user
+    /// cannot see, and both hidden rows survived. The grid emptied with no
+    /// visible cause.
+    ///
+    /// Excluding hidden rows only from *deletion* would not fix it: the
+    /// invisible row still claims the first occurrence and still takes a
+    /// visible one with it. They have to be excluded as keys too.
+    #[test]
+    fn remove_duplicates_ignores_the_rows_a_filter_is_hiding() {
+        session_new();
+        for (r, (region, n)) in [
+            ("region", "n"),
+            ("East", "1"),
+            ("West", "1"),
+            ("West", "1"),
+            ("East", "2"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            session_set_cell(0, r as u32, 0, region).unwrap();
+            session_set_cell(0, r as u32, 1, n).unwrap();
+        }
+        session_set_filter_range(0, 0, 0, 4, 1).unwrap();
+        session_set_filter_values(0, 0, vec!["West".to_owned()]).unwrap();
+        assert_eq!(
+            filter_hidden(),
+            [1, 4],
+            "the two East rows are filtered out"
+        );
+
+        // Keyed on the **number** column alone, which is what makes the hidden
+        // rows collide with the visible ones — the whole point of the defect.
+        // Keying on both columns cannot discriminate, because `East` and `West`
+        // never produce the same key and the mutation below proves nothing.
+        let removed = crate::clipboard::session_remove_duplicates(0, 1, 1, 4, 1).unwrap();
+        assert_eq!(removed, 1, "one visible duplicate, not both visible rows");
+
+        let regions: Vec<String> = (0..4).map(|r| shown(r, 0)).collect();
+        assert_eq!(
+            regions,
+            ["region", "East", "West", "East"],
+            "both East rows are hidden and must survive; exactly one West goes"
+        );
+    }
+
     /// **`DATA-SORT-01`: a sort under a filter still hides the excluded rows.**
     ///
     /// `filter_hidden` is a set of row *indices*, and nothing rebuilds it but
