@@ -1801,3 +1801,350 @@ pub(crate) fn guard_protected(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod column_stats_tests {
+    use super::{
+        StatsLimits, column_stats, session_column_stats, session_new, session_set_cell,
+        with_session,
+    };
+    use serde_json::Value;
+
+    fn stats(r0: u32, c0: u32, r1: u32, c1: u32) -> Value {
+        let json = session_column_stats(0, r0, c0, r1, c1);
+        serde_json::from_str(&json).unwrap_or_else(|why| panic!("not JSON ({why}): {json}"))
+    }
+
+    fn set(row: u32, input: &str) {
+        session_set_cell(0, row, 0, input).unwrap();
+    }
+
+    /// The wire shape itself, pinned.
+    ///
+    /// The host reads these key names; renaming one is a silent break that no
+    /// value-level assertion above would notice.
+    #[test]
+    fn the_json_shape_is_what_the_host_reads() {
+        session_new();
+        set(0, "10");
+        set(1, "'007");
+        set(3, "20");
+        assert_eq!(
+            session_column_stats(0, 0, 0, 3, 0),
+            concat!(
+                r#"{"rows":4,"cols":1,"cells":4,"count":3,"empty":1,"unique":3,"#,
+                r#""uniqueExact":true,"truncated":false,"#,
+                r#""types":{"number":2,"date":0,"text":1,"numberAsText":1,"#,
+                r#""boolean":0,"error":0,"formula":0},"errors":{},"#,
+                r#""numeric":{"count":2,"sum":30.0,"avg":15.0,"median":15.0,"#,
+                r#""min":10.0,"max":20.0,"stdev":7.0710678118654755,"stdevp":5.0},"#,
+                r#""frequency":[{"value":"10","type":"number","count":1},"#,
+                r#"{"value":"20","type":"number","count":1},"#,
+                r#"{"value":"007","type":"text","count":1}],"#,
+                r#""frequencyOther":{"values":0,"count":0}}"#,
+            )
+        );
+    }
+
+    /// **A blank is not a zero.**
+    ///
+    /// The whole reason a stats panel is opened on a column somebody has just
+    /// been sent is to see what is *not* there. Averaging blanks as zeroes turns
+    /// 15 into 6 and hides the gap that caused it, so empties are counted on
+    /// their own line and excluded from every aggregate — as Excel and Sheets
+    /// both do.
+    #[test]
+    fn blanks_are_counted_apart_and_never_average_as_zero() {
+        session_new();
+        set(0, "10");
+        set(2, "20");
+
+        let v = stats(0, 0, 4, 0);
+        assert_eq!(v["rows"], 5);
+        assert_eq!(v["cells"], 5);
+        assert_eq!(v["count"], 2, "non-empty cells");
+        assert_eq!(v["empty"], 3);
+        assert_eq!(v["unique"], 2);
+        assert_eq!(v["numeric"]["count"], 2);
+        assert_eq!(v["numeric"]["sum"], 30.0);
+        assert_eq!(
+            v["numeric"]["avg"], 15.0,
+            "three blanks would drag this to 6"
+        );
+        assert_eq!(v["numeric"]["median"], 15.0);
+    }
+
+    /// **A number stored as text is text, and saying so is the point.**
+    ///
+    /// This is the single commonest thing wrong with a real column, and it is
+    /// exactly what the panel exists to reveal: one `'007` in a numeric column
+    /// is why the SUM is short. Coercing it here would hide the defect the user
+    /// opened the panel to find.
+    #[test]
+    fn a_number_stored_as_text_is_text_and_stays_out_of_the_average() {
+        session_new();
+        set(0, "10");
+        set(1, "'007"); // quote-prefixed: text, however numeric it looks
+        set(2, "20");
+
+        let v = stats(0, 0, 2, 0);
+        assert_eq!(v["count"], 3);
+        assert_eq!(v["types"]["number"], 2);
+        assert_eq!(v["types"]["text"], 1);
+        assert_eq!(
+            v["types"]["numberAsText"], 1,
+            "the text that looks numeric is named, not silently coerced"
+        );
+        assert_eq!(v["numeric"]["count"], 2);
+        assert_eq!(v["numeric"]["sum"], 30.0, "coercion would make this 37");
+        assert_eq!(v["numeric"]["avg"], 15.0);
+    }
+
+    /// **An error is counted, not skipped and not a number.**
+    #[test]
+    fn errors_are_counted_and_are_not_numbers() {
+        session_new();
+        set(0, "10");
+        set(1, "=1/0");
+        set(2, "20");
+
+        let v = stats(0, 0, 2, 0);
+        assert_eq!(v["count"], 3, "the error cell is not empty");
+        assert_eq!(v["types"]["error"], 1);
+        assert_eq!(v["errors"]["#DIV/0!"], 1, "broken down by token");
+        assert_eq!(v["types"]["formula"], 1);
+        assert_eq!(v["numeric"]["count"], 2, "an error is not a number");
+        assert_eq!(v["numeric"]["avg"], 15.0);
+    }
+
+    /// Dates and booleans are their own kinds, and a date shows as a date.
+    ///
+    /// A date is a number underneath and the status-bar summary counts it as
+    /// one; the panel agrees with the bar (`numeric.count` includes it) while
+    /// still naming it separately, and the frequency row shows `2024-01-15`
+    /// rather than the serial nobody can read.
+    #[test]
+    fn dates_and_booleans_are_split_out_of_the_type_distribution() {
+        session_new();
+        set(0, "2024-01-15");
+        set(1, "2024-01-16");
+        set(2, "=1>0");
+        set(3, "5");
+
+        let v = stats(0, 0, 3, 0);
+        assert_eq!(v["types"]["date"], 2);
+        assert_eq!(v["types"]["boolean"], 1);
+        assert_eq!(v["types"]["number"], 1);
+        assert_eq!(
+            v["numeric"]["count"], 3,
+            "dates are numbers to the aggregate"
+        );
+        let rows = v["frequency"].as_array().expect("frequency rows");
+        assert!(
+            rows.iter()
+                .any(|e| e["value"] == "2024-01-15" && e["type"] == "date"),
+            "frequency shows the date, not its serial: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|e| e["value"] == "TRUE" && e["type"] == "boolean"),
+            "{rows:?}"
+        );
+    }
+
+    /// **The frequency table is bounded and its order is total.**
+    ///
+    /// A column of 100,000 invoice numbers must not return 100,000 rows, and two
+    /// identical runs must return the same rows in the same order — a panel that
+    /// reshuffles equal-frequency values on every open looks broken.
+    #[test]
+    fn the_frequency_table_is_bounded_ordered_and_deterministic() {
+        session_new();
+        // v00 twelve times, v01 eleven … with v09 and v10 tied on three, which
+        // is what pins the tie-break: by value, so v09 is listed and v10 is not.
+        let counts = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 3, 1];
+        let mut row = 0u32;
+        for (i, n) in counts.iter().enumerate() {
+            for _ in 0..*n {
+                set(row, &format!("v{i:02}"));
+                row += 1;
+            }
+        }
+        let total: u32 = counts.iter().sum();
+        assert_eq!(row, total);
+
+        let json = session_column_stats(0, 0, 0, total - 1, 0);
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["count"], u64::from(total));
+        assert_eq!(v["unique"], 12);
+        assert_eq!(v["uniqueExact"], true);
+
+        let rows = v["frequency"].as_array().expect("frequency rows");
+        assert_eq!(rows.len(), 10, "top N, not every distinct value");
+        assert_eq!(rows[0]["value"], "v00");
+        assert_eq!(rows[0]["count"], 12);
+        assert_eq!(rows[0]["type"], "text");
+        assert_eq!(
+            rows[9]["value"], "v09",
+            "ties break by value, so the panel cannot flicker: {rows:?}"
+        );
+        assert_eq!(
+            v["frequencyOther"]["values"], 2,
+            "and what is not listed is still accounted for"
+        );
+        assert_eq!(v["frequencyOther"]["count"], 4);
+
+        assert_eq!(
+            json,
+            session_column_stats(0, 0, 0, total - 1, 0),
+            "two runs over the same data must agree byte for byte"
+        );
+    }
+
+    /// Median over an even count is the mean of the two middle values, and the
+    /// deviations are the textbook ones.
+    #[test]
+    fn median_min_max_and_deviation() {
+        session_new();
+        for (i, n) in [9, 5, 4, 4, 2, 7, 4, 5].iter().enumerate() {
+            set(i as u32, &n.to_string());
+        }
+
+        let v = stats(0, 0, 7, 0);
+        assert_eq!(v["numeric"]["count"], 8);
+        assert_eq!(v["numeric"]["avg"], 5.0);
+        assert_eq!(v["numeric"]["median"], 4.5, "sorted: 2 4 4 4 | 5 5 7 9");
+        assert_eq!(v["numeric"]["min"], 2.0);
+        assert_eq!(v["numeric"]["max"], 9.0);
+        assert_eq!(v["numeric"]["stdevp"], 2.0);
+        let sample = v["numeric"]["stdev"].as_f64().expect("sample stdev");
+        assert!(
+            (sample - (32.0f64 / 7.0).sqrt()).abs() < 1e-12,
+            "sample (n-1) deviation, as Excel's STDEV.S: {sample}"
+        );
+    }
+
+    /// A pathological column is bounded rather than returned whole, and says so.
+    ///
+    /// Exercised through the limits the binding passes in, so the bound is
+    /// testable without building a two-million-cell fixture.
+    #[test]
+    fn the_scan_and_the_distinct_set_are_both_bounded() {
+        session_new();
+        for i in 0..20u32 {
+            set(i, &format!("id{i:02}"));
+        }
+        let tiny = StatsLimits {
+            scan: 5,
+            distinct: 3,
+            key_bytes: 1 << 20,
+            top: 2,
+        };
+        let s = with_session(|w| column_stats(w.workbook(), 0, 0, 0, 19, 0, tiny)).unwrap();
+
+        assert!(
+            s.truncated,
+            "the scan budget stops the pass and is reported"
+        );
+        assert_eq!(s.count, 5, "only the budgeted cells are counted");
+        assert_eq!(s.frequency.len(), 2, "top-N rows, not one per value");
+        assert!(!s.unique_exact, "20 ids cannot be tracked in three slots");
+        assert_eq!(s.unique, 3);
+        assert_eq!(
+            s.frequency_other.count, 3,
+            "one tracked-but-unlisted value plus the two never tracked"
+        );
+    }
+
+    /// **The neighbouring column is not in the answer.**
+    ///
+    /// The scan walks the sparse store's *row band*, which spans every column;
+    /// the selection is a filter applied inside it. Forget the filter and a
+    /// stats panel on A silently reports B as well — a wrong answer that looks
+    /// entirely plausible.
+    #[test]
+    fn only_the_selected_columns_are_counted() {
+        session_new();
+        set(0, "10");
+        set(1, "20");
+        for row in 0..2u32 {
+            session_set_cell(0, row, 1, "999").unwrap(); // column B
+        }
+
+        let v = stats(0, 0, 1, 0);
+        assert_eq!(v["cols"], 1);
+        assert_eq!(v["count"], 2, "column B is not in the selection");
+        assert_eq!(v["numeric"]["sum"], 30.0);
+        assert_eq!(v["numeric"]["max"], 20.0);
+
+        // Widened to A:B, the same pass now sees both.
+        let both = stats(0, 0, 1, 1);
+        assert_eq!(both["cols"], 2);
+        assert_eq!(both["cells"], 4);
+        assert_eq!(both["count"], 4);
+        assert_eq!(both["numeric"]["sum"], 2028.0);
+    }
+
+    /// **A value JSON cannot spell must not become JSON that will not parse.**
+    ///
+    /// `format!("{}", f64::NAN)` is `NaN`, and an imported workbook can carry
+    /// one. Emitted literally it throws inside the host's `JSON.parse` and takes
+    /// the whole panel out over a single cell, so a non-finite aggregate is
+    /// `null` — the JSON spelling of "no answer".
+    #[test]
+    fn a_non_finite_value_does_not_produce_unparseable_json() {
+        use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(1.0)));
+        sheet
+            .cells
+            .set(CellRef::new(1, 0), Cell::value(CellValue::Number(f64::NAN)));
+        wb.sheets.push(sheet);
+
+        let s = column_stats(&wb, 0, 0, 0, 1, 0, StatsLimits::default());
+        let json = serde_json::to_string(&s).expect("serialises");
+        let v: Value = serde_json::from_str(&json).expect("host can parse it");
+        assert!(
+            !json.contains(":NaN") && !json.contains(":inf"),
+            "a bare non-finite token reached the wire: {json}"
+        );
+        assert_eq!(v["count"], 2, "the cell is still a value");
+        assert_eq!(v["numeric"]["count"], 2);
+        assert_eq!(
+            v["numeric"]["sum"],
+            Value::Null,
+            "no answer, said in the only way JSON can say it"
+        );
+    }
+
+    /// **A whole-column selection walks the data, not the address space.**
+    ///
+    /// `A:A` is 1,048,576 cells and three of them hold anything. Reading the
+    /// rectangle cell by cell is a million lookups for an answer the sparse
+    /// store already knows; the empty count is arithmetic, not a scan.
+    #[test]
+    fn a_whole_column_selection_walks_the_data_not_the_address_space() {
+        session_new();
+        set(0, "1");
+        set(9, "2");
+        set(999, "3");
+
+        let started = std::time::Instant::now();
+        let v = stats(0, 0, casual_calc_model::GRID_MAX_ROW, 0);
+        let elapsed = started.elapsed();
+
+        assert_eq!(v["rows"], 1_048_576);
+        assert_eq!(v["count"], 3);
+        assert_eq!(v["empty"], 1_048_573);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["numeric"]["sum"], 6.0);
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "A:A took {elapsed:?} — that is a rectangle scan, not a data scan"
+        );
+    }
+}

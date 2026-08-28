@@ -1442,6 +1442,11 @@ export let scrollMeta = { maxScrollY: 1, maxScrollX: 1, vSpan: 1, hSpan: 1 };
 // used to leave the grid parked in blank space with no way back but scrolling
 // the other way — the thumb had already bottomed out, so it gave no hint that
 // anything had moved.
+// The scrollbar tracks' own size, which changes with the window and nothing
+// else. Dropped by `invalidateTrackSize` rather than re-read every frame.
+const trackSize = { h: 0, w: 0 };
+export function invalidateTrackSize() { trackSize.h = 0; trackSize.w = 0; }
+
 function updateScrollbars(v) {
   if (!wasm) return;
   const b = usedBounds();
@@ -1456,7 +1461,15 @@ function updateScrollbars(v) {
     wasm.session_col_offset_px(state.sheet, b.cols + 8),
     viewW + 1,
   );
-  const trackH = vscroll.clientHeight, trackW = hscroll.clientWidth;
+  // Read once and remembered. `clientHeight` on an element whose layout was
+  // just dirtied forces a synchronous reflow, and this ran every frame — so the
+  // scrollbar paid to flush the whole editor's layout to learn a number that
+  // only changes when the window does.
+  if (trackSize.h === 0) {
+    trackSize.h = vscroll.clientHeight;
+    trackSize.w = hscroll.clientWidth;
+  }
+  const trackH = trackSize.h, trackW = trackSize.w;
   const thumbH = Math.max(28, trackH * Math.min(1, viewH / contentH));
   const thumbW = Math.max(28, trackW * Math.min(1, viewW / contentW));
   const maxScrollY = Math.max(1, contentH - viewH);
@@ -2519,7 +2532,7 @@ export function draw() {
   if (editSurface === inline) positionInline();
   updateNameBox();
   announceCell();
-  rebuildA11yGrid();
+  scheduleA11yGrid();
   updateGridCounts();
   updateCellMode();
   updateScrollbars(v);
@@ -4902,8 +4915,50 @@ const A11Y_MAX_COLS = 40;
 
 const a11yCellId = (row, col) => `a11y-${row}-${col}`;
 
+// Rebuilding the accessibility mirror is not scroll work.
+//
+// The mirror is hundreds of DOM nodes, and its guard against a redundant
+// rebuild hashes `JSON.stringify(geoItems)` — every visible cell, every frame.
+// While scrolling that signature genuinely changes each frame, so the guard
+// never fires: the tree is rebuilt continuously, the layout is dirtied
+// continuously, and the scrollbar's `clientHeight` read has to flush all of it.
+// A CPU profile of a scroll put 36.8% in `updateScrollbars` and 6.6% here —
+// 43% of the frame in two functions that do not draw a cell.
+//
+// Deferred until the view stops. A screen reader is not reading a grid mid-
+// fling, and the mirror only has to be true when the motion is — so this drops
+// the cost out of the scroll path without ever leaving the tree stale while
+// somebody could be reading it.
+// Deferred **only while the view is moving**. An edit is not a scroll: the
+// mirror is the only DOM this canvas has, so it is what a screen reader reads
+// *and* what a test reads, and delaying it by even a frame delays the
+// announcement of a paste. That distinction was not free — deferring
+// unconditionally broke `a copied value pastes as itself`, which reads
+// `#a11y-7-0` and had nothing to read for 120ms. The test was right and the
+// first version of this was wrong.
+let a11ySettle = 0;
+let a11yRebuilds = 0;
+let movingUntil = 0;
+export const a11yRebuildCountForTest = () => a11yRebuilds;
+/// Called by the scroll paths: the view is moving, so the mirror can wait.
+export function viewIsMoving() { movingUntil = performance.now() + 90; }
+
+function scheduleA11yGrid() {
+  clearTimeout(a11ySettle);
+  if (performance.now() >= movingUntil) {
+    // Standing still — an edit, a selection, a format. Announce it now.
+    rebuildA11yGrid();
+    return;
+  }
+  a11ySettle = setTimeout(() => {
+    a11ySettle = 0;
+    rebuildA11yGrid();
+  }, 120);
+}
+
 function rebuildA11yGrid() {
   if (!a11yEl || !wasm || !geo.rowIdx || !geo.colIdx) return;
+  a11yRebuilds += 1;
   const rows = geo.rowIdx.slice(0, A11Y_MAX_ROWS);
   const cols = geo.colIdx.slice(0, A11Y_MAX_COLS);
   if (!rows.length || !cols.length) return;
@@ -5938,6 +5993,7 @@ function wireEvents() {
         state.scrollX += dx * unit * scrollDamp;
       }
       clampScroll();
+      viewIsMoving();
       scheduleDraw();
     },
     { passive: false },
@@ -6089,6 +6145,7 @@ function wireEvents() {
       state.scrollX = pan.sx - dx;
       state.scrollY = pan.sy - dy;
       clampScroll();
+      viewIsMoving();
       scheduleDraw();
       e.preventDefault();
     },
@@ -7049,7 +7106,7 @@ function wireEvents() {
     }
   }
 
-  window.addEventListener("resize", () => { resize(); reflowToolbar(); });
+  window.addEventListener("resize", () => { invalidateTrackSize(); resize(); reflowToolbar(); });
 
   // ---- Application menu bar (File / Edit / View / …) -----------------------
   // Declarative menu → item table. Every item delegates to an existing handler

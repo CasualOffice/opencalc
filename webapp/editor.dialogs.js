@@ -56,6 +56,7 @@ import {
   panelNote,
   panelRangeEls,
   parseColor,
+  parseNameRange,
   printSheet,
   pushRecent,
   readThread,
@@ -1528,7 +1529,13 @@ export function hyperlinkDialog() {
   setTimeout(() => target.focus(), 0);
 }
 
-export async function tableDialog() {
+// Create a table under the cursor — Excel's Ctrl+T dialog, not a silent create.
+//
+// The old path detected a block and created immediately: no confirmation of the
+// range, no headers question, no style. Everything is still live in the panel
+// afterwards; the modal exists so the *range* and the *headers* decision are
+// settled before a table exists, because both are awkward to correct after.
+export function tableDialog() {
   let existing = null;
   try {
     existing = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col));
@@ -1545,15 +1552,146 @@ export async function tableDialog() {
       if (blk) bounds = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
     } catch {}
   }
-  try {
-    const name = wasm.session_create_table(
-      state.sheet, bounds.r0, bounds.c0, bounds.r1, bounds.c1, "", true);
-    select(bounds.r0, bounds.c0);
+
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Create table";
+  body.textContent = "";
+  body.append(el("p", "oc-confirm-text", "Where is the data for your table?"));
+
+  const form = el("div", "oc-table-form");
+  const rangeLabel = el("label", "oc-form-label", "Range");
+  rangeLabel.htmlFor = "oc-table-range";
+  const rangeIn = document.createElement("input");
+  rangeIn.type = "text";
+  rangeIn.id = "oc-table-range";
+  rangeIn.className = "oc-form-field mono";
+  rangeIn.value = A1range(bounds);
+  rangeIn.spellcheck = false;
+  rangeIn.autocomplete = "off";
+
+  const err = el("div", "oc-form-error");
+  err.id = "oc-table-range-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const clearError = () => {
+    err.hidden = true;
+    err.textContent = "";
+    rangeIn.classList.remove("bad");
+    rangeIn.removeAttribute("aria-invalid");
+  };
+  rangeIn.addEventListener("input", clearError);
+
+  const headerLabel = el("label", "oc-check");
+  const headerBox = document.createElement("input");
+  headerBox.type = "checkbox";
+  headerBox.id = "oc-table-headers";
+  headerBox.checked = true;
+  headerLabel.append(headerBox, document.createTextNode(" My table has headers"));
+
+  // The same swatch language the table panel uses (`buildTablePanel`): a
+  // four-row miniature painted from the engine's own resolution of the style,
+  // so the preview here and the grid afterwards cannot disagree.
+  const styles = el("div", "oc-table-styles");
+  let chosenStyle = "TableStyleMedium2";
+  const swatches = [];
+  for (const [label, id] of TABLE_STYLES) {
+    const b = el("button", "oc-style-swatch" + (id === chosenStyle ? " sel" : ""));
+    b.type = "button";
+    b.title = label;
+    let c = { headerFill: "FFFFFF", bandFill: "F2F2F2", border: "BFBFBF" };
+    try { c = JSON.parse(wasm.session_table_style_preview(id)) || c; } catch {}
+    const head = el("span");
+    head.style.background = "#" + c.headerFill;
+    head.style.borderBottom = "2px solid #" + c.border;
+    const band = el("span");
+    band.style.background = "#" + c.bandFill;
+    b.append(head, el("span"), band, el("span"));
+    b.addEventListener("click", () => {
+      chosenStyle = id;
+      for (const s of swatches) s.b.classList.toggle("sel", s.id === id);
+    });
+    styles.appendChild(b);
+    swatches.push({ b, id });
+  }
+
+  form.append(
+    rangeLabel, rangeIn,
+    el("span"), err,
+    el("span"), headerLabel,
+    el("span", "oc-form-label top", "Style"), styles,
+  );
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "Create");
+  actions.append(cancel, ok);
+  body.append(form, actions);
+  modal.hidden = false;
+
+  // The modal's own ✕ and backdrop only hide it, which would leave this key
+  // handler installed forever — so, as `confirmModal` does, treat both as
+  // Cancel and unwire everything in one place.
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", onCancel);
+    modal.removeEventListener("click", onBackdrop);
+  };
+  const onCancel = () => { close(); canvas.focus(); };
+  const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); onCancel(); }
+    else if (e.key === "Enter") { e.stopPropagation(); e.preventDefault(); create(); }
+  };
+
+  const create = () => {
+    // `parseNameRange` is the name box's own parser, so whatever Go To accepts
+    // this box accepts too. The two strips in front of it are the shapes Excel
+    // writes into its equivalent field — a leading `=` and absolute `$`
+    // markers — which that parser does not take on a cell reference.
+    const typed = rangeIn.value.trim();
+    const box = parseNameRange(typed.replace(/^=/, "").replace(/\$/g, ""));
+    if (!box) {
+      err.textContent = typed
+        ? `"${typed}" is not a range — type something like A1:D20.`
+        : "Enter a range, such as A1:D20.";
+      err.hidden = false;
+      rangeIn.classList.add("bad");
+      rangeIn.setAttribute("aria-invalid", "true");
+      rangeIn.focus();
+      rangeIn.select();
+      return;
+    }
+    const headers = headerBox.checked;
+    const style = chosenStyle;
+    close();
+    canvas.focus();
+    let name;
+    try {
+      name = wasm.session_create_table(
+        state.sheet, box.r0, box.c0, box.r1, box.c1, "", headers);
+    } catch (e) { statusError(errText(e)); return; }
+    select(box.r0, box.c0);
+    // After `select`, so `applyTableStyle`'s `currentTable()` finds the table
+    // just made; before `openPanel`, so its `refreshTablePanel` is still a
+    // no-op and the panel gets built once, from the finished table.
+    if (style) applyTableStyle({ style });
     status.textContent = `created ${name} — Esc closes the panel`;
-  } catch (e) { statusError(errText(e)); return; }
-  invalidateGrowth();
-  draw();
-  openPanel("table");
+    invalidateGrowth();
+    draw();
+    openPanel("table");
+  };
+
+  document.addEventListener("keydown", onKey, true);
+  x.addEventListener("click", onCancel);
+  modal.addEventListener("click", onBackdrop);
+  cancel.addEventListener("click", onCancel);
+  ok.addEventListener("click", create);
+  rangeIn.focus();
+  rangeIn.select();
 }
 
 export function confirmModal(title, message, confirmLabel = "OK") {

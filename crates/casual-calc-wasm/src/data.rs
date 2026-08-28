@@ -1619,3 +1619,424 @@ pub fn session_set_font_color(
         st.set_font_color(color.clone(), theme)
     })
 }
+
+// ---------------------------------------------------------------------------
+// Column statistics.
+//
+// Google Sheets' *Data ▸ Column stats*: what a column actually holds, for
+// somebody who has just been sent it. The status bar's `session_range_stats`
+// answers the same question at a glance (Sum/Avg/Min/Max/Count) and this must
+// agree with it — a panel that disagrees with the bar three centimetres below
+// it is worse than no panel — so the numeric aggregate keeps the bar's rule
+// that every `Number` cell is numeric, dates included, and adds the shape the
+// bar has no room for: medians, deviations, frequencies, and which kinds of
+// value are mixed together in the column.
+//
+// Three rules decide almost every answer here:
+//
+// - **A blank is not a zero.** Empty cells are counted on their own line and
+//   enter no aggregate; averaging them as zeroes hides the gap that caused the
+//   number to look wrong.
+// - **A number stored as text is text.** It is the commonest defect in a real
+//   column and the reason to open the panel at all, so it is counted as text
+//   *and* named (`types.numberAsText`) rather than quietly coerced.
+// - **An error is a value.** `#DIV/0!` is counted, broken down by token, and is
+//   never a number.
+// ---------------------------------------------------------------------------
+
+/// What one column-stats pass will look at, and how much of it comes back.
+#[derive(Clone, Copy)]
+pub(crate) struct StatsLimits {
+    /// Stored (non-blank) cells examined before the answer is marked partial.
+    pub scan: usize,
+    /// Distinct values tracked for `unique` and the frequency table.
+    pub distinct: usize,
+    /// Bytes of value text held in that table.
+    pub key_bytes: usize,
+    /// Frequency rows returned.
+    pub top: usize,
+}
+
+impl Default for StatsLimits {
+    fn default() -> Self {
+        Self {
+            // Two million: more than a whole column (1,048,576), so the case the
+            // panel is opened for is never truncated, and still a hard stop for
+            // a many-column selection over a full sheet — where the rectangle is
+            // 17 billion cells and no answer is worth that wait.
+            scan: 2_000_000,
+            // A column of 100,000 unique invoice numbers is a real column. It is
+            // tracked (the count is exact) but the table it feeds is not
+            // returned; past this the answer becomes a lower bound and says so
+            // through `uniqueExact`.
+            distinct: 100_000,
+            // …unless the values are long. 100,000 × 32 KB of text would be 3 GB
+            // in a tab, so the map is capped by bytes as well as by entries.
+            key_bytes: 4 << 20,
+            // Ten rows, the length of Sheets' own list: a frequency table is
+            // read to spot the modal values and the odd one out, and nobody
+            // reads the eleventh. Everything else is summed into `frequencyOther`
+            // rather than dropped.
+            top: 10,
+        }
+    }
+}
+
+/// The kinds a stats pass distinguishes. Ordered, because the frequency table's
+/// tie-break has to be total or the panel reshuffles between identical runs.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum ValueKind {
+    Number,
+    Date,
+    Text,
+    Bool,
+    Error,
+}
+
+impl ValueKind {
+    fn tag(self) -> &'static str {
+        match self {
+            ValueKind::Number => "number",
+            ValueKind::Date => "date",
+            ValueKind::Text => "text",
+            ValueKind::Bool => "boolean",
+            ValueKind::Error => "error",
+        }
+    }
+}
+
+/// A float as JSON, or `null` where JSON has no spelling for it.
+///
+/// `format!("{}", f64::NAN)` is `NaN`, which is not JSON: emitting it would
+/// throw inside the host's `JSON.parse` and take the whole panel out over one
+/// cell. Non-finite values reach here from imported files.
+fn finite(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
+}
+
+/// How many of each kind of value the range holds.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TypeCounts {
+    pub number: u64,
+    pub date: u64,
+    pub text: u64,
+    pub number_as_text: u64,
+    pub boolean: u64,
+    pub error: u64,
+    pub formula: u64,
+}
+
+/// The numeric aggregate over the range.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NumericStats {
+    pub count: u64,
+    pub sum: Option<f64>,
+    pub avg: Option<f64>,
+    pub median: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub stdev: Option<f64>,
+    pub stdevp: Option<f64>,
+}
+
+/// One row of the frequency table.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FreqEntry {
+    pub value: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub count: u64,
+}
+
+/// Everything the frequency table did not list.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FreqOther {
+    pub values: u64,
+    pub count: u64,
+}
+
+/// The whole answer.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ColumnStats {
+    pub rows: u64,
+    pub cols: u64,
+    pub cells: u64,
+    pub count: u64,
+    pub empty: u64,
+    pub unique: u64,
+    pub unique_exact: bool,
+    pub truncated: bool,
+    pub types: TypeCounts,
+    pub errors: std::collections::BTreeMap<String, u64>,
+    pub numeric: NumericStats,
+    pub frequency: Vec<FreqEntry>,
+    pub frequency_other: FreqOther,
+}
+
+/// The selection as `(r0, c0, r1, c1)`, normalised and inside the grid.
+///
+/// The host may hand over a backwards drag, and a row past the last one would
+/// make `cells` — and so the empty count — a number about an address space that
+/// does not exist.
+fn clamp_rect(r0: u32, c0: u32, r1: u32, c1: u32) -> (u32, u32, u32, u32) {
+    use casual_calc_model::{GRID_MAX_COL, GRID_MAX_ROW};
+    (
+        r0.min(r1).min(GRID_MAX_ROW),
+        c0.min(c1).min(GRID_MAX_COL),
+        r0.max(r1).min(GRID_MAX_ROW),
+        c0.max(c1).min(GRID_MAX_COL),
+    )
+}
+
+impl ColumnStats {
+    /// The answer for a range with nothing in it: every cell empty, and every
+    /// bound still honest. Also what a caller with no session or no such sheet
+    /// gets, so the host never has to branch on a differently shaped reply.
+    fn over(r0: u32, c0: u32, r1: u32, c1: u32) -> Self {
+        let (lo_row, lo_col, hi_row, hi_col) = clamp_rect(r0, c0, r1, c1);
+        let rows = u64::from(hi_row - lo_row) + 1;
+        let cols = u64::from(hi_col - lo_col) + 1;
+        Self {
+            rows,
+            cols,
+            cells: rows * cols,
+            empty: rows * cols,
+            unique_exact: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Summarise `r0..=r1 × c0..=c1` on `sheet`.
+///
+/// Walks the **stored** cells in the row band, not the rectangle: a panel is
+/// opened on `A:A`, which addresses 1,048,576 cells and usually holds a few
+/// hundred, and the empty count is then arithmetic (`cells - count`) rather
+/// than a million lookups that find nothing.
+///
+/// `limits` is a parameter rather than a constant so the bounds are testable
+/// without a two-million-cell fixture.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn column_stats(
+    wb: &Workbook,
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    limits: StatsLimits,
+) -> ColumnStats {
+    use std::collections::hash_map::Entry;
+
+    let (lo_row, lo_col, hi_row, hi_col) = clamp_rect(r0, c0, r1, c1);
+    let mut out = ColumnStats::over(r0, c0, r1, c1);
+    let Some(sh) = wb.sheets.get(sheet) else {
+        return out;
+    };
+
+    // Every numeric value, kept because the median needs them ordered and a
+    // two-pass deviation is worth the memory over the naive `E[x²] - mean²`,
+    // which loses its significant digits on a column of large near-equal
+    // numbers (timestamps, prices). Bounded by `limits.scan`.
+    let mut nums: Vec<f64> = Vec::new();
+    // (kind, exact value text) → (occurrences, the text as displayed). Keyed on
+    // the exact value so `42` and `'42` are two values — which is the whole
+    // point — and labelled with the displayed one so a date column's frequency
+    // rows read `2024-01-15` rather than `45306`.
+    let mut freq: std::collections::HashMap<(ValueKind, String), (u64, String)> =
+        std::collections::HashMap::new();
+    let mut tracked = 0u64;
+    let mut key_bytes = 0usize;
+    // Occurrences of values there was no room to track. They are still counted,
+    // in `frequencyOther` — dropping them would make the table's totals lie.
+    let mut untracked = 0u64;
+
+    // `examined` counts every stored cell the band hands over, including the
+    // ones outside the selected columns: skipping a cell is cheap but not free,
+    // and the budget has to bound the walk rather than the part of it that
+    // happens to be in the selection.
+    for (examined, (at, cell)) in sh.cells.row_band(lo_row, hi_row).enumerate() {
+        if examined >= limits.scan {
+            out.truncated = true;
+            break;
+        }
+        if at.col < lo_col || at.col > hi_col {
+            continue;
+        }
+        // A cell exists in the store for its style or its comment alone, and a
+        // formula can evaluate to nothing. None of those is a value: they are
+        // empty, and they are counted by the arithmetic below rather than here.
+        if cell.value.is_empty() {
+            continue;
+        }
+        out.count += 1;
+        if cell.formula.is_some() {
+            out.types.formula += 1;
+        }
+
+        let (kind, key) = match &cell.value {
+            CellValue::Number(n) => {
+                out.numeric.count += 1;
+                nums.push(*n);
+                // A date is a number wearing a format, and the status bar counts
+                // it as one. Named separately all the same: "300 dates" and "300
+                // numbers" are different columns.
+                let is_date = casual_calc_layout::cell_number_format(wb, cell)
+                    .is_some_and(casual_calc_io::is_date_format);
+                if is_date {
+                    out.types.date += 1;
+                    (ValueKind::Date, format!("{n}"))
+                } else {
+                    out.types.number += 1;
+                    (ValueKind::Number, format!("{n}"))
+                }
+            }
+            CellValue::Bool(b) => {
+                out.types.boolean += 1;
+                (
+                    ValueKind::Bool,
+                    if *b { "TRUE" } else { "FALSE" }.to_owned(),
+                )
+            }
+            CellValue::Error(e) => {
+                out.types.error += 1;
+                *out.errors.entry(e.to_string()).or_default() += 1;
+                (ValueKind::Error, e.to_string())
+            }
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                let text = wb.strings.get(*id).unwrap_or_default();
+                out.types.text += 1;
+                // Counted as text — never coerced — and *named*, because one
+                // `'007` in a numeric column is why the SUM is short and the
+                // panel exists to say so.
+                if text.trim().parse::<f64>().is_ok_and(f64::is_finite) {
+                    out.types.number_as_text += 1;
+                }
+                (ValueKind::Text, text.to_owned())
+            }
+            CellValue::Empty => continue,
+        };
+
+        let cost = key.len();
+        match freq.entry((kind, key)) {
+            Entry::Occupied(mut seen) => seen.get_mut().0 += 1,
+            Entry::Vacant(slot) => {
+                if tracked < limits.distinct as u64 && key_bytes + cost <= limits.key_bytes {
+                    slot.insert((1, display_text(wb, cell)));
+                    tracked += 1;
+                    key_bytes += cost;
+                } else {
+                    untracked += 1;
+                    // `unique` is now a floor, and the host must not print it as
+                    // a fact.
+                    out.unique_exact = false;
+                }
+            }
+        }
+    }
+
+    out.empty = out.cells.saturating_sub(out.count);
+    out.unique = tracked;
+
+    if !nums.is_empty() {
+        // `total_cmp`: a total order, so a NaN that came in from a file cannot
+        // make the sort itself nondeterministic.
+        nums.sort_unstable_by(f64::total_cmp);
+        let n = nums.len();
+        let sum: f64 = nums.iter().sum();
+        let mean = sum / n as f64;
+        let median = if n % 2 == 1 {
+            nums[n / 2]
+        } else {
+            (nums[n / 2 - 1] + nums[n / 2]) / 2.0
+        };
+        let ss: f64 = nums.iter().map(|v| (v - mean) * (v - mean)).sum();
+        out.numeric.sum = finite(sum);
+        out.numeric.avg = finite(mean);
+        out.numeric.median = finite(median);
+        out.numeric.min = finite(nums[0]);
+        out.numeric.max = finite(nums[n - 1]);
+        // Sample (n-1) *and* population, as Excel's STDEV.S and STDEV.P: with
+        // one value the sample deviation is undefined rather than zero, and
+        // reporting zero there is a claim about spread that nothing supports.
+        out.numeric.stdev = (n > 1)
+            .then(|| (ss / (n - 1) as f64).sqrt())
+            .and_then(finite);
+        out.numeric.stdevp = finite((ss / n as f64).sqrt());
+    }
+
+    // Most frequent first; ties by kind then by value, so two runs over the same
+    // data return the same rows in the same order. A `HashMap`'s own order is
+    // randomised per process, and a panel that reshuffles on every open reads as
+    // broken.
+    let mut ranked: Vec<(ValueKind, String, u64, String)> = freq
+        .into_iter()
+        .map(|((kind, key), (count, label))| (kind, key, count, label))
+        .collect();
+    ranked.sort_unstable_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let listed = ranked.len().min(limits.top);
+    out.frequency_other.values = (ranked.len() - listed) as u64;
+    out.frequency_other.count = ranked[listed..].iter().map(|e| e.2).sum::<u64>() + untracked;
+    out.frequency = ranked
+        .into_iter()
+        .take(listed)
+        .map(|(kind, _, count, label)| FreqEntry {
+            value: label,
+            kind: kind.tag().to_owned(),
+            count,
+        })
+        .collect();
+    out
+}
+
+/// Summarise a column (or any range) the way Google Sheets' *Column stats* does:
+/// how many rows, how many blanks, how many distinct values, the numeric
+/// aggregate (sum/avg/median/min/max/deviation), the most frequent values, and
+/// the mix of *kinds* — which is how the one text cell wrecking a SUM becomes
+/// visible.
+///
+/// Returns JSON:
+///
+/// ```json
+/// {
+///   "rows": 5, "cols": 1, "cells": 5, "count": 3, "empty": 2,
+///   "unique": 3, "uniqueExact": true, "truncated": false,
+///   "types": { "number": 2, "date": 0, "text": 1, "numberAsText": 1,
+///              "boolean": 0, "error": 0, "formula": 0 },
+///   "errors": { "#DIV/0!": 1 },
+///   "numeric": { "count": 2, "sum": 30.0, "avg": 15.0, "median": 15.0,
+///                "min": 10.0, "max": 20.0, "stdev": 7.07, "stdevp": 5.0 },
+///   "frequency": [ { "value": "007", "type": "text", "count": 1 } ],
+///   "frequencyOther": { "values": 0, "count": 0 }
+/// }
+/// ```
+///
+/// `count` is non-empty cells and `empty` is the rest of the rectangle;
+/// `types` partitions `count` (`formula` cuts across it, and `numberAsText` is
+/// the subset of `text` that parses as a number). `numeric.count` is
+/// `types.number + types.date` — a date is a number wearing a format, which is
+/// how `session_range_stats` counts it for the status bar, and the panel must
+/// not contradict the bar. Every `numeric` field is `null` when there is
+/// nothing to report — including when one non-finite value poisons the
+/// aggregate, since JSON has no other way to say so.
+///
+/// `truncated` and `uniqueExact` say when a bound was hit rather than letting a
+/// partial answer pass as a whole one: with `truncated` set, every count
+/// describes the prefix that was scanned, and `empty` (which is arithmetic over
+/// the rectangle) is then a ceiling rather than a fact.
+#[wasm_bindgen]
+pub fn session_column_stats(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    let stats =
+        with_session(|s| column_stats(s.workbook(), sheet, r0, c0, r1, c1, StatsLimits::default()))
+            .unwrap_or_else(|| ColumnStats::over(r0, c0, r1, c1));
+    serde_json::to_string(&stats).unwrap_or_else(|_| "null".to_owned())
+}
