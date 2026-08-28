@@ -185,7 +185,12 @@ mod tests {
         let ids = command_ids(&parse(MODEL).unwrap());
         assert_eq!(
             ids,
-            vec!["file.new", "file.download", "file.download.xlsx", "file.save"]
+            vec![
+                "file.new",
+                "file.download",
+                "file.download.xlsx",
+                "file.save"
+            ]
         );
     }
 
@@ -212,7 +217,10 @@ mod tests {
 
     #[test]
     fn named_keys_get_their_platform_spelling() {
-        assert_eq!(accelerator("Ctrl+PgDn").as_deref(), Some("CmdOrCtrl+PageDown"));
+        assert_eq!(
+            accelerator("Ctrl+PgDn").as_deref(),
+            Some("CmdOrCtrl+PageDown")
+        );
         assert_eq!(accelerator("Esc").as_deref(), Some("Escape"));
         assert_eq!(accelerator("Ctrl+Del").as_deref(), Some("CmdOrCtrl+Delete"));
     }

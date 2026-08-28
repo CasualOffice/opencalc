@@ -384,6 +384,14 @@ jobs:
       # failed fuzz-build on main. Seconds here beats minutes there.
       - name: The fuzz lockfile is not stale
         run: python3 tools/check-fuzz-lock.py
+      # `desktop/` is its own cargo workspace (ADR-023), so no `--workspace`
+      # job here compiles it: for the whole of TAURI-001 nothing built the
+      # desktop application on any machine, and every job stayed green. The
+      # `desktop` job below is the fix; this is what stops it going missing
+      # again, or quietly losing its Windows leg, or being reduced to a
+      # `cargo build` that cannot catch the blank window it exists to catch.
+      - name: CI builds the desktop application
+        run: python3 tools/check-desktop-build.py
       # DOC-025's "142 stale claims" had no list behind it. This is one thing
       # that *is* enumerable: a document naming a path is making a checkable
       # claim, and an integrator who follows it and finds nothing has been
@@ -805,3 +813,136 @@ jobs:
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
       - run: rustup override set ${{ matrix.toolchain }}
       - run: cargo test --workspace --all-features --locked
+
+  # **Nothing built the desktop application, on any machine.** `desktop/` is its
+  # own cargo workspace (ADR-023, so Tauri's dependency tree does not ride along
+  # in every `--workspace` build here), which means `format`, `lint`, `test`,
+  # `docs` and `platform` all pass over it without touching it — and its unit
+  # tests, the ones that open a workbook and save it back, ran only on whoever
+  # remembered `tools/check-rust.py`. That is `CI-014` again: a second workspace
+  # with no job of its own can break on main and nobody finds out.
+  #
+  # **It bundles, rather than merely compiling.** `cargo build` succeeding is
+  # precisely the signal that was already worthless here — `desktop/build.rs`
+  # exists because a green build produces an installer whose window opens blank
+  # when `webapp/pkg/` was missing when `generate_context!` embedded the assets.
+  # So this job builds the engine first and then produces a real bundle, which
+  # makes the `build.rs` release panic load-bearing rather than theoretical: if
+  # the WebAssembly step were ever dropped, the bundle step fails here.
+  #
+  # Unsigned, deliberately: no signing identity exists for this project, and a
+  # job that needs a secret is a job that cannot run on a fork's pull request.
+  #
+  # Asserted by tools/check-desktop-build.py, because a CI job with nothing
+  # asserting it exists is how this one went missing for the whole of TAURI-001.
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # **One bundle format per platform, chosen for what CI can produce
+          # without a network round-trip to somebody else's tooling.**
+          # `--bundles all` on Linux also builds an AppImage, which downloads
+          # linuxdeploy at build time; the `.deb` is produced from the packages
+          # apt already installed below. On macOS the `.app` *is* the
+          # application — a `.dmg` is a disk image wrapped around it and needs a
+          # mountable volume, which is a flake this job does not need to buy.
+          - os: ubuntu-latest
+            bundles: deb
+            # A directory for `.app`, a file for the rest, so the assertion
+            # below has to know which it is looking for.
+            artifact: target/release/bundle/deb
+          - os: macos-latest
+            bundles: app
+            artifact: target/release/bundle/macos
+          - os: windows-latest
+            bundles: nsis
+            artifact: target/release/bundle/nsis
+    runs-on: ${{ matrix.os }}
+    # Windows runners default to `pwsh`, and every `run:` below is bash — the
+    # same bash the rest of this workflow is written in. Set once here rather
+    # than per step, so a step added later does not have to remember.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # **Two lockfiles, two warm-ups.** `desktop/` resolves its own (ADR-023),
+      # and the engine crates are built here too. Warming both also fetches
+      # `--locked`, which is where a stale `desktop/Cargo.lock` fails with
+      # cargo's own message instead of thirty minutes into a Tauri build.
+      - uses: ./.github/actions/cargo-warmup
+      - uses: ./.github/actions/cargo-warmup
+        with:
+          manifest-path: desktop/Cargo.toml
+      # The Tauri v2 prerequisites for Debian/Ubuntu. `4.1`, not `4.0`: Tauri 2
+      # links against the GTK4-era webkit2gtk and the older `-dev` package
+      # satisfies the build without satisfying the link.
+      - name: Install the Linux webview and bundler dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            file
+      - name: Install wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+      # Built here and never taken from the tree, for the reason browser-smoke
+      # gives: `webapp/pkg/` is not committed, so a bundle assembled from
+      # whatever a checkout happens to contain is a bundle assembled from
+      # nothing. The out-dir is **relative to the crate**, unlike the absolute
+      # `$PWD` form used elsewhere: this job also runs under Git bash on
+      # Windows, where an absolute `/d/a/...` path is mangled on its way into a
+      # native program.
+      - name: Build the engine the webview loads
+        run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir ../../webapp/pkg
+      # The desktop workspace's own tests — opening an `.xlsx`, editing a cell,
+      # undoing, saving, reopening what was written. They need no window, and
+      # until this job existed no machine but a developer's ran them. Linux
+      # only: they are platform-independent, and a debug build of the Tauri tree
+      # on three runners to re-prove the same thing is not worth the minutes.
+      - name: The desktop shell's own tests
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path desktop/Cargo.toml
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+      # Unsigned. `tauri build` runs `cargo build --release`, which is where
+      # `desktop/build.rs` panics if the step above did not leave an engine
+      # behind.
+      - name: Build the desktop bundle
+        working-directory: desktop
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
+      # **A bundle that was not produced is the whole failure this job is
+      # against**, and `tauri build` has exited 0 having emitted nothing when a
+      # bundler was unavailable. So the artefact is looked for on disk rather
+      # than inferred from an exit code.
+      - name: A bundle was actually produced
+        run: |
+          set -euo pipefail
+          dir="desktop/${{ matrix.artifact }}"
+          if [ ! -d "$dir" ]; then
+            echo "::error::$dir does not exist: tauri build produced no ${{ matrix.bundles }} bundle"
+            find desktop/target/release/bundle -maxdepth 3 2>/dev/null || echo "(no bundle directory at all)"
+            exit 1
+          fi
+          # `-mindepth 1` so the directory itself never counts as its own
+          # contents, which is how an empty bundle directory passes a check
+          # written as `[ -d ]`.
+          if [ -z "$(find "$dir" -mindepth 1 -print -quit)" ]; then
+            echo "::error::$dir is empty: tauri build produced no ${{ matrix.bundles }} bundle"
+            exit 1
+          fi
+          du -sh "$dir"/* || true
+          echo "bundled ${{ matrix.bundles }} for ${{ matrix.os }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: desktop/${{ matrix.artifact }}
+          retention-days: 7

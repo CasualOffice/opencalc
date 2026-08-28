@@ -171,14 +171,18 @@ fn set_document(window: WebviewWindow, name: Option<String>, dirty: bool) -> Res
 /// changed their mind.
 #[tauri::command]
 async fn native_open(app: AppHandle) -> Result<Option<Opened>, String> {
-    {
+    // The guard and the format list are read under one lock: two locks would
+    // let a `set_capabilities` land between them and raise a panel whose
+    // filters came from a different report than the permission did.
+    let extensions = {
         let shell = app.state::<Shell>();
         let session = locked(&shell.session)?;
         session.guard_open()?;
-    }
+        session.open_extensions()
+    };
 
     let mut panel = app.dialog().file().set_title("Open");
-    for filter in dialog::open_filters() {
+    for filter in dialog::open_filters(&extensions) {
         let extensions: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
         panel = panel.add_filter(&filter.name, &extensions);
     }
@@ -317,7 +321,21 @@ const BOOTSTRAP: &str = r#"(function () {
       const e = editor();
       if (!e || !e.getCapabilities) return null;
       const caps = e.getCapabilities();
-      await invoke("set_capabilities", { capabilities: caps });
+      // The engine's own answer about what it can open, carried on the same
+      // report so the panel and the permission can never come from different
+      // moments. `openable_extensions` asks the SDK about candidates rather
+      // than reciting a list, so a format the engine learns shows up in the
+      // panel the day it does — which is why the shell stopped keeping a list.
+      let openExtensions = [];
+      try {
+        openExtensions = JSON.parse(e.wasmApi().openable_extensions())
+          .map((x) => String(x).replace(/^[."']+|["']+$/g, ""));
+      } catch (err) {
+        // A shell that cannot read the list falls back to the floor, not to
+        // nothing: an Open panel with no filters opens no files at all.
+        console.error("[opencalc] openable_extensions", err);
+      }
+      await invoke("set_capabilities", { capabilities: { ...caps, openExtensions } });
       return caps;
     },
     async setDocument(name, dirty) {

@@ -342,7 +342,34 @@ struct CellSnap {
     formula: Option<StoredFormula>,
 }
 
-fn observable(wb: &Workbook) -> Vec<(String, Vec<(CellRef, CellSnap)>)> {
+/// One sheet, as anything reading the workbook would see it.
+///
+/// `DATA-SORT-01`: this used to be the name and the cells alone, and that is a
+/// gate hole rather than a simplification. A sheet is not only its cells —
+/// which rows are hidden, where the merges are, what the autofilter excludes
+/// and where a table sits are all state a reader renders, and none of it was
+/// compared. So `assert_round_trip` could watch an inverse restore every value
+/// on the sheet while leaving `filter_hidden` naming rows that no longer hold
+/// the data it was computed from, and stay green: the exact shape of
+/// `DATA-SORT-01`, invisible to the strongest round-trip helper the crate has.
+///
+/// `SheetMetadata::capture` is used rather than a hand-listed subset for the
+/// reason the bundle exists at all (see [`crate::SheetMetadata`]): the field
+/// list is written once, so a field added later is compared without anybody
+/// remembering to come back here.
+///
+/// This is deliberately *not* the same as `assert_round_trip_strict`, which
+/// compares the whole `Workbook` and is therefore unusable the moment a formula
+/// is rewritten, because the arena grows. Metadata has no arena, so it can be
+/// compared exactly even when cells cannot.
+#[derive(Debug, PartialEq)]
+struct SheetSnap {
+    name: String,
+    metadata: crate::SheetMetadata,
+    cells: Vec<(CellRef, CellSnap)>,
+}
+
+fn observable(wb: &Workbook) -> Vec<SheetSnap> {
     wb.sheets
         .iter()
         .map(|s| {
@@ -369,7 +396,11 @@ fn observable(wb: &Workbook) -> Vec<(String, Vec<(CellRef, CellSnap)>)> {
                     )
                 })
                 .collect();
-            (s.name.clone(), cells)
+            SheetSnap {
+                name: s.name.clone(),
+                metadata: crate::SheetMetadata::capture(s),
+                cells,
+            }
         })
         .collect()
 }
@@ -380,6 +411,84 @@ fn assert_round_trip(mut wb: Workbook, op: Operation) {
     let inverse = apply(&mut wb, op).unwrap();
     apply(&mut wb, inverse).unwrap();
     assert_eq!(observable(&wb), before);
+}
+
+/// `DATA-SORT-01`: a sheet is not only its cells, and the round-trip helper
+/// has to know that.
+///
+/// Two sheets holding identical values while disagreeing about which rows the
+/// filter hides are **different sheets** — one draws the row, the other does
+/// not — and until this test existed `observable` called them equal. That is
+/// the hole `DATA-SORT-01` fell through: every `assert_round_trip` in the crate
+/// compares `observable`, so an operation whose inverse restored all the data
+/// and left the hidden set naming rows that no longer held the data it was
+/// computed from was indistinguishable, to this crate's strongest round-trip
+/// helper, from one that got it right.
+///
+/// Asserted on `filter_hidden` and on `hidden_rows` separately because they are
+/// separate fields with separate reasons (`filter_hidden_is_separate_from_hand_hidden_rows`
+/// in `casual-calc-model`), and a snapshot that folded them together would go
+/// green on a fix that only carried one of them.
+#[test]
+fn observable_distinguishes_sheets_that_differ_only_in_which_rows_are_hidden() {
+    let mut base = workbook();
+    set_num(&mut base, 0, 0, 0, 1.0);
+    set_num(&mut base, 0, 1, 0, 2.0);
+
+    let mut filtered = base.clone();
+    filtered.sheets[0].filter_hidden.insert(1);
+    assert_ne!(
+        observable(&base),
+        observable(&filtered),
+        "a stale `filter_hidden` shows the row the filter exists to hide; \
+         `observable` must not call that the same sheet"
+    );
+
+    let mut hand_hidden = base.clone();
+    hand_hidden.sheets[0].hidden_rows.insert(1);
+    assert_ne!(
+        observable(&base),
+        observable(&hand_hidden),
+        "a row hidden by hand is hidden too, and is a different field"
+    );
+
+    // And the two are not each other: folding them into one flag would make a
+    // half-fix look whole.
+    assert_ne!(observable(&filtered), observable(&hand_hidden));
+}
+
+/// The metadata half of a round trip, on an operation whose inverse cannot get
+/// it back by symmetry.
+///
+/// Chosen deliberately over `MoveRows`. A move is a permutation, so its inverse
+/// puts the hidden set back by *reindexing* whether or not anything snapshotted
+/// it — a round trip over a move is green even with the metadata restore torn
+/// out, and asserts nothing. A delete destroys: `filter_hidden` entries inside
+/// the band are gone, and re-inserting an empty band cannot invent them. Only
+/// the pre-mutation `SheetMetadata` snapshot can, which is what this pins.
+///
+/// Before `observable` compared metadata this test was unwritable — the helper
+/// would have called a workbook that lost its whole hidden set identical to one
+/// that kept it.
+#[test]
+fn deleting_rows_and_undoing_restores_the_hidden_set_as_well_as_the_data() {
+    let mut wb = sheet_with_filter(0, 5);
+    for r in 0..=5u32 {
+        set_num(&mut wb, 0, r, 0, f64::from(r));
+    }
+    // Rows 2 and 4 fall inside the band the delete removes, so nothing about
+    // the geometry can reconstruct them.
+    wb.sheets[0].filter_hidden.insert(2);
+    wb.sheets[0].hidden_rows.insert(4);
+
+    assert_round_trip(
+        wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 2,
+            count: 3,
+        },
+    );
 }
 
 /// Round trip via strict `Workbook` equality (valid only when no formula is

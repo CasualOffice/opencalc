@@ -90,6 +90,22 @@ pub struct SheetMetadata {
     pub auto_filter: Option<AutoFilter>,
     /// Rows the autofilter hides. Travels with the filter so undo restores the
     /// rules and the rows they hid together.
+    ///
+    /// **This set is indexed by row, so anything that reorders rows owes it an
+    /// answer.** The structural operations give one: an
+    /// insert, a delete and a move all reindex it under the same map they apply
+    /// to the cells, so a hidden row stays hidden and stays attached to the data
+    /// that made it hidden.
+    ///
+    /// A **sort is a row permutation that does not go through those operations**
+    /// — it is composed elsewhere as a batch of [`Operation::SetCell`] plus one
+    /// [`Operation::SetSheetMetadata`] — and it does not currently give that
+    /// answer. `DATA-SORT-01` in `docs/14-EXECUTION-TRACKER.md` is **open**:
+    /// sorting a filtered range moves the data and leaves this set naming the
+    /// rows it named before, so the filter goes on hiding a row that now holds
+    /// different values. This paragraph records where the invariant lives and
+    /// that it is currently broken on that one path; it does not claim the
+    /// engine keeps it.
     pub filter_hidden: BTreeSet<u32>,
     /// Outline nesting level per row.
     #[serde(deserialize_with = "casual_calc_model::int_keys::deserialize")]
