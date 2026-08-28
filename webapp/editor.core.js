@@ -5908,13 +5908,34 @@ function wireEvents() {
       // Fluid pixel scrolling: move the absolute content offset directly, so the
       // grid glides smoothly instead of snapping a whole row/column at a time.
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? wrap.clientHeight : 1;
+      // Lock to the dominant axis.
+      //
+      // A trackpad does not deliver a pure axis: a two-finger vertical scroll
+      // carries a pixel or two of `deltaX` from the hand's own drift, tens of
+      // times a second. Adding every one of them moved the sheet sideways while
+      // the user watched it move down — and it accumulates rather than
+      // cancelling, because a hand drifts one way, so the grid ends up somewhere
+      // nobody put it. Reported from the desktop app as "scrolling up and down
+      // scrolled slightly right", which is exactly what it is.
+      //
+      // A ratio rather than a fixed threshold, so it scales with how hard the
+      // gesture is thrown, and generous enough that a genuinely diagonal scroll
+      // keeps both components — locking those would make the grid fight the
+      // hand.
+      const AXIS_LOCK = 3;
+      let dx = e.deltaX;
+      let dy = e.deltaY;
+      const ax = Math.abs(dx);
+      const ay = Math.abs(dy);
+      if (ay > ax * AXIS_LOCK) dx = 0;
+      else if (ax > ay * AXIS_LOCK) dy = 0;
       // Shift turns a vertical wheel horizontal — the convention everywhere, and
       // the only way to pan sideways on a mouse with one wheel.
-      if (e.shiftKey && e.deltaX === 0) {
-        state.scrollX += e.deltaY * unit * scrollDamp;
+      if (e.shiftKey && dx === 0) {
+        state.scrollX += dy * unit * scrollDamp;
       } else {
-        state.scrollY += e.deltaY * unit * scrollDamp;
-        state.scrollX += e.deltaX * unit * scrollDamp;
+        state.scrollY += dy * unit * scrollDamp;
+        state.scrollX += dx * unit * scrollDamp;
       }
       clampScroll();
       scheduleDraw();
