@@ -245,6 +245,77 @@ pub fn session_delete_columns(sheet: usize, at: u32, count: u32) -> Result<(), J
     commit_edit(EditOperation::DeleteColumns { sheet, at, count })
 }
 
+/// Move the columns `[at, at + count)` so they sit before column `before` —
+/// dragging a column header (undoable; formula references follow).
+///
+/// `before` is in the coordinates the user can see, i.e. before the move: the
+/// drop indicator sits between two of the columns currently on screen. Dropping
+/// inside the dragged band changes nothing.
+#[wasm_bindgen]
+pub fn session_move_columns(sheet: usize, at: u32, count: u32, before: u32) -> Result<(), JsError> {
+    // Both ends are written: the band leaves its columns and arrives in
+    // others, and everything between them is renumbered. Guarding only the band
+    // would let a drag rewrite locked cells it landed on — the `SEC-006` shape,
+    // where a guard existed but measured less than the edit did.
+    let last = at.saturating_add(count.max(1) - 1);
+    guard_protected(sheet, 0, at.min(before), 0, last.max(before))?;
+    commit_edit(EditOperation::MoveColumns {
+        sheet,
+        at,
+        count,
+        before,
+    })
+}
+
+/// Move the rows `[at, at + count)` so they sit above row `before` — dragging a
+/// row header (undoable; formula references follow).
+#[wasm_bindgen]
+pub fn session_move_rows(sheet: usize, at: u32, count: u32, before: u32) -> Result<(), JsError> {
+    let last = at.saturating_add(count.max(1) - 1);
+    guard_protected(sheet, at.min(before), 0, last.max(before), 0)?;
+    commit_edit(EditOperation::MoveRows {
+        sheet,
+        at,
+        count,
+        before,
+    })
+}
+
+/// Move the rectangle `(r0,c0)..(r1,c1)` so its top-left lands on
+/// `(to_row, to_col)`, leaving the source empty — dragging a selection's
+/// border (undoable; formula references follow).
+///
+/// The destination rectangle is overwritten, blanks included. A destination
+/// that would run off the grid is refused by doing nothing.
+#[wasm_bindgen]
+pub fn session_move_range(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    to_row: u32,
+    to_col: u32,
+) -> Result<(), JsError> {
+    let (rr0, cc0) = (r0.min(r1), c0.min(c1));
+    let (rr1, cc1) = (r0.max(r1), c0.max(c1));
+    // The source is emptied and the destination is overwritten, so a locked
+    // cell in **either** rectangle refuses the move.
+    guard_protected(sheet, rr0, cc0, rr1, cc1)?;
+    guard_protected(
+        sheet,
+        to_row,
+        to_col,
+        to_row.saturating_add(rr1 - rr0),
+        to_col.saturating_add(cc1 - cc0),
+    )?;
+    commit_edit(EditOperation::MoveRange {
+        sheet,
+        from: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+        to: CellRef::new(to_row, to_col),
+    })
+}
+
 /// Set vertical alignment across a range: `top`/`middle`/`bottom`, or empty to
 /// clear (one undo step).
 #[wasm_bindgen]
@@ -611,4 +682,148 @@ pub fn session_set_rotation(
 ) -> Result<(), JsError> {
     let rot = rotation.min(255);
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.rotation = rot)
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::{
+        session_cell_input, session_cells, session_move_columns, session_move_range,
+        session_move_rows, session_new, session_set_cell, session_set_sheet_protected,
+        session_undo,
+    };
+
+    /// One cell's *displayed* text, so a recalculation can be checked rather
+    /// than assumed.
+    fn shown(row: u32, col: u32) -> String {
+        let json = session_cells(0, row, col, row, col);
+        let cells: Vec<serde_json::Value> = serde_json::from_str(&json).expect("cells are json");
+        cells
+            .iter()
+            .find(|c| c["r"] == row && c["c"] == col)
+            .and_then(|c| c["t"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Whether a binding refused to write.
+    ///
+    /// Off-wasm a refusal arrives as a **panic**, not an `Err`: `guard_protected`
+    /// builds a `JsError`, and constructing one outside wasm calls an imported
+    /// function that does not exist (`UX-PROT-01`). Either outcome means the
+    /// same thing here — the write did not happen — and the state assertions
+    /// beside the call are what actually prove it, since a binding with no
+    /// guard at all returns `Ok` and moves the data.
+    ///
+    /// The panic hook is silenced for the duration so a passing test does not
+    /// print three backtraces that look like failures.
+    fn refused(call: impl FnOnce() -> Result<(), wasm_bindgen::JsError>) -> bool {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+        std::panic::set_hook(hook);
+        !matches!(outcome, Ok(Ok(())))
+    }
+
+    /// **All three move bindings obey sheet protection.**
+    ///
+    /// `SEC-006` found nine write paths that never asked, so a new one that
+    /// does not ask re-opens exactly that hole. The refusal is asserted through
+    /// the binding rather than through `protection_blocks`, because asserting
+    /// the predicate tests the rule and not its use — and the state assertion
+    /// underneath it is what actually catches a missing guard: remove the
+    /// guard and the columns move, whatever the return value says.
+    #[test]
+    fn a_protected_sheet_refuses_all_three_moves() {
+        session_new();
+        session_set_cell(0, 0, 0, "a").unwrap();
+        session_set_cell(0, 0, 1, "b").unwrap();
+        session_set_cell(0, 1, 0, "c").unwrap();
+        session_set_sheet_protected(0, true).unwrap();
+
+        assert!(refused(|| session_move_columns(0, 0, 1, 2)), "columns");
+        assert!(refused(|| session_move_rows(0, 0, 1, 2)), "rows");
+        assert!(refused(|| session_move_range(0, 0, 0, 1, 1, 4, 4)), "range");
+
+        // And nothing moved.
+        assert_eq!(session_cell_input(0, 0, 0), "a");
+        assert_eq!(session_cell_input(0, 0, 1), "b");
+        assert_eq!(session_cell_input(0, 1, 0), "c");
+        assert_eq!(session_cell_input(0, 4, 4), "");
+
+        // Unprotecting releases all three again.
+        session_set_sheet_protected(0, false).unwrap();
+        session_move_columns(0, 0, 1, 2).expect("unprotected columns");
+        assert_eq!(session_cell_input(0, 0, 0), "b");
+        assert_eq!(session_cell_input(0, 0, 1), "a");
+    }
+
+    /// The whole binding path: data relocates, a formula outside the band
+    /// follows its reference, the values are recalculated, and one undo puts it
+    /// all back.
+    #[test]
+    fn moving_a_column_through_the_binding_relocates_data_and_references() {
+        session_new();
+        session_set_cell(0, 0, 0, "1").unwrap(); // A1
+        session_set_cell(0, 0, 1, "2").unwrap(); // B1
+        session_set_cell(0, 0, 2, "3").unwrap(); // C1
+        session_set_cell(0, 0, 7, "=B1*10").unwrap(); // H1, names the moved column
+        session_set_cell(0, 0, 8, "=SUM(A1:C1)").unwrap(); // I1, B is dragged out of it
+
+        // Drag B out past C, D and E: A C D E B, so B lands in column E.
+        session_move_columns(0, 1, 1, 5).expect("drag B before F");
+
+        assert_eq!(session_cell_input(0, 0, 1), "3", "C closed up behind B");
+        assert_eq!(session_cell_input(0, 0, 4), "2", "B landed in column E");
+        assert_eq!(
+            session_cell_input(0, 0, 7),
+            "=E1*10",
+            "the reference followed the column"
+        );
+        assert_eq!(
+            session_cell_input(0, 0, 8),
+            "=SUM(A1:B1)",
+            "the range the column was dragged out of shrinks to what survives"
+        );
+
+        // **And the values were recalculated.** The kept precedent graph is
+        // keyed by address and a move renumbers every one of them, so anything
+        // short of a full invalidation leaves the sheet showing pre-move
+        // numbers — `CALC-01`'s defect one level down from the tab drag it was
+        // found on. Two ways to see it, because they fail differently: the sum
+        // covers a different set of columns now, and a *later* edit has to
+        // still reach its dependent through a graph the move rebuilt.
+        assert_eq!(shown(0, 7), "20", "=E1*10 over the moved column");
+        assert_eq!(
+            shown(0, 8),
+            "4",
+            "SUM(A1:B1) is 1 + 3 now that B was dragged out of it"
+        );
+        session_set_cell(0, 0, 4, "5").unwrap();
+        assert_eq!(shown(0, 7), "50", "an edit after the move still propagates");
+
+        session_undo().expect("undo"); // the cell edit
+        session_undo().expect("undo"); // the move
+        assert_eq!(session_cell_input(0, 0, 1), "2");
+        assert_eq!(session_cell_input(0, 0, 2), "3");
+        assert_eq!(session_cell_input(0, 0, 7), "=B1*10");
+        assert_eq!(session_cell_input(0, 0, 8), "=SUM(A1:C1)");
+        assert_eq!(shown(0, 8), "6");
+    }
+
+    /// A range move empties its source through the binding.
+    #[test]
+    fn moving_a_range_through_the_binding_empties_the_source() {
+        session_new();
+        session_set_cell(0, 0, 0, "1").unwrap(); // A1
+        session_set_cell(0, 1, 1, "4").unwrap(); // B2
+        session_set_cell(0, 0, 5, "=A1+B2").unwrap(); // F1
+
+        session_move_range(0, 0, 0, 1, 1, 2, 2).expect("drag A1:B2 to C3");
+
+        assert_eq!(session_cell_input(0, 0, 0), "");
+        assert_eq!(session_cell_input(0, 1, 1), "");
+        assert_eq!(session_cell_input(0, 2, 2), "1");
+        assert_eq!(session_cell_input(0, 3, 3), "4");
+        assert_eq!(session_cell_input(0, 0, 5), "=C3+D4");
+    }
 }

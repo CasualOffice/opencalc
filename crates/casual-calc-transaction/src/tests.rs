@@ -2839,3 +2839,781 @@ fn a_series_on_another_sheet_is_not_touched_or_reformatted() {
         "an insert on S must not move a series reading Other"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Moving columns, rows and ranges.
+// ---------------------------------------------------------------------------
+
+/// A sheet whose columns A..E hold 1..5 in row 1, so a reorder is readable as a
+/// sequence.
+fn lettered_columns() -> Workbook {
+    let mut wb = workbook();
+    for c in 0..5u32 {
+        set_num(&mut wb, 0, 0, c, f64::from(c) + 1.0);
+    }
+    wb
+}
+
+/// Row 1's values left to right, with a gap for an empty column.
+fn row_one(wb: &Workbook, width: u32) -> Vec<Option<f64>> {
+    (0..width)
+        .map(|c| match value_at(wb, CellRef::new(0, c)) {
+            CellValue::Number(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn moving_a_column_relocates_its_data() {
+    let mut wb = lettered_columns();
+    // Drag B (value 2) and drop it before E: A C D B E.
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        row_one(&wb, 5),
+        vec![Some(1.0), Some(3.0), Some(4.0), Some(2.0), Some(5.0)],
+        "cut-and-insert, not a swap"
+    );
+}
+
+#[test]
+fn moving_a_band_of_columns_left_relocates_its_data() {
+    let mut wb = lettered_columns();
+    // Drag D:E and drop them before B: A D E B C.
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 3,
+            count: 2,
+            before: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        row_one(&wb, 5),
+        vec![Some(1.0), Some(4.0), Some(5.0), Some(2.0), Some(3.0)]
+    );
+}
+
+#[test]
+fn a_drop_onto_the_band_itself_changes_nothing() {
+    for before in [1u32, 2, 3] {
+        let mut wb = lettered_columns();
+        let before_state = observable(&wb);
+        let inverse = apply(
+            &mut wb,
+            Operation::MoveColumns {
+                sheet: 0,
+                at: 1,
+                count: 2,
+                before,
+            },
+        )
+        .unwrap();
+        assert_eq!(observable(&wb), before_state, "drop before {before}");
+        // Provably nothing, so `History` keeps it off the undo stack.
+        assert_eq!(inverse, Operation::Batch(Vec::new()));
+        assert!(crate::changes_nothing(&inverse));
+    }
+}
+
+#[test]
+fn a_formula_outside_the_moved_columns_follows_them() {
+    let mut wb = lettered_columns();
+    for r in 0..3u32 {
+        set_num(&mut wb, 0, r, 1, f64::from(r) + 10.0); // B1:B3
+    }
+    set_formula(&mut wb, 0, 0, 5, "SUM(B1:B3)"); // F1, outside the move
+
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    // B landed where D was, so the reference has to land there too.
+    assert_eq!(
+        formula_text(&wb, 0, 0, 5).as_deref(),
+        Some("SUM(D1:D3)"),
+        "a reference to a moved column must follow it"
+    );
+}
+
+#[test]
+fn an_anchored_reference_follows_a_moved_column_too() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 5, "$B$1*2");
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    // `$` is about what a *copy* does to a reference, not about whether the
+    // cell it names may move. Excel moves both.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("$D$1*2"));
+}
+
+#[test]
+fn a_formula_inside_a_moved_column_keeps_its_meaning() {
+    let mut wb = lettered_columns();
+    // B1 reads one column left (A, which does not move) and one right (C, which
+    // is renumbered by the move).
+    set_formula(&mut wb, 0, 0, 1, "C1+A1");
+
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 2,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    // B:C landed where D:E began, so the formula is now in C1. It still names
+    // the same two cells: A never moved, and old C is now D.
+    assert_eq!(
+        formula_text(&wb, 0, 0, 2).as_deref(),
+        Some("D1+A1"),
+        "a formula that moves means what it always meant"
+    );
+    assert!(formula_text(&wb, 0, 0, 1).is_none(), "B1 is empty now");
+}
+
+#[test]
+fn a_moved_formulas_relative_reference_does_not_drift() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 1, "A1*2"); // B1, reading its left neighbour
+
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    // The tree is stored as an offset from its own cell (`PERF-11`), so the
+    // move has to re-store it at the new origin. Left un-restored, the same
+    // "one column left" read as C1 from its new home in D1.
+    assert_eq!(formula_text(&wb, 0, 0, 3).as_deref(), Some("A1*2"));
+}
+
+#[test]
+fn a_range_the_moved_column_is_taken_out_of_shrinks() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 5, "SUM(A1:C1)");
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    // {A, B, C} minus B is {A, C}, which is not contiguous; the delete half of
+    // Excel's cut-and-insert leaves the surviving span, so old A and old C.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("SUM(A1:B1)"));
+}
+
+#[test]
+fn a_range_the_moved_column_is_dropped_into_grows() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 5, "SUM(B1:E1)");
+    // Drag A and drop it before D, i.e. into the middle of the range.
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+            before: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("SUM(A1:E1)"));
+}
+
+#[test]
+fn a_move_never_produces_a_ref_error() {
+    // Every span position against every move, on a small grid: a move destroys
+    // nothing, so nothing may read as destroyed.
+    for at in 0..5u32 {
+        for count in 1..3u32 {
+            for before in 0..6u32 {
+                for lo in 0..5u32 {
+                    for hi in lo..5u32 {
+                        let mut wb = lettered_columns();
+                        let text = format!(
+                            "SUM({}1:{}1)",
+                            casual_calc_formula::column_to_letters(lo),
+                            casual_calc_formula::column_to_letters(hi)
+                        );
+                        set_formula(&mut wb, 0, 0, 8, &text);
+                        apply(
+                            &mut wb,
+                            Operation::MoveColumns {
+                                sheet: 0,
+                                at,
+                                count,
+                                before,
+                            },
+                        )
+                        .unwrap();
+                        let after = formula_text(&wb, 0, 0, 8).unwrap_or_default();
+                        assert!(
+                            !after.contains("#REF!"),
+                            "{text} became {after} moving {count} at {at} before {before}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_defined_name_follows_a_moved_column() {
+    let mut wb = lettered_columns();
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "Rate".to_owned(),
+        sheet: None,
+        formula: parse("S!$B$1").unwrap(),
+    });
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.defined_names[0].formula.to_string(), "S!$D$1");
+}
+
+#[test]
+fn a_moved_column_takes_its_width_and_hidden_flag_with_it() {
+    let mut wb = lettered_columns();
+    wb.sheets[0].columns.sizes.insert(1, 2400);
+    wb.sheets[0].hidden_cols.insert(1);
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].columns.sizes.get(&3), Some(&2400));
+    assert!(!wb.sheets[0].columns.sizes.contains_key(&1));
+    assert!(wb.sheets[0].hidden_cols.contains(&3));
+    assert!(!wb.sheets[0].hidden_cols.contains(&1));
+}
+
+#[test]
+fn a_merge_inside_a_moved_column_travels_with_it() {
+    let mut wb = lettered_columns();
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(0, 1), CellRef::new(2, 1)));
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0].merges,
+        vec![CellRange::new(CellRef::new(0, 3), CellRef::new(2, 3))]
+    );
+}
+
+#[test]
+fn moving_columns_undoes_exactly() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 5, "SUM(A1:C1)"); // the band is dragged out of it
+    // **The endpoint the band swallows is the case a reverse move cannot
+    // recover.** `B1:C1` loses its low endpoint to the band, so the forward
+    // rewrite clamps it to what is left — `B1:B1`, meaning old C — and the
+    // reverse move, seeing a span that is merely *next to* the returning band,
+    // shifts it rather than re-growing it. Only the snapshot restores it, and
+    // dropping the snapshot leaves every other assertion here green.
+    set_formula(&mut wb, 0, 0, 7, "SUM(B1:C1)");
+    set_formula(&mut wb, 0, 0, 1, "A1*2"); // travels
+    set_formula(&mut wb, 0, 1, 6, "B1+$C$1"); // follows
+    wb.sheets[0].columns.sizes.insert(1, 2400);
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(0, 1), CellRef::new(2, 1)));
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(4, 1), CellRef::new(4, 2)));
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "Rate".to_owned(),
+        sheet: None,
+        formula: parse("S!$B$1:$C$1").unwrap(),
+    });
+    let before = wb.clone();
+
+    let inverse = apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    assert_ne!(observable(&wb), observable(&before));
+    apply(&mut wb, inverse).unwrap();
+
+    assert_eq!(observable(&wb), observable(&before));
+    // Spelled out rather than left to `observable`, which compares a stored
+    // tree's *absolute* rendering: under `PERF-11` a tree is a set of offsets,
+    // and two different offset sets can render alike off their own origin.
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("SUM(A1:C1)"));
+    assert_eq!(formula_text(&wb, 0, 0, 7).as_deref(), Some("SUM(B1:C1)"));
+    assert_eq!(formula_text(&wb, 0, 0, 1).as_deref(), Some("A1*2"));
+    assert_eq!(formula_text(&wb, 0, 1, 6).as_deref(), Some("B1+$C$1"));
+    assert_eq!(wb.sheets[0].columns.sizes, before.sheets[0].columns.sizes);
+    assert_eq!(wb.sheets[0].merges, before.sheets[0].merges);
+    assert_eq!(wb.defined_names, before.defined_names);
+}
+
+#[test]
+fn moving_columns_redoes_what_it_undid() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 0, 5, "SUM(B1:B1)");
+    let mut history = History::new();
+    let op = Operation::MoveColumns {
+        sheet: 0,
+        at: 1,
+        count: 1,
+        before: 4,
+    };
+    let original = observable(&wb);
+    history.apply(&mut wb, op).unwrap();
+    let moved = observable(&wb);
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("SUM(D1:D1)"));
+
+    history.undo(&mut wb).unwrap();
+    assert_eq!(observable(&wb), original);
+    history.redo(&mut wb).unwrap();
+    assert_eq!(observable(&wb), moved);
+}
+
+#[test]
+fn moving_rows_relocates_data_and_follows_references() {
+    let mut wb = workbook();
+    for r in 0..5u32 {
+        set_num(&mut wb, 0, r, 0, f64::from(r) + 1.0); // A1:A5 = 1..5
+    }
+    set_formula(&mut wb, 0, 0, 3, "SUM(A2:A2)"); // D1, outside the move
+    set_formula(&mut wb, 0, 1, 1, "A2*2"); // B2, travels with row 2
+
+    apply(
+        &mut wb,
+        Operation::MoveRows {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    // Row 2 (value 2) lands where row 4 was: 1 3 4 2 5.
+    let column: Vec<Option<f64>> = (0..5)
+        .map(|r| match value_at(&wb, CellRef::new(r, 0)) {
+            CellValue::Number(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        column,
+        vec![Some(1.0), Some(3.0), Some(4.0), Some(2.0), Some(5.0)]
+    );
+    assert_eq!(formula_text(&wb, 0, 0, 3).as_deref(), Some("SUM(A4:A4)"));
+    // The travelling formula is now in B4 and still names the cell it named.
+    assert_eq!(formula_text(&wb, 0, 3, 1).as_deref(), Some("A4*2"));
+}
+
+#[test]
+fn moving_rows_undoes_exactly() {
+    let mut wb = workbook();
+    for r in 0..5u32 {
+        set_num(&mut wb, 0, r, 0, f64::from(r) + 1.0);
+    }
+    set_formula(&mut wb, 0, 0, 3, "SUM(A1:A3)");
+    wb.sheets[0].rows.sizes.insert(1, 400);
+    assert_round_trip(
+        wb,
+        Operation::MoveRows {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    );
+}
+
+#[test]
+fn moving_a_range_leaves_the_source_empty() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 1, 0, 2.0); // A2
+    set_num(&mut wb, 0, 1, 1, 4.0); // B2 — B1 deliberately empty
+    set_num(&mut wb, 0, 2, 2, 99.0); // C3, about to be overwritten
+    set_num(&mut wb, 0, 2, 3, 77.0); // D3, under the block's *blank* corner
+
+    apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(2, 2),
+        },
+    )
+    .unwrap();
+
+    for at in [CellRef::new(0, 0), CellRef::new(1, 0), CellRef::new(1, 1)] {
+        assert!(
+            wb.sheets[0].cells.get(at).is_none(),
+            "source {at:?} must be empty"
+        );
+    }
+    assert_eq!(value_at(&wb, CellRef::new(2, 2)), CellValue::Number(1.0));
+    assert_eq!(value_at(&wb, CellRef::new(3, 2)), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, CellRef::new(3, 3)), CellValue::Number(4.0));
+    // A move carries its blanks: D3 held 77 and the block's empty B1 landed on
+    // it, so it is empty now rather than left behind.
+    assert!(wb.sheets[0].cells.get(CellRef::new(2, 3)).is_none());
+}
+
+#[test]
+fn a_formula_outside_a_moved_range_follows_it() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 1, 1, 4.0); // B2
+    set_formula(&mut wb, 0, 0, 5, "A1+$B$2"); // F1, outside
+
+    apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(2, 2),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(formula_text(&wb, 0, 0, 5).as_deref(), Some("C3+$D$4"));
+}
+
+#[test]
+fn a_formula_inside_a_moved_range_keeps_its_meaning() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 5, 7.0); // F1, outside the block and staying put
+    set_formula(&mut wb, 0, 0, 0, "F1*2"); // A1, inside the block
+
+    apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(2, 2),
+        },
+    )
+    .unwrap();
+
+    // The cell moved to C3 and still reads F1 — a cut travels verbatim.
+    assert_eq!(formula_text(&wb, 0, 2, 2).as_deref(), Some("F1*2"));
+}
+
+#[test]
+fn moving_a_range_undoes_exactly() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    set_num(&mut wb, 0, 1, 1, 4.0);
+    set_num(&mut wb, 0, 2, 2, 99.0); // destroyed by the move; only a snapshot brings it back
+    set_formula(&mut wb, 0, 0, 5, "A1+$B$2");
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "Rate".to_owned(),
+        sheet: None,
+        formula: parse("S!$A$1").unwrap(),
+    });
+    let before = wb.clone();
+
+    let inverse = apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(2, 2),
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.defined_names[0].formula.to_string(), "S!$C$3");
+    apply(&mut wb, inverse).unwrap();
+
+    assert_eq!(observable(&wb), observable(&before));
+    assert_eq!(wb.defined_names, before.defined_names);
+    assert_eq!(value_at(&wb, CellRef::new(2, 2)), CellValue::Number(99.0));
+}
+
+#[test]
+fn a_range_move_to_where_it_already_is_changes_nothing() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    let inverse = apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(0, 0),
+        },
+    )
+    .unwrap();
+    assert_eq!(inverse, Operation::Batch(Vec::new()));
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0));
+}
+
+#[test]
+fn a_merge_inside_a_moved_range_travels_and_one_it_lands_on_is_destroyed() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(0, 0), CellRef::new(0, 1)));
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(2, 2), CellRef::new(2, 3)));
+
+    apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(2, 2),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        wb.sheets[0].merges,
+        vec![CellRange::new(CellRef::new(2, 2), CellRef::new(2, 3))],
+        "the source merge travels onto exactly where the destination one was"
+    );
+}
+
+#[test]
+fn a_concurrent_move_is_refused_by_the_transform() {
+    // Not designed yet, and a wrong answer would be silent divergence.
+    let subject = Operation::MoveColumns {
+        sheet: 0,
+        at: 1,
+        count: 1,
+        before: 4,
+    };
+    let against = Operation::SetValue {
+        sheet: 0,
+        at: CellRef::new(0, 0),
+        value: CellValue::Number(1.0),
+    };
+    assert!(
+        crate::transform::transform(&subject, &against, crate::transform::Side::Later, &[])
+            .is_err()
+    );
+    assert!(
+        crate::transform::transform(&against, &subject, crate::transform::Side::Later, &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn a_cross_sheet_reference_follows_a_moved_column() {
+    let mut wb = lettered_columns();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "T"));
+    set_formula(&mut wb, 1, 0, 0, "S!B1*2");
+    // An unqualified reference on the *other* sheet names that sheet, so it
+    // must not move.
+    set_formula(&mut wb, 1, 1, 0, "B1*2");
+
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(formula_text(&wb, 1, 0, 0).as_deref(), Some("S!D1*2"));
+    assert_eq!(formula_text(&wb, 1, 1, 0).as_deref(), Some("B1*2"));
+}
+
+#[test]
+fn dragging_a_column_inside_a_table_reorders_its_column_list() {
+    let mut wb = lettered_columns();
+    // A table over B..D with three named columns.
+    wb.sheets[0]
+        .tables
+        .push(table("Sales", 0, 1, 4, 3, &["Region", "Amount", "Date"]));
+
+    // Drag "Amount" (column C) to sit before "Region" (column B).
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 2,
+            count: 1,
+            before: 1,
+        },
+    )
+    .unwrap();
+
+    let names: Vec<&str> = wb.sheets[0].tables[0]
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    // A structured reference resolves through this list by position, so leaving
+    // it alone would make `Sales[Amount]` name its neighbour.
+    assert_eq!(names, vec!["Amount", "Region", "Date"]);
+    assert_eq!(wb.sheets[0].tables[0].range, merge(0, 1, 4, 3));
+}
+
+#[test]
+fn a_range_move_that_overlaps_its_own_source_keeps_every_cell() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0); // A1
+    set_num(&mut wb, 0, 0, 1, 2.0); // B1
+    set_num(&mut wb, 0, 1, 0, 3.0); // A2
+    set_num(&mut wb, 0, 1, 1, 4.0); // B2
+
+    // A1:B2 dragged one cell down-right, so the two rectangles share B2.
+    apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(1, 1),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(value_at(&wb, CellRef::new(1, 1)), CellValue::Number(1.0));
+    assert_eq!(value_at(&wb, CellRef::new(1, 2)), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, CellRef::new(2, 1)), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, CellRef::new(2, 2)), CellValue::Number(4.0));
+    // The parts of the source the destination does not cover are empty.
+    assert!(wb.sheets[0].cells.get(CellRef::new(0, 0)).is_none());
+    assert!(wb.sheets[0].cells.get(CellRef::new(0, 1)).is_none());
+    assert!(wb.sheets[0].cells.get(CellRef::new(1, 0)).is_none());
+}
+
+#[test]
+fn an_overlapping_range_move_undoes_exactly() {
+    let mut wb = workbook();
+    for r in 0..2u32 {
+        for c in 0..2u32 {
+            set_num(&mut wb, 0, r, c, f64::from(r * 2 + c) + 1.0);
+        }
+    }
+    assert_round_trip(
+        wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(1, 1),
+        },
+    );
+}
+
+#[test]
+fn a_range_move_off_the_end_of_the_grid_does_nothing() {
+    let mut wb = workbook();
+    set_num(&mut wb, 0, 0, 0, 1.0);
+    let inverse = apply(
+        &mut wb,
+        Operation::MoveRange {
+            sheet: 0,
+            from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+            to: CellRef::new(u32::MAX, 0),
+        },
+    )
+    .unwrap();
+    assert_eq!(inverse, Operation::Batch(Vec::new()));
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0));
+}
+
+#[test]
+fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 4, 7, "SUM(B:B)");
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+    // A whole-column range still names a column, and that column moved.
+    assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
+
+    // A *row* move cannot change it: it already covers every row, and shifting
+    // its open bound would turn `D:D` into a range that no longer starts at
+    // row 1.
+    apply(
+        &mut wb,
+        Operation::MoveRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+            before: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
+}

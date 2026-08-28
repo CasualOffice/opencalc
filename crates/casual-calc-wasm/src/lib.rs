@@ -744,9 +744,86 @@ mod tests {
 #[cfg(test)]
 mod fill_series_tests {
     use super::{
-        detect_text_series, session_cell_input, session_fill, session_new, session_set_cell,
-        text_series_at,
+        SuffixSeries, detect_suffix_series, detect_text_series, is_day_format, session_cell_input,
+        session_fill, session_new, session_set_cell, suffix_series_at, text_series_at,
     };
+
+    fn series(prefix: &str, width: usize, start: i64, step: i64) -> Option<SuffixSeries> {
+        Some(SuffixSeries {
+            prefix: prefix.to_owned(),
+            width,
+            start,
+            step,
+        })
+    }
+
+    #[test]
+    fn suffix_series_detection_and_its_edges() {
+        // One cell counts by one; the padding width comes from the source.
+        assert_eq!(
+            detect_suffix_series(&[Some("Item 1".into())]),
+            series("Item ", 1, 1, 1)
+        );
+        assert_eq!(
+            detect_suffix_series(&[Some("Q01".into())]),
+            series("Q", 2, 1, 1)
+        );
+        // Two cells set the step; identical text is required.
+        assert_eq!(
+            detect_suffix_series(&[Some("Q1".into()), Some("Q3".into())]),
+            series("Q", 1, 1, 2)
+        );
+        assert_eq!(
+            detect_suffix_series(&[Some("Item 1".into()), Some("Thing 2".into())]),
+            None
+        );
+        // Uneven widths mean the source was not padding, so nor do we.
+        assert_eq!(
+            detect_suffix_series(&[Some("Item 9".into()), Some("Item 10".into())]),
+            series("Item ", 1, 9, 1)
+        );
+        // No trailing digits, a bare numeral, a blank, and digits too long to
+        // be an integer all tile rather than count.
+        assert_eq!(detect_suffix_series(&[Some("Widget".into())]), None);
+        assert_eq!(detect_suffix_series(&[Some("42".into())]), None);
+        assert_eq!(detect_suffix_series(&[None]), None);
+        assert_eq!(detect_suffix_series(&[]), None);
+        assert_eq!(
+            detect_suffix_series(&[Some("X99999999999999999999".into())]),
+            None
+        );
+
+        // Rendering: padding kept, width grows, counting down goes negative
+        // rather than wrapping, and an overflow refuses instead of panicking.
+        let q = detect_suffix_series(&[Some("Q01".into())]).unwrap();
+        assert_eq!(suffix_series_at(&q, 1).as_deref(), Some("Q02"));
+        assert_eq!(suffix_series_at(&q, 98).as_deref(), Some("Q99"));
+        assert_eq!(suffix_series_at(&q, 99).as_deref(), Some("Q100"));
+        assert_eq!(suffix_series_at(&q, -2).as_deref(), Some("Q-1"));
+        let huge = SuffixSeries {
+            prefix: "N".into(),
+            width: 1,
+            start: i64::MAX,
+            step: i64::MAX,
+        };
+        assert_eq!(suffix_series_at(&huge, 2), None);
+        assert_eq!(suffix_series_at(&huge, 1), None);
+    }
+
+    #[test]
+    fn only_calendar_formats_count_as_a_day() {
+        assert!(is_day_format("yyyy-mm-dd"));
+        assert!(is_day_format("d/m/yy"));
+        assert!(is_day_format("[$-409]dddd"));
+        // Time-only codes are dates to the formatter but have no day step.
+        assert!(!is_day_format("hh:mm"));
+        assert!(!is_day_format("[h]:mm:ss"));
+        assert!(!is_day_format("0.00"));
+        assert!(!is_day_format("General"));
+        // A `d` inside quoted text or escaped is literal text, not a day.
+        assert!(!is_day_format("0\" days\""));
+        assert!(!is_day_format("0\\d"));
+    }
 
     #[test]
     fn text_series_detection() {
@@ -788,6 +865,158 @@ mod fill_series_tests {
         session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap(); // A1 down to A3
         assert_eq!(session_cell_input(0, 1, 0), "Sat");
         assert_eq!(session_cell_input(0, 2, 0), "Sun"); // wraps Sat → Sun
+    }
+
+    /// Dragging one date cell is the commonest fill there is, and it tiled:
+    /// every cell came out `2024-01-01`. Excel and Sheets both walk the days.
+    #[test]
+    fn a_lone_date_fills_as_consecutive_days() {
+        session_new();
+        session_set_cell(0, 0, 0, "2024-01-01").unwrap(); // A1
+        session_fill(0, 0, 0, 0, 0, 0, 0, 3, 0).unwrap(); // A1 down to A4
+        assert_eq!(session_cell_input(0, 1, 0), "2024-01-02");
+        assert_eq!(session_cell_input(0, 2, 0), "2024-01-03");
+        assert_eq!(session_cell_input(0, 3, 0), "2024-01-04");
+
+        // A leap day is a serial like any other — the calendar comes from the
+        // formatter, not from the fill.
+        session_new();
+        session_set_cell(0, 0, 0, "2024-02-28").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "2024-02-29");
+        assert_eq!(session_cell_input(0, 2, 0), "2024-03-01");
+
+        // Filling upward walks backwards.
+        session_new();
+        session_set_cell(0, 4, 0, "2024-03-05").unwrap(); // A5
+        session_fill(0, 4, 0, 4, 0, 2, 0, 4, 0).unwrap(); // A5 up to A3
+        assert_eq!(session_cell_input(0, 3, 0), "2024-03-04");
+        assert_eq!(session_cell_input(0, 2, 0), "2024-03-03");
+
+        // Sideways too.
+        session_new();
+        session_set_cell(0, 0, 0, "2024-01-31").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 0, 2).unwrap(); // A1 right to C1
+        assert_eq!(session_cell_input(0, 0, 1), "2024-02-01");
+        assert_eq!(session_cell_input(0, 0, 2), "2024-02-02");
+
+        // Ctrl-drag (explicit copy) still tiles the date.
+        session_new();
+        session_set_cell(0, 0, 0, "2024-01-01").unwrap();
+        super::session_fill_mode(0, 0, 0, 0, 0, 0, 0, 2, 0, "copy").unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "2024-01-01");
+
+        // A lone *time* has no day to step, so it copies — the step is the
+        // calendar's, not every date-ish format's. A time format hides a day
+        // step (13:45 tomorrow still reads 13:45), so ask the serial itself.
+        session_new();
+        session_set_cell(0, 0, 0, "13:45").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "13:45");
+        session_set_cell(0, 0, 1, "=A3-A1").unwrap();
+        assert_eq!(
+            super::session_copy_tsv(0, 0, 1, 0, 1).trim(),
+            "0",
+            "a copied time is the same instant, not two days on"
+        );
+    }
+
+    /// The asymmetry Excel actually has, and the one a "simplification" would
+    /// destroy: a lone *plain* number copies where a lone date steps.
+    #[test]
+    fn a_lone_plain_number_still_copies() {
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 3, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "5");
+        assert_eq!(session_cell_input(0, 2, 0), "5");
+        assert_eq!(session_cell_input(0, 3, 0), "5");
+
+        // Two cells still establish a step, as they always did.
+        session_new();
+        session_set_cell(0, 0, 0, "1").unwrap();
+        session_set_cell(0, 1, 0, "3").unwrap();
+        session_fill(0, 0, 0, 1, 0, 0, 0, 3, 0).unwrap();
+        assert_eq!(session_cell_input(0, 2, 0), "5");
+        assert_eq!(session_cell_input(0, 3, 0), "7");
+
+        // And "fill series" from a single number still steps by one.
+        session_new();
+        session_set_cell(0, 0, 0, "5").unwrap();
+        super::session_fill_mode(0, 0, 0, 0, 0, 0, 0, 2, 0, "series").unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "6");
+        assert_eq!(session_cell_input(0, 2, 0), "7");
+    }
+
+    /// `Item 1` tiled where Excel gives `Item 2` — a trailing integer in
+    /// otherwise identical text continues, and its padding survives.
+    #[test]
+    fn trailing_integers_in_text_continue() {
+        session_new();
+        session_set_cell(0, 0, 0, "Item 1").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "Item 2");
+        assert_eq!(session_cell_input(0, 2, 0), "Item 3");
+
+        // Zero padding is part of the text, so it is kept — Q01 → Q02, never Q2.
+        session_new();
+        session_set_cell(0, 0, 0, "Q01").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "Q02");
+        assert_eq!(session_cell_input(0, 2, 0), "Q03");
+
+        // Width grows naturally when the number outgrows it.
+        session_new();
+        session_set_cell(0, 0, 0, "Item 9").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 1, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "Item 10");
+
+        // Text with no trailing integer still tiles.
+        session_new();
+        session_set_cell(0, 0, 0, "Widget").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 2, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "Widget");
+        assert_eq!(session_cell_input(0, 2, 0), "Widget");
+
+        // Two cells set the step, and the prefix must match exactly.
+        session_new();
+        session_set_cell(0, 0, 0, "Q1").unwrap();
+        session_set_cell(0, 1, 0, "Q3").unwrap();
+        session_fill(0, 0, 0, 1, 0, 0, 0, 3, 0).unwrap();
+        assert_eq!(session_cell_input(0, 2, 0), "Q5");
+        assert_eq!(session_cell_input(0, 3, 0), "Q7");
+
+        session_new();
+        session_set_cell(0, 0, 0, "Item 1").unwrap();
+        session_set_cell(0, 1, 0, "Thing 2").unwrap();
+        session_fill(0, 0, 0, 1, 0, 0, 0, 3, 0).unwrap();
+        assert_eq!(
+            session_cell_input(0, 2, 0),
+            "Item 1",
+            "different prefixes tile"
+        );
+        assert_eq!(session_cell_input(0, 3, 0), "Thing 2");
+
+        // Filling upward counts down.
+        session_new();
+        session_set_cell(0, 4, 0, "Item 5").unwrap(); // A5
+        session_fill(0, 4, 0, 4, 0, 2, 0, 4, 0).unwrap();
+        assert_eq!(session_cell_input(0, 3, 0), "Item 4");
+        assert_eq!(session_cell_input(0, 2, 0), "Item 3");
+
+        // Ctrl-drag copies verbatim.
+        session_new();
+        session_set_cell(0, 0, 0, "Item 1").unwrap();
+        super::session_fill_mode(0, 0, 0, 0, 0, 0, 0, 2, 0, "copy").unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "Item 1");
+        assert_eq!(session_cell_input(0, 2, 0), "Item 1");
+
+        // A number too large to be an integer is text, not a series — and must
+        // not panic or wrap around.
+        session_new();
+        session_set_cell(0, 0, 0, "'X99999999999999999999").unwrap();
+        session_fill(0, 0, 0, 0, 0, 0, 0, 1, 0).unwrap();
+        assert_eq!(session_cell_input(0, 1, 0), "'X99999999999999999999");
     }
 }
 

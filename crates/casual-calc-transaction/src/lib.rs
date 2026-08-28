@@ -605,6 +605,101 @@ pub enum Operation {
         /// Number of columns to delete.
         count: u32,
     },
+    /// Move the columns `[at, at + count)` so they sit immediately before
+    /// column `before` — Excel's cut-and-insert, which is what dragging a
+    /// column header does. **Not a swap**: the columns between the band and its
+    /// destination close up behind it and re-open in front of it.
+    ///
+    /// `before` is in **pre-move** coordinates, because that is what the host
+    /// has: the drop indicator sits between two columns the user can currently
+    /// see. `before` inside the band, or at either of its edges, is a drop onto
+    /// itself and changes nothing.
+    ///
+    /// # What follows the move, and what does not
+    ///
+    /// A line move is a **permutation** of the axis: nothing is created,
+    /// nothing is destroyed, and no reference it rewrites ever becomes
+    /// `#REF!`. Everything below is mapped by that permutation, with ranges
+    /// following the rule in `map_span_move`.
+    ///
+    /// **Follows:** cell values, styles and formulas; every formula reference
+    /// in the workbook, including cross-sheet and `$`-anchored ones; defined
+    /// names; chart series reference strings; column widths / row heights; the
+    /// hidden sets; outline levels and collapse flags; the rows an autofilter
+    /// hides; merges; data validations; conditional formats; hyperlinks;
+    /// comments; the autofilter's range; tables (range, filter range, and the
+    /// **column list** when the move is a reorder within the table); chart
+    /// frames; pivot anchors, report blocks and sources, including pivots on
+    /// other sheets; image anchors.
+    ///
+    /// **Does not follow:** the frozen-pane counts, deliberately — they count
+    /// pinned lines rather than naming them, and reordering does not change how
+    /// many are pinned. A table whose column *membership* changes (a column
+    /// dragged out of it, or a foreign one dropped in) keeps its old column
+    /// list, since inventing or discarding a `TableColumn` is a decision this
+    /// pass should not make silently. `Expr::StructuredRef` is never rewritten,
+    /// as with an insert or a delete: it names columns rather than addresses.
+    /// And there is **no operational transform** for this operation — see
+    /// [`transform`], which refuses rather than guessing.
+    MoveColumns {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based first column of the moving band.
+        at: u32,
+        /// How many columns move.
+        count: u32,
+        /// The column the band lands in front of, in pre-move coordinates.
+        before: u32,
+    },
+    /// [`Operation::MoveColumns`] on the other axis — dragging a row header.
+    MoveRows {
+        /// Sheet index.
+        sheet: usize,
+        /// Zero-based first row of the moving band.
+        at: u32,
+        /// How many rows move.
+        count: u32,
+        /// The row the band lands above, in pre-move coordinates.
+        before: u32,
+    },
+    /// Move the rectangle `from` so its top-left corner lands on `to`, leaving
+    /// the source empty — dragging a selection's border.
+    ///
+    /// The destination rectangle is **overwritten**, including the parts of it
+    /// the source had nothing in: a move carries the whole block, blanks
+    /// included, which is what makes it a move rather than a merge of two
+    /// blocks. A destination that would run off the grid changes nothing —
+    /// clamping would silently drop the block's far edge.
+    ///
+    /// # What follows the move, and what does not
+    ///
+    /// **Follows:** the block's cells, whose formulas travel *verbatim* (a cut
+    /// does not change what a cell means, only where it lives); every formula
+    /// elsewhere in the workbook that named a moved cell, and every defined
+    /// name that did — the same [`repointed_after_move`] /
+    /// [`defined_names_after_move`] pair the clipboard's cut uses, so a drag
+    /// and a cut cannot disagree; merges wholly inside the block, with any
+    /// merge under the destination destroyed as a paste destroys it;
+    /// validations, conditional formats, hyperlinks and comments wholly inside
+    /// the block.
+    ///
+    /// **Does not follow:** tables, autofilters, charts, pivots and images,
+    /// none of which is moved by dragging cells out from under it; row heights
+    /// and column widths, which belong to the lines rather than to the block,
+    /// as in Excel. A validation, format or link that only *partly* overlaps
+    /// the block stays where it is — half of what it describes is leaving, and
+    /// splitting one is a bigger decision than a drag should make. Moving a
+    /// block to **another sheet** is not expressible here (one `sheet` index);
+    /// the clipboard's cut/paste covers that. And there is **no operational
+    /// transform** — see [`transform`].
+    MoveRange {
+        /// Sheet index.
+        sheet: usize,
+        /// The rectangle to lift.
+        from: CellRange,
+        /// Where its top-left corner lands.
+        to: CellRef,
+    },
     /// Replace a sheet's position-indexed metadata wholesale: merged ranges,
     /// column widths, row heights, hidden row/column sets, and frozen-pane
     /// counts. This is the universal inverse form for the metadata half of a
@@ -804,6 +899,9 @@ fn describe_op(op: &Operation) -> &'static str {
         Operation::DeleteRows { .. } => "delete rows",
         Operation::InsertColumns { .. } => "insert columns",
         Operation::DeleteColumns { .. } => "delete columns",
+        Operation::MoveColumns { .. } => "move columns",
+        Operation::MoveRows { .. } => "move rows",
+        Operation::MoveRange { .. } => "move cells",
         Operation::InsertSheet { .. } => "add sheet",
         Operation::RemoveSheet { .. } => "remove sheet",
         Operation::RenameSheet { .. } => "rename sheet",
@@ -882,6 +980,21 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         }
         Operation::DeleteColumns { sheet, at, count } => {
             structural::delete(workbook, sheet, Axis::Col, at, count)
+        }
+        Operation::MoveColumns {
+            sheet,
+            at,
+            count,
+            before,
+        } => structural::move_lines(workbook, sheet, Axis::Col, at, count, before),
+        Operation::MoveRows {
+            sheet,
+            at,
+            count,
+            before,
+        } => structural::move_lines(workbook, sheet, Axis::Row, at, count, before),
+        Operation::MoveRange { sheet, from, to } => {
+            structural::move_range(workbook, sheet, from, to)
         }
         Operation::SetSheetMetadata {
             sheet,
