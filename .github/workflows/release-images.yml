@@ -152,21 +152,20 @@ jobs:
       # The registry page is written here and reviewed like anything else,
       # rather than pasted into a web form on release day and never seen again.
       #
-      # `continue-on-error`, and the reason matters. Docker Hub's description
-      # endpoint refuses an **access token**: it wants account credentials, and
-      # `DOCKER_SECRET` is a PAT — correctly, because a password in CI is worse
-      # than a token that can only push. So `server-v0.0.0` published all three
-      # images, multi-arch, with SBOM and provenance, and then reported the
-      # whole release as *failed* because a README did not sync (`DEP-18`).
+      # This was `continue-on-error` for one release, and the reason it no longer
+      # is matters more than the reason it was. `DEP-18` recorded that Docker
+      # Hub "refuses an access token and wants account credentials". That was
+      # wrong: the description endpoint accepts a PAT, but wants `Read, Write,
+      # Delete` where pushing an image wants only `Read, Write`. So the token
+      # pushed three images and then got `Forbidden` on one README, which looked
+      # like a credential conflict and was a scope.
       #
-      # A release that says it failed when the artifact is public and correct is
-      # the more dangerous report of the two: it invites a re-run of a workflow
-      # whose work is already done. The step still runs, still fails visibly,
-      # and the summary below says plainly whether the page synced — what does
-      # not happen is a green artifact being called a red release.
+      # The scope has been granted, so this step can now succeed — and a step
+      # that can succeed must be allowed to fail. `continue-on-error` earns its
+      # place only while a failure is expected; left on afterwards it is a step
+      # nobody is watching, which is how a page silently stops syncing.
       - name: Publish the registry overview
         id: overview
-        continue-on-error: true
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4
         with:
