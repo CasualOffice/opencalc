@@ -222,6 +222,9 @@ import {
   registerSuppliedFonts,
   runFont,
   runsWidth,
+  textWidth,
+  textWidthStatsForTest,
+  resetTextWidthStatsForTest,
   textY,
   tintColor,
   wrapLines,
@@ -581,6 +584,9 @@ export {
   registerSuppliedFonts,
   runFont,
   runsWidth,
+  textWidth,
+  textWidthStatsForTest,
+  resetTextWidthStatsForTest,
   textY,
   tintColor,
   wrapLines,
@@ -1593,6 +1599,41 @@ function measure() {
     }
   }
 
+  // **Trim the line lists to the window before anything is fetched for them.**
+  //
+  // `colCap`/`rowCap` are floored by `MIN_LINE = 8` because a line *can* be
+  // 8px, so the cap has to assume they all are. On an ordinary sheet they are
+  // not: a 1280x800 view of 100px columns asked the engine for 157 columns and
+  // 73 rows — 2920 cells — to draw 13 by 29. Everything downstream then
+  // measured, mapped and considered eight times the cells the frame could
+  // show, and it is why the cost tracked visible columns (`PERF-D-01`): narrow
+  // columns mean more of the fetch is real.
+  //
+  // The cap stays as it is — it is the safe over-estimate that makes one
+  // engine call enough. This throws away what the sizes prove is off-screen.
+  //
+  // One line past the edge is kept deliberately: it is where a spilling label
+  // clips, and what `colAtX`/`rowAtY` fall back to. Zero-width hidden lines do
+  // not advance the cursor, so a run of hidden columns is crossed rather than
+  // mistaken for the edge. Rows are trimmed on their *stored* heights, before
+  // auto-height grows them — growth only makes a row taller, so this can
+  // over-fetch and never under-fetch.
+  const keepLines = (idx, sizes, origin, split, splitOrigin, limit, fallback) => {
+    let p = origin;
+    let keep = 0;
+    for (let i = 0; i < idx.length; i++) {
+      if (i === split) p = splitOrigin;
+      keep = i + 1;
+      if (p >= limit) break;
+      p += sizes[i] ?? fallback;
+    }
+    return keep;
+  };
+  const keepC = keepLines(geo.colIdx, geo.colW, HW, fc, bodyX0 - subX, v.w, COL_W);
+  const keepR = keepLines(geo.rowIdx, geo.rowH, HH, fr, bodyY0 - subY, v.h, ROW_H);
+  geo.colIdx.length = keepC; geo.colW.length = keepC;
+  geo.rowIdx.length = keepR; geo.rowH.length = keepR;
+
   // Index → slot maps (needed by the accessors and auto-height below).
   geo.colOf = new Map(); geo.colIdx.forEach((c, i) => geo.colOf.set(c, i));
   geo.rowOf = new Map(); geo.rowIdx.forEach((r, i) => geo.rowOf.set(r, i));
@@ -1619,17 +1660,37 @@ function measure() {
     const span = JSON.parse(
       wasm.session_spill_owners(state.sheet, firstRowIdx, lastRowIdx, firstColIdx, lastColIdx),
     );
-    const gather = (a, b) => {
+    // **Reduce to the nearest populated cell per row, and filter after.**
+    //
+    // The band between the furthest owner and the window is not empty — only
+    // the *columns outside the span* are — so this used to push every
+    // populated cell in it, which on a wide sheet is unbounded and was hundreds
+    // of items a frame.
+    //
+    // Filtering to spillable text *before* reducing was also wrong, and wrong
+    // in a way that showed on screen: a blocking **number** between a far label
+    // and the window never entered the set, so the spill scan ran straight
+    // through the column that should have stopped it and drew the label into a
+    // window Excel would not show it in. The nearest cell wins whatever it
+    // holds; only then is it asked whether it can spill.
+    const gather = (a, b, fromLeft) => {
+      const nearest = new Map();
       for (const it of JSON.parse(
         wasm.session_cells(state.sheet, firstRowIdx, a, lastRowIdx, b),
       )) {
+        const held = nearest.get(it.r);
+        if (held === undefined || (fromLeft ? it.c > held.c : it.c < held.c)) {
+          nearest.set(it.r, it);
+        }
+      }
+      for (const it of nearest.values()) {
         // Only text can spill: a number too wide for its cell becomes `#`
         // inside it, and a wrapped or clipped cell stays put by definition.
         if (it.t && !it.n && !it.w && !it.cl && !it.shrink) geoItems.push(it);
       }
     };
-    if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1);
-    if (span.right !== null) gather(lastColIdx + 1, span.right);
+    if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1, true);
+    if (span.right !== null) gather(lastColIdx + 1, span.right, false);
   } catch { /* nothing outside the window is the common case */ }
   // Rows the workbook sized itself are pinned: auto-height must not override an
   // imported height (nor one the user dragged), exactly as Excel stops
@@ -2269,7 +2330,7 @@ export function draw() {
     // "Fill" repeats the text until the cell is full — Excel's separator-row
     // idiom. Repeating is the mode, so it happens before any overflow scan.
     if (mode === "fill") {
-      const unit = ctx.measureText(String(it.t)).width;
+      const unit = textWidth(ctx.font, String(it.t));
       ctx.save();
       if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
       ctx.beginPath();
@@ -2324,7 +2385,7 @@ export function draw() {
     // the concatenation with the cell's font gives a width that is wrong
     // wherever they differ — and the spill scan below would then borrow the
     // wrong number of neighbouring columns.
-    let tw = it.runs ? runsWidth(it) : ctx.measureText(text).width;
+    let tw = it.runs ? runsWidth(it) : textWidth(ctx.font, text);
 
     // Text overflows across adjacent EMPTY cells (Excel behavior). Extend the
     // clip rectangle left/right over blank neighbours until the text fits or a
@@ -2344,9 +2405,9 @@ export function draw() {
     // a real — and wrong — value. This holds under "clip" too, for the same
     // reason.
     if (it.n && tw > w - 8) {
-      const hashW = ctx.measureText("#").width || 1;
+      const hashW = textWidth(ctx.font, "#") || 1;
       text = "#".repeat(Math.max(1, Math.floor((w - 8) / hashW)));
-      tw = ctx.measureText(text).width;
+      tw = textWidth(ctx.font, text);
     // "Clip" (`it.cl`) is the third state of the overflow control: stop at the
     // cell edge rather than borrowing empty neighbours. Excel has no such
     // setting — it always spills — so this skips the spill scan entirely and
@@ -2397,7 +2458,7 @@ export function draw() {
       const weight = it.b ? "600 " : "";
       const slant = it.i ? "italic " : "";
       ctx.font = `${slant}${weight}${px}px ${fontStack(it.fn)}`;
-      tw = ctx.measureText(text).width;
+      tw = textWidth(ctx.font, text);
     }
     ctx.fillStyle = cellFg(it);
     let tx;
@@ -5309,6 +5370,25 @@ let a11ySettle = 0;
 let a11yRebuilds = 0;
 let movingUntil = 0;
 export const a11yRebuildCountForTest = () => a11yRebuilds;
+
+/// What a frame actually fetched, against what it can show.
+///
+/// The `PERF-D-01` measurement could see that frame cost tracked *visible
+/// columns* and not sheet size, but not why. It was this: `colCap`/`rowCap`
+/// are floored by `MIN_LINE`, so a view of ordinary-width columns asked the
+/// engine for roughly eight times the lines it could draw. A wall-clock
+/// assertion on that would be flaky; the count is the thing that was wrong and
+/// the thing worth pinning.
+export function frameWindowForTest() {
+  return {
+    colIdx: geo.colIdx.length,
+    rowIdx: geo.rowIdx.length,
+    cols: geo.cols,
+    rows: geo.rows,
+    geoItems: geoItems.length,
+    spillCols: geoItems.filter((it) => geo.colOf.get(it.c) === undefined).map((it) => it.c),
+  };
+}
 /// Called by the scroll paths: the view is moving, so the mirror can wait.
 export function viewIsMoving() { movingUntil = performance.now() + 90; }
 
