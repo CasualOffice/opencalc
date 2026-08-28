@@ -1550,3 +1550,20 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    overlay host anyway — but the strip itself gives its height to the sheet,
    which is the only reason hiding it is an improvement rather than a loss. */
 .oc-chrome-native #menubar { display: none; }
+
+/* --- Column stats ---------------------------------------------------------- */
+/* Dense on purpose: this is a panel somebody reads at a glance while clicking
+   through columns, not a report. Label left, figure right, aligned so the
+   figures form a column you can scan down. */
+.stats-range { font: 600 12px/1.4 var(--oc-mono-font-family); color: var(--oc-faint-text-color); margin: 0 0 8px; }
+.stats-head {
+  font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--oc-faint-text-color); margin: 10px 0 4px;
+}
+.stats-rows { display: flex; flex-direction: column; gap: 1px; }
+.stats-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 2px 0; font-size: 12.5px; }
+.stats-label { color: var(--oc-text-color); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-value { font-family: var(--oc-mono-font-family); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+/* Numbers stored as text is a finding, not a statistic — it is the answer to
+   "why doesn't my SUM add up", so it does not read like the rows around it. */
+.stats-row.warn .stats-label, .stats-row.warn .stats-value { color: var(--oc-warn-text-color, #a9601a); font-weight: 600; }

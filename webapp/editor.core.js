@@ -3968,6 +3968,7 @@ export function openPanel(tool) {
       : tool === "pivot" ? "PivotTable fields"
       : tool === "chart" ? "Chart"
       : tool === "page" ? "Page setup"
+      : tool === "stats" ? "Column stats"
       : "Comments";
   const body = byId("side-panel-body");
   body.textContent = "";
@@ -3977,10 +3978,128 @@ export function openPanel(tool) {
   else if (tool === "pivot") buildPivotPanel(body);
   else if (tool === "chart") buildChartPanel(body);
   else if (tool === "page") buildPagePanel(body);
+  else if (tool === "stats") buildStatsPanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
   resize(); // the grid narrows — refit the canvas to its new width
 }
+
+// --- Column stats -----------------------------------------------------------
+//
+// What a person needs when somebody sends them a column: how much of it there
+// is, how much is missing, and *what it is made of*. The type distribution is
+// the part the status bar cannot give — it is how you find the one text cell
+// wrecking a SUM, or the 300 numbers stored as text that make a filter behave
+// oddly. The engine computes it (`session_column_stats`); this only lays it out.
+function buildStatsPanel(body) {
+  const render = () => {
+    body.textContent = "";
+    let s = effectiveRange();
+    // A single cell means "this column", which is what the feature is called
+    // and what Google's does. Asking somebody to select the column first is
+    // work the app can do — and reporting on one cell would make the panel a
+    // worse status bar rather than a different tool. Bounded to the used rows,
+    // so it describes the data rather than a million empty addresses.
+    if (s.r0 === s.r1 && s.c0 === s.c1) {
+      const b = usedBounds();
+      s = { r0: 0, c0: s.c0, r1: Math.max(0, b.rows - 1), c1: s.c1 };
+    }
+    let d = null;
+    try { d = JSON.parse(wasm.session_column_stats(state.sheet, s.r0, s.c0, s.r1, s.c1) || "null"); }
+    catch (why) { statusError(errText(why)); return; }
+    if (!d) return;
+
+    const num = (v) =>
+      v === null || v === undefined ? "—"
+        : Math.abs(v) >= 1e15 || (v !== 0 && Math.abs(v) < 1e-9) ? v.toExponential(4)
+          : String(Math.round(v * 1e10) / 1e10);
+
+    const section = (title) => {
+      const h = el("div", "stats-head", title);
+      body.appendChild(h);
+      const t = el("div", "stats-rows");
+      body.appendChild(t);
+      return t;
+    };
+    const line = (into, label, value, hint) => {
+      const row = el("div", "stats-row");
+      row.appendChild(el("span", "stats-label", label));
+      const v = el("span", "stats-value", value);
+      if (hint) v.title = hint;
+      row.appendChild(v);
+      into.appendChild(row);
+    };
+
+    const head = el("div", "stats-range", d.cols === 1 ? `Column ${colName(s.c0)}` : A1range(s));
+    body.appendChild(head);
+
+    const counts = section("Counts");
+    line(counts, "Cells", String(d.cells));
+    line(counts, "With a value", String(d.count));
+    // Named apart, always. A blank is not a zero, and the commonest question
+    // about a column somebody sent you is how much of it is missing.
+    line(counts, "Empty", String(d.empty));
+    line(
+      counts,
+      "Unique",
+      d.uniqueExact ? String(d.unique) : `${d.unique}+`,
+      d.uniqueExact ? "" : "counted up to the distinct-value limit",
+    );
+    if (d.truncated) {
+      line(counts, "Scanned", "partial", "the range was larger than the scan budget");
+    }
+
+    if (d.numeric && d.numeric.count > 0) {
+      const n = section("Numbers");
+      line(n, "Count", String(d.numeric.count));
+      line(n, "Sum", num(d.numeric.sum));
+      line(n, "Average", num(d.numeric.avg));
+      line(n, "Median", num(d.numeric.median));
+      line(n, "Min", num(d.numeric.min));
+      line(n, "Max", num(d.numeric.max));
+      line(n, "Std dev", num(d.numeric.stdev), "sample (n−1), as STDEV.S");
+    }
+
+    // The reason this panel exists rather than a wider status bar.
+    const t = section("What it is made of");
+    const kinds = [
+      ["Numbers", d.types.number],
+      ["Dates", d.types.date],
+      ["Text", d.types.text],
+      ["Booleans", d.types.boolean],
+      ["Errors", d.types.error],
+    ].filter(([, n]) => n > 0);
+    if (!kinds.length) line(t, "Nothing", "—");
+    for (const [label, n] of kinds) line(t, label, String(n));
+    if (d.types.numberAsText > 0) {
+      // The finding, not a statistic: these look like numbers and do not add up.
+      const row = el("div", "stats-row warn");
+      row.appendChild(el("span", "stats-label", "Numbers stored as text"));
+      row.appendChild(el("span", "stats-value", String(d.types.numberAsText)));
+      t.appendChild(row);
+    }
+    if (d.types.formula > 0) line(t, "Formulas", String(d.types.formula), "counted across the kinds above");
+    for (const [code, n] of Object.entries(d.errors || {})) line(t, code, String(n));
+
+    if (d.frequency && d.frequency.length) {
+      const f = section("Most common");
+      for (const e of d.frequency) line(f, e.value === "" ? "(blank)" : e.value, String(e.count));
+      if (d.frequencyOther && d.frequencyOther.values > 0) {
+        line(
+          f,
+          `${d.frequencyOther.values} other value${d.frequencyOther.values === 1 ? "" : "s"}`,
+          String(d.frequencyOther.count),
+        );
+      }
+    }
+  };
+
+  render();
+  // Recomputed as the selection moves, which is how the panel is used: click a
+  // column, read it, click the next.
+  panelStatsRefresh = render;
+}
+let panelStatsRefresh = null;
 
 export function closePanel() {
   const panel = byId("side-panel");
@@ -4020,6 +4139,8 @@ function refreshPanel() {
       panelPivot = { sheet: state.sheet, index: here.index };
       refreshPivotPanel();
     }
+  } else if (activePanel === "stats" && panelStatsRefresh) {
+    panelStatsRefresh();
   } else if (activePanel === "note" && panelNote) {
     const addr = A1(state.sel.row, state.sel.col);
     if (addr !== panelNote.cell) {
@@ -7379,6 +7500,7 @@ function wireEvents() {
         ["Filter", () => toggleFilter()],
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Clear my view", () => clearMyView()],
+        ["Column stats…", () => openPanel("stats")],
         ["Data validation…", clickEl("#tb-dv")],
         "sep",
         ["PivotTable fields…", () => pivotDialog()],
