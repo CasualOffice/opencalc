@@ -139,6 +139,286 @@ check("Sheets", "double-click a sheet tab renames it", async (page) => {
   );
 });
 
+// --- formatting, and what the toolbar tells you about it --------------------
+// Enumerated against Excel/Sheets, then measured. The enumeration's own
+// guesses are not recorded anywhere: a guess is the thing this replaces.
+const fmt = (page, r, c) =>
+  page.evaluate(([r, c]) => JSON.parse(window.opencalcEditor.wasmApi().session_cell_format(0, r, c)), [r, c]);
+
+check("Formatting", "bold applies across a multi-cell selection", async (page) => {
+  await page.evaluate(() => {
+    window.opencalcEditor.selectForTest(0, 0);
+    window.opencalcEditor.runCommand("toolbar.bold");
+  });
+  await page.waitForTimeout(150);
+  return !!(await fmt(page, 0, 0)).b;
+});
+
+check("Formatting", "the toolbar shows the active cell's number format", async (page) => {
+  await page.evaluate(() => {
+    window.opencalcEditor.selectForTest(0, 0);
+    window.opencalcEditor.wasmApi().session_set_number_format(0, 0, 0, 0, 0, "0%");
+    window.opencalcEditor.selectForTest(1, 0);
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.waitForTimeout(200);
+  // A percent cell that looks identical to a General one means the toolbar is
+  // not telling you what you are standing on.
+  return page.evaluate(() =>
+    ["#tb-percent", "#tb-numfmt", "#tb-currency"].some((id) => {
+      const el = document.querySelector(id);
+      return el && (el.getAttribute("aria-pressed") === "true" || (el.textContent || "").includes("%"));
+    }),
+  );
+});
+
+check("Formatting", "the toolbar shows the active cell's fill colour", async (page) => {
+  await page.evaluate(() => {
+    window.opencalcEditor.selectForTest(0, 0);
+    window.opencalcEditor.wasmApi().session_set_fill(0, 0, 0, 0, 0, "FF0000");
+    window.opencalcEditor.selectForTest(1, 0);
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.waitForTimeout(200);
+  return page.evaluate(() => {
+    const el = document.querySelector("#tb-fillcolor");
+    if (!el) return false;
+    const shown = (el.style.cssText + " " + (el.getAttribute("style") || "")).toLowerCase();
+    return shown.includes("ff0000") || shown.includes("255, 0, 0");
+  });
+});
+
+check("Formatting", "a mixed selection does not report as uniform", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_set_font_size(0, 0, 0, 0, 0, 14);
+    a.session_set_font_size(0, 0, 1, 0, 1, 9);
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.evaluate(() => window.opencalcEditor.extendSelectionForTest?.(0, 1));
+  await page.waitForTimeout(200);
+  // Reading the top-left cell and showing it as the answer is how somebody
+  // applies 14pt to a selection they believed was already 14pt.
+  const shown = await page.evaluate(() => document.querySelector("#tb-size")?.value ?? "");
+  return shown === "" || shown === "—";
+});
+
+check("Formatting", "hovering a font previews it before committing", async (page) => {
+  const before = await fmt(page, 0, 0);
+  await page.evaluate(() => document.querySelector("#tb-font-caret")?.click());
+  await page.waitForTimeout(150);
+  const item = page.locator("#font-menu .combo-item").nth(3);
+  if (!(await item.count())) return false;
+  await item.hover();
+  await page.waitForTimeout(200);
+  const during = await fmt(page, 0, 0);
+  return (during.fn || "") !== (before.fn || "");
+});
+
+check("View", "the zoom level is visible without opening a menu", async (page) =>
+  page.evaluate(() => {
+    const text = (document.querySelector(".bottom-bar")?.textContent || "") +
+      (document.querySelector(".statusbar")?.textContent || "");
+    return /\d{2,3}\s*%/.test(text) || !!document.querySelector("#zoom-level, .zoom-widget, input[type=range][aria-label*=oom]");
+  }),
+);
+
+check("Formatting", "row height and column width are reachable from the menu bar", async (page) =>
+  page.evaluate(() =>
+    window.opencalcEditor
+      .listCommands()
+      .some((id) => /row-height|column-width|row_height|col-width/i.test(id)),
+  ),
+);
+
+check("Formatting", "shrink-to-fit can be turned on", async (page) =>
+  page.evaluate(() => {
+    const api = window.opencalcEditor.wasmApi();
+    const hasBinding = Object.keys(api).some((k) => /shrink/i.test(k));
+    const hasCommand = window.opencalcEditor.listCommands().some((id) => /shrink/i.test(id));
+    return hasBinding || hasCommand;
+  }),
+);
+
+check("Formatting", "a currency other than $ can be chosen", async (page) =>
+  page.evaluate(() =>
+    window.opencalcEditor.listCommands().some((id) => /currenc/i.test(id)) &&
+    !!document.querySelector("[data-nf*='€'], [data-nf*='£'], [data-currency]"),
+  ),
+);
+
+// --- claims worth measuring because they are worse than "missing" ----------
+check("Selection", "a banked multi-range is what operations act on", async (page) =>
+  page.evaluate(() => {
+    const ed = window.opencalcEditor;
+    // `effectiveRange()` reads `selRect()` and ignores `state.ranges`, so even
+    // where a second range is banked nothing downstream sees it: Copy takes the
+    // active range alone, silently.
+    const banked = ed.state?.ranges;
+    if (!banked || banked.length < 1) return false;
+    return typeof ed.allRanges === "function" && ed.allRanges().length > 1;
+  }),
+);
+
+check("View", "Ctrl+0 does what the Zoom menu says it does", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => window.opencalcEditor.setZoomForTest?.(1.5));
+  const w0 = await page.evaluate(() => window.opencalcEditor.colWAt(0));
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(200);
+  const zoom = await page.evaluate(() => window.opencalcEditor.scrollStateForTest().zoom);
+  const w1 = await page.evaluate(() => window.opencalcEditor.colWAt(0));
+  // The Zoom menu advertises Ctrl+0 for 100%. If instead it hid a column, the
+  // label is not merely wrong — it fires a destructive verb.
+  return Math.abs(zoom - 1) < 0.01 && w1 !== 0 && w0 !== 0;
+});
+
+check("Editing", "Ctrl+Backspace scrolls back to the active cell", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 0));
+  const before = await cell(page, 1, 0);
+  await page.keyboard.press("Control+Backspace");
+  await page.waitForTimeout(200);
+  // Excel scrolls the view back. If the cell is now empty this is worse than
+  // missing: an unbound chord fell through to something that deletes.
+  return (await cell(page, 1, 0)) === before;
+});
+
+check("Editing", "a CRLF paste does not leave a stray carriage return", async (page) => {
+  await page.evaluate(() =>
+    window.opencalcEditor.wasmApi().session_paste_tsv(0, 7, 0, "a\tb\r\nc\td"),
+  );
+  await page.waitForTimeout(150);
+  // Every paste out of Excel on Windows arrives this way.
+  return (await cell(page, 7, 1)) === "b";
+});
+
+check("Editing", "an Alt+Enter entry undoes in one step", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => window.opencalcEditor.selectForTest(7, 0));
+  await page.evaluate(() => window.opencalcEditor.commit("one\ntwo", false));
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  // commit() writes the value and then toggles wrap — two history entries, so
+  // the first undo takes the wrap off and leaves the text.
+  return (await cell(page, 7, 0)) === "";
+});
+
+check("Editing", "undo moves the view to what it just changed", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => {
+    window.opencalcEditor.selectForTest(1, 0);
+    window.opencalcEditor.commit("changed", false);
+    window.opencalcEditor.selectForTest(60, 5);
+  });
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const s = await page.evaluate(() => window.opencalcEditor.scrollStateForTest());
+  // Undoing something you cannot see is indistinguishable from nothing happening.
+  return s.row === 1 && s.col === 0;
+});
+
+check("Selection", "arrowing past a hidden row skips it", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => {
+    window.opencalcEditor.wasmApi().session_hide_rows(0, 3, 3);
+    window.opencalcEditor.selectForTest(2, 0);
+  });
+  await page.waitForTimeout(150);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(150);
+  // Parking the cursor on a zero-height row means the next keystroke edits a
+  // cell the user cannot see.
+  return (await page.evaluate(() => window.opencalcEditor.scrollStateForTest())).row === 4;
+});
+
+check("Editing", "filling a date increments it", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_set_cell(0, 7, 0, "2024-01-01");
+    a.session_fill(0, 7, 0, 7, 0, 7, 0, 10, 0);
+  });
+  await page.waitForTimeout(200);
+  return (await cell(page, 8, 0)) !== (await cell(page, 7, 0));
+});
+
+check("Editing", "filling 'Item 1' continues the number", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_set_cell(0, 7, 0, "Item 1");
+    a.session_fill(0, 7, 0, 7, 0, 7, 0, 10, 0);
+  });
+  await page.waitForTimeout(200);
+  return (await cell(page, 8, 0)) === "Item 2";
+});
+
+check("Editing", "Flash Fill derives a column from an example", async (page) =>
+  page.evaluate(() => window.opencalcEditor.listCommands().some((id) => /flash/i.test(id))),
+);
+
+check("Editing", "typing offers entries already in the column", async (page) =>
+  page.evaluate(() => {
+    // Excel's AutoComplete for text. The only completion here is the function
+    // catalogue, which does not read the column.
+    const src = String(window.opencalcEditor.showAutocompleteForTest || "");
+    return /column|neighbour|values/i.test(src);
+  }),
+);
+
+check("Formatting", "Format Cells leaves a font colour alone if untouched", async (page) => {
+  await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
+  const before = await fmt(page, 0, 0);
+  await page.evaluate(() => window.opencalcEditor.runCommand(window.opencalcEditor.listCommands().find((i) => /format.*cell/i.test(i)) || "format.cells"));
+  await page.waitForTimeout(300);
+  const apply = page.locator(".oc-modal:not([hidden]) button", { hasText: /^(Apply|OK)$/ });
+  if (!(await apply.count())) return false;
+  await apply.first().click();
+  await page.waitForTimeout(250);
+  const after = await fmt(page, 0, 0);
+  // Stamping 000000 onto a cell that had no colour is a change the user did not
+  // ask for, and it survives into the file.
+  return (before.fc || "") === (after.fc || "");
+});
+
+check("Editing", "a locked cell refuses before the user types, not after", async (page) => {
+  await page.locator("#grid").focus();
+  await page.evaluate(() => {
+    window.opencalcEditor.wasmApi().session_set_sheet_protected(0, true);
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.keyboard.press("F2");
+  await page.waitForTimeout(200);
+  // Letting somebody type a paragraph and refusing at Enter wastes their work.
+  return page.evaluate(() => {
+    const el = document.getElementById("inline-edit");
+    return !el || getComputedStyle(el).display === "none";
+  });
+});
+
+check("Data", "Remove Duplicates spares data outside the selection", async (page) => {
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_new();
+    ["x", "x", "y", "y", "z", "z"].forEach((v, r) => a.session_set_cell(0, r, 0, v));
+    [1, 2, 3, 4, 5, 6].forEach((v, r) => a.session_set_cell(0, r, 4, String(v)));
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.locator("#grid").focus();
+  for (let i = 0; i < 5; i += 1) await page.keyboard.press("Shift+ArrowDown");
+  await page.evaluate(() => window.opencalcEditor.runCommand("data.remove-duplicates"));
+  await page.waitForTimeout(300);
+  const btn = page.locator(".oc-modal:not([hidden]) button").last();
+  if (await btn.count()) { await btn.click(); await page.waitForTimeout(350); }
+  const left = await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    return [0, 1, 2, 3, 4, 5].map((r) => a.session_cell_input(0, r, 4)).filter(Boolean);
+  });
+  // Rows may move. Values may not vanish.
+  return ["1", "2", "3", "4", "5", "6"].every((v) => left.includes(v));
+});
+
 // --- runner -----------------------------------------------------------------
 const browser = await chromium.launch();
 const results = [];

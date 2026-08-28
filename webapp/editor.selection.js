@@ -629,10 +629,54 @@ export function applySort(s, keys, hasHeader) {
   draw();
 }
 
+/// Columns holding data on the affected rows that the comparison does not cover.
+///
+/// The engine deletes whole *sheet rows*, so anything on those rows outside the
+/// compared columns goes with them. Selecting A1:A6 and removing duplicates
+/// deleted three values from column E — off-screen, in a column the user never
+/// touched, under a status bar that said "removed 3 duplicate rows".
+function dataBesideTheComparison(first, r1, c0, c1) {
+  const b = usedBounds();
+  const outside = [];
+  for (let c = 0; c < b.cols; c += 1) {
+    if (c >= c0 && c <= c1) continue;
+    for (let r = first; r <= r1; r += 1) {
+      let text = "";
+      try { text = wasm.session_cell_input(state.sheet, r, c); } catch { text = ""; }
+      if (text !== "") { outside.push(c); break; }
+    }
+  }
+  return outside;
+}
+
 export async function removeDuplicates() {
   const s = sortTarget();
   const hasHeader = looksLikeHeader(s);
   const first = hasHeader ? s.r0 + 1 : s.r0;
+  const beside = dataBesideTheComparison(first, s.r1, s.c0, s.c1);
+
+  // Excel notices adjacent data and offers to widen before it does anything.
+  // Widening is offered rather than assumed, because comparing more columns
+  // finds fewer duplicates — it is a different question, not a safer version of
+  // the same one. Declining cancels: with the engine deleting whole rows there
+  // is no third option that keeps the narrow comparison *and* the data.
+  if (beside.length) {
+    const names = beside.slice(0, 4).map(colName).join(", ");
+    const more = beside.length > 4 ? `, and ${beside.length - 4} more` : "";
+    const widen = await confirmModal(
+      "There is data next to the selection",
+      `Column${beside.length === 1 ? "" : "s"} ${names}${more} also hold data on these rows, and removing a ` +
+        `duplicate row removes the whole row — so those values would go too. ` +
+        `Compare the whole block instead, so nothing is lost?`,
+      "Compare the whole block",
+    );
+    canvas.focus();
+    if (!widen) return;
+    const b = usedBounds();
+    s.c0 = 0;
+    s.c1 = Math.max(0, b.cols - 1);
+  }
+
   const ok = await confirmModal(
     "Remove duplicates",
     `Compare ${colName(s.c0)}${first + 1}:${colName(s.c1)}${s.r1 + 1} and delete rows that repeat an earlier one` +

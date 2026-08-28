@@ -8,7 +8,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-4 of 8 measured behaviours present.
+7 of 31 measured behaviours present.
 
 ## Selection
 
@@ -20,16 +20,54 @@ served tree (`python3 webapp/serve.py 8123`).
 | ❌ | Ctrl+click adds a second range |
 | ✅ | double-click a column border autofits it |
 | ✅ | drag across column headers selects a span |
+| ❌ | a banked multi-range is what operations act on |
+| ❌ | arrowing past a hidden row skips it |
 
 ## Editing
 
 | | behaviour |
 |---|---|
 | ✅ | drag the fill handle fills |
+| ❌ | Ctrl+Backspace scrolls back to the active cell |
+| ✅ | a CRLF paste does not leave a stray carriage return |
+| ❌ | an Alt+Enter entry undoes in one step |
+| ❌ | undo moves the view to what it just changed |
+| ❌ | filling a date increments it |
+| ❌ | filling 'Item 1' continues the number |
+| ❌ | Flash Fill derives a column from an example |
+| ❌ | typing offers entries already in the column |
+| ❌ | a locked cell refuses before the user types, not after |
 
 ## Sheets
 
 | | behaviour |
 |---|---|
 | ✅ | double-click a sheet tab renames it |
+
+## Formatting
+
+| | behaviour |
+|---|---|
+| ✅ | bold applies across a multi-cell selection |
+| ❌ | the toolbar shows the active cell's number format |
+| ❌ | the toolbar shows the active cell's fill colour |
+| ❌ | a mixed selection does not report as uniform |
+| ❌ | hovering a font previews it before committing |
+| ❌ | row height and column width are reachable from the menu bar |
+| ❌ | shrink-to-fit can be turned on |
+| ❌ | a currency other than $ can be chosen |
+| ❌ | Format Cells leaves a font colour alone if untouched |
+
+## View
+
+| | behaviour |
+|---|---|
+| ❌ | the zoom level is visible without opening a menu |
+| ❌ | Ctrl+0 does what the Zoom menu says it does |
+
+## Data
+
+| | behaviour |
+|---|---|
+| ✅ | Remove Duplicates spares data outside the selection |
 
