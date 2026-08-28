@@ -35,13 +35,28 @@ use crate::title;
 /// the opposite of the editor's own default (all-`true` for standalone) and
 /// deliberately so: there the default describes a user's own page, here it
 /// describes a report that has not arrived.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Capabilities {
     pub can_open: bool,
     pub can_save_as: bool,
     pub owns_file: bool,
     pub read_only: bool,
+    /// Every extension the engine will actually open, as the engine reports it.
+    ///
+    /// The shell used to keep its own list, and it was wrong: it offered
+    /// `xlsx, csv, tsv, psv` while the engine has read `.ods` since `ODS-01`
+    /// — its own crate, its own fuzz target, six closed rows — so a
+    /// LibreOffice file was greyed out in the panel by an application that
+    /// could open it perfectly. A second list is a list that drifts, and the
+    /// comment above the old one claimed it was "the ones the engine reads",
+    /// which is the shape of a promise the code had stopped keeping.
+    ///
+    /// Empty until the webview reports. `open_extensions()` falls back rather
+    /// than offering nothing, because a panel with no filters cannot open
+    /// anything at all — the failure has to be narrower than the feature.
+    #[serde(default)]
+    pub open_extensions: Vec<String>,
 }
 
 impl Capabilities {
@@ -92,7 +107,7 @@ impl Session {
     }
 
     pub fn capabilities(&self) -> Capabilities {
-        self.capabilities
+        self.capabilities.clone()
     }
 
     /// Refuse a native Open the mode does not allow.
@@ -106,6 +121,23 @@ impl Session {
         } else {
             Err("this window may not open another document (canOpen is off)".to_owned())
         }
+    }
+
+    /// The extensions the Open panel should offer.
+    ///
+    /// The engine's answer when it has given one, and `SPREADSHEET_EXTENSIONS`
+    /// until then. Not default-deny, unlike `guard_open` — refusing to open
+    /// *anything* because a report has not arrived turns a slow boot into a
+    /// broken application, and the fallback is a subset of the truth rather
+    /// than a superset, so nothing is offered that the engine would refuse.
+    pub fn open_extensions(&self) -> Vec<String> {
+        if self.capabilities.open_extensions.is_empty() {
+            return crate::dialog::SPREADSHEET_EXTENSIONS
+                .iter()
+                .map(|e| (*e).to_owned())
+                .collect();
+        }
+        self.capabilities.open_extensions.clone()
     }
 
     /// Refuse a native Save the mode does not allow.

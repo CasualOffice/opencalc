@@ -92,6 +92,28 @@ GATES = [
         ["cargo", "test", "--manifest-path", "desktop/Cargo.toml"],
         None,
     ),
+    (
+        # `--all` above reaches only the workspace this runs in, so for two
+        # releases the desktop shell had a *test* gate and no format or lint
+        # gate at all — and the comment above claiming it was "gated from the
+        # day it exists" was a third true. Found by running `cargo fmt` there
+        # and watching it rewrite files nobody had touched: `main` was
+        # unformatted and every gate was green.
+        #
+        # This is `CI-014`'s shape a third time. A separate workspace does not
+        # inherit anything; each gate has to name it.
+        "desktop shell format",
+        ["cargo", "fmt", "--manifest-path", "desktop/Cargo.toml", "--", "--check"],
+        None,
+    ),
+    (
+        "desktop shell clippy",
+        [
+            "cargo", "clippy", "--manifest-path", "desktop/Cargo.toml",
+            "--all-targets", "--", "-D", "warnings",
+        ],
+        None,
+    ),
 ]
 
 # The oracle, which is not a compiler gate and belongs here anyway.

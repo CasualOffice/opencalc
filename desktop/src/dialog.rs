@@ -10,12 +10,18 @@
 //! dialog is raised here: the filters and names are values, so the part that is
 //! wrong in a screenshot is the part `cargo test` can check without a window.
 //!
-//! The formats are the ones the engine reads and writes through
-//! `format_for_extension` — `.xlsx` and the three delimited kinds. An extension
-//! offered here that the engine refuses is a file the user is invited to open
-//! and then told they cannot.
+//! The formats are **the engine's answer**, reported by the webview from
+//! `openable_extensions()`, not a list held here. An extension offered here
+//! that the engine refuses is a file the user is invited to open and then told
+//! they cannot; one the engine reads and this omits is a file the panel greys
+//! out for no reason, which is what happened to `.ods` for as long as this
+//! module kept its own copy.
 
-/// Every spreadsheet extension the panels offer, in the order a user meets them.
+/// The floor the panels offer before the engine has reported.
+///
+/// Deliberately a subset of what the engine reads: offering less than the
+/// truth for a moment costs a user one cancelled panel, offering more costs
+/// them a file that opens and then fails.
 pub const SPREADSHEET_EXTENSIONS: &[&str] = &["xlsx", "csv", "tsv", "psv"];
 
 /// One entry in a panel's format list.
@@ -54,6 +60,8 @@ fn label(ext: &str) -> String {
         "csv" => "Comma-separated values".to_owned(),
         "tsv" => "Tab-separated values".to_owned(),
         "psv" => "Pipe-separated values".to_owned(),
+        "ods" => "OpenDocument Spreadsheet".to_owned(),
+        "tab" => "Tab-separated values (.tab)".to_owned(),
         // Not a format this build knows. Named rather than silently dropped:
         // an unknown extension reaching here is a bug upstream, and a panel
         // with no filter at all is indistinguishable from a panel that offers
@@ -79,13 +87,10 @@ fn label(ext: &str) -> String {
 /// as it is rather than trimmed to the platform's floor: the entries are right
 /// on two of three platforms, and a filter list written down to macOS's
 /// limitation would be wrong on the other two.
-pub fn open_filters() -> Vec<Filter> {
-    let mut out = vec![Filter::new("Spreadsheets", SPREADSHEET_EXTENSIONS)];
-    out.extend(
-        SPREADSHEET_EXTENSIONS
-            .iter()
-            .map(|ext| Filter::new(&label(ext), &[ext])),
-    );
+pub fn open_filters(extensions: &[String]) -> Vec<Filter> {
+    let exts: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let mut out = vec![Filter::new("Spreadsheets", &exts)];
+    out.extend(exts.iter().map(|ext| Filter::new(&label(ext), &[*ext])));
     out.push(Filter::new("All Files", &["*"]));
     out
 }
@@ -151,9 +156,16 @@ mod tests {
 
     #[test]
     fn the_open_panel_offers_every_format_the_engine_reads() {
-        let filters = open_filters();
+        let engine: Vec<String> = ["xlsx", "ods", "csv", "tsv", "tab", "psv"]
+            .iter()
+            .map(|e| (*e).to_owned())
+            .collect();
+        let filters = open_filters(&engine);
         assert_eq!(filters[0].name, "Spreadsheets");
-        assert_eq!(filters[0].extensions, ["xlsx", "csv", "tsv", "psv"]);
+        assert_eq!(
+            filters[0].extensions,
+            ["xlsx", "ods", "csv", "tsv", "tab", "psv"]
+        );
         // One entry per format, and an escape hatch. A user with a `.csv` that
         // somebody named `.txt` has to be able to reach it.
         let names: Vec<&str> = filters.iter().map(|f| f.name.as_str()).collect();
@@ -162,8 +174,10 @@ mod tests {
             [
                 "Spreadsheets",
                 "Excel Workbook",
+                "OpenDocument Spreadsheet",
                 "Comma-separated values",
                 "Tab-separated values",
+                "Tab-separated values (.tab)",
                 "Pipe-separated values",
                 "All Files",
             ]
@@ -184,9 +198,33 @@ mod tests {
 
     #[test]
     fn an_unknown_format_is_still_named() {
-        let filters = save_filters("ods");
-        assert_eq!(filters[0].name, "ODS file");
-        assert_eq!(filters[0].extensions, ["ods"]);
+        // Deliberately an extension no spreadsheet engine writes. This test
+        // used `ods` as its example of "unknown", which is how it came to be
+        // asserting that the shell did not know a format the engine has read
+        // since `ODS-01` — a test agreeing with the code about something they
+        // were both wrong about.
+        let filters = save_filters("wk1");
+        assert_eq!(filters[0].name, "WK1 file");
+        assert_eq!(filters[0].extensions, ["wk1"]);
+    }
+
+    #[test]
+    fn no_two_entries_in_the_open_panel_share_a_name() {
+        // A panel with two rows reading the same thing is one the user cannot
+        // choose from. `.tsv` and `.tab` are both tab-separated and collided
+        // the moment the engine's full list replaced the shell's short one.
+        let engine: Vec<String> = ["xlsx", "ods", "csv", "tsv", "tab", "psv"]
+            .iter()
+            .map(|e| (*e).to_owned())
+            .collect();
+        let names: Vec<String> = open_filters(&engine).into_iter().map(|f| f.name).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for n in &names {
+            assert!(
+                seen.insert(n.clone()),
+                "two filters are both called {n:?}: {names:?}"
+            );
+        }
     }
 
     #[test]
