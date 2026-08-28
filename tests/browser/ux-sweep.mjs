@@ -651,8 +651,26 @@ check("Editing", "Replace All honours the all-sheets option the Find used", asyn
 
 // --- runner -----------------------------------------------------------------
 const browser = await chromium.launch();
+// `--only <substring>` runs a subset. The full sweep takes minutes, which is
+// long enough that verifying one row by mutation — revert, watch it go red,
+// restore — stops being something anybody does. A subset run never writes the
+// map: a partial result must not be able to overwrite a measured one.
+const ONLY = (() => {
+  const i = process.argv.indexOf("--only");
+  return i === -1 ? null : process.argv[i + 1];
+})();
+if (ONLY && process.argv.includes("--write")) {
+  console.error("--only cannot be combined with --write: a subset would blank every row it did not run");
+  process.exit(2);
+}
+const SELECTED = ONLY ? CHECKS.filter((c) => c.name.includes(ONLY)) : CHECKS;
+if (ONLY && SELECTED.length === 0) {
+  console.error(`--only ${JSON.stringify(ONLY)} matched none of the ${CHECKS.length} checks`);
+  process.exit(2);
+}
+
 const results = [];
-for (const c of CHECKS) {
+for (const c of SELECTED) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const page = await ctx.newPage();
   try {

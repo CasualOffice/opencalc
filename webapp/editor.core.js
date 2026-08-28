@@ -658,6 +658,7 @@ export {
   emit,
   emitStateEvents,
   endInline,
+  extendSelectionForTest,
   fillWithin,
   followHyperlink,
   gridHandlesForTest,

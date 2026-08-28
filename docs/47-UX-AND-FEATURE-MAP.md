@@ -8,7 +8,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-17 of 46 measured behaviours present.
+22 of 46 measured behaviours present.
 
 ## Selection
 
@@ -50,9 +50,9 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | bold applies across a multi-cell selection |
-| ❌ | the toolbar shows the active cell's number format |
-| ❌ | the toolbar shows the active cell's fill colour |
-| ❌ | a mixed selection does not report as uniform |
+| ✅ | the toolbar shows the active cell's number format |
+| ✅ | the toolbar shows the active cell's fill colour |
+| ✅ | a mixed selection does not report as uniform |
 | ❌ | hovering a font previews it before committing |
 | ❌ | row height and column width are reachable from the menu bar |
 | ❌ | shrink-to-fit can be turned on |
@@ -71,8 +71,8 @@ served tree (`python3 webapp/serve.py 8123`).
 | | behaviour |
 |---|---|
 | ✅ | Remove Duplicates spares data outside the selection |
-| ❌ | the filter dropdown offers sorting, as Excel and Sheets do |
-| ❌ | the filter checklist orders numbers numerically |
+| ✅ | the filter dropdown offers sorting, as Excel and Sheets do |
+| ✅ | the filter checklist orders numbers numerically |
 | ❌ | Remove Duplicates lets you choose which columns count |
 | ❌ | reopening validation shows the rule that is there |
 | ❌ | deleting a sheet asks first |
@@ -108,14 +108,9 @@ are judgement and are declared in the harness; the verdict above is not.
 
 | | behaviour | met | size |
 |---|---|---|---|
-| ❌ | the toolbar shows the active cell's number format | daily | s |
-| ❌ | the toolbar shows the active cell's fill colour | daily | s |
-| ❌ | a mixed selection does not report as uniform | daily | s |
 | ❌ | the zoom level is visible without opening a menu | daily | s |
 | ❌ | undo moves the view to what it just changed | daily | s |
 | ❌ | arrowing past a hidden row skips it | daily | s |
-| ❌ | the filter dropdown offers sorting, as Excel and Sheets do | daily | s |
-| ❌ | the filter checklist orders numbers numerically | daily | s |
 | ❌ | row height and column width are reachable from the menu bar | weekly | s |
 | ❌ | a currency other than $ can be chosen | weekly | s |
 | ❌ | Ctrl+0 does what the Zoom menu says it does | weekly | s |
