@@ -1400,8 +1400,16 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   width: 46px; padding: 2px; gap: 0;
   border: 1px solid var(--oc-border-color); border-radius: 4px;
   background: var(--oc-surface-color); cursor: pointer;
+  /* Chrome's UA stylesheet gives every `button` `align-items: flex-start`,
+     which start-aligns each band to its own content height — and the bands
+     have no content. Four 6px rows were reserved and nothing was drawn in
+     them, so every swatch was a blank box and the picker offered eight
+     identical options. The colours had been arriving correctly all along. */
+  align-items: stretch;
 }
-.oc-style-swatch span { display: block; }
+/* `border-box` so the header band's 2px rule sits inside its 6px row rather
+   than pushing the stack past the reserved height. */
+.oc-style-swatch span { display: block; box-sizing: border-box; min-height: 0; }
 .oc-style-swatch.sel { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 
 /* The create-table modal (Ctrl+T). Two columns — label beside its control —
@@ -1413,6 +1421,20 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   display: grid; grid-template-columns: auto minmax(0, 1fr);
   gap: 8px 10px; align-items: center; margin: 0 0 14px;
 }
+/* **A conditionally hidden element is never a direct child of this grid.**
+   `hidden` is `display: none`, which takes the element out of the flow
+   entirely — so it occupies no cell and every later child shifts one place.
+   That is what put the checkbox in the label column, swelled the `auto` track
+   to the full width, collapsed `minmax(0, 1fr)` to `0px`, and left the range
+   input an 18px pill against the right edge with "Style" clipped off it. The
+   form looked broken in its *default* state, because the error is hidden
+   until the range is refused.
+
+   The error goes inside a cell instead, and the cell is `flex`, not `grid`:
+   flex has no cells to fall out of, so a `display: none` child shortens the
+   stack and shifts nothing. Making this a grid reproduces the trap one level
+   down — which it did, on the first attempt at this fix. */
+.oc-form-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .oc-form-label { font-size: 12px; color: var(--oc-muted-text-color); white-space: nowrap; }
 .oc-form-label.top { align-self: start; padding-top: 3px; }
 .oc-form-field {

@@ -1098,12 +1098,7 @@ export function buildTablePanel(body) {
     // and the grid cannot disagree about what a style looks like.
     let c = { headerFill: "FFFFFF", bandFill: "F2F2F2", border: "BFBFBF" };
     try { c = JSON.parse(wasm.session_table_style_preview(id)) || c; } catch {}
-    const head = el("span");
-    head.style.background = "#" + c.headerFill;
-    head.style.borderBottom = "2px solid #" + c.border;
-    const band = el("span");
-    band.style.background = "#" + c.bandFill;
-    b.append(head, el("span"), band, el("span"));
+    b.append(...styleSwatchBands(c));
     b.addEventListener("click", () => applyTableStyle({ style: id }));
     styles.appendChild(b);
   }
@@ -1622,6 +1617,24 @@ export function hyperlinkDialog() {
 // range, no headers question, no style. Everything is still live in the panel
 // afterwards; the modal exists so the *range* and the *headers* decision are
 // settled before a table exists, because both are awkward to correct after.
+/// The four bands of a table-style swatch: header, body, banded body, body.
+///
+/// One painter for both builders — `tableDialog` and `buildTablePanel` held
+/// two copies of the same four lines, and both ignored `bodyFill`, so rows 2
+/// and 4 were transparent and every swatch showed the panel's own surface
+/// through them. A light style and a dark one then differed by a single
+/// stripe, in a picker whose whole job is to show the difference.
+function styleSwatchBands(c) {
+  const band = (fill, rule) => {
+    const n = el("span");
+    n.style.background = "#" + fill;
+    if (rule) n.style.borderBottom = "2px solid #" + rule;
+    return n;
+  };
+  const body = c.bodyFill || "FFFFFF";
+  return [band(c.headerFill, c.border), band(body), band(c.bandFill), band(body)];
+}
+
 export function tableDialog() {
   let existing = null;
   try {
@@ -1688,12 +1701,7 @@ export function tableDialog() {
     b.title = label;
     let c = { headerFill: "FFFFFF", bandFill: "F2F2F2", border: "BFBFBF" };
     try { c = JSON.parse(wasm.session_table_style_preview(id)) || c; } catch {}
-    const head = el("span");
-    head.style.background = "#" + c.headerFill;
-    head.style.borderBottom = "2px solid #" + c.border;
-    const band = el("span");
-    band.style.background = "#" + c.bandFill;
-    b.append(head, el("span"), band, el("span"));
+    b.append(...styleSwatchBands(c));
     b.addEventListener("click", () => {
       chosenStyle = id;
       for (const s of swatches) s.b.classList.toggle("sel", s.id === id);
@@ -1702,9 +1710,16 @@ export function tableDialog() {
     swatches.push({ b, id });
   }
 
+  // `err` is hidden until the range is refused, and a `display: none` child
+  // occupies no grid cell — so as a direct child it shifted every later
+  // control one place along and collapsed the control column to nothing. It
+  // goes inside a cell with the input it belongs to, which is also where a
+  // refused range should be answered. The two spacer spans that existed only
+  // to skip the error row go with it.
+  const rangeCell = el("div", "oc-form-cell");
+  rangeCell.append(rangeIn, err);
   form.append(
-    rangeLabel, rangeIn,
-    el("span"), err,
+    rangeLabel, rangeCell,
     el("span"), headerLabel,
     el("span", "oc-form-label top", "Style"), styles,
   );
