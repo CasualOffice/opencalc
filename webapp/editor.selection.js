@@ -20,6 +20,7 @@ import {
   byId,
   calcMode,
   canvas,
+  capabilityForbids,
   cellFont,
   cellPx,
   cellRef,
@@ -50,6 +51,7 @@ import {
   fscreenXEnd,
   fscreenY,
   fscreenYEnd,
+  getCapabilities,
   hiddenColMarks,
   hiddenRowMarks,
   hideAutocomplete,
@@ -814,8 +816,26 @@ export function commandId(path, label) {
   return path ? `${path}.${slug}` : slug;
 }
 
+/// Every command id this mount currently offers.
+///
+/// **Rule-hidden commands are left out, and `runCommand` refuses them**, so the
+/// menu and the API cannot disagree. A mode that takes `File ▸ Download` off
+/// the menu and still runs it from `runCommand("file.download.csv-csv")` has
+/// not taken it away at all — it has moved it somewhere the user cannot see and
+/// a script still can, which is worse than leaving it visible.
+///
+/// The filter is `.oc-cmd-hidden`, the class `applyCommandRules()` stamps —
+/// **not** the `hidden` attribute. Three controls are authored hidden and are
+/// still perfectly runnable: `#tb-open` is the `<input type=file>` that
+/// `File ▸ Open` clicks, and `#tb-more` with its flyout are the narrow-window
+/// overflow. Filtering on `hidden` would drop those from a standalone editor
+/// that has hidden nothing.
 export function listCommands() {
-  return [...qsa("[data-oc-command]")].map((n) => n.dataset.ocCommand).filter((v, i, a) => a.indexOf(v) === i).sort();
+  return [...qsa("[data-oc-command]")]
+    .filter((n) => !n.classList.contains("oc-cmd-hidden"))
+    .map((n) => n.dataset.ocCommand)
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .sort();
 }
 
 // The menu, in a shape an operating system can draw.
@@ -848,6 +868,15 @@ export function menuModel() {
   const panelFor = (id, cls) =>
     id ? document.querySelector(`${cls}[data-oc-for="${CSS.escape(id)}"]`) : null;
 
+  // A native menu is a menu, so it gets the same treatment the HTML one does:
+  // a command the rules **hid** is absent from it, not present and greyed.
+  // `runCommand` now refuses a hidden id, so carrying one across would give the
+  // operating system an entry that throws — the exact failure `TAURI-004`
+  // avoided by deriving this from the live DOM instead of the `MENUS` literal.
+  // Disabled is still carried: greyed-because-there-is-nothing-to-undo is a
+  // state, where hidden-in-this-mode is a command that does not exist here.
+  const ruleHidden = (node) => node.classList.contains("oc-cmd-hidden");
+
   const itemsOf = (container) => {
     const out = [];
     if (!container) return out;
@@ -857,7 +886,7 @@ export function menuModel() {
         out.push({ kind: "separator" });
         continue;
       }
-      if (node.tagName !== "BUTTON") continue;
+      if (node.tagName !== "BUTTON" || ruleHidden(node)) continue;
       const id = node.dataset.ocCommand;
       const sub = panelFor(id, ".menu-sub");
       if (sub) {
@@ -875,13 +904,24 @@ export function menuModel() {
         checked: typeof node._check === "function" ? !!node._check() : undefined,
       });
     }
-    return out;
+    // Removing items leaves the separators that used to divide them: a leading
+    // one, a trailing one, or two in a row, each of which draws a rule against
+    // nothing. Collapsed here rather than in the Rust, because this is the file
+    // that knows an item went. A menu with nothing hidden is untouched by this.
+    const tidy = [];
+    for (const entry of out) {
+      if (entry.kind === "separator" &&
+          (!tidy.length || tidy[tidy.length - 1].kind === "separator")) continue;
+      tidy.push(entry);
+    }
+    while (tidy.length && tidy[tidy.length - 1].kind === "separator") tidy.pop();
+    return tidy;
   };
 
   return [...qsa("#menubar .menu-top")]
     // The overflow "⋯" is a bar affordance, not a menu — a native bar has no
     // width limit and nothing to overflow into.
-    .filter((b) => b.dataset.ocCommand)
+    .filter((b) => b.dataset.ocCommand && !ruleHidden(b))
     .map((b) => ({
       id: b.dataset.ocCommand,
       label: b.dataset.ocLabel || b.textContent.trim(),
@@ -904,15 +944,62 @@ export function runCommand(id) {
   if (node.disabled || node.getAttribute("aria-disabled") === "true") {
     throw new Error(`the command "${id}" is disabled`);
   }
+  // Hidden by the rules — a mode's capabilities, the host's own `hidden` list,
+  // or read-only. Refused for the same reason a *disabled* one is: the rule is
+  // a promise, and honouring it only in the menu would be no promise at all.
+  // In an embedded editor the promise is the host's document, so this is the
+  // difference between taking `File ▸ Open` away and merely hiding it.
+  if (node.classList.contains("oc-cmd-hidden")) {
+    throw new Error(`the command "${id}" is not available in this mode`);
+  }
   node.click();
   return true;
 }
 
 export function applyCommandRules() {
-  const viewer = readOnly();
+  // `getCapabilities().readOnly` is already the engine's answer *or* the mode's
+  // — see its definition — so this is one read, not two conventions.
+  const viewer = getCapabilities().readOnly === true;
+  // **These rules restore what they changed, and nothing else.**
+  //
+  // This used to be `node.hidden = on` and `node.disabled = dim` outright,
+  // which silently asserts that every command in the editor starts visible and
+  // enabled. Three do not, and running the rules revealed or enabled them:
+  // `#tb-open` is the `<input type=file>` behind `File ▸ Open` (a bare "Choose
+  // file" control appearing in the header), `#tb-more` and its flyout are the
+  // narrow-window overflow the collapse logic owns, and `#tb-undo`/`#tb-redo`
+  // are authored `disabled` because an empty history has nothing to undo.
+  // Nobody noticed because the rules only ran when a host called
+  // `setCommandRules` or `setReadOnly`; they run on **every boot** now, so the
+  // assumption had to go.
+  //
+  // The class is our marker and `data-oc-was-*` is the state we displaced, so
+  // "off" restores what was there rather than guessing that it was `false`.
   const hide = (node, on) => {
-    node.hidden = on;
-    node.classList.toggle("oc-cmd-hidden", on);
+    if (on) {
+      if (!node.classList.contains("oc-cmd-hidden")) {
+        node.dataset.ocWasHidden = node.hidden ? "1" : "";
+      }
+      node.hidden = true;
+      node.classList.add("oc-cmd-hidden");
+    } else if (node.classList.contains("oc-cmd-hidden")) {
+      node.hidden = node.dataset.ocWasHidden === "1";
+      delete node.dataset.ocWasHidden;
+      node.classList.remove("oc-cmd-hidden");
+    }
+  };
+  const dimmed = (node, on) => {
+    if (on) {
+      if (!node.classList.contains("oc-cmd-disabled")) {
+        node.dataset.ocWasDisabled = node.disabled ? "1" : "";
+      }
+      node.disabled = true;
+      node.classList.add("oc-cmd-disabled");
+    } else if (node.classList.contains("oc-cmd-disabled")) {
+      node.disabled = node.dataset.ocWasDisabled === "1";
+      delete node.dataset.ocWasDisabled;
+      node.classList.remove("oc-cmd-disabled");
+    }
   };
 
   for (const node of qsa("[data-oc-command]")) {
@@ -922,11 +1009,18 @@ export function applyCommandRules() {
     // whether anything inside it survived.
     if (node.classList.contains("menu-top")) continue;
     const id = node.dataset.ocCommand;
-    const off = commandRules.hidden.includes(id) || (viewer && !isReadOnlySafe(id));
+    // Three sources, and **no name check anywhere in this loop**: the host's
+    // own list, the mode's capabilities (`CAPABILITY_COMMANDS` in
+    // `editor.core.js` says which id each capability governs), and read-only's
+    // whitelist. A command is hidden because something declared it so, which is
+    // what makes the set of commands a mode offers readable from the tables
+    // rather than from the code that consumes them.
+    const off =
+      commandRules.hidden.includes(id) ||
+      capabilityForbids(id) ||
+      (viewer && !isReadOnlySafe(id));
     hide(node, off);
-    const dim = !off && commandRules.disabled.includes(id);
-    node.disabled = dim;
-    node.classList.toggle("oc-cmd-disabled", dim);
+    dimmed(node, !off && commandRules.disabled.includes(id));
   }
 
   // A submenu whose every item went, and then the menu that opens it: an empty
@@ -948,12 +1042,27 @@ export function applyCommandRules() {
   // is narrow it collapses each group behind a trigger button, and that trigger
   // is not a command. Counting it kept every group "live" and left a row of
   // dropdowns that open onto nothing.
+  const commandsIn = (root) => [...root.querySelectorAll("[data-oc-command]")];
   let anyGroup = false;
   for (const group of qsa(".tb-group")) {
-    const live = [...group.querySelectorAll("[data-oc-command]")].some((n) => !n.hidden);
+    const cmds = commandsIn(group);
+    const live = cmds.some((n) => !n.hidden);
     anyGroup ||= live;
-    group.hidden = !live;
-    group.classList.toggle("oc-cmd-hidden", !live);
+    // **A group with no commands in it at all has been collapsed, not
+    // emptied.** `collapseGroup` *moves* a narrow toolbar's controls into the
+    // group's flyout, so on a small window every `.tb-group` is an empty box
+    // that the collapse logic will refill when the window widens. Claiming one
+    // here put `display: none !important` on it — which `expandGroup`'s
+    // `hidden = false` cannot undo — and the group would have disappeared for
+    // good on the next resize, in an editor that had hidden nothing.
+    hide(group, cmds.length > 0 && !live);
+  }
+  // Same reason, from the other side: with the controls in the flyouts, the
+  // groups are empty and `anyGroup` was false, which took the whole toolbar
+  // away on a narrow window. The flyouts are where the controls are, so they
+  // are where liveness is.
+  for (const fly of qsa(".toolbar .tb-flyout")) {
+    anyGroup ||= commandsIn(fly).some((n) => !n.hidden);
   }
   // Every control on the toolbar formats something, so in a viewer the whole
   // strip is empty. Removing it is not a policy choice the host should have to

@@ -269,6 +269,20 @@ body {
   height: auto; min-height: 0; padding: 0; background: none; border-bottom: 0;
 }
 .oc-hide-localepicker .locale-picker { display: none; }
+/* `?mode=embedded` — the third chrome.
+ *
+ * `<opencalc-sheet>` already hides the header when it embeds this editor, on
+ * the grounds quoted above: an embedded editor is the host's product. A host
+ * that iframes `editor.html` with `?mode=embedded` is in exactly that position
+ * and was getting the brand mark, the alpha badge, the Open button and the
+ * settings gear anyway. This is that same decision, reached from the mode
+ * rather than from an element wrapper — the region rule it reuses is the one
+ * directly above, not a second way of saying the same thing.
+ *
+ * It is a *separate selector* from `.oc-hide-header` rather than the mode
+ * adding that class, so `?hide=` stays the host's explicit list and the mode
+ * stays the mode: a host can read either off the root and know which asked. */
+.oc-chrome-embedded .app-header { display: none; }
 .locale-picker select {
   font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
   border: 1px solid var(--oc-control-border-color); background: var(--oc-bg, transparent);
