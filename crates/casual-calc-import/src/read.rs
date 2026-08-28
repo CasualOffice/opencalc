@@ -979,6 +979,25 @@ fn read_sheet_format(e: &BytesStart<'_>, result: &mut Worksheet) -> Result<(), I
     Ok(())
 }
 
+/// A `<color>` inside a `<cfRule>`, from whichever dispatch saw it.
+///
+/// Shared rather than written twice, because the two copies are what drift: the
+/// `Start` arm existed and the `Empty` one did not, and **every real writer
+/// self-closes this element**, so colour-scale and data-bar rules arrived with
+/// no colours at all — `colors.len() >= 2` failed, the rule became `None`, and
+/// a sheet full of colour scales imported as a sheet with none.
+fn read_cf_color(e: &BytesStart<'_>, cur_cf: &mut Option<RawCf>) -> Result<(), ImportError> {
+    if let Some(rgb) = read_attr(e, b"rgb")?
+        && let Some(cf) = cur_cf.as_mut()
+    {
+        let hex = rgb.trim();
+        if hex.len() >= 6 {
+            cf.colors.push(hex[hex.len() - 6..].to_ascii_uppercase());
+        }
+    }
+    Ok(())
+}
+
 /// Parse a worksheet part's `sheetData`, `mergeCells`, and `sheetView` pane.
 pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, ImportError> {
     let mut reader = Reader::from_reader(xml);
@@ -1152,16 +1171,7 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
                     b"cfRule" => {
                         cur_cf = Some(read_cf_rule(&e, &cf_sqref)?);
                     }
-                    b"color" if cur_cf.is_some() => {
-                        if let Some(rgb) = read_attr(&e, b"rgb")?
-                            && let Some(cf) = cur_cf.as_mut()
-                        {
-                            let hex = rgb.trim();
-                            if hex.len() >= 6 {
-                                cf.colors.push(hex[hex.len() - 6..].to_ascii_uppercase());
-                            }
-                        }
-                    }
+                    b"color" if cur_cf.is_some() => read_cf_color(&e, &mut cur_cf)?,
                     b"formula" if cur_cf.is_some() => {
                         in_cf_formula = true;
                         if let Some(cf) = cur_cf.as_mut() {
@@ -1174,6 +1184,8 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
             Event::Empty(e) => {
                 bounds.count()?;
                 match e.local_name().as_ref() {
+                    // `<color rgb="FFF8696B"/>` — how every writer spells it.
+                    b"color" if cur_cf.is_some() => read_cf_color(&e, &mut cur_cf)?,
                     b"c" => {
                         result.cells.push(RawCell {
                             reference: cell_reference(&e, row_now, &mut col_next)?,

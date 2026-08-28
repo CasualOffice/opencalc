@@ -555,15 +555,25 @@ fn childless_elements_are_handled_in_the_empty_dispatch() {
             if let Some(j) = rest.find('"') {
                 let name = &rest[..j];
                 // Attribute reads look the same; keep only match arms.
-                if rest[j..]
-                    .trim_start_matches('"')
-                    .trim_start()
-                    .starts_with("=>")
-                    || rest[j..]
-                        .trim_start_matches('"')
-                        .trim_start()
-                        .starts_with('|')
-                {
+                //
+                // A *guarded* arm is still an arm. This used to require `=>` or
+                // `|` immediately after the name, so `b"color" if cur_cf.is_some()
+                // =>` was invisible — and with it every conditional-format
+                // element, which is exactly where the next self-closing bug was
+                // waiting. A test that quietly ignores a whole syntactic form is
+                // worse than no test, because the form it ignores is where the
+                // careful code is.
+                let after = rest[j..].trim_start_matches('"').trim_start();
+                let after = match after.strip_prefix("if ") {
+                    // Skip the guard expression to whatever terminates the arm.
+                    Some(guard) => guard.split_once("=>").map_or("", |(_, rest)| {
+                        // Put the `=>` back so the check below still sees it.
+                        let _ = rest;
+                        "=>"
+                    }),
+                    None => after,
+                };
+                if after.starts_with("=>") || after.starts_with('|') {
                     out.insert(name.to_owned());
                 }
                 rest = &rest[j..];
@@ -1321,6 +1331,63 @@ fn a_two_cell_anchors_own_rectangle_wins_over_a_stray_extent() {
 /// resolved to no fill and was dropped whole, taking the rule with it.
 ///
 /// Both dxfs below are the shapes Excel actually writes, alpha pair included.
+#[test]
+fn colour_scales_and_data_bars_survive_a_self_closed_color_element() {
+    // Every real writer self-closes `<color rgb="..."/>`, and the handler for it
+    // sat only in the `Start` dispatch — so `RawCf.colors` stayed empty, the
+    // `colors.len() >= 2` gate failed, the rule became `None`, and a sheet full
+    // of colour scales imported as a sheet with none. Excel writes both of these
+    // exactly as written here.
+    let sheet_xml =
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData>
+        <conditionalFormatting sqref="A1:A9">
+            <cfRule type="colorScale" priority="1">
+                <colorScale>
+                    <cfvo type="min"/>
+                    <cfvo type="max"/>
+                    <color rgb="FFF8696B"/>
+                    <color rgb="FF63BE7B"/>
+                </colorScale>
+            </cfRule>
+        </conditionalFormatting>
+        <conditionalFormatting sqref="B1:B9">
+            <cfRule type="dataBar" priority="2">
+                <dataBar>
+                    <cfvo type="min"/>
+                    <cfvo type="max"/>
+                    <color rgb="FF638EC6"/>
+                </dataBar>
+            </cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+            .to_vec();
+    let bytes = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ]);
+    let sheet = &import_package(bytes).unwrap().workbook.sheets[0];
+
+    assert_eq!(
+        sheet.conditional_formats.len(),
+        2,
+        "a colour scale and a data bar, both written the way Excel writes them"
+    );
+    assert_eq!(
+        sheet.conditional_formats[0].rule,
+        casual_calc_model::CfRule::ColorScale(vec!["F8696B".into(), "63BE7B".into()]),
+        "both stops of the colour scale"
+    );
+    assert_eq!(
+        sheet.conditional_formats[1].rule,
+        casual_calc_model::CfRule::DataBar("638EC6".into()),
+        "the data bar's colour"
+    );
+}
+
 #[test]
 fn a_conditional_formats_dxf_font_colour_and_bold_survive_import() {
     const STYLES: &[u8] =

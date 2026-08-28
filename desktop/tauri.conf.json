@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenCalc",
+  "version": "0.0.0",
+  "identifier": "org.casualoffice.opencalc",
+  "build": {
+    "frontendDist": "../webapp"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "OpenCalc",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "url": "editor.html?chrome=native"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": []
+  }
+}
