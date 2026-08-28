@@ -172,7 +172,21 @@ export function collaborate({
         // a later one may be fine, and the server is not a hostile party.
         return;
       }
-      receive(message);
+      // **A throw in `receive` must not be allowed to end the session in
+      // silence.** It had no handler, so an op the engine could not transform
+      // — the `COL-44` refusal is the ordinary way to get one — escaped here,
+      // and the socket stayed open while nothing was ever applied again. The
+      // document quietly stopped being shared and looked completely fine:
+      // no error, no status change, the peer's cursor still moving.
+      //
+      // Reported, not swallowed. This is the one failure where carrying on
+      // silently is worse than stopping, because the user goes on typing into
+      // a document they believe is shared.
+      try {
+        receive(message);
+      } catch (err) {
+        status("desynced", String(err && err.message ? err.message : err));
+      }
     };
 
     socket.onclose = () => {
