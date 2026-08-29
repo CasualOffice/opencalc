@@ -555,6 +555,35 @@ body {
   background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px; cursor: pointer;
 }
 .oc-btn:hover { border-color: var(--oc-border-hover-color); }
+
+/* ── Crash recovery bar (`SAVE-03`, `docs/83` §4.3) ──────────────────────────
+   A band above the toolbar, present only when this browser holds a draft from
+   a session that ended without one. It is deliberately not a modal: a recovered
+   document is offered, never applied, and a dialog that blocks the editor to
+   ask about yesterday's document is the feature deciding for the user in the
+   other direction.
+
+   `flex: 0 0 auto` in the body's column, so it takes its own height rather than
+   stealing the grid's — the grid is sized from the space that is left, and a
+   bar that overlaid it would hide the document the user is being asked to
+   compare against. */
+.oc-recovery {
+  flex: 0 0 auto; padding: 8px 12px;
+  border-bottom: 1px solid var(--oc-border-color);
+  background: color-mix(in srgb, var(--oc-accent-color) 8%, var(--oc-background-color));
+  font-size: 12.5px; line-height: 1.5; color: var(--oc-text-color);
+}
+.oc-recovery[hidden] { display: none; }
+.oc-recovery-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.oc-recovery-row + .oc-recovery-row { margin-top: 6px; }
+.oc-recovery-note { color: var(--oc-muted-text-color); }
+/* `margin-left: auto` rather than a spacer element: the buttons ride the right
+   edge on a wide window and wrap under the sentence on a narrow one, which is
+   what `editor.narrow-screens` asks of every band in this column. */
+.oc-recovery-actions { margin-left: auto; display: inline-flex; gap: 6px; flex: 0 0 auto; }
+.oc-recovery-actions .oc-btn { padding: 4px 10px; font-size: 12px; }
 .oc-btn.primary { background: var(--oc-accent-color); border-color: var(--oc-accent-color); color: #fff; }
 .oc-btn.primary:hover { filter: brightness(1.06); }
 
@@ -899,6 +928,19 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   font-size: 11.5px; color: var(--oc-faint-text-color); white-space: nowrap;
 }
 .bottom-status .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--oc-success-color); }
+/* Autosave, when it is not running (`SAVE-03`, `docs/83` §5.5). Coloured as a
+   warning and not as fine print, for the reason `.share-warning` gives: a
+   notice a user's eye slides over is not a notice, and this one says their work
+   is no longer being kept. Hidden entirely while autosave works — an indicator
+   that is always on screen is one nobody reads. */
+.autosave-state {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 2px 8px; border-radius: 7px;
+  border: 1px solid var(--oc-danger-color);
+  background: color-mix(in srgb, var(--oc-danger-color) 9%, transparent);
+  font-size: 11.5px; color: var(--oc-text-color); white-space: nowrap;
+}
+.autosave-state[hidden] { display: none; }
 /* Zoom, at the far right of the status bar — Excel's and Sheets' position.
    After `.bottom-status`, which carries `margin-left: auto`, so this rides the
    right edge without a second auto margin fighting the first. */

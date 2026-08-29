@@ -14,7 +14,10 @@
 // Supplied by `editor.boot.js`, which is the file the page names and so the
 // only one whose URL carries the tag. Falling back to this module's own
 // query keeps it working if it is ever loaded directly.
-const BUILD =
+// Exported because a draft records which build wrote it (`editor.drafts.js`):
+// a recovery bar that cannot say what produced an entry cannot refuse one from
+// a version it was not written to read.
+export const BUILD =
   globalThis.__opencalcBuild ||
   new URL(import.meta.url).searchParams.get("v") ||
   "dev";
@@ -366,6 +369,7 @@ import {
   doSave,
   isDirty,
   markSaved,
+  savedAtEditsForDraft,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -398,6 +402,26 @@ import {
   viewOptions,
   wireZoom,
 } from "./editor.sheets.js";
+
+// Browser drafts and crash recovery (`SAVE-03`). Imported for `initDrafts()`,
+// which `main()` calls; the rest is re-exported because `window.opencalcEditor`
+// **is** this namespace, so a host or a test that cannot see the draft state
+// cannot check that autosave is running — and an autosave nobody can observe is
+// how one stops without anybody noticing.
+import { initDrafts } from "./editor.drafts.js";
+export {
+  autosaveFault,
+  breakDraftStoreForTest,
+  draftPolicy,
+  draftSlotForTest,
+  draftStateForTest,
+  initDrafts,
+  lastDraftReason,
+  listDrafts,
+  refreshRecoveryBar,
+  restartDraftSchedulerForTest,
+  setDraftPolicyForTest,
+} from "./editor.drafts.js";
 
 export {
   applyChart,
@@ -736,6 +760,7 @@ export {
   doSave,
   isDirty,
   markSaved,
+  savedAtEditsForDraft,
   doSaveDelimited,
   doSaveNative,
   moveTab,
@@ -1122,6 +1147,31 @@ export function setMountRoot(root) {
   ocRoot = root;
   ocOverlayHost = root === document ? document.body : root;
   ocThemeHost = root === document ? document.documentElement : root.host;
+}
+
+/// Whether this editor **is** the page, rather than a part of somebody else's.
+///
+/// Two ways it is not, and they are the two ways this project is embedded: a
+/// shadow root (`<opencalc-sheet>`, which calls `setMountRoot` before `main`)
+/// and a frame (the landing page's demo, and any host that iframes
+/// `editor.html`).
+///
+/// Added for `editor.drafts.js`, and the reason is a privacy rule rather than a
+/// layout one. `docs/83` §3.3 refuses a local draft wherever the document is
+/// somebody else's — "a host's document must not leave a copy in the user's
+/// browser storage as a side effect of being opened". The `ownsFile` capability
+/// says that when a host sets it, but the presets are chosen by `?mode=`, and
+/// **an embed that says nothing gets `standalone`**. So the capability alone
+/// would have every `<opencalc-sheet>` on the web quietly writing its host's
+/// document into the visitor's IndexedDB.
+export function editorIsThePage() {
+  if (ocRoot !== document) return false;
+  try {
+    return window.top === window;
+  } catch {
+    // A cross-origin parent throws on access, which is itself the answer.
+    return false;
+  }
 }
 
 export const byId = (id) => ocRoot.getElementById(id);
@@ -9579,6 +9629,18 @@ async function main() {
   if (isTopLevel && (!document.activeElement || document.activeElement === document.body)) {
     canvas.focus({ preventScroll: true });
   }
+
+  // Drafts, last: it reads the store, may put a bar on screen, and — when the
+  // page was opened with `?draft=` — replaces the seeded document with the
+  // recovered one. All three want an editor that already exists.
+  //
+  // **Awaited, and its failure is not fatal.** `initDrafts` catches its own
+  // storage failures and reports them as a standing indicator rather than
+  // throwing; this `catch` is the belt for anything it did not anticipate,
+  // because a browser that will not store a draft must still open the editor.
+  // A crash-recovery feature that stops the editor booting has recovered
+  // nothing.
+  await initDrafts().catch((err) => console.error("[opencalc] drafts", err));
 }
 
 /// Start the editor against the current mount root.
