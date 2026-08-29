@@ -104,7 +104,6 @@ the other way around. This index is the map.
 | 65 | [Running OpenCalc](65-RUNNING-IT.md) | Standalone, Docker and clustered operation |
 | 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
 | 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
-| 68 | [Visual audit](68-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see |
 | 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | Pasting from Excel, LibreOffice and Sheets: who parses the markup, why it is safe, and what is deliberately not mapped |
 | 69 | [Collaborative Undo Policy](69-COLLABORATIVE-UNDO-POLICY.md) | What undo *means* once somebody else has been typing — whose edit comes back, and what is refused |
 | 70 | [Comparison Semantics](70-COMPARISON-SEMANTICS.md) | What `=`, `<` and `>` mean across types, and why text and numbers never mix |
@@ -116,6 +115,7 @@ the other way around. This index is the map.
 | 77 | [Keeping the coordinator available](77-COORDINATOR-AVAILABILITY.md) | `ADR-020`: Sentinel over Cluster mode, and what an asynchronous failover can still lose |
 | 80 | [Geometry in the display list](80-CHART-DISPLAY-LIST.md) | `ADR-021`: why a chart needs shapes the display list did not have, and what that costs every backend |
 | 81 | [Desktop shell composition](81-DESKTOP-SHELL-COMPOSITION.md) | `ADR-023`: why the Tauri app depends on the SDK directly, what a separate Cargo workspace costs, and the three decisions a running shell is still needed to settle |
+| 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see |
 | 78 | [How the engine reaches the platform](78-HOST-CAPABILITY-SEAMS.md) | `ADR-019`: why the capability trait was never written, and why what grew instead is better |
 
 ### Measured gap trackers (50–53, 73)
