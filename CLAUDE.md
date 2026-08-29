@@ -39,9 +39,11 @@ all Accepted; a clustered OT server with resume, presence and relay, exercised
 by two real browsers in CI). The SDK is published at `0.0.0` and does ship type
 declarations (`SDK-009`, Done).
 
-What is open is **not** only operational. `COL-46` is a live P0: a
-`$`-anchored formula rebased across a concurrent insert diverges between
-replicas with nothing raised anywhere. On the operational side metrics and
+What is open is **not** only operational. `COL-46` — the `$`-anchored formula
+that diverged across a concurrent insert — is Done; `COL-50` took its place: an
+insert meeting a delete does not converge for a formula *range*, and each
+answer is the one Excel gives for its own order, so it is a semantics decision
+rather than a defect to patch. On the operational side metrics and
 images have shipped (`DEP-06`, `DEP-07`); the Helm chart is blocked on there
 being a cluster to render against (`DEP-08`). See
 [docs/14](docs/14-EXECUTION-TRACKER.md) and AGENTS.md §"Current state".

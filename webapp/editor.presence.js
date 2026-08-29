@@ -492,26 +492,33 @@ export function collabDraft() {
 // already passed in. There was no user-reachable route at all, by query string
 // or otherwise. That is a finding for `docs/12`, not something to fix by prose.
 //
-// # Why it is behind a capability, off by default
+// # Why it is behind a capability
 //
-// `COL-46` is an open **P0**: a `$`-anchored formula rebased across a
-// concurrent insert lands as `$E$1` on one replica and `$D$1` on the other,
-// with no error raised anywhere. Two replicas of one document holding different
-// formulas is the worst failure class this system has, and a Share button that
-// walked a user into it silently would be worse than no button — they would
-// have been told the feature was ready.
+// It was held shut by `COL-46`, an open **P0** at the time: a `$`-anchored
+// formula rebased across a concurrent insert landed as `$E$1` on one replica
+// and `$D$1` on the other, with no error raised anywhere. Two replicas of one
+// document holding different formulas is the worst failure class this system
+// has, and a Share button that walked a user into it silently would have been
+// worse than no button.
 //
-// So the route is **built and complete**, and the door has two locks, because
-// they protect different people:
+// **`COL-46` is now Done, and `canShare` is `true` in `standalone` and
+// `desktop`.** This paragraph said otherwise for a while, which is its own
+// small lesson (`DOC-046`): a comment citing a tracker row states a fact that
+// expires, and this one was load-bearing — a reader could verify the citation,
+// find the row closed, and change a *safety default* on a true observation
+// about a stale sentence.
 //
-//   1. `canShare` is `false` in every mode preset, so `File ▸ Share…` is absent
-//      from a plain editor and `runCommand("file.share")` is refused. Closing
-//      `COL-46` is then a one-word change in `MODE_PRESETS` rather than a
-//      feature to build, which is the point of wiring it now.
-//   2. A host that turns it on (`setCapabilities({ canShare: true })`) gets the
-//      divergence named, in the dialog, at the moment of sharing, and cannot
-//      start a session without acknowledging it. A host flipping a flag is not
-//      the person whose formulas diverge.
+// Two things still hold, and they are the reason the capability remains:
+//
+//   1. `canShare` stays `false` in `embedded` and `wopi`, for a reason that
+//      does not expire: starting a session for a document **somebody else
+//      owns** is the host's decision, not ours.
+//   2. `COL-50` is still open — an insert meeting a delete does not converge
+//      for a formula *range*, and each answer is the one Excel gives for its
+//      own order. The dialog names it before it will connect. It needs a range
+//      formula *plus* two concurrent structural edits, where `COL-46` needed
+//      one ordinary insert beside one ordinary formula, which is why one held
+//      the feature shut and the other does not.
 //
 // # Why nothing here auto-connects
 //
