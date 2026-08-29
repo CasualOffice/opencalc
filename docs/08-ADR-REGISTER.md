@@ -64,7 +64,7 @@ decision is marked `Superseded by ADR-NNN`, not edited away.
   independently-versioned op wire format) — triggered by
   [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md); stated as "to be Accepted before
   Phase 1A editing lands". **Phase 1A shipped, and so did Phase 5 on top of the
-  same op set** — `PROTOCOL_VERSION` is at 5 and every collaboration ADR
+  same op set** — `PROTOCOL_VERSION` is 7 and every collaboration ADR
   depends on the set being closed. Overdue, not queued.
 - ADR for the **dependency-graph representation** (cell-level vs block-level
   nodes, range handling) — proposed in [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md),

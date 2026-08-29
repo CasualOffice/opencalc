@@ -143,7 +143,29 @@ def main():
             text = doc.read_text(encoding="utf-8")
             # Present tense only. "`PROTOCOL_VERSION` 7" and "PROTOCOL_VERSION
             # is 7" are claims about now; "6 -> 7" and "moves to 8" are not.
-            for m in re.finditer(r"`?PROTOCOL_VERSION`?\s+(?:is\s+)?(\d+)(?!\s*(?:->|→))", text):
+            # **One intervening word used to defeat this.** The pattern was
+            # `PROTOCOL_VERSION` then optionally `is` then the number, so
+            # "is 5" was caught and "is *at* 5" sailed past — and `docs/08`
+            # sat two bumps stale behind exactly that. A gate a synonym can
+            # walk around is not checking the claim, it is checking a phrasing.
+            #
+            # So: the first number within a short window, whatever prose sits
+            # between, and the window is short so a claim cannot reach into an
+            # unrelated figure in the next sentence.
+            #
+            # A **transition** is not a claim about now — "6 -> 7", "moves to
+            # 8", "goes to 2 ... it has since moved on" are records of a change
+            # and are correct as written. `docs/61` documents the bump that ADR
+            # made and would otherwise be reported for stating history.
+            TRANSITION = re.compile(
+                r"->|→|moves?\s+to|goes\s+to|bumped?\s+to|moved\s+on|raise[sd]?\s+to"
+            )
+            for m in re.finditer(r"`?PROTOCOL_VERSION`?[^\n\d]{0,24}?(\d+)", text):
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                line_end = text.find("\n", m.end())
+                line = text[line_start : line_end if line_end != -1 else len(text)]
+                if TRANSITION.search(line):
+                    continue
                 if m.group(1) != current:
                     problems.append(
                         f"{doc.name}: says `PROTOCOL_VERSION` {m.group(1)}, but it is {current}. "
