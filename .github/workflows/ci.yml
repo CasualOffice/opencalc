@@ -448,6 +448,14 @@ jobs:
       # verified; ten rows were malformed when this was written.
       - name: Every tracker row has the columns its table declares
         run: python3 tools/check-tracker-shape.py
+      # A row that has been `Done` for three months has the right columns and
+      # a unique id, so both gates above pass it — correctly. The decay is only
+      # visible as a ratio, and nothing counted it: `docs/14` reached 245
+      # closed rows out of 285 while its own preamble said closed rows move to
+      # `14a` (`DOC-050`). Quiet below 20 closed rows, so closing a row and
+      # sweeping it out stay separate commits.
+      - name: The live tracker is mostly live work
+        run: python3 tools/check-tracker-freshness.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
