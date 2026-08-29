@@ -379,6 +379,8 @@ import {
   recalculateNow,
   renameSheet,
   resetView,
+  newDocument,
+  downloadItems,
   saveAs,
   saveSheetView,
   setCalculationMode,
@@ -747,6 +749,8 @@ export {
   recalculateNow,
   renameSheet,
   resetView,
+  newDocument,
+  downloadItems,
   saveAs,
   saveSheetView,
   setCalculationMode,
@@ -3434,10 +3438,22 @@ export function pushRecent(hex) {
 // until this has run. Called once at startup and again on every explicit
 // recalculation; `reseed` is what makes RAND reroll rather than repeat.
 let volatileSeed = 1;
+
+// "Now", read in exactly one place.
+//
+// The engine reads no clock of its own — `syncClock` below is what hands it
+// one — and the *static* stamps (Ctrl+; and Ctrl+Shift+;) have to come from
+// the same reading, or the editor would hold two clocks that can disagree:
+// a date typed into a cell one second either side of `session_set_clock` and
+// a `TODAY()` beside it could then name different days, with nothing in the
+// document to explain it. One seam is also what makes the pair testable —
+// a fake clock installed on the page moves both.
+export function hostNow() { return new Date(); }
+
 export function syncClock(reseed = false) {
   if (!wasm) return;
   if (reseed) volatileSeed = (volatileSeed * 1103515245 + 12345) >>> 0;
-  const now = new Date();
+  const now = hostNow();
   // Excel's epoch is 1899-12-30, and the serial is local time, not UTC — a
   // UTC serial puts TODAY() on the wrong day for most of the world's evening.
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
@@ -6146,6 +6162,106 @@ export function renderTabs() {
 
 // Live-update the previewed size of the line being dragged.
 
+// The formula bar's expand toggle, in one place.
+//
+// The `fx` chevron and Ctrl+Shift+U are the same command, so they share the
+// same three lines: `resize()` is not optional — the bar growing changes the
+// canvas's height, and skipping it leaves the grid painting under the bar.
+export function toggleFormulaBarExpanded() {
+  const bar = qs(".formula-bar");
+  if (!bar) return false;
+  const on = bar.classList.toggle("expanded");
+  const btn = byId("fx-expand");
+  if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+  resize();
+  return on;
+}
+
+// Excel's Ctrl+Shift+O — select every cell on this sheet that carries a note.
+//
+// A multi-range bank, the same structure Ctrl+click builds: the first cell
+// becomes the active one and the rest are banked, so the operations that read
+// the bank (bold, Delete, copy) act on all of them, and the Name Box names the
+// one the caret is on.
+//
+// The range asked of the engine is the whole sheet rather than `usedBounds()`.
+// A note is anchored to a cell whether or not that cell has a value, and a
+// note beside empty cells is the most likely kind — bounding the query by the
+// used range would silently miss exactly those.
+export function selectCommentedCells() {
+  let cells = [];
+  try { cells = JSON.parse(wasm.session_comments(state.sheet, 0, 0, 1048575, 16383)); }
+  catch (err) { statusError(errText(err)); return; }
+  if (!cells.length) { status.textContent = "no cells with notes on this sheet"; return; }
+  // Built backwards on purpose. `addRange` banks whatever is active and makes
+  // its argument the new active cell, so walking forwards leaves the caret on
+  // the *last* note — and Excel leaves it on the first, which is also the only
+  // useful place to leave it: the point of the chord is to start reading the
+  // notes, and reading starts at the top.
+  select(cells[cells.length - 1].r, cells[cells.length - 1].c);
+  for (let i = cells.length - 2; i >= 0; i -= 1) addRange(cells[i].r, cells[i].c);
+  status.textContent = cells.length === 1
+    ? "1 cell with a note" : `${cells.length} cells with notes`;
+}
+
+// How far Alt+Down looks up and down the column for entries. Excel stops at a
+// blank; this stops at a blank *or* here, so a column of a million filled cells
+// cannot turn one keystroke into a million engine calls.
+const PICK_LIST_SCAN = 1000;
+
+// Excel's Alt+Down on a cell with no validation rule: the text already entered
+// in this column, offered as a list to pick from.
+//
+// Text only, and the contiguous run only — both are Excel's rules and both
+// earn their place. Numbers are excluded because a column of amounts would
+// produce a list nobody can use; formulas are excluded because picking one
+// would paste its source text, not its value. The run stops at a blank so two
+// unrelated tables stacked in one column do not offer each other's entries.
+export function openColumnPickList() {
+  const col = state.sel.col;
+  const seen = new Set();
+  const values = [];
+  const scan = (step) => {
+    for (let i = 1; i <= PICK_LIST_SCAN; i += 1) {
+      const r = state.sel.row + i * step;
+      if (r < 0) break;
+      let v = "";
+      try { v = wasm.session_cell_input(state.sheet, r, col); } catch { break; }
+      if (!v) break;                                   // a blank ends the run
+      if (v.startsWith("=")) continue;                 // a formula, not an entry
+      if (v.trim() === "" || Number.isFinite(Number(v))) continue;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      values.push(v);
+    }
+  };
+  scan(-1);
+  scan(1);
+  if (!values.length) { status.textContent = "no entries in this column to pick from"; return; }
+  values.sort((a, b) => a.localeCompare(b));
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu dv-menu";
+  menu.id = "sheet-ctx";
+  for (const val of values) {
+    const b = document.createElement("button");
+    b.textContent = val;
+    b.addEventListener("click", () => {
+      closeSheetMenu();
+      tryEdit(() => wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, val));
+      canvas.focus();
+    });
+    menu.appendChild(b);
+  }
+  // Under the active cell, the way the validation dropdown places itself. The
+  // active cell is on screen (every `select` calls `ensureVisible`), but the
+  // geometry lookups still answer `undefined` off-screen, so both are guarded.
+  const rect = canvas.getBoundingClientRect();
+  const x = colXAt(col) ?? 0;
+  const y = rowYAt(state.sel.row) ?? 0;
+  positionMenu(menu, rect.left + x, rect.top + y + (rowHAt(state.sel.row) ?? 0));
+}
+
 function wireEvents() {
   // The real paste event, which is the only place `clipboardData` exists.
   //
@@ -6990,8 +7106,24 @@ function wireEvents() {
 
   canvas.addEventListener("keydown", async (e) => {
     if (state.editing) return;
-    // Alt+Down opens the active cell's validation dropdown (Excel parity).
-    if (e.altKey && e.key === "ArrowDown" && validationChevron) { openValidationMenu(); e.preventDefault(); return; }
+    // Alt+Down is Excel's in-column pick list: the validation dropdown when the
+    // cell has one, and otherwise the text already entered in this column.
+    //
+    // It used to be the first of those only, and with no list to open the chord
+    // fell through to the plain ArrowDown below and **moved the selection down
+    // one row** — the second rebinding `docs/12` §4.1 names. A chord that moves
+    // the cursor when the user asked for a list is the cheap kind of wrong
+    // (no undo needed) and still the expensive kind to live with, because it
+    // fires on the way to typing and the typing then lands a row late.
+    //
+    // `preventDefault` unconditionally, including when there is nothing to
+    // offer: falling through was the bug, and "no entries" is an answer.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowDown") {
+      if (validationChevron) openValidationMenu();
+      else openColumnPickList();
+      e.preventDefault();
+      return;
+    }
     const mod = e.ctrlKey || e.metaKey;
 
     // Alt+= — AutoSum. Outside the Ctrl/Cmd branch on purpose: Alt is not one
@@ -7120,8 +7252,17 @@ function wireEvents() {
       // Ctrl+; stamps today's date, Ctrl+Shift+; the time. Both are *static*
       // values, not TODAY()/NOW() — that is the whole point of them, and it is
       // why they need no clock in the calc engine.
-      if (e.key === ";") {
-        const now = new Date();
+      //
+      // **Both characters the key can send.** `Ctrl+Shift+;` does not arrive as
+      // `";"` — Shift changes the character, so the event carries `e.key === ":"`
+      // with `e.code === "Semicolon"` [measured]. The `e.shiftKey` branch three
+      // lines down was therefore unreachable from the moment it was written:
+      // the time stamp existed in full and no keystroke could ever reach it,
+      // which is why `docs/12` §4.1 measured the chord as doing nothing. This is
+      // the whole class of bug that reading cannot see — the code is correct and
+      // the door to it is locked.
+      if (e.key === ";" || e.key === ":") {
+        const now = hostNow();
         const text = e.shiftKey
           ? `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`
           : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -7135,7 +7276,21 @@ function wireEvents() {
       if (k === "v" && e.altKey) { pasteSpecialDialog(); e.preventDefault(); return; }
       if (k === "b") { toggleBold(); e.preventDefault(); return; }
       if (k === "i") { toggleItalic(); e.preventDefault(); return; }
+      // Ctrl+Shift+U is Excel's "expand the formula bar", and it used to fall
+      // into the line below and **underline the selection** instead. That is
+      // the rebinding this file already argues against twice (Ctrl+9/0,
+      // Ctrl+Shift+L), and it was the worst-behaved instance of it: the chord
+      // an Excel user presses to *see more of a formula* silently changed the
+      // document's formatting, so the cost was an undo plus a moment spent
+      // wondering what had just been typed. `docs/12` §4.1 recorded it as doing
+      // nothing, because an underline on an empty cell is invisible — the
+      // measurement was right about the user's experience and wrong about the
+      // model, which is the more expensive half.
+      if (k === "u" && e.shiftKey) { toggleFormulaBarExpanded(); e.preventDefault(); return; }
       if (k === "u") { toggleUnderline(); e.preventDefault(); return; }
+      // Excel's Ctrl+Shift+O — select every cell on the sheet carrying a note,
+      // so "where did I leave comments?" is one keystroke instead of a scroll.
+      if (e.shiftKey && k === "o") { selectCommentedCells(); e.preventDefault(); return; }
       if (e.shiftKey && (k === "7" || k === "&")) { toggleBorder(); e.preventDefault(); return; }
       // Excel's Ctrl+Shift+L is Toggle Filter, and it is among the most-used
       // chords in daily spreadsheet work. It used to left-align here, borrowed
@@ -7154,6 +7309,15 @@ function wireEvents() {
       }
       if (e.key === " ") { if (e.shiftKey) ctrlA(); else selectColsSpan(); e.preventDefault(); return; } // Ctrl+Space cols; Ctrl+Shift+Space all
       if (k === "a") { ctrlA(); e.preventDefault(); return; }
+      // Ctrl+Shift+F is Excel's Format Cells (on its Font tab). It used to fall
+      // into the `k === "f"` line below and open the **find bar** — a second
+      // route to a dialog Ctrl+F already opens, paid for with the one chord a
+      // migrating user presses to change a font. Nothing is lost by moving it:
+      // Ctrl+F still finds, and Ctrl+Shift+F was never a second finder anybody
+      // reached for on purpose. The dialog opens on its own first tab rather
+      // than on Font — `formatCellsDialog()` takes no tab argument, and
+      // inventing one is a change to `editor.dialogs.js`, not to a chord.
+      if (k === "f" && e.shiftKey) { formatCellsDialog(); e.preventDefault(); return; }
       if (k === "f") { openFind(); e.preventDefault(); return; }
       // Ctrl+H is Excel's Replace. Every piece of it already existed —
       // #replace-input, #replace-all, session_replace_all — reachable only
@@ -7870,11 +8034,9 @@ function wireEvents() {
   byId("fx-expand").addEventListener("click", (e) => {
     e.stopPropagation();
     // A long formula is unreadable in a one-line box; expanding gives it room
-    // without opening a dialog that would lose the caret.
-    const bar = qs(".formula-bar");
-    const on = bar.classList.toggle("expanded");
-    e.currentTarget.setAttribute("aria-expanded", on ? "true" : "false");
-    resize();
+    // without opening a dialog that would lose the caret. Shared with
+    // Ctrl+Shift+U, which is the same command from the keyboard.
+    toggleFormulaBarExpanded();
   });
   byId("name-box-list").addEventListener("click", (e) => {
     e.stopPropagation();
@@ -8103,16 +8265,28 @@ function wireEvents() {
       byId("oc-modal-body").innerHTML = html;
       byId("oc-modal").hidden = false;
     };
+    // Every row here is a promise, and each one has been pressed. The list said
+    // `F3` for the name manager for as long as it has existed and no keystroke
+    // has ever answered — the chord is `Ctrl+F3` (`docs/12` §9.6). A help page
+    // that names a chord doing nothing is worse than one that omits it: the
+    // user does not conclude the shortcut is missing, they conclude the editor
+    // is broken, and they are half right.
     function showShortcuts() {
       const rows = [
         ["Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"],
         ["Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"],
         ["Bold / Italic / Underline", "Ctrl+B / Ctrl+I / Ctrl+U"],
-        ["Find & replace", "Ctrl+F"],
+        ["Find / Replace", "Ctrl+F / Ctrl+H"],
         ["Select all", "Ctrl+A"],
         ["Insert / delete line", "Ctrl++ / Ctrl+−"],
         ["Edit cell", "F2 / Enter"],
-        ["Name manager", "F3"],
+        ["Go to (name box)", "Ctrl+G / F5"],
+        ["Insert date / time", "Ctrl+; / Ctrl+Shift+;"],
+        ["Format cells", "Ctrl+1 / Ctrl+Shift+F"],
+        ["Expand formula bar", "Ctrl+Shift+U"],
+        ["Select cells with notes", "Ctrl+Shift+O"],
+        ["Pick from this column", "Alt+Down"],
+        ["Name manager", "Ctrl+F3"],
       ];
       showModal("Keyboard shortcuts", rows.map(([a, b]) =>
         `<div class="kb-row"><span>${a}</span><span>${b.replace(/(\S+)/g, "<kbd>$1</kbd>").replace(/<kbd>\/<\/kbd>/g, "/")}</span></div>`).join(""));
@@ -8135,20 +8309,26 @@ function wireEvents() {
             "This workbook has changes that have not been downloaded. Starting a new one discards them, and undo will not bring them back.",
             "Discard and start new",
           ))) return;
-          stopMarch(); wasm.session_new(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
+          // `newDocument()` clears the opened name **and the save target**.
+          // Without it `Ctrl+S` on a brand-new workbook writes over the file
+          // that was open before it — the document on screen saved into
+          // somebody else's file, which is the worst shape a save bug takes.
+          // The desktop shell also drops the target when it sees `file.new`
+          // go past, but that is a second definition of one fact and this is
+          // the one that holds in a browser tab too.
+          stopMarch(); wasm.session_new(); newDocument(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
         }],
         ["Open…", clickEl("#tb-open")],
-        { sub: "Download", items: [
-          // First, and named for what it does rather than for a format: it is
-          // the only one of these that gives back the kind of file that was
-          // opened. The others are conversions, and a conversion chosen by
-          // accident is how a `.csv` becomes a package under its own name.
-          ["Same format as opened", () => saveAs("native")],
-          ["Excel (.xlsx)", () => saveAs("xlsx")],
-          ["CSV (.csv)", () => saveAs("csv")],
-          ["Tab-separated (.tsv)", () => saveAs("tsv")],
-          ["Pipe-separated (.psv)", () => saveAs("psv")],
-        ] },
+        // Built from `writable_extensions()` rather than written out here, the
+        // same way Open is built from `openable_extensions()`. A format the
+        // engine learns then appears without anyone remembering — `.ods` and
+        // `.xlsm` were reachable by the engine and absent from this menu for
+        // exactly as long as this list was a list.
+        //
+        // `"download"` is the intent: these write a copy. `Ctrl+S` saves in
+        // place, and the entry that gives back the kind of file that was
+        // opened must not quietly become that.
+        { sub: "Download", items: downloadItems() },
         // The only route into the collaboration server that is not a host
         // writing JavaScript. Hidden while `COL-46` is open — `canShare` is
         // `false` in every mode preset — so this line is present and

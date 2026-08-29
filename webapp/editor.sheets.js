@@ -352,26 +352,156 @@ export function isDirty() {
   return editsApplied() !== savedAtEdits;
 }
 
-export function doSave() {
-  download(
-    wasm.session_save(),
-    "opencalc.xlsx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+// --- What this build can write ----------------------------------------------
+//
+// `IO-07` and `IO-08` gave the engine ODS and macro-enabled `.xlsm`, and for a
+// while the editor could reach neither: `saveAs` knew four formats by name and
+// the Download submenu listed five entries by hand. That is the same shape the
+// shell's own format list had before `ODS-01` — a second list, drifting, greying
+// out a format the engine reads perfectly — so the answer is the same one:
+// **ask the engine**.
+
+/// Extensions this build can write, as the engine reports them.
+///
+/// `writable_extensions()` is deliberately narrower than what the engine
+/// *reads*: `.tab` names the TAB delimiter, whose own extension is `tsv`, so it
+/// is a name this engine opens and does not write. Offering it would be a menu
+/// entry whose save then refuses.
+///
+/// The floor on failure is the document's own format rather than nothing: a
+/// build that cannot answer this question can still write the file it opened,
+/// and a Download submenu with no entries is worse than one with too few.
+export function writableFormats() {
+  try {
+    return JSON.parse(wasm.writable_extensions())
+      .map((x) => String(x).replace(/^[."']+|["']+$/g, ""))
+      .filter(Boolean);
+  } catch (err) {
+    console.error("[opencalc] writable_extensions", err);
+    return ["xlsx"];
+  }
+}
+
+/// What a human calls a format, for the Download submenu.
+///
+/// The four that existed keep their exact wording, because the command id is
+/// slugged from the label (`commandId()`), and a reworded entry is a renamed
+/// command that every host rule naming it stops matching.
+const FORMAT_LABELS = {
+  xlsx: "Excel (.xlsx)",
+  xlsm: "Excel macro-enabled (.xlsm)",
+  ods: "OpenDocument (.ods)",
+  csv: "CSV (.csv)",
+  tsv: "Tab-separated (.tsv)",
+  psv: "Pipe-separated (.psv)",
+};
+
+/// The Download submenu, derived from the engine rather than written out.
+///
+/// "Same format as opened" leads and is named for what it does rather than for
+/// a format: it is the only one of these that gives back the kind of file that
+/// was opened. The others are conversions, and a conversion chosen by accident
+/// is how a `.csv` comes back as a package under its own name.
+///
+/// A format the engine learns appears here the day it does.
+export function downloadItems() {
+  return [
+    ["Same format as opened", () => saveAs("native", "download")],
+    ...writableFormats().map((ext) => [
+      FORMAT_LABELS[ext] || `${ext.toUpperCase()} (.${ext})`,
+      () => saveAs(ext, "download"),
+    ]),
+  ];
+}
+
+/// Put the cost of a format to the user, **before** any bytes exist.
+///
+/// `session_save_loss_for` takes the format the person picked, not the one they
+/// opened — and that distinction is the whole of `IO-08`'s user-facing half. A
+/// two-sheet workbook loses its other sheets to `.csv` and nothing to `.ods`; a
+/// macro workbook loses its macros to both. `session_save_loss()` could not tell
+/// those apart because it only ever answered about the session's own format, so
+/// `File ▸ Download ▸ Excel (.xlsx)` on a macro-enabled workbook said nothing at
+/// all while the VBA project was dropped.
+///
+/// Returns whether to go ahead. An empty report is not a question.
+async function confirmLoss(ext, verb) {
+  let loss = "";
+  try { loss = wasm.session_save_loss_for(ext); } catch {}
+  if (!loss) return true;
+  return await confirmModal(
+    `.${ext} cannot carry all of this`,
+    `${loss}. The file will hold everything a ${ext.toUpperCase()} file can, and nothing else.`,
+    `${verb} .${ext}`,
   );
+}
+
+/// Write the document as `ext`, whatever it was opened from.
+///
+/// **Always a download, never a save.** This is the conversion path — the user
+/// picked a format that is not necessarily the document's — and `docs/83` §2 is
+/// clear that a copy in another format is not where the document lives now. So
+/// it never acquires a save target and never moves one.
+export async function doSaveFormat(ext) {
+  if (!(await confirmLoss(ext, "Download"))) return false;
+  let written;
+  try {
+    written = await download(
+      wasm.session_save_as(ext),
+      `opencalc.${ext}`,
+      wasm.format_content_type(ext),
+    );
+  } catch (e) {
+    statusError(`could not save: ${errText(e)}`);
+    return false;
+  }
+  // `null` is a cancelled panel: not a failure, not a save, and nothing to say.
+  if (written === null || written === undefined) {
+    status.textContent = "";
+    return false;
+  }
   markSaved();
+  status.textContent = window.__opencalcNative
+    ? `wrote a copy — ${written}`
+    : `downloaded .${ext}`;
+  return true;
+}
+
+/// The raw `.xlsx` path, kept because it is part of the host surface.
+///
+/// It used to call `session_save()` with no loss report at all, which is how an
+/// `.xlsm` came back as an `.xlsx` with its macros silently gone (`IO-08`). It
+/// is now the generic path with `xlsx` filled in, so there is one place the
+/// question is asked.
+export function doSave() {
+  return doSaveFormat("xlsx");
 }
 
 export async function doSaveDelimited(delim, ext) {
   // Delimited text holds one sheet and no formatting. On a multi-sheet workbook
   // that is a lossy export chosen by someone who may not realise it, so it is
   // said before the download rather than after.
+  //
+  // **Not the generic `doSaveFormat` path**, and the reason is a feature:
+  // `session_save_delimited` writes the sheet the user is *looking at*, which
+  // `session_save_as("csv")` cannot express — it writes the first one. So this
+  // keeps its own writer and its own sentence, which names that sheet, and asks
+  // the engine for everything the sheet count does not cover.
   let sheets = 1;
   try { sheets = JSON.parse(wasm.session_sheet_names()).length; } catch {}
-  if (sheets > 1) {
+  let loss = "";
+  try { loss = wasm.session_save_loss_for(ext); } catch {}
+  if (sheets > 1 || loss) {
     const name = sheetNameAt(state.sheet);
+    const others = sheets > 1
+      ? `the other ${sheets - 1} sheet${sheets === 2 ? "" : "s"} and all formatting, formulas' styling and merges are not part of a ${ext.toUpperCase()} file`
+      : `formatting, formulas' styling and merges are not part of a ${ext.toUpperCase()} file`;
+    // The engine's own sentence, appended rather than replacing this one: it
+    // knows about the macro project and this does not, and it does not know
+    // which sheet is on screen.
     const ok = await confirmModal(
       `.${ext} holds one sheet`,
-      `Only "${name}" will be written — the other ${sheets - 1} sheet${sheets === 2 ? "" : "s"} and all formatting, formulas' styling and merges are not part of a ${ext.toUpperCase()} file.`,
+      `Only "${name}" will be written — ${others}.${loss ? ` And ${loss}.` : ""}`,
       `Export "${name}"`,
     );
     if (!ok) return false;
@@ -390,17 +520,96 @@ export async function doSaveDelimited(delim, ext) {
   return true;
 }
 
-export async function doSaveNative() {
+// --- The save target --------------------------------------------------------
+//
+// `docs/83` §2: **a document has one save target; `Ctrl+S` commits the document
+// to that target and never creates a second document.** Phase A (`SAVE-02`)
+// implements the `file` target — a path the desktop shell holds because a
+// platform panel returned it.
+//
+// Before this, `Ctrl+S` in the desktop shell raised a Save As panel every time,
+// so a user accumulated `opencalc (1).xlsx`, `opencalc (2).xlsx` beside the file
+// they had opened, and the file they had opened was never updated. Downloading
+// is not saving; `File ▸ Download` keeps doing what the keystroke used to.
+//
+// The shell decides nothing here beyond *where*: it holds the path, compares it
+// against what it looked like when the document was opened, and writes through
+// a temporary file and a rename so that a failed save never leaves the user
+// with neither the old file nor the new one.
+
+/// Commit `bytes` to the window's save target.
+///
+/// Three answers, because they are three different things for the caller to do:
+/// `true` the bytes landed, `false` they did not and the user has been told,
+/// and `"no-target"` — this document has never been saved, so the caller
+/// *acquires* a target through the panel rather than downloading.
+async function commitToTarget(bytes, force = false) {
+  const native = window.__opencalcNative;
+  let outcome;
+  try {
+    outcome = await native.saveTarget(bytes, force);
+  } catch (e) {
+    statusError(`could not save: ${errText(e)}`);
+    return false;
+  }
+  const status_ = outcome && outcome.status;
+  if (status_ === "written") {
+    // **Only now.** `SAVE-01`'s lesson, and the reason this is awaited at all:
+    // the document is marked saved by the completion of a write, never by the
+    // start of one.
+    markSaved();
+    status.textContent = `saved ${outcome.name}`;
+    return true;
+  }
+  if (status_ === "refused") {
+    // A file that changed underneath us is a question, not a report — another
+    // window, a sync client, or another application, and all three present
+    // identically (`docs/83` §5.3–5.4). Detection rather than a lock file: a
+    // stale lock strands a document nobody can then open.
+    if (outcome.kind === "changed" && !force) {
+      const ok = await confirmModal(
+        `${outcome.name} changed on disk`,
+        `Something else has written to ${outcome.name} since this window opened it — another window, another application, or a sync client. Saving now replaces what is there with this window's version, and what is there now cannot be brought back from here.`,
+        "Overwrite",
+      );
+      if (!ok) {
+        statusError(`not saved — ${outcome.name} changed on disk. File ▸ Download writes a copy under another name.`);
+        return false;
+      }
+      return await commitToTarget(bytes, true);
+    }
+    statusError(`could not save: ${outcome.why}`);
+    return false;
+  }
+  // `no-target`, and anything a future shell answers that this build does not
+  // know: acquire a target rather than claim a save that did not happen.
+  return "no-target";
+}
+
+/// The document's own format, to its own file.
+///
+/// `intent` is which command asked. `"save"` is `Ctrl+S` and commits to the
+/// target, acquiring one through the panel when there is none. `"download"` is
+/// `File ▸ Download ▸ Same format as opened`, which writes a copy and leaves
+/// the target where it is.
+export async function doSaveNative(intent = "save") {
   const ext = wasm.session_format();
-  // Said before the download, because afterwards the file is already on disk.
+  // Said before the write, because afterwards the file is already on disk.
   const loss = wasm.session_save_loss();
   if (loss) {
     const ok = await confirmModal(
       `.${ext} cannot carry all of this`,
-      `${loss}. The download will hold everything a ${ext.toUpperCase()} file can, and nothing else.`,
-      `Download .${ext}`,
+      `${loss}. The file will hold everything a ${ext.toUpperCase()} file can, and nothing else.`,
+      intent === "save" ? `Save .${ext}` : `Download .${ext}`,
     );
     if (!ok) return false;
+  }
+  const native = window.__opencalcNative;
+  if (intent === "save" && native && native.saveTarget) {
+    const done = await commitToTarget(wasm.session_save_native());
+    // Anything but "no-target" is an answer; only a document that has never
+    // been saved falls through to the panel below.
+    if (done !== "no-target") return done;
   }
   // **`markSaved()` only after the bytes have landed.** It used to run
   // immediately after `download()`, which returns before the desktop shell has
@@ -418,6 +627,10 @@ export async function doSaveNative() {
       wasm.session_save_native(),
       `opencalc.${ext}`,
       wasm.session_format_content_type(),
+      // Acquiring a target, not writing a copy: the file the user names in this
+      // panel is where the document lives from now on, so the next Ctrl+S goes
+      // straight there. A Download passes nothing and moves nothing.
+      { adopt: intent === "save" },
     );
   } catch (e) {
     statusError(`could not save: ${errText(e)}`);
@@ -432,17 +645,58 @@ export async function doSaveNative() {
   // In a browser tab this put a file in the downloads folder and the document
   // has no home to go back to; only a host that owns a file has actually
   // *saved* anything. `docs/83` turns on that distinction, so the word here
-  // has to keep it.
-  status.textContent = window.__opencalcNative ? `saved ${written}` : `downloaded .${ext}`;
+  // has to keep it — and on the desktop the distinction is now between the
+  // file the window commits to and a copy written beside it.
+  if (!window.__opencalcNative) status.textContent = `downloaded .${ext}`;
+  else status.textContent = intent === "save" ? `saved ${written}` : `wrote a copy — ${written}`;
+  // A `Ctrl+S` that acquired a target is where the document lives now, so the
+  // title bar has to say so — the shell adopted that path in the same call. A
+  // Download did not, and neither did a browser tab: a file in the downloads
+  // folder is a copy, and renaming the document to it would be the claim
+  // `docs/83` §2 exists to stop.
+  if (intent === "save" && window.__opencalcNative) openedName = written;
   return true;
 }
 
-export async function saveAs(fmt) {
+/// The window is showing a different document now.
+///
+/// `File ▸ New` replaces the session outright, and the shell has to be told:
+/// without this the next `Ctrl+S` writes a blank workbook over the file the
+/// window was showing a moment ago. `docs/83` §3.2 names missing this clear as
+/// the way a new document overwrites the last one.
+///
+/// The document name goes with it. It was already stale after a New — the
+/// desktop title bar kept naming a file that was no longer open — and a stale
+/// name is now also the thing the shell matches a save target against.
+export function newDocument() {
+  openedName = null;
+  const native = window.__opencalcNative;
+  if (native && native.clearSaveTarget) {
+    native.clearSaveTarget().catch((err) => console.error("[opencalc] clearSaveTarget", err));
+  }
+}
+
+/// The one entry point every save route goes through.
+///
+/// `fmt` is `"native"` — the document's own format — or any extension
+/// [`writableFormats`] reports. It is no longer a list of four names this
+/// function knows: `.ods` and `.xlsm` reach the engine because the engine says
+/// it writes them, not because anybody remembered to add a branch.
+///
+/// `intent` distinguishes `Ctrl+S` from `File ▸ Download` and applies only to
+/// `"native"`; every other format is a conversion, and a conversion is a
+/// download whichever command asked for it.
+export async function saveAs(fmt, intent = "save") {
   try {
-    if (fmt === "native") { await doSaveNative(); return; }
-    if (fmt === "xlsx") { doSave(); status.textContent = "downloaded .xlsx"; return; }
-    const delim = fmt === "csv" ? 44 : fmt === "tsv" ? 9 : 124;
-    if (await doSaveDelimited(delim, fmt)) status.textContent = "downloaded ." + fmt;
+    if (fmt === "native") { await doSaveNative(intent); return; }
+    // Delimited text writes the sheet on screen, which the generic path cannot
+    // express — see `doSaveDelimited`.
+    const delim = fmt === "csv" ? 44 : fmt === "tsv" ? 9 : fmt === "psv" ? 124 : 0;
+    if (delim) {
+      if (await doSaveDelimited(delim, fmt)) status.textContent = "downloaded ." + fmt;
+      return;
+    }
+    await doSaveFormat(fmt);
   } catch (e) { statusError(errText(e)); }
 }
 

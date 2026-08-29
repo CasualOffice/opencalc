@@ -36,7 +36,15 @@ export function htmlText(raw) {
 /// Returns a promise for the native path, so a caller that must know whether
 /// the bytes actually landed can wait for it. The browser path is synchronous
 /// and resolves immediately; `Promise.resolve` keeps one shape for both.
-export function download(data, name, type) {
+///
+/// `options.adopt` is the desktop shell's question and nothing else's: does the
+/// file the user picks in the panel *become* the file this window commits to?
+/// A `Ctrl+S` on a document that has never been saved acquires a target that
+/// way and passes `true`; `File ▸ Download ▸ CSV` writes a copy and does not,
+/// because a one-sheet export is not where the workbook lives now
+/// (`docs/83` §2, `SAVE-02`). Absent — every existing caller — it is `false`,
+/// which is the behaviour those callers already had.
+export function download(data, name, type, options) {
   const native = window.__opencalcNative;
   if (native) {
     const dot = name.lastIndexOf(".");
@@ -55,7 +63,7 @@ export function download(data, name, type) {
     // The promise resolves to the written file's name, or `null` when the user
     // cancelled — so a caller can tell "did not happen" from "went wrong", and
     // one that ignores it behaves exactly as before.
-    return native.save(bytes, ext);
+    return native.save(bytes, ext, !!(options && options.adopt));
   }
   const blob = new Blob([data], { type });
   const a = document.createElement("a");
