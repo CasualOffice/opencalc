@@ -402,9 +402,38 @@ export async function doSaveNative() {
     );
     if (!ok) return false;
   }
-  download(wasm.session_save_native(), `opencalc.${ext}`, wasm.session_format_content_type());
+  // **`markSaved()` only after the bytes have landed.** It used to run
+  // immediately after `download()`, which returns before the desktop shell has
+  // even raised its panel — so a cancelled save, a failed write, or the boot
+  // window where the shell still refuses everything cleared the dirty bullet
+  // and disarmed the close warning while nothing had been written. The user
+  // was told their work was safe and could then close the window (`SAVE-01`).
+  //
+  // `null` means the user cancelled, which is not a failure and not a save:
+  // the document stays dirty and nothing is reported, because they know what
+  // they did. A thrown error is a failure and is named.
+  let written;
+  try {
+    written = await download(
+      wasm.session_save_native(),
+      `opencalc.${ext}`,
+      wasm.session_format_content_type(),
+    );
+  } catch (e) {
+    statusError(`could not save: ${errText(e)}`);
+    return false;
+  }
+  if (written === null || written === undefined) {
+    status.textContent = "";
+    return false;
+  }
   markSaved();
-  status.textContent = "downloaded ." + ext;
+  // **A download is not a save, and the status must not claim otherwise.**
+  // In a browser tab this put a file in the downloads folder and the document
+  // has no home to go back to; only a host that owns a file has actually
+  // *saved* anything. `docs/83` turns on that distinction, so the word here
+  // has to keep it.
+  status.textContent = window.__opencalcNative ? `saved ${written}` : `downloaded .${ext}`;
   return true;
 }
 
