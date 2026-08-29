@@ -6482,11 +6482,26 @@ function wireEvents() {
       return;
     }
     const hit = cellAt(px, py);
-    if (hit) {
+    // **The right button does not move the selection here.**
+    //
+    // `mousedown` fires *before* `contextmenu`, so a right-click used to reach
+    // the `select()` below and collapse the selection to the clicked cell
+    // before the menu opened. Reported from a running editor: `Ctrl+A` took the
+    // block, a right-click inside it left one cell selected, and every verb in
+    // the menu then acted on that cell rather than on what the user was looking
+    // at — Delete included.
+    //
+    // The `contextmenu` handler already owns this policy and gets it right:
+    // right-clicking *inside* a selection keeps it, outside moves it, which is
+    // what Excel and Sheets both do. It just never got the chance. Buttons
+    // other than the primary one are left to it.
+    if (hit && e.button === 0) {
       endInline();
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { addRange(hit.row, hit.col); state.dragging = true; }
       else if (e.shiftKey) extend(hit.row, hit.col);
       else { select(hit.row, hit.col); state.dragging = true; }
+      canvas.focus();
+    } else if (hit) {
       canvas.focus();
     }
   });
