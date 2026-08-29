@@ -296,6 +296,31 @@ mod tests {
         assert!(css.contains("text-align:center;"));
     }
 
+    /// **An eight-digit OOXML colour is `AARRGGBB`; CSS reads `RRGGBBAA`.**
+    ///
+    /// Emitted unchanged, the alpha becomes the red channel: an opaque black
+    /// `FF000000` reads as `#FF0000` at zero alpha — fully transparent red. The
+    /// cell loses its colour on paste and in the printout, and nothing reports
+    /// it, because the string is a valid colour in both notations and only
+    /// means different things.
+    #[test]
+    fn an_eight_digit_colour_is_reordered_from_ooxml_to_css() {
+        let style = Style {
+            font_color: Some("FF000000".to_owned()), // opaque black
+            fill_color: Some("80FF0000".to_owned()), // half-transparent red
+            ..Style::default()
+        };
+        let css = html_cell_css(&style);
+        assert!(
+            css.contains("color:#000000FF;"),
+            "opaque black must stay black, not become transparent red: {css}"
+        );
+        assert!(
+            css.contains("background-color:#FF000080;"),
+            "the alpha belongs last in CSS: {css}"
+        );
+    }
+
     /// **A colour is hex, or it is not emitted.**
     ///
     /// `style.font_color` is whatever the file's `styles.xml` said — preserved
@@ -1257,8 +1282,9 @@ mod protection_tests {
 mod page_setup_tests {
     use super::{
         session_new, session_page_setup, session_print_html, session_set_cell,
-        session_set_page_setup, strip_hf_codes,
+        session_set_page_setup,
     };
+    use crate::view::{HfContext, HfPart, hf_sections};
 
     /// Every print attribute was carried verbatim with nothing able to change
     /// it, so a sheet imported as landscape could only ever be saved that way.
@@ -1321,15 +1347,244 @@ mod page_setup_tests {
         assert!(html.contains("Widget"), "{html}");
     }
 
-    /// Field codes are markup, not text. Printing them literally would put
-    /// `&L&"Calibri"Sales` at the top of the page.
+    /// Field codes are markup, not text, and they are **substituted** rather
+    /// than dropped.
+    ///
+    /// `strip_hf_codes` turned every one into a space, so `&P` — the code the
+    /// dialog's own placeholder text advertises — could not put a page number
+    /// on the paper at all.
     #[test]
-    fn header_field_codes_are_stripped_not_printed() {
-        assert_eq!(strip_hf_codes("&LSales&C&P"), "Sales");
-        assert_eq!(strip_hf_codes("&\"Arial,Bold\"&14Report"), "Report");
-        // `&&` is a literal ampersand and must survive.
-        assert_eq!(strip_hf_codes("Profit && Loss"), "Profit & Loss");
-        assert_eq!(strip_hf_codes(""), "");
+    fn header_field_codes_are_substituted_into_their_three_sections() {
+        let ctx = HfContext {
+            sheet: "Q3",
+            file: "",
+            now: None,
+        };
+        // Section codes place the text; the page number survives as a token.
+        let [left, centre, right] = hf_sections("&LSales&RPage &P of &N", &ctx);
+        assert_eq!(left, vec![HfPart::Text("Sales".to_owned())]);
+        assert!(centre.is_empty(), "{centre:?}");
+        assert_eq!(
+            right,
+            vec![
+                HfPart::Text("Page ".to_owned()),
+                HfPart::PageNumber,
+                HfPart::Text(" of ".to_owned()),
+                HfPart::PageCount,
+            ]
+        );
+
+        // Font and point-size codes are consumed; the text between survives.
+        let [_, centre, _] = hf_sections("&\"Arial,Bold\"&14Report", &ctx);
+        assert_eq!(centre, vec![HfPart::Text("Report".to_owned())]);
+
+        // `&&` is a literal ampersand and must survive; `&A` is the sheet name.
+        let [_, centre, _] = hf_sections("Profit && Loss - &A", &ctx);
+        assert_eq!(centre, vec![HfPart::Text("Profit & Loss - Q3".to_owned())]);
+
+        assert!(hf_sections("", &ctx).iter().all(Vec::is_empty));
+    }
+
+    /// The page number reaches the printed document as a CSS page counter in an
+    /// `@page` margin box, which is the one place a browser can count pages.
+    #[test]
+    fn the_page_number_is_emitted_as_a_page_counter() {
+        session_new();
+        session_set_cell(0, 0, 0, "Widget").unwrap();
+        session_set_page_setup(
+            0,
+            vec!["hf.oddFooter".to_owned()],
+            vec!["&CPage &P of &N".to_owned()],
+        )
+        .unwrap();
+        let html = session_print_html(0);
+        assert!(
+            html.contains("@bottom-center{content:\"Page \" counter(page) \" of \" counter(pages)"),
+            "{html}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod print_fidelity_tests {
+    use super::{
+        session_hide_cols, session_merge_cells, session_new, session_print_html,
+        session_set_border, session_set_cell, session_set_col_width, session_set_page_setup,
+        session_set_print_area, session_set_row_height,
+    };
+
+    /// The printout is the deliverable for a lot of users, and it was not the
+    /// sheet: `<table style="table-layout:fixed">` with no `<col>` anywhere, so
+    /// every column printed at the same width whatever the screen showed
+    /// (`docs/12` §3.17, switching-blocker #5).
+    #[test]
+    fn column_widths_and_row_heights_reach_the_printed_table() {
+        session_new();
+        session_set_cell(0, 0, 0, "wide").unwrap();
+        session_set_cell(0, 0, 1, "narrow").unwrap();
+        session_set_col_width(0, 0, 200).unwrap();
+        session_set_col_width(0, 1, 40).unwrap();
+        session_set_row_height(0, 0, 33).unwrap();
+        let html = session_print_html(0);
+        assert!(
+            html.contains(
+                "<colgroup><col style=\"width:200px\"><col style=\"width:40px\"></colgroup>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("height:33px"), "{html}");
+    }
+
+    /// Merges printed as separate cells: the generator emitted no `colspan` or
+    /// `rowspan` at all, so a merged title printed as one cell of text beside
+    /// the empty cells it had swallowed on screen.
+    #[test]
+    fn merges_print_as_colspan_and_rowspan() {
+        session_new();
+        session_set_cell(0, 0, 0, "Title").unwrap();
+        session_set_cell(0, 2, 0, "below").unwrap();
+        session_merge_cells(0, 0, 0, 1, 2).unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("colspan=\"3\""), "{html}");
+        assert!(html.contains("rowspan=\"2\""), "{html}");
+        // The cells the merge covers must not also be emitted, or the row has
+        // more cells in it than the table has columns.
+        assert_eq!(html.matches("<td").count(), 4, "{html}");
+    }
+
+    /// A span counts the lines that *print*, not the lines the model holds.
+    ///
+    /// Both halves of this are ways to emit a row with more cells in it than
+    /// the table has columns, which renders as a staircase rather than as a
+    /// table: a merge over a hidden column, and a merge whose top-left the
+    /// print area clips away so nothing is left to hang the span on.
+    #[test]
+    fn a_span_counts_printed_lines_not_model_lines() {
+        session_new();
+        session_set_cell(0, 0, 0, "Banner").unwrap();
+        session_set_cell(0, 1, 0, "a").unwrap();
+        session_set_cell(0, 1, 1, "b").unwrap();
+        session_set_cell(0, 1, 2, "c").unwrap();
+        session_merge_cells(0, 0, 0, 0, 2).unwrap();
+        session_hide_cols(0, 1, 1).unwrap();
+        let html = session_print_html(0);
+        assert!(
+            html.contains("colspan=\"2\""),
+            "a hidden column narrows the span: {html}"
+        );
+        // Two printed columns, and the banner row must hold exactly one cell.
+        assert_eq!(html.matches("<col ").count(), 2, "{html}");
+        assert_eq!(html.matches("<td").count(), 3, "{html}");
+
+        // Now clip the merge's top-left away with a print area. The first
+        // corner that still prints has to carry the span, or the row loses a
+        // cell and the table renders as a staircase.
+        session_new();
+        session_set_cell(0, 0, 0, "Banner").unwrap();
+        session_set_cell(0, 1, 1, "b").unwrap();
+        session_set_cell(0, 1, 2, "c").unwrap();
+        session_merge_cells(0, 0, 0, 0, 2).unwrap();
+        session_set_print_area(0, 0, 1, 1, 2).unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("colspan=\"2\""), "{html}");
+        assert_eq!(html.matches("<col ").count(), 2, "{html}");
+        assert_eq!(html.matches("<td").count(), 3, "{html}");
+    }
+
+    /// Cell borders did not print. The only border rule was a blanket
+    /// `td,th{border:1px solid #b0b0b0}` behind the gridlines switch, so a
+    /// styled table printed as either a uniform grey grid or nothing.
+    #[test]
+    fn cell_borders_are_carried_into_the_printed_cell() {
+        session_new();
+        session_set_cell(0, 0, 0, "boxed").unwrap();
+        session_set_border(0, 0, 0, 0, 0, "all", "medium", "FF0000").unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("border-top:2px solid #FF0000;"), "{html}");
+        assert!(html.contains("border-bottom:2px solid #FF0000;"), "{html}");
+        assert!(html.contains("border-left:2px solid #FF0000;"), "{html}");
+        assert!(html.contains("border-right:2px solid #FF0000;"), "{html}");
+    }
+
+    /// The three scale controls in Page setup changed the saved file and
+    /// nothing else: the emitted CSS was only `@page{size:…;margin:…}`.
+    #[test]
+    fn the_scale_percent_is_applied_to_the_printed_table() {
+        session_new();
+        session_set_cell(0, 0, 0, "x").unwrap();
+        session_set_page_setup(0, vec!["page.scale".to_owned()], vec!["70".to_owned()]).unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("table{zoom:0.7}"), "{html}");
+    }
+
+    /// Fit-to-width is arithmetic over the grid against the printable area, so
+    /// only the engine can answer it — CSS has no fit-to-page primitive.
+    ///
+    /// Twenty 200 px columns is 4000 px of grid; Letter portrait less 0.7 in
+    /// margins leaves 7.1 in, which is 681.6 px. The scale is that ratio.
+    #[test]
+    fn fit_to_one_page_wide_shrinks_the_table_to_the_printable_width() {
+        session_new();
+        for c in 0..20u32 {
+            session_set_cell(0, 0, c, "x").unwrap();
+            session_set_col_width(0, c, 200).unwrap();
+        }
+        session_set_page_setup(
+            0,
+            vec![
+                "setupPr.fitToPage".to_owned(),
+                "page.fitToWidth".to_owned(),
+                "page.fitToHeight".to_owned(),
+            ],
+            vec!["1".to_owned(), "1".to_owned(), "0".to_owned()],
+        )
+        .unwrap();
+        let html = session_print_html(0);
+        assert!(html.contains("table{zoom:0.17}"), "{html}");
+
+        // Fit-to-page only shrinks. A sheet that already fits is left alone,
+        // not blown up to fill the paper.
+        session_new();
+        session_set_cell(0, 0, 0, "x").unwrap();
+        session_set_page_setup(
+            0,
+            vec![
+                "setupPr.fitToPage".to_owned(),
+                "page.fitToWidth".to_owned(),
+                "page.fitToHeight".to_owned(),
+            ],
+            vec!["1".to_owned(), "1".to_owned(), "0".to_owned()],
+        )
+        .unwrap();
+        assert!(
+            !session_print_html(0).contains("zoom:"),
+            "fit-to-page enlarged a sheet that fits"
+        );
+    }
+
+    /// A header is workbook text and reaches a `<style>` element, where
+    /// `push_html_escaped` is no defence: `&lt;` inside a stylesheet is four
+    /// literal characters. `</style>` in a header would close the sheet and let
+    /// the rest run as markup, in a popup carrying the editor's origin.
+    #[test]
+    fn a_header_cannot_close_the_style_element() {
+        session_new();
+        session_set_cell(0, 0, 0, "x").unwrap();
+        session_set_page_setup(
+            0,
+            vec!["hf.oddHeader".to_owned()],
+            vec!["&C</style><img src=x onerror=alert(1)>".to_owned()],
+        )
+        .unwrap();
+        let html = session_print_html(0);
+        let style = html.split("<style>").nth(1).unwrap_or_default();
+        let style = style.split("</style>").next().unwrap_or_default();
+        assert!(style.contains("@top-center{content:"), "{html}");
+        assert!(
+            !style.contains('<'),
+            "a raw `<` survived into the stylesheet: {style}"
+        );
+        assert!(!html.contains("onerror=alert(1)>"), "{html}");
     }
 }
 

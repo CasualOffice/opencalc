@@ -22,6 +22,7 @@ pub mod conditional;
 mod display;
 mod geometry;
 mod numfmt;
+pub mod print;
 pub mod table_style;
 
 pub use axis::Axis;
@@ -636,7 +637,12 @@ fn border_line(edge: &BorderEdge) -> BorderLine {
 
 /// The pixel width for an OOXML border line-style token. Unknown tokens fall
 /// back to a thin (1px) line so any style still paints.
-fn border_width(token: &str) -> u32 {
+///
+/// Public because the printed page has to agree with the drawn one: the print
+/// path emits CSS border widths, and a second table of tokens there would be a
+/// second answer to the same question.
+#[must_use]
+pub fn border_width(token: &str) -> u32 {
     match token {
         "hair" | "thin" | "dashed" | "dotted" | "dashDot" | "dashDotDot" => 1,
         "medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" | "slantDashDot" => 2,
