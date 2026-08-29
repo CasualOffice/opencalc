@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
-use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+use casual_calc_model::{Cell, CellRange, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use casual_calc_transaction::protocol::{
     ClientMessage, Draft, PROTOCOL_VERSION, Refusal, ServerMessage,
 };
@@ -4095,11 +4095,21 @@ async fn an_edit_that_could_not_be_merged_is_not_a_save_failure() {
             seq: 2,
             base: Base::Revision(0),
             ops: vec![WireOperation {
-                op: Operation::MoveColumns {
+                // `MoveRange`, not `MoveColumns`. This test used a column
+                // move to produce an unmergeable pair, because before `COL-44`
+                // every concurrent move was refused. `COL-44` gave line moves
+                // a transform, so that pair now merges and the server acks it
+                // — the feature landing, visible at the protocol level.
+                //
+                // A rectangle move is refused on a stated ground rather than
+                // for want of an implementation: it is not a permutation, it
+                // overwrites, and a concurrent delete can cut its source into
+                // a shape no rectangle names. So it is the right op for a test
+                // about what the server *says* when a pair cannot be merged.
+                op: Operation::MoveRange {
                     sheet: 0,
-                    at: 0,
-                    count: 1,
-                    before: 3,
+                    from: CellRange::new(CellRef::new(0, 0), CellRef::new(0, 1)),
+                    to: CellRef::new(4, 4),
                 },
                 formulas: Default::default(),
                 styles: Default::default(),
