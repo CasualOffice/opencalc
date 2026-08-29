@@ -1398,6 +1398,132 @@ fn remove_sheet_restores_full_contents_on_undo() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// A chart series naming a sheet that is removed (`CHT-08`).
+// ---------------------------------------------------------------------------
+
+/// A workbook of two sheets, `S` and `Other`, with a chart on `S` plotting one
+/// series from each. `Other!$A$1:$A$3` is the one that has to break.
+fn workbook_with_a_cross_sheet_chart() -> Workbook {
+    use casual_calc_model::{ChartKind, ChartSeries, ChartView};
+
+    let mut wb = workbook();
+    wb.sheets.push(named_sheet(3, "Other"));
+    let mut chart = ChartView::new(
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+        ChartKind::Column,
+    );
+    chart.series.push(ChartSeries {
+        name: "Rev".to_owned(),
+        categories: Some("S!$A$2:$A$4".to_owned()),
+        values: "S!$B$2:$B$4".to_owned(),
+    });
+    chart.series.push(ChartSeries {
+        name: "FromOther".to_owned(),
+        categories: Some("Other!$A$1:$A$3".to_owned()),
+        values: "Other!$B$1:$B$3".to_owned(),
+    });
+    wb.sheets[0].charts.push(chart);
+    wb
+}
+
+fn series_text(wb: &Workbook) -> Vec<(String, Option<String>)> {
+    wb.sheets[0].charts[0]
+        .series
+        .iter()
+        .map(|s| (s.values.clone(), s.categories.clone()))
+        .collect()
+}
+
+/// **A series naming a removed sheet collapses to `#REF!`.**
+///
+/// It used to keep the sheet *name*, which is not a broken reference — it is a
+/// reference waiting for something to answer to that name. Same spelling a
+/// `DeleteRows` already writes into a series whose rows it took, so the chart
+/// path is one convention rather than two.
+#[test]
+fn removing_a_sheet_breaks_the_chart_series_that_named_it() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    assert_eq!(
+        series_text(&wb),
+        vec![
+            ("S!$B$2:$B$4".to_owned(), Some("S!$A$2:$A$4".to_owned())),
+            ("#REF!".to_owned(), Some("#REF!".to_owned())),
+        ],
+        "the series naming the removed sheet must break, and the other must not"
+    );
+}
+
+/// **And a new sheet of the same name does not inherit it.**
+///
+/// This is the half that made `CHT-08` worse than a broken chart: the series
+/// kept the *name*, so anything later called `Other` — an import, a duplicate,
+/// a sheet a collaborator added — was silently plotted in its place. A chart
+/// showing somebody else's numbers under the old series' name is a lie the
+/// picture gives no hint of.
+#[test]
+fn a_recreated_sheet_of_the_same_name_does_not_adopt_the_old_series() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 1,
+            sheet: Box::new(named_sheet(9, "Other")),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(wb.sheets[1].name, "Other", "the name is back");
+    assert_eq!(
+        series_text(&wb)[1],
+        ("#REF!".to_owned(), Some("#REF!".to_owned())),
+        "the series must stay broken rather than adopt the new sheet"
+    );
+}
+
+/// Case is not a defence: a reference resolves case-insensitively, so
+/// `other!$B$1` names `Other` and has to break with it.
+#[test]
+fn a_series_naming_the_removed_sheet_in_another_case_breaks_too() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    wb.sheets[0].charts[0].series[1].values = "other!$B$1:$B$3".to_owned();
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    assert_eq!(series_text(&wb)[1].0, "#REF!");
+}
+
+/// Undo restores the references, not just the sheet. The inverse becomes a
+/// batch only when something broke — a removal that broke nothing keeps the
+/// single `InsertSheet` it always had, so the common case is unchanged.
+#[test]
+fn undoing_the_removal_restores_the_broken_series() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    let before = series_text(&wb);
+    let inverse = apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    assert!(
+        matches!(inverse, Operation::Batch(_)),
+        "the inverse has to carry the reference restore: {inverse:?}"
+    );
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    assert_eq!(wb.sheets[1].name, "Other");
+    assert_eq!(
+        series_text(&wb),
+        before,
+        "undo must put the references back"
+    );
+
+    // And a removal that breaks nothing still inverts to one operation.
+    let mut plain = workbook();
+    plain.sheets.push(named_sheet(3, "Other"));
+    let inverse = apply(&mut plain, Operation::RemoveSheet { index: 1 }).unwrap();
+    assert!(
+        matches!(inverse, Operation::InsertSheet { .. }),
+        "{inverse:?}"
+    );
+}
+
 #[test]
 fn remove_missing_sheet_errors() {
     let mut wb = workbook();

@@ -1327,12 +1327,29 @@ mod charts {
         assert_eq!(value_extent(&series), (0.0, 3.0));
     }
 
-    /// Series colours come from the workbook's own theme accents, and cycle.
+    /// Series colours come from the workbook's own theme accents.
+    ///
+    /// **This test used to assert the defect** (`CHT-09`): it pinned
+    /// `series_colors(&wb, 7)[6] == "4472C4"` with the comment *"the palette
+    /// cycles"*. Two things were tangled in that one line. The part worth
+    /// keeping is that the palette is *the file's theme* and not a list
+    /// invented here — that is checked below and unchanged. The part that was
+    /// wrong is the literal repeat: cycling six accents gives series 1 and
+    /// series 7 the same fill and a legend that cannot tell them apart. So the
+    /// assertion is not overridden, it is split: the theme is still the source,
+    /// and the seventh colour is now a *variant* of the first rather than the
+    /// first.
     #[test]
     fn series_colours_are_the_workbook_theme_accents() {
         let mut wb = wb();
         assert_eq!(series_colors(&wb, 2), vec!["4472C4", "ED7D31"]);
-        assert_eq!(series_colors(&wb, 7)[6], "4472C4", "the palette cycles");
+        // Accent 1 darkened 25%, Excel's own variant of the colour it shares a
+        // slot with — recognisably the same hue, and not the same fill.
+        assert_eq!(
+            series_colors(&wb, 7)[6],
+            "335693",
+            "a variant, not a repeat"
+        );
         wb.theme_colors = vec![
             String::new(),
             String::new(),
@@ -1341,6 +1358,39 @@ mod charts {
             "AA0000".to_owned(),
         ];
         assert_eq!(series_colors(&wb, 1), vec!["AA0000"], "this file's accent");
+    }
+
+    /// The seventh series must not repeat the first's fill — the whole of
+    /// `CHT-09`, asserted as a property rather than as one literal so it keeps
+    /// holding if the theme or the variant table changes.
+    #[test]
+    fn no_two_of_the_first_twelve_series_share_a_colour() {
+        let wb = wb();
+        let colors = series_colors(&wb, 12);
+        assert_eq!(colors[0], "4472C4");
+        for (i, a) in colors.iter().enumerate() {
+            for (j, b) in colors.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "series {} and series {} share {a}", i + 1, j + 1);
+            }
+        }
+    }
+
+    /// A theme colour this file spells in a way the variant arithmetic cannot
+    /// read is returned as it stands. Repeating an accent is a bad picture;
+    /// inventing a colour for one is a wrong one.
+    #[test]
+    fn an_unreadable_theme_colour_is_not_guessed_at() {
+        let mut wb = wb();
+        wb.theme_colors = vec![
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "not a colour".to_owned(),
+        ];
+        let colors = series_colors(&wb, 7);
+        assert_eq!(colors[0], "not a colour");
+        assert_eq!(colors[6], "not a colour");
     }
 
     /// A chart over `A1:F10` — 384x200 px at 96 dpi with the default geometry,
@@ -1758,6 +1808,251 @@ mod charts {
         let json = serde_json::to_string(&list).expect("serializes");
         let back: crate::DisplayList = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, list);
+    }
+
+    // --- A series whose sheet went away (CHT-08) -------------------------
+
+    /// A series whose reference names no cells at all is **kept and marked**,
+    /// where it used to be filtered out of the resolved list and vanish from
+    /// the picture with nothing said.
+    #[test]
+    fn a_series_naming_a_missing_sheet_is_kept_and_marked() {
+        let wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3", "Gone!$A$1:$A$3"]);
+        chart.series[0].name = "Rev".to_owned();
+        chart.series[1].name = "FromGone".to_owned();
+        let (_, series) = resolve(&wb, 0, &chart);
+        assert_eq!(
+            series.len(),
+            2,
+            "the broken series was dropped in silence: {series:?}"
+        );
+        assert!(!series[0].broken, "the live series must not be marked");
+        assert!(series[1].broken, "the dead one must be");
+        assert!(
+            series[1].values.is_empty(),
+            "a broken series plots nothing: {:?}",
+            series[1].values
+        );
+    }
+
+    /// A range of blank cells is **not** broken. The distinction is the point:
+    /// a chart waiting for numbers and a chart that lost them are different
+    /// faults, and marking the first `#REF!` would be its own lie.
+    #[test]
+    fn an_empty_range_is_unfilled_and_not_broken() {
+        let wb = wb();
+        // `$D$1:$D$3` is inside the sheet and holds nothing.
+        let chart = column_chart(&["$D$1:$D$3"]);
+        let (_, series) = resolve(&wb, 0, &chart);
+        assert!(
+            series.is_empty(),
+            "an empty range is still dropped rather than plotted as zeroes: {series:?}"
+        );
+    }
+
+    /// And the legend says so, so the picture names the series it cannot draw.
+    #[test]
+    fn the_legend_marks_a_broken_series() {
+        let mut wb = wb();
+        let mut chart = column_chart(&["$A$1:$A$3", "Gone!$A$1:$A$3"]);
+        chart.series[0].name = "Rev".to_owned();
+        chart.series[1].name = "FromGone".to_owned();
+        chart.legend = Some("r".to_owned());
+        wb.sheets[0].charts.push(chart);
+
+        let found = labels(&layout_full(&wb, 0, &GridGeometry::default()));
+        assert!(
+            found.contains(&"FromGone (#REF!)".to_owned()),
+            "the legend must name the dead series and mark it: {found:?}"
+        );
+        assert!(
+            found.contains(&"Rev".to_owned()),
+            "and leave the live one alone: {found:?}"
+        );
+    }
+
+    /// Every series broken is not "no data" — it is a chart that had data.
+    #[test]
+    fn a_chart_whose_every_series_is_broken_says_which_fault_it_has() {
+        let mut wb = wb();
+        wb.sheets[0].charts.push(column_chart(&["Gone!$A$1:$A$3"]));
+        let found = labels(&layout_full(&wb, 0, &GridGeometry::default()));
+        assert!(
+            found.contains(&"series reference broken (#REF!)".to_owned()),
+            "{found:?}"
+        );
+        assert!(!found.contains(&"no data".to_owned()), "{found:?}");
+    }
+
+    // --- The bar plot's bound (CHT-06) ----------------------------------
+
+    /// A frame 400x300 CSS pixels, in twips, which is the size the measurement
+    /// in `docs/84` §3.5 was taken at.
+    fn frame_400x300() -> crate::Rect {
+        crate::Rect {
+            x: 0,
+            y: 0,
+            w: (400.0 * PX) as i64,
+            h: (300.0 * PX) as i64,
+        }
+    }
+
+    /// A workbook with `rows` rows of `series` columns starting at `B1`, each
+    /// column a series, plus one outlier planted at `spike_row` in column B.
+    fn wide_workbook(rows: u32, series: u32, spike_row: u32) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut s = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for r in 0..rows {
+            for c in 0..series {
+                let v = if c == 0 && r == spike_row {
+                    1_000_000.0
+                } else {
+                    f64::from(r % 50) + 1.0
+                };
+                s.cells
+                    .set(CellRef::new(r, c + 1), Cell::value(CellValue::Number(v)));
+            }
+        }
+        wb.sheets.push(s);
+        wb
+    }
+
+    fn wide_chart(rows: u32, series: u32) -> ChartView {
+        let refs: Vec<String> = (0..series)
+            .map(|c| {
+                let col = char::from(b'B' + u8::try_from(c).expect("fits"));
+                format!("${col}$1:${col}${rows}")
+            })
+            .collect();
+        let mut ch = ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            ChartKind::Column,
+        );
+        ch.series = refs
+            .iter()
+            .map(|v| ChartSeries {
+                name: String::new(),
+                categories: None,
+                values: v.clone(),
+            })
+            .collect();
+        ch
+    }
+
+    /// **The bound, structurally.** Six series over 1,000 rows emitted 6,007
+    /// display-list items — one polygon per point per series, uncapped, and
+    /// every one of the 6,000 bars zero pixels wide because `bar_w` had hit its
+    /// clamp. The bound is stated in items, not in milliseconds, because a
+    /// wall-clock assertion on a shared machine is a test that gets deleted.
+    #[test]
+    fn a_bar_plot_is_bounded_by_what_the_plot_can_resolve() {
+        for rows in [1_000u32, 5_000] {
+            let wb = wide_workbook(rows, 6, 7);
+            let chart = wide_chart(rows, 6);
+            let mut list = crate::DisplayList::new();
+            crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+            let bars = polygons(&list).len() - 1; // less the frame's own ground
+            assert!(
+                bars <= 128,
+                "{rows} rows x 6 series emitted {bars} bar polygons; \
+                 uncapped that is {}",
+                rows * 6
+            );
+            assert!(
+                bars > 0,
+                "the plot drew nothing at all, which is not a bound but a blank"
+            );
+            assert!(
+                list.items.len() < 200,
+                "{rows} rows x 6 series is {} display-list items",
+                list.items.len()
+            );
+        }
+    }
+
+    /// **And the bound is honest.** A bucket is drawn from its minimum to its
+    /// maximum, so the one row in five thousand holding a spike still reaches
+    /// the top of the plot. A cap that kept every nth point would drop it and
+    /// the chart would say the spike never happened.
+    #[test]
+    fn bucketing_keeps_the_outlier_it_would_be_a_lie_to_drop() {
+        let rows = 5_000u32;
+        let wb = wide_workbook(rows, 6, 3_331);
+        let chart = wide_chart(rows, 6);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+
+        let bars = polygons(&list);
+        // The plot's top edge: the tallest bar must reach it, and only the
+        // spike is anywhere near 1,000,000.
+        let top = bars
+            .iter()
+            .skip(1)
+            .flat_map(|(pts, _)| pts.iter().map(|p| p.y))
+            .min()
+            .expect("bars");
+        let floor = bars
+            .iter()
+            .skip(1)
+            .flat_map(|(pts, _)| pts.iter().map(|p| p.y))
+            .max()
+            .expect("bars");
+        // The spike is 20,000x the next value, so if it were dropped every bar
+        // would be within a whisker of the zero line — the axis still scales to
+        // 1,000,000 because `value_extent` sees every point — instead of
+        // spanning the plot.
+        let spike_reaches = (floor - top) as f64;
+        let plot_h = 300.0 * PX;
+        assert!(
+            spike_reaches > plot_h * 0.5,
+            "the tallest bar spans {spike_reaches} twips of a {plot_h}-twip frame — \
+             the outlier was dropped rather than kept"
+        );
+    }
+
+    /// A series shorter than the longest keeps every point it has.
+    ///
+    /// Found by asking what the bucketing does at the ragged end: the bucket
+    /// range is built from the *longest* series' point count, so a short series
+    /// has buckets that run past its last value. Slicing that out of bounds
+    /// returns nothing for the whole bucket, which would drop the points at its
+    /// start that do exist.
+    #[test]
+    fn a_series_shorter_than_the_longest_keeps_its_points() {
+        // Ragged **references**, not ragged data: `ref_numbers` returns one
+        // entry per cell of the range, gaps included, so blanking cells gives
+        // two series of equal length and would prove nothing here. Two ranges
+        // of different sizes is what makes one `values` vector shorter.
+        let wb = wide_workbook(600, 2, 999);
+        let mut chart = wide_chart(600, 2);
+        chart.series[1].values = "$C$1:$C$295".to_owned();
+
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let fills: Vec<String> = polygons(&list).into_iter().map(|(_, f)| f).collect();
+        let first = fills.iter().filter(|f| *f == "4472C4").count();
+        let second = fills.iter().filter(|f| *f == "ED7D31").count();
+        assert!(second > 0, "the short series drew nothing: {fills:?}");
+        assert_eq!(
+            second,
+            first.div_ceil(2),
+            "the short series covers just under half the rows, so it must fill \
+             every bucket that starts inside them and no fewer: {first} vs {second}"
+        );
+    }
+
+    /// Below the bound nothing changes: an uncapped plot is the plot it always
+    /// was, point for point. This is the control — a cap that fired on every
+    /// chart would pass the two tests above and ruin every real one.
+    #[test]
+    fn a_plot_inside_the_bound_is_untouched() {
+        let wb = wide_workbook(3, 2, 99);
+        let chart = wide_chart(3, 2);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        // Ground, plus one bar per point per series, and none merged.
+        assert_eq!(polygons(&list).len(), 1 + 3 * 2);
     }
 }
 

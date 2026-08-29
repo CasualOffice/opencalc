@@ -682,7 +682,7 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
 /// [`Operation::SetSheetMetadata`]. Used as a delete's inverse so undo reinstates
 /// merges, sizing, hidden lines, and frozen panes the delete may have dropped —
 /// re-inserting an empty band cannot resurrect them.
-fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
+pub(crate) fn snapshot_metadata(workbook: &Workbook, sheet: usize) -> Operation {
     // `ALL` and not a narrower set on purpose: this is a *pre*-mutation
     // snapshot, taken before anyone knows which fields the delete will drop.
     // `apply` narrows it against the post-delete sheet when the undo runs,
@@ -1610,6 +1610,95 @@ fn rewrite_chart_series(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Removing a whole sheet: the chart series that named it (`CHT-08`).
+// ---------------------------------------------------------------------------
+
+/// Every sheet index whose charts name `gone`, in ascending order.
+///
+/// Read before the sheet is removed so [`crate::apply`] can snapshot exactly
+/// those sheets for the inverse and no others: an undo that rewrote every
+/// sheet's metadata would be a much larger operation than the edit it reverses.
+pub(crate) fn sheets_charting(workbook: &Workbook, gone: &str) -> Vec<usize> {
+    workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .filter(|(_, sheet)| {
+            sheet.charts.iter().any(|chart| {
+                chart.series.iter().any(|series| {
+                    names_sheet(&series.values, gone)
+                        || series
+                            .categories
+                            .as_deref()
+                            .is_some_and(|text| names_sheet(text, gone))
+                })
+            })
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Collapse to `#REF!` every chart series reference that names `gone`.
+///
+/// **The convention is the one chart series already follow.** A `DeleteRows`
+/// that takes the rows out from under a series rewrites that series to `#REF!`
+/// through `rewrite_range` — removing the whole sheet deletes the same data at
+/// a coarser grain, and was the only delete that left the reference spelled by
+/// name. Leaving it spelled by name is what let a chart re-resolve against an
+/// unrelated sheet created later under the same name (`CHT-08`): the picture
+/// changed from one workbook's numbers to another's with nothing raised.
+///
+/// A *cell formula* is deliberately left alone here, and that is not an
+/// inconsistency: a formula's dead reference is visible where the user works —
+/// the cell prints `#REF!` — so both the break and any later re-resolution are
+/// on screen. A chart series' dead reference is visible nowhere, which is the
+/// whole of why this one has to be written down in the model.
+pub(crate) fn break_series_naming(workbook: &mut Workbook, gone: &str) {
+    for sheet in workbook.sheets.iter_mut() {
+        for chart in sheet.charts.iter_mut() {
+            for series in chart.series.iter_mut() {
+                if names_sheet(&series.values, gone) {
+                    series.values = ref_error().to_string();
+                }
+                if let Some(text) = series.categories.as_deref()
+                    && names_sheet(text, gone)
+                {
+                    series.categories = Some(ref_error().to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Whether a reference string is qualified with `sheet`.
+///
+/// Compared case-insensitively because that is how a reference resolves — the
+/// evaluator and the chart data resolver both find a sheet with
+/// `eq_ignore_ascii_case`, so `other!$A$1` names the sheet `Other` and has to
+/// break with it.
+fn names_sheet(text: &str, sheet: &str) -> bool {
+    fn walk(expr: &Expr, sheet: &str) -> bool {
+        let named = |r: &StoredRef| {
+            r.sheet
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(sheet))
+        };
+        match expr {
+            Expr::Reference(r) => named(r),
+            Expr::Range(a, b) => named(a) || named(b),
+            Expr::Unary { operand, .. } => walk(operand, sheet),
+            Expr::Binary { left, right, .. } => walk(left, sheet) || walk(right, sheet),
+            Expr::Function { args, .. } => args.iter().any(|arg| walk(arg, sheet)),
+            Expr::Call { callee, args } => {
+                walk(callee, sheet) || args.iter().any(|arg| walk(arg, sheet))
+            }
+            _ => false,
+        }
+    }
+    casual_calc_formula::parse(text).is_ok_and(|expr| walk(&expr, sheet))
 }
 
 /// Parse `text` as a reference, shift it, and print it back — `None` when it

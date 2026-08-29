@@ -1092,11 +1092,37 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             if index >= workbook.sheets.len() {
                 return Err(TxnError::SheetNotFound { index });
             }
+            // A chart series names its sheet by *name*, so the sheet going away
+            // does not break the reference — it leaves it pointing at a name
+            // nothing answers to, and at whatever answers to it next. Collapse
+            // those to `#REF!`, the same spelling a `DeleteRows` already writes
+            // into a series whose rows it took (`CHT-08`).
+            //
+            // The snapshots are taken *before* the removal, at pre-removal sheet
+            // indices, which is what the inverse restores them at: the batch
+            // re-inserts the sheet first, so every later index is the one it was.
+            let gone = workbook.sheets[index].name.clone();
+            let charting = structural::sheets_charting(workbook, &gone);
+            let restores: Vec<Operation> = charting
+                .into_iter()
+                .filter(|at| *at != index)
+                .map(|at| structural::snapshot_metadata(workbook, at))
+                .collect();
             let removed = workbook.sheets.remove(index);
-            Ok(Operation::InsertSheet {
+            structural::break_series_naming(workbook, &gone);
+            let reinsert = Operation::InsertSheet {
                 index,
                 sheet: Box::new(removed),
-            })
+            };
+            if restores.is_empty() {
+                // The common case keeps the plain inverse it always had, so a
+                // removal that broke nothing is still one operation to undo.
+                return Ok(reinsert);
+            }
+            let mut ops = Vec::with_capacity(restores.len() + 1);
+            ops.push(reinsert);
+            ops.extend(restores);
+            Ok(Operation::Batch(ops))
         }
         Operation::RenameSheet { index, name } => {
             let previous = {

@@ -60,7 +60,7 @@
 
 use casual_calc_model::{ChartKind, ChartView, Workbook};
 
-use crate::chart_data::{ref_numbers, ref_text};
+use crate::chart_data::{ref_cells, ref_numbers, ref_text};
 use crate::display::{Align, DisplayList, PaintItem, Point, Rect};
 
 /// Twips in one CSS pixel at 96 dpi: 1440 / 96.
@@ -91,21 +91,79 @@ const CHART_AXIS: &str = "666666";
 /// Named so the fallback is visible rather than implied.
 const ACCENT_SLOTS: [usize; 6] = [4, 5, 6, 7, 8, 9];
 
-/// `n` series colours, cycling the workbook's own theme accents.
+/// How the seventh series and beyond vary the accent they share with an
+/// earlier one: Excel's own theme-colour variants, in Excel's order.
+///
+/// A positive number is a **tint** — that fraction of the way to white,
+/// Excel's "Lighter 40%". A negative one is a **shade**, its magnitude being
+/// the fraction of the way to black, Excel's "Darker 25%". Round zero is the
+/// accent itself and is not in the table.
+///
+/// Five rounds past the accent is thirty-six distinguishable series, which is
+/// past the point a legend is readable at all; beyond that the table cycles and
+/// two series can share a colour again. That is a bound worth stating rather
+/// than a claim of infinite distinctness.
+const ACCENT_VARIANTS: [f64; 5] = [-0.25, 0.40, -0.50, 0.60, 0.80];
+
+/// `n` series colours from the workbook's own theme accents.
 ///
 /// The workbook's, not a palette invented here — a chart should match the file
 /// it came from. [`Workbook::theme_slot`] already falls back to the stock
 /// Office accent for a slot this file does not define, which is what the canvas
 /// does by filtering the slice and substituting its own list.
+///
+/// **Past the sixth series the accent is varied, not repeated** (`CHT-09`).
+/// A theme has six accents and this used to cycle them, so a seven-series
+/// chart gave series 1 and series 7 the same `4472C4` and a legend that could
+/// not tell them apart — correct at eight series and wrong at seven, since
+/// eight is where a reader expects to see a colour twice and seven is not.
+/// Series 7 is now accent 1 darkened 25%, series 8 accent 2 darkened 25%, and
+/// so on through `ACCENT_VARIANTS`: the chart still matches the file's theme,
+/// which is what the cycling was protecting, and the colours are distinct,
+/// which is what a legend needs.
 #[must_use]
 pub fn series_colors(workbook: &Workbook, n: usize) -> Vec<String> {
+    let slots = ACCENT_SLOTS.len();
     (0..n)
         .map(|i| {
-            workbook
-                .theme_slot(ACCENT_SLOTS[i % ACCENT_SLOTS.len()])
-                .to_owned()
+            let accent = workbook.theme_slot(ACCENT_SLOTS[i % slots]);
+            match (i / slots).checked_sub(1) {
+                None => accent.to_owned(),
+                Some(round) => vary(accent, ACCENT_VARIANTS[round % ACCENT_VARIANTS.len()]),
+            }
         })
         .collect()
+}
+
+/// Tint (`amount > 0`, toward white) or shade (`amount < 0`, toward black) an
+/// `RRGGBB` hex colour, returning `RRGGBB`.
+///
+/// A colour that is not six hex digits is returned unchanged rather than
+/// guessed at: [`Workbook::theme_slot`] can hand back whatever the file wrote,
+/// and a chart that invents a colour for an unreadable one is worse than a
+/// chart that repeats the accent.
+fn vary(color: &str, amount: f64) -> String {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return color.to_owned();
+    }
+    let mut out = String::with_capacity(6);
+    for i in 0..3 {
+        let Ok(channel) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) else {
+            return color.to_owned();
+        };
+        let v = f64::from(channel);
+        let moved = if amount >= 0.0 {
+            v + (255.0 - v) * amount
+        } else {
+            v * (1.0 + amount)
+        };
+        // `round` and not a truncation: a shade of 0.75 on 0x44 is 51.0 exactly,
+        // and truncating a value that arrived at 50.999… from the other side
+        // would make the palette depend on floating-point noise.
+        out.push_str(&format!("{:02X}", moved.round().clamp(0.0, 255.0) as u8));
+    }
+    out
 }
 
 /// One series, resolved to the numbers it plots.
@@ -115,6 +173,10 @@ pub struct ResolvedSeries {
     pub name: String,
     /// Its points, in order; `None` is a gap rather than a zero.
     pub values: Vec<Option<f64>>,
+    /// Its reference names no cells at all — `#REF!`, an unparseable string, or
+    /// a sheet this workbook does not have. Distinct from *empty*: a series
+    /// over a range of blank cells is not broken, it is unfilled.
+    pub broken: bool,
 }
 
 /// A chart's series and category labels, resolved against the cached values.
@@ -122,6 +184,12 @@ pub struct ResolvedSeries {
 /// A series with no value that resolved is dropped rather than plotted as
 /// zeroes — a chart of flat zeroes looks like data, which is worse than a chart
 /// with one series missing. That rule is the canvas's, kept.
+///
+/// **A series whose reference resolves to no cells at all is kept, and marked**
+/// ([`ResolvedSeries::broken`]). Dropping it is the same silence a cell would
+/// have if `#REF!` printed as blank: the picture loses a series and says
+/// nothing, so a chart that was plotting three things plots two and looks
+/// finished (`CHT-08`). The legend names it instead.
 #[must_use]
 pub fn resolve(
     workbook: &Workbook,
@@ -137,11 +205,19 @@ pub fn resolve(
     let series = chart
         .series
         .iter()
-        .map(|se| ResolvedSeries {
-            name: se.name.clone(),
-            values: ref_numbers(workbook, sheet_index, &se.values),
+        .map(|se| {
+            let cells = ref_cells(workbook, sheet_index, &se.values);
+            ResolvedSeries {
+                name: se.name.clone(),
+                values: if cells.is_empty() {
+                    Vec::new()
+                } else {
+                    ref_numbers(workbook, sheet_index, &se.values)
+                },
+                broken: cells.is_empty(),
+            }
         })
-        .filter(|s| s.values.iter().any(Option::is_some))
+        .filter(|s| s.broken || s.values.iter().any(Option::is_some))
         .collect();
     (cats, series)
 }
@@ -245,17 +321,32 @@ struct LegendBox {
 /// The point size the canvas draws legend text at, in CSS pixels.
 const LEGEND_PT: f64 = 10.0;
 
+/// The suffix a broken series' legend entry carries.
+///
+/// The cell spelling, on purpose: a reader who has seen `#REF!` in the grid
+/// already knows what it means, and a chart that invents its own word for the
+/// same condition teaches two.
+const BROKEN_SUFFIX: &str = " (#REF!)";
+
 /// A series' displayed name, which is its position when it has none.
 ///
 /// The canvas's `s.name || \`Series ${i + 1}\``, kept: a blank name must
 /// measure as the text that will be drawn, or the box is sized for nothing and
 /// the label runs out of it.
+///
+/// A broken series is named **and** marked. Naming it is what stops the picture
+/// losing a series in silence; marking it is what stops the reader taking an
+/// empty slot for an empty range (`CHT-08`).
 fn legend_label(series: &ResolvedSeries, index: usize) -> String {
-    if series.name.is_empty() {
+    let mut label = if series.name.is_empty() {
         format!("Series {}", index + 1)
     } else {
         series.name.clone()
+    };
+    if series.broken {
+        label.push_str(BROKEN_SUFFIX);
     }
+    label
 }
 
 /// How wide a legend label is, in twips.
@@ -458,11 +549,19 @@ pub fn push_chart(
     }
 
     let (cats, series) = resolve(workbook, sheet_index, chart);
-    if series.is_empty() {
+    if series.is_empty() || series.iter().all(|s| s.broken) {
         // Honest rather than blank: the chart exists, its data did not resolve.
+        // The two cases are told apart, because they are different faults — an
+        // empty range is a chart waiting for numbers, and a broken reference is
+        // a chart that used to have them (`CHT-08`).
+        let note = if series.is_empty() {
+            "no data"
+        } else {
+            "series reference broken (#REF!)"
+        };
         list.items.push(text_at(
             line(x + 8.0 * PX, top, w - 8.0 * PX, 11.0 * PX),
-            "no data".to_owned(),
+            note.to_owned(),
             Align::Left,
             CHART_MUTED,
         ));
@@ -584,6 +683,47 @@ fn axis_label(v: f64) -> String {
     s
 }
 
+/// The most bar polygons one bar or column plot will emit, whatever its frame
+/// and whatever its data.
+///
+/// `bar_groups`'s geometric bound is already `0.35 ×` the plot's width in
+/// pixels, so this only binds a chart anchored over a frame thousands of pixels
+/// wide. It is here as a **resource bound** rather than a picture decision, on
+/// the same rule every parser in this workspace follows: a size the caller
+/// controls needs a ceiling the caller does not.
+pub const MAX_BAR_POLYGONS: usize = 2048;
+
+/// How many category groups a bar plot of `points` points can actually draw.
+///
+/// Below the group width where `bar_w` hits its `.max(PX)` clamp, `bw` — the
+/// polygon's body, `bar_w - PX` — is **zero**, and the plot emits one
+/// zero-width polygon per point per series: six series over a thousand rows in
+/// a 400 px frame was 6,000 polygons of which every single one drew nothing
+/// (`CHT-06`). So the bound is the group count at which a bar still has a body
+/// of at least one pixel: `bar_w >= 2 · PX`, hence
+/// `groups <= plot_w · 0.7 / (2 · series · PX)`.
+///
+/// The points above the bound are **not discarded** — see [`push_bars`], which
+/// merges them into a bucket drawn from the bucket's minimum to its maximum.
+fn bar_groups(plot_w: f64, series: usize, points: usize) -> usize {
+    let series = series.max(1);
+    let resolvable = plot_w * 0.7 / (2.0 * series as f64 * PX);
+    let resolvable = if resolvable.is_finite() && resolvable >= 1.0 {
+        resolvable.floor() as usize
+    } else {
+        1
+    };
+    points.min(resolvable).min(MAX_BAR_POLYGONS / series).max(1)
+}
+
+/// The half-open point range group `g` of `groups` covers, over `points` points.
+///
+/// Integer arithmetic on purpose: `groups == points` must give exactly
+/// `[g, g + 1)`, or the uncapped plot would stop being the plot it was.
+fn bucket(g: usize, groups: usize, points: usize) -> (usize, usize) {
+    (g * points / groups, (g + 1) * points / groups)
+}
+
 fn push_bars(
     list: &mut DisplayList,
     workbook: &Workbook,
@@ -599,23 +739,48 @@ fn push_bars(
     if points == 0 {
         return;
     }
-    let group_w = plot.w / points as f64;
+    // **The bound, and what it costs.** Past what the plot can resolve, points
+    // are bucketed and each bucket draws one rectangle per series spanning that
+    // bucket's minimum to its maximum. No value is dropped and no outlier is
+    // hidden: the tallest bar in a bucket is exactly the top of the rectangle
+    // and the deepest is exactly its bottom, so the ink covers the same values
+    // the individual bars covered. What is given up is *horizontal* resolution
+    // — which point inside the bucket held which value — below the width of one
+    // bar, which is under a pixel and could not be read either way (`CHT-06`).
+    let groups = bar_groups(plot.w, series.len(), points);
+    let group_w = plot.w / groups as f64;
     // Every "1" in the canvas's arithmetic is one *pixel*; in twips it is
     // fifteen. Getting that wrong is invisible at a glance and a whole pixel
     // wide in the picture, which is how a bar came out a pixel too wide here.
     let bar_w = (group_w * 0.7 / series.len() as f64).max(PX);
-    for i in 0..points {
+    for g in 0..groups {
+        let (from, to) = bucket(g, groups, points);
         for (si, s) in series.iter().enumerate() {
-            let Some(Some(v)) = s.values.get(i) else {
+            let mut span: Option<(f64, f64)> = None;
+            // Clamped, not `get(from..to)`: the point count is the *longest*
+            // series', so a shorter one has buckets that overrun its end, and an
+            // out-of-bounds slice would return `None` for the whole bucket —
+            // silently dropping the points at its start that do exist.
+            let end = to.min(s.values.len());
+            for v in s.values[from.min(end)..end].iter().flatten() {
+                span = Some(match span {
+                    None => (*v, *v),
+                    Some((min, max)) => (min.min(*v), max.max(*v)),
+                });
+            }
+            let Some((min, max)) = span else {
                 continue;
             };
-            let bx = plot.x + i as f64 * group_w + group_w * 0.15 + si as f64 * bar_w;
-            let bar_top = plot.y + plot.h * ((hi - v) / (hi - lo));
+            let bx = plot.x + g as f64 * group_w + group_w * 0.15 + si as f64 * bar_w;
+            let top = plot.y + plot.h * ((hi - max) / (hi - lo));
+            let bottom = plot.y + plot.h * ((hi - min) / (hi - lo));
             // A negative value draws downward from the zero line, which is why
-            // the rectangle is measured from it rather than from the axis.
-            let y0 = bar_top.min(zero_y);
+            // the rectangle is measured from it rather than from the axis. With
+            // one point in the bucket `top == bottom` and this is the single
+            // bar it always was.
+            let y0 = top.min(zero_y);
             let bh = {
-                let d = (zero_y - bar_top).abs();
+                let d = bottom.max(zero_y) - y0;
                 // A zero value still shows a one-pixel mark on the axis rather
                 // than nothing, so a zero and a gap look different.
                 if d == 0.0 { PX } else { d }
