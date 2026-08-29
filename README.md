@@ -9,9 +9,9 @@ it, renders a live grid, and runs the whole engine client-side in WebAssembly �
 so co-editing scales without sticky sessions and the editor keeps working when
 the network hiccups.
 
-[**Live demo**](https://casualoffice.github.io/opencalc/editor.html) ·
-[Docs](docs/00-README.md) · [Deployment](docs/65-RUNNING-IT.md) ·
-[SDK](sdk/)
+[**Live demo**](https://calc.casualoffice.org/editor.html) ·
+[Site](https://calc.casualoffice.org) · [Docs](docs/00-README.md) ·
+[Deployment](docs/65-RUNNING-IT.md) · [SDK](sdk/)
 
 ---
 
@@ -148,7 +148,7 @@ Contributor guide: [AGENTS.md](AGENTS.md).
 stack runs, but interfaces still move and the SDK is published at `0.0.0`.
 
 Known gaps are tracked in [docs/14](docs/14-EXECUTION-TRACKER.md) — notably no
-PDF export, no ODS, and no WOPI integration yet.
+PDF export and no ODS yet.
 
 ## License
 
