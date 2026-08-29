@@ -15,6 +15,7 @@ import {
   afterFilterChange,
   allRanges,
   applyCommandRules,
+  byId,
   clearHeightMemo,
   clearKeepWaiting,
   colAtX,
@@ -54,13 +55,60 @@ import {
 
 export function setZoom(z) {
   const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
-  if (next === state.zoom) return;
+  if (next === state.zoom) {
+    // Still redraw the widget. A slider dragged past the end, or a `−` at 25%,
+    // clamps to the level already in force — and the control that moved is
+    // showing the value it was dragged to, not the one that took effect. The
+    // early return is about the expensive relayout below, not about the chrome.
+    renderZoom();
+    return;
+  }
   state.zoom = next;
   // Text is measured in zoom-logical units, so every grown row's height changes.
   clearHeightMemo();
   invalidateGrowth();
   resize();
   status.textContent = `zoom ${Math.round(next * 100)}%`;
+  renderZoom();
+}
+
+/// The zoom readout in the status bar, redrawn from `state.zoom`.
+///
+/// Called from `setZoom` rather than from each control, because `setZoom` is
+/// the only writer of `state.zoom` in the editor — the View ▸ Zoom submenu,
+/// `Ctrl+Alt+0`, `Ctrl`+wheel, a trackpad pinch and these three controls all go
+/// through it. A widget that updated itself would be right for the two buttons
+/// beside it and stale for the four routes that are not.
+export function renderZoom() {
+  const level = byId("zoom-level");
+  const slider = byId("zoom-slider");
+  const out = byId("zoom-out");
+  const zin = byId("zoom-in");
+  // A host that hid the status bar, or a call before the mount is bound.
+  if (!level) return;
+  const pct = Math.round((state.zoom || 1) * 100);
+  level.textContent = `${pct}%`;
+  if (slider) slider.value = String(pct);
+  // Disabled at the ends rather than silently doing nothing: a button that
+  // still looks live and no longer moves anything reads as a broken editor.
+  if (out) out.disabled = state.zoom <= ZOOM_MIN;
+  if (zin) zin.disabled = state.zoom >= ZOOM_MAX;
+}
+
+/// Bind the status-bar zoom controls. Called once, from boot.
+export function wireZoom() {
+  const level = byId("zoom-level");
+  const slider = byId("zoom-slider");
+  if (!level) return;
+  // A tenth at a time, matching the `Ctrl`+wheel step, so the two routes to the
+  // same thing do not land on different ladders.
+  byId("zoom-out")?.addEventListener("click", () => setZoom(state.zoom / 1.1));
+  byId("zoom-in")?.addEventListener("click", () => setZoom(state.zoom * 1.1));
+  level.addEventListener("click", () => setZoom(1));
+  // `input`, not `change`: the grid follows the thumb while it is dragged, which
+  // is what makes a zoom slider usable at all.
+  slider?.addEventListener("input", () => setZoom(Number(slider.value) / 100));
+  renderZoom();
 }
 
 export function commitFreezeDrag(axis, px, py) {

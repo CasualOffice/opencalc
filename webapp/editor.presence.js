@@ -16,6 +16,7 @@ import {
   closePresence,
   collabRoster,
   collabSession,
+  collaborate,
   colors,
   draw,
   editHome,
@@ -41,6 +42,7 @@ import {
   state,
   status,
   statusError,
+  stopCollaborating,
   switchSheet,
   syncClock,
   t,
@@ -469,4 +471,253 @@ export function collabDraft() {
   if (!editSurface || !editHome) return null;
   if (editHome.sheet !== state.sheet) return null;
   return { at: [editHome.row, editHome.col], text: editSurface.value };
+}
+
+// --- Share ------------------------------------------------------------------
+//
+// The route into a collaborative session, and the reason it is closed by
+// default.
+//
+// # What was missing
+//
+// Below the line there is a clustered OT server with a leader per document,
+// epoch-fenced appends, relay, resume and presence, exercised by two real
+// browsers in CI. Above the line there was **nothing**: `listCommands()`
+// matched nothing against `share|collab|invite`, and `collaborate()` could only
+// be reached by a host writing JavaScript against the module namespace.
+//
+// `docs/12` §3.22 says a session is joined "by putting `?doc=` on the URL". It
+// is not: nothing in the editor has ever read `?doc=` off the page URL —
+// `collab.js:150` puts `doc` on the *WebSocket* URL, from the key the caller
+// already passed in. There was no user-reachable route at all, by query string
+// or otherwise. That is a finding for `docs/12`, not something to fix by prose.
+//
+// # Why it is behind a capability, off by default
+//
+// `COL-46` is an open **P0**: a `$`-anchored formula rebased across a
+// concurrent insert lands as `$E$1` on one replica and `$D$1` on the other,
+// with no error raised anywhere. Two replicas of one document holding different
+// formulas is the worst failure class this system has, and a Share button that
+// walked a user into it silently would be worse than no button — they would
+// have been told the feature was ready.
+//
+// So the route is **built and complete**, and the door has two locks, because
+// they protect different people:
+//
+//   1. `canShare` is `false` in every mode preset, so `File ▸ Share…` is absent
+//      from a plain editor and `runCommand("file.share")` is refused. Closing
+//      `COL-46` is then a one-word change in `MODE_PRESETS` rather than a
+//      feature to build, which is the point of wiring it now.
+//   2. A host that turns it on (`setCapabilities({ canShare: true })`) gets the
+//      divergence named, in the dialog, at the moment of sharing, and cannot
+//      start a session without acknowledging it. A host flipping a flag is not
+//      the person whose formulas diverge.
+//
+// # Why nothing here auto-connects
+//
+// `?collab=` and `?doc=` **prefill** the fields and never start a session. An
+// editor that opened a WebSocket to a URL-supplied host on load would be an
+// automatic network fetch decided by whoever handed the user the link, which
+// `AGENTS.md` §"Engineering priorities" 3 rules out. The endpoint is shown, and
+// a human presses the button.
+//
+// The token is deliberately **not** read from the URL and never put into the
+// invite link. It is a credential; a credential on a URL is a credential in
+// browser history, in the referrer, and in whatever the link was pasted into.
+// The host mints one per user — that is what `tokenFor` does in the collab gate
+// — so the link carries the document and the recipient brings their own.
+
+/// Host-supplied defaults for the Share dialog: `{ url, token, document }`.
+///
+/// A host that already knows its endpoint and can mint a token sets these once
+/// and the user never types anything. Every field is optional.
+let shareDefaults = {};
+
+/// Set them. Returns what is now held, with the token reported as present
+/// rather than echoed — a getter that hands a credential back to any script on
+/// the page is a second way to leak the thing the section above protects.
+export function setShareDefaults(partial) {
+  if (partial && typeof partial === "object") shareDefaults = { ...shareDefaults, ...partial };
+  return { url: shareDefaults.url || "", document: shareDefaults.document || "", token: !!shareDefaults.token };
+}
+
+/// A document key for a session that does not have one yet.
+///
+/// Random rather than derived from the file name: the key is what the server
+/// keys a document by, so two people who both have a `Budget.xlsx` and guess
+/// the obvious key would land in each other's session.
+function newDocumentKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `doc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/// The link a collaborator opens. Document and endpoint, never the token.
+function inviteLink(url, key) {
+  const link = new URL(location.origin + location.pathname);
+  if (url) link.searchParams.set("collab", url);
+  link.searchParams.set("doc", key);
+  return link.toString();
+}
+
+/// A labelled text field for the dialog.
+function shareField(id, label, value, placeholder) {
+  const wrap = el("label", "share-field");
+  wrap.appendChild(el("span", "share-field-label", label));
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = id;
+  input.className = "oc-input";
+  input.value = value || "";
+  if (placeholder) input.placeholder = placeholder;
+  // Every field here is an address or an opaque token; a browser that
+  // capitalises or spell-checks them is corrupting them.
+  input.autocapitalize = "off";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  wrap.appendChild(input);
+  return wrap;
+}
+
+export function shareDialog() {
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  if (!modal || !body) return;
+  byId("oc-modal-title").textContent = t("share.title", "Share this workbook");
+  body.textContent = "";
+  const close = () => { modal.hidden = true; body.textContent = ""; };
+  body.appendChild(collabSession ? shareLive(close) : shareStart(close));
+  modal.hidden = false;
+}
+
+/// The dialog for a session that is already running.
+function shareLive(close) {
+  const box = el("div", "share-body");
+  const key = shareDefaults.document || "";
+  const others = collabRoster.size;
+  box.appendChild(
+    el("p", "share-note",
+      others === 0
+        ? "Sharing — nobody else has joined yet."
+        : `Sharing — ${others} other${others === 1 ? "" : "s"} connected.`),
+  );
+
+  const link = shareField("share-link", "Invite link", inviteLink(shareDefaults.url, key));
+  link.querySelector("input").readOnly = true;
+  box.appendChild(link);
+  box.appendChild(
+    el("p", "share-hint",
+      "The link carries the document, not a token — whoever opens it needs one of their own from this deployment."),
+  );
+
+  const row = el("div", "oc-confirm-actions");
+  const copy = document.createElement("button");
+  copy.className = "oc-btn";
+  copy.id = "share-copy";
+  copy.textContent = "Copy link";
+  copy.addEventListener("click", async () => {
+    const input = byId("share-link");
+    try { await navigator.clipboard.writeText(input.value); copy.textContent = "Copied"; }
+    catch { input.select(); copy.textContent = "Press Ctrl+C"; }
+  });
+  const stop = document.createElement("button");
+  stop.className = "oc-btn primary";
+  stop.id = "share-stop";
+  stop.textContent = "Stop sharing";
+  stop.addEventListener("click", () => {
+    stopCollaborating();
+    status.textContent = "stopped sharing";
+    close();
+  });
+  row.append(copy, stop);
+  box.appendChild(row);
+  return box;
+}
+
+/// The dialog for starting one, and the `COL-46` warning that gates it.
+function shareStart(close) {
+  const box = el("div", "share-body");
+
+  // Named, and specific. "Collaboration is experimental" is the sentence that
+  // gets skipped; a sentence saying which of your formulas can silently become
+  // a different formula on someone else's screen is not.
+  const warn = el("div", "share-warning");
+  warn.id = "share-warning";
+  warn.appendChild(el("strong", "", "Known defect: COL-46 (open, P0)"));
+  warn.appendChild(
+    el("p", "",
+      "A formula with a $-anchored reference, rebased across an insert somebody else makes at "
+      + "the same moment, can end up different on the two screens — $E$1 here, $D$1 there — with "
+      + "no error shown to either of you. Check anchored formulas by hand after concurrent edits."),
+  );
+  box.appendChild(warn);
+
+  const params = new URL(location.href).searchParams;
+  box.appendChild(shareField(
+    "share-url", "Collaboration server",
+    shareDefaults.url || params.get("collab") || "",
+    "wss://collab.example.com/collab",
+  ));
+  box.appendChild(shareField(
+    "share-doc", "Document",
+    shareDefaults.document || params.get("doc") || newDocumentKey(),
+  ));
+  // Not prefilled from the URL, on purpose — see the note at the top of this
+  // section. A host that can mint one sets it through `setShareDefaults`.
+  box.appendChild(shareField(
+    "share-token", "Access token",
+    shareDefaults.token || "",
+    "the token this deployment issued you",
+  ));
+
+  const ack = el("label", "share-ack");
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.id = "share-ack";
+  ack.appendChild(check);
+  ack.appendChild(el("span", "", "I have read COL-46 and will check anchored formulas."));
+  box.appendChild(ack);
+
+  const row = el("div", "oc-confirm-actions");
+  const cancel = document.createElement("button");
+  cancel.className = "oc-btn";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", close);
+  const start = document.createElement("button");
+  start.className = "oc-btn primary";
+  start.id = "share-start";
+  start.textContent = "Start sharing";
+  // Disabled rather than refusing on click: a button that can be pressed and
+  // then complains has already taught the user to press first and read after.
+  start.disabled = true;
+  check.addEventListener("change", () => { start.disabled = !check.checked; });
+  start.addEventListener("click", async () => {
+    const url = byId("share-url").value.trim();
+    const key = byId("share-doc").value.trim();
+    const token = byId("share-token").value.trim();
+    if (!url || !key || !token) {
+      statusError("sharing needs a server, a document and a token");
+      return;
+    }
+    start.disabled = true;
+    start.textContent = "Connecting…";
+    try {
+      shareDefaults = { ...shareDefaults, url, document: key };
+      await collaborate({ url, token, document: key });
+      close();
+    } catch (err) {
+      // Left open, with the message in it. Closing the dialog on a failure
+      // throws away the endpoint and the token just typed, which is exactly
+      // what is needed in order to try again.
+      start.disabled = false;
+      start.textContent = "Start sharing";
+      byId("share-error")?.remove();
+      const failed = el("p", "share-error", String(err && err.message ? err.message : err));
+      failed.id = "share-error";
+      box.appendChild(failed);
+      statusError(`could not start sharing: ${failed.textContent}`);
+    }
+  });
+  row.append(cancel, start);
+  box.appendChild(row);
+  return box;
 }

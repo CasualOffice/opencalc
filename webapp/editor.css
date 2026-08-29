@@ -557,6 +557,35 @@ body {
 .oc-btn:hover { border-color: var(--oc-border-hover-color); }
 .oc-btn.primary { background: var(--oc-accent-color); border-color: var(--oc-accent-color); color: #fff; }
 .oc-btn.primary:hover { filter: brightness(1.06); }
+
+/* ── Share ───────────────────────────────────────────────────────────────────
+   The warning is the first thing in the dialog and is styled as a warning, not
+   as fine print: `COL-46` is an open P0 that can leave two replicas holding
+   different formulas, and a notice a user's eye slides over is not a notice. */
+.share-body { display: grid; gap: 14px; }
+.share-warning {
+  display: grid; gap: 6px; padding: 12px 14px; border-radius: 9px;
+  border: 1px solid var(--oc-danger-color);
+  background: color-mix(in srgb, var(--oc-danger-color) 9%, transparent);
+  font-size: 12.5px; line-height: 1.45;
+}
+.share-warning p { margin: 0; color: var(--oc-text-color); }
+.share-field { display: grid; gap: 5px; }
+.share-field-label { font-size: 12px; color: var(--oc-muted-text-color); }
+.share-field .oc-input {
+  width: 100%; box-sizing: border-box; height: 30px; padding: 0 9px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 7px;
+  background: var(--oc-background-color); color: var(--oc-text-color); font-size: 13px;
+}
+.share-note { margin: 0; font-size: 13px; color: var(--oc-text-color); }
+.share-hint { margin: 0; font-size: 11.5px; color: var(--oc-muted-text-color); }
+.share-ack { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; cursor: pointer; }
+.share-error { margin: 0; font-size: 12.5px; color: var(--oc-danger-color); }
+/* Scoped to this dialog rather than to `.oc-btn` everywhere: the toolbar's
+   undo/redo are authored disabled and already have their own dimming, and a
+   global rule here would quietly restyle chrome this change has no business
+   touching. */
+.share-body .oc-btn:disabled { opacity: .45; cursor: default; filter: none; }
 /* Custom number-format dialog: code field, live preview, quick presets. */
 .cf-code {
   width: 100%; box-sizing: border-box; height: 34px; padding: 0 10px; margin-bottom: 10px;
@@ -870,6 +899,34 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   font-size: 11.5px; color: var(--oc-faint-text-color); white-space: nowrap;
 }
 .bottom-status .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--oc-success-color); }
+/* Zoom, at the far right of the status bar — Excel's and Sheets' position.
+   After `.bottom-status`, which carries `margin-left: auto`, so this rides the
+   right edge without a second auto margin fighting the first. */
+.zoom-widget {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  padding-left: 10px; margin-left: 4px; border-left: 1px solid var(--oc-border-color);
+}
+.zoom-step {
+  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--oc-muted-text-color);
+  font-size: 14px; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.zoom-step:hover:not(:disabled) { background: var(--oc-surface-color); color: var(--oc-text-color); }
+.zoom-step:disabled { opacity: .4; cursor: default; }
+.zoom-slider { width: 84px; height: 4px; margin: 0; accent-color: var(--oc-accent-color); cursor: pointer; }
+/* Tabular numerals, and a width that fits "100%": the readout sits at the edge
+   of the window and a percentage that shifts the layout as it changes is the
+   one thing a status bar must not do. */
+.zoom-level {
+  min-width: 42px; height: 20px; padding: 0 4px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--oc-muted-text-color);
+  font-size: 11.5px; font-variant-numeric: tabular-nums; text-align: right; cursor: pointer;
+}
+.zoom-level:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+/* On a narrow window the sheet tabs are what the user needs; the slider is the
+   part of this that can go, because − / + / the readout still do all of it. */
+@media (max-width: 720px) { .zoom-slider { display: none; } }
 /* Tab-color picker inside the sheet context menu. */
 .menu-label { font-size: 11px; color: var(--oc-muted-text-color); padding: 2px 10px; text-transform: uppercase; letter-spacing: .04em; }
 .swatch-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 8px; max-width: 176px; }
