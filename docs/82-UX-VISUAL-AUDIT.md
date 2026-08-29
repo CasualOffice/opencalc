@@ -7,7 +7,7 @@ Regenerate with a served tree:
 
 # Visual audit
 
-7 finding(s) across 8 surface(s).
+5 finding(s) across 8 surface(s).
 
 `ux-sweep.mjs` asks whether a behaviour exists. Every defect a user has
 reported by hand here has been visual instead — a collapsed grid track, a blank
@@ -27,13 +27,6 @@ of them. This walks the real chrome and measures geometry.
 |---|---|---|
 | Paste special | did not open | `no modal or panel became visible` |
 | Row/column size | did not open | `no modal or panel became visible` |
-
-## Table
-
-| where | what | detail |
-|---|---|---|
-| header row | the label is drawn into its filter arrow | `{"col":3,"label":"Revenue","inkInArrowZone":6}` |
-| outline | no border is drawn | `engine resolves 85A3D9 over 9 rows` |
 
 ## Chrome
 
