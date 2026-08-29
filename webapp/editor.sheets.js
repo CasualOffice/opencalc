@@ -352,6 +352,17 @@ export function isDirty() {
   return editsApplied() !== savedAtEdits;
 }
 
+/// The counter at the last save or load — the *baseline*, not the verdict.
+///
+/// `isDirty()` collapses this to a boolean, and a boolean is not enough for a
+/// draft. A recovery bar has to state how far ahead of the last save the draft
+/// is (`docs/83` §4.3), and it has to leave a draft level with the last save
+/// unoffered — neither of which "true" can express. So the number is exported
+/// for `editor.drafts.js` and read nowhere else.
+export function savedAtEditsForDraft() {
+  return savedAtEdits;
+}
+
 // --- What this build can write ----------------------------------------------
 //
 // `IO-07` and `IO-08` gave the engine ODS and macro-enabled `.xlsm`, and for a
