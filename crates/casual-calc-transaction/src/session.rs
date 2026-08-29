@@ -63,6 +63,21 @@ pub enum SessionError {
         /// The snapshot that should have been reproduced.
         to: u64,
     },
+    /// This client is no longer a participant: an arrival could not be merged,
+    /// so the session latched and refuses everything that crosses the network
+    /// (`COL-47`).
+    ///
+    /// The first refusal is reported as itself — [`Self::Transform`] or
+    /// [`Self::Apply`] — and every later
+    /// [`receive`](ClientSession::receive) answers this instead. The
+    /// distinction is worth having: the first names the pair that could not be
+    /// merged, and this one says the session has already stopped, so a host
+    /// does not report the same failure twice under two different causes.
+    ///
+    /// The only recovery is a **full rejoin from a server snapshot** — a new
+    /// [`ClientSession`], not [`resume`](ClientSession::resume), which
+    /// deliberately keeps the latch. See the type's own documentation for why.
+    Desynced,
     /// A client submitted against a revision the server no longer has history
     /// for, or one it has never issued.
     ///
@@ -98,6 +113,10 @@ impl core::fmt::Display for SessionError {
             Self::Transform(error) => write!(f, "{error}"),
             Self::Apply(error) => write!(f, "{error}"),
             Self::Snapshot(why) => write!(f, "snapshot: {why}"),
+            Self::Desynced => write!(
+                f,
+                "this client is desynced: an arrival could not be merged, so it must rejoin from a snapshot"
+            ),
             Self::SnapshotMismatch { from, to } => write!(
                 f,
                 "replaying revisions {from}..={to} did not reproduce the stored snapshot"
@@ -256,6 +275,13 @@ pub struct ClientSession {
     pending: Vec<Operation>,
     /// Chunks taken from `pending` so far, which is what numbers them.
     chunks: u64,
+    /// Latched the first time an arrival could not be merged (`COL-47`).
+    ///
+    /// **One way, and never cleared here.** Recovery is a new session built on
+    /// a server snapshot; [`ClientSession::resume`] keeps this set on purpose,
+    /// because resuming means "my document is continuous" and this is the
+    /// statement that it is not.
+    desynced: bool,
 }
 
 impl ClientSession {
@@ -268,6 +294,7 @@ impl ClientSession {
             sent: Vec::new(),
             pending: Vec::new(),
             chunks: 0,
+            desynced: false,
         }
     }
 
@@ -288,6 +315,12 @@ impl ClientSession {
     /// reissues it, which is what makes the suppression work across the gap. It
     /// is taken as an argument rather than assumed so the server stays the only
     /// authority on identity.
+    ///
+    /// **A desync is not resumable and this does not clear it** (`COL-47`).
+    /// Resuming asserts that this client's document is continuous with the
+    /// server's; a desynced one is exactly the case where that is false, and
+    /// the outstanding edits it would carry over are the half-rebased ones. The
+    /// route back is a new session over a `welcome` snapshot.
     ///
     /// See [ADR-015](../../../docs/61-COLLABORATION-RESUME.md).
     pub fn resume(&mut self, client: ClientId, revision: u64) {
@@ -361,8 +394,13 @@ impl ClientSession {
     /// The base is [`Base::Chained`] whenever anything is already outstanding,
     /// because this chunk was written on top of it and only the server knows
     /// where that landed.
+    /// A desynced session sends nothing (`COL-47`). The pending edits are kept
+    /// rather than discarded, so
+    /// [`has_unacknowledged`](Self::has_unacknowledged) can still tell a host
+    /// there is work about to be lost — which is the whole difference between
+    /// losing it loudly and losing it quietly.
     pub fn flush(&mut self, workbook: &Workbook) -> Option<Submission> {
-        if self.pending.is_empty() || self.sent.len() >= MAX_OUTSTANDING {
+        if self.desynced || self.pending.is_empty() || self.sent.len() >= MAX_OUTSTANDING {
             return None;
         }
         let base = if self.sent.is_empty() {
@@ -395,8 +433,16 @@ impl ClientSession {
     /// The absolute base is the client's *current* revision rather than the one
     /// it originally sent, because remote operations that arrived meanwhile
     /// have already rebased these chunks.
+    ///
+    /// **Empty when the session is desynced** (`COL-47`). These chunks were
+    /// half-rebased against an arrival this client never applied, so submitting
+    /// them would push a divergence into the shared document — the one place it
+    /// would stop being this client's problem.
     #[must_use]
     pub fn resend(&self, workbook: &Workbook) -> Vec<Submission> {
+        if self.desynced {
+            return Vec::new();
+        }
         self.sent
             .iter()
             .enumerate()
@@ -442,13 +488,101 @@ impl ClientSession {
         self.revision = revision;
     }
 
+    /// Whether this client has stopped being a participant (`COL-47`).
+    ///
+    /// True once an arrival could not be merged. From that moment
+    /// [`receive`](Self::receive) refuses, [`flush`](Self::flush) and
+    /// [`resend`](Self::resend) send nothing, and the only way out is a full
+    /// rejoin from a server snapshot.
+    ///
+    /// A host that wants to *report* the state reads this; a host that wants
+    /// to *recover* replaces the session. Nothing here can do the second: the
+    /// engine has no transport, and the document it would have to fetch lives
+    /// on the server.
+    #[must_use]
+    pub fn is_desynced(&self) -> bool {
+        self.desynced
+    }
+
     /// Someone else's operation arrived, already committed at `revision`.
+    ///
+    /// # What a client does with a chunk it cannot transform (`COL-47`)
+    ///
+    /// It **stops being a client**, loudly, and every route to the network is
+    /// closed behind it. Three answers were available and two of them are
+    /// wrong:
+    ///
+    /// - *Drop the chunk and carry on.* This is the one that looks cheapest and
+    ///   is the most expensive: the document is then permanently missing a
+    ///   committed revision, and every later arrival is rebased past
+    ///   outstanding edits that assume it happened. Two replicas hold different
+    ///   documents and nothing anywhere says so — the class `COL-46` was.
+    /// - *Refuse this arrival and keep the session.* What this did. It is the
+    ///   same outcome by accident: a refusal left the outstanding edits
+    ///   **half-rebased** and then let the *next*, non-contending arrival
+    ///   through, so the client applied revision *n+1* without revision *n*.
+    ///   "Blocks every later arrival" was the kinder reading and it was not
+    ///   what happened.
+    /// - *Rejoin from a snapshot.* Correct, and expensive, and not available
+    ///   here — the engine has no transport. So this half latches and reports,
+    ///   and the host does the fetch. That division is the same one the rest of
+    ///   this file keeps: the engine computes, the host owns policy.
+    ///
+    /// **What it costs the user.** Everything unacknowledged, `sent` and
+    /// `pending` alike, because those edits were written against a state the
+    /// client is about to abandon and re-applying them untransformed is the
+    /// divergence being prevented. The loss is *nameable* rather than silent:
+    /// [`has_unacknowledged`](Self::has_unacknowledged) still answers true, and
+    /// that is the question a host already asks before replacing a document
+    /// with a snapshot.
+    ///
+    /// **What the server has to know: nothing new.** Recovery is an ordinary
+    /// join — reconnect without a resume key and take the `welcome` snapshot,
+    /// a path the server already serves. No message, no field, and no enum
+    /// variant crosses the wire for this, so `PROTOCOL_VERSION` does not move.
+    ///
+    /// Local editing is deliberately *not* sealed. [`edit`](Self::edit) and
+    /// [`record`](Self::record) still work, because the harm is in what leaves
+    /// this machine and in what is applied to it, not in a user continuing to
+    /// type. The line is drawn exactly at the network.
+    ///
+    /// # Atomic
+    ///
+    /// Either every pair transforms and the arrival is applied, or **nothing**
+    /// outstanding is touched. The rebases are computed into a buffer and
+    /// written back only on success. Before, they were written in place as the
+    /// fold went, so a refusal in the fourth operation left the first three
+    /// rebased past an arrival the workbook never received — a client whose own
+    /// unacknowledged edits had silently moved. (Formulas interned by a
+    /// half-completed fold stay in the arena. That is garbage, not corruption:
+    /// a handle nothing references, on a session that is about to be replaced.)
     ///
     /// # Errors
     ///
-    /// [`SessionError::Transform`] when it cannot be rebased past this client's
-    /// outstanding edits.
+    /// [`SessionError::Transform`] when the arrival cannot be rebased past this
+    /// client's outstanding edits, [`SessionError::Apply`] when it cannot be
+    /// applied, and [`SessionError::Desynced`] for every call after either.
     pub fn receive(
+        &mut self,
+        workbook: &mut Workbook,
+        incoming: &WireOperation,
+        revision: u64,
+    ) -> Result<(), SessionError> {
+        if self.desynced {
+            return Err(SessionError::Desynced);
+        }
+        match self.merge(workbook, incoming, revision) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.desynced = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// [`receive`](Self::receive) without the latch, so the latch is set in
+    /// exactly one place and cannot be forgotten on a new error path.
+    fn merge(
         &mut self,
         workbook: &mut Workbook,
         incoming: &WireOperation,
@@ -473,16 +607,30 @@ impl ClientSession {
         // the arrival's band, and rewriting produces a tree that needs
         // interning before a handle for it exists (`COL-46`).
         let sheets = sheet_names(workbook);
-        let outstanding = self.sent.iter_mut().flat_map(|chunk| chunk.ops.iter_mut());
-        for local in outstanding.chain(self.pending.iter_mut()) {
+        let outstanding = self.sent.iter().flat_map(|chunk| chunk.ops.iter());
+        // Buffered rather than written in place: see "Atomic" above.
+        let mut rebased: Vec<Operation> = Vec::new();
+        for local in outstanding.chain(self.pending.iter()) {
             let rebased_arrival =
                 transform_with_formulas(&arriving, local, Side::Earlier, &sheets, workbook)?;
-            *local = transform_with_formulas(local, &arriving, Side::Later, &sheets, workbook)?;
+            rebased.push(transform_with_formulas(
+                local,
+                &arriving,
+                Side::Later,
+                &sheets,
+                workbook,
+            )?);
             arriving = rebased_arrival;
         }
 
         if !is_noop(&arriving) {
             apply(workbook, arriving)?;
+        }
+
+        // Past every fallible step, so this cannot leave a partial rewrite.
+        let outstanding = self.sent.iter_mut().flat_map(|chunk| chunk.ops.iter_mut());
+        for (slot, op) in outstanding.chain(self.pending.iter_mut()).zip(rebased) {
+            *slot = op;
         }
         self.revision = revision;
         Ok(())
@@ -891,6 +1039,100 @@ impl ServerSession {
                 from: from.revision,
                 to: to.revision,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod receive_is_atomic {
+    //! Here rather than in `session_tests` on purpose: once
+    //! [`ClientSession::receive`] latches, the outstanding chunks stop being
+    //! reachable through [`ClientSession::resend`] — the seal is doing its job
+    //! — so the only place this invariant is observable at all is inside the
+    //! module that owns the field.
+
+    use super::{ClientId, ClientSession};
+    use crate::{Operation, wire::WireOperation};
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    fn book() -> Workbook {
+        let mut workbook = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..8u32 {
+            for col in 0..8u32 {
+                sheet.cells.set(
+                    CellRef::new(row, col),
+                    Cell::value(CellValue::Number(f64::from(row * 10 + col))),
+                );
+            }
+        }
+        workbook.sheets.push(sheet);
+        workbook
+    }
+
+    /// A refused arrival must leave **nothing** outstanding rewritten.
+    ///
+    /// The fold rebased each local operation in place as it went, so a refusal
+    /// on the second one had already rewritten the first: a `SetCell` the user
+    /// typed into column 2 became a `SetCell` on column 5, rebased past an
+    /// arrival this workbook never received. The session survived holding an
+    /// edit that had silently moved.
+    #[test]
+    fn a_refusal_leaves_every_outstanding_operation_exactly_as_it_was() {
+        let mut wb = book();
+        let mut client = ClientSession::new(ClientId(1), 0);
+        client.edit(&mut wb, keystroke()).expect("a keystroke");
+        client.edit(&mut wb, narrow_drag()).expect("a drag");
+        client.flush(&wb).expect("the chunk goes out");
+
+        let before = outstanding_ops(&client);
+        let arrival = WireOperation::of(wide_drag(), &wb);
+        assert!(
+            client.receive(&mut wb, &arrival, 1).is_err(),
+            "the pair has no transform"
+        );
+        assert_eq!(
+            outstanding_ops(&client),
+            before,
+            "a refused merge must not have rewritten half the chunk on its way out"
+        );
+    }
+
+    /// Everything the session is holding, chunk by chunk.
+    fn outstanding_ops(client: &ClientSession) -> Vec<Vec<Operation>> {
+        client
+            .sent
+            .iter()
+            .map(|chunk| chunk.ops.clone())
+            .chain(core::iter::once(client.pending.clone()))
+            .collect()
+    }
+
+    fn keystroke() -> Operation {
+        Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(0, 2),
+            cell: Some(Cell::value(CellValue::Number(42.0))),
+        }
+    }
+
+    /// Transformable against the arrival — it is the operation *after* this one
+    /// that refuses, which is what makes the half-rewrite reachable.
+    fn narrow_drag() -> Operation {
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 2,
+            count: 1,
+            before: 0,
+        }
+    }
+
+    fn wide_drag() -> Operation {
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 3,
+            before: 7,
         }
     }
 }

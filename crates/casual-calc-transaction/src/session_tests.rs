@@ -1558,3 +1558,112 @@ fn a_relay_records_what_it_adopted_so_a_reconnect_is_still_safe() {
         "recognised as something already ordered, not applied a second time"
     );
 }
+
+/// **`COL-47`.** What a client does with a chunk it cannot transform.
+///
+/// The row said one unmergeable arrival "blocks every later arrival". Measured,
+/// it did not, and the truth is worse: the refusal left the client's own
+/// outstanding edits half-rebased, and then let the *next*, non-contending
+/// arrival straight through. So the client applied revision 2 without ever
+/// applying revision 1 — two replicas holding different documents with nothing
+/// anywhere saying so, which is exactly the class `COL-46` was. Being deaf
+/// would have been the honest failure; this was the quiet one.
+///
+/// It now latches. The first refusal is reported as itself, everything after it
+/// is [`SessionError::Desynced`], and both routes to the network are closed so
+/// the divergence cannot be pushed into the shared document. Recovery is a
+/// rejoin from a server snapshot, which needs nothing new on the wire.
+#[test]
+fn a_refused_arrival_stops_the_client_rather_than_letting_it_drift() {
+    use crate::session::SessionError;
+
+    // Eight columns, so two overlapping drags have somewhere to overlap. Move
+    // versus move is the ordinary way to get a refusal — `COL-44` answers most
+    // of the pairs and deliberately not this one.
+    let mut wb = seed();
+    for row in 0..8u32 {
+        for col in 3..8u32 {
+            wb.sheets[0].cells.set(
+                CellRef::new(row, col),
+                Cell::value(CellValue::Number(f64::from(row * 10 + col))),
+            );
+        }
+    }
+
+    let mut client = ClientSession::new(ClientId(1), 0);
+    client
+        .edit(&mut wb, write(0, 2, 42.0))
+        .expect("a keystroke");
+    client
+        .edit(
+            &mut wb,
+            Operation::MoveColumns {
+                sheet: 0,
+                at: 2,
+                count: 1,
+                before: 0,
+            },
+        )
+        .expect("a drag");
+    client.flush(&wb).expect("the chunk goes out");
+
+    // Somebody else's drag, committed at revision 1, that this one cannot be
+    // rebased past.
+    let contending = WireOperation::of(
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 1,
+            count: 3,
+            before: 7,
+        },
+        &wb,
+    );
+    assert!(
+        matches!(
+            client.receive(&mut wb, &contending, 1),
+            Err(SessionError::Transform(_))
+        ),
+        "the pair has no transform, and that much was never in doubt"
+    );
+    assert!(client.is_desynced(), "so the session has stopped");
+
+    // The measured failure, asserted as itself: an ordinary edit from a third
+    // party, at revision 2, must NOT be applied. Before this fix it returned
+    // `Ok(())` and landed on a document missing revision 1.
+    let ordinary = WireOperation::of(write(7, 0, 999.0), &wb);
+    assert_eq!(
+        client.receive(&mut wb, &ordinary, 2),
+        Err(SessionError::Desynced),
+        "a later arrival must not be applied onto a document missing a committed revision"
+    );
+
+    // And nothing leaves this machine. `resend` carried the half-rebased chunks
+    // straight back to the server, which is where a private divergence would
+    // have become everybody's.
+    assert!(
+        client.resend(&wb).is_empty(),
+        "a desynced client resends nothing"
+    );
+    client
+        .edit(&mut wb, write(3, 3, 7.0))
+        .expect("still typing");
+    assert!(
+        client.flush(&wb).is_none(),
+        "and sends nothing new either, however much is typed into it"
+    );
+
+    // The work is kept rather than discarded, which is what lets a host say
+    // what is about to be lost instead of losing it quietly.
+    assert!(
+        client.has_unacknowledged(),
+        "the unsent work is still nameable at the rejoin"
+    );
+
+    // A resume is not a recovery: it asserts continuity, which is the thing
+    // that is false here.
+    client.resume(ClientId(1), 2);
+    assert!(
+        client.is_desynced(),
+        "resuming a desynced session must not clear it"
+    );
+}

@@ -150,6 +150,15 @@ pub(crate) fn delete(
     // the exact pre-delete metadata rather than trying to un-shift it.
     let restores = snapshot_for_delete(workbook, sheet, axis, at);
     let metadata_restore = snapshot_metadata(workbook, sheet);
+    // A pivot reading this sheet usually *lives* on another one, and the
+    // snapshot above covers only this sheet — so until `PIV-06` the delete's
+    // inverse could not restore the source rectangle it had just shrunk, let
+    // alone the fields it now renumbers. Snapshotted before mutation, like
+    // everything else here.
+    let sourcing_restores: Vec<Operation> = sheets_sourcing(workbook, sheet)
+        .into_iter()
+        .map(|other| snapshot_metadata(workbook, other))
+        .collect();
     shift_cells_delete(workbook, sheet, axis, at, count);
     shift_metadata_delete(&mut workbook.sheets[sheet], axis, at, count);
     rewrite_all_formulas(workbook, &target, axis, ShiftKind::Delete, at, count);
@@ -159,9 +168,12 @@ pub(crate) fn delete(
 
     // Inverse order: re-open the band (restores cell geometry), overwrite the
     // metadata with its pre-delete snapshot, then restore the touched cells.
-    let mut ops = Vec::with_capacity(restores.len() + 2);
+    let mut ops = Vec::with_capacity(restores.len() + sourcing_restores.len() + 2);
     ops.push(insert_op(sheet, axis, at, count));
     ops.push(metadata_restore);
+    // After the re-insert, which shifts these pivots' sources a second time:
+    // the snapshot is the pre-delete truth and has to be what lands last.
+    ops.extend(sourcing_restores);
     ops.extend(restores);
     Ok(Operation::Batch(ops))
 }
@@ -1370,6 +1382,11 @@ fn shift_drawings_and_pivot_sources(
             if pivot.source_sheet != target_id {
                 continue;
             }
+            // Where the source began *before* the shift. Every `source_column`
+            // is an offset from here, so renumbering needs both ends of the
+            // move and this is the only moment the first one still exists.
+            let was_start = axis.coord(pivot.source.start);
+            let mut moved = true;
             match kind {
                 ShiftKind::Insert => {
                     insert_coord(axis, &mut pivot.source.start, at, count);
@@ -1384,6 +1401,11 @@ fn shift_drawings_and_pivot_sources(
                     if let Some((new_lo, new_hi)) = map_range_delete(lo, hi, at, count) {
                         pivot.source.start = axis.with_coord(pivot.source.start, new_lo);
                         pivot.source.end = axis.with_coord(pivot.source.end, new_hi);
+                    } else {
+                        // The rectangle did not move, so neither do the offsets
+                        // into it. Renumbering against a start that never
+                        // changed would be arithmetic on a fiction.
+                        moved = false;
                     }
                 }
                 ShiftKind::Move { landing } => {
@@ -1397,8 +1419,138 @@ fn shift_drawings_and_pivot_sources(
                     pivot.source.end = axis.with_coord(pivot.source.end, hi);
                 }
             }
+            // `source_column` is a **column** offset, so only a column shift can
+            // invalidate it. A row insert on the source sheet moves the
+            // rectangle and leaves every field naming the same field.
+            if moved && axis == Axis::Col {
+                renumber_pivot_fields(pivot, was_start, kind, at, count);
+            }
         }
     }
+}
+
+/// Follow every `source_column` through a column shift of the pivot's source
+/// (`PIV-06`).
+///
+/// # Why this is not the chart convention
+///
+/// A chart series whose data is deleted is rewritten to `#REF!`
+/// ([`break_series_naming`]), and the obvious question is whether a pivot field
+/// should be broken the same way. It cannot be, and the reason is not taste:
+/// **a series is a reference *string* and a pivot field is an *index***. `#REF!`
+/// is a value both the model (`String`) and the file format (`<c:f>`) can hold,
+/// so a broken series survives a save and stays broken. `source_column` is a
+/// `u32` addressing a cache field, and `<field x="…"/>` must name one that
+/// exists — neither end has a "broken" value to write. An out-of-range index is
+/// not a broken field, it is a file Excel opens as damaged, which is the fault
+/// `PIV-05` closed on the import side.
+///
+/// So a field whose column is deleted is **dropped**, which is what Excel does,
+/// and which is also the convention every other position-indexed thing on this
+/// sheet already follows: a merge, a validation or a conditional format on a
+/// deleted band goes with the band. The pivot itself is kept even if it loses
+/// every field — the same choice as [`shift_drawings_and_pivot_sources`] makes
+/// for a source deleted out of existence, and for the same reason.
+///
+/// **It is not silent.** A delete's inverse carries a pre-delete
+/// [`Operation::SetSheetMetadata`] snapshot for the pivot's own sheet
+/// ([`sheets_sourcing`]), so undo restores the dropped field exactly. That is
+/// this layer's answer to "no silent data loss" for an *edit*: reversibility,
+/// not a compatibility report, which is an import/export instrument.
+///
+/// An insert and a move drop nothing — an insert only widens the rectangle and
+/// a move only permutes it — but both renumber, and before this neither did.
+/// Those two are the quieter half of the fault: the indices stay in range, so
+/// no file is damaged and no prompt appears, and the pivot simply groups by a
+/// different column than the one the user chose.
+fn renumber_pivot_fields(
+    pivot: &mut PivotTable,
+    was_start: u32,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+) {
+    let now_start = pivot.source.start.col;
+    let now_end = pivot.source.end.col;
+    // Absolute column → its new offset, or `None` if it is gone or has fallen
+    // outside the rectangle.
+    let follow = |offset: u32| -> Option<u32> {
+        let was = was_start.saturating_add(offset);
+        let now = match kind {
+            ShiftKind::Insert => {
+                if was >= at {
+                    was.saturating_add(count)
+                } else {
+                    was
+                }
+            }
+            ShiftKind::Delete => {
+                let end = at.saturating_add(count);
+                if was >= at && was < end {
+                    return None;
+                } else if was < at {
+                    was
+                } else {
+                    was - count
+                }
+            }
+            ShiftKind::Move { landing } => LineMove { at, count, landing }.map(was),
+        };
+        (now >= now_start && now <= now_end).then(|| now - now_start)
+    };
+    pivot.rows.retain_mut(|f| match follow(f.source_column) {
+        Some(next) => {
+            f.source_column = next;
+            true
+        }
+        None => false,
+    });
+    pivot.cols.retain_mut(|f| match follow(f.source_column) {
+        Some(next) => {
+            f.source_column = next;
+            true
+        }
+        None => false,
+    });
+    pivot.filters.retain_mut(|f| match follow(f.source_column) {
+        Some(next) => {
+            f.source_column = next;
+            true
+        }
+        None => false,
+    });
+    pivot.values.retain_mut(|f| match follow(f.source_column) {
+        Some(next) => {
+            f.source_column = next;
+            true
+        }
+        None => false,
+    });
+}
+
+/// Every sheet index holding a pivot whose records live on `sheet`, excluding
+/// `sheet` itself.
+///
+/// Read before a delete mutates anything, so [`delete`] can snapshot exactly
+/// those sheets for its inverse — the same shape as [`sheets_charting`], and
+/// for the same reason: an undo that rewrote every sheet's metadata would be a
+/// much larger operation than the edit it reverses.
+///
+/// **Without it a column delete was not undoable at all for a pivot on another
+/// sheet**, which is the ordinary arrangement: `snapshot_metadata` captures one
+/// sheet, and a pivot reading `Data` usually sits on `Report`. Undo re-opened
+/// the band and left the pivot's source rectangle a column short, permanently.
+fn sheets_sourcing(workbook: &Workbook, sheet: usize) -> Vec<usize> {
+    let target_id = workbook.sheets[sheet].id;
+    workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .filter(|(index, other)| {
+            *index != sheet && other.pivots.iter().any(|p| p.source_sheet == target_id)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Shift a **pending metadata bundle's** chart series and pivot sources.
