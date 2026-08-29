@@ -832,6 +832,65 @@ pub fn session_cells(
                 json_string(&text)
             ));
         }
+
+        // **A conditional format can paint a cell that does not exist.**
+        //
+        // The loop above walks `row_band`, which is *stored* cells — so a cell
+        // nobody has typed in is never offered to `effect_for` and never gets a
+        // fill. That is fine for a rule about a cell's own value, which has
+        // none, and wrong for a rule about another cell: `=$D2>100` over
+        // `B2:E6` is precisely a rule that paints blanks, and whole-row
+        // highlighting is the commonest conditional format there is. Without
+        // this the highlight comes out **striped** wherever a column happens to
+        // be empty — which is the feature `CF-01` was built for, failing on any
+        // real table.
+        //
+        // Bounded by the window, not by the rule: a format over a whole column
+        // is a million cells, and the caller has already asked for the few
+        // hundred it can draw. Each empty position costs one `effect_for`,
+        // which is the same call the stored cells make.
+        let mut painted_empty = Vec::new();
+        for cf in &sheet.conditional_formats {
+            let r0 = cf.range.start.row.max(first_row);
+            let r1 = cf.range.end.row.min(last_row);
+            let c0 = cf.range.start.col.max(first_col);
+            let c1 = cf.range.end.col.min(last_col);
+            for row in r0..=r1 {
+                for col in c0..=c1 {
+                    if sheet.cells.get(CellRef::new(row, col)).is_some() {
+                        continue; // already emitted above, with its own text
+                    }
+                    let effect = casual_calc_layout::conditional::effect_for(
+                        sheet,
+                        &cf_stats,
+                        &cf_order,
+                        row,
+                        col,
+                        &CellValue::Empty,
+                        "",
+                        &cf_exprs,
+                    );
+                    let Some(fill) = effect.fill else { continue };
+                    if fill.is_empty() {
+                        continue;
+                    }
+                    painted_empty.push(format!(
+                        "{{\"r\":{row},\"c\":{col},\"t\":\"\",\"a\":\"l\",\"bg\":{}}}",
+                        json_string(&fill)
+                    ));
+                }
+            }
+        }
+        // A position covered by two rules is visited once per rule; the second
+        // would emit a duplicate for the same cell, and the painter would draw
+        // the loser over the winner.
+        painted_empty.sort();
+        painted_empty.dedup_by(|a, b| {
+            let key = |s: &str| s.split(",\"t\"").next().unwrap_or(s).to_owned();
+            key(a) == key(b)
+        });
+        items.extend(painted_empty);
+
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())

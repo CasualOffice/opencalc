@@ -1084,6 +1084,33 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .panel-btn-ghost:hover { background: var(--oc-surface-color); }
 .panel-hint { font-size: 11.5px; color: var(--oc-faint-text-color); line-height: 1.4; }
 
+/* A refusal, shown beside the field it is about rather than only in the status
+   bar — the failure `docs/82` found was a validation message nobody could see
+   from where they typed. */
+.panel-error {
+  font-size: 12px; line-height: 1.45; color: var(--oc-danger-color);
+  border: 1px solid var(--oc-danger-color); border-radius: 8px; padding: 7px 9px;
+  background: color-mix(in srgb, var(--oc-danger-color) 9%, transparent);
+}
+.panel-field[aria-invalid="true"] { border-color: var(--oc-danger-color); box-shadow: 0 0 0 3px var(--oc-danger-ring); }
+
+/* The cell a custom conditional-format formula is written for. It is the whole
+   difference between `=$D2>100` and `=D2>100`, so it is stated rather than
+   left to be worked out. */
+.cf-formula { font-family: var(--oc-mono-font-family); }
+.cf-anchor {
+  font-size: 11.5px; line-height: 1.5; color: var(--oc-muted-text-color);
+  border-left: 3px solid var(--oc-accent-color); padding: 2px 0 2px 9px;
+}
+/* Which of the two things Apply is about to do. Louder than a hint, because a
+   silent rewrite of an existing rule is the one outcome nobody can undo by
+   looking. */
+.cf-editing { color: var(--oc-text-color); font-weight: 600; }
+.cf-anchor-cell {
+  font-family: var(--oc-mono-font-family); font-weight: 700; font-size: 12.5px;
+  color: var(--oc-text-color);
+}
+
 .find-bar {
   position: absolute; top: 6px; right: 18px; z-index: 20; display: flex; align-items: center; gap: 6px;
   background: var(--oc-popover-background-color); border: 1px solid var(--oc-border-color); border-radius: 10px; padding: 6px 8px;
@@ -1705,3 +1732,81 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 /* Numbers stored as text is a finding, not a statistic — it is the answer to
    "why doesn't my SUM add up", so it does not read like the rows around it. */
 .stats-row.warn .stats-label, .stats-row.warn .stats-value { color: var(--oc-warn-text-color, #a9601a); font-weight: 600; }
+
+/* --- Coarse pointers ------------------------------------------------------- */
+/*
+ * Measured on a phone (390x844) and a tablet (820x1180) with touch, before any
+ * of this existed: **not one** of the editor's 27 pointer targets reached 44px,
+ * the iOS minimum (Android asks 48). Eight were under 24px, the floor `docs/68`
+ * already enforces elsewhere in this product:
+ *
+ *     fx-insert 16x16 | fx-expand 17x17 | name-box-list 18x22
+ *     zoom-out 20x20  | zoom-in 20x20   | zoom-level 42x20
+ *     hdr-collapse 26x22 | tb-brand 65x17 | zoom-slider 84x4 (tablet)
+ *
+ * `(pointer: coarse)` rather than a width breakpoint, because the question is
+ * what is doing the pointing and not how wide the window is: a 390px *window*
+ * on a desktop still has a mouse, and a tablet in landscape is 1180px wide and
+ * still has a finger.
+ *
+ * **This must not take height from the grid, and it does not.** UX-EDIT-01
+ * settled that argument for the toolbar — every pixel of chrome comes out of
+ * the sheet — and it holds here. So the growth is spent where the room already
+ * exists: the header is 52px and its buttons were 32, the toolbar is 48px and
+ * its buttons were 30, the formula bar is 40px and its buttons were 16, and
+ * every menu, submenu, context menu and overflow panel floats over the grid and
+ * costs it nothing whatever. `#grid` is the same height before and after.
+ *
+ * **Two places are deliberately left alone**, because both need a decision
+ * rather than a rule:
+ *
+ *   - The menu bar is 30px. Its buttons fill it, so 44px means taking 14px from
+ *     the sheet, and 30px is awkward rather than unusable.
+ *   - The status bar cannot do it at all. Its contents already do not fit at
+ *     390px — `#sheet-tabs` is squeezed to **4px** there and the tabs draw over
+ *     the mode label — so widening the zoom controls to 44px pushed the
+ *     document to 439px and the page began to slide sideways. Growing them is
+ *     the easy half of a bar that has to be laid out again.
+ */
+@media (pointer: coarse) {
+  /* Menu rows — the ones that matter most, and the ones that cost nothing.
+     Seventeen 33px rows in the Format menu alone, and a mis-tap there does not
+     merely navigate: "Clear formatting" and "Merge cells" are two apart. With
+     the toolbar folded into `⋯` on a phone, these panels are where nearly every
+     command actually lives. */
+  .menu-drop button,
+  .menu-sub button,
+  .ctx-menu button,
+  .tb-more-flyout button { min-height: 44px; }
+
+  /* Header, 52px tall; its buttons were 32. */
+  .tb-icon { width: 44px; height: 44px; }
+  .tb-brand { display: inline-flex; align-items: center; min-height: 44px; }
+
+  /* Toolbar, 48px tall; its buttons were 30. Widening them cannot push the
+     page sideways: `.toolbar` is its own overflow-x scroller and `reflowToolbar`
+     folds whatever stops fitting into `⋯`. */
+  .toolbar .tb-btn, .tb-file { width: 44px; height: 44px; }
+
+  /* The menu bar's 30px is all there is without spending the grid's height, so
+     this only lifts the collapse toggle over the 24px floor. */
+  .menu-collapse { width: 30px; height: 30px; }
+
+  /* Formula bar, 40px tall, holding the three smallest controls in the editor.
+     `#formula-input` is `flex: 1`, so it gives up exactly what they take and
+     the bar's own height is untouched. */
+  .formula-bar .fx,
+  button.fx { min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+  .fx-expand { min-width: 40px; min-height: 40px; justify-content: center; padding: 0; }
+  .name-caret { width: 26px; height: 34px; }
+  .formula-bar .name-box .cell-ref { padding-right: 26px; }
+  .formula-bar .cell-ref { height: 34px; }
+  /* `flex: 1` is not enough to give the width back. A flex item's default
+     `min-width: auto` floors it at its own intrinsic minimum, so the 47px the
+     three buttons above take had nowhere to come from and pushed the document
+     to 426px on a 390px screen — the whole page then slides sideways, which is
+     precisely the failure UX-EDIT-01 fixed for the toolbar. The formula bar is
+     not a scroller and should not become one; the input is the one thing in it
+     that can afford to be narrower. */
+  .formula-bar input#formula-input { height: 34px; min-width: 0; }
+}

@@ -1030,7 +1030,13 @@ export function openValidationMenu() {
   positionMenu(menu, x, y);
 }
 
-export function panelLabel(body, text) { body.appendChild(el("div", "panel-section-label", text)); }
+// Returns the label element, so a panel whose section heading depends on what
+// is selected can retitle it rather than append a second heading beside it.
+export function panelLabel(body, text) {
+  const label = el("div", "panel-section-label", text);
+  body.appendChild(label);
+  return label;
+}
 
 export function panelRangeReadout(body) {
   panelLabel(body, "Apply to range");
@@ -1477,9 +1483,51 @@ export function buildDvPanel(body) {
   setTimeout(() => inp.focus(), 0);
 }
 
+// The section heading over the rule-kind picker. A formula rule is not a test
+// on "the value" — it is a test the *author* writes, which may look anywhere —
+// so the heading says so rather than leaving the sentence false.
+const CF_VALUE_HEADING = "Highlight cells where the value…";
+const CF_FORMULA_HEADING = "Highlight cells where this formula is true";
+
+/// Read a rule reported by `session_cf_rules` back into the panel's controls.
+///
+/// The binding reports a rule as the prose `describe_cf_rule` writes, which is
+/// what the rules manager lists. Turning that prose back into controls is what
+/// lets an existing rule be **amended** rather than only replaced. `DV-04`
+/// fixed exactly this for data validation; a conditional format has the same
+/// trap with a sharper edge, because a second rule added over the first is
+/// evaluated *later* — so a user who "edits" a rule by re-applying it would
+/// watch the original keep winning and nothing at all appear to happen.
+///
+/// Returns `null` for a rule the panel has no control for — an imported `>=`,
+/// or an above-average rule that also matches equality. Showing such a rule as
+/// something it is not is worse than showing nothing, because Apply would then
+/// quietly rewrite it into the near-miss the panel could display.
+export function cfRuleFromDesc(desc) {
+  const d = String(desc == null ? "" : desc);
+  // Kept first: a formula body may contain anything the other patterns match.
+  if (d.startsWith("formula =")) return { kind: "formula", formula: d.slice("formula ".length) };
+  const num = "(-?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)";
+  let m;
+  if ((m = new RegExp(`^greater than ${num}$`).exec(d))) return { kind: "gt", a: m[1] };
+  if ((m = new RegExp(`^less than ${num}$`).exec(d))) return { kind: "lt", a: m[1] };
+  if ((m = new RegExp(`^equal to ${num}$`).exec(d))) return { kind: "eq", a: m[1] };
+  if ((m = new RegExp(`^between ${num} and ${num}$`).exec(d))) return { kind: "between", a: m[1], b: m[2] };
+  if ((m = /^text contains "([\s\S]*)"$/.exec(d))) return { kind: "contains", a: m[1] };
+  if ((m = /^(top|bottom) (\d+)(%?)$/.exec(d))) return { kind: m[1] + (m[3] ? "pct" : ""), a: m[2] };
+  if ((m = /^(above|below) average$/.exec(d))) return { kind: m[1] };
+  if (d === "duplicated") return { kind: "duplicate" };
+  if (d === "appears only once") return { kind: "unique" };
+  if ((m = /^colour scale \((\d+) stops\)$/.exec(d))) {
+    return { kind: Number(m[1]) >= 3 ? "colorscale3" : "colorscale" };
+  }
+  if (d === "data bar") return { kind: "databar" };
+  return null;
+}
+
 export function buildCfPanel(body) {
   panelRangeReadout(body);
-  panelLabel(body, "Highlight cells where the value…");
+  const heading = panelLabel(body, CF_VALUE_HEADING);
   const op = el("select", "panel-select");
   [["gt", "is greater than"], ["lt", "is less than"], ["eq", "equals"], ["between", "is between"],
    ["contains", "text contains"],
@@ -1488,6 +1536,10 @@ export function buildCfPanel(body) {
    ["toppct", "is in the top N%"], ["bottompct", "is in the bottom N%"],
    ["above", "is above average"], ["below", "is below average"],
    ["duplicate", "is duplicated"], ["unique", "appears only once"],
+   // The only kind that can look at a cell other than the one it paints, and
+   // therefore the only way to highlight a whole row. The engine has had it
+   // since `CF-01`; until now nothing in the editor could reach it.
+   ["formula", "custom formula is"],
    ["colorscale", "— colour scale (2 stops)"],
    ["colorscale3", "— colour scale (3 stops)"], ["databar", "— data bar"]]
     .forEach(([v, t]) => { const o = el("option", null, t); o.value = v; op.appendChild(o); });
@@ -1495,35 +1547,186 @@ export function buildCfPanel(body) {
   const a = el("input", "panel-field"); a.placeholder = "value"; a.spellcheck = false;
   const b = el("input", "panel-field"); b.placeholder = "and"; b.spellcheck = false; b.style.display = "none";
   body.appendChild(a); body.appendChild(b);
+
+  // The formula field, and the anchor readout that goes with it.
+  //
+  // A conditional-format formula is written **as if for the top-left cell of
+  // the range** and shifted for every other cell in it. That single fact is
+  // the whole difference between `=$D2>100`, which paints the row, and
+  // `=D2>100`, which paints one column — and it is invisible unless the dialog
+  // says which cell the formula is being written for. Excel and Sheets both
+  // keep the range in front of the author for this reason; naming the anchor
+  // outright is the same idea, one step less to work out.
+  const formula = el("input", "panel-field cf-formula");
+  formula.placeholder = "=$D2>100";
+  formula.spellcheck = false;
+  formula.setAttribute("aria-label", "Custom formula");
+  formula.style.display = "none";
+  body.appendChild(formula);
+  const anchor = el("div", "cf-anchor");
+  anchor.style.display = "none";
+  const anchorCell = el("span", "cf-anchor-cell", "A1");
+  const anchorRest = el("span", "cf-anchor-text", "");
+  anchor.append(el("span", "cf-anchor-lead", "Written for "), anchorCell, anchorRest);
+
+  // Where a refusal lands. The binding refuses a formula that cannot parse
+  // rather than storing a rule that can never match; that refusal is only
+  // useful if it appears beside the field it is about. `docs/82` found a
+  // dialog whose validation message went somewhere nobody was looking — the
+  // status bar keeps its copy, but this is the one the author sees.
+  const problem = el("div", "panel-error");
+  problem.setAttribute("role", "alert");
+  problem.hidden = true;
+  body.appendChild(problem);
+  body.appendChild(anchor);
+  const clearProblem = () => { problem.hidden = true; problem.textContent = ""; formula.removeAttribute("aria-invalid"); };
+  // Says which of the two things Apply is about to do. Appended just above the
+  // buttons, further down.
+  const editingNote = el("div", "panel-hint cf-editing");
+  editingNote.hidden = true;
+  const showProblem = (message, field) => {
+    problem.textContent = message;
+    problem.hidden = false;
+    if (field === formula) formula.setAttribute("aria-invalid", "true");
+    statusError(message);
+  };
+
   // The scale/bar kinds are range-relative: they take no operand, and their
   // colours come from the swatch row rather than a single fill.
   const rangeRelative = () => op.value.startsWith("colorscale") || op.value === "databar";
   // Kinds needing a rank, and kinds needing no operand at all.
   const ranked = () => ["top", "bottom", "toppct", "bottompct"].includes(op.value);
-  const noOperand = () => rangeRelative() || ["above", "below", "duplicate", "unique"].includes(op.value);
-  op.addEventListener("change", () => {
+  const noOperand = () => rangeRelative() || ["above", "below", "duplicate", "unique"].includes(op.value)
+    || op.value === "formula";
+  const sync = () => {
+    const isFormula = op.value === "formula";
     b.style.display = op.value === "between" ? "" : "none";
     a.style.display = noOperand() ? "none" : "";
     a.placeholder = op.value === "contains" ? "text" : ranked() ? "how many" : "value";
+    formula.style.display = isFormula ? "" : "none";
+    anchor.style.display = isFormula ? "" : "none";
+    heading.textContent = isFormula ? CF_FORMULA_HEADING : CF_VALUE_HEADING;
     panelHint.textContent = rangeRelative()
       ? "Colour comes from the value's position between the range's smallest and largest."
-      : ranked() || noOperand()
-        ? "Compared against the whole range, so adding rows can change which cells match."
-        : "";
-  });
+      : isFormula
+        ? ""
+        : ranked() || noOperand()
+          ? "Compared against the whole range, so adding rows can change which cells match."
+          : "";
+  };
   const panelHint = el("div", "panel-hint");
   body.appendChild(panelHint);
   panelLabel(body, "Fill color");
   const strip = el("div", "panel-swatches");
-  let fill = "ffd166";
-  ["ffd166", "d1f0d6", "ffd6e0", "d6e4ff", "fed7aa", "e9d5ff", "fca5a5", "a7f3d0"].forEach((hx, i) => {
+  const SWATCHES = ["ffd166", "d1f0d6", "ffd6e0", "d6e4ff", "fed7aa", "e9d5ff", "fca5a5", "a7f3d0"];
+  let fill = SWATCHES[0];
+  const selectSwatch = (hx) => {
+    fill = hx;
+    strip.querySelectorAll(".swatch").forEach((x) => x.classList.toggle("on", x.dataset.hex === hx));
+  };
+  SWATCHES.forEach((hx, i) => {
     const sw = el("button", "swatch" + (i === 0 ? " on" : ""));
+    sw.dataset.hex = hx;
     sw.style.background = "#" + hx;
     sw.title = "#" + hx;
-    sw.addEventListener("click", () => { fill = hx; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); sw.classList.add("on"); });
+    sw.addEventListener("click", () => { dirty = true; selectSwatch(hx); });
     strip.appendChild(sw);
   });
   body.appendChild(strip);
+
+  // --- Reading back the rule that is already there -------------------------
+  //
+  // `loaded` is the rule the panel is currently showing, if it came from the
+  // workbook: `{ i, range }`, where `i` is its document index. Apply replaces
+  // that rule instead of stacking a second one over it — see `cfRuleFromDesc`
+  // for why a stacked "edit" is invisible rather than merely untidy.
+  let loaded = null;
+  // Set by any edit to the controls. A selection change reloads the panel from
+  // the workbook only while nothing has been typed into it, so moving the
+  // cursor cannot throw away a half-written rule.
+  let dirty = false;
+  const anchorOf = (s) => A1(Math.min(s.r0, s.r1), Math.min(s.c0, s.c1));
+  const syncAnchor = () => {
+    const s = effectiveRange();
+    const at = anchorOf(s);
+    const range = A1range(s);
+    anchorCell.textContent = at;
+    anchorRest.textContent =
+      (range === at ? ", the only cell in the range. " : `, the top-left of ${range}, and shifted for every other cell in it. `)
+      + "Lock the column with $ to reach across a row: =$D2>100 paints the whole row, =D2>100 only column D.";
+  };
+  // Whether Apply is about to add a rule or rewrite the one being shown. A
+  // panel that loads an existing rule and then quietly replaces it on Apply is
+  // the mirror of the bug being fixed: the user cannot see which of the two
+  // Apply means, and one of them destroys a rule they did not mean to touch.
+  const syncEditingNote = () => {
+    const editing = loaded && loaded.range === A1range(effectiveRange());
+    editingNote.hidden = !editing;
+    if (editing) editingNote.textContent = `Editing the rule already on ${loaded.range} — Apply rewrites it.`;
+  };
+  const resetControls = () => {
+    op.value = "gt";
+    a.value = ""; b.value = ""; formula.value = "";
+    selectSwatch(SWATCHES[0]);
+    loaded = null;
+    clearProblem();
+    sync();
+    syncEditingNote();
+  };
+  const loadExisting = () => {
+    const s = effectiveRange();
+    const r = Math.min(s.r0, s.r1), c = Math.min(s.c0, s.c1);
+    let rules = [];
+    try { rules = JSON.parse(wasm.session_cf_rules(state.sheet)); } catch { rules = []; }
+    // A rule over exactly this range first — that is the rule the panel itself
+    // would have written, and preferring it keeps Apply amending the rule the
+    // author is looking at rather than an older one that merely overlaps.
+    // Failing that, rules are listed in evaluation order, so the first one
+    // covering the anchor cell is the one actually painting it.
+    const here = A1range(s);
+    const found = rules.find((rule) => rule.range === here) || rules.find((rule) => {
+      const box = parseNameRange(rule.range);
+      return box && box.r0 <= r && box.r1 >= r && box.c0 <= c && box.c1 >= c;
+    });
+    const read = found ? cfRuleFromDesc(found.desc) : null;
+    if (!read) { resetControls(); return; }
+    op.value = read.kind;
+    a.value = read.a == null ? "" : String(read.a);
+    b.value = read.b == null ? "" : String(read.b);
+    formula.value = read.formula || "";
+    const hex = String(found.fill || "").toLowerCase();
+    if (SWATCHES.includes(hex)) selectSwatch(hex);
+    else { fill = hex || SWATCHES[0]; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); }
+    loaded = { i: found.i, range: found.range };
+    clearProblem();
+    sync();
+    syncEditingNote();
+  };
+
+  for (const control of [op, a, b, formula]) {
+    control.addEventListener("input", () => { dirty = true; clearProblem(); });
+    control.addEventListener("change", () => { dirty = true; });
+  }
+  op.addEventListener("change", sync);
+
+  // The panel stays open while the selection moves, and `refreshPanel` keeps
+  // every readout pushed onto `panelRangeEls` in step by writing its
+  // `textContent`. Pushing an object with a setter therefore subscribes to that
+  // same notification without the core needing to know this panel exists — and
+  // the readout is exactly the signal wanted, since it changes when and only
+  // when the range the panel would act on changes.
+  let shownRange = A1range(effectiveRange());
+  panelRangeEls.push({
+    set textContent(next) {
+      if (next === shownRange) return;
+      shownRange = next;
+      syncAnchor();
+      if (dirty) syncEditingNote();
+      else loadExisting();
+    },
+  });
+
+  body.appendChild(editingNote);
   panelActions(
     body,
     "Apply",
@@ -1541,8 +1744,30 @@ export function buildCfPanel(body) {
       if (kind === "colorscale") { txt = `${fill},ffffff`; }
       else if (kind === "colorscale3") { kind = "colorscale"; txt = `${fill},ffffff,63be7b`; }
       else if (kind === "databar") { txt = fill; }
-      try { wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, rank, bv, txt, fill); }
-      catch (e) { statusError(errText(e)); }
+      else if (kind === "formula") { txt = formula.value; }
+      clearProblem();
+      // Replacing rather than stacking, and only when the range has not moved:
+      // the add goes first so a refusal leaves the existing rule alone, and the
+      // delete uses the document index the add did not disturb (a new rule is
+      // pushed onto the end).
+      const replacing = loaded && loaded.range === A1range(s) ? loaded.i : null;
+      try {
+        wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, rank, bv, txt, fill);
+      } catch (e) {
+        showProblem(errText(e), kind === "formula" ? formula : a);
+        (kind === "formula" ? formula : a).focus();
+        return;
+      }
+      if (replacing !== null) {
+        try { wasm.session_delete_cf_rule(state.sheet, replacing); }
+        catch (e) { statusError(errText(e)); }
+      }
+      // Reload from the workbook, so what the panel shows after Apply is the
+      // rule that was stored rather than the text that was typed.
+      dirty = false;
+      loadExisting();
+      status.textContent =
+        `${replacing !== null ? "rule updated on" : "rule applied to"} ${A1range(s)}`;
       draw();
     },
     "Clear",
@@ -1550,10 +1775,14 @@ export function buildCfPanel(body) {
       const s = effectiveRange();
       try { wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1); }
       catch (e) { statusError(errText(e)); }
+      dirty = false;
+      loadExisting();
       draw();
     }
   );
-  setTimeout(() => a.focus(), 0);
+  syncAnchor();
+  loadExisting();
+  setTimeout(() => (op.value === "formula" ? formula : a).focus(), 0);
 }
 
 export function hyperlinkDialog() {
