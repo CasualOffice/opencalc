@@ -114,6 +114,43 @@ def main():
                     f"contract, and a contract that silently gains clauses is not one"
                 )
 
+    # **A document naming the protocol version must name the current one.**
+    #
+    # `AGENTS.md` said `PROTOCOL_VERSION` 5 while the code said 7 — it had
+    # drifted by two bumps with nothing to notice. That number is not
+    # decoration: it is what an old client is refused on, so a document stating
+    # the wrong one tells a reader the wire is compatible when it is not.
+    #
+    # The version itself is read from the source rather than listed here, so
+    # this gate cannot be the thing that goes stale.
+    proto_src = (ROOT / "crates/casual-calc-transaction/src/protocol.rs").read_text(encoding="utf-8")
+    found = re.search(r"PROTOCOL_VERSION: u32 = (\d+)", proto_src)
+    if not found:
+        problems.append(
+            "could not read PROTOCOL_VERSION from protocol.rs — this gate reads it "
+            "from the source on purpose, so a rename here is a gate that has stopped checking"
+        )
+    else:
+        current = found.group(1)
+        # The trackers are a *record*: rows say "PROTOCOL_VERSION 6 -> 7"
+        # because that is what happened, and rewriting a record to match today
+        # falsifies it. They are exempt for the same reason
+        # `check-doc-references` exempts the archive.
+        HISTORICAL = {"14-EXECUTION-TRACKER.md", "14a-ARCHIVE-CLOSED-WORK.md"}
+        for doc in DOCS:
+            if doc.name in HISTORICAL:
+                continue
+            text = doc.read_text(encoding="utf-8")
+            # Present tense only. "`PROTOCOL_VERSION` 7" and "PROTOCOL_VERSION
+            # is 7" are claims about now; "6 -> 7" and "moves to 8" are not.
+            for m in re.finditer(r"`?PROTOCOL_VERSION`?\s+(?:is\s+)?(\d+)(?!\s*(?:->|→))", text):
+                if m.group(1) != current:
+                    problems.append(
+                        f"{doc.name}: says `PROTOCOL_VERSION` {m.group(1)}, but it is {current}. "
+                        f"That number is what an old client is refused on, so a document "
+                        f"stating the wrong one says the wire is compatible when it is not"
+                    )
+
     if problems:
         print("documents claiming gates that CI does not run:", file=sys.stderr)
         for p in problems:
