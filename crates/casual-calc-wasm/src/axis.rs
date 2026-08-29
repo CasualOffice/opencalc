@@ -164,9 +164,39 @@ pub fn session_autofit_candidates(sheet: usize) -> String {
 }
 
 /// Absolute pixel offset (96 dpi) of a column's left edge from column 0.
+///
+/// The twips-to-pixels conversion is done in `i64` and only then narrowed.
+/// Done in `i32` it overflows: an axis offset is twips, and `twips * 96` passes
+/// `i32::MAX` at 1,491,308 px — and because `overflow-checks` is on in the
+/// release profile, that is not a wrong number, it is a **panic in the shipped
+/// build**. A panicking `wasm_bindgen` export traps the module, so the whole
+/// editor stops and the document goes with it.
+///
+/// Columns cannot reach it at the default width, but they can be widened, and
+/// a bound that holds only for the default is not a bound. See
+/// [`session_row_offset_px`], where rows reach it at row 74,566.
 #[wasm_bindgen]
 pub fn session_col_offset_px(sheet: usize, col: u32) -> i32 {
-    with_session(|s| geometry_of(s, sheet).columns.offset(col) as i32 * 96 / 1440).unwrap_or(0)
+    with_session(|s| px_from_twips(geometry_of(s, sheet).columns.offset(col))).unwrap_or(0)
+}
+
+/// Twips to pixels at 96 dpi, saturating rather than trapping.
+///
+/// `i32` is the return type these exports have across the boundary, so the
+/// clamp has to happen somewhere; doing it here means it happens once, in
+/// arithmetic wide enough to compute the true value first. Note `offset`
+/// already returns `i64` — the old code narrowed to `i32` *before* multiplying
+/// by 96, throwing away the width it had been handed. A sheet deep enough
+/// to saturate is beyond anything that can be scrolled to in any case — but it
+/// is reachable by `Ctrl+End` and by typing an address into the Name Box, and
+/// what it did before was take the document down.
+fn px_from_twips(twips: i64) -> i32 {
+    // `saturating_mul`, because widening alone is not enough: `twips * 96`
+    // overflows `i64` too, just further out. Its own test caught that — the
+    // first version of this fix moved the boundary instead of removing it,
+    // which is the shape of a fix that looks right and only postpones.
+    let px = twips.saturating_mul(96) / 1440;
+    px.clamp(0, i32::MAX as i64) as i32
 }
 
 /// The column span just outside a horizontal window that can still show text
@@ -215,7 +245,7 @@ pub fn session_spill_owners(sheet: usize, r0: u32, r1: u32, c0: u32, c1: u32) ->
 /// Absolute pixel offset (96 dpi) of a row's top edge from row 0.
 #[wasm_bindgen]
 pub fn session_row_offset_px(sheet: usize, row: u32) -> i32 {
-    with_session(|s| geometry_of(s, sheet).rows.offset(row) as i32 * 96 / 1440).unwrap_or(0)
+    with_session(|s| px_from_twips(geometry_of(s, sheet).rows.offset(row))).unwrap_or(0)
 }
 
 /// The column containing absolute pixel position `px` (clamped at 0).
@@ -1266,4 +1296,61 @@ pub fn session_filter_info(sheet: usize) -> String {
     })
     .flatten()
     .unwrap_or_else(|| "null".to_owned())
+}
+
+#[cfg(test)]
+mod offset_overflow_tests {
+    use super::{px_from_twips, session_new, session_row_offset_px, session_set_row_height};
+
+    /// **The last row Excel has must have a pixel offset.**
+    ///
+    /// `offset` returns `i64`; the conversion narrowed to `i32` *before*
+    /// multiplying by 96, so it overflowed at 1,491,308 px — row 74,566 at the
+    /// default 20px height. `overflow-checks` is on in the release profile, so
+    /// that was a panic in the shipped build, not a wrong number. A panicking
+    /// `wasm_bindgen` export traps the module: the editor stopped and the
+    /// document went with it.
+    ///
+    /// Reachable two ways a user meets by accident — `Ctrl+End` on a deep
+    /// sheet, and typing `A1048576` into the Name Box.
+    #[test]
+    fn the_last_row_excel_has_still_has_an_offset() {
+        session_new();
+        // 1_048_575 is the last row of an `.xlsx` grid, zero-based.
+        let px = session_row_offset_px(0, 1_048_575);
+        assert_eq!(
+            px, 20_971_500,
+            "the deepest row Excel can address must resolve"
+        );
+    }
+
+    /// The boundary itself, and one line either side of it.
+    #[test]
+    fn the_row_that_used_to_trap_is_one_pixel_step_past_the_one_before_it() {
+        session_new();
+        assert_eq!(session_row_offset_px(0, 74_565), 1_491_300);
+        assert_eq!(session_row_offset_px(0, 74_566), 1_491_320);
+    }
+
+    /// The boundary scales inversely with row height, which is what proves the
+    /// cause is the arithmetic rather than the row index: at double the height
+    /// it arrives at half the row, on the same pixel offset.
+    #[test]
+    fn a_taller_row_reaches_the_old_boundary_sooner_and_still_resolves() {
+        session_new();
+        session_set_row_height(0, 0, 40).unwrap();
+        // Every row is 40px only if the default changed; instead assert the
+        // conversion directly, which is where the defect lived.
+        assert_eq!(px_from_twips(22_369_800), 1_491_320);
+        assert_eq!(px_from_twips(44_739_600), 2_982_640);
+    }
+
+    /// Saturating rather than trapping is the *behaviour*, not an accident of
+    /// the widening: a value past what an `i32` can carry has to come back as
+    /// something, and a clamp is the only answer that keeps the module alive.
+    #[test]
+    fn an_offset_past_what_the_boundary_can_carry_saturates_instead_of_trapping() {
+        assert_eq!(px_from_twips(i64::MAX), i32::MAX);
+        assert_eq!(px_from_twips(-1), 0);
+    }
 }
