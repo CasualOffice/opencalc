@@ -51,6 +51,14 @@ pub struct PivotSpec {
     pub col_grand_totals: bool,
     /// `<pivotTableStyleInfo name>`.
     pub style: String,
+    /// How many `<dataField>`s carry a `@showDataAs` other than `normal`.
+    ///
+    /// "Show Values As" turns a measure into a **derivation** of the measure —
+    /// a percentage of the grand total, a running total, a rank — so a field
+    /// carrying it is not summarized the way its `@subtotal` alone says. Not
+    /// modelled, and counted here so it can be reported rather than left to
+    /// come out as a plain sum under a caption reading `% of total`.
+    pub shown_as: u64,
 }
 
 /// What a `pivotCacheDefinition` says.
@@ -69,6 +77,128 @@ pub struct CacheSpec {
     /// Each cache field's shared items, as display text, so a `<pageField item>`
     /// index can be resolved to the value it selects.
     pub items: Vec<Vec<String>>,
+    /// Which cache fields are **calculated** — a formula over the aggregated
+    /// values rather than a column of the source.
+    ///
+    /// `<cacheField formula="Amount*0.1" databaseField="0"/>`. Nothing in the
+    /// source range corresponds to one, so its index cannot become a
+    /// `source_column`; see [`FieldMap`].
+    pub calculated: Vec<bool>,
+}
+
+/// The two index spaces a pivot lives in, and the map between them.
+///
+/// A `pivotTableDefinition` names every field by its **cache-field index**.
+/// The model's `source_column` is something else entirely — the doc comment on
+/// [`casual_calc_model::PivotAxisField::source_column`] says it: "a zero-based
+/// offset into [`PivotTable::source`]". The two coincide only while every cache
+/// field is a column of the source, which stops being true the moment a pivot
+/// carries a calculated field or a grouped one: Excel appends a cache field for
+/// each, so `<dataField fld="3"/>` over a three-column source names nothing the
+/// range can address.
+///
+/// Writing the cache index straight into `source_column` therefore aimed
+/// measures and axis fields off the end of the source, where
+/// `casual_calc_eval::pivot` reads them as blank without complaint and the
+/// writer emits them as out-of-range indices. This maps the one onto the other
+/// and says when it cannot.
+///
+/// [`PivotTable::source`]: casual_calc_model::PivotTable::source
+pub struct FieldMap {
+    /// Per cache-field index: the source-column offset, or why there is none.
+    slots: Vec<Slot>,
+    /// How many columns the source rectangle has.
+    width: u32,
+}
+
+/// What one cache-field index resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// A column of the source, at this offset from its left edge.
+    Column(u32),
+    /// A calculated field: `@formula` over the aggregates, no column behind it.
+    Calculated,
+    /// A field with no column behind it that is not calculated either — which
+    /// in practice is a **group** field, the extra cache field Excel appends
+    /// when a column is grouped into months, quarters or years.
+    Derived,
+}
+
+impl FieldMap {
+    /// Build the map from the cache and the resolved source rectangle.
+    ///
+    /// Database fields are counted rather than assumed to be a prefix: OOXML
+    /// lists them in source-column order, but nothing forbids a derived field
+    /// between two of them, and an identity map would then shift every field
+    /// after it onto its neighbour's column — a pivot quietly summarizing a
+    /// different measure, which is worse than one that refuses.
+    #[must_use]
+    pub fn build(cache: &CacheSpec, source: CellRange) -> Self {
+        let width = source.end.col.saturating_sub(source.start.col) + 1;
+        let mut next = 0u32;
+        let slots = (0..cache.fields.len())
+            .map(|i| {
+                if cache.calculated.get(i).copied().unwrap_or(false) {
+                    return Slot::Calculated;
+                }
+                // Past the source's own width there is no column to name, so
+                // this is a field the cache added: a group field, or a cache
+                // that disagrees with the range it points at. Either way the
+                // offset would be unaddressable.
+                if next >= width {
+                    return Slot::Derived;
+                }
+                let at = next;
+                next += 1;
+                Slot::Column(at)
+            })
+            .collect();
+        Self { slots, width }
+    }
+
+    /// Resolve one cache-field index.
+    ///
+    /// Past the end of `<cacheFields>` the map falls back to the index itself,
+    /// bounded by the source's width. A cache that declares fewer fields than
+    /// its own range has columns is a file this reader has always accepted, and
+    /// tightening *that* is not what this is for: the defect was indices the
+    /// source cannot address, and the fallback cannot produce one.
+    #[must_use]
+    pub fn slot(&self, cache_field: u32) -> Slot {
+        if let Some(slot) = self.slots.get(cache_field as usize) {
+            return *slot;
+        }
+        if cache_field < self.width {
+            Slot::Column(cache_field)
+        } else {
+            Slot::Derived
+        }
+    }
+}
+
+/// What a pivot's definition said that the model could not take.
+///
+/// Counted per pivot so [`crate::CompatibilityReport`] can name each kind. All
+/// three are *retained* — the pivot's part is written back byte for byte — so
+/// the file keeps them; what they are missing from is the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PivotLosses {
+    /// Axis, filter or value fields dropped because they named a calculated
+    /// cache field.
+    pub calculated_fields: u64,
+    /// Ditto for a cache field with no source column behind it — a group
+    /// field, which is what date grouping produces.
+    pub group_fields: u64,
+    /// Value fields kept, but whose `@showDataAs` is not honoured.
+    pub shown_as: u64,
+}
+
+impl PivotLosses {
+    /// Whether anything at all was lost.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.calculated_fields > 0 || self.group_fields > 0 || self.shown_as > 0
+    }
 }
 
 /// `@axis` -> which list a field belongs on.
@@ -186,6 +316,15 @@ pub fn parse_pivot_table(xml: &[u8]) -> Result<PivotSpec, ImportError> {
                     else {
                         continue;
                     };
+                    // `@showDataAs` defaults to `normal`, which means "show the
+                    // aggregate itself" and is the only setting this engine
+                    // computes. Anything else redefines the figure.
+                    if !matches!(
+                        read_attr(e, b"showDataAs")?.as_deref(),
+                        None | Some("normal")
+                    ) {
+                        spec.shown_as += 1;
+                    }
                     spec.values.push(PivotValueField {
                         source_column: fld,
                         aggregate: read_attr(e, b"subtotal")?
@@ -237,6 +376,16 @@ pub fn parse_pivot_cache(xml: &[u8]) -> Result<CacheSpec, ImportError> {
                 b"cacheField" => {
                     spec.fields.push(read_attr(e, b"name")?.unwrap_or_default());
                     spec.items.push(Vec::new());
+                    // Two spellings for the same thing, and files carry either:
+                    // the formula itself, and `@databaseField="0"` saying this
+                    // field did not come from the records. Excel writes both
+                    // together; taking only one would miss a file that does not.
+                    let calculated = read_attr(e, b"formula")?.is_some()
+                        || matches!(
+                            read_attr(e, b"databaseField")?.as_deref(),
+                            Some("0" | "false")
+                        );
+                    spec.calculated.push(calculated);
                 }
                 b"sharedItems" => in_shared = true,
                 // The item elements, which appear only inside `<sharedItems>`
@@ -298,6 +447,15 @@ fn casual_calc_layout_general(value: f64) -> String {
 
 /// Turn the two specs into the model's pivot, resolving field indices against
 /// the cache's field list and the page-field item indices against its items.
+///
+/// Every index in `spec` is a **cache-field** index and every index in the
+/// result is a **source-column** offset; [`FieldMap`] is the translation, and a
+/// field it cannot translate is left out rather than written through. Left out
+/// is the honest outcome: the part is retained whole, so the file still carries
+/// the field, while a cache index written into `source_column` would name a
+/// column outside the source — which reads as blank on refresh and writes as an
+/// out-of-range `<field x>` on save. What was left out comes back in the
+/// [`PivotLosses`] so the caller can report it.
 pub fn to_model(
     spec: &PivotSpec,
     cache: &CacheSpec,
@@ -305,23 +463,48 @@ pub fn to_model(
     source_sheet: casual_calc_model::SheetId,
     source: CellRange,
     part: String,
-) -> casual_calc_model::PivotTable {
-    let anchor = spec
-        .location
-        .map_or(casual_calc_model::CellRef::new(0, 0), |range| range.start);
-    casual_calc_model::PivotTable {
-        id,
-        name: spec.name.clone(),
-        source_sheet,
-        source,
-        anchor,
-        rows: spec.rows.clone(),
-        cols: spec.cols.clone(),
-        filters: spec
-            .filters
+) -> (casual_calc_model::PivotTable, PivotLosses) {
+    let map = FieldMap::build(cache, source);
+    let mut losses = PivotLosses {
+        shown_as: spec.shown_as,
+        ..PivotLosses::default()
+    };
+    let mut count = |slot: Slot| match slot {
+        Slot::Column(at) => Some(at),
+        Slot::Calculated => {
+            losses.calculated_fields += 1;
+            None
+        }
+        Slot::Derived => {
+            losses.group_fields += 1;
+            None
+        }
+    };
+
+    let axis = |fields: &[PivotAxisField], count: &mut dyn FnMut(Slot) -> Option<u32>| {
+        fields
             .iter()
-            .map(|(fld, item)| PivotFilterField {
-                source_column: *fld,
+            .filter_map(|f| {
+                count(map.slot(f.source_column)).map(|at| PivotAxisField {
+                    source_column: at,
+                    ..f.clone()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let rows = axis(&spec.rows, &mut count);
+    let cols = axis(&spec.cols, &mut count);
+
+    let filters = spec
+        .filters
+        .iter()
+        .filter_map(|(fld, item)| {
+            let at = count(map.slot(*fld))?;
+            Some(PivotFilterField {
+                source_column: at,
+                // The item index is still resolved against the *cache* field,
+                // because that is where the shared items are listed. Only the
+                // column offset is translated.
                 selected: item
                     .and_then(|i| {
                         cache
@@ -333,8 +516,33 @@ pub fn to_model(
                     .map(|v| vec![v])
                     .unwrap_or_default(),
             })
-            .collect(),
-        values: spec.values.clone(),
+        })
+        .collect();
+
+    let values = spec
+        .values
+        .iter()
+        .filter_map(|v| {
+            count(map.slot(v.source_column)).map(|at| PivotValueField {
+                source_column: at,
+                ..v.clone()
+            })
+        })
+        .collect();
+
+    let anchor = spec
+        .location
+        .map_or(casual_calc_model::CellRef::new(0, 0), |range| range.start);
+    let pivot = casual_calc_model::PivotTable {
+        id,
+        name: spec.name.clone(),
+        source_sheet,
+        source,
+        anchor,
+        rows,
+        cols,
+        filters,
+        values,
         row_grand_totals: spec.row_grand_totals,
         col_grand_totals: spec.col_grand_totals,
         style: spec.style.clone(),
@@ -343,5 +551,6 @@ pub fn to_model(
         // under ours.
         output: spec.location,
         part: Some(part),
-    }
+    };
+    (pivot, losses)
 }

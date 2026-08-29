@@ -1658,3 +1658,258 @@ fn a_cf_rule_whose_dxf_paints_nothing_modelled_is_reported() {
     assert_eq!(entry.model, ModelOutcome::Omitted);
     assert_eq!(entry.retention, crate::RetentionOutcome::NotRetained);
 }
+
+/// The same two-sheet package, but the pivot carries the three analytical
+/// features `docs/12` §3.9 names as absent: a **calculated field**, a
+/// **Show Values As** setting, and **date grouping**.
+///
+/// Five cache fields over a three-column source, which is the shape that makes
+/// this interesting. Excel appends a cache field for a calculated field and
+/// another for each grouping level, so `<cacheFields>` runs past the source's
+/// own width, and `<dataField fld="3"/>` names something the range cannot
+/// address. The `Date` field carries a `<fieldGroup>` of its own — the base
+/// field of a date group does — and is still an ordinary source column, which
+/// is the case a rule keyed on `<fieldGroup>` alone would get wrong.
+fn analytic_pivot_package() -> Vec<u8> {
+    const WORKBOOK: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets><pivotCaches><pivotCache cacheId="7" r:id="rId3"/></pivotCaches></workbook>"#;
+    const WORKBOOK_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition1.xml"/></Relationships>"#;
+    const SHEET2_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#;
+    const PIVOT_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition1.xml"/></Relationships>"#;
+    const CACHE: &[u8] = br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" recordCount="3"><cacheSource type="worksheet"><worksheetSource ref="A1:C4" sheet="Data"/></cacheSource><cacheFields count="5"><cacheField name="Region"><sharedItems><s v="East"/><s v="West"/></sharedItems></cacheField><cacheField name="Date" numFmtId="14"><sharedItems containsSemiMixedTypes="0" containsNonDate="0" containsDate="1" containsString="0"><d v="2024-01-15T00:00:00"/><d v="2024-02-20T00:00:00"/></sharedItems><fieldGroup base="1"><rangePr groupBy="months" startDate="2024-01-15T00:00:00" endDate="2024-03-01T00:00:00"/><groupItems count="3"><s v="Jan"/><s v="Feb"/><s v="Mar"/></groupItems></fieldGroup></cacheField><cacheField name="Amount"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"/></cacheField><cacheField name="Commission" databaseField="0" formula="Amount*0.1"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"/></cacheField><cacheField name="Months"><fieldGroup base="1"><rangePr groupBy="months"/><groupItems count="2"><s v="Jan"/><s v="Feb"/></groupItems></fieldGroup></cacheField></cacheFields></pivotCacheDefinition>"#;
+    const PIVOT: &[u8] = br#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Sales" cacheId="7"><location ref="A3:C6" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/><pivotFields count="5"><pivotField axis="axisRow" showAll="0"/><pivotField axis="axisPage" showAll="0"/><pivotField dataField="1" showAll="0"/><pivotField dataField="1" showAll="0"/><pivotField axis="axisRow" showAll="0"/></pivotFields><rowFields count="2"><field x="0"/><field x="4"/></rowFields><pageFields count="1"><pageField fld="1" hier="-1"/></pageFields><dataFields count="2"><dataField name="Pct of total" fld="2" subtotal="sum" showDataAs="percentOfTotal" baseField="0" baseItem="1048832"/><dataField name="Sum of Commission" fld="3" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1"/></pivotTableDefinition>"#;
+
+    let data = sheet_with(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Date</t></is></c><c r="C1" t="inlineStr"><is><t>Amount</t></is></c></row>
+           <row r="2"><c r="A2" t="inlineStr"><is><t>East</t></is></c><c r="B2"><v>45306</v></c><c r="C2"><v>10</v></c></row>
+           <row r="3"><c r="A3" t="inlineStr"><is><t>West</t></is></c><c r="B3"><v>45342</v></c><c r="C3"><v>30</v></c></row>
+           <row r="4"><c r="A4" t="inlineStr"><is><t>East</t></is></c><c r="B4"><v>45312</v></c><c r="C4"><v>99</v></c></row>"#,
+    );
+    let report = sheet_with("");
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/worksheets/sheet1.xml", &data),
+        ("xl/worksheets/sheet2.xml", &report),
+        ("xl/worksheets/_rels/sheet2.xml.rels", SHEET2_RELS),
+        ("xl/pivotTables/pivotTable1.xml", PIVOT),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", PIVOT_RELS),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", CACHE),
+    ])
+}
+
+/// **Every `source_column` a pivot carries has to be a column of its source.**
+///
+/// The model says so in as many words — `PivotAxisField::source_column` is "a
+/// zero-based offset into `PivotTable::source`" — and the reader was writing an
+/// OOXML *cache-field* index into it instead. The two are the same number only
+/// while every cache field is a source column, which a calculated field or a
+/// grouped one ends immediately: Excel appends a cache field for each, so a
+/// three-column source acquires fields 3 and 4 that no column answers to.
+///
+/// This is the invariant, and it is asserted over every field on every axis
+/// rather than over the two that happen to be wrong here, because the next
+/// construct to append a cache field will break it the same way.
+#[test]
+fn every_pivot_field_names_a_column_the_source_actually_has() {
+    let import = import_package(analytic_pivot_package()).unwrap();
+    let pivot = &import.workbook.sheets[1].pivots[0];
+    let width = pivot.source.end.col - pivot.source.start.col + 1;
+    assert_eq!(width, 3, "the source is A1:C4");
+
+    for f in pivot.rows.iter().chain(pivot.cols.iter()) {
+        assert!(
+            f.source_column < width,
+            "axis field names column {} of a {width}-column source",
+            f.source_column
+        );
+    }
+    for f in &pivot.filters {
+        assert!(
+            f.source_column < width,
+            "page field names column {} of a {width}-column source",
+            f.source_column
+        );
+    }
+    for f in &pivot.values {
+        assert!(
+            f.source_column < width,
+            "measure {:?} names column {} of a {width}-column source",
+            f.name,
+            f.source_column
+        );
+    }
+}
+
+/// The fields with a column behind them survive, and only those.
+///
+/// A test that only counted losses would pass just as well if the reader threw
+/// the whole pivot away, so what is pinned here is both halves: `Region` and
+/// `Amount` still resolve, `Date` still resolves **even though it carries a
+/// `<fieldGroup>` of its own** — the base field of a date group does, and a
+/// rule keyed on that element would drop a real column — and the two that name
+/// nothing are gone.
+#[test]
+fn a_calculated_field_and_a_group_field_are_dropped_and_the_real_ones_are_not() {
+    let import = import_package(analytic_pivot_package()).unwrap();
+    let pivot = &import.workbook.sheets[1].pivots[0];
+
+    // `<rowFields>` listed `x="0"` (Region) and `x="4"` (the Months group).
+    assert_eq!(
+        pivot
+            .rows
+            .iter()
+            .map(|f| f.source_column)
+            .collect::<Vec<_>>(),
+        vec![0],
+        "the group field has no column, so it is not on the row axis"
+    );
+    // `<pageField fld="1"/>` is Date — grouped, and still a source column.
+    assert_eq!(
+        pivot
+            .filters
+            .iter()
+            .map(|f| f.source_column)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "a grouped base field is still a column of the source"
+    );
+    // `<dataFields>` listed `fld="2"` (Amount) and `fld="3"` (Commission,
+    // calculated).
+    assert_eq!(
+        pivot
+            .values
+            .iter()
+            .map(|f| (f.source_column, f.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "Pct of total")],
+        "the calculated measure has no column to sum"
+    );
+    // And the part is still retained, so the file keeps all three.
+    assert_eq!(
+        pivot.part.as_deref(),
+        Some("xl/pivotTables/pivotTable1.xml")
+    );
+}
+
+/// Nothing here is dropped quietly — the three are named separately, because
+/// they are three different answers to "what will this pivot do now".
+#[test]
+fn the_three_analytical_features_are_each_named_in_the_report() {
+    let import = import_package(analytic_pivot_package()).unwrap();
+    let find = |feature: &str| {
+        import
+            .report
+            .entries()
+            .into_iter()
+            .find(|e| e.feature == feature)
+            .unwrap_or_else(|| panic!("{feature} is not in the report: {:?}", import.report))
+    };
+
+    let calc = find("pivotTable/calculatedField");
+    assert_eq!(calc.model, ModelOutcome::Omitted);
+    assert_eq!(calc.retention, crate::RetentionOutcome::Preserved);
+    assert_eq!(calc.count, 1);
+
+    let group = find("pivotTable/groupField");
+    assert_eq!(group.model, ModelOutcome::Omitted);
+    assert_eq!(group.retention, crate::RetentionOutcome::Preserved);
+    assert_eq!(group.count, 1);
+
+    // Kept, not dropped: the figure under `Pct of total` is a true sum of a
+    // real column, it is simply not the percentage the file asked for. That is
+    // `Degraded`, and it is the entry that stops the number being silent.
+    let shown = find("pivotTable/showDataAs");
+    assert_eq!(shown.model, ModelOutcome::Degraded);
+    assert_eq!(shown.retention, crate::RetentionOutcome::Preserved);
+    assert_eq!(shown.count, 1);
+
+    // And the pivot itself stops claiming it was fully mapped.
+    assert_eq!(find("pivotTable").model, ModelOutcome::Degraded);
+}
+
+/// A pivot whose fields name nothing is not merely untidy — it **refreshes
+/// wrong**, which is what a user sees.
+///
+/// Before the fix `casual_calc_eval::pivot` read every out-of-range field as
+/// absent and said nothing: the `Months` row field produced a `(blank)` label
+/// on every line and the `Commission` measure produced a column of empties.
+/// Neither raised anything anywhere.
+#[test]
+fn refreshing_an_analytic_pivot_produces_no_blank_labels_or_empty_measures() {
+    use casual_calc_eval::pivot::{PivotCellKind, compute};
+    let import = import_package(analytic_pivot_package()).unwrap();
+    let wb = &import.workbook;
+    let report = compute(wb, &wb.sheets[1].pivots[0]).expect("it still has a measure to refresh");
+
+    for cell in &report.cells {
+        assert_ne!(
+            cell.value,
+            casual_calc_eval::Value::Text("(blank)".to_owned()),
+            "a row label reading (blank) is a field aimed off the end of the source: {cell:?}"
+        );
+        if matches!(
+            cell.kind,
+            PivotCellKind::Value | PivotCellKind::Subtotal | PivotCellKind::GrandTotal
+        ) {
+            assert_ne!(
+                cell.value,
+                casual_calc_eval::Value::Empty,
+                "an empty figure is a measure with no column behind it: {cell:?}"
+            );
+        }
+    }
+    // The report is two columns wide, not four: one row field and one measure.
+    assert_eq!(report.range.end.col - report.range.start.col + 1, 2);
+}
+
+/// A cache that declares fewer fields than its own range has columns has always
+/// been read tolerantly, and this change must not tighten *that*.
+///
+/// The defect was indices the source cannot address; an index the source **can**
+/// address still resolves, however little the cache says about it.
+#[test]
+fn a_cache_that_under_declares_its_fields_still_resolves_the_columns_it_has() {
+    use crate::pivot::{CacheSpec, FieldMap, Slot};
+    let cache = CacheSpec {
+        fields: vec!["Region".to_owned()],
+        calculated: vec![false],
+        ..CacheSpec::default()
+    };
+    let source = casual_calc_model::CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2));
+    let map = FieldMap::build(&cache, source);
+    assert_eq!(map.slot(0), Slot::Column(0), "the one it declared");
+    assert_eq!(map.slot(2), Slot::Column(2), "and the ones it did not");
+    assert_eq!(map.slot(3), Slot::Derived, "but never past the range");
+}
+
+/// Database fields are **counted**, not assumed to be a prefix.
+///
+/// If a derived field could sit between two real ones, an identity map would
+/// shift every field after it onto its neighbour's column — a pivot quietly
+/// summarizing a different measure, which is worse than one that refuses.
+#[test]
+fn a_derived_field_in_the_middle_does_not_shift_the_ones_after_it() {
+    use crate::pivot::{CacheSpec, FieldMap, Slot};
+    let cache = CacheSpec {
+        fields: vec![
+            "Region".to_owned(),
+            "Bonus".to_owned(),
+            "Amount".to_owned(),
+            "Cost".to_owned(),
+        ],
+        calculated: vec![false, true, false, false],
+        ..CacheSpec::default()
+    };
+    let source = casual_calc_model::CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2));
+    let map = FieldMap::build(&cache, source);
+    assert_eq!(map.slot(0), Slot::Column(0));
+    assert_eq!(map.slot(1), Slot::Calculated);
+    assert_eq!(
+        map.slot(2),
+        Slot::Column(1),
+        "Amount is the second *column*, whatever its cache index"
+    );
+    assert_eq!(map.slot(3), Slot::Column(2));
+}
