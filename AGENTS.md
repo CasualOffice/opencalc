@@ -116,16 +116,19 @@ When two goals conflict, the earlier one wins:
 
 **Alpha — the engine, the editor and the embeddable SDK are live.** Phases 0
 through 1E are done, Phase 2 (calc) is substantially done, and Phase 3
-(spreadsheet features) has shipped. The workspace is fifteen crates; the browser
+(spreadsheet features) has shipped. The workspace is sixteen crates; the browser
 editor runs the same core through WebAssembly.
 
 What is still open, and therefore where the work is:
 
-- **A live P0.** `COL-46`: a `$`-anchored formula rebased across a concurrent
-  insert lands as `$E$1` on one replica and `$D$1` on the other, with no error
-  anywhere. Two replicas of a shared document holding different formulas is the
-  worst class this system has, and it is **not** operational — so do not read
-  the paragraphs below as saying nothing architectural is open.
+- **A live P1 in the same place `COL-46` was.** `COL-46` — a `$`-anchored
+  formula diverging across a concurrent insert — is **Done**. What replaced it
+  is `COL-50`: an insert meeting a delete does not converge for a formula
+  *range*, and **each answer is the one Excel gives for its own order**, so
+  resolving it means choosing what a range *means* across a concurrent edit
+  rather than fixing a transform. It needs no formula in flight — a range
+  formula and two ordinary structural edits reach it. So do not read the
+  paragraphs below as saying nothing architectural is open.
 - **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
   by an `sdk-v*` tag) and now ships type declarations (`SDK-009`); what remains
   is a *stable* API, since `0.0.x` is a preview, and the nine decisions

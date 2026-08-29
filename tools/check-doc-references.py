@@ -85,6 +85,12 @@ NAMED_BUT_UNDEFINED = {
 ROW = re.compile(r"^\|\s*([0-9]{2}[a-z]?)\s*\|")
 ID_ROW = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|")
 DOC_CITE = re.compile(r"\bdocs/([0-9]{2}[a-z]?)\b")
+# A citation that spells out a *filename* — `docs/82-UX-VISUAL-AUDIT.md`.
+# The number check above only asks whether that number resolves, so a
+# rename left every citation naming a file that no longer exists while
+# every gate stayed green: `docs/68-UX-VISUAL-AUDIT.md` — the exact
+# collision that turned main red once — passed all four (`DOC-048`).
+DOC_FILE_CITE = re.compile(r"\bdocs/([0-9]{2}[a-z]?-[A-Z0-9][A-Za-z0-9-]*\.md)\b")
 ADR_CITE = re.compile(r"\bADR-([0-9]{3})\b")
 
 
@@ -162,6 +168,14 @@ def main() -> int:
                 problems.append(
                     f"{doc}: cites docs/{number}, which is neither a file nor a "
                     f"tombstone row in {INDEX}"
+                )
+        for filename in sorted(set(DOC_FILE_CITE.findall(text))):
+            if not (ROOT / "docs" / filename).is_file():
+                problems.append(
+                    f"{doc}: cites docs/{filename}, and no such file exists. The "
+                    f"number may well resolve — that is what makes this quiet: a "
+                    f"renamed document leaves every citation pointing at a name "
+                    f"nothing has, and the number check cannot see it"
                 )
         for number in sorted(set(ADR_CITE.findall(text))):
             if f"ADR-{number}" not in adrs:
