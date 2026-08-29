@@ -35,7 +35,7 @@ use casual_calc_model::{ModelError, Workbook};
 
 use crate::{
     Operation, TxnError, apply,
-    transform::{Side, TransformError, is_noop, transform},
+    transform::{Side, TransformError, is_noop, transform_with_formulas},
     wire::WireOperation,
 };
 
@@ -468,11 +468,16 @@ impl ClientSession {
         // operation against coordinates it was never expressed in.
         // What the sheet indices in these operations actually name. The
         // transform cannot look it up, so it is handed over (`FID-28`).
+        // The workbook is passed as the formula table too: an outstanding
+        // `SetCell` carrying a formula has to have that formula rewritten by
+        // the arrival's band, and rewriting produces a tree that needs
+        // interning before a handle for it exists (`COL-46`).
         let sheets = sheet_names(workbook);
         let outstanding = self.sent.iter_mut().flat_map(|chunk| chunk.ops.iter_mut());
         for local in outstanding.chain(self.pending.iter_mut()) {
-            let rebased_arrival = transform(&arriving, local, Side::Earlier, &sheets)?;
-            *local = transform(local, &arriving, Side::Later, &sheets)?;
+            let rebased_arrival =
+                transform_with_formulas(&arriving, local, Side::Earlier, &sheets, workbook)?;
+            *local = transform_with_formulas(local, &arriving, Side::Later, &sheets, workbook)?;
             arriving = rebased_arrival;
         }
 
@@ -640,12 +645,14 @@ impl ServerSession {
         for op in &incoming {
             let mut current = op.clone();
             for committed in &mut history {
-                let next = transform(&current, committed, Side::Later, &sheets)?;
+                let next =
+                    transform_with_formulas(&current, committed, Side::Later, &sheets, workbook)?;
                 // The concurrent operation has to move past this one too, so
                 // the *next* operation in the chunk is rebased onto a history
                 // that has advanced. Missing this is the batch-threading bug
                 // one layer up.
-                *committed = transform(committed, &current, Side::Earlier, &sheets)?;
+                *committed =
+                    transform_with_formulas(committed, &current, Side::Earlier, &sheets, workbook)?;
                 current = next;
             }
             // Deliberately not pushed onto `history`: the next operation in the

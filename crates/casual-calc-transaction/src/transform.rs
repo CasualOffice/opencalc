@@ -45,8 +45,14 @@
 //! outcome this layer must not produce: the two clients would diverge and
 //! nothing would say so.
 
-use crate::{Operation, SheetFields, structural::Axis};
-use casual_calc_model::{CellRef, CellValue};
+use crate::{
+    Operation, SheetFields,
+    structural::{Axis, CarriedShift, ShiftKind},
+};
+use casual_calc_formula::{Expr, stored::Origin};
+use casual_calc_model::{Cell, CellRef, CellValue, FormulaHandle};
+
+mod line_move;
 
 /// Where `subject` sits relative to `against` in the order the server settled
 /// on.
@@ -231,11 +237,106 @@ fn shift_cell(at: CellRef, band: Band) -> Option<CellRef> {
 /// skipped rather than guessed.
 pub type SheetNames = [(String, casual_calc_model::SheetId)];
 
+/// The formula table a rebase needs when the operation it is moving **carries**
+/// a formula.
+///
+/// `SheetNames` is the same idea for sheet identity: the transform is a pure
+/// function and is handed what it cannot look up (`FID-28`). A formula needs
+/// more than a lookup, though — rewriting one produces a *new* tree, and a
+/// [`Cell`] refers to its formula by an arena handle,
+/// so the new tree has to be interned somewhere before a handle for it exists.
+/// This is that capability and nothing else: read one tree, intern the tree it
+/// becomes. It is deliberately not `&mut Workbook`, which would let the
+/// transform go looking for anything at all.
+///
+/// # Why it can refuse
+///
+/// [`transform`] has no table, so it answers `None` here and the pair is
+/// refused rather than merged wrongly — see [`NoFormulas`].
+pub trait FormulaTable {
+    /// Read the tree behind `handle`, put it through `rewrite`, and intern the
+    /// result.
+    ///
+    /// `None` when this table cannot — an unknown handle, or no table at all.
+    /// The caller turns that into [`TransformError::Unsupported`]; it must
+    /// never turn it into "carry the formula over unchanged", which is the
+    /// silent divergence `COL-46` was.
+    fn rebase(
+        &mut self,
+        handle: FormulaHandle,
+        rewrite: &dyn Fn(&Expr) -> Expr,
+    ) -> Option<FormulaHandle>;
+}
+
+/// A [`FormulaTable`] that holds nothing, so every rebase of a carried formula
+/// is refused.
+///
+/// What plain [`transform`] uses. A caller with a workbook should pass it
+/// instead — [`transform_with_formulas`] — and get the pair answered.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoFormulas;
+
+impl FormulaTable for NoFormulas {
+    fn rebase(&mut self, _: FormulaHandle, _: &dyn Fn(&Expr) -> Expr) -> Option<FormulaHandle> {
+        None
+    }
+}
+
+impl FormulaTable for casual_calc_model::Workbook {
+    fn rebase(
+        &mut self,
+        handle: FormulaHandle,
+        rewrite: &dyn Fn(&Expr) -> Expr,
+    ) -> Option<FormulaHandle> {
+        let expr = self.formula(handle)?.clone();
+        Some(self.store_formula(rewrite(&expr)))
+    }
+}
+
+/// [`transform`], with a table to rebase carried formulas through.
+///
+/// The pair `transform` refuses for want of one — an unacknowledged
+/// [`Operation::SetCell`] holding a formula, meeting a concurrent insert or
+/// delete — is answered here. Every caller that holds a workbook should use
+/// this one; [`session`](crate::session) does.
+///
+/// # Errors
+///
+/// As [`transform`], plus [`TransformError::Unsupported`] when `formulas` does
+/// not know a handle the operation carries, or when `sheets` does not say what
+/// the operation's sheet index is called (the rewrite has to decide whether a
+/// `Sheet1!$D$2` names it).
+pub fn transform_with_formulas(
+    subject: &Operation,
+    against: &Operation,
+    side: Side,
+    sheets: &SheetNames,
+    formulas: &mut dyn FormulaTable,
+) -> Result<Operation, TransformError> {
+    transform_inner(subject, against, side, sheets, formulas)
+}
+
+/// # Errors
+///
+/// [`TransformError::Unsupported`] for the pairs listed in the module docs, and
+/// for any operation carrying a formula that a concurrent insert or delete
+/// moves — this entry point has no formula table to rewrite it through. Use
+/// [`transform_with_formulas`] when a workbook is at hand.
 pub fn transform(
     subject: &Operation,
     against: &Operation,
     side: Side,
     sheets: &SheetNames,
+) -> Result<Operation, TransformError> {
+    transform_inner(subject, against, side, sheets, &mut NoFormulas)
+}
+
+fn transform_inner(
+    subject: &Operation,
+    against: &Operation,
+    side: Side,
+    sheets: &SheetNames,
+    formulas: &mut dyn FormulaTable,
 ) -> Result<Operation, TransformError> {
     // A batch is transformed member by member, **threading** the other side
     // through as it goes.
@@ -252,8 +353,8 @@ pub fn transform(
         let mut out = Vec::with_capacity(members.len());
         let mut other = against.clone();
         for member in members {
-            let rebased = transform(member, &other, side, sheets)?;
-            other = transform(&other, member, side.flip(), sheets)?;
+            let rebased = transform_inner(member, &other, side, sheets, formulas)?;
+            other = transform_inner(&other, member, side.flip(), sheets, formulas)?;
             if !is_noop(&rebased) {
                 out.push(rebased);
             }
@@ -266,7 +367,7 @@ pub fn transform(
         // order is already the composition.
         let mut current = subject.clone();
         for member in members {
-            current = transform(&current, member, side, sheets)?;
+            current = transform_inner(&current, member, side, sheets, formulas)?;
             if is_noop(&current) {
                 return Ok(noop());
             }
@@ -290,42 +391,58 @@ pub fn transform(
         return Err(unsupported(subject, against));
     }
 
-    // **A move has no transform, and says so rather than guessing.** Reordering
-    // a band is a delete and an insert at once on the *same* axis, and a range
-    // move is a permutation `Band` cannot express at all — so neither
-    // `band_of` nor `rebase_onto_band` has an answer, and the fall-through
-    // ("`against` moves nothing, so `subject`'s coordinates still mean what
-    // they meant") would be false. A wrong answer here is invisible divergence
-    // that never heals, which is the one outcome `docs/56` rules out; an
-    // `Unsupported` is a caller-visible refusal. Concurrency only: an
-    // uncontended move never reaches `transform` at all.
-    if is_cell_move(subject) || is_cell_move(against) {
-        return Err(unsupported(subject, against));
+    // **A move is a permutation, which `Band` cannot express**, so the pair
+    // goes to the module that can: reordering a band is a delete and an insert
+    // at once on the same axis, and the fall-through here ("`against` moves
+    // nothing, so `subject`'s coordinates still mean what they meant") is false
+    // for it. A *rectangle* move is still refused, and so are the two shapes of
+    // concurrent reorder that no single `Move*` can name — [`line_move`] argues
+    // each from convergence. Concurrency only: an uncontended move never
+    // reaches `transform` at all.
+    if line_move::involves_move(subject) || line_move::involves_move(against) {
+        return line_move::rebase(subject, against, side, sheets, formulas);
     }
 
-    // Different sheets never interact: no operation here addresses two.
+    let band = band_of(against);
+
+    // Different sheets never interact **positionally**, and that was read as
+    // "never interact at all". A formula is the exception and the only one: a
+    // reference qualified with another sheet's name — `S!$D$1` sitting on sheet
+    // `T` — is moved by a structural operation on `S`, because `apply` rewrites
+    // every formula in the *workbook* that targets the banded sheet and not
+    // merely the ones living on it. So a cell edit carrying a formula still
+    // goes through the band; nothing else does, and its address does not move.
     match (sheet_of(subject), sheet_of(against)) {
-        (Some(a), Some(b)) if a != b => return Ok(subject.clone()),
+        (Some(a), Some(b)) if a != b => {
+            return match band {
+                Some(band) if carries_formula(subject) => {
+                    rebase_onto_band(subject, band, sheets, formulas)
+                }
+                _ => Ok(subject.clone()),
+            };
+        }
         _ => {}
     }
 
-    let Some(band) = band_of(against) else {
-        // `against` moves nothing, so `subject`'s coordinates still mean what
-        // they meant. What is left is contention for the same target, which the
-        // settled order decides.
-        return Ok(resolve_contention(subject, against, side));
+    let Some(band) = band else {
+        // `against` moves no *lines*. It may still have moved a **name**: a
+        // concurrent `RenameSheet` rewrites every qualified reference in the
+        // workbook, so an operation carrying one has to follow it or the two
+        // replicas end up with `S!$C$3` and `renamed0!$C$3` for the same cell.
+        // The `COL-46` shape again, one axis over — a carried reference that
+        // was not rebased, diverging with nothing raised.
+        let renamed = rebase_across_rename(subject, against, sheets, formulas)?;
+        // What is left is contention for the same target, which the settled
+        // order decides.
+        return Ok(resolve_contention(&renamed, against, side));
     };
 
-    Ok(rebase_onto_band(subject, band, sheets))
+    rebase_onto_band(subject, band, sheets, formulas)
 }
 
-/// Whether an operation permutes cell addresses within a sheet — the three
-/// move operations. See the refusal in [`transform`].
-fn is_cell_move(op: &Operation) -> bool {
-    matches!(
-        op,
-        Operation::MoveColumns { .. } | Operation::MoveRows { .. } | Operation::MoveRange { .. }
-    )
+/// Whether an operation writes a cell that holds a formula.
+fn carries_formula(op: &Operation) -> bool {
+    matches!(op, Operation::SetCell { cell: Some(cell), .. } if cell.formula.is_some())
 }
 
 /// Whether an operation changes what a `sheet` index refers to.
@@ -432,17 +549,46 @@ fn rebase_across_sheets(
             Some(mapped) => *index = mapped,
             None => return Err(unsupported(subject, against)),
         },
-        // These name a sheet, and vanish with it.
-        Operation::RemoveSheet { index } | Operation::RenameSheet { index, .. } => {
-            match map_sheet_index(*index, against) {
-                Some(mapped) => *index = mapped,
-                None => return Ok(noop()),
-            }
-        }
+        // These name a sheet, and vanish with it — except that a rename does
+        // not only touch the sheet it names. It rewrites every `Old!A1` in the
+        // workbook, on every other sheet and in the defined names, so dropping
+        // it to a no-op keeps the sheet list right and loses that rewrite: one
+        // replica renamed `S` and then removed it, leaving the references
+        // reading `renamed0!`, and the other removed `S` first and left them
+        // reading `S!`. Same shape as the band above, refused for the same
+        // reason — there is no operation that performs only the rewrite.
+        Operation::RenameSheet { index, .. } => match map_sheet_index(*index, against) {
+            Some(mapped) => *index = mapped,
+            None => return Err(unsupported(subject, against)),
+        },
+        Operation::RemoveSheet { index } => match map_sheet_index(*index, against) {
+            Some(mapped) => *index = mapped,
+            None => return Ok(noop()),
+        },
         _ => {
             if let Some(sheet) = sheet_field_mut(&mut rebased) {
                 match map_sheet_index(*sheet, against) {
                     Some(mapped) => *sheet = mapped,
+                    // **The sheet this operation was about is gone — but a
+                    // structural one did not only act on that sheet.** An
+                    // insert or a delete rewrites every formula in the
+                    // *workbook* that points at the sheet it runs on, plus the
+                    // defined names, so dropping it to a no-op keeps the cells
+                    // right and silently loses that rewrite. The replica that
+                    // ordered the insert first shifted `T!` formulas reading
+                    // `S!$B$2` to `S!$B$3` and then removed `S`; the one that
+                    // removed `S` first never shifted them. Both end with `S`
+                    // gone and with different formulas in `T`.
+                    //
+                    // There is no operation in the closed set that performs
+                    // only that rewrite, so there is no answer to give and the
+                    // pair is refused (`COL-49`). Found by TP1 the first time
+                    // the seed carried a cross-sheet reference; every other
+                    // operation really is confined to its own sheet, which is
+                    // why the no-op is right for them and only for them.
+                    None if band_of(&rebased).is_some() => {
+                        return Err(unsupported(subject, against));
+                    }
                     None => return Ok(noop()),
                 }
             }
@@ -510,139 +656,436 @@ fn variant_name(op: &Operation) -> &'static str {
     }
 }
 
-/// Rebase an operation across a structural band on the same sheet.
-fn rebase_onto_band(subject: &Operation, band: Band, sheets: &SheetNames) -> Operation {
-    match subject.clone() {
-        // Cell-addressed operations follow their cell, or vanish with it.
-        Operation::SetCell { sheet, at, cell } => match shift_cell(at, band) {
-            Some(at) => Operation::SetCell { sheet, at, cell },
-            None => noop(),
-        },
-        Operation::SetValue { sheet, at, value } => match shift_cell(at, band) {
-            Some(at) => Operation::SetValue { sheet, at, value },
-            None => noop(),
-        },
-        Operation::SetStyle { sheet, at, style } => match shift_cell(at, band) {
-            Some(at) => Operation::SetStyle { sheet, at, style },
-            None => noop(),
-        },
-        Operation::ClearCell { sheet, at } => match shift_cell(at, band) {
-            Some(at) => Operation::ClearCell { sheet, at },
-            None => noop(),
-        },
-
-        // Axis sizing follows its line — but only when the band is on the same
-        // axis. A column width is untouched by an inserted row.
-        Operation::SetColumnWidth { sheet, col, width } => {
-            if band.axis != Axis::Col {
-                return Operation::SetColumnWidth { sheet, col, width };
-            }
-            match shift_index(col, band) {
-                Some(col) => Operation::SetColumnWidth { sheet, col, width },
-                None => noop(),
-            }
-        }
-        Operation::SetRowHeight { sheet, row, height } => {
-            if band.axis != Axis::Row {
-                return Operation::SetRowHeight { sheet, row, height };
-            }
-            match shift_index(row, band) {
-                Some(row) => Operation::SetRowHeight { sheet, row, height },
-                None => noop(),
-            }
-        }
-
-        // Structural against structural. Cross-axis pairs are independent —
-        // inserting a row does not move a column — so only the same axis needs
-        // arithmetic.
-        Operation::InsertRows { sheet, at, count } if band.axis == Axis::Row => {
-            rebase_insert(band, at, count).map_or_else(noop, |at| Operation::InsertRows {
-                sheet,
-                at,
-                count,
-            })
-        }
-        Operation::InsertColumns { sheet, at, count } if band.axis == Axis::Col => {
-            rebase_insert(band, at, count).map_or_else(noop, |at| Operation::InsertColumns {
-                sheet,
-                at,
-                count,
-            })
-        }
-        Operation::DeleteRows { sheet, at, count } if band.axis == Axis::Row => {
-            rebase_delete(band, at, count).map_or_else(noop, |(at, count)| Operation::DeleteRows {
-                sheet,
-                at,
-                count,
-            })
-        }
-        Operation::DeleteColumns { sheet, at, count } if band.axis == Axis::Col => {
-            rebase_delete(band, at, count).map_or_else(noop, |(at, count)| {
-                Operation::DeleteColumns { sheet, at, count }
-            })
-        }
-
-        // A metadata bundle carries positional state of its own — merges, axis
-        // sizing, hidden lines, the freeze band, the outline — all of which the
-        // structural op moved out from under it. Shifting the bundle by the
-        // same band is what keeps a pending resize pointing at the column the
-        // user resized. It reuses the shift `apply` performs on the sheet
-        // itself, so the two cannot disagree.
-        Operation::SetSheetMetadata {
+/// Follow a concurrent [`Operation::RenameSheet`] through the references an
+/// operation **carries**.
+///
+/// A rename is not a position, so no band describes it and the fall-through
+/// used to carry the operation over untouched. That is wrong for the same
+/// reason `COL-46` was: `apply` rewrites every `Old!A1` in the workbook when
+/// the rename lands, so a pending `SetDefinedNames` or a pending cell formula
+/// that still says `Old!` means something different on the replica that
+/// ordered the rename first.
+///
+/// Everything without a sheet qualifier is untouched, which is most of what
+/// exists — and cheaply so, since `rename_sheet_references` reports whether it
+/// changed anything.
+///
+/// # Errors
+///
+/// [`TransformError::Unsupported`] when `sheets` does not say what the renamed
+/// index was called (the rewrite matches on the *old* name, which only the
+/// caller knows), or when `formulas` cannot rewrite a tree the operation
+/// carries.
+fn rebase_across_rename(
+    subject: &Operation,
+    against: &Operation,
+    sheets: &SheetNames,
+    formulas: &mut dyn FormulaTable,
+) -> Result<Operation, TransformError> {
+    let Operation::RenameSheet { index, name } = against else {
+        return Ok(subject.clone());
+    };
+    // Nothing an operation can carry names a sheet, so nothing can move.
+    if !carries_a_reference(subject) {
+        return Ok(subject.clone());
+    }
+    let refuse = || unsupported(subject, against);
+    let old = sheets.get(*index).ok_or_else(refuse)?.0.clone();
+    // **The snapshot already shows the new name, so the old one is unknowable.**
+    // `RenameSheet` carries only the name it is moving *to*; the name it is
+    // moving *from* is a fact about state, and the only place it can come from
+    // is `sheets`. `ClientSession` builds that from a workbook the arrival has
+    // not been applied to yet, so it holds the old name and the rewrite works.
+    // `ServerSession` builds it from a workbook the committed history *has*
+    // been applied to, so for a rename inside that history it already reads the
+    // new name — and a rewrite keyed on it would match nothing and leave the
+    // pending formula pointing at a sheet that no longer answers to that name.
+    //
+    // Refused rather than passed through, because passed through is the
+    // divergence: the submitting client rewrites its own copy when the rename
+    // reaches it and the server does not. A rename genuinely to the same name
+    // is a no-op and loses nothing by being refused with it.
+    if old == *name {
+        return Err(refuse());
+    }
+    let rename = |expr: &Expr| {
+        let mut renamed = expr.clone();
+        casual_calc_formula::rename_sheet_references(&mut renamed, &old, name);
+        renamed
+    };
+    Ok(match subject.clone() {
+        Operation::SetCell {
             sheet,
-            mut data,
-            changed,
-            // Bytes, not positions. A retained chart part has nothing to shift.
-            restore,
+            at,
+            cell: Some(mut cell),
         } => {
-            match band.inserting {
-                true => crate::structural::shift_metadata_insert(
-                    data.as_mut(),
-                    band.axis,
-                    band.at,
-                    band.count,
-                ),
-                false => crate::structural::shift_metadata_delete(
-                    data.as_mut(),
-                    band.axis,
-                    band.at,
-                    band.count,
-                ),
+            if let Some(handle) = cell.formula {
+                cell.formula = Some(formulas.rebase(handle, &rename).ok_or_else(refuse)?);
             }
-            // A chart's series is a reference *string* and a pivot's source is
-            // on another sheet, so neither can be decided from a sheet index
-            // alone — which is why `shift_metadata_*` above leaves them. The
-            // caller holds the workbook and passed what the indices name, so
-            // they can be shifted here rather than reinstating a pre-insert
-            // reference when this bundle lands (`FID-28`).
-            if let (Some(target), Some(home)) =
-                (band.sheet.and_then(|i| sheets.get(i)), sheets.get(sheet))
-            {
-                crate::structural::shift_bundle_references(
-                    data.as_mut(),
-                    &crate::structural::BundleShift {
-                        target_name: &target.0,
-                        target_id: target.1,
-                        home_name: &home.0,
-                        axis: band.axis,
-                        inserting: band.inserting,
-                        at: band.at,
-                        count: band.count,
-                    },
-                );
+            Operation::SetCell {
+                sheet,
+                at,
+                cell: Some(cell),
             }
+        }
+        Operation::SetDefinedNames(names) => Operation::SetDefinedNames(
+            names
+                .into_iter()
+                .map(|mut defined| {
+                    defined.formula = rename(&defined.formula);
+                    defined
+                })
+                .collect(),
+        ),
+        other => other,
+    })
+}
+
+/// Whether an operation carries a formula, and so can name a sheet by name.
+///
+/// A [`Operation::Batch`] never reaches here — `transform` has already split it
+/// into members — so it deliberately answers `false` rather than recursing into
+/// something that cannot arrive.
+fn carries_a_reference(op: &Operation) -> bool {
+    match op {
+        Operation::SetCell { cell, .. } => cell.as_ref().is_some_and(|c| c.formula.is_some()),
+        Operation::SetDefinedNames(_) => true,
+        _ => false,
+    }
+}
+
+/// One structural change to the grid, in the terms a formula rewrite needs.
+///
+/// A [`Band`] and a line move are different operations that do the same thing
+/// to a formula — [`crate::structural`] already reduces all three to one
+/// [`ShiftKind`] — so the rewrite is described once here and both paths build
+/// it. Keeping them apart is how the move transform and the band transform
+/// would drift into rewriting formulas differently.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Shift {
+    /// The sheet the operation runs on, whose references move.
+    sheet: usize,
+    axis: Axis,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+    /// The operation's name, for the refusal when the context is not enough.
+    against: &'static str,
+}
+
+impl Band {
+    /// The formula rewrite this band implies, or `None` when the band's own
+    /// sheet is unknown — which cannot happen for the four operations
+    /// [`band_of`] accepts, all of which name a sheet.
+    const fn shift(self) -> Option<Shift> {
+        let Some(sheet) = self.sheet else {
+            return None;
+        };
+        Some(Shift {
+            sheet,
+            axis: self.axis,
+            kind: if self.inserting {
+                ShiftKind::Insert
+            } else {
+                ShiftKind::Delete
+            },
+            at: self.at,
+            count: self.count,
+            against: match (self.axis, self.inserting) {
+                (Axis::Row, true) => "InsertRows",
+                (Axis::Row, false) => "DeleteRows",
+                (Axis::Col, true) => "InsertColumns",
+                (Axis::Col, false) => "DeleteColumns",
+            },
+        })
+    }
+}
+
+/// How `shift` rewrites the formulas of a document, or `None` when `sheets`
+/// does not say what the indices involved are called.
+///
+/// Both names are needed and they are not the same question. `target` is the
+/// sheet the operation runs on — what a qualified `Sheet1!$D$2` has to name to
+/// be moved. `home` is the sheet the formula lives on, which is what decides an
+/// *unqualified* reference. They are equal whenever the edit is on the banded
+/// sheet and differ for the cross-sheet case, which is the whole reason the
+/// rewrite takes two.
+fn carried_shift<'a>(
+    shift: Shift,
+    home_name: &'a str,
+    sheets: &'a SheetNames,
+) -> Option<CarriedShift<'a>> {
+    let target = sheets.get(shift.sheet)?;
+    Some(CarriedShift {
+        target_name: &target.0,
+        home_name,
+        axis: shift.axis,
+        kind: shift.kind,
+        at: shift.at,
+        count: shift.count,
+    })
+}
+
+/// Rebase the formula a [`Operation::SetCell`] carries, so it means on the
+/// rebased state what it meant on the state it was written against.
+///
+/// This is `COL-46`. The cell address was already being moved and the formula
+/// was carried verbatim, so a replica that applied the concurrent insert first
+/// kept `=$D$1` where the other had been rewritten to `=$E$1` — two replicas of
+/// one document holding different formulas, with nothing raised anywhere.
+///
+/// **It is not only the `$`-anchored references that move**, which is the part
+/// that reads wrong until it is worked through. A relative reference is stored
+/// as an offset from its own cell (`PERF-11`), so it survives a band that lies
+/// outside the span between the reference and the cell — and diverges just as
+/// loudly for one that lies inside it. `=A1` in `B2` across an
+/// `InsertColumns{at:1}` is the smallest example.
+///
+/// # Errors
+///
+/// [`TransformError::Unsupported`] when `formulas` cannot rewrite the tree, or
+/// when `sheets` does not name the sheet the rewrite has to decide against.
+/// Refusing is the whole point: the alternative is the divergence above.
+pub(super) fn rebase_cell_formula(
+    cell: Option<Cell>,
+    sheet: usize,
+    from: CellRef,
+    to: CellRef,
+    shift: Shift,
+    sheets: &SheetNames,
+    formulas: &mut dyn FormulaTable,
+) -> Result<Option<Cell>, TransformError> {
+    let Some(mut cell) = cell else {
+        return Ok(None);
+    };
+    let Some(handle) = cell.formula else {
+        return Ok(Some(cell));
+    };
+    let refuse = || TransformError::Unsupported {
+        subject: "SetCell",
+        against: shift.against,
+    };
+    let home = sheets.get(sheet).ok_or_else(refuse)?;
+    let carried = carried_shift(shift, &home.0, sheets).ok_or_else(refuse)?;
+    let (from, to) = (Origin::at(from.row, from.col), Origin::at(to.row, to.col));
+    cell.formula = Some(
+        formulas
+            .rebase(handle, &|expr| carried.cell_formula(expr, from, to))
+            .ok_or_else(refuse)?,
+    );
+    Ok(Some(cell))
+}
+
+/// Rebase an operation across a structural band on the same sheet.
+///
+/// # Errors
+///
+/// [`TransformError::Unsupported`] when the operation carries a formula that
+/// the band moves and `formulas` cannot rewrite it — see [`FormulaTable`].
+fn rebase_onto_band(
+    subject: &Operation,
+    band: Band,
+    sheets: &SheetNames,
+    formulas: &mut dyn FormulaTable,
+) -> Result<Operation, TransformError> {
+    let out =
+        match subject.clone() {
+            // Cell-addressed operations follow their cell, or vanish with it — and
+            // a cell carrying a **formula** carries coordinates of its own, which
+            // the band moved just as surely as it moved the address (`COL-46`).
+            Operation::SetCell { sheet, at, cell } => {
+                // The **address** moves only when the band is on this cell's own
+                // sheet. The **formula** moves either way: a reference qualified
+                // with the banded sheet's name is rewritten by `apply` wherever it
+                // lives, so an edit on `T` carrying `S!$D$1` is reached by an
+                // insert on `S` and its address is not.
+                let to = if band.sheet == Some(sheet) {
+                    match shift_cell(at, band) {
+                        Some(to) => to,
+                        None => return Ok(noop()),
+                    }
+                } else {
+                    at
+                };
+                let Some(shift) = band.shift() else {
+                    return Ok(Operation::SetCell {
+                        sheet,
+                        at: to,
+                        cell,
+                    });
+                };
+                Operation::SetCell {
+                    sheet,
+                    at: to,
+                    cell: rebase_cell_formula(cell, sheet, at, to, shift, sheets, formulas)?,
+                }
+            }
+            Operation::SetValue { sheet, at, value } => match shift_cell(at, band) {
+                Some(at) => Operation::SetValue { sheet, at, value },
+                None => noop(),
+            },
+            Operation::SetStyle { sheet, at, style } => match shift_cell(at, band) {
+                Some(at) => Operation::SetStyle { sheet, at, style },
+                None => noop(),
+            },
+            Operation::ClearCell { sheet, at } => match shift_cell(at, band) {
+                Some(at) => Operation::ClearCell { sheet, at },
+                None => noop(),
+            },
+
+            // Axis sizing follows its line — but only when the band is on the same
+            // axis. A column width is untouched by an inserted row.
+            Operation::SetColumnWidth { sheet, col, width } => {
+                if band.axis != Axis::Col {
+                    return Ok(Operation::SetColumnWidth { sheet, col, width });
+                }
+                match shift_index(col, band) {
+                    Some(col) => Operation::SetColumnWidth { sheet, col, width },
+                    None => noop(),
+                }
+            }
+            Operation::SetRowHeight { sheet, row, height } => {
+                if band.axis != Axis::Row {
+                    return Ok(Operation::SetRowHeight { sheet, row, height });
+                }
+                match shift_index(row, band) {
+                    Some(row) => Operation::SetRowHeight { sheet, row, height },
+                    None => noop(),
+                }
+            }
+
+            // Structural against structural. Cross-axis pairs are independent —
+            // inserting a row does not move a column — so only the same axis needs
+            // arithmetic.
+            Operation::InsertRows { sheet, at, count } if band.axis == Axis::Row => {
+                rebase_insert(band, at, count).map_or_else(noop, |at| Operation::InsertRows {
+                    sheet,
+                    at,
+                    count,
+                })
+            }
+            Operation::InsertColumns { sheet, at, count } if band.axis == Axis::Col => {
+                rebase_insert(band, at, count).map_or_else(noop, |at| Operation::InsertColumns {
+                    sheet,
+                    at,
+                    count,
+                })
+            }
+            Operation::DeleteRows { sheet, at, count } if band.axis == Axis::Row => {
+                rebase_delete(band, at, count).map_or_else(noop, |(at, count)| {
+                    Operation::DeleteRows { sheet, at, count }
+                })
+            }
+            Operation::DeleteColumns { sheet, at, count } if band.axis == Axis::Col => {
+                rebase_delete(band, at, count).map_or_else(noop, |(at, count)| {
+                    Operation::DeleteColumns { sheet, at, count }
+                })
+            }
+
+            // A metadata bundle carries positional state of its own — merges, axis
+            // sizing, hidden lines, the freeze band, the outline — all of which the
+            // structural op moved out from under it. Shifting the bundle by the
+            // same band is what keeps a pending resize pointing at the column the
+            // user resized. It reuses the shift `apply` performs on the sheet
+            // itself, so the two cannot disagree.
             Operation::SetSheetMetadata {
                 sheet,
-                data,
+                mut data,
                 changed,
+                // Bytes, not positions. A retained chart part has nothing to shift.
                 restore,
+            } => {
+                match band.inserting {
+                    true => crate::structural::shift_metadata_insert(
+                        data.as_mut(),
+                        band.axis,
+                        band.at,
+                        band.count,
+                    ),
+                    false => crate::structural::shift_metadata_delete(
+                        data.as_mut(),
+                        band.axis,
+                        band.at,
+                        band.count,
+                    ),
+                }
+                // A chart's series is a reference *string* and a pivot's source is
+                // on another sheet, so neither can be decided from a sheet index
+                // alone — which is why `shift_metadata_*` above leaves them. The
+                // caller holds the workbook and passed what the indices name, so
+                // they can be shifted here rather than reinstating a pre-insert
+                // reference when this bundle lands (`FID-28`).
+                if let (Some(target), Some(home)) =
+                    (band.sheet.and_then(|i| sheets.get(i)), sheets.get(sheet))
+                {
+                    crate::structural::shift_bundle_references(
+                        data.as_mut(),
+                        &crate::structural::BundleShift {
+                            target_name: &target.0,
+                            target_id: target.1,
+                            home_name: &home.0,
+                            axis: band.axis,
+                            kind: if band.inserting {
+                                ShiftKind::Insert
+                            } else {
+                                ShiftKind::Delete
+                            },
+                            at: band.at,
+                            count: band.count,
+                        },
+                    );
+                }
+                Operation::SetSheetMetadata {
+                    sheet,
+                    data,
+                    changed,
+                    restore,
+                }
             }
-        }
 
-        // Everything else is positionally inert: a tab colour, a rename, the
-        // defined-name table, and any cross-axis structural pair.
-        other => other,
-    }
+            // **A defined name is a formula with no cell**, and it was being
+            // carried across a band verbatim — found by this crate's TP1 property
+            // the first time that property could see a formula at all (`COL-50`,
+            // the second head of `COL-46`). `apply` rewrites every name targeting
+            // the sheet a band runs on, so `Anchor = S!$C$3` written concurrently
+            // with `InsertRows{at:0}` settled as `$C$4` on the replica that
+            // ordered the name first and `$C$3` on the other.
+            //
+            // No formula table is needed and none is asked for: a name carries its
+            // tree inline rather than by handle, so the rewrite is pure.
+            Operation::SetDefinedNames(names) => {
+                let Some(shift) = band.shift() else {
+                    return Ok(Operation::SetDefinedNames(names));
+                };
+                let refuse = || TransformError::Unsupported {
+                    subject: "SetDefinedNames",
+                    against: shift.against,
+                };
+                let mut shifted = Vec::with_capacity(names.len());
+                for mut name in names {
+                    // A name's home is the sheet it is *scoped* to, which is what
+                    // resolves an unqualified reference inside it. A
+                    // workbook-scoped name has none, and the empty name it gets
+                    // here is the same answer `rewrite_defined_names` reaches —
+                    // deliberately no sheet at all, so an unqualified reference is
+                    // left alone rather than rewritten against a sheet picked
+                    // arbitrarily.
+                    let home = name
+                        .sheet
+                        .and_then(|id| sheets.iter().find(|(_, sheet_id)| *sheet_id == id))
+                        .map_or("", |(sheet_name, _)| sheet_name.as_str());
+                    let carried = carried_shift(shift, home, sheets).ok_or_else(refuse)?;
+                    name.formula = carried.free_formula(&name.formula);
+                    shifted.push(name);
+                }
+                Operation::SetDefinedNames(shifted)
+            }
+
+            // Everything else is positionally inert: a tab colour, a rename, and
+            // any cross-axis structural pair.
+            other => other,
+        };
+    Ok(out)
 }
 
 /// Where an insert at `at` lands after `band`, or `None` when the band swallowed
