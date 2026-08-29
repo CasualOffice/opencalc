@@ -133,7 +133,7 @@ What is still open, and therefore where the work is:
   answered before anything shipped (`DOC-034`).
 - **Phase 5** — **built and running, both halves.** `casual-calc-transaction`
   carries `transform` (TP1 as a property), the session protocol
-  (`PROTOCOL_VERSION` 5), snapshots and idempotent submissions;
+  (`PROTOCOL_VERSION` 7), snapshots and idempotent submissions;
   `server/casual-calc-collab-server` is a workspace member serving `/collab`,
   with a leader per document, epoch-fenced appends, relay from any node,
   resume, presence and host callbacks, plus a standalone mode needing no

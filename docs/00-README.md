@@ -131,6 +131,7 @@ the other way around. This index is the map.
 | 81 | [Desktop shell composition](81-DESKTOP-SHELL-COMPOSITION.md) | `ADR-023`: why the Tauri app depends on the SDK directly, what a separate Cargo workspace costs, and the three decisions a running shell is still needed to settle |
 | 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see. **Generated** by `tests/browser/ux-visual-audit.mjs`; do not edit by hand |
 | 83 | [Save, autosave, recovery and version history](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md) | What `Ctrl+S` means in four hosts and the one rule behind it; why the collaboration op log is a resume buffer and not a history; snapshot-based versions and restore as a new operation |
+| 84 | [Chart expressiveness](84-CHART-EXPRESSIVENESS.md) | Stacking, combination, a secondary axis and data labels: why the file survives but the picture lies, why grouping is a field and not a `ChartKind`, what a chart costs per frame, and the forty-odd chart types deliberately refused |
 
 ### Measured gap trackers (50–53, 73)
 
