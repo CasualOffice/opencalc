@@ -216,3 +216,36 @@ test("a flick still throws when the release arrives late", async ({ page }) => {
   const settled = (await scroll(page)).scrollY;
   expect(settled, "a late release still throws, only weaker").toBeGreaterThan(atRelease + 10);
 });
+
+test("a glide is a scroll, so the accessibility mirror is not rebuilt per frame", async ({ page }) => {
+  await boot(page);
+  // `viewIsMoving()` is called from the two paths a finger or a wheel drives,
+  // and a glide is neither: it is the throw after the finger has already gone,
+  // running on its own rAF. So the mirror's deferral never saw it, and one
+  // fling rebuilt hundreds of DOM nodes on all forty of its frames — the whole
+  // per-frame cost `PERF-D-01` removed, still present on the platform with the
+  // least frame budget to spare. Measured at 40 rebuilds per fling before the
+  // glide step started declaring itself, and 4 after.
+  const rebuilds = () => page.evaluate(() => window.opencalcEditor.a11yRebuildCountForTest());
+  const cdp = await page.context().newCDPSession(page);
+  const box = await page.locator("#grid").boundingBox();
+  const x = box.x + box.width / 2;
+  const y0 = box.y + box.height * 0.8;
+
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: y0 }] });
+  for (let i = 1; i <= 10; i += 1) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y0 - i * 30 }] });
+    await page.waitForTimeout(16);
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  const atRelease = await rebuilds();
+  const scrollAtRelease = (await scroll(page)).scrollY;
+  await page.waitForTimeout(1500);
+
+  expect((await scroll(page)).scrollY, "nothing glided, so this proves nothing")
+    .toBeGreaterThan(scrollAtRelease + 20);
+  const during = (await rebuilds()) - atRelease;
+  // Bounded by the staleness ceiling rather than by zero: a fling is still
+  // motion, and `A11Y-01` is the reason the mirror has to catch up during it.
+  expect(during, `${during} mirror rebuilds during one glide`).toBeLessThanOrEqual(10);
+});

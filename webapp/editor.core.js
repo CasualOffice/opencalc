@@ -5491,10 +5491,6 @@ const a11yCellId = (row, col) => `a11y-${row}-${col}`;
 // A CPU profile of a scroll put 36.8% in `updateScrollbars` and 6.6% here —
 // 43% of the frame in two functions that do not draw a cell.
 //
-// Deferred until the view stops. A screen reader is not reading a grid mid-
-// fling, and the mirror only has to be true when the motion is — so this drops
-// the cost out of the scroll path without ever leaving the tree stale while
-// somebody could be reading it.
 // Deferred **only while the view is moving**. An edit is not a scroll: the
 // mirror is the only DOM this canvas has, so it is what a screen reader reads
 // *and* what a test reads, and delaying it by even a frame delays the
@@ -5502,10 +5498,48 @@ const a11yCellId = (row, col) => `a11y-${row}-${col}`;
 // unconditionally broke `a copied value pastes as itself`, which reads
 // `#a11y-7-0` and had nothing to read for 120ms. The test was right and the
 // first version of this was wrong.
+//
+// ...and deferring *until the motion stops* was wrong too (`A11Y-01`). The
+// settle timer was re-armed on every frame, so a scroll that never settles
+// never rebuilds: measured on an unmodified tree, 1.5s of continuous wheel
+// scrolling left the mirror **220 rows behind the screen**, and the bound is
+// the length of the gesture rather than any number in this file. A canvas grid
+// has no other accessible representation, so for a screen-reader user that is
+// not a stale detail — it is the grid showing somewhere they are not.
+//
+// So: deferred, but with a ceiling. While the view moves the mirror is rebuilt
+// at most once per `A11Y_MAX_STALE_MS`, and the settle timer still fires
+// afterwards so the tree that comes to rest is exact.
+//
+// **What that trades.** Between the ceiling and the next rebuild the mirror is
+// still stale — up to a quarter second of it — which is the deliberate half of
+// the design: a mirror that is never stale is a mirror rebuilt every frame,
+// which is the 43%-of-frame cost `PERF-D-01` removed. The number is chosen
+// against what a reader can actually consume: announcing one row of cells takes
+// well over a second in any screen reader, so a quarter second cannot let a
+// reader *finish* a row that was already gone when it started. And it caps the
+// rate at 4 rebuilds/second where the pre-`PERF-D-01` path did 60 — 6.7% of the
+// cost, for a bound that does not depend on how long somebody holds a scroll.
+//
+// **What it costs, measured** (`tests/browser/frame-profile.mjs`, 1.5s of
+// continuous scrolling, before and after on the same machine and server):
+// the median frame is 16.7ms either way. The tail is where it shows: on a
+// 41-column window — 1200 mirrored cells, the worst case this file allows —
+// max frame goes from 17.7ms to ~25ms and frames over 20ms from 0-1 to ~5 per
+// 86, which is the four rebuilds a second arriving. One rebuild is ~5ms of JS
+// plus the layout of ~1300 nodes. On a 13-column window it is at the edge of
+// measurable. So: roughly four slightly-long frames per second, while the wheel
+// or a finger is actually moving, and nothing at all while reading, editing or
+// navigating by keyboard.
+const A11Y_MAX_STALE_MS = 250;
 let a11ySettle = 0;
 let a11yRebuilds = 0;
+let a11yFreshAt = 0;
 let movingUntil = 0;
 export const a11yRebuildCountForTest = () => a11yRebuilds;
+/// The staleness ceiling, so the gate asserts the contract rather than a second
+/// copy of the number.
+export const a11yMaxStaleMsForTest = () => A11Y_MAX_STALE_MS;
 
 /// What a frame actually fetched, against what it can show.
 ///
@@ -5530,20 +5564,31 @@ export function viewIsMoving() { movingUntil = performance.now() + 90; }
 
 function scheduleA11yGrid() {
   clearTimeout(a11ySettle);
-  if (performance.now() >= movingUntil) {
+  const now = performance.now();
+  if (now >= movingUntil) {
     // Standing still — an edit, a selection, a format. Announce it now.
     rebuildA11yGrid();
     return;
   }
+  // Moving. Wait for the view to settle — but no longer than the ceiling allows
+  // the mirror to describe a screen that is not there. Always through a timer,
+  // never inline: this runs from `draw`, inside the animation frame, and a
+  // rebuild there dirties layout the browser then has to resolve before it can
+  // paint. Off the frame it is the same work in a task of its own.
+  const settle = Math.min(120, Math.max(0, A11Y_MAX_STALE_MS - (now - a11yFreshAt)));
   a11ySettle = setTimeout(() => {
     a11ySettle = 0;
     rebuildA11yGrid();
-  }, 120);
+  }, settle);
 }
 
 function rebuildA11yGrid() {
   if (!a11yEl || !wasm || !geo.rowIdx || !geo.colIdx) return;
   a11yRebuilds += 1;
+  // Before the early-out below, not after: a signature that has not changed
+  // means the mirror is *already* true for this frame, and re-checking it 16ms
+  // later costs a `JSON.stringify` of the whole window for no gain.
+  a11yFreshAt = performance.now();
   const rows = geo.rowIdx.slice(0, A11Y_MAX_ROWS);
   const cols = geo.colIdx.slice(0, A11Y_MAX_COLS);
   if (!rows.length || !cols.length) return;
@@ -6749,6 +6794,13 @@ function wireEvents() {
       state.scrollX -= vx * dt;
       state.scrollY -= vy * dt;
       clampScroll();
+      // A glide is a scroll that the finger has already let go of, and the two
+      // scroll paths that say so — `wheel` and `touchmove` — both stop firing
+      // the moment the throw begins. So this was the one kind of motion the
+      // accessibility mirror's deferral never saw: measured at **40 rebuilds
+      // in a single fling**, the whole per-frame cost `PERF-D-01` removed,
+      // still there on the platform with the least frame budget to spare.
+      viewIsMoving();
       scheduleDraw();
       const decay = GLIDE_DECAY ** (dt / 16);
       vx *= decay;
