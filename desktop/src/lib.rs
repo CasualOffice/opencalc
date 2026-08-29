@@ -20,6 +20,7 @@
 pub mod assets;
 pub mod dialog;
 pub mod menu;
+pub mod save;
 pub mod session;
 pub mod title;
 

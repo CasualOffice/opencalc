@@ -24,6 +24,16 @@
 //! invariant and it is enforced here by shape: no command accepts a path and no
 //! command hands one out, so a webview cannot ask this process to read a file
 //! the user did not choose in a panel.
+//!
+//! `SAVE-02` restates that more precisely rather than relaxing it: **a path may
+//! cross *into* this process only from a platform panel, and never crosses back
+//! out.** The shell now remembers one — the file this window was opened from —
+//! so that `Ctrl+S` writes the document back to it instead of producing
+//! `opencalc (1).xlsx` beside it ([`docs/83`] §3.2). `native_save_target` takes
+//! no path and returns only a base name, so the shape is unchanged: the webview
+//! still cannot name a destination, only "the one the user already chose".
+//!
+//! [`docs/83`]: ../../docs/83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md
 
 // The window is the point of this binary; there is nothing to print.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -32,6 +42,7 @@ use std::sync::Mutex;
 
 use casual_calc_desktop::dialog;
 use casual_calc_desktop::menu::{self, Menu as MenuModel, Node};
+use casual_calc_desktop::save::{SaveTarget, write_in_place};
 use casual_calc_desktop::session::{Capabilities, Session};
 use serde::Serialize;
 use tauri::ipc::{InvokeBody, Request, Response};
@@ -48,11 +59,18 @@ use tauri_plugin_dialog::DialogExt;
 /// not been chosen for yet. Both are taken rather than read, so a cancelled
 /// dialog leaves nothing behind and a second save cannot write the first one's
 /// bytes.
+///
+/// `target` is the exception and deliberately so: it is the file this window
+/// commits to, and the point of it is that it *persists*. `take`-semantics
+/// would make `Ctrl+S` work once. What it costs is the one piece of shell state
+/// that has to be actively cleared — on `File ▸ New`, and on an open that did
+/// not take — and [`SaveTarget`] holds that reasoning.
 #[derive(Default)]
 struct Shell {
     session: Mutex<Session>,
     opened: Mutex<Option<Vec<u8>>>,
     staged: Mutex<Option<Vec<u8>>>,
+    target: Mutex<SaveTarget>,
 }
 
 /// A poisoned lock is a panic somewhere else; say so rather than panicking too.
@@ -149,15 +167,38 @@ fn set_capabilities(window: WebviewWindow, capabilities: Capabilities) -> Result
 /// One command for both, because they are one fact about one title bar and two
 /// commands would let them disagree — a name updated without a dirty flag shows
 /// a clean document that has unsaved work in it.
+/// It is also the signal that promotes a save target. `native_open` has a path
+/// in hand before anyone knows whether the bytes behind it parse, so the path is
+/// *armed* there and adopted here — when the webview says the document on screen
+/// is that file. An open the engine refused reports the previous document's
+/// name, and the candidate is dropped. See [`SaveTarget`].
 #[tauri::command]
 fn set_document(window: WebviewWindow, name: Option<String>, dirty: bool) -> Result<(), String> {
     let title = {
         let shell = window.state::<Shell>();
         let mut session = locked(&shell.session)?;
-        session.set_document(name, dirty);
+        session.set_document(name.clone(), dirty);
         session.title()
     };
+    {
+        let shell = window.state::<Shell>();
+        locked(&shell.target)?
+            .observe_document(name.as_deref().map(str::trim).filter(|n| !n.is_empty()));
+    }
     window.set_title(&title).map_err(|why| why.to_string())
+}
+
+/// This window is showing a different document now, so it commits to nothing.
+///
+/// `File ▸ New` is what this is for. Without it the next `Ctrl+S` writes a blank
+/// workbook over the file the window was showing a moment ago — the failure
+/// [`docs/83`](../../docs/83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md) §3.2 names as
+/// the one the acceptance test exists for.
+#[tauri::command]
+fn clear_save_target(window: WebviewWindow) -> Result<(), String> {
+    let shell = window.state::<Shell>();
+    locked(&shell.target)?.clear();
+    Ok(())
 }
 
 /// The platform's open panel, and the bytes behind whatever it returned.
@@ -197,6 +238,10 @@ async fn native_open(app: AppHandle) -> Result<Option<Opened>, String> {
     {
         let shell = app.state::<Shell>();
         *locked(&shell.opened)? = Some(bytes);
+        // Armed, not adopted. The bytes have not been parsed yet, and a target
+        // adopted here would point `Ctrl+S` at a file the window is not showing
+        // if the engine refuses them. `set_document` decides.
+        locked(&shell.target)?.arm(path);
     }
     Ok(Some(Opened { name, size }))
 }
@@ -254,8 +299,16 @@ fn stage_save_bytes(window: WebviewWindow, request: Request<'_>) -> Result<(), S
 /// deliberately does **not** update its own document name here: the editor
 /// decides what a save means for the document it is showing — a `.csv` export
 /// of one sheet is not a rename — and one of the two has to be the authority.
+///
+/// `adopt` is the same question asked about the *save target*, and for the same
+/// reason. A `Ctrl+S` on a document that has no target yet acquires one here, so
+/// the path this panel returned becomes the file the window commits to. A
+/// `File ▸ Download ▸ CSV` writes a copy and must leave the target where it is —
+/// otherwise the next `Ctrl+S` writes a workbook into a `.csv` the user asked
+/// for as an export. The editor knows which of the two this is; the shell does
+/// not, and does not guess.
 #[tauri::command]
-async fn native_save(app: AppHandle, ext: String) -> Result<Option<String>, String> {
+async fn native_save(app: AppHandle, ext: String, adopt: bool) -> Result<Option<String>, String> {
     // Taken first and unconditionally, so that *every* way out of this function
     // — a refused capability, a cancelled panel, a failed write — leaves no
     // copy of the document behind in the shell.
@@ -285,8 +338,78 @@ async fn native_save(app: AppHandle, ext: String) -> Result<Option<String>, Stri
     };
 
     let path = chosen.into_path().map_err(|why| why.to_string())?;
-    std::fs::write(&path, &bytes).map_err(|why| format!("could not write the file: {why}"))?;
-    Ok(Some(dialog::base_name(&path.to_string_lossy())))
+    // The same atomic write the in-place save uses. A Save As over an existing
+    // file has exactly the hazard `save::write_in_place` exists for: a partial
+    // write leaves the user with neither the file they picked nor the document
+    // they were saving. No change check, because the user just named this file
+    // in a panel and the platform already asked about replacing it.
+    let stamp = write_in_place(&path, &bytes, None).map_err(|why| why.to_string())?;
+    let name = dialog::base_name(&path.to_string_lossy());
+    if adopt {
+        let shell = app.state::<Shell>();
+        locked(&shell.target)?.adopt(path, Some(stamp));
+    }
+    Ok(Some(name))
+}
+
+/// What a `Ctrl+S` against the window's own file did.
+///
+/// Four outcomes rather than a `Result<Option<String>, String>`, because they
+/// are four different things for the user to do next and the webview has to
+/// branch on them: a changed file wants a decision, a read-only one wants a
+/// Save As, a missing folder wants a different folder, and no target at all is
+/// not a failure — it is a document that has never been saved, and the answer is
+/// to acquire a target rather than to download.
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+enum SavedToTarget {
+    /// The bytes are on disk at the path the user opened.
+    Written { name: String },
+    /// This window has no file to commit to yet.
+    NoTarget,
+    /// Nothing was written, and this is why.
+    Refused {
+        kind: &'static str,
+        name: String,
+        why: String,
+    },
+}
+
+/// Write the document back to the file this window was opened from.
+///
+/// The command `SAVE-02` adds, and the reason the "bytes, never paths"
+/// invariant survives it: it takes no path, and the only thing it hands back is
+/// a base name. `force` is only ever true because the user was shown a
+/// changed-file conflict and chose to overwrite.
+///
+/// `guard_save()` applies, as it does to the panel: a mode without `canSaveAs`
+/// cannot reach a file through this door either.
+///
+/// `async` for the same reason [`native_save`] is, minus the panel: the write
+/// blocks, and a blocking write on the thread that also draws is a window that
+/// stops repainting for as long as the filesystem takes.
+#[tauri::command]
+async fn native_save_target(app: AppHandle, force: bool) -> Result<SavedToTarget, String> {
+    let shell = app.state::<Shell>();
+    // Taken first and unconditionally, exactly as `native_save` does: every way
+    // out of this function leaves no copy of the document behind in the shell.
+    let staged = locked(&shell.staged)?.take();
+    locked(&shell.session)?.guard_save()?;
+    let bytes = staged.ok_or_else(|| "nothing was staged to save".to_owned())?;
+
+    let mut target = locked(&shell.target)?;
+    match target.write(&bytes, force) {
+        Ok(Some(name)) => Ok(SavedToTarget::Written { name }),
+        Ok(None) => Ok(SavedToTarget::NoTarget),
+        Err(why) => Ok(SavedToTarget::Refused {
+            kind: why.kind(),
+            name: target
+                .path()
+                .map(|p| dialog::base_name(&p.to_string_lossy()))
+                .unwrap_or_default(),
+            why: why.to_string(),
+        }),
+    }
 }
 
 /// The shell's half of the bridge, injected into the page.
@@ -297,11 +420,15 @@ async fn native_save(app: AppHandle, ext: String) -> Result<Option<String>, Stri
 /// only ever exists in this binary. Instead the shell installs the thing it can
 /// provide, and the editor asks whether `window.__opencalcNative` is there.
 ///
-/// Five functions, and each is a native capability rather than a policy:
-/// `open()` raises the panel and returns bytes, `save()` writes them,
-/// `setDocument()` moves the title bar, `syncCapabilities()` re-reports what
-/// the mode allows, `publishMenu()` rebuilds the bar. *When* to call them is
-/// the editor's decision, made where the editor's own rules live.
+/// Seven functions, and each is a native capability rather than a policy:
+/// `open()` raises the panel and returns bytes, `save()` writes them through
+/// one, `saveTarget()` writes them back to the file the window was opened from,
+/// `clearSaveTarget()` says this is a different document now, `setDocument()`
+/// moves the title bar, `syncCapabilities()` re-reports what the mode allows,
+/// `publishMenu()` rebuilds the bar. *When* to call them is the editor's
+/// decision, made where the editor's own rules live — which is why the editor,
+/// not this bridge, decides that `Ctrl+S` means `saveTarget` and
+/// `File ▸ Download` means `save`.
 ///
 /// Injected on **every page load**, not once at startup. A reload — Cmd+R, or
 /// anything that navigates — replaces `window`, and a bridge installed once
@@ -359,10 +486,34 @@ const BOOTSTRAP: &str = r#"(function () {
       return { name: opened.name, bytes: new Uint8Array(bytes) };
     },
     // Returns the file name written, or null when the user cancelled.
-    async save(bytes, ext) {
+    //
+    // `adopt` says whether the file the user picks *becomes* this window's save
+    // target. A `Ctrl+S` on a document that has never been saved acquires one
+    // here and passes true; `File ▸ Download ▸ CSV` writes a copy and passes
+    // false, because a `.csv` export of one sheet is not where the workbook
+    // lives now.
+    async save(bytes, ext, adopt) {
       await native.syncCapabilities();
       await invoke("stage_save_bytes", new Uint8Array(bytes));
-      return await invoke("native_save", { ext: String(ext) });
+      return await invoke("native_save", { ext: String(ext), adopt: !!adopt });
+    },
+    // Write the document back to the file this window was opened from.
+    //
+    // Returns `{status}`: `written` with the name, `no-target` when this window
+    // has no file yet — the caller acquires one through `save()` rather than
+    // downloading — or `refused` with a `kind` (`changed`, `read-only`,
+    // `no-directory`, `failed`) and a sentence to show. `force` is only ever
+    // true because the user was shown a changed-file conflict and chose to
+    // overwrite.
+    async saveTarget(bytes, force) {
+      await native.syncCapabilities();
+      await invoke("stage_save_bytes", new Uint8Array(bytes));
+      return await invoke("native_save_target", { force: !!force });
+    },
+    // This window is showing a different document now. `File ▸ New`: without
+    // it the next Ctrl+S writes a blank workbook over the file that was open.
+    async clearSaveTarget() {
+      await invoke("clear_save_target");
     },
   };
   window.__opencalcNative = native;
@@ -393,10 +544,26 @@ fn main() {
             take_opened_bytes,
             stage_save_bytes,
             native_save,
+            native_save_target,
+            clear_save_target,
         ])
         .on_menu_event(|app, event| {
             // The id is the editor's own command id, so this is the whole of
             // the dispatch: no second table, no mapping to keep in step.
+            //
+            // One exception, and it is a safety one. `File ▸ New` replaces the
+            // document, and a save target that survives it points `Ctrl+S` at
+            // the file the window was showing a moment ago. The clear happens
+            // *before* the command runs, so a New the user then cancels leaves
+            // this window without a target — one Save As panel, which is the
+            // cheap side of the mistake. See [`save::NEW_DOCUMENT_COMMAND`] for
+            // why this lives here and what replaces it.
+            let replaces = casual_calc_desktop::save::replaces_the_document(&event.id().0);
+            if let Some(shell) = replaces.then(|| app.try_state::<Shell>()).flatten() {
+                // A poisoned lock here means a panic elsewhere; the save target
+                // is already unusable and there is nothing to report to.
+                let _ = shell.target.lock().map(|mut target| target.clear());
+            }
             let id = event.id().0.replace('\\', "\\\\").replace('\'', "\\'");
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.eval(format!(
