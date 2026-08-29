@@ -469,18 +469,41 @@ fn read_pivots(
                 );
                 continue;
             };
-            workbook.sheets[index].pivots.push(pivot::to_model(
-                &spec,
-                &cache,
-                next_id,
-                source_sheet,
-                source,
-                target,
-            ));
+            let (model, losses) =
+                pivot::to_model(&spec, &cache, next_id, source_sheet, source, target);
+            workbook.sheets[index].pivots.push(model);
             next_id += 1;
+            // Each kind named separately, because they are three different
+            // answers to "what will this pivot do now" and a host that has to
+            // tell the user needs to say which. All three are `Preserved`: the
+            // pivot's part is written back whole, so the *file* keeps every one
+            // of them; what they are missing from is the model, and therefore
+            // from anything this engine recomputes.
+            report.record_n(
+                "pivotTable/calculatedField",
+                ModelOutcome::Omitted,
+                RetentionOutcome::Preserved,
+                losses.calculated_fields,
+            );
+            report.record_n(
+                "pivotTable/groupField",
+                ModelOutcome::Omitted,
+                RetentionOutcome::Preserved,
+                losses.group_fields,
+            );
+            report.record_n(
+                "pivotTable/showDataAs",
+                ModelOutcome::Degraded,
+                RetentionOutcome::Preserved,
+                losses.shown_as,
+            );
             report.record(
                 "pivotTable",
-                ModelOutcome::Mapped,
+                if losses.any() {
+                    ModelOutcome::Degraded
+                } else {
+                    ModelOutcome::Mapped
+                },
                 RetentionOutcome::Preserved,
             );
         }
