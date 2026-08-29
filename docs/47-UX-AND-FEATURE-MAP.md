@@ -8,7 +8,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-22 of 46 measured behaviours present.
+26 of 46 measured behaviours present.
 
 ## Selection
 
@@ -17,10 +17,10 @@ served tree (`python3 webapp/serve.py 8123`).
 | ✅ | drag a column header to reorder |
 | ✅ | drag a row header to reorder |
 | ❌ | drag the selection border to move a range |
-| ❌ | Ctrl+click adds a second range |
+| ✅ | Ctrl+click adds a second range |
 | ✅ | double-click a column border autofits it |
 | ✅ | drag across column headers selects a span |
-| ❌ | a banked multi-range is what operations act on |
+| ✅ | a banked multi-range is what operations act on |
 | ❌ | arrowing past a hidden row skips it |
 
 ## Editing
@@ -36,7 +36,7 @@ served tree (`python3 webapp/serve.py 8123`).
 | ✅ | filling 'Item 1' continues the number |
 | ❌ | Flash Fill derives a column from an example |
 | ❌ | typing offers entries already in the column |
-| ❌ | a locked cell refuses before the user types, not after |
+| ✅ | a locked cell refuses before the user types, not after |
 | ❌ | Replace All honours the all-sheets option the Find used |
 
 ## Sheets
@@ -75,7 +75,7 @@ served tree (`python3 webapp/serve.py 8123`).
 | ✅ | the filter checklist orders numbers numerically |
 | ❌ | Remove Duplicates lets you choose which columns count |
 | ❌ | reopening validation shows the rule that is there |
-| ❌ | deleting a sheet asks first |
+| ✅ | deleting a sheet asks first |
 
 ## Navigation
 
@@ -115,9 +115,7 @@ are judgement and are declared in the harness; the verdict above is not.
 | ❌ | a currency other than $ can be chosen | weekly | s |
 | ❌ | Ctrl+0 does what the Zoom menu says it does | weekly | s |
 | ❌ | an Alt+Enter entry undoes in one step | weekly | s |
-| ❌ | a locked cell refuses before the user types, not after | weekly | s |
 | ❌ | reopening validation shows the rule that is there | weekly | s |
-| ❌ | deleting a sheet asks first | weekly | s |
 | ❌ | drag the selection border to move a range | daily | m |
 | ❌ | hovering a font previews it before committing | daily | m |
 | ❌ | typing offers entries already in the column | daily | m |
@@ -128,7 +126,5 @@ are judgement and are declared in the harness; the verdict above is not.
 | ❌ | Data ▸ Subtotal groups sorted rows | weekly | m |
 | ❌ | a quick-analysis affordance appears on a selection | weekly | m |
 | ❌ | Replace All honours the all-sheets option the Find used | weekly | m |
-| ❌ | Ctrl+click adds a second range | daily | l |
-| ❌ | a banked multi-range is what operations act on | daily | l |
 | ❌ | Flash Fill derives a column from an example | weekly | l |
 | ❌ | sparklines exist | rare | l |

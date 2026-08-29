@@ -147,6 +147,13 @@ check("Selection", "drag the selection border to move a range", async (page, box
   return (await cell(page, 5, 3)) === "A1";
 });
 
+// **This probe used to report a working feature as missing**, and it was the
+// largest entry in the fix pipeline for weeks. It read `selectionRectForTest()`,
+// which returns the *active* rectangle — and after a Ctrl+click the active
+// rectangle is exactly the cell just clicked, so the check could never be true
+// no matter how well the bank worked. A probe that cannot observe the thing it
+// asks about reports `MISSING` for a feature that is there, which is the same
+// cost as a false pass pointing the other way.
 check("Selection", "Ctrl+click adds a second range", async (page, box) => {
   const a = await centre(page, 0, 0), d = await centre(page, 4, 4);
   await page.mouse.click(box.x + a.x, box.y + a.y);
@@ -154,8 +161,8 @@ check("Selection", "Ctrl+click adds a second range", async (page, box) => {
   await page.mouse.click(box.x + d.x, box.y + d.y);
   await page.keyboard.up("Control");
   await page.waitForTimeout(120);
-  const r = await sel(page);
-  return !(r.r0 === 4 && r.c0 === 4 && r.r1 === 4 && r.c1 === 4);
+  // The bank is what a second range *is*, so the bank is what to look at.
+  return (await page.evaluate(() => window.opencalcEditor.allRanges().length)) > 1;
 });
 
 check("Selection", "double-click a column border autofits it", async (page, box, hdr) => {
@@ -306,17 +313,33 @@ check("Formatting", "a currency other than $ can be chosen", async (page) =>
 );
 
 // --- claims worth measuring because they are worse than "missing" ----------
-check("Selection", "a banked multi-range is what operations act on", async (page) =>
-  page.evaluate(() => {
-    const ed = window.opencalcEditor;
-    // `effectiveRange()` reads `selRect()` and ignores `state.ranges`, so even
-    // where a second range is banked nothing downstream sees it: Copy takes the
-    // active range alone, silently.
-    const banked = ed.state?.ranges;
-    if (!banked || banked.length < 1) return false;
-    return typeof ed.allRanges === "function" && ed.allRanges().length > 1;
-  }),
-);
+// Also a false negative, and for a plainer reason: it inspected `state.ranges`
+// without ever *making* a second range, so on a fresh page it read an empty
+// bank and returned false. Its comment asserted that "Copy takes the active
+// range alone, silently" — measured, that is not what happens; formatting
+// applies to every banked range. The claim was never checked.
+//
+// Asserting the *effect* rather than the state: what matters is that an
+// operation reaches both ranges, and a bank nothing acts on is not a feature.
+check("Selection", "a banked multi-range is what operations act on", async (page, box) => {
+  const a = await centre(page, 0, 0), d = await centre(page, 4, 4);
+  await page.mouse.click(box.x + a.x, box.y + a.y);
+  await page.keyboard.down("Control");
+  await page.mouse.click(box.x + d.x, box.y + d.y);
+  await page.keyboard.up("Control");
+  await page.waitForTimeout(120);
+  if ((await page.evaluate(() => window.opencalcEditor.allRanges().length)) < 2) return false;
+  await page.evaluate(() => document.getElementById("tb-bold").click());
+  await page.waitForTimeout(200);
+  const [first, second] = await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    return [
+      JSON.parse(a.session_cell_format(0, 0, 0)).b,
+      JSON.parse(a.session_cell_format(0, 4, 4)).b,
+    ];
+  });
+  return !!first && !!second;
+});
 
 check("View", "Ctrl+0 does what the Zoom menu says it does", async (page) => {
   await page.locator("#grid").focus();
