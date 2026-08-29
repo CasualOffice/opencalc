@@ -4118,3 +4118,269 @@ fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
     .unwrap();
     assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
 }
+
+// ---------------------------------------------------------------------------
+// `PIV-06`: a column shift under a pivot's source has to renumber its fields.
+// ---------------------------------------------------------------------------
+
+/// `A1:C10` on `S`, grouped by column 0, split by column 1, summing column 2,
+/// with the pivot itself on a second sheet — the ordinary arrangement, and the
+/// one where the bug hides, since `source` and the fields live on `S` while the
+/// definition lives on `Report`.
+fn pivot_over_three_columns() -> Workbook {
+    use casual_calc_model::{
+        PivotAggregate, PivotAxisField, PivotSort, PivotTable, PivotValueField,
+    };
+
+    let mut wb = workbook();
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Report"));
+    let data_sheet = wb.sheets[0].id;
+    let mut pivot = PivotTable::new(
+        1,
+        "P".into(),
+        data_sheet,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2)),
+        CellRef::new(0, 0),
+    );
+    pivot.rows.push(PivotAxisField {
+        source_column: 0,
+        sort: PivotSort::Ascending,
+        subtotal: true,
+    });
+    pivot.cols.push(PivotAxisField {
+        source_column: 1,
+        sort: PivotSort::Ascending,
+        subtotal: true,
+    });
+    pivot.values.push(PivotValueField {
+        source_column: 2,
+        aggregate: PivotAggregate::Sum,
+        name: "Amount".into(),
+        number_format: None,
+    });
+    wb.sheets[1].pivots.push(pivot);
+    wb
+}
+
+/// The three field lists as plain offsets, plus the width they must index into.
+fn pivot_fields(wb: &Workbook) -> (u32, Vec<u32>, Vec<u32>, Vec<u32>) {
+    let p = &wb.sheets[1].pivots[0];
+    (
+        p.source.end.col - p.source.start.col + 1,
+        p.rows.iter().map(|f| f.source_column).collect(),
+        p.cols.iter().map(|f| f.source_column).collect(),
+        p.values.iter().map(|f| f.source_column).collect(),
+    )
+}
+
+/// **`PIV-06`.** Deleting a source column renumbers what survives and drops the
+/// field that named the column now gone.
+///
+/// Both halves were wrong and each is wrong in its own way. Deleting column A
+/// left the row field reading `0`, which after the delete names *Rep* rather
+/// than *Region* — a pivot that silently groups by a different thing. And it
+/// left the measure reading `2` against a two-column source, which is
+/// `<field x="2"/>` under `<cacheFields count="2"/>`: the out-of-range index
+/// `PIV-05` closed on the import side, reopened by an ordinary edit. Excel
+/// opens that file as damaged.
+///
+/// Dropping — rather than a `#REF!` marker, as a chart series gets — is argued
+/// at `renumber_pivot_fields`: an index has nowhere to record a break, in this
+/// model or in the file format, and it is what every other position-indexed
+/// thing on a deleted band already does.
+#[test]
+fn deleting_a_source_column_renumbers_a_pivots_fields_and_drops_the_lost_one() {
+    // Delete column A: the row field's own column.
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pivot_fields(&wb),
+        (2, vec![], vec![0], vec![1]),
+        "the field on the deleted column goes with it; the other two follow their columns"
+    );
+
+    // Delete column B: the column field's own column, and the one between the
+    // other two — so the measure has to move and the row field must not.
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pivot_fields(&wb),
+        (2, vec![0], vec![], vec![1]),
+        "a field before the delete stays put and one after it moves down"
+    );
+
+    // The file-level consequence, asserted as itself rather than implied: every
+    // index a save writes as `<field x>` must name a cache field that exists.
+    let p = &wb.sheets[1].pivots[0];
+    let width = p.source.end.col - p.source.start.col + 1;
+    for column in p
+        .rows
+        .iter()
+        .map(|f| f.source_column)
+        .chain(p.cols.iter().map(|f| f.source_column))
+        .chain(p.filters.iter().map(|f| f.source_column))
+        .chain(p.values.iter().map(|f| f.source_column))
+    {
+        assert!(
+            column < width,
+            "source_column {column} is outside a {width}-column source: Excel opens that as damaged"
+        );
+    }
+}
+
+/// **The quieter half of `PIV-06`.** An insert and a drag never take a column
+/// away, so every index stays in range and no file is damaged and no prompt
+/// appears — the pivot just summarises a different column than the one the user
+/// chose. That makes these two worse to leave than the delete, not better.
+#[test]
+fn inserting_and_dragging_source_columns_renumber_a_pivots_fields() {
+    // A column inserted between A and B widens the source; everything at or
+    // after the insertion point moves up, and the new blank column is named by
+    // nothing.
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pivot_fields(&wb),
+        (4, vec![0], vec![2], vec![3]),
+        "the measure must follow its column rather than adopt the blank one inserted in front of it"
+    );
+
+    // Dragging column A to the end is a permutation: same width, same fields,
+    // all three renumbered.
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+            before: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pivot_fields(&wb),
+        (3, vec![2], vec![0], vec![1]),
+        "a drag permutes the fields exactly as it permutes the columns"
+    );
+}
+
+/// A row shift is not a column shift, and the fix must not overreach.
+///
+/// `source_column` is a column offset, so inserting rows into the source moves
+/// the rectangle and must leave every field naming exactly the field it named.
+#[test]
+fn a_row_insert_under_a_pivot_source_leaves_its_fields_alone() {
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[1].pivots[0].source,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(11, 2)),
+        "the rectangle grows by the inserted rows"
+    );
+    assert_eq!(
+        pivot_fields(&wb),
+        (3, vec![0], vec![1], vec![2]),
+        "and the fields are untouched, because none of them is a row"
+    );
+}
+
+/// A source deleted out of existence keeps its rectangle — and therefore has to
+/// keep its offsets, which still index that rectangle correctly.
+///
+/// Renumbering here would be arithmetic against a start that never moved: it
+/// would strip every field off a pivot while leaving the definition claiming a
+/// three-column source, which is a more confusing wreck than the stale one. The
+/// pivot is kept for the reason it always was — the user can still see it on
+/// the sheet — and this is that decision followed through to the fields.
+#[test]
+fn a_source_deleted_out_of_existence_keeps_its_fields_with_its_rectangle() {
+    let mut wb = pivot_over_three_columns();
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[1].pivots[0].source,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, 2)),
+        "the rectangle is left alone rather than removing a pivot the user still sees"
+    );
+    assert_eq!(
+        pivot_fields(&wb),
+        (3, vec![0], vec![1], vec![2]),
+        "so the offsets into it are left alone too"
+    );
+}
+
+/// **Dropping a field is only acceptable because it is reversible**, and it was
+/// not.
+///
+/// `snapshot_metadata` captures the sheet the delete ran on. A pivot reading
+/// `S` lives on `Report`, so its source rectangle — never mind its fields —
+/// was outside the inverse entirely: undo re-opened the band and left the pivot
+/// pointing at `B1:C10`, a column short, for ever. Found while establishing
+/// whether the drop above could be called safe.
+#[test]
+fn undoing_a_column_delete_restores_a_pivot_that_lives_on_another_sheet() {
+    let mut wb = pivot_over_three_columns();
+    let before = wb.sheets[1].pivots[0].clone();
+
+    let inverse = apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pivot_fields(&wb),
+        (2, vec![], vec![0], vec![1]),
+        "the delete really did drop and renumber, so the undo below has something to restore"
+    );
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(
+        wb.sheets[1].pivots[0], before,
+        "undo restores the pivot whole: the rectangle, the dropped field and every offset"
+    );
+}
