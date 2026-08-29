@@ -2290,6 +2290,318 @@ mod ods_sessions {
     }
 }
 
+/// **`.xlsm` — the macro half of `IO-04`.**
+///
+/// Two things were wrong and only one of them looked like a bug. `.xlsm` was
+/// *refused*, by a name check and nothing else: the package is the same OOXML
+/// the `.xlsx` reader has always read, with one extra part in it. That was the
+/// visible half. The dangerous half was what happened when somebody worked
+/// around the refusal by renaming the file — the session opened as `.xlsx`,
+/// saved as `.xlsx`, and the macros were gone with an empty compatibility
+/// report to say so. A retained part that nothing reports is exactly the shape
+/// `no silent data loss` exists to forbid.
+///
+/// What these hold shut is the *fate* of the macro project, both ways: carried
+/// byte for byte into a macro-enabled package, and named in the report when the
+/// target format has nowhere to put it. Either is an acceptable answer; a
+/// silent drop is not.
+mod macro_enabled_sessions {
+    use casual_calc_model::{
+        Cell, CellRef, CellValue, Id, RetainedPart, RetainedRel, Sheet, SheetId, Workbook,
+    };
+
+    use crate::{EditOperation, ModelOutcome, SessionFormat, WorkbookSession};
+
+    /// The relationship type Office hangs a VBA project off the workbook part
+    /// with.
+    const VBA_REL: &str = "http://schemas.microsoft.com/office/2006/relationships/vbaProject";
+    /// What `[Content_Types].xml` declares that part as.
+    const VBA_CT: &str = "application/vnd.ms-office.vbaProject";
+    /// The workbook part's content type in a macro-enabled package — the one
+    /// difference at the package level, and the one Excel reads.
+    const CT_MACRO_MAIN: &str = "application/vnd.ms-excel.sheet.macroEnabled.main+xml";
+    const CT_PLAIN_MAIN: &str =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+    const VBA_PART: &str = "xl/vbaProject.bin";
+
+    /// Stand-in bytes with a compound-file header on the front. Deliberately
+    /// **not** a real project, and it does not need to be: nothing in this
+    /// engine parses, interprets or executes them, so the only property under
+    /// test is that they come out the other side unchanged.
+    const VBA_BYTES: &[u8] =
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 stand-in macro project, never parsed and never run";
+
+    fn xlsm() -> SessionFormat {
+        SessionFormat::for_extension("xlsm")
+            .expect("`.xlsm` must name a format, or nothing below can open one")
+    }
+
+    /// A macro-enabled package: one sheet, one cell, one VBA project hanging
+    /// off `xl/workbook.xml` exactly as Excel hangs it.
+    fn xlsm_bytes() -> Vec<u8> {
+        let mut workbook = Workbook::new(Id::from_parts(9, 0));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Number(41.0)));
+        workbook.sheets.push(sheet);
+        workbook.retained_parts.push(RetainedPart {
+            path: VBA_PART.to_owned(),
+            bytes: VBA_BYTES.to_vec(),
+            content_type: Some(VBA_CT.to_owned()),
+        });
+        workbook.retained_rels.push(RetainedRel {
+            source: "xl/workbook.xml".to_owned(),
+            id: "rId99".to_owned(),
+            rel_type: VBA_REL.to_owned(),
+            target: "vbaProject.bin".to_owned(),
+            external: false,
+        });
+        casual_calc_export::write_workbook(&workbook).expect("a macro workbook writes")
+    }
+
+    /// One part's bytes out of a package, or `None` when it holds no such part.
+    fn part_of(package: &[u8], path: &str) -> Option<Vec<u8>> {
+        let mut opened = casual_calc_ooxml::SpreadsheetPackage::open(
+            package.to_vec(),
+            casual_calc_ooxml::OoxmlLimits::default(),
+        )
+        .expect("the bytes are an admissible package");
+        if !opened.contains(path) {
+            return None;
+        }
+        Some(opened.read_part(path).expect("a part that is there reads"))
+    }
+
+    /// What `[Content_Types].xml` says `xl/workbook.xml` is.
+    fn workbook_content_type(package: &[u8]) -> String {
+        let mut opened = casual_calc_ooxml::SpreadsheetPackage::open(
+            package.to_vec(),
+            casual_calc_ooxml::OoxmlLimits::default(),
+        )
+        .expect("the bytes are an admissible package");
+        opened
+            .content_types()
+            .expect("a package declares its parts")
+            .resolve("xl/workbook.xml")
+            .expect("the workbook part is always declared")
+            .to_owned()
+    }
+
+    /// **The other half of the row, recorded rather than built.**
+    ///
+    /// `.xls` is legacy BIFF8 — a compound-file binary and a whole reader — and
+    /// it stays refused. What is worth pinning is that the refusal is
+    /// *consistent*: `for_extension` says no by name, and `for_bytes` says no
+    /// by content, so a `.xls` renamed `.csv` and dropped on the engine is not
+    /// read as a sheet of mojibake. The two halves of `IO-04` share a row and
+    /// not a fate, and this is the line between them.
+    #[test]
+    fn xls_is_refused_by_name_and_by_content_alike() {
+        assert_eq!(SessionFormat::for_extension("xls"), None);
+        // The OLE2 compound-file header every BIFF8 workbook begins with,
+        // followed by the NUL padding such a file is full of.
+        let mut biff8 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1".to_vec();
+        biff8.extend(std::iter::repeat_n(0u8, 512));
+        assert_eq!(
+            SessionFormat::for_bytes(&biff8),
+            None,
+            "a legacy workbook must not be guessed into some format this engine \
+             does read"
+        );
+    }
+
+    /// The name check that refused the format, and the two answers a host needs
+    /// once it does not.
+    #[test]
+    fn xlsm_names_a_format_with_its_own_extension_and_type() {
+        assert_eq!(SessionFormat::for_extension("xlsm"), Some(xlsm()));
+        assert_eq!(SessionFormat::for_extension("XLSM"), Some(xlsm()));
+        // Its own extension, not `xlsx`: a session that saved an `.xlsm` back
+        // under the other name is the whole defect.
+        assert_eq!(xlsm().extension(), "xlsm");
+        assert_eq!(
+            xlsm().content_type(),
+            "application/vnd.ms-excel.sheet.macroEnabled.12"
+        );
+    }
+
+    /// The reader was never the problem. Proven rather than asserted, because
+    /// "the engine can already read it" was the premise the whole row rested on.
+    #[test]
+    fn an_xlsm_opens_and_its_sheets_are_read() {
+        let session = WorkbookSession::open_as(xlsm_bytes(), xlsm()).expect("an `.xlsm` opens");
+        assert_eq!(session.format(), xlsm());
+        assert_eq!(
+            session.workbook().sheets[0]
+                .cells
+                .get(CellRef::new(0, 0))
+                .map(|c| c.value.clone()),
+            Some(CellValue::Number(41.0)),
+            "the sheets of a macro-enabled package read like any other"
+        );
+    }
+
+    /// The round-trip floor holds for this format too: opened and not edited,
+    /// it saves as itself.
+    #[test]
+    fn an_untouched_xlsm_saves_as_itself_byte_for_byte() {
+        let bytes = xlsm_bytes();
+        let session = WorkbookSession::open_as(bytes.clone(), xlsm()).expect("opens");
+        assert_eq!(session.save().expect("saves"), bytes);
+    }
+
+    /// **The fate of the macro part, decided: retained byte for byte.**
+    ///
+    /// After an edit the semantic writer runs, so this is the path where a
+    /// retained part either survives or quietly does not. It survives, *and*
+    /// the package that comes out declares itself macro-enabled — which is the
+    /// half that is easy to miss, because a package carrying a VBA project
+    /// while declaring the plain workbook type is one Excel opens as damaged
+    /// and repairs by deleting the project. Keeping the bytes and mis-declaring
+    /// the package would lose the macros just as thoroughly, one step later.
+    #[test]
+    fn an_edited_xlsm_keeps_its_macro_project_byte_for_byte() {
+        let mut session = WorkbookSession::open_as(xlsm_bytes(), xlsm()).expect("opens");
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(42.0),
+            })
+            .expect("edits");
+        assert!(
+            !session.is_unmodified(),
+            "the semantic writer has to be the one that runs, or this proves nothing"
+        );
+
+        let saved = session.save().expect("an edited `.xlsm` saves");
+        assert_eq!(
+            part_of(&saved, VBA_PART).as_deref(),
+            Some(VBA_BYTES),
+            "the macro project was not carried through the write unchanged"
+        );
+        assert_eq!(
+            workbook_content_type(&saved),
+            CT_MACRO_MAIN,
+            "a package holding a VBA project must declare itself macro-enabled"
+        );
+        assert!(
+            session.format_loss().is_empty(),
+            "an `.xlsm` written as an `.xlsm` loses nothing, and must not claim to: {:?}",
+            session.format_loss().entries()
+        );
+    }
+
+    /// **The fate of the macro part, the other way: named, never silent.**
+    ///
+    /// This is the conversion the row was raised for. `.xlsx` has nowhere to
+    /// put a VBA project, so the project is removed rather than smuggled into a
+    /// package that denies holding it — and the removal is counted and named
+    /// before the bytes exist, so a host can say so before the download.
+    #[test]
+    fn saving_a_macro_workbook_as_xlsx_drops_the_macros_and_says_so() {
+        let mut session = WorkbookSession::open_as(xlsm_bytes(), xlsm()).expect("opens");
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(42.0),
+            })
+            .expect("edits");
+
+        let loss = session.loss_writing(SessionFormat::Xlsx);
+        let entry = loss
+            .entries()
+            .into_iter()
+            .find(|e| e.feature == "macros (VBA project)")
+            .expect("converting a macro workbook to `.xlsx` must name what it costs");
+        assert_eq!(entry.model, ModelOutcome::Omitted);
+
+        let saved = session
+            .save_as(SessionFormat::Xlsx)
+            .expect("converts to a plain package");
+        assert_eq!(
+            part_of(&saved, VBA_PART),
+            None,
+            "the macro project was carried into a package that declares itself macro-free"
+        );
+        assert_eq!(
+            workbook_content_type(&saved),
+            CT_PLAIN_MAIN,
+            "asking for an `.xlsx` and getting a macro-enabled declaration is the \
+             same lie as a `.csv` inside an `.xlsx` name"
+        );
+    }
+
+    /// The report and the bytes have to agree in **both** directions.
+    ///
+    /// An untouched session hands back the file it opened, whatever format is
+    /// asked for by name — so for the session's own format there is no loss to
+    /// report, and claiming one would send a host to warn about macros that are
+    /// still in the file it is about to write.
+    #[test]
+    fn an_untouched_xlsm_is_not_reported_as_losing_its_own_macros() {
+        let session = WorkbookSession::open_as(xlsm_bytes(), xlsm()).expect("opens");
+        assert!(session.is_unmodified());
+        assert!(
+            session.format_loss().is_empty(),
+            "{:?}",
+            session.format_loss().entries()
+        );
+    }
+
+    /// **A loss is only a loss if the write actually takes it.**
+    ///
+    /// The case is real and reachable: `SessionFormat::for_bytes` reads the
+    /// zip's first entry name, and a macro-enabled package and a plain one both
+    /// begin `[Content_Types].xml` — so `.xlsm` bytes detected by content are
+    /// opened *as* `Xlsx`. Untouched, that session saves by handing the opened
+    /// file straight back, macros included, and a report claiming they were
+    /// dropped would send a host to warn about a loss that did not happen. The
+    /// same session after one edit runs the writer, and then the loss is real
+    /// and must be named.
+    #[test]
+    fn a_save_that_returns_the_opened_bytes_reports_no_macro_loss() {
+        let bytes = xlsm_bytes();
+
+        let session = WorkbookSession::open(bytes.clone()).expect("a package reads either way");
+        assert_eq!(
+            session.format(),
+            SessionFormat::Xlsx,
+            "the premise of this test is a macro package opened under the plain format"
+        );
+        assert_eq!(
+            session.save().expect("saves"),
+            bytes,
+            "untouched, these are the bytes that were opened"
+        );
+        assert!(
+            session.format_loss().is_empty(),
+            "a save that returns the opened file has lost nothing: {:?}",
+            session.format_loss().entries()
+        );
+
+        let mut edited = WorkbookSession::open(bytes).expect("opens");
+        edited
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Number(42.0),
+            })
+            .expect("edits");
+        assert!(
+            edited
+                .format_loss()
+                .entries()
+                .iter()
+                .any(|e| e.feature == "macros (VBA project)"),
+            "once the writer runs the macros really do go, and that has to be said: {:?}",
+            edited.format_loss().entries()
+        );
+    }
+}
+
 /// **The pictures a workbook holds reach the renderer** (`RND-14`).
 ///
 /// `casual-calc-render` grew a picture backend, an `ImageSource` to feed it and
