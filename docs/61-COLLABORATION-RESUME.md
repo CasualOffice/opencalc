@@ -1,6 +1,6 @@
-# ADR-015: Resuming a collaborative session after a disconnect
+# 61 — ADR-015: Resuming a collaborative session after a disconnect
 
-**Status:** accepted
+**Status: Accepted**
 **Supersedes nothing.** Extends [ADR-011](56-COLLABORATION-CONCURRENCY-DESIGN.md),
 [ADR-012](57-COLLABORATION-SERVER-BOUNDARY.md) and
 [ADR-014](59-COLLABORATION-SERVICE-STACK.md).

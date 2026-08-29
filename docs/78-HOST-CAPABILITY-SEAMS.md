@@ -1,8 +1,12 @@
 # 78 — How the engine reaches the platform
 
-**For** `ADR-019`. **Status:** proposed. Nothing here is built *as a
-consequence* — it describes what was built, argues that it is right, and asks
-for the decision the register has been carrying as pending since Phase 0.
+**For** `ADR-019`. **Status: Accepted** — the register
+([08](08-ADR-REGISTER.md)) is where an ADR's status lives, and it records
+ADR-019 as Accepted; the tracker row of the same name is `Done`. Nothing here
+is built *as a consequence*: it describes what was built, argues that it is
+right, and asked for the decision the register had been carrying as pending
+since Phase 0. What the decision unblocked is `TAURI-001`
+([44](44-TAURI-DESKTOP-SHELL-DESIGN.md) §Open decisions).
 
 ## The promise, and what happened instead
 

@@ -1,6 +1,20 @@
 # 49 — Design System
 
-_Generated 2026-08-06. Two parts: the **current** de-facto design language extracted from `webapp/editor.css` / `editor.html`, and the **target** system to converge on. Adoption is tracked as its own milestone in [48 — Feature Pipeline](48-FEATURE-PIPELINE.md)._
+_Generated 2026-08-06. Two parts: the **current** de-facto design language extracted from `webapp/editor.css` / `editor.html`, and the **target** system to converge on._
+
+> **Part A is a snapshot of 2026-08-06 and has not been regenerated since**, so
+> read it as the state on that date rather than as the tree. It was accurate
+> when written and nothing re-derives it — the same shape as `48`, whose own
+> audit found 33 of 35 items already built. What is checked continuously is
+> narrower and lives in code: `tools/check-theme-tokens.py` asserts every
+> advertised `--oc-*` token is honoured.
+>
+> **Adoption was tracked as `M10` in [48](48-FEATURE-PIPELINE.md)**, whose
+> banner records where it got to: `M10-1` closed as `UX-TOKEN-01` (24 semantic
+> colour tokens, plus the elevation and surface layer that was the gap).
+> `DOC-034` is the open question about the token *names*: `55` §1 argued for
+> AG Grid-style typed suffixes and called the rename *"cheap now and impossible
+> after the first release"*, and the release has happened.
 
 ## Part A — Current design language (as-built)
 

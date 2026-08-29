@@ -5,10 +5,18 @@ CI is part of the architecture, not an afterthought. The job names below are a
 doc defines the gates for when the workspace exists (Phase 0 onward) and records
 which gates are not yet built.
 
-> **Current state:** twelve jobs run on every push — `format`, `lint`, `test`,
-> `docs`, `wasm`, `benchmark-smoke`, `browser-smoke`, `oracle-diff`,
-> `repository-policy`, `fuzz-build`, `dependency-policy`, and a three-platform
-> matrix including MSRV. Every job in the table below exists.
+> **Current state:** fifteen jobs run on every push — `format`, `lint`, `test`,
+> `docs`, `wasm`, `benchmark-smoke`, `sdk-types`, `browser-smoke`,
+> `oracle-diff`, `repository-policy`, `fuzz-build`, `docker-build`,
+> `dependency-policy`, `desktop`, and a three-platform `platform` matrix
+> including MSRV. Two more run on a schedule in `security.yml`: `advisories`
+> and `fuzz-campaign`.
+>
+> The list is a contract in **both** directions — every job below exists, and
+> every job CI runs is below. `tools/check-doc-claims.py` checks both, because
+> the first three jobs to be added here (`sdk-types`, `docker-build`,
+> `desktop`) were added to the workflow and not to this table, and a contract
+> that silently gains clauses is not one.
 
 ## PR gates
 
@@ -22,6 +30,9 @@ which gates are not yet built.
 | `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + determinism (**implemented**, F-007) |
 | `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile (**implemented**, F-008) |
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
+| `sdk-types` | `npm ci && npm test` in `sdk/types` | The published `.d.ts` surface compiles under `strict` **and** names only methods that exist — a declaration nothing compiles against drifts (`SDK-009`) |
+| `docker-build` | build every image in the repository | A Dockerfile that stops building fails here rather than at an integrator (`DEP-07`) |
+| `desktop` | `tauri build` on macOS, Windows and Linux, one bundle format each | The desktop shell's own Cargo workspace still builds — the gate `CI-014` had to add for `fuzz/` after a signature change broke it silently, present from the day the workspace existed (`ADR-023`) |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
 | `oracle-diff` | recalculate a corpus in LibreOffice Calc and diff the values; re-save a feature workbook through it and diff the structure | The evaluator and the **writer**, against an implementation that shares neither our code nor our reading of the spec (**implemented**, P2-003 + P1B-003) |

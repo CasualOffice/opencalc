@@ -1,6 +1,6 @@
-# ADR-018: Where text shaping belongs, and where it does not
+# 64 — ADR-018: Where text shaping belongs, and where it does not
 
-**Status:** accepted
+**Status: Accepted**
 **Relates to** P1C-003, and to ADR-004's per-cell byte ceiling only indirectly.
 
 ## The problem as it was stated

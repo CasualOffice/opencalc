@@ -7,9 +7,20 @@ half is `casual-calc-wasm`. Both compose the *same* host-agnostic core.
 
 Status: design note (DOC-014); §"The platform seams" corrected against the code
 by `DOC-029`. The desktop shell is host-side glue; it adds no engine logic and
-sits above `casual-calc-sdk`. Nothing here is built — `TAURI-001` is
-deliberately not started — so read every present tense below as a description of
-the *engine* it would sit on, not of a shell that exists.
+sits above `casual-calc-sdk`. **Built, and running** — `desktop/` is a crate in
+its own Cargo workspace (`ADR-023`, [81](81-DESKTOP-SHELL-COMPOSITION.md))
+depending on `casual-calc-sdk` and Tauri 2. It opens a workbook, lays out a
+viewport, edits a cell, undoes, saves and reopens what it wrote; there is a
+window (`TAURI-005`); the operating system draws the menu bar from ids the
+editor supplies rather than from a second menu definition (`TAURI-004`); the
+webview reaches the engine by swapping what its single `wasm` handle points at,
+so the shell calculates natively (`TAURI-003`); and CI's `desktop` job bundles
+it on macOS, Windows and Linux. There is no `casual-calc-tauri` crate and there
+will not be — `ADR-023` settled the open decision this document records.
+
+What is **not** done: `TAURI-001` stays `Partial` for the three things only a
+running shell can measure (§Open decisions), and `UX-DESK-01` is open — the
+shell still looks like a web page in a window.
 
 ## Why Tauri, and why native calc
 
@@ -204,8 +215,19 @@ also exposes — the command layer is a transport, not logic.
   Left listed here as struck through rather than deleted: this section is what a
   reader consults to know whether the shell can be started, and an open decision
   that silently vanishes is indistinguishable from one nobody made.
-- Webview ↔ backend transport for large display lists / bitmaps (IPC vs shared
-  surface) — must hold the 60 fps budget on desktop.
-- Whether `casual-calc-tauri` exists as a crate or the app wires the SDK inline.
+- ~~**Webview ↔ backend transport** for large display lists / bitmaps (IPC vs
+  shared surface).~~ **Decided: `TAURI-003`, Done.** The editor keeps one
+  codebase and the desktop swaps what its single `wasm` handle points at, so the
+  shell calculates natively and no display list crosses an IPC boundary per
+  frame. Reimplementing the call surface as Tauri commands was rejected on cost.
+  The remaining IPC question — whether the *native* path holds the 60 fps budget
+  under a real window — is one `ADR-023` leaves open for a running shell to
+  measure.
+- ~~Whether `casual-calc-tauri` exists as a crate or the app wires the SDK
+  inline.~~ **Decided: `ADR-023`, Accepted.** The app is a binary depending on
+  `casual-calc-sdk` and Tauri and nothing else of ours, in its own Cargo
+  workspace. A crate earns its place by having more than one consumer, and this
+  one would have exactly one. See [81](81-DESKTOP-SHELL-COMPOSITION.md); the
+  diagram above keeps the box because it is the shape that was rejected.
 - Native GPU backend timing and API (wgpu vs platform-native).
 - Parallel-recalc partitioning strategy (shared with [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md) open decisions).

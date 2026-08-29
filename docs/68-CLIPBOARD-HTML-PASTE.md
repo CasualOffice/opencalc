@@ -1,4 +1,4 @@
-# Design note: pasting from Excel, LibreOffice and Sheets
+# 68 — Design note: pasting from Excel, LibreOffice and Sheets
 
 **For** UX-CLIP-01 (docs/67 wave C). Design first; what is *not* supported is
 recorded here as deliberately as what is.

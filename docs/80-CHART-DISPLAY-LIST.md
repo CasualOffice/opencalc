@@ -1,6 +1,12 @@
 # 80 — General geometry in the display list
 
-**For** `ADR-021`. **Status:** proposed. **Decides** the option
+**For** `ADR-021`. **Status: Accepted** — on the evidence of being built:
+`RND-11` shipped to this note and closed, all seven chart kinds draw
+model-to-PNG, and `PaintItem::Polyline`/`Polygon`/`Wedge` are in the display
+list with an arm each in the renderer. It stayed "proposed" through all of
+that, which is what `tools/check-adr-status.py` now prevents.
+
+**Decides** the option
 [76](76-CHART-RENDERING-BACKEND.md) recommended, and the display-list change
 that option requires. **Relates to** ADR-008 (the display-list contract),
 ADR-018 (what may go into the WebAssembly bundle), `RND-11`, `RND-10`,

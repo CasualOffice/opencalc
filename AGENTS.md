@@ -31,17 +31,20 @@ slot in without rework. The order of *construction* is phased (see
   DAG, and the seams between layers are designed in
   [docs/19-WORKSPACE-SCAFFOLD-DESIGN.md](docs/19-WORKSPACE-SCAFFOLD-DESIGN.md)
   and must not require a do-over when the calc engine or collaboration land.
-- **The calc engine is built.** 364 functions dispatch, dynamic arrays spill
-  and refuse rather than overwrite, `LET` and `LAMBDA` carry first-class
-  function values, and recalculation is incremental over a precedent graph kept
-  across edits — a cell-reference edit is flat from ten thousand cells to a
-  hundred thousand. Automatic or manual mode comes from the file's own
-  `<calcPr>`. See
+- **The calc engine is built.** Several hundred functions dispatch, dynamic
+  arrays spill and refuse rather than overwrite, `LET` and `LAMBDA` carry
+  first-class function values, and recalculation is incremental over a
+  precedent graph kept across edits — a cell-reference edit is flat from ten
+  thousand cells to a hundred thousand. Automatic or manual mode comes from the
+  file's own `<calcPr>`. See
   [docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md](docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)
   and [docs/66-INCREMENTAL-RECALC-GRAPH.md](docs/66-INCREMENTAL-RECALC-GRAPH.md).
-  What remains is budget rather than capability: the <50 ms target is asserted
-  for warm incremental recalc only (`PERF-07`), and range precedents are still
-  scanned linearly (`PERF-06`).
+  The budget is now asserted rather than extrapolated: `PERF-07` closed with the
+  <50 ms cap tested absolutely for the cold first edit and for the adversarial
+  sheet [docs/30](docs/30-PERFORMANCE-AND-CAPACITY-TARGETS.md) defines, and
+  `PERF-06` replaced the linear range-precedent scan with row-band buckets.
+  **No function count is given here on purpose.** The figure this paragraph
+  carried for months ("364") was unsourced and wrong; `DOC-038` is the row.
 - **Virtualization is a first-class design axis**, not a late optimization. The
   1M-cell / 60 fps / <50 ms-recalc targets shape the model, the layout engine,
   and the render seam from the start
@@ -118,11 +121,16 @@ editor runs the same core through WebAssembly.
 
 What is still open, and therefore where the work is:
 
-- **Phase 2 tail** — the persistent incremental dependency graph and the <50 ms
-  worst-case recalc budget.
+- **A live P0.** `COL-46`: a `$`-anchored formula rebased across a concurrent
+  insert lands as `$E$1` on one replica and `$D$1` on the other, with no error
+  anywhere. Two replicas of a shared document holding different formulas is the
+  worst class this system has, and it is **not** operational — so do not read
+  the paragraphs below as saying nothing architectural is open.
 - **Phase 4** — the SDK is published (`@opencalc/sheet` and friends, released
-  by an `sdk-v*` tag); what remains is a *stable* API, since `0.0.x` is a
-  preview.
+  by an `sdk-v*` tag) and now ships type declarations (`SDK-009`); what remains
+  is a *stable* API, since `0.0.x` is a preview, and the nine decisions
+  [docs/55](docs/55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) §12 said would be
+  answered before anything shipped (`DOC-034`).
 - **Phase 5** — **built and running, both halves.** `casual-calc-transaction`
   carries `transform` (TP1 as a property), the session protocol
   (`PROTOCOL_VERSION` 5), snapshots and idempotent submissions;
@@ -136,11 +144,20 @@ What is still open, and therefore where the work is:
   [59](docs/59-COLLABORATION-SERVICE-STACK.md).
   The boundary still holds and is checked by CI: **nothing in `crates/` may
   depend on the server**.
-  What is *not* done is operational — no metrics, no published image, no chart
-  ([14](docs/14-EXECUTION-TRACKER.md), `DEP-06..08`).
+  What is left on the operational side is **one row, not three**: `/metrics`
+  serves twelve series (`DEP-06`, Done), both images build in CI and are
+  published as `server-v0.0.0` (`DEP-07`, Done), and `DEP-08` — the Kubernetes
+  manifests and Helm chart — is `Blocked` on there being a cluster to render
+  against ([14](docs/14-EXECUTION-TRACKER.md)).
+- **The desktop shell runs.** `TAURI-001` is `Partial`, not unstarted: there is
+  a window, the operating system draws the menu bar, the webview calculates
+  natively, and CI's `desktop` job bundles on three platforms. `UX-DESK-01` is
+  the open half — it still looks like a web page in a window.
 
 The design-first rule has not relaxed now that code exists: a substantial
 design is discussed and written down before it is implemented, not alongside.
 Do not update this section from a commit message — update it when a phase
-actually changes state, and keep it agreeing with the phase table in
-[README.md](README.md) and [06](docs/06-ROADMAP-AND-DELIVERY.md).
+actually changes state, and keep it agreeing with §Status in
+[README.md](README.md), §Status in
+[docs/00-README.md](docs/00-README.md) and
+[06](docs/06-ROADMAP-AND-DELIVERY.md).

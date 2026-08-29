@@ -42,24 +42,43 @@ decision is marked `Superseded by ADR-NNN`, not edited away.
 
 ## Pending / to be written
 
-- ~~ADR for the **dual-host capability trait**~~ — written as `ADR-019`, which
-  proposes **rejecting** the single trait in favour of capability-per-seam. The
-  four documents that state the trait in the present tense
-  ([19](19-WORKSPACE-SCAFFOLD-DESIGN.md) invariant 7,
-  [02](02-ARCHITECTURE.md) §Host targets,
-  [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md)) still say so **on purpose**:
-  they are the promise as it stands, and are not edited until the decision is
-  Accepted. Editing them first is how a decision gets made by nobody.
+> **Three of these name a phase that has already shipped, which makes them
+> deadlines missed rather than work queued** (`DOC-039`). That is the shape
+> `ADR-019` was: listed here as "to be recorded at Phase 0", carried through
+> Phases 0–3, and only written when somebody noticed the code had grown three
+> seams in the meantime. A pending ADR whose trigger has passed is a decision
+> the code took without anybody making it, and this list is where that becomes
+> visible — so the dates stay, rather than being quietly relaxed.
+
+- ~~ADR for the **dual-host capability trait**~~ — **written and Accepted** as
+  `ADR-019`, which **rejects** the single trait in favour of
+  capability-per-seam. The documents that stated the trait in the present tense
+  have been brought to the decision: [19](19-WORKSPACE-SCAFFOLD-DESIGN.md)
+  invariant 7 now reads *"no engine crate names a platform"*, which is what
+  `tools/check-host-seams.py` checks, and
+  [02](02-ARCHITECTURE.md) §Host targets and
+  [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md) both cite `ADR-019`. They
+  were **not** edited before the decision was Accepted, on purpose: editing
+  them first is how a decision gets made by nobody.
 - ADR for the **edit / operation schema** (the closed op set, inverses, and the
   independently-versioned op wire format) — triggered by
-  [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md); to be Accepted before Phase 1A
-  editing lands.
+  [24](24-TRANSACTION-AND-EDIT-SEMANTICS.md); stated as "to be Accepted before
+  Phase 1A editing lands". **Phase 1A shipped, and so did Phase 5 on top of the
+  same op set** — `PROTOCOL_VERSION` is at 5 and every collaboration ADR
+  depends on the set being closed. Overdue, not queued.
 - ADR for the **dependency-graph representation** (cell-level vs block-level
   nodes, range handling) — proposed in [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md),
-  to be Accepted before Phase 2.
+  stated as "to be Accepted before Phase 2". **Phase 2 shipped**, and the
+  representation was decided in code and written up in
+  [66](66-INCREMENTAL-RECALC-GRAPH.md): a kept precedent graph with range edges
+  bucketed by row band (`PERF-04`, `PERF-06`). Overdue.
 - ADR for the **recalculation ordering strategy** (topological + dirty
-  propagation vs Excel's calc-chain replay).
+  propagation vs Excel's calc-chain replay). No stated deadline; also decided
+  in code.
 - ADR for the **cell-store constants** (block height, second-axis blocking,
   `Cell` byte ceiling) — the *shape* is Accepted (ADR-004); the *constants* are
   benchmarked and pinned at Phase 0, see [23](23-CELL-STORE-REPRESENTATION.md).
-- ADR for **MSRV / toolchain pin** once the workspace is scaffolded.
+  `ADR-013` settled the largest of them: a cell is 32 bytes, not 80.
+- ADR for **MSRV / toolchain pin** once the workspace is scaffolded. **The
+  workspace was scaffolded**, and the pin is enforced by CI's `platform` job
+  ([15](15-CI-AND-RELEASE-GATES.md)) without an ADR behind it. Overdue.

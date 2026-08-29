@@ -1,6 +1,6 @@
-# ADR-017: How a node that does not lead a document serves its clients
+# 63 — ADR-017: How a node that does not lead a document serves its clients
 
-**Status:** accepted
+**Status: Accepted**
 **Extends** [ADR-012](57-COLLABORATION-SERVER-BOUNDARY.md) and
 [ADR-014](59-COLLABORATION-SERVICE-STACK.md).
 

@@ -19,6 +19,17 @@ Both were found by an audit rather than by review, which is the argument for
 checking it here. Reviewing a diff shows the row being added; it does not show
 the row three hundred lines up that already has that id.
 
+**And the status column is a closed vocabulary**, which `docs/14` states in the
+same breath as the id rule: *"`Open`, `WIP`, `Partial`, `Blocked`, `Designed`,
+`Done`, `Dropped`. Nothing else."* Nothing enforced it, and `UX-HIDE-01`
+carried `Rejected` — a word from the **ADR register's** vocabulary, where a
+decision can be rejected, in a table where work cannot. It matters because the
+status column is read by machine: `check-adr-status.py` selects on `Done`, and
+a row in a fourteenth spelling is a row that gate silently skips.
+
+Only `docs/14` is held to it. The archive keeps whatever a row said when it
+closed, and `53` and `67` run their own columns.
+
 Run with no arguments; exits non-zero and names every clash.
 """
 
@@ -47,6 +58,12 @@ TRACKERS = [
 # is a *reference*, not a definition — is not counted as one.
 ID_ROW = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|")
 
+# The live tracker, and the vocabulary it publishes for its own `St` column.
+LIVE = "docs/14-EXECUTION-TRACKER.md"
+STATUSES = {"Open", "WIP", "Partial", "Blocked", "Designed", "Done", "Dropped"}
+# `| ID | Title | St | ...` — the third cell.
+ROW_STATUS = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|[^|]*\|\s*([^|]*?)\s*\|")
+
 
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -65,19 +82,45 @@ def main() -> int:
             if match:
                 seen[match.group(1)].append(f"{name}:{number}")
 
+    wrong_status: list[str] = []
+    live = root / LIVE
+    if live.exists():
+        for number, line in enumerate(live.read_text().splitlines(), start=1):
+            match = ROW_STATUS.match(line)
+            if match and match.group(2) not in STATUSES:
+                wrong_status.append(
+                    f"  {LIVE}:{number}: {match.group(1)} has status "
+                    f"{match.group(2)!r}, which is not one of "
+                    f"{', '.join(sorted(STATUSES))}"
+                )
+
     clashes = {i: where for i, where in seen.items() if len(where) > 1}
-    if not clashes:
-        print(f"tracker ids: {len(seen)} unique across {len(TRACKERS)} documents")
+    if not clashes and not wrong_status:
+        print(
+            f"tracker ids: {len(seen)} unique across {len(TRACKERS)} documents, "
+            "every live status in the vocabulary"
+        )
         return 0
 
-    print("tracker ids are not unique:", file=sys.stderr)
-    for identifier, where in sorted(clashes.items()):
-        print(f"  {identifier} defined at {', '.join(where)}", file=sys.stderr)
-    print(
-        "\nAn id names one piece of work. Pick a free one, or a new prefix if it "
-        "is a different workstream.",
-        file=sys.stderr,
-    )
+    if clashes:
+        print("tracker ids are not unique:", file=sys.stderr)
+        for identifier, where in sorted(clashes.items()):
+            print(f"  {identifier} defined at {', '.join(where)}", file=sys.stderr)
+        print(
+            "\nAn id names one piece of work. Pick a free one, or a new prefix if it "
+            "is a different workstream.",
+            file=sys.stderr,
+        )
+    if wrong_status:
+        print("statuses outside the vocabulary docs/14 publishes:", file=sys.stderr)
+        for problem in wrong_status:
+            print(problem, file=sys.stderr)
+        print(
+            "\nThe column is read by machine — check-adr-status.py selects on "
+            "`Done` — so a fourteenth spelling is a row a gate silently skips. "
+            "Use the word, or change the vocabulary in docs/14 and here together.",
+            file=sys.stderr,
+        )
     return 1
 
 

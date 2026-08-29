@@ -1,6 +1,6 @@
-# ADR-016: Pipelined submissions and cumulative acknowledgement
+# 62 — ADR-016: Pipelined submissions and cumulative acknowledgement
 
-**Status:** accepted
+**Status: Accepted**
 **Extends** [ADR-011](56-COLLABORATION-CONCURRENCY-DESIGN.md) and
 [ADR-015](61-COLLABORATION-RESUME.md).
 
