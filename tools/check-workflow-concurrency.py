@@ -42,11 +42,31 @@ def gates_main(text):
 
 def concurrency(text):
     """The workflow's `cancel-in-progress` value, or None if it sets no group."""
-    block = re.search(r"^concurrency:\n((?:  .*\n)+)", text, re.M)
+    block = re.search(r"^concurrency:\n((?:  .*\n|  #.*\n)+)", text, re.M)
     if not block:
         return None
     found = re.search(r"^  cancel-in-progress: *(.+?) *$", block.group(1), re.M)
     return found.group(1) if found else "false"
+
+
+def group_is_per_commit_on_main(text):
+    """Does main get a concurrency group of its own per commit?
+
+    `cancel-in-progress: false` protects a run that is **already going**. It
+    does not protect one that is still *queued*: when a third request joins the
+    group, GitHub discards the pending one. So two merges landing minutes apart
+    left the commit between them with no CI — measured at 5 of 30 runs, and the
+    one inspected had **zero jobs**, so it never started.
+
+    That is this gate's own hole, one level down: it asserted the expression
+    and the outcome stayed broken. A group carrying `github.sha` on main means
+    nothing can supersede a main run, queued or otherwise.
+    """
+    block = re.search(r"^concurrency:\n((?:  .*\n|  #.*\n)+)", text, re.M)
+    if not block:
+        return False
+    found = re.search(r"^  group: *(.+?) *$", block.group(1), re.M)
+    return bool(found and "github.sha" in found.group(1))
 
 
 def main():
@@ -69,6 +89,20 @@ def main():
                 f"    A push to main is one run per merge and it is the record of\n"
                 f"    whether main is releasable. Exclude main:\n"
                 f"      cancel-in-progress: ${{{{ github.ref != 'refs/heads/main' }}}}"
+            )
+        # The expression above protects a run that has *started*. A queued run
+        # is still discarded when a newer request joins the group, so two
+        # merges close together left the commit between them with no CI —
+        # measured at 5 of 30, and the one inspected had zero jobs.
+        if not group_is_per_commit_on_main(text):
+            problems.append(
+                f"{path.name}: gates main, but its concurrency group is the "
+                f"same for every commit on main. `cancel-in-progress: false` "
+                f"protects a run that has started; a *queued* run is still "
+                f"discarded when a newer request joins the group.\n"
+                f"      Put the commit in the group on main:\n"
+                f"      group: ci-${{ github.workflow }}-${{ github.ref }}"
+                f"-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}"
             )
 
     if problems:

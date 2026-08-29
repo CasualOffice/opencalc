@@ -12,7 +12,22 @@ on:
 # of forty consecutive main runs were cancelled this way, which is why `ci` on
 # main was a coin flip rather than a signal. Asserted by check-workflow-concurrency.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # **On main the group is per-commit, not per-branch.**
+  #
+  # `cancel-in-progress: false` protects the run that is *already going*. It
+  # does not protect a run that is still **queued**: when a third request joins
+  # the group, GitHub discards the pending one. Two merges landing minutes
+  # apart therefore left the commit between them with no CI at all — measured,
+  # 5 of the last 30 `ci` runs on main were cancelled, and the one inspected
+  # had **zero jobs**, so it never started.
+  #
+  # That is the same hole `check-workflow-concurrency` was written to close,
+  # one level down: the expression became asymmetric and the *outcome* did not.
+  # Including the SHA gives every main commit its own group, so nothing can
+  # supersede it and "is this commit green?" always has an answer.
+  #
+  # A pull request keeps the per-ref group: there, superseding is the point.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
