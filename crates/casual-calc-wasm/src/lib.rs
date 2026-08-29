@@ -347,13 +347,23 @@ mod tests {
         );
         assert_eq!(css, "", "a colour that is not a colour is simply dropped");
 
-        // The shapes a real file uses still come through.
-        for good in ["FF0000", "F00", "FFFF0000"] {
+        // The shapes a real file uses still come through. Three and six digits
+        // are the same in both notations and pass through unchanged; **eight
+        // are not**, and this loop used to assert they did — an OOXML
+        // `AARRGGBB` emitted verbatim is read by CSS as `RRGGBBAA`, so an
+        // opaque red `FFFF0000` became `#FFFF00` at zero alpha, a transparent
+        // yellow. See `an_eight_digit_colour_is_reordered_from_ooxml_to_css`
+        // and `FID-35`; the assertion here was encoding the defect.
+        for (good, css) in [
+            ("FF0000", "FF0000"),
+            ("F00", "F00"),
+            ("FFFF0000", "FF0000FF"),
+        ] {
             let style = Style {
                 font_color: Some(good.to_owned()),
                 ..Style::default()
             };
-            assert_eq!(html_cell_css(&style), format!("color:#{good};"));
+            assert_eq!(html_cell_css(&style), format!("color:#{css};"));
         }
     }
 
