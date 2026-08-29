@@ -8,7 +8,7 @@
 //! crates. See `docs/02-ARCHITECTURE.md`.
 
 use casual_calc_eval::{Recalculated, Recalculator, recalculate, recalculate_cancellable};
-use casual_calc_export::{ExportError, write_workbook};
+use casual_calc_export::{ExportError, PackageKind, write_workbook_as};
 use casual_calc_formula::parse;
 use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
@@ -63,6 +63,18 @@ pub enum SessionFormat {
     /// for a session built in memory rather than opened from a file.
     #[default]
     Xlsx,
+    /// A **macro-enabled** OOXML package: the same schema, the same parts and
+    /// the same reader as [`Xlsx`](Self::Xlsx), plus a `vbaProject.bin` part
+    /// and a different content type on `xl/workbook.xml`.
+    ///
+    /// A separate variant rather than a synonym for `Xlsx` precisely because
+    /// the difference survives the read: a session that forgot it opened an
+    /// `.xlsm` saves an `.xlsx` back, and the macros in a file somebody has
+    /// work in disappear with nothing said. What this engine does with the
+    /// macro project is documented on
+    /// [`Workbook::macro_project`](casual_calc_model::Workbook::macro_project)
+    /// — it retains the bytes and never reads them.
+    Xlsm,
     /// Delimited text (CSV / TSV / PSV), carrying the separator byte it was
     /// read with so the save uses the same one.
     Delimited(u8),
@@ -87,6 +99,9 @@ impl SessionFormat {
     pub fn for_extension(ext: &str) -> Option<Self> {
         if ext.eq_ignore_ascii_case("xlsx") {
             return Some(Self::Xlsx);
+        }
+        if ext.eq_ignore_ascii_case("xlsm") {
+            return Some(Self::Xlsm);
         }
         if ext.eq_ignore_ascii_case("ods") {
             return Some(Self::Ods);
@@ -126,6 +141,7 @@ impl SessionFormat {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Xlsx => "xlsx",
+            Self::Xlsm => "xlsm",
             Self::Ods => "ods",
             Self::Delimited(casual_calc_io::COMMA) => "csv",
             Self::Delimited(casual_calc_io::TAB) => "tsv",
@@ -139,6 +155,10 @@ impl SessionFormat {
     pub fn content_type(self) -> &'static str {
         match self {
             Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            // Note the shape: this is the *package* type a host serves the
+            // download as, which is not the `…macroEnabled.main+xml` that
+            // `xl/workbook.xml` carries inside the package.
+            Self::Xlsm => "application/vnd.ms-excel.sheet.macroEnabled.12",
             Self::Ods => "application/vnd.oasis.opendocument.spreadsheet",
             Self::Delimited(casual_calc_io::COMMA) => "text/csv;charset=utf-8",
             Self::Delimited(casual_calc_io::TAB) => "text/tab-separated-values;charset=utf-8",
@@ -642,8 +662,40 @@ impl WorkbookSession {
         format: SessionFormat,
         config: SessionConfig,
     ) -> Result<Self, SdkError> {
+        Self::open_as_cancellable(bytes, format, config, &casual_calc_model::Never)
+    }
+
+    /// The same, with a way to stop it.
+    ///
+    /// The package formats are the long ones — admission walks every cell — and
+    /// they are the ones this can interrupt; delimited text and OpenDocument run
+    /// to completion. A host under a time budget calls **this** rather than
+    /// branching on the format itself to decide which open is stoppable, which
+    /// is how `.xlsm` would have arrived unstoppable on a browser's single
+    /// thread while `.xlsx` was not.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_as`](Self::open_as), plus a cancellation.
+    pub fn open_as_cancellable(
+        bytes: Vec<u8>,
+        format: SessionFormat,
+        config: SessionConfig,
+        cancel: &dyn casual_calc_model::Cancel,
+    ) -> Result<Self, SdkError> {
         match format {
-            SessionFormat::Xlsx => Self::open_with(bytes, config),
+            SessionFormat::Xlsx => Self::open_cancellable(bytes, config, cancel),
+            // The **same reader**, and that is the whole point: an `.xlsm` is
+            // an OOXML package whose sheets this engine has always been able
+            // to read, and a name check was all that refused it (`IO-04`).
+            // What differs is only what the session remembers, so that saving
+            // writes a macro-enabled package back rather than an `.xlsx` with
+            // the macros quietly gone.
+            SessionFormat::Xlsm => {
+                let mut session = Self::open_cancellable(bytes, config, cancel)?;
+                session.format = SessionFormat::Xlsm;
+                Ok(session)
+            }
             SessionFormat::Ods => Self::open_ods_with(bytes, config),
             SessionFormat::Delimited(delimiter) => {
                 Self::open_delimited_with(bytes, delimiter, config)
@@ -1499,11 +1551,45 @@ impl WorkbookSession {
     /// would, and its report must be asked for before the write, not after.
     #[must_use]
     pub fn loss_writing(&self, format: SessionFormat) -> CompatibilityReport {
-        match format {
-            SessionFormat::Xlsx => CompatibilityReport::default(),
+        let mut report = match format {
+            // A macro-enabled package carries everything a plain one does; the
+            // extra part it carries is the reason it is a separate format.
+            SessionFormat::Xlsx | SessionFormat::Xlsm => CompatibilityReport::default(),
             SessionFormat::Ods => casual_calc_ods::export_loss(&self.workbook),
             SessionFormat::Delimited(_) => delimited_loss(&self.workbook, DELIMITED_SHEET),
+        };
+        // **The `.xlsm` half of `IO-04`.** Macros can only travel in a
+        // macro-enabled package, so writing this document as anything else
+        // leaves them behind — and the whole point of the row is that this had
+        // been happening with nothing said. Counted here rather than in each
+        // format's own loss function because it is a fact about the *target*
+        // format, and the three writers below it would each have had to
+        // remember the same thing.
+        //
+        // Not reported when the save hands back the opened file untouched:
+        // those bytes still contain the project, so claiming a loss would be
+        // as wrong in the other direction.
+        if format != SessionFormat::Xlsm
+            && !self.writes_source_verbatim(format)
+            && self.workbook.macro_project().is_some()
+        {
+            report.record(
+                "macros (VBA project)",
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
         }
+        report
+    }
+
+    /// Whether [`save_as`](Self::save_as) would hand `format` the opened bytes
+    /// unchanged rather than running a writer.
+    ///
+    /// The byte-for-byte guarantee and the loss report have to agree: a save
+    /// that returns the original file has lost nothing, whatever the writer for
+    /// that format cannot carry.
+    fn writes_source_verbatim(&self, format: SessionFormat) -> bool {
+        format == self.format && self.source.is_some()
     }
 
     /// Serialize the workbook to the format it was opened from.
@@ -1548,11 +1634,23 @@ impl WorkbookSession {
     /// only when `format` is the one the session was opened from. Asking for a
     /// different format is by definition asking for different bytes.
     ///
+    /// # Macros
+    ///
+    /// A VBA project can travel in [`SessionFormat::Xlsm`] and nowhere else.
+    /// Written as `.xlsm` it is carried through byte for byte, like any other
+    /// [retained part](casual_calc_model::Workbook::macro_project); written as
+    /// anything else it is **removed**, and
+    /// [`loss_writing`](Self::loss_writing) names the loss under
+    /// `macros (VBA project)`. Removing it is the deliberate choice: a package
+    /// that holds macros while declaring itself a plain workbook is one Excel
+    /// opens as damaged, so smuggling the bytes across would cost the whole
+    /// file rather than the macros.
+    ///
     /// # Errors
     ///
     /// As [`save`](Self::save).
     pub fn save_as(&self, format: SessionFormat) -> Result<Vec<u8>, SdkError> {
-        if format == self.format
+        if self.writes_source_verbatim(format)
             && let Some(source) = &self.source
         {
             // The original bytes, untouched. Nothing has edited them, so there
@@ -1575,7 +1673,27 @@ impl WorkbookSession {
         // a file the author will open tomorrow is data loss.
         self.workbook.validate()?;
         match format {
-            SessionFormat::Xlsx => Ok(write_workbook(&self.workbook)?),
+            // Macros cannot travel here. `write_workbook` would otherwise
+            // declare the package macro-enabled on their account — which is
+            // the correct thing for it to do and the wrong file to hand back
+            // to somebody who asked for an `.xlsx`. So the project is removed
+            // and the loss is named by `loss_writing`, which reports exactly
+            // this case. Cloning only when there is something to remove keeps
+            // the ordinary save free of it.
+            SessionFormat::Xlsx if self.workbook.macro_project().is_some() => {
+                let mut demacroed = self.workbook.clone();
+                demacroed.remove_macro_project();
+                Ok(write_workbook_as(&demacroed, PackageKind::Workbook)?)
+            }
+            SessionFormat::Xlsx => Ok(write_workbook_as(&self.workbook, PackageKind::Workbook)?),
+            // Named rather than derived: a workbook whose macros were all
+            // deleted is still an `.xlsm` if that is what the caller asked
+            // for, and a `.xlsm` declaring itself a plain workbook is a file
+            // Excel argues with.
+            SessionFormat::Xlsm => Ok(write_workbook_as(
+                &self.workbook,
+                PackageKind::MacroEnabled,
+            )?),
             SessionFormat::Ods => Ok(casual_calc_ods::export_ods(&self.workbook)?),
             // No byte-order mark. `read_delimited` does not strip one, so a BOM
             // written here comes back as part of the first field — a save that

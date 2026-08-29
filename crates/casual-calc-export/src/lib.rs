@@ -55,8 +55,87 @@ const EPOCH_STAMP: &str = "1970-01-01T00:00:00.00";
 const FIRST_CUSTOM_NUM_FMT: u32 = 164;
 const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 
+/// The content type of `xl/workbook.xml` in a plain workbook package.
+const CT_WORKBOOK: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+/// The content type of `xl/workbook.xml` in a macro-enabled package.
+///
+/// The **only** difference between an `.xlsx` and an `.xlsm` at the package
+/// level, besides the VBA part itself: same schema, same parts, same reader.
+const CT_WORKBOOK_MACRO: &str = "application/vnd.ms-excel.sheet.macroEnabled.main+xml";
+
+/// Which OOXML spreadsheet flavour a written package declares itself to be.
+///
+/// Not a guess about the file name. The workbook part's content type is what a
+/// reader keys off, and getting it wrong is not cosmetic in either direction: a
+/// macro-enabled declaration on a package with no macros makes Excel warn about
+/// content it will not find, and a plain declaration on a package that *does*
+/// carry a VBA project makes Excel report the file as damaged and repair it by
+/// deleting the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PackageKind {
+    /// `.xlsx` — a workbook that carries no macros.
+    #[default]
+    Workbook,
+    /// `.xlsm` — a macro-enabled workbook.
+    MacroEnabled,
+}
+
+impl PackageKind {
+    /// The flavour a workbook **must** be written as, given what it carries.
+    ///
+    /// A package holding a VBA project is macro-enabled whether or not its
+    /// caller thought so, which is why this is consulted even when the caller
+    /// named a flavour: the alternative is a file that denies what is inside it.
+    #[must_use]
+    pub fn for_workbook(workbook: &Workbook) -> Self {
+        if workbook.macro_project().is_some() {
+            Self::MacroEnabled
+        } else {
+            Self::Workbook
+        }
+    }
+
+    fn workbook_content_type(self) -> &'static str {
+        match self {
+            Self::Workbook => CT_WORKBOOK,
+            Self::MacroEnabled => CT_WORKBOOK_MACRO,
+        }
+    }
+}
+
 /// Serialize a workbook to a deterministic `.xlsx` package.
+///
+/// A workbook still carrying a [VBA
+/// project](casual_calc_model::Workbook::macro_project) is written as the
+/// macro-enabled package it is — see [`write_workbook_as`] for the caller that
+/// wants to name the flavour, and
+/// [`remove_macro_project`](casual_calc_model::Workbook::remove_macro_project)
+/// for the one that wants a plain `.xlsx` out of a macro workbook.
+///
+/// # Errors
+///
+/// As [`write_workbook_as`].
 pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
+    write_workbook_as(workbook, PackageKind::for_workbook(workbook))
+}
+
+/// The same, declaring a named flavour.
+///
+/// `kind` is **raised** to [`PackageKind::MacroEnabled`] when the workbook
+/// carries a VBA project: a package cannot both hold macros and deny holding
+/// them, and the writer is the last place that can be true. A caller that wants
+/// a genuinely macro-free `.xlsx` out of a macro workbook removes the project
+/// first and says so in its compatibility report.
+///
+/// # Errors
+///
+/// As [`write_workbook`]: an unwritable workbook or a zip failure.
+pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u8>, ExportError> {
+    let kind = match PackageKind::for_workbook(workbook) {
+        PackageKind::MacroEnabled => PackageKind::MacroEnabled,
+        PackageKind::Workbook => kind,
+    };
     let has_strings = !workbook.strings.is_empty();
     // Conditional-format fills become `<dxfs>` in styles.xml, shared by dxfId
     // with the worksheet `<cfRule>`s — so styles.xml is written when there are
@@ -110,6 +189,7 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
             "[Content_Types].xml".to_owned(),
             content_types(
                 workbook,
+                kind,
                 has_styles,
                 has_strings,
                 any_theme_link(workbook),
@@ -338,6 +418,7 @@ fn package_with_retained(
 
 fn content_types(
     workbook: &Workbook,
+    kind: PackageKind,
     has_styles: bool,
     has_strings: bool,
     has_theme: bool,
@@ -351,7 +432,13 @@ fn content_types(
     if any_comments {
         s.push_str("<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/>");
     }
-    s.push_str("<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>");
+    // The one part whose type says which flavour of package this is. Excel
+    // reads it, not the file name, and a `vbaProject.bin` under the plain
+    // workbook type is a package it opens as damaged.
+    s.push_str(&format!(
+        "<Override PartName=\"/xl/workbook.xml\" ContentType=\"{}\"/>",
+        kind.workbook_content_type()
+    ));
     for i in 0..workbook.sheets.len() {
         s.push_str(&format!(
             "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",

@@ -552,6 +552,101 @@ fn retained_parts_survive_a_model_snapshot() {
     );
 }
 
+/// A workbook carrying macros can point at the part that holds them — and let
+/// go of it cleanly when a format with no place for macros is being written.
+///
+/// Both halves are needed and neither is obvious. Finding it goes through the
+/// *relationship*, not the conventional path, because `xl/vbaProject.bin` is a
+/// convention. Letting go has to take the signature with it: a signed project
+/// keeps its signature in a second part related from the project part itself,
+/// and a signature left behind names a part the package no longer carries —
+/// which is the "file needs repair" dialog rather than a clean conversion.
+#[test]
+fn a_macro_project_is_found_by_relationship_and_removed_with_its_signature() {
+    const VBA: &str = "http://schemas.microsoft.com/office/2006/relationships/vbaProject";
+    const SIG: &str = "http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature";
+    const IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+
+    let mut wb = Workbook::new(wb_id());
+    for path in [
+        "xl/vbaProject.bin",
+        "xl/vbaProjectSignature.bin",
+        "xl/media/image1.png",
+    ] {
+        wb.retained_parts.push(crate::RetainedPart {
+            path: path.into(),
+            bytes: path.as_bytes().to_vec(),
+            content_type: None,
+        });
+    }
+    let rel = |source: &str, id: &str, rel_type: &str, target: &str| crate::RetainedRel {
+        source: source.into(),
+        id: id.into(),
+        rel_type: rel_type.into(),
+        target: target.into(),
+        external: false,
+    };
+    // The target is relative to the part that declares it, which is why
+    // finding the project cannot be a string comparison against a path.
+    wb.retained_rels
+        .push(rel("xl/workbook.xml", "rId7", VBA, "vbaProject.bin"));
+    wb.retained_rels.push(rel(
+        "xl/vbaProject.bin",
+        "rId1",
+        SIG,
+        "vbaProjectSignature.bin",
+    ));
+    wb.retained_rels.push(rel(
+        "xl/worksheets/sheet1.xml",
+        "rId1",
+        IMAGE,
+        "../media/image1.png",
+    ));
+
+    assert_eq!(
+        wb.macro_project().map(|p| p.path.as_str()),
+        Some("xl/vbaProject.bin"),
+        "the project is the part the vbaProject relationship reaches"
+    );
+
+    let taken = wb.remove_macro_project();
+    assert_eq!(
+        taken.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+        ["xl/vbaProject.bin", "xl/vbaProjectSignature.bin"],
+        "the signature is reached only through the project and goes with it"
+    );
+    assert!(wb.macro_project().is_none());
+    // The picture is nobody's business here, and a removal that took it would
+    // be the loss this whole path exists to avoid.
+    assert_eq!(
+        wb.retained_parts
+            .iter()
+            .map(|p| p.path.as_str())
+            .collect::<Vec<_>>(),
+        ["xl/media/image1.png"]
+    );
+    assert_eq!(
+        wb.retained_rels
+            .iter()
+            .map(|r| r.rel_type.as_str())
+            .collect::<Vec<_>>(),
+        [IMAGE],
+        "and the relationships naming removed parts go too, or the package \
+         names parts it does not carry"
+    );
+
+    // A workbook with no macros is not changed by asking.
+    let mut plain = Workbook::new(wb_id());
+    plain.retained_rels.push(rel(
+        "xl/worksheets/sheet1.xml",
+        "rId1",
+        IMAGE,
+        "../media/image1.png",
+    ));
+    assert!(plain.remove_macro_project().is_empty());
+    assert_eq!(plain.retained_rels.len(), 1);
+}
+
 /// A retained part costs roughly four times its size in a snapshot.
 ///
 /// `serde_json` writes `Vec<u8>` as an array of decimal numbers — `[171,171,…]`

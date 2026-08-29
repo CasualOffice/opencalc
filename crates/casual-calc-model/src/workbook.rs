@@ -477,6 +477,43 @@ fn intern_into(
     FormulaHandle(at)
 }
 
+/// The last segment of an OPC relationship type URI.
+///
+/// Relationship types are namespaced URIs whose namespace has moved — a VBA
+/// project is `.../office/2006/relationships/vbaProject` from one producer and
+/// a longer path from another — while the name on the end has not. Comparing
+/// whole URIs is how a part stops being recognised the day a producer updates
+/// its namespace.
+fn rel_local_name(rel_type: &str) -> &str {
+    rel_type.rsplit('/').next().unwrap_or(rel_type)
+}
+
+/// The package path a relationship target names, resolved against the part that
+/// declares it.
+///
+/// A target is relative to its **source part's directory**
+/// (`../charts/chart1.xml` from a drawing), and a leading `/` makes it absolute
+/// from the package root. Only for `TargetMode="Internal"` targets: an external
+/// target is a URI, and resolving `file:///other.xlsx` against `xl/workbook.xml`
+/// invents the part `xl/file:/other.xlsx`, which no package has ever held.
+fn resolve_part_path(source: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.to_owned();
+    }
+    let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for segment in target.split('/') {
+        match segment {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
 impl Workbook {
     /// A new, empty workbook at the current schema version.
     pub fn new(workbook_id: Id) -> Self {
@@ -502,6 +539,102 @@ impl Workbook {
             cell_styles: Vec::new(),
             date1904: false,
         }
+    }
+
+    /// The VBA macro project this package carries, as the retained bytes it
+    /// arrived as — or `None` for a workbook with no macros.
+    ///
+    /// # What this engine does with it
+    ///
+    /// Nothing. A macro project is a [retained part](RetainedPart) like any
+    /// other: never parsed, never interpreted, never executed, and never
+    /// consulted by the calculation engine. This exists so that the two
+    /// decisions which *do* turn on its presence can be made — which content
+    /// type the workbook part is written under, and whether a save to a
+    /// macro-free format is losing something the author has to be told about.
+    /// See `docs/36`.
+    ///
+    /// # Why the relationship and not the path
+    ///
+    /// `xl/vbaProject.bin` is a convention, not a rule; the package's own
+    /// answer to "which part holds the macros" is the relationship the workbook
+    /// part declares. Matched on the relationship type's **last segment**,
+    /// because the namespace in front of it has moved between Office versions
+    /// and the local name has not.
+    #[must_use]
+    pub fn macro_project(&self) -> Option<&RetainedPart> {
+        let target = self
+            .retained_rels
+            .iter()
+            .filter(|rel| !rel.external && rel_local_name(&rel.rel_type) == "vbaProject")
+            .map(|rel| resolve_part_path(&rel.source, &rel.target))
+            .next()?;
+        self.retained_parts
+            .iter()
+            .find(|part| part.path.eq_ignore_ascii_case(&target))
+    }
+
+    /// Remove the VBA macro project and its signature, along with every
+    /// relationship that names or is declared by them. Returns the parts taken
+    /// away.
+    ///
+    /// Called when a macro workbook is written to a format that has nowhere to
+    /// put macros — an `.xlsx`, an `.ods`, a `.csv`. Removing rather than
+    /// carrying the bytes across is the deliberate half: an OOXML package
+    /// holding a VBA project while declaring itself a plain workbook is not a
+    /// file with a harmless extra part, it is one Excel reports as damaged and
+    /// repairs by deleting. Handing that out would be a worse outcome than the
+    /// loss it avoided — so the loss is taken, and the caller names it in the
+    /// compatibility report rather than letting it happen quietly.
+    ///
+    /// The signature is the half that is easy to miss: a signed project keeps
+    /// it in a second part, and a signature left behind names a part the
+    /// package no longer carries.
+    pub fn remove_macro_project(&mut self) -> Vec<RetainedPart> {
+        // The VBA family, named by the relationships that reach it: the
+        // project, and on a signed workbook its signature. Both relationship
+        // types share the `vbaProject` prefix on their local name, which is
+        // what makes one filter enough.
+        let doomed: BTreeSet<String> = self
+            .retained_rels
+            .iter()
+            .filter(|rel| !rel.external && rel_local_name(&rel.rel_type).starts_with("vbaProject"))
+            .map(|rel| resolve_part_path(&rel.source, &rel.target))
+            .collect();
+        if doomed.is_empty() {
+            return Vec::new();
+        }
+        // Two kinds of relationship go: one that *names* a removed part, which
+        // would otherwise point at nothing, and one *declared by* a removed
+        // part, which would otherwise be written into a `.rels` belonging to a
+        // part the package no longer has.
+        //
+        // What is deliberately not done is chasing further. A part the project
+        // related to and nothing else does survives here, unreferenced —
+        // costing its own bytes. Following the graph would remove it too, and
+        // an earlier draft of this did; it was dropped because no real package
+        // reaches such a part and no test could be written that told the two
+        // versions apart. Of the two ways to be wrong, only one of them deletes
+        // a part this code never understood in the first place.
+        self.retained_rels.retain(|rel| {
+            let declared_by_a_survivor = !doomed.contains(&rel.source);
+            // An external target is a URI, not a part path, so it can never
+            // name one of these — and must not be resolved as though it could.
+            let names_a_survivor =
+                rel.external || !doomed.contains(&resolve_part_path(&rel.source, &rel.target));
+            declared_by_a_survivor && names_a_survivor
+        });
+        let mut taken = Vec::new();
+        let mut kept = Vec::with_capacity(self.retained_parts.len());
+        for part in std::mem::take(&mut self.retained_parts) {
+            if doomed.contains(&part.path) {
+                taken.push(part);
+            } else {
+                kept.push(part);
+            }
+        }
+        self.retained_parts = kept;
+        taken
     }
 
     /// Intern a string into the workbook's table, returning its id.
