@@ -2758,6 +2758,15 @@ fn cf_rule_body(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> Strin
                 "duplicateValues"
             },
         ),
+        // The formula goes out exactly as the model holds it, because the model
+        // holds exactly what the file said: A1 text anchored to the top-left of
+        // this rule's range (`CfRule::Expression`). Re-anchoring it here — to
+        // `A1`, or to anything else — would move every highlight by the
+        // difference, and nothing on the way back in would notice.
+        CfRule::Expression(formula) => format!(
+            "<cfRule type=\"expression\" dxfId=\"{dxf_id}\" priority=\"{priority}\"><formula>{}</formula></cfRule>",
+            escape_text(formula)
+        ),
         CfRule::TextContains(text) => {
             let top = cell_a1(cf.range.start.row, cf.range.start.col);
             format!(

@@ -4067,3 +4067,75 @@ fn a_created_pivot_is_written_as_a_pivot_and_reads_back() {
     assert_eq!(read[0].rows[0].source_column, 0);
     assert_eq!(read[0].values[0].aggregate, PivotAggregate::Sum);
 }
+
+/// A `.xlsx` whose sheet carries one `<cfRule type="expression">` over
+/// `A2:H10` — the whole-row highlight every real workbook uses — plus a `<dxf>`
+/// for it to paint with.
+///
+/// Written out longhand rather than built from the model because the point of
+/// the test below is what happens to a rule *arriving from a file*: the loss it
+/// demonstrates happened on import, before the model was ever consulted.
+fn expression_cf_xlsx() -> Vec<u8> {
+    const DXF_STYLES: &[u8] =
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <cellXfs count="1"><xf numFmtId="0"/></cellXfs>
+        <dxfs count="1">
+            <dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+        </dxfs>
+    </styleSheet>"#;
+    let sheet_xml =
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData>
+          <row r="2"><c r="A2" t="s"><v>0</v></c><c r="D2"><v>150</v></c></row>
+          <row r="3"><c r="A3" t="s"><v>0</v></c><c r="D3"><v>50</v></c></row>
+        </sheetData>
+        <conditionalFormatting sqref="A2:H10">
+            <cfRule type="expression" dxfId="0" priority="1"><formula>$D2&gt;100</formula></cfRule>
+        </conditionalFormatting>
+    </worksheet>"#
+            .to_vec();
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/sharedStrings.xml", SHARED),
+        ("xl/styles.xml", DXF_STYLES),
+        ("xl/worksheets/sheet1.xml", &sheet_xml),
+    ])
+}
+
+/// **A formula rule opened here and saved comes back out of the file.**
+///
+/// The `expression` rule used to be dropped on import — counted in the
+/// compatibility report, but gone — so a user who opened a workbook with
+/// whole-row highlighting and pressed save lost the rule from the *file* as
+/// well as from the screen. That is the half of the defect that costs something
+/// unrecoverable, so it is asserted end to end: file in, file out, rule still
+/// there, formula unchanged.
+#[test]
+fn an_expression_conditional_format_survives_a_round_trip() {
+    let wb = import_package(expression_cf_xlsx()).unwrap().workbook;
+    assert_eq!(
+        wb.sheets[0].conditional_formats.len(),
+        1,
+        "the file's one expression rule reaches the model"
+    );
+
+    let written = write_workbook(&wb).unwrap();
+    let sheet_xml = xml_of(&written, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains(r#"type="expression""#),
+        "and is written back as an expression rule: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("<formula>$D2&gt;100</formula>"),
+        "with its formula anchored to the range's top-left, as it arrived: {sheet_xml}"
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(
+        back.sheets[0].conditional_formats, wb.sheets[0].conditional_formats,
+        "import -> write -> import is a fixed point for an expression rule"
+    );
+}

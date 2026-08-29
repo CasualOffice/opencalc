@@ -939,6 +939,29 @@ pub enum CfRule {
         /// Match values that appear exactly once instead.
         unique: bool,
     },
+    /// An arbitrary formula, true for the cells the rule should paint. OOXML
+    /// `<cfRule type="expression">` and the commonest rule in real workbooks:
+    /// `$D2>100` over `A2:H10` is how a whole row gets highlighted.
+    ///
+    /// # Anchoring — the one thing that is easy to get wrong
+    ///
+    /// The string is the formula body **as the file writes it: A1 text,
+    /// anchored to the top-left of [`ConditionalFormat::range`]**, with no
+    /// leading `=`. It is *not* anchored to `A1`, and it is *not* relative to
+    /// the cell being tested.
+    ///
+    /// Every cell in the range is then tested with the formula's relative
+    /// references shifted by that cell's offset from the top-left, exactly as a
+    /// fill-down would shift them — so `$D2>100` written for `A2:H10` asks
+    /// `$D2>100` of row 2, `$D7>100` of row 7, and (because the `$` pins the
+    /// column) never `$E…` of any column. Anchoring it to `A1` instead would
+    /// shift every row by one and paint the wrong cells, with nothing to show
+    /// for it on screen but a highlight one row out.
+    ///
+    /// Storing the file's own text rather than a parsed tree is deliberate: it
+    /// is what lets the writer emit the rule back byte-for-byte, so a workbook
+    /// opened and saved keeps the rule it arrived with.
+    Expression(String),
 }
 
 /// A data-validation rule over a range, covering the full OOXML `type` set.
@@ -1383,6 +1406,26 @@ impl CfRule {
             | CfRule::Top10 { .. }
             | CfRule::AboveAverage { .. }
             | CfRule::DuplicateValues { .. } => false,
+            // An expression is not a predicate on the cell's own value at all —
+            // `$D2>100` may not mention the cell it paints. It is decided by
+            // the formula engine, which this crate is below; `formula()` hands
+            // the text to whoever has one.
+            CfRule::Expression(_) => false,
+        }
+    }
+
+    /// The formula body of an `expression` rule, anchored to the top-left of
+    /// the rule's range — see [`CfRule::Expression`] for what that means and
+    /// why it is not `A1`.
+    ///
+    /// `None` for every other kind. A caller with an evaluator uses this to
+    /// decide the rule per cell; a caller without one gets `None` and paints
+    /// nothing, which is the same answer as "no rule matched".
+    #[must_use]
+    pub fn formula(&self) -> Option<&str> {
+        match self {
+            CfRule::Expression(f) => Some(f.as_str()),
+            _ => None,
         }
     }
 

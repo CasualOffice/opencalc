@@ -198,6 +198,41 @@ impl CellEffect {
     }
 }
 
+/// Where a [`CfRule::Expression`]'s per-cell answer comes from.
+///
+/// A formula rule is the one kind this crate cannot decide for itself. Deciding
+/// it means evaluating a formula, which is `casual-calc-eval` — and that crate
+/// depends on *this* one, so the arrow cannot be turned round. So the caller
+/// that has an evaluator supplies the answers through this trait, and the one
+/// implementation of conditional formatting stays the only one, which is the
+/// whole point of the module (`RND-05`).
+///
+/// `&self` rather than `&mut self` deliberately: an implementation wants to
+/// memoize, and the callers here hold `effect_for` inside a closure that is
+/// called per cell. Interior mutability on the implementer's side keeps that
+/// from spreading a `&mut` through every layout path.
+pub trait CfExpressions {
+    /// Whether the `rule`-th conditional format of the sheet — indexed as
+    /// `Sheet::conditional_formats` is — is true at `(row, col)`.
+    ///
+    /// Only ever asked of a rule whose [`CfRule::formula`] is `Some`.
+    fn matches(&self, rule: usize, row: u32, col: u32) -> bool;
+}
+
+/// The answer a caller with no formula engine gives: no expression matches.
+///
+/// Used by the layout entry points that take only a workbook. It is not the
+/// same as "there is no rule" — the rule is in the model and will be written
+/// back to the file — it is "this caller cannot see whether it applies".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoExpressions;
+
+impl CfExpressions for NoExpressions {
+    fn matches(&self, _rule: usize, _row: u32, _col: u32) -> bool {
+        false
+    }
+}
+
 /// The order rules are considered in: **by priority, not by document order**.
 ///
 /// Lowest priority wins, and a rule with no priority sorts last. Returned
@@ -222,6 +257,14 @@ pub fn priority_order(sheet: &Sheet) -> Vec<usize> {
 ///
 /// First match wins per property, and a matching rule with `stopIfTrue` ends
 /// the search.
+///
+/// `exprs` decides the formula rules; pass [`NoExpressions`] when there is no
+/// evaluator to hand.
+// Eight, and each one is a distinct thing the answer depends on: the rules, the
+// per-rule statistics, the order, the address, the value, the text, and the
+// expression oracle. Bundling them into a struct would move the argument list
+// to the call site and gain nothing — every caller already computes all of them.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn effect_for(
     sheet: &Sheet,
@@ -231,6 +274,7 @@ pub fn effect_for(
     col: u32,
     value: &CellValue,
     text: &str,
+    exprs: &dyn CfExpressions,
 ) -> CellEffect {
     let mut effect = CellEffect::default();
     for &i in order {
@@ -261,7 +305,13 @@ pub fn effect_for(
             }
             continue;
         }
-        let hit = if cf.rule.needs_range_stats() {
+        let hit = if cf.rule.formula().is_some() {
+            // A formula rule is decided by the formula, not by this cell's
+            // value: `$D2>100` over `A2:H10` paints A2 because of what is in
+            // D2. Asking `matches_number` here would test the wrong cell and
+            // answer `false` for every one of them.
+            exprs.matches(i, row, col)
+        } else if cf.rule.needs_range_stats() {
             stats[i].matches(&cf.rule, value, text)
         } else {
             match value {

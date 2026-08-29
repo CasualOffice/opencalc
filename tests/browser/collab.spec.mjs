@@ -41,7 +41,7 @@ const ORIGIN = `http://127.0.0.1:${ORIGIN_PORT}`;
 /// Asserted against the engine's own number in the first test, because a client
 /// that states the wrong version is refused *before* it joins — which, from the
 /// test's side, is indistinguishable from the server hanging.
-const PROTOCOL = 6;
+const PROTOCOL = 7;
 
 
 

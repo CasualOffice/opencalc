@@ -13,7 +13,7 @@ use casual_calc_formula::parse;
 use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
-use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, layout_viewport, panes};
+use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
 use casual_calc_model::{Id, Workbook};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
@@ -1400,12 +1400,16 @@ impl WorkbookSession {
     }
 
     /// Lay out a viewport of a sheet into a display list.
+    ///
+    /// Formula conditional-format rules are resolved, so what this returns is
+    /// what the canvas and the PNG show.
     pub fn layout(&self, sheet_index: usize, viewport: &Viewport) -> DisplayList {
-        layout_viewport(
+        casual_calc_layout::layout_viewport_with(
             &self.workbook,
             sheet_index,
             &self.geometry(sheet_index),
             viewport,
+            &casual_calc_eval::conditional::CfExpressionRules::new(&self.workbook, sheet_index),
         )
     }
 
@@ -1648,9 +1652,22 @@ pub fn render_sheet_png_with_report(
         .unwrap_or_default();
 
     let regions = panes(geometry, viewport, freeze);
+    // Formula conditional-format rules resolved here too, not only on the
+    // canvas: the PNG and the browser show one sheet, and the whole reason
+    // conditional formatting lives in `casual-calc-layout` is that the two
+    // cannot be allowed to disagree (`RND-05`).
+    let cf_exprs = casual_calc_eval::conditional::CfExpressionRules::new(workbook, sheet_index);
     let lists: Vec<DisplayList> = regions
         .iter()
-        .map(|pane| layout_viewport(workbook, sheet_index, geometry, &pane.viewport))
+        .map(|pane| {
+            casual_calc_layout::layout_viewport_with(
+                workbook,
+                sheet_index,
+                geometry,
+                &pane.viewport,
+                &cf_exprs,
+            )
+        })
         .collect();
     let paints: Vec<PanePaint<'_>> = regions
         .iter()

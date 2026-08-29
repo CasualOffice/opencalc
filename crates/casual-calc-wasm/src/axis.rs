@@ -556,7 +556,8 @@ pub fn session_cells(
 ) -> String {
     with_session(|s| {
         let wb = s.workbook();
-        let Some(sheet) = wb.sheets.get(sheet) else {
+        let sheet_index = sheet;
+        let Some(sheet) = wb.sheets.get(sheet_index) else {
             return "[]".to_owned();
         };
         // One pass per rule that needs the whole range — its extremes, its mean,
@@ -569,6 +570,10 @@ pub fn session_cells(
             .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
             .collect();
         let cf_order = casual_calc_layout::conditional::priority_order(sheet);
+        // The formula rules, parsed once for this call. The canvas is the one
+        // renderer with a formula engine behind it, so it is the one that can
+        // answer them; the parse is per rule, not per cell.
+        let cf_exprs = casual_calc_eval::conditional::CfExpressionRules::new(wb, sheet_index);
 
         let mut items = Vec::new();
         for (at, cell) in sheet.cells.row_band(first_row, last_row) {
@@ -614,6 +619,7 @@ pub fn session_cells(
                 at.col,
                 &cell.value,
                 &text,
+                &cf_exprs,
             );
             let bar = effect.data_bar;
             let cf_font = effect.font_color;

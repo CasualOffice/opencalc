@@ -23,6 +23,7 @@
 //!
 //! See `docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md`.
 
+pub mod conditional;
 mod eval;
 mod functions;
 mod graph;
@@ -616,6 +617,8 @@ fn value_to_cell(workbook: &mut Workbook, value: Value) -> CellValue {
     }
 }
 
+#[cfg(test)]
+mod conditional_tests;
 #[cfg(test)]
 mod pivot_tests;
 #[cfg(test)]

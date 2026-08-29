@@ -453,24 +453,14 @@ pub fn session_clear_validation(
     })
 }
 
-/// Add a highlight-cells conditional-format rule over a range. `kind` is one of
-/// `gt`/`lt`/`eq`/`between`/`contains`; `a`/`b` are numeric operands (b only for
-/// `between`), `text` the substring for `contains`, `fill` the `RRGGBB` color.
-#[wasm_bindgen]
-#[allow(clippy::too_many_arguments)]
-pub fn session_add_cf(
-    sheet: usize,
-    r0: u32,
-    c0: u32,
-    r1: u32,
-    c1: u32,
-    kind: &str,
-    a: f64,
-    b: f64,
-    text: &str,
-    fill: &str,
-) -> Result<(), JsError> {
-    let rule = match kind {
+/// The rule a `kind` token and its operands name, or why it is not one.
+///
+/// Split out of [`session_add_cf`] because the refusals are the interesting
+/// part and `JsError` cannot be constructed off a WebAssembly target — a test
+/// that asks whether a bad formula is refused would abort rather than answer.
+/// The error is a plain `String` here and becomes a `JsError` one line up.
+fn cf_rule_from_kind(kind: &str, a: f64, b: f64, text: &str) -> Result<CfRule, String> {
+    Ok(match kind {
         "gt" => CfRule::GreaterThan(a),
         "lt" => CfRule::LessThan(a),
         "eq" => CfRule::EqualTo(a),
@@ -486,7 +476,7 @@ pub fn session_add_cf(
                 .filter(|c| c.len() == 6)
                 .collect();
             if colors.len() < 2 {
-                return Err(JsError::new("a colour scale needs at least two colours"));
+                return Err("a colour scale needs at least two colours".to_owned());
             }
             CfRule::ColorScale(colors)
         }
@@ -504,8 +494,47 @@ pub fn session_add_cf(
         },
         "duplicate" => CfRule::DuplicateValues { unique: false },
         "unique" => CfRule::DuplicateValues { unique: true },
-        _ => return Err(JsError::new("unknown conditional-format rule")),
-    };
+        // The custom-formula rule, and the only way to highlight a whole row:
+        // `$D2>100` over `A2:H10`. The formula arrives through `text` and is
+        // **anchored to the top-left of the range** — the top-left the caller
+        // sorts `r0`/`r1` into — which is both what OOXML means by it and what
+        // an Excel user types. A leading `=` is what the dialog shows, so it is
+        // accepted and dropped; the model holds the body.
+        "formula" => {
+            let body = text.trim().strip_prefix('=').unwrap_or(text.trim()).trim();
+            if body.is_empty() {
+                return Err("a formula rule needs a formula".to_owned());
+            }
+            // Refused here rather than stored: a formula that does not parse
+            // can never match, so a rule holding one is a highlight that will
+            // never appear and never say why.
+            casual_calc_formula::parse(body)
+                .map_err(|e| format!("that formula does not parse: {e}"))?;
+            CfRule::Expression(body.to_owned())
+        }
+        _ => return Err("unknown conditional-format rule".to_owned()),
+    })
+}
+
+/// Add a highlight-cells conditional-format rule over a range. `kind` is one of
+/// `gt`/`lt`/`eq`/`between`/`contains`/`formula`; `a`/`b` are numeric operands
+/// (b only for `between`), `text` the substring for `contains` or the formula
+/// body for `formula`, `fill` the `RRGGBB` color.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_add_cf(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+    a: f64,
+    b: f64,
+    text: &str,
+    fill: &str,
+) -> Result<(), JsError> {
+    let rule = cf_rule_from_kind(kind, a, b, text).map_err(|e| JsError::new(&e))?;
     let fill = fill.trim().trim_start_matches('#').to_ascii_uppercase();
     edit_sheet_metadata(sheet, move |_, data| {
         let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
@@ -1266,6 +1295,10 @@ pub(crate) fn describe_cf_rule(rule: &CfRule) -> String {
             "duplicated"
         }
         .to_owned(),
+        // Shown with the `=` an author writes, even though the model stores the
+        // body: the rules manager is where somebody checks what a rule says,
+        // and a formula without its `=` reads as a label.
+        CfRule::Expression(f) => format!("formula ={f}"),
     }
 }
 
@@ -2691,5 +2724,76 @@ mod validation_readback_tests {
         session_clear_validation(0, 0, 0, 0, 0).unwrap();
         assert_eq!(session_validation_messages(0, 0, 0), "");
         assert_eq!(session_validation_messages(0, 9, 9), "");
+    }
+}
+
+/// **Whole-row highlighting, through the bindings the editor actually calls.**
+///
+/// The engine could hold and evaluate a formula rule and still be unreachable
+/// from the product: that gap — "engine ✓ / editor ✗" — is the one
+/// `docs/12` counts seven times. So this drives `session_add_cf` with the
+/// `formula` kind and reads the grid back through `session_cells`, which is the
+/// call the canvas makes for every frame.
+#[cfg(test)]
+mod formula_cf_tests {
+    use super::{cf_rule_from_kind, session_add_cf, session_new, session_set_cell};
+    use crate::axis::session_cells;
+    use crate::formula::session_cf_rules;
+
+    /// The background `session_cells` reports for one cell, or `""`.
+    fn fill_at(row: u32, col: u32) -> String {
+        let cells: serde_json::Value =
+            serde_json::from_str(&session_cells(0, 0, 0, 20, 20)).expect("json");
+        cells
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|c| c["r"] == row && c["c"] == col)
+            .and_then(|c| c["bg"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// A rule over `A2:H10` saying `=$D2>100` paints the rows whose D is over a
+    /// hundred, and only those — the anchor being the range's top-left, not
+    /// `A1`, which is why the range starts at row 2.
+    #[test]
+    fn a_formula_rule_highlights_whole_rows() {
+        session_new();
+        session_set_cell(0, 1, 3, "150").unwrap(); // D2
+        session_set_cell(0, 2, 3, "50").unwrap(); // D3
+        session_set_cell(0, 3, 3, "900").unwrap(); // D4
+        session_add_cf(0, 1, 0, 9, 7, "formula", 0.0, 0.0, "=$D2>100", "FFC7CE").unwrap();
+
+        assert_eq!(fill_at(1, 3), "FFC7CE", "D2's own row is highlighted");
+        assert_eq!(fill_at(2, 3), "", "D3's is not");
+        assert_eq!(fill_at(3, 3), "FFC7CE", "D4's is");
+
+        // And the rules manager can say what the rule is, rather than showing a
+        // rule it has no words for.
+        let rules: serde_json::Value = serde_json::from_str(&session_cf_rules(0)).expect("json");
+        assert_eq!(rules[0]["desc"], "formula =$D2>100");
+        assert_eq!(rules[0]["range"], "A2:H10");
+    }
+
+    /// A formula that does not parse is refused at the point of authoring.
+    ///
+    /// Storing it would produce a rule that can never match and never explains
+    /// itself — the user would see no highlight and no reason for it.
+    #[test]
+    fn a_formula_that_does_not_parse_is_refused() {
+        assert!(
+            cf_rule_from_kind("formula", 0.0, 0.0, "=$D2>").is_err(),
+            "an unparseable formula is not accepted"
+        );
+        assert!(
+            cf_rule_from_kind("formula", 0.0, 0.0, "   ").is_err(),
+            "and neither is an empty one"
+        );
+        assert_eq!(
+            cf_rule_from_kind("formula", 0.0, 0.0, " =$D2>100 "),
+            Ok(casual_calc_model::CfRule::Expression("$D2>100".to_owned())),
+            "a good one loses its `=` and its whitespace and keeps the rest"
+        );
     }
 }

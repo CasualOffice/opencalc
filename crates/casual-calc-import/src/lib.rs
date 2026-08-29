@@ -1322,8 +1322,57 @@ pub fn import_package_cancellable(
                 }),
                 ("duplicateValues", _) => Some(CfRule::DuplicateValues { unique: false }),
                 ("uniqueValues", _) => Some(CfRule::DuplicateValues { unique: true }),
+                // The formula rule. Its `<formula>` is kept as the file wrote
+                // it — A1 text anchored to the top-left of the `sqref`, which is
+                // the anchor OOXML defines and the one `CfRule::Expression`
+                // documents. Nothing is re-anchored here, so the writer can put
+                // the same string back and a workbook that arrives with
+                // whole-row highlighting leaves with it.
+                //
+                // An empty or whitespace-only `<formula>` is not a rule; it
+                // falls through to the report below rather than becoming an
+                // expression that can only ever evaluate to an error.
+                ("expression", _) => raw
+                    .formulas
+                    .first()
+                    .map(|f| f.trim())
+                    .filter(|f| !f.is_empty())
+                    .map(|f| CfRule::Expression(f.to_owned())),
+                // A `timePeriod` rule ("yesterday", "thisMonth", …) is kept as
+                // the formula Excel writes beside it — `FLOOR(D1,1)=TODAY()-1`
+                // for `yesterday` — because that formula *is* the rule, anchored
+                // the same way, and this engine has a deterministic `TODAY()`.
+                //
+                // It is a **degradation, not a mapping**, and it is reported as
+                // one below: the rule comes back out of the writer as
+                // `type="expression"`, so Excel's Manage Rules dialog will
+                // offer it as "Use a formula" rather than "Yesterday". The
+                // cells it paints do not change. Keeping a rule that paints the
+                // right cells and saying what was lost beats dropping it, which
+                // is what happened before.
+                //
+                // A file that writes no `<formula>` for the rule falls through
+                // to the report as an outright omission, since there is then
+                // nothing to reconstruct it from.
+                ("timePeriod", _) => raw
+                    .formulas
+                    .first()
+                    .map(|f| f.trim())
+                    .filter(|f| !f.is_empty())
+                    .map(|f| CfRule::Expression(f.to_owned())),
                 _ => None,
             };
+            // Named even though it was kept: the file said `timePeriod` and
+            // this model can only say `expression`, and a host that never hears
+            // about the difference cannot tell the user their rule will look
+            // different when they reopen it in Excel.
+            if raw.kind == "timePeriod" && rule.is_some() {
+                report.record(
+                    cf_report_feature("timePeriod"),
+                    ModelOutcome::Degraded,
+                    RetentionOutcome::NotRetained,
+                );
+            }
             let Some(rule) = rule else {
                 // Every rule the model cannot represent is named here — an
                 // `iconSet`, an `expression`, a `timePeriod`, or a `cellIs`
