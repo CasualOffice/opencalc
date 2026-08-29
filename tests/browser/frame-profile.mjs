@@ -13,11 +13,15 @@
 //     16.7ms both before and after the fix. It only discriminates because the
 //     scroll now runs during the measurement.
 //
-// Run with the editor served: `python3 webapp/serve.py 8123`.
+// Run with the editor served: `python3 webapp/serve.py 8123`. `OPENCALC_SMOKE_PORT`
+// points it at a different one — a worktree serving its own `webapp/` cannot use
+// 8123 if the main checkout is already there, and a before/after comparison has
+// to run both halves against the same server.
 import { chromium } from "@playwright/test";
+const PORT = Number(process.env.OPENCALC_SMOKE_PORT ?? 8123);
 const b = await chromium.launch();
 const page = await b.newPage({ viewport: { width: 1280, height: 800 } });
-await page.goto("http://127.0.0.1:8123/editor.html");
+await page.goto(`http://127.0.0.1:${PORT}/editor.html`);
 await page.waitForFunction(() => /^engine v/.test(document.querySelector("#tb-status")?.textContent || ""), null, { timeout: 30000 });
 await page.evaluate(() => {
   const a = window.opencalcEditor.wasmApi();
@@ -46,6 +50,12 @@ for (const w of [102, 30]) {
   await scrolling;
   const w2 = await page.evaluate(() => window.opencalcEditor.frameWindowForTest());
   const sorted = ms.slice(5).sort((a, b) => a - b);
-  console.log(`${w}px cols: drawing ${w2.cols}x${w2.rows}, fetched ${w2.colIdx}x${w2.rowIdx} = ${w2.colIdx*w2.rowIdx} cells; frame median ${sorted[Math.floor(sorted.length/2)].toFixed(1)}ms`);
+  const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
+  // The median alone cannot see work that happens a few times a second: the
+  // grid is vsync-bound, so 4 expensive frames in 90 leave a 16.7ms median
+  // untouched. The tail is where a periodic cost shows up, which is what the
+  // accessibility mirror's staleness ceiling (`A11Y_MAX_STALE_MS`) is.
+  const over = (n) => sorted.filter((x) => x > n).length;
+  console.log(`${w}px cols: drawing ${w2.cols}x${w2.rows}, fetched ${w2.colIdx}x${w2.rowIdx} = ${w2.colIdx*w2.rowIdx} cells; frames ${sorted.length}, median ${at(0.5).toFixed(1)}ms p95 ${at(0.95).toFixed(1)}ms max ${sorted[sorted.length-1].toFixed(1)}ms, >20ms ${over(20)} >33ms ${over(33)}`);
 }
 await b.close();
