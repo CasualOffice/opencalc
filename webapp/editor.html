@@ -104,6 +104,19 @@
          File ops (New / Open / Download) live in the header + File menu, not the
          toolbar; new sheets are the bottom tab-bar "+". -->
     <input id="tb-open" type="file" accept=".xlsx,.csv,.tsv,.psv" hidden />
+    <!-- Deleting a sheet had exactly one route — the tab's own context menu —
+         so `listCommands()` had never heard of the verb, and a host with its own
+         chrome, or the native menu builder, could not offer it at all. This is
+         the command's control; the *user's* route stays the tab menu, because a
+         Delete button beside the tabs would put the most destructive verb in the
+         application one stray click from the "+".
+
+         Authored hidden, exactly like `#tb-open` above, and like it still
+         perfectly runnable: `listCommands()` filters on `.oc-cmd-hidden`, the
+         class the rules stamp, not on the `hidden` attribute. The id gives it
+         `toolbar.delete-sheet`, which is not read-only-safe, so a viewer does
+         not get it. -->
+    <button id="tb-delete-sheet" type="button" hidden>Delete sheet</button>
     <div class="toolbar" role="toolbar" aria-label="Formatting">
       <div class="tb-group tb-keep">
         <button id="tb-undo" class="tb-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">

@@ -1029,11 +1029,12 @@ export function commandId(path, label) {
 /// a script still can, which is worse than leaving it visible.
 ///
 /// The filter is `.oc-cmd-hidden`, the class `applyCommandRules()` stamps —
-/// **not** the `hidden` attribute. Three controls are authored hidden and are
+/// **not** the `hidden` attribute. Four controls are authored hidden and are
 /// still perfectly runnable: `#tb-open` is the `<input type=file>` that
-/// `File ▸ Open` clicks, and `#tb-more` with its flyout are the narrow-window
-/// overflow. Filtering on `hidden` would drop those from a standalone editor
-/// that has hidden nothing.
+/// `File ▸ Open` clicks, `#tb-delete-sheet` is the control behind
+/// `toolbar.delete-sheet` (whose *visible* route is the tab's context menu),
+/// and `#tb-more` with its flyout are the narrow-window overflow. Filtering on
+/// `hidden` would drop those from a standalone editor that has hidden nothing.
 export function listCommands() {
   return [...qsa("[data-oc-command]")]
     .filter((n) => !n.classList.contains("oc-cmd-hidden"))
