@@ -27,6 +27,8 @@ mod session_tests;
 mod structural;
 pub mod transform;
 #[cfg(test)]
+mod transform_move_tests;
+#[cfg(test)]
 mod transform_tests;
 pub mod wire;
 
@@ -1180,6 +1182,16 @@ fn set_axis_override(axis: &mut AxisSizing, index: u32, size: Option<i64>) -> Op
 /// Rewrite every workbook formula that references sheet `old` (by name) so it
 /// points at `new`. Only formulas that actually change are re-stored, mirroring
 /// the structural row/column rewrite pass.
+///
+/// **Defined names are formulas too**, and this pass used to walk only the
+/// cells — so renaming a sheet left every name that referred to it pointing at
+/// a sheet no longer in the workbook, with nothing said. The same shape as
+/// `FID-24`, which fixed the row/column rewrite for defined names and did not
+/// reach the rename. Found by the TP1 property the first time its seed carried
+/// a defined name: an `InsertRows` and a `RenameSheet` on the same sheet
+/// settled the name at `$C$4` in one order and `$C$3` in the other, because in
+/// the second order the insert no longer recognised the sheet the stale
+/// qualifier still named.
 fn rename_sheet_in_formulas(workbook: &mut Workbook, old: &str, new: &str) {
     let mut jobs: Vec<(usize, CellRef, Expr)> = Vec::new();
     for (idx, sheet) in workbook.sheets.iter().enumerate() {
@@ -1202,6 +1214,9 @@ fn rename_sheet_in_formulas(workbook: &mut Workbook, old: &str, new: &str) {
             updated.formula = Some(handle);
             store.set(addr, updated);
         }
+    }
+    for name in &mut workbook.defined_names {
+        rename_sheet_references(&mut name.formula, old, new);
     }
 }
 

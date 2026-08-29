@@ -29,12 +29,27 @@ fn seed() -> Workbook {
     workbook
 }
 
+/// What two replicas have to agree on.
+///
+/// **The formula, not only the value.** A cell holds its formula by handle and
+/// its value is a cache nothing here recalculates, so comparing values alone
+/// called two clients converged while they held different formulas — which is
+/// exactly what `COL-46` was, and this harness could not have seen it. The tree
+/// is compared in its stored form, relative to its own cell, and handles are
+/// deliberately *not* compared: each replica interns into its own arena, so the
+/// same formula legitimately has different handle numbers.
 fn observe(workbook: &Workbook) -> String {
     let sheet = &workbook.sheets[0];
     let mut cells: Vec<String> = sheet
         .cells
         .iter()
-        .map(|(at, cell)| format!("{}:{}={:?}", at.row, at.col, cell.value))
+        .map(|(at, cell)| {
+            let formula = cell
+                .formula
+                .and_then(|handle| workbook.formula(handle))
+                .map_or_else(String::new, |expr| format!("={expr:?}"));
+            format!("{}:{}={:?}{formula}", at.row, at.col, cell.value)
+        })
         .collect();
     cells.sort();
     format!("{} cols{:?}", cells.join(","), sheet.columns.sizes)
@@ -231,6 +246,94 @@ fn an_edit_below_a_concurrent_insert_lands_on_the_right_row() {
         observe(&world.workbook).contains("6:0=Number(999.0)"),
         "the edit followed its row: {}",
         observe(&world.workbook)
+    );
+}
+
+/// **`COL-46` through the protocol, which is where it would have been paid
+/// for.** One participant types `=$C$1`; another inserts a column at the front
+/// in the same moment.
+///
+/// Both edits commit — this was never a refusal — and before the fix the two
+/// documents held `$D$1` and `$C$1` at the same address, for ever, with the
+/// server agreeing with one of them and nothing anywhere reporting a problem.
+#[test]
+fn a_formula_typed_beside_a_concurrent_insert_means_the_same_thing_everywhere() {
+    let mut world = World::new(2);
+    let at = CellRef::new(1, 0);
+    let handle = world.peers[1].workbook.store_formula_at(
+        casual_calc_formula::parse("$C$1").expect("parses"),
+        casual_calc_formula::stored::Origin::at(at.row, at.col),
+    );
+    let mut cell = Cell::value(CellValue::Number(0.0));
+    cell.formula = Some(handle);
+
+    world.edit(
+        0,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    );
+    world.edit(
+        1,
+        Operation::SetCell {
+            sheet: 0,
+            at,
+            cell: Some(cell),
+        },
+    );
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("a formula beside an insert");
+
+    // And what everybody agrees on is the *right* thing: the column that held
+    // `C1`'s data is `D1` once a column is inserted in front of it.
+    let seen = observe(&world.workbook);
+    assert!(
+        seen.contains("col: 3, row: 0, col_absolute: true"),
+        "the anchor must follow the column it named: {seen}"
+    );
+}
+
+/// **`COL-44` through the protocol.** One participant drags a column header
+/// while another types into a cell the drag renumbers.
+///
+/// Every one of these exchanges used to fail: the server refused the drag, the
+/// dragging client could not take the keystroke, and the two documents stayed
+/// different for ever because a resend was refused for the same reason each
+/// time. Both edits now commit, and the keystroke lands in the column it was
+/// typed into rather than in whatever moved into that index.
+#[test]
+fn a_column_drag_and_a_concurrent_keystroke_both_land() {
+    let mut world = World::new(2);
+    // Column 0 is dragged to sit after column 2, so what was column 1 becomes
+    // column 0 and what was column 2 becomes column 1.
+    world.edit(
+        0,
+        Operation::MoveColumns {
+            sheet: 0,
+            at: 0,
+            count: 1,
+            before: 3,
+        },
+    );
+    world.edit(1, write(4, 2, 555.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("a drag beside a keystroke");
+
+    let seen = observe(&world.workbook);
+    assert!(
+        seen.contains("4:1=Number(555.0)"),
+        "the keystroke follows the column it was typed into: {seen}"
+    );
+    // And the drag really happened: row 0 read 0,1,2 and now reads 1,2,0.
+    assert!(
+        seen.contains("0:0=Number(1.0)") && seen.contains("0:2=Number(0.0)"),
+        "the columns were reordered: {seen}"
     );
 }
 

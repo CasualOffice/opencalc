@@ -3708,28 +3708,52 @@ fn a_merge_inside_a_moved_range_travels_and_one_it_lands_on_is_destroyed() {
     );
 }
 
+/// This test used to assert the opposite — that a concurrent move was
+/// **refused** — and it was right to, for as long as there was no transform:
+/// the fall-through would have been silent divergence, and refusing is the safe
+/// half of the answer. `COL-44` supplies the other half, so the pair is now
+/// answered and the keystroke follows the column it was typed into.
+///
+/// What is still refused is named alongside, so that "refused" stays a decision
+/// rather than a leftover.
 #[test]
-fn a_concurrent_move_is_refused_by_the_transform() {
-    // Not designed yet, and a wrong answer would be silent divergence.
-    let subject = Operation::MoveColumns {
+fn a_concurrent_line_move_is_transformed_and_a_range_move_is_still_refused() {
+    use crate::transform::{Side, transform};
+
+    let moved = Operation::MoveColumns {
         sheet: 0,
         at: 1,
         count: 1,
         before: 4,
     };
-    let against = Operation::SetValue {
+    let typed = Operation::SetValue {
         sheet: 0,
-        at: CellRef::new(0, 0),
+        at: CellRef::new(0, 2),
         value: CellValue::Number(1.0),
     };
-    assert!(
-        crate::transform::transform(&subject, &against, crate::transform::Side::Later, &[])
-            .is_err()
+    // Column 1 is dragged to sit before column 4, so columns 2 and 3 shuffle
+    // down one: the cell typed into column 2 is column 1 afterwards.
+    assert_eq!(
+        transform(&typed, &moved, Side::Later, &[]).unwrap(),
+        Operation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 1),
+            value: CellValue::Number(1.0),
+        },
     );
-    assert!(
-        crate::transform::transform(&against, &subject, crate::transform::Side::Later, &[])
-            .is_err()
-    );
+    // And the move itself is untouched by a cell write: it permutes, the write
+    // does not.
+    assert_eq!(transform(&moved, &typed, Side::Later, &[]).unwrap(), moved);
+
+    // A rectangle move is not a permutation — it overwrites its destination —
+    // so it has no transform and says so.
+    let range_move = Operation::MoveRange {
+        sheet: 0,
+        from: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)),
+        to: CellRef::new(4, 4),
+    };
+    assert!(transform(&range_move, &typed, Side::Later, &[]).is_err());
+    assert!(transform(&typed, &range_move, Side::Later, &[]).is_err());
 }
 
 #[test]

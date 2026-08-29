@@ -97,8 +97,13 @@ impl Axis {
 }
 
 /// Whether a rewrite is shifting for an insert, a delete, or a move.
+///
+/// Visible to the crate because [`crate::transform`] rebases the formulas an
+/// operation *carries* by exactly this rewrite (`COL-46`): the transform and
+/// `apply` must reach the same tree or the two replicas hold different
+/// formulas, which is divergence nothing raises.
 #[derive(Debug, Clone, Copy)]
-enum ShiftKind {
+pub(crate) enum ShiftKind {
     Insert,
     Delete,
     /// The band `[at, at + count)` was lifted out and re-inserted so that it
@@ -171,7 +176,7 @@ pub(crate) fn delete(
 /// and none is destroyed, which is what makes its geometry exactly invertible
 /// and what stops it ever producing `#REF!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LineMove {
+pub(crate) struct LineMove {
     /// First line of the moving band, before the move.
     at: u32,
     /// How many lines move.
@@ -186,7 +191,7 @@ impl LineMove {
     /// asks for nothing: an empty band, or a drop inside (or on either edge of)
     /// the band itself, which is a user dragging a selection back onto where it
     /// already is.
-    fn plan(at: u32, count: u32, before: u32) -> Option<Self> {
+    pub(crate) fn plan(at: u32, count: u32, before: u32) -> Option<Self> {
         if count == 0 {
             return None;
         }
@@ -456,7 +461,7 @@ fn move_cells(workbook: &mut Workbook, sheet: usize, axis: Axis, mv: LineMove) {
 /// **The frozen band is deliberately left alone.** Its value is a count of
 /// pinned lines, not an index, and reordering columns does not change how many
 /// are pinned — Excel likewise keeps the freeze where it is.
-fn move_metadata(sheet: &mut impl Positional, axis: Axis, mv: LineMove) {
+pub(crate) fn move_metadata(sheet: &mut impl Positional, axis: Axis, mv: LineMove) {
     let move_range = |range: &mut CellRange| {
         let (lo, hi) = map_span_move(axis.coord(range.start), axis.coord(range.end), mv);
         range.start = axis.with_coord(range.start, lo);
@@ -1422,7 +1427,10 @@ pub(crate) struct BundleShift<'a> {
     /// reference.
     pub home_name: &'a str,
     pub axis: Axis,
-    pub inserting: bool,
+    /// Insert, delete **or move** — the same three the cell rewrite takes, so a
+    /// pending chart series follows a concurrent reorder as well as a band
+    /// (`COL-44`).
+    pub kind: ShiftKind,
     pub at: u32,
     pub count: u32,
 }
@@ -1433,15 +1441,10 @@ pub(crate) fn shift_bundle_references(data: &mut crate::SheetMetadata, shift: &B
         target_id,
         home_name,
         axis,
-        inserting,
+        kind,
         at,
         count,
     } = *shift;
-    let kind = if inserting {
-        ShiftKind::Insert
-    } else {
-        ShiftKind::Delete
-    };
     let ctx = RewriteCtx {
         target: target_name,
         home: home_name,
@@ -1479,11 +1482,87 @@ pub(crate) fn shift_bundle_references(data: &mut crate::SheetMetadata, shift: &B
                     pivot.source.end = axis.with_coord(pivot.source.end, new_hi);
                 }
             }
-            // A pending bundle is only ever rebased past an insert or a delete
-            // — the collaboration transform's `inserting` flag has no third
-            // state — so a move cannot reach here.
-            ShiftKind::Move { .. } => {}
+            // A move permutes, so a pivot's source block travels under exactly
+            // the span map [`move_metadata`] uses for its report block. This
+            // arm used to be empty, on the reasoning that "the collaboration
+            // transform's `inserting` flag has no third state" — a statement
+            // about a field rather than about the grid, and one that stopped
+            // being true the moment a concurrent move had a transform at all
+            // (`COL-44`).
+            ShiftKind::Move { landing } => {
+                let mv = LineMove { at, count, landing };
+                let (lo, hi) = map_span_move(
+                    axis.coord(pivot.source.start),
+                    axis.coord(pivot.source.end),
+                    mv,
+                );
+                pivot.source.start = axis.with_coord(pivot.source.start, lo);
+                pivot.source.end = axis.with_coord(pivot.source.end, hi);
+            }
         }
+    }
+}
+
+/// What a formula an **in-flight operation carries** must be rewritten by when
+/// that operation is rebased across a concurrent structural change (`COL-46`).
+///
+/// [`shift_bundle_references`] above does this for a pending metadata bundle's
+/// chart series. The same hole existed one layer down and was worse: an
+/// unacknowledged `SetCell` carrying `=$D$1`, rebased past a concurrent
+/// `InsertColumns`, had its **address** shifted and its formula carried
+/// verbatim — so the replica that applied the insert first ended up with `$D$1`
+/// where the other had `$E$1`, and nothing anywhere said so.
+///
+/// The rewrite is deliberately [`rewrite_expr`], the one `apply` performs, and
+/// not a second implementation of the same arithmetic. A transform that models
+/// a shift differently from how `apply` performs it converges on paper and
+/// diverges in the document.
+pub(crate) struct CarriedShift<'a> {
+    /// The sheet the structural operation runs on — what a qualified reference
+    /// must name to be moved.
+    pub target_name: &'a str,
+    /// The sheet the formula belongs to, which resolves an *unqualified*
+    /// reference.
+    pub home_name: &'a str,
+    pub axis: Axis,
+    pub kind: ShiftKind,
+    pub at: u32,
+    pub count: u32,
+}
+
+impl CarriedShift<'_> {
+    fn ctx(&self) -> RewriteCtx<'_> {
+        RewriteCtx {
+            target: self.target_name,
+            home: self.home_name,
+            axis: self.axis,
+            kind: self.kind,
+            at: self.at,
+            count: self.count,
+        }
+    }
+
+    /// Rewrite a formula **stored against a cell**, which is moving from `from`
+    /// to `to` as part of the same rebase.
+    ///
+    /// Two things happen here and both are needed. In and out of the absolute
+    /// form, because "is this reference at or past the insertion point" is a
+    /// question about an address and not about an offset — the same round trip
+    /// [`rewrite_all_formulas`] makes. And **out at a different origin than it
+    /// came in at**, which is the part a reader expects to be symmetrical and
+    /// is not: the cell itself moved, so a relative reference measured from it
+    /// means a different address unless it is re-measured. That is why `=A1` in
+    /// `B2` diverges across an `InsertColumns{at:1}` just as an anchored
+    /// reference does, against the intuition that only `$` is at risk.
+    pub(crate) fn cell_formula(&self, expr: &Expr, from: Origin, to: Origin) -> Expr {
+        let absolute = restore_at(expr, from, ABSOLUTE);
+        restore_at(&rewrite_expr(&absolute, &self.ctx()), ABSOLUTE, to)
+    }
+
+    /// Rewrite a formula with **no holding cell** — a defined name's, which is
+    /// already the absolute form and has no origin to re-measure against.
+    pub(crate) fn free_formula(&self, expr: &Expr) -> Expr {
+        rewrite_expr(expr, &self.ctx())
     }
 }
 
