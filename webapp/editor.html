@@ -439,6 +439,28 @@
         <select id="locale-select" aria-label="Language"></select>
       </label>
       <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
+      <!-- Zoom, in the status bar, where Excel and Sheets both put it.
+           `docs/47` ranks "the zoom level is visible without opening a menu"
+           the #1 daily miss: zoom already existed behind View ▸ Zoom, Ctrl+wheel
+           and pinch, and none of those ever *said* what the level was — so a
+           user who pinched by accident had no way to read how far off 100% they
+           were, let alone get back. Every control here goes through the same
+           `setZoom()` the menu uses, and the readout is redrawn from `setZoom`
+           rather than from each control, so the wheel and the menu keep it
+           right too. -->
+      <div class="zoom-widget" id="zoom-widget">
+        <button class="zoom-step" id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">&#8722;</button>
+        <input class="zoom-slider" id="zoom-slider" type="range" min="25" max="200" step="5" value="100"
+               aria-label="Zoom level" title="Zoom">
+        <button class="zoom-step" id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+        <!-- A button, not a label: the percentage is the affordance for getting
+             back to 100%, which is the only thing a user wants from it once
+             they have zoomed by accident. Excel opens a Zoom dialog here; there
+             is no such dialog to open, so it does the thing that dialog is used
+             for and the tooltip says so rather than leaving it to be guessed. -->
+        <button class="zoom-level" id="zoom-level" type="button" title="Reset zoom to 100%"
+                aria-label="Zoom level, reset to 100%">100%</button>
+      </div>
     </div>
 
     <script type="module" src="./editor.js?v=38"></script>

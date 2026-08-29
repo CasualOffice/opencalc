@@ -8,7 +8,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 # UX and feature map
 
-26 of 46 measured behaviours present.
+27 of 46 measured behaviours present.
 
 ## Selection
 
@@ -63,7 +63,7 @@ served tree (`python3 webapp/serve.py 8123`).
 
 | | behaviour |
 |---|---|
-| ❌ | the zoom level is visible without opening a menu |
+| ✅ | the zoom level is visible without opening a menu |
 | ❌ | Ctrl+0 does what the Zoom menu says it does |
 
 ## Data
@@ -108,7 +108,6 @@ are judgement and are declared in the harness; the verdict above is not.
 
 | | behaviour | met | size |
 |---|---|---|---|
-| ❌ | the zoom level is visible without opening a menu | daily | s |
 | ❌ | undo moves the view to what it just changed | daily | s |
 | ❌ | arrowing past a hidden row skips it | daily | s |
 | ❌ | row height and column width are reachable from the menu bar | weekly | s |

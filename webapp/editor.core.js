@@ -272,6 +272,8 @@ import {
   presenceWhere,
   relativeTime,
   renderPresence,
+  setShareDefaults,
+  shareDialog,
   syncMirrorBox,
   wasStopped,
   wirePresence,
@@ -392,6 +394,7 @@ import {
   switchSheet,
   toggleSheetProtected,
   viewOptions,
+  wireZoom,
 } from "./editor.sheets.js";
 
 export {
@@ -636,6 +639,8 @@ export {
   presenceWhere,
   relativeTime,
   renderPresence,
+  setShareDefaults,
+  shareDialog,
   syncMirrorBox,
   wasStopped,
   wirePresence,
@@ -757,6 +762,7 @@ export {
   switchSheet,
   toggleSheetProtected,
   viewOptions,
+  wireZoom,
 } from "./editor.sheets.js";
 
 export let init, wasm;
@@ -841,9 +847,11 @@ for (const region of HIDDEN_CHROME) {
 // and a mode is a third presentation of the same model, not a third model.
 //
 /// The axes. Every one is a *permission*, phrased so that `true` is the
-/// permissive answer and the standalone editor is all-`true` — which is what
-/// makes "the default changes nothing" checkable by looking rather than by
-/// remembering.
+/// permissive answer.
+///
+/// The standalone editor is all-`true`, which keeps the property that made this
+/// table worth having: "the default changes nothing" is checkable by looking
+/// rather than by remembering.
 ///
 /// - `canOpen`   — may the editor replace the document it is showing? Covers
 ///                 `File ▸ New` as well as `File ▸ Open`: both discard what is
@@ -863,7 +871,27 @@ for (const region of HIDDEN_CHROME) {
 ///                 this (`session_read_only`); the capability is how a preset
 ///                 asks for it, and boot hands it to the engine so the two
 ///                 cannot drift.
-export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "ownsFile", "chrome", "readOnly"];
+/// - `canShare`  — may the user start a collaborative session (`File ▸ Share…`)?
+///                 Held `false` in every preset until `COL-46` closed — a
+///                 `$`-anchored formula rebased across a concurrent insert
+///                 landed as `$E$1` on one replica and `$D$1` on the other with
+///                 no error raised, and a Share button that walks two people
+///                 into a silent divergence is worse than no button. `COL-46`
+///                 is Done, so it is `true` in `standalone` and `desktop`.
+///                 **A host still owns the document**, so it stays `false` in
+///                 `embedded` and `wopi`: starting a session there is the
+///                 host's decision, not ours, and it can turn it on with
+///                 `setCapabilities({ canShare: true })`.
+///
+///                 `COL-50` is still open and the dialog names it: a range
+///                 formula meeting a concurrent insert **and** delete on the
+///                 same axis can still settle differently, because growing a
+///                 range and clamping one do not commute and each answer is the
+///                 one Excel gives for its own order. That needs a range
+///                 formula plus two concurrent structural edits, where `COL-46`
+///                 needed one ordinary insert beside one ordinary formula —
+///                 which is why one held the feature and the other does not.
+export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "canShare", "ownsFile", "chrome", "readOnly"];
 
 const CHROMES = ["web", "native", "embedded"];
 
@@ -871,22 +899,22 @@ const CHROMES = ["web", "native", "embedded"];
 /// preset: reading one tells you what that mode is without chasing a chain.
 const MODE_PRESETS = {
   // Today's editor, and the default. Every permission granted, our own chrome.
-  standalone: { canOpen: true, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "web", readOnly: false },
+  standalone: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, ownsFile: false, chrome: "web", readOnly: false },
   // The desktop shell. Same document ownership as standalone — the user's own
   // file, opened by the user — but the operating system draws the menu bar.
-  desktop: { canOpen: true, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "native", readOnly: false },
+  desktop: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, ownsFile: false, chrome: "native", readOnly: false },
   // Inside somebody else's page. The host owns the document *and* the chrome.
-  embedded: { canOpen: false, canSaveAs: false, canPrint: true, ownsFile: true, chrome: "embedded", readOnly: false },
+  embedded: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, ownsFile: true, chrome: "embedded", readOnly: false },
   // A WOPI frame. The host owns the document — including save and versioning,
   // which is why `canSaveAs` starts false — but the editor **is** the frame and
   // draws its own chrome, the way Office Online does inside a WOPI host. The
   // difference from `embedded` is one axis, which is the point of composing
   // them rather than writing two mode branches.
-  wopi: { canOpen: false, canSaveAs: false, canPrint: true, ownsFile: true, chrome: "web", readOnly: false },
+  wopi: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, ownsFile: true, chrome: "web", readOnly: false },
   // A published sheet. Read-only, and a copy is still allowed: a viewer that
   // cannot print or export is a screenshot with extra steps, and `READ_ONLY_SAFE`
   // has always let both through.
-  viewer: { canOpen: false, canSaveAs: true, canPrint: true, ownsFile: false, chrome: "web", readOnly: true },
+  viewer: { canOpen: false, canSaveAs: true, canPrint: true, canShare: false, ownsFile: false, chrome: "web", readOnly: true },
 };
 
 export const MODES = Object.keys(MODE_PRESETS);
@@ -1016,6 +1044,12 @@ const CAPABILITY_COMMANDS = {
   canOpen: [/^file\.new$/, /^file\.open$/, /^header\.open$/, /^toolbar\.open$/],
   canSaveAs: [/^file\.download/],
   canPrint: [/^file\.print$/],
+  // `File ▸ Share…`. Off in every preset while `COL-46` is open, so the command
+  // is absent from `listCommands()` *and* refused by `runCommand` — the rule
+  // this table exists to keep: a command taken off the menu and still runnable
+  // from a script has not been taken away, it has been hidden from the one
+  // party who could have declined it.
+  canShare: [/^file\.share$/],
 };
 
 /// True when some capability of this mode forbids the command.
@@ -7998,6 +8032,19 @@ function wireEvents() {
           ["Tab-separated (.tsv)", () => saveAs("tsv")],
           ["Pipe-separated (.psv)", () => saveAs("psv")],
         ] },
+        // The only route into the collaboration server that is not a host
+        // writing JavaScript. Hidden while `COL-46` is open — `canShare` is
+        // `false` in every mode preset — so this line is present and
+        // unreachable by design rather than by omission. §Share in
+        // `editor.presence.js` has the reasoning; `CAPABILITY_COMMANDS` has the
+        // gate.
+        //
+        // Inside the New/Open/Download group rather than after the separator,
+        // so that hiding it leaves the File menu byte-for-byte the one that is
+        // there today. A hidden item between two separators would draw two
+        // rules against nothing — `menuModel()` collapses those for the native
+        // menu, and nothing collapses them for the HTML one.
+        ["Share…", () => shareDialog()],
         "sep",
         ["Page setup…", () => openPanel("page")],
         // Excel inserts both a row and a column break at the active cell, and
@@ -8703,6 +8750,18 @@ let collabLostUnsent = false;
 /// submitting the same edits under different client ids.
 export async function collaborate({ url, token, document: documentKey, onStatus, onDocument, onPresence } = {}) {
   if (collabSession) throw new Error("already in a collaborative session");
+  // What the Share dialog needs in order to say what is being shared, recorded
+  // **here** rather than in the dialog, because this is the one function every
+  // route goes through: a host calling `collaborate()` from its own UI would
+  // otherwise leave `File ▸ Share…` offering an invite link with an empty
+  // `doc=`. The transport's handle does not carry the key back — it returns
+  // `{ present, close, flush, latency, ping, reconnect }` — so this is the only
+  // place that knows it.
+  //
+  // The **token is deliberately not recorded**: it is a credential, and putting
+  // it here would prefill it into a DOM input on the next Share dialog. See
+  // §Share in `editor.presence.js`.
+  setShareDefaults({ url, document: documentKey });
   const { collaborate: connect } = await import(`./collab.js?b=${BUILD}`);
   collabSession = connect({
     url,
@@ -9113,6 +9172,9 @@ async function main() {
   seed();
   renderTabs();
   resize();
+  // The status bar's zoom controls. After `resize()`, so the first readout is
+  // drawn from the zoom the grid is actually laid out at.
+  wireZoom();
   // The mode's commands, once the menus exist and the toolbar has reflowed —
   // both are built by `wireEvents()` above, and `applyCommandRules()` reads the
   // live DOM rather than the `MENUS` literal (`TAURI-004`).
