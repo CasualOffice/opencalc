@@ -425,6 +425,14 @@ jobs:
       # retired numbers had no tombstone row, so they read as free (DOC-036).
       - name: Every document, ADR and tracker row a document cites exists
         run: python3 tools/check-doc-references.py
+      # A markdown row splits on `|`, so an unescaped pipe in prose adds a
+      # column and everything after it shifts. Nothing renders wrong — the
+      # table still draws — but anything reading a column by position reads
+      # the wrong cell. `A11Y-01` carried a trailing pipe and read as having
+      # no evidence at all, over work that had shipped and been mutation-
+      # verified; ten rows were malformed when this was written.
+      - name: Every tracker row has the columns its table declares
+        run: python3 tools/check-tracker-shape.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
