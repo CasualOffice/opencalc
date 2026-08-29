@@ -60,7 +60,7 @@
 
 use casual_calc_model::{ChartKind, ChartView, Workbook};
 
-use crate::chart_data::{ref_cells, ref_numbers, ref_text};
+use crate::chart_data::{ref_strip, ref_text, strip_numbers};
 use crate::display::{Align, DisplayList, PaintItem, Point, Rect};
 
 /// Twips in one CSS pixel at 96 dpi: 1440 / 96.
@@ -123,16 +123,23 @@ const ACCENT_VARIANTS: [f64; 5] = [-0.25, 0.40, -0.50, 0.60, 0.80];
 /// which is what a legend needs.
 #[must_use]
 pub fn series_colors(workbook: &Workbook, n: usize) -> Vec<String> {
+    (0..n).map(|i| series_color(workbook, i)).collect()
+}
+
+/// The colour series `i` gets, without building the ones before it.
+///
+/// [`series_colors`] is the whole list, which is what a legend and a bar plot
+/// both want. A pie does not: it has one colour per *value*, and a pie of ten
+/// thousand values would allocate ten thousand `String`s per frame to use the
+/// handful that survive `push_pie`'s merge.
+#[must_use]
+pub fn series_color(workbook: &Workbook, i: usize) -> String {
     let slots = ACCENT_SLOTS.len();
-    (0..n)
-        .map(|i| {
-            let accent = workbook.theme_slot(ACCENT_SLOTS[i % slots]);
-            match (i / slots).checked_sub(1) {
-                None => accent.to_owned(),
-                Some(round) => vary(accent, ACCENT_VARIANTS[round % ACCENT_VARIANTS.len()]),
-            }
-        })
-        .collect()
+    let accent = workbook.theme_slot(ACCENT_SLOTS[i % slots]);
+    match (i / slots).checked_sub(1) {
+        None => accent.to_owned(),
+        Some(round) => vary(accent, ACCENT_VARIANTS[round % ACCENT_VARIANTS.len()]),
+    }
 }
 
 /// Tint (`amount > 0`, toward white) or shade (`amount < 0`, toward black) an
@@ -177,6 +184,15 @@ pub struct ResolvedSeries {
     /// a sheet this workbook does not have. Distinct from *empty*: a series
     /// over a range of blank cells is not broken, it is unfilled.
     pub broken: bool,
+    /// Points the read bound refused, and therefore points this series does not
+    /// carry (`CHT-11`).
+    ///
+    /// Zero for every chart anybody drew on purpose: the bound is
+    /// [`MAX_SERIES_POINTS`](crate::chart_data::MAX_SERIES_POINTS), 65,536
+    /// points, and it exists so that a reference naming a region of the grid
+    /// cannot make the reader allocate without limit. Non-zero is a **loss**,
+    /// so the legend says so rather than the picture quietly showing a prefix.
+    pub truncated: usize,
 }
 
 /// A chart's series and category labels, resolved against the cached values.
@@ -206,15 +222,19 @@ pub fn resolve(
         .series
         .iter()
         .map(|se| {
-            let cells = ref_cells(workbook, sheet_index, &se.values);
+            // Resolved **once**. This used to call `ref_cells` to ask whether
+            // the reference named anything and then `ref_numbers`, which
+            // resolves it again — so every series was parsed twice and its
+            // whole address list built twice, the second copy thrown away
+            // unread.
+            let strip = ref_strip(workbook, sheet_index, &se.values);
             ResolvedSeries {
                 name: se.name.clone(),
-                values: if cells.is_empty() {
-                    Vec::new()
-                } else {
-                    ref_numbers(workbook, sheet_index, &se.values)
-                },
-                broken: cells.is_empty(),
+                values: strip
+                    .map(|s| strip_numbers(workbook, s))
+                    .unwrap_or_default(),
+                broken: strip.is_none(),
+                truncated: strip.map_or(0, |s| s.truncated),
             }
         })
         .filter(|s| s.broken || s.values.iter().any(Option::is_some))
@@ -328,6 +348,14 @@ const LEGEND_PT: f64 = 10.0;
 /// same condition teaches two.
 const BROKEN_SUFFIX: &str = " (#REF!)";
 
+/// The suffix a series the read bound cut short carries.
+///
+/// The picture's own report. Layout has no compatibility report to write into
+/// — that belongs to import — so the only place a reader can be told that this
+/// series is a prefix of itself is the legend, which is where `CHT-08` already
+/// puts `#REF!` for the same reason.
+const TRUNCATED_SUFFIX: &str = " (truncated)";
+
 /// A series' displayed name, which is its position when it has none.
 ///
 /// The canvas's `s.name || \`Series ${i + 1}\``, kept: a blank name must
@@ -345,6 +373,9 @@ fn legend_label(series: &ResolvedSeries, index: usize) -> String {
     };
     if series.broken {
         label.push_str(BROKEN_SUFFIX);
+    }
+    if series.truncated > 0 {
+        label.push_str(TRUNCATED_SUFFIX);
     }
     label
 }
@@ -800,6 +831,46 @@ fn push_bars(
     push_category_labels(list, kind, cats, plot, points);
 }
 
+/// The most points one polyline will carry, whatever the series' length.
+///
+/// A **byte** bound, which is the one `CHT-06` did not need. A line plot has
+/// always been bounded in *items* — one polyline per series — and that is what
+/// made its cost invisible: six series over 10,000 rows is 12 display-list
+/// items and **1,181,094 bytes of JSON across the wasm boundary, every frame**,
+/// which is larger than the 722 KB the uncapped bar plot was fixed for. An
+/// item count is not a size.
+///
+/// Two points per pixel column is the geometric bound (see
+/// `push_polyline`); this is the resource ceiling on top of it, for a chart
+/// anchored over a frame thousands of pixels wide.
+///
+/// The ceiling is the **plot's**, shared out across its series, as
+/// [`MAX_BAR_POLYGONS`] is. A per-series ceiling is not a bound on the picture:
+/// six series each honouring 4,096 is 24,576, and the frame pays for the plot
+/// rather than for a series.
+pub const MAX_LINE_POINTS: usize = 4096;
+
+/// The most markers one scatter plot will emit, across all of its series.
+///
+/// A scatter plot's ink is a marker at a position, so `CHT-06`'s min-max
+/// bucket does not apply: a bar's rectangle runs from zero to its value and
+/// covers everything between, and a marker covers four pixels and nothing else.
+/// The bound is therefore on *positions* rather than on values — see
+/// `push_markers`.
+///
+/// Shared out across the series for the reason [`MAX_LINE_POINTS`] gives, and
+/// this is not a detail: with a per-series ceiling of 2,048 a six-series plot
+/// measured **11,940 markers and 1.4 MB of JSON**, which is a cap that has not
+/// capped anything a frame budget can feel.
+pub const MAX_SCATTER_MARKERS: usize = 4096;
+
+/// The most wedges one pie or doughnut will emit. See `push_pie`.
+pub const MAX_PIE_WEDGES: usize = 1024;
+
+/// The scatter marker's side, in CSS pixels: two markers whose centres are
+/// closer than this overlap by more than half.
+const MARKER_PX: f64 = 4.0;
+
 fn push_line(
     list: &mut DisplayList,
     workbook: &Workbook,
@@ -817,35 +888,223 @@ fn push_line(
     } else {
         0.0
     };
+    let frame = Frame {
+        plot,
+        step,
+        lo,
+        hi,
+        series: series.len().max(1),
+    };
     for (si, s) in series.iter().enumerate() {
-        // A gap breaks the line rather than being bridged across, which is the
-        // canvas's `started = false`; here that means starting a new polyline.
-        let mut run: Vec<Point> = Vec::new();
-        for (i, v) in s.values.iter().enumerate() {
-            let Some(v) = v else {
-                flush_run(list, &mut run, &cols[si]);
-                continue;
-            };
-            let px = plot.x + i as f64 * step;
-            let py = plot.y + plot.h * ((hi - v) / (hi - lo));
-            if kind == ChartKind::Scatter {
-                // A point marker: four pixels square, centred on the value.
-                list.items.push(PaintItem::Polygon {
-                    points: vec![
-                        point(px - 2.0 * PX, py - 2.0 * PX),
-                        point(px + 2.0 * PX, py - 2.0 * PX),
-                        point(px + 2.0 * PX, py + 2.0 * PX),
-                        point(px - 2.0 * PX, py + 2.0 * PX),
-                    ],
-                    fill: cols[si].clone(),
-                });
-                continue;
-            }
-            run.push(point(px, py));
+        if kind == ChartKind::Scatter {
+            push_markers(list, s, &cols[si], frame);
+        } else {
+            push_polyline(list, s, &cols[si], frame);
         }
-        flush_run(list, &mut run, &cols[si]);
     }
     push_category_labels(list, kind, cats, plot, points);
+}
+
+/// Everything a series plot needs that is the same for every series on it.
+///
+/// One struct rather than five parameters: the value extent, the horizontal
+/// step and how many series share the plot's item ceiling all belong to the
+/// *plot* rather than to a series, and threading them one by one gave two
+/// functions eight arguments each.
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    plot: Plot,
+    /// Twips between one point's x and the next's.
+    step: f64,
+    /// The value extent the axis covers.
+    lo: f64,
+    hi: f64,
+    /// How many series divide this plot's item ceiling.
+    series: usize,
+}
+
+impl Frame {
+    /// Where a value sits in the plot, vertically.
+    fn y(&self, v: f64) -> f64 {
+        self.plot.y + self.plot.h * ((self.hi - v) / (self.hi - self.lo))
+    }
+
+    /// Where point `i` sits, horizontally.
+    fn x(&self, i: usize) -> f64 {
+        self.plot.x + i as f64 * self.step
+    }
+}
+
+/// The lowest and highest point of one series inside one pixel column.
+#[derive(Debug, Clone, Copy)]
+struct Column {
+    at: i64,
+    /// `(point index, y)` of the smallest y in the column, and of the largest.
+    top: (usize, f64),
+    bottom: (usize, f64),
+}
+
+/// One series as polylines, at most two points per pixel column (`CHT-11`).
+///
+/// **What the bound preserves.** Within one pixel column a polyline's ink is
+/// the vertical span between its lowest and its highest point there; every
+/// point between them is drawn over. Emitting exactly those two, in the order
+/// they occur, paints the same column of pixels. So no spike is lost and no
+/// value is dropped — this is `CHT-06`'s min-max bucket again, and it is sound
+/// here for the same reason it was sound for bars and is *not* sound for a
+/// marker or a wedge.
+///
+/// **What it gives up.** The order of the wiggle inside one pixel column, and
+/// the sub-pixel x of the two survivors. Neither is on the screen.
+///
+/// **What does not change.** With one point per column — which is every chart
+/// whose series is no longer than its plot is wide — each column's top and
+/// bottom are the same point, one point is emitted, and the polyline is the
+/// one it always was.
+fn push_polyline(list: &mut DisplayList, series: &ResolvedSeries, color: &str, frame: Frame) {
+    // One pixel, or wider if a pixel would put more than this series' share of
+    // the plot's ceiling into one line.
+    let allowance = (MAX_LINE_POINTS / frame.series / 2).max(1);
+    let pitch = (frame.plot.w / allowance as f64).max(PX);
+    let mut run: Vec<Point> = Vec::new();
+    let mut open: Option<Column> = None;
+    for (i, v) in series.values.iter().enumerate() {
+        let Some(v) = v else {
+            // A gap breaks the line rather than being bridged across, which is
+            // the canvas's `started = false`; here that means closing the open
+            // column first — its points belong to the run that is ending — and
+            // then starting a new polyline.
+            flush_column(&mut run, open.take(), frame);
+            flush_run(list, &mut run, color);
+            continue;
+        };
+        let y = frame.y(*v);
+        // Clamped to the last column, not merely divided into one. The final
+        // point sits at exactly `plot.w`, which divides to one column *past*
+        // the allowance and made the ceiling two points per series short of
+        // being a ceiling — 4,098 emitted against a stated 4,096.
+        let at = ((i as f64 * frame.step / pitch) as i64).min(allowance as i64 - 1);
+        match &mut open {
+            Some(c) if c.at == at => {
+                if y < c.top.1 {
+                    c.top = (i, y);
+                }
+                if y > c.bottom.1 {
+                    c.bottom = (i, y);
+                }
+            }
+            _ => {
+                flush_column(&mut run, open.take(), frame);
+                open = Some(Column {
+                    at,
+                    top: (i, y),
+                    bottom: (i, y),
+                });
+            }
+        }
+    }
+    flush_column(&mut run, open.take(), frame);
+    flush_run(list, &mut run, color);
+}
+
+/// Append a closed column's survivors to the open run, in point order.
+fn flush_column(run: &mut Vec<Point>, column: Option<Column>, frame: Frame) {
+    let Some(c) = column else {
+        return;
+    };
+    let at = |(i, y): (usize, f64)| point(frame.x(i), y);
+    if c.top.0 == c.bottom.0 {
+        run.push(at(c.top));
+        return;
+    }
+    let (first, second) = if c.top.0 < c.bottom.0 {
+        (c.top, c.bottom)
+    } else {
+        (c.bottom, c.top)
+    };
+    run.push(at(first));
+    run.push(at(second));
+}
+
+/// One scatter series as markers, one per distinguishable position (`CHT-11`).
+///
+/// **Why not `CHT-06`'s bucket.** A bar's ink is a rectangle from zero to its
+/// value, so merging two bars into their min-max span covers exactly what the
+/// two covered. A marker's ink is four pixels around its own position and
+/// nothing in between, so a min-max span would be a rectangle the data never
+/// drew — and dropping every nth point would be the outlier-hiding lie
+/// `CHT-06` was careful to avoid. The bound has to be on *positions*.
+///
+/// **What the bound preserves.** The plot is divided into cells one marker
+/// wide, and the first point to land in a cell draws the marker for it. Since a
+/// marker is `MARKER_PX` across, two points in one cell were already drawing
+/// the same opaque square in the same place. Every point still contributes ink
+/// within one cell of where it was; the cloud's outline, its extremes and its
+/// empty regions are unchanged, and nothing is dropped from a place that would
+/// otherwise be blank.
+///
+/// **What it gives up.** Overplotting *density* — after this you cannot tell
+/// one point in a cell from fifty. You could not before either: the markers are
+/// opaque, identical and in the same place, so the fiftieth painted exactly
+/// what the first did.
+///
+/// **The cell is widened** past one marker if a marker-fine grid would hold
+/// more than this series' share of [`MAX_SCATTER_MARKERS`] — a resource ceiling
+/// on the same rule as [`MAX_BAR_POLYGONS`]. Widening merges rather than drops,
+/// so the guarantee above survives it with a larger "one cell", and the cost is
+/// stated plainly: **the merge radius grows with the series count**, because
+/// the ceiling belongs to the plot and six series share it six ways. At a
+/// 400x300 plot that is a 6-pixel cell for one series and 13 for six.
+fn push_markers(list: &mut DisplayList, series: &ResolvedSeries, color: &str, frame: Frame) {
+    let plot = frame.plot;
+    let area = (plot.w / PX) * (plot.h / PX);
+    let allowance = (MAX_SCATTER_MARKERS / frame.series).max(1);
+    let ceiling = (area / allowance as f64).sqrt().ceil();
+    let mut pitch = MARKER_PX.max(if ceiling.is_finite() {
+        ceiling
+    } else {
+        MARKER_PX
+    }) * PX;
+    let cells = |extent: f64, pitch: f64| ((extent / pitch).ceil() as usize).max(1);
+    let (mut nx, mut ny) = (cells(plot.w, pitch), cells(plot.h, pitch));
+    // A pitch taken from the plot's *area* bounds the cell count only for a
+    // plot near square. A frame a thousand pixels wide and twenty tall holds
+    // far more cells than its area suggests, so the ceiling would not be one —
+    // widen until it is. Terminates: the pitch doubles and the count at least
+    // halves, ending at a single cell.
+    while nx.saturating_mul(ny) > allowance && (nx > 1 || ny > 1) {
+        pitch *= 2.0;
+        nx = cells(plot.w, pitch);
+        ny = cells(plot.h, pitch);
+    }
+    // Emission follows the data's order, not the grid's, so the display list is
+    // deterministic — a hash set's iteration order would not be.
+    let mut drawn = vec![false; nx.saturating_mul(ny)];
+    for v in series.values.iter().enumerate() {
+        let (i, Some(v)) = v else {
+            continue;
+        };
+        let px = frame.x(i);
+        let py = frame.y(*v);
+        let cx = (((px - plot.x) / pitch) as usize).min(nx - 1);
+        let cy = (((py - plot.y) / pitch) as usize).min(ny - 1);
+        let cell = cy * nx + cx;
+        if drawn[cell] {
+            continue;
+        }
+        drawn[cell] = true;
+        // A point marker: four pixels square, centred on the value.
+        let half = MARKER_PX / 2.0 * PX;
+        list.items.push(PaintItem::Polygon {
+            points: vec![
+                point(px - half, py - half),
+                point(px + half, py - half),
+                point(px + half, py + half),
+                point(px - half, py + half),
+            ],
+            fill: color.to_owned(),
+        });
+    }
 }
 
 /// Emit the accumulated run as one polyline and start a new one.
@@ -882,7 +1141,6 @@ fn push_pie(
     if total <= 0.0 {
         return;
     }
-    let cols = series_colors(workbook, values.len());
     let cx = plot.x + plot.w / 2.0;
     let cy = plot.y + plot.h / 2.0;
     let r = (plot.w.min(plot.h) / 2.0 - 4.0 * PX).max(6.0 * PX);
@@ -891,20 +1149,88 @@ fn push_pie(
     } else {
         0.0
     };
+    let least = min_sweep(r);
     // Twelve o'clock, clockwise, as Excel starts.
     let mut from = 0.0f64;
+    // The open group: how much of the total it holds, and which of its values
+    // is the largest — the one whose colour it will be drawn in.
+    let (mut held, mut lead, mut lead_v) = (0.0f64, 0usize, f64::NEG_INFINITY);
+    let mut last: Option<usize> = None;
     for (i, v) in values.iter().enumerate() {
-        let sweep = v / total * 360.0;
+        held += v;
+        if *v > lead_v {
+            (lead, lead_v) = (i, *v);
+        }
+        let sweep = held / total * 360.0;
+        if sweep < least {
+            continue;
+        }
+        last = Some(list.items.len());
         list.items.push(PaintItem::Wedge {
             center: point(cx, cy),
             radius: round(r),
             inner_radius: round(inner),
             from,
             sweep,
-            fill: cols[i].clone(),
+            fill: series_color(workbook, lead),
         });
         from += sweep;
+        (held, lead, lead_v) = (0.0, i + 1, f64::NEG_INFINITY);
     }
+    // **The tail joins the wedge before it rather than becoming one.** What is
+    // left after the loop is by construction below the threshold, so drawing it
+    // separately would put back exactly the hairline the merge exists to
+    // remove — and would make the wedge count `MAX_PIE_WEDGES + 1`, so the
+    // ceiling would be off by one from what it says. Extending the last wedge
+    // to close the circle keeps the total at 360 and the count at the bound.
+    if held > 0.0 {
+        match last.and_then(|at| list.items.get_mut(at)) {
+            Some(PaintItem::Wedge {
+                from: at, sweep, ..
+            }) => *sweep = 360.0 - *at,
+            // Nothing was emitted at all, which needs every value to sit under
+            // the threshold — only reachable if the threshold is a whole turn.
+            _ => list.items.push(PaintItem::Wedge {
+                center: point(cx, cy),
+                radius: round(r),
+                inner_radius: round(inner),
+                from: 0.0,
+                sweep: 360.0,
+                fill: series_color(workbook, lead),
+            }),
+        }
+    }
+}
+
+/// The narrowest wedge worth drawing, in degrees, for a pie of radius `r`.
+///
+/// **Why not `CHT-06`'s bucket, and what this one is.** A wedge's ink is an
+/// *angle*, so merging by min and max would be meaningless — but a wedge's
+/// angle is also **contiguous and ordered**, which a marker's position is not.
+/// So adjacent wedges can be merged, and that is what `push_pie` does: the
+/// merged wedge occupies exactly the angle its members occupied, in the same
+/// place, and the total still closes at 360 degrees.
+///
+/// The threshold is two pixels of arc at the rim. Below it a wedge is a
+/// hairline: a pie of 500 slices in a 300-pixel frame gives each slice about
+/// 1.9 pixels of arc, and one of 10,000 gives it a tenth of a pixel — which is
+/// how a pie came to emit 10,002 display-list items and 1.4 MB of JSON for a
+/// picture with no visible divisions in it at all.
+///
+/// **What merging preserves.** Every value's angular position — each is still
+/// inside the wedge it was merged into — the order around the circle, and the
+/// total. **What it gives up.** The boundary between merged neighbours, and
+/// the colour of every member of a group but its largest. Both were already
+/// below two pixels of arc, which is to say neither was on the screen.
+fn min_sweep(r: f64) -> f64 {
+    let circumference = 2.0 * core::f64::consts::PI * r;
+    let by_pixel = if circumference > 0.0 {
+        360.0 * (2.0 * PX) / circumference
+    } else {
+        360.0
+    };
+    // And never fine enough to exceed the resource ceiling, whatever the frame.
+    by_pixel.max(360.0 / MAX_PIE_WEDGES as f64)
 }
 
 /// Category labels under the plot, thinned to whatever fits: overlapping labels

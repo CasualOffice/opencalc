@@ -905,11 +905,32 @@ impl WorkbookSession {
     }
 
     /// Keep view keys pointing at the sheets they were applied to.
+    ///
+    /// Called from **every** path that applies an operation to this session's
+    /// workbook — [`edit`](Self::edit), [`undo`](Self::undo),
+    /// [`redo`](Self::redo) and [`apply_raw`](Self::apply_raw) — because the
+    /// index a personal view is keyed by moves whenever a sheet does, and none
+    /// of those four is more or less a sheet move than the others. Only `edit`
+    /// called it for a long time, which made the renumbering **one-way**: an
+    /// insert moved the view and undoing the insert did not move it back, so
+    /// the key was left on a sheet that no longer existed (`FID-38`).
+    ///
+    /// A `Batch` is walked in order. Its members are applied in order and each
+    /// one's indices are written against the index space the previous member
+    /// produced, so the remappings compose the same way. Not a corner case: a
+    /// `RemoveSheet` whose sheet was charted has a `Batch` for its inverse, so
+    /// this is the shape undo hands back for the very operation that moves the
+    /// most sheets.
     fn resequence_views(&mut self, op: &Operation) {
         if self.views.is_empty() {
             return;
         }
         match *op {
+            Operation::Batch(ref ops) => {
+                for member in ops {
+                    self.resequence_views(member);
+                }
+            }
             Operation::InsertSheet { index, .. } => {
                 self.views
                     .resequence(|at| Some(if at >= index { at + 1 } else { at }));
@@ -1238,6 +1259,12 @@ impl WorkbookSession {
             return Err(SdkError::UndoWouldDiscard(blocked));
         }
         let applied = self.history.undo(&mut self.workbook)?;
+        // The undo stack holds *inverses*, so what came back is the operation
+        // that just ran against this workbook — an insert's undo is a removal,
+        // and it renumbers exactly as the removal a user typed would.
+        if let Some(op) = &applied {
+            self.resequence_views(op);
+        }
         self.record_for_peers(applied);
         self.source = None;
         // Undo replays whatever it reverses, which may have been structural.
@@ -1255,6 +1282,9 @@ impl WorkbookSession {
     /// transmitted for the same reason as [`undo`](Self::undo).
     pub fn redo(&mut self) -> Result<(), SdkError> {
         let applied = self.history.redo(&mut self.workbook)?;
+        if let Some(op) = &applied {
+            self.resequence_views(op);
+        }
         self.record_for_peers(applied);
         self.source = None;
         self.recalc.invalidate();
@@ -1390,6 +1420,9 @@ impl WorkbookSession {
             return Err(SdkError::ReadOnly);
         }
         self.source = None;
+        // Bypassing the *history* is what this is for; bypassing the view
+        // renumbering was never part of it. Before the apply, as in `edit`.
+        self.resequence_views(&op);
         // The op is applied without classification, so it may have been a
         // structural one. Same reasoning as `workbook_mut` below.
         self.recalc.invalidate();

@@ -1255,8 +1255,11 @@ mod charts {
         Workbook,
     };
 
-    use crate::chart::{PX, resolve, series_colors, value_extent};
-    use crate::chart_data::{ref_cells, ref_numbers, ref_text};
+    use crate::chart::{
+        MAX_LINE_POINTS, MAX_PIE_WEDGES, MAX_SCATTER_MARKERS, PX, resolve, series_colors,
+        value_extent,
+    };
+    use crate::chart_data::{MAX_SERIES_POINTS, ref_cells, ref_numbers, ref_text};
     use crate::{GridGeometry, PaintItem, Point, layout_full};
 
     /// `A1:A3` holding 1, "two", 3 on `S`, and a second sheet `T` holding 9 in
@@ -2053,6 +2056,574 @@ mod charts {
         crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
         // Ground, plus one bar per point per series, and none merged.
         assert_eq!(polygons(&list).len(), 1 + 3 * 2);
+    }
+
+    // --- Reading a range: the bound, and the band (CHT-10, CHT-11) ------
+
+    /// **A chart series reference was unbounded, and it is a file's string.**
+    ///
+    /// `$A$1:$XFD$1048576` names 17,179,869,184 cells. `ref_cells` built one
+    /// `(usize, CellRef)` per cell, so resolving that chart asked the allocator
+    /// for about 206 GB — measured, and the process was killed rather than
+    /// erring. That is a denial of service reachable from an untrusted `.xlsx`,
+    /// which AGENTS.md ranks third, above fidelity and speed both.
+    ///
+    /// Asserted through [`ref_strip`], which computes the size **without**
+    /// allocating it: a test that had to allocate the unbounded answer in order
+    /// to complain about it would take the runner down with it instead of
+    /// failing.
+    #[test]
+    fn a_series_reference_cannot_name_more_cells_than_the_bound() {
+        let wb = wide_workbook(4, 1, 99);
+        for reference in [
+            "$A$1:$XFD$1048576",
+            "$A$1:$A$1048576",
+            "A:A",
+            "$A:$XFD",
+            "$A$1:$B$1048576",
+        ] {
+            let strip = crate::chart_data::ref_strip(&wb, 0, reference)
+                .unwrap_or_else(|| panic!("{reference} must resolve"));
+            assert!(
+                strip.len() <= MAX_SERIES_POINTS,
+                "{reference} resolved to {} points, past the {MAX_SERIES_POINTS} bound: \
+                 at 9 bytes a point that is {:.1} GB the reader would try to allocate",
+                strip.len(),
+                strip.len() as f64 * 9.0 / 1e9
+            );
+            assert!(
+                strip.named() > strip.len() && strip.truncated > 0,
+                "{reference} names more than the bound keeps, so the shortfall must be \
+                 counted: len {} truncated {}",
+                strip.len(),
+                strip.truncated
+            );
+        }
+        // And the read itself honours it, not only the strip's arithmetic.
+        assert_eq!(ref_numbers(&wb, 0, "A:A").len(), MAX_SERIES_POINTS);
+        assert_eq!(ref_cells(&wb, 0, "A:A").len(), MAX_SERIES_POINTS);
+        assert_eq!(ref_text(&wb, 0, "A:A").len(), MAX_SERIES_POINTS);
+    }
+
+    /// A reference inside the bound keeps every point, and counts none lost.
+    ///
+    /// The control the test above needs: a cap that fired on every chart would
+    /// satisfy it and ruin every real one.
+    #[test]
+    fn a_series_reference_inside_the_bound_is_untouched() {
+        let wb = wide_workbook(4, 1, 99);
+        let strip = crate::chart_data::ref_strip(&wb, 0, "$A$1:$B$4").expect("resolves");
+        assert_eq!((strip.len(), strip.truncated, strip.named()), (8, 0, 8));
+        assert_eq!(ref_numbers(&wb, 0, "$B$1:$B$4").len(), 4);
+    }
+
+    /// **Truncation is said, not swallowed** (`CHT-11`).
+    ///
+    /// A capped series is a series drawing a prefix of itself. Layout has no
+    /// compatibility report to write that into, so the legend carries it — the
+    /// same place and the same reason `CHT-08` puts `#REF!`. Drawing the first
+    /// 65,536 of a million and looking finished is the `CHT-05` silent lie.
+    #[test]
+    fn a_truncated_series_says_so_in_the_legend() {
+        let wb = wide_workbook(4, 1, 99);
+        let mut chart = wide_chart(4, 1);
+        chart.series[0].values = "$B$1:$B$1048576".to_owned();
+        chart.legend = Some("r".to_owned());
+        chart.series[0].name = "Sales".to_owned();
+
+        let (_, resolved) = resolve(&wb, 0, &chart);
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            resolved[0].truncated > 0,
+            "the series lost points and did not count them"
+        );
+
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let found = labels(&list);
+        assert!(
+            found.iter().any(|l| l == "Sales (truncated)"),
+            "the legend does not say the series is a prefix of itself: {found:?}"
+        );
+    }
+
+    /// **The band read answers exactly what the point read answered**
+    /// (`CHT-10`).
+    ///
+    /// The residual after `CHT-06` was cell *reading*: `ref_numbers` did one
+    /// `BTreeMap` descent per cell, sixty thousand of them a frame for a
+    /// 10,000-row six-series chart. It does one ordered `row_band` traversal
+    /// per reference now, which is a different algorithm over the same data —
+    /// so the thing that can be silently wrong is not the speed but the
+    /// **answer**, and an index off by a column or a row would show up as a
+    /// chart plotting its neighbour's numbers.
+    ///
+    /// The twin below is written against `CellStore::get` and shares no code
+    /// with the thing it checks. The data is deliberately awkward: sparse,
+    /// ragged, multi-column, off-origin, on two sheets, with text and booleans
+    /// among the numbers.
+    #[test]
+    fn reading_a_strip_by_band_agrees_with_reading_it_cell_by_cell() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let label = wb.intern_string("label");
+        for (name, seed) in [("S", 3u32), ("T", 7)] {
+            let mut sh = Sheet::new(SheetId(Id::from_parts(u64::from(seed), 1)), name);
+            for r in 0..40u32 {
+                for c in 0..7u32 {
+                    // Holes, on purpose: a band traversal only visits populated
+                    // cells, so a dense sheet would hide an index error that a
+                    // sparse one exposes.
+                    if (r * 7 + c + seed) % 3 == 0 {
+                        continue;
+                    }
+                    let cell = match (r + c) % 5 {
+                        0 => Cell::value(CellValue::SharedString(label)),
+                        1 => Cell::value(CellValue::Bool(r % 2 == 0)),
+                        _ => Cell::value(CellValue::Number(f64::from(r * 100 + c))),
+                    };
+                    sh.cells.set(CellRef::new(r, c), cell);
+                }
+            }
+            wb.sheets.push(sh);
+        }
+
+        /// The obvious implementation: one point lookup per cell of the strip.
+        fn by_cell(wb: &Workbook, sheet: usize, reference: &str) -> Vec<Option<f64>> {
+            let strip = crate::chart_data::ref_strip(wb, sheet, reference).expect("resolves");
+            let mut out = Vec::new();
+            for r in strip.start.row..=strip.end.row {
+                for c in strip.start.col..=strip.end.col {
+                    out.push(
+                        wb.sheets[strip.sheet]
+                            .cells
+                            .get(CellRef::new(r, c))
+                            .and_then(|cell| match cell.value {
+                                CellValue::Number(n) => Some(n),
+                                CellValue::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+                                _ => None,
+                            }),
+                    );
+                }
+            }
+            out
+        }
+
+        for reference in [
+            "$A$1:$A$40",
+            "$C$5:$C$31",
+            "$B$3:$E$29",
+            "$A$1:$G$40",
+            "$D$12",
+            "T!$B$2:$D$18",
+            "$G$40:$G$40",
+        ] {
+            for sheet in [0usize, 1] {
+                assert_eq!(
+                    ref_numbers(&wb, sheet, reference),
+                    by_cell(&wb, sheet, reference),
+                    "{reference} from sheet {sheet} reads differently by band than by cell"
+                );
+            }
+        }
+        // Text goes down the same traversal and must agree too.
+        assert_eq!(
+            ref_text(&wb, 0, "$B$3:$E$29").len(),
+            by_cell(&wb, 0, "$B$3:$E$29").len()
+        );
+        assert!(
+            ref_text(&wb, 0, "$A$1:$G$40").iter().any(|t| t == "label"),
+            "the text read down the same traversal lost its strings"
+        );
+    }
+
+    // --- Scatter, pie and the line's bytes (CHT-11) ---------------------
+
+    /// A chart of `series` columns over `rows` rows, of a given kind.
+    fn wide_chart_of(rows: u32, series: u32, kind: ChartKind) -> ChartView {
+        let mut ch = wide_chart(rows, series);
+        ch.kind = kind;
+        ch
+    }
+
+    fn wedges(list: &crate::DisplayList) -> Vec<(f64, f64, String)> {
+        list.items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Wedge {
+                    from, sweep, fill, ..
+                } => Some((*from, *sweep, fill.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The polylines that are *series* rather than chrome.
+    ///
+    /// The frame outline and the two axes are polylines too, and the outline is
+    /// five points — long enough to be mistaken for a short line run, which it
+    /// was until this filtered on the stroke instead. A series is drawn at the
+    /// canvas's 1.8 px `lineWidth` and every piece of chrome at one pixel.
+    fn line_runs(list: &crate::DisplayList) -> Vec<Vec<Point>> {
+        list.items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Polyline {
+                    points,
+                    width,
+                    color: _,
+                } if *width > crate::chart::PX as i64 => Some(points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn series_points(list: &crate::DisplayList) -> usize {
+        line_runs(list).iter().map(Vec::len).sum()
+    }
+
+    /// **A line plot was bounded in items and not in bytes** (`CHT-11`).
+    ///
+    /// One polyline per series is 12 display-list items for six series over
+    /// 10,000 rows — and **1,181,094 bytes of JSON across the wasm boundary,
+    /// every frame**, which is larger than the 722 KB the *uncapped* bar plot
+    /// was fixed for under `CHT-06`. An item count is not a size, and the item
+    /// count is what the existing gate looks at.
+    #[test]
+    fn a_line_plot_is_bounded_in_points_and_not_only_in_items() {
+        for rows in [1_000u32, 10_000] {
+            let wb = wide_workbook(rows, 6, 7);
+            let chart = wide_chart_of(rows, 6, ChartKind::Line);
+            let mut list = crate::DisplayList::new();
+            crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+
+            let points = series_points(&list);
+            // Two per pixel column per series is the geometric bound; the plot
+            // is under 400 px wide once the axis gutter is taken off.
+            assert!(
+                points <= 2 * 400 * 6,
+                "{rows} rows x 6 series carried {points} polyline points; \
+                 uncapped that is {}",
+                rows * 6
+            );
+            assert!(
+                points <= MAX_LINE_POINTS,
+                "{points} points is past the plot's ceiling of {MAX_LINE_POINTS}"
+            );
+            assert!(points > 0, "the plot drew no line at all, which is a blank");
+        }
+    }
+
+    /// **And the bound is honest**: the one row in ten thousand holding a spike
+    /// still reaches the top of the plot.
+    ///
+    /// A cap that kept every nth point, or the first point of each column,
+    /// would drop it — and the axis would still scale to the spike, so the
+    /// picture would show a flat line under an axis that says a million.
+    #[test]
+    fn a_line_keeps_the_outlier_it_would_be_a_lie_to_drop() {
+        let rows = 10_000u32;
+        let wb = wide_workbook(rows, 6, 6_667);
+        let chart = wide_chart_of(rows, 6, ChartKind::Line);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+
+        let top = line_runs(&list)
+            .iter()
+            .flat_map(|p| p.iter().map(|q| q.y))
+            .min()
+            .expect("a line");
+        let floor = line_runs(&list)
+            .iter()
+            .flat_map(|p| p.iter().map(|q| q.y))
+            .max()
+            .expect("a line");
+        let plot_h = 300.0 * PX;
+        assert!(
+            (floor - top) as f64 > plot_h * 0.5,
+            "the line spans {} twips of a {plot_h}-twip frame — the spike was dropped",
+            floor - top
+        );
+    }
+
+    /// A gap still breaks the line rather than being bridged across.
+    ///
+    /// The column bucketing accumulates points and flushes them, and a gap has
+    /// to close the open column *before* it closes the run — flush them the
+    /// other way round and the points either side of the gap join up, which is
+    /// a line drawn through data that is not there.
+    #[test]
+    fn a_gap_still_breaks_the_line() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut s = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for r in 0..9u32 {
+            if r == 4 {
+                continue;
+            }
+            s.cells.set(
+                CellRef::new(r, 1),
+                Cell::value(CellValue::Number(f64::from(r) + 1.0)),
+            );
+        }
+        wb.sheets.push(s);
+        let mut chart = wide_chart_of(9, 1, ChartKind::Line);
+        chart.series[0].values = "$B$1:$B$9".to_owned();
+
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let runs: Vec<usize> = line_runs(&list).iter().map(Vec::len).collect();
+        assert_eq!(
+            runs,
+            vec![4, 4],
+            "the gap at row 5 must leave two runs of four points, not one bridge"
+        );
+    }
+
+    /// Below the bound a line is the line it always was, point for point.
+    ///
+    /// **Twelve points, not five.** A column holding two points emits both, in
+    /// index order, which is the same two points the unbucketed plot drew — so
+    /// a five-point series survives a *deliberately broken* pitch unchanged and
+    /// proves nothing. Three in a column is the first case where min-and-max is
+    /// fewer than all, so twelve points is what makes this control discriminate.
+    #[test]
+    fn a_line_inside_the_bound_is_untouched() {
+        let wb = wide_workbook(12, 1, 99);
+        let chart = wide_chart_of(12, 1, ChartKind::Line);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let runs = line_runs(&list);
+        assert_eq!(
+            runs.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![12],
+            "twelve points must stay twelve points"
+        );
+        // And in place: evenly spaced along the plot, which is what a merged
+        // column would break even where the count happened to survive.
+        let xs: Vec<i64> = runs[0].iter().map(|p| p.x).collect();
+        let gaps: Vec<i64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.windows(2).all(|w| (w[0] - w[1]).abs() <= 1),
+            "the points are no longer evenly spaced: {gaps:?}"
+        );
+    }
+
+    /// **Scatter emitted one polygon per point, uncapped** (`CHT-11`).
+    ///
+    /// 10,000 rows x 6 series was 60,006 display-list items and **7,181,064
+    /// bytes of JSON per frame**, ten times the uncapped bar plot `CHT-06` was
+    /// opened for. `CHT-06`'s min-max bucket cannot be reused: a bar's ink is a
+    /// rectangle from zero to its value and a marker's is four pixels around
+    /// its own position, so the bound is on positions instead.
+    #[test]
+    fn a_scatter_plot_is_bounded_by_the_positions_a_plot_can_distinguish() {
+        for rows in [1_000u32, 10_000] {
+            let wb = wide_workbook(rows, 6, 7);
+            let chart = wide_chart_of(rows, 6, ChartKind::Scatter);
+            let mut list = crate::DisplayList::new();
+            crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+            let markers = polygons(&list).len() - 1; // less the frame's ground
+            assert!(
+                markers <= MAX_SCATTER_MARKERS,
+                "{rows} rows x 6 series emitted {markers} markers against a \
+                 {MAX_SCATTER_MARKERS} ceiling; uncapped that is {}",
+                rows * 6
+            );
+            assert!(markers > 0, "the plot drew nothing at all");
+        }
+    }
+
+    /// **And the ceiling holds for a frame that is not near square.**
+    ///
+    /// Found by asking what would have to be true for the bound to be wrong.
+    /// The marker pitch is derived from the plot's *area*, and area bounds the
+    /// cell count only for a plot near square: a frame 4,000 pixels wide and 40
+    /// tall has the same area as 400x400 and forty times as many marker-wide
+    /// columns. So the stated ceiling was not one, and a chart anchored across
+    /// a very wide, very short band of cells is an ordinary thing to draw.
+    #[test]
+    fn a_scatter_plot_on_a_long_thin_frame_still_honours_the_ceiling() {
+        let rows = 10_000u32;
+        // No spike: an outlier pins the axis to itself and squashes every other
+        // point into a single row of cells, which is fewer cells and so a
+        // weaker test. The sawtooth alone fills the plot's height.
+        let wb = wide_workbook(rows, 6, rows);
+        let chart = wide_chart_of(rows, 6, ChartKind::Scatter);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(
+            &mut list,
+            &wb,
+            0,
+            &chart,
+            crate::Rect {
+                x: 0,
+                y: 0,
+                w: (60_000.0 * PX) as i64,
+                h: (200.0 * PX) as i64,
+            },
+        );
+        let markers = polygons(&list).len() - 1;
+        assert!(
+            markers <= MAX_SCATTER_MARKERS,
+            "a 60000x200 frame emitted {markers} markers against a \
+             {MAX_SCATTER_MARKERS} ceiling"
+        );
+        assert!(markers > 0, "the plot drew nothing at all");
+    }
+
+    /// **And nothing vanishes from a place that would otherwise be blank.**
+    ///
+    /// The grid *merges* points that were already drawing the same square; it
+    /// does not drop points. A lone outlier is alone in its cell, so it keeps
+    /// its own marker — and the extremes of the cloud are exactly where they
+    /// were, because the merge radius is the marker's own size.
+    #[test]
+    fn a_scatter_plot_keeps_a_lone_outlier() {
+        let rows = 10_000u32;
+        let wb = wide_workbook(rows, 1, 6_667);
+        let chart = wide_chart_of(rows, 1, ChartKind::Scatter);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+
+        let top = polygons(&list)
+            .iter()
+            .skip(1)
+            .flat_map(|(pts, _)| pts.iter().map(|p| p.y))
+            .min()
+            .expect("markers");
+        let floor = polygons(&list)
+            .iter()
+            .skip(1)
+            .flat_map(|(pts, _)| pts.iter().map(|p| p.y))
+            .max()
+            .expect("markers");
+        let plot_h = 300.0 * PX;
+        assert!(
+            (floor - top) as f64 > plot_h * 0.5,
+            "the cloud spans {} twips of a {plot_h}-twip frame — the spike was merged away",
+            floor - top
+        );
+    }
+
+    /// Below the bound every point still gets its own marker.
+    ///
+    /// **Twenty points, not four.** Four points spread across a 400-pixel plot
+    /// land in four separate cells of *any* grid coarse enough to be wrong, so
+    /// they survive a deliberately broken pitch and prove nothing. Twenty are
+    /// 21 pixels apart, which a marker-fine grid separates and a coarse one
+    /// does not.
+    #[test]
+    fn a_scatter_plot_inside_the_bound_is_untouched() {
+        let wb = wide_workbook(20, 2, 99);
+        let chart = wide_chart_of(20, 2, ChartKind::Scatter);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        assert_eq!(
+            polygons(&list).len(),
+            1 + 20 * 2,
+            "a point inside the bound lost its own marker"
+        );
+    }
+
+    /// **A pie emitted one wedge per value, uncapped** (`CHT-11`).
+    ///
+    /// 10,000 values was 10,002 items and 1.4 MB of JSON for a picture with no
+    /// visible divisions in it: at a 300-pixel frame each slice had a tenth of
+    /// a pixel of arc. Adjacent wedges merge, which is sound where the marker
+    /// grid is not — a wedge's angle is contiguous and ordered, so a merged
+    /// wedge occupies exactly the angle its members occupied.
+    #[test]
+    fn a_pie_is_bounded_by_the_arc_a_rim_can_show() {
+        for rows in [500u32, 10_000] {
+            let wb = wide_workbook(rows, 1, 7);
+            let chart = wide_chart_of(rows, 1, ChartKind::Pie);
+            let mut list = crate::DisplayList::new();
+            crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+            let drawn = wedges(&list);
+            assert!(
+                drawn.len() <= MAX_PIE_WEDGES,
+                "{rows} values drew {} wedges against a {MAX_PIE_WEDGES} ceiling",
+                drawn.len()
+            );
+            // The geometric bound: the rim is under 1,000 px around, and no
+            // wedge below two pixels of it is worth an item.
+            assert!(
+                drawn.len() <= 500,
+                "{rows} values drew {} wedges, more than the rim can show",
+                drawn.len()
+            );
+            assert!(!drawn.is_empty(), "the pie drew nothing");
+
+            // **Merging must not lose a value.** The wedges tile the circle:
+            // each starts where the last ended and together they close at 360.
+            let mut expected = 0.0f64;
+            for (from, sweep, _) in &drawn {
+                assert!(
+                    (from - expected).abs() < 1e-6,
+                    "a wedge starts at {from} where the one before ended at {expected}: \
+                     the merge left a gap or an overlap"
+                );
+                expected += sweep;
+            }
+            assert!(
+                (expected - 360.0).abs() < 1e-6,
+                "the wedges cover {expected} degrees, not 360 — a value was dropped"
+            );
+        }
+    }
+
+    /// **Merging groups *adjacent* values, and loses none of them.**
+    ///
+    /// The strongest available statement of that without reaching inside: give
+    /// every value the same size, and every merged wedge must then cover the
+    /// same angle, because each holds the same number of them. A merge that
+    /// dropped its group and let the final wedge absorb the remainder still
+    /// closes at 360 — the tail correction sees to that — so the tiling
+    /// assertion above does **not** catch it and this does.
+    #[test]
+    fn merging_a_pie_groups_neighbours_rather_than_discarding_them() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sh = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for r in 0..10_000u32 {
+            sh.cells
+                .set(CellRef::new(r, 1), Cell::value(CellValue::Number(1.0)));
+        }
+        wb.sheets.push(sh);
+        let chart = wide_chart_of(10_000, 1, ChartKind::Pie);
+
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let sweeps: Vec<f64> = wedges(&list).into_iter().map(|(_, s, _)| s).collect();
+        assert!(
+            sweeps.len() > 100,
+            "the pie merged into {} wedges",
+            sweeps.len()
+        );
+        let widest = sweeps.iter().cloned().fold(f64::MIN, f64::max);
+        let narrowest = sweeps.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            widest < narrowest * 2.0,
+            "ten thousand equal values gave wedges from {narrowest} to {widest} degrees —              the merge is not grouping neighbours, it is discarding them and letting \
+             the last wedge cover what is left"
+        );
+    }
+
+    /// Below the bound a pie is the pie it always was: one wedge per value, in
+    /// order, each in its own series colour.
+    #[test]
+    fn a_pie_inside_the_bound_is_untouched() {
+        // Ten values, not three: three are 60 degrees apart or more, so they
+        // survive a threshold set wrong by two orders of magnitude and prove
+        // nothing. The smallest of ten is 6.5 degrees, which is comfortably
+        // above the real 0.8-degree threshold and below a broken one.
+        let wb = wide_workbook(10, 1, 99);
+        let chart = wide_chart_of(10, 1, ChartKind::Pie);
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let drawn = wedges(&list);
+        assert_eq!(drawn.len(), 10, "ten values must draw ten wedges");
+        let palette = series_colors(&wb, 10);
+        let fills: Vec<String> = drawn.into_iter().map(|(_, _, f)| f).collect();
+        assert_eq!(fills, palette, "the wedges lost their own colours");
     }
 }
 
