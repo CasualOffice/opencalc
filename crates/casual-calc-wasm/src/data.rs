@@ -2754,6 +2754,42 @@ mod formula_cf_tests {
             .to_owned()
     }
 
+    /// **A whole-row highlight must not come out striped.**
+    ///
+    /// `session_cells` walks `row_band`, which is *stored* cells — so a cell
+    /// nobody has typed in was never offered to `effect_for` and never got a
+    /// fill. Harmless for a rule about a cell's own value, which a blank does
+    /// not have. Wrong for a rule about **another** cell: `=$D2>100` is
+    /// precisely a rule that paints blanks, and whole-row highlighting is the
+    /// commonest conditional format there is.
+    ///
+    /// So the feature `CF-01` was built for failed on any real table, wherever
+    /// a column happened to be empty. The blank column here is the whole point
+    /// of the fixture.
+    #[test]
+    fn a_whole_row_rule_paints_the_blank_cells_in_the_row_too() {
+        session_new();
+        // B and D hold data; C is blank, as a column in a real table often is.
+        session_set_cell(0, 1, 1, "Widget").unwrap();
+        session_set_cell(0, 1, 3, "150").unwrap();
+        session_set_cell(0, 2, 1, "Gadget").unwrap();
+        session_set_cell(0, 2, 3, "20").unwrap();
+        session_add_cf(0, 1, 1, 5, 4, "formula", 0.0, 0.0, "$D2>100", "FFD166").unwrap();
+
+        for col in 1..=4 {
+            assert_eq!(
+                fill_at(1, col),
+                "FFD166",
+                "row 2 has D over a hundred, so every cell of it paints — \
+                 including column {col}, which holds nothing"
+            );
+        }
+        // And the row that does not match stays clear, blanks included.
+        for col in 1..=4 {
+            assert_eq!(fill_at(2, col), "", "row 3 has D at 20 and must not paint");
+        }
+    }
+
     /// A rule over `A2:H10` saying `=$D2>100` paints the rows whose D is over a
     /// hundred, and only those — the anchor being the range's top-left, not
     /// `A1`, which is why the range starts at row 2.

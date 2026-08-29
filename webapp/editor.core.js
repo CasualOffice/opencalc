@@ -5181,6 +5181,58 @@ export function activeCellLocked() {
   }
 }
 
+/// The bottom of what the user can actually see, in layout pixels.
+///
+/// **Not `window.innerHeight`.** A software keyboard does not resize the page:
+/// it shrinks the *visual* viewport and leaves the layout viewport alone.
+/// `.editor-body` is `height: 100vh`, so the grid keeps its full height and the
+/// keyboard is simply drawn over the bottom of it. A pinch or page zoom does
+/// the same thing by a different route, and wants the same answer, which is why
+/// this is phrased as "what is visible" rather than as keyboard handling.
+const visibleBottomPx = () => {
+  const vv = window.visualViewport;
+  if (!vv) return window.innerHeight;
+  return Math.min(window.innerHeight, vv.offsetTop + vv.height);
+};
+
+/// Daylight left under the in-cell editor when it has to be scrolled clear.
+const EDIT_CLEARANCE = 8;
+
+/// Scroll the sheet until the cell being edited is somewhere the user can see.
+///
+/// Measured on a 390×844 phone before this existed: editing a cell near the
+/// foot of the grid put the in-cell editor at y=738, and an iOS keyboard starts
+/// at 508. You typed into a box 230px underneath the keyboard, with the formula
+/// bar as the only readable copy of what you were writing. Nothing in `webapp/`
+/// referenced `visualViewport` at all.
+///
+/// Called when an edit opens and when the visual viewport resizes under an open
+/// one — never per frame, so it is off the scroll and paint paths entirely.
+/// Not exported: `editor.js` re-exports this module wholesale, and this is an
+/// internal reaction to a browser event rather than anything a host calls.
+function keepEditVisible() {
+  if (!wasm || !state.editing || editSurface !== inline) return;
+  const box = inline.getBoundingClientRect();
+  if (box.height <= 0) return;
+  const over = box.bottom + EDIT_CLEARANCE - visibleBottomPx();
+  if (over <= 0) return;
+  // Never lift the cell above the body origin. `positionInline` clamps the box
+  // to its own pane, so a cell scrolled up under the column headers or a frozen
+  // band would leave the editor parked on the header while the value it belongs
+  // to is somewhere else entirely.
+  const z = state.zoom || 1;
+  const f = state.freeze || { bodyY0: 0 };
+  const room = box.top - (wrap.getBoundingClientRect().top + f.bodyY0 * z);
+  const move = Math.min(over, Math.max(0, room));
+  if (move <= 0) return;
+  state.scrollY += move / z;
+  clampScroll();
+  // `draw()` rather than a scheduled frame: this runs once per edit or per
+  // viewport resize, and `positionInline` — which puts the box back on its cell
+  // — happens inside it.
+  draw();
+}
+
 export function beginEdit(surface, initial, caretAtEnd = false) {
   // A read-only session refuses the write anyway; refusing here means the user
   // is told before typing rather than after, which is the difference between a
@@ -5246,6 +5298,10 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
     if (caretAtEnd) surface.setSelectionRange(surface.value.length, surface.value.length);
     else surface.select();
   }
+  // The ordinary case once a keyboard is already up: Enter walks to the next
+  // row and the editor reopens further down. Nothing resizes, so the
+  // `visualViewport` listener never fires — this is the path that catches it.
+  keepEditVisible();
   // Opening an existing formula highlights the cells it reads straight away,
   // rather than waiting for the first keystroke.
   updateRefSpans();
@@ -7990,6 +8046,15 @@ function wireEvents() {
   }
 
   window.addEventListener("resize", () => { invalidateTrackSize(); resize(); reflowToolbar(); });
+  // A software keyboard fires none of the above. It shrinks the *visual*
+  // viewport and leaves `window.innerHeight` — and therefore the whole layout —
+  // exactly as it was, so `resize` above never runs and the grid goes on
+  // believing it owns the part of the screen the keyboard is now covering.
+  // `visualViewport` is the only event that says so; nothing in the webapp
+  // listened to it. `scroll` is deliberately *not* wired: on a zoomed page the
+  // user pans the visual viewport themselves, and scrolling the sheet out from
+  // under them each time they did would be worse than the problem.
+  window.visualViewport?.addEventListener("resize", keepEditVisible);
 
   // ---- Application menu bar (File / Edit / View / …) -----------------------
   // Declarative menu → item table. Every item delegates to an existing handler
@@ -8336,13 +8401,39 @@ function wireEvents() {
       for (const b of topBtns) b.setAttribute("aria-expanded", "false");
       openIdx = -1;
     };
+    // Place a submenu beside the row that owns it, flipping and clamping to stay
+    // on screen — and **measure it while it is shown**.
+    //
+    // It used to measure `sub` while the caller still had it `hidden`, and
+    // `[hidden]` is `display: none`, so `offsetWidth` and `offsetHeight` were
+    // both 0. Every test below then compared an edge against a panel of no
+    // size: `left + 0 > innerWidth - 4` cannot be true for a trigger that is
+    // itself on screen, so the flip and the bottom clamp were dead code from
+    // the day they were written. On a desktop there is always room to the
+    // right and nothing looked wrong.
+    //
+    // On a 390px phone it put all fourteen submenus off the edge — Format ▸
+    // Number opened at x=377.3 with a width of 178, so 165px of it was past
+    // the screen and the user saw nothing happen. Unhiding first is the whole
+    // fix; no paint can occur between here and the assignment at the end,
+    // because it is one synchronous task.
     const positionSub = (sub, btn) => {
       const r = btn.getBoundingClientRect();
-      sub.style.left = "0px"; sub.style.top = "0px";
+      sub.hidden = false;
+      sub.style.left = "0px"; sub.style.top = "0px"; sub.style.maxHeight = "";
       const sw = sub.offsetWidth, sh = sub.offsetHeight;
       let left = r.right - 3, top = r.top - 5;
       if (left + sw > window.innerWidth - 4) left = Math.max(4, r.left - sw + 3);
+      // Still past the right edge after the flip — a panel wider than the
+      // window has nowhere to go, so pin it to the left margin rather than
+      // leaving it hanging off whichever side lost.
+      if (left + sw > window.innerWidth - 4) left = 4;
       if (top + sh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - 4 - sh);
+      // Taller than the screen: clamp and let `.popmenu`'s own `overflow-y`
+      // carry the rest, which is what `anchorMenu` already does for the
+      // top-level drops. Without this a long submenu simply runs off the
+      // bottom and the items past the fold cannot be reached at all.
+      if (sh > window.innerHeight - 8) { top = 4; sub.style.maxHeight = (window.innerHeight - 8) + "px"; }
       sub.style.left = left + "px"; sub.style.top = top + "px";
     };
     // Tick every item under `root` that has a predicate.
@@ -8377,8 +8468,25 @@ function wireEvents() {
           b.dataset.ocCommand = commandId(path, it.sub);
           sub.dataset.ocFor = commandId(path, it.sub);
           renderItems(sub, it.items, false, commandId(path, it.sub));
-          const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); sub.hidden = false; };
-          b.addEventListener("mouseenter", openSub);
+          // `positionSub` does the unhiding, because it has to measure the
+          // panel to know where to put it and a hidden one measures 0×0.
+          const openSub = () => { closeSubs(); refreshChecks(sub); positionSub(sub, b); };
+          // Hover opens a submenu only where hovering is a thing.
+          //
+          // A tap does not just produce a `click`: Chrome replays the whole
+          // mouse sequence at the touch point, `mouseenter` first. That opened
+          // the submenu, and on a narrow screen the submenu has nowhere to go
+          // but back over the row that opened it — so the `click` that followed
+          // a few hundred microseconds later hit whichever *submenu item* had
+          // landed under the finger and ran it. On a phone, tapping "Clear ▸"
+          // silently performed one of the clears and closed the menu.
+          //
+          // Checked per event rather than once at build time so a device that
+          // gains or loses a mouse is answered as it is now, not as it was when
+          // the menu bar was constructed.
+          b.addEventListener("mouseenter", () => {
+            if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) openSub();
+          });
           b.addEventListener("click", (e) => { e.stopPropagation(); openSub(); });
           container.appendChild(b); continue;
         }
