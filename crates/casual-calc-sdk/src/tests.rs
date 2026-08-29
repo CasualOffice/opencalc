@@ -2567,3 +2567,88 @@ fn the_opening_sheet_is_a_sheet_you_can_type_into() {
         "the opening sheet's id is its own"
     );
 }
+
+/// **A formula conditional format reaches the display list, and therefore the
+/// PNG.**
+///
+/// The unit tests for this live in `casual-calc-eval` and call `effect_for`
+/// directly; this one runs the wiring — session → `layout_viewport_with` →
+/// `effect_for` → the evaluator — because the seam it crosses is exactly the
+/// one that used to be missing. A renderer that resolves every other rule and
+/// silently skips this one is what `RND-05` was, and reading the call chain is
+/// how it stayed unnoticed the first time.
+///
+/// The range starts at row 2, so an `A1`-anchored formula would paint the wrong
+/// row and this would still be green if it started at `A1`.
+#[test]
+fn a_formula_conditional_format_paints_through_the_sdk_layout() {
+    use casual_calc_model::{CellRange, CfRule, ConditionalFormat};
+
+    let mut session = WorkbookSession::blank();
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(0x5346, 1)), "Sheet1");
+    for (row, amount) in [(1u32, 150.0), (2, 50.0), (3, 900.0)] {
+        sheet.cells.set(
+            CellRef::new(row, 3), // column D
+            casual_calc_model::Cell::value(CellValue::Number(amount)),
+        );
+        sheet.cells.set(
+            CellRef::new(row, 0), // column A, the cell that gets painted
+            casual_calc_model::Cell::value(CellValue::Number(f64::from(row))),
+        );
+    }
+    let mut rule = ConditionalFormat::new(
+        CellRange::new(CellRef::new(1, 0), CellRef::new(9, 7)), // A2:H10
+        CfRule::Expression("$D2>100".to_owned()),
+        "FFC7CE",
+    );
+    rule.priority = 1;
+    sheet.conditional_formats = vec![rule];
+    session.workbook_mut().sheets.push(sheet);
+
+    let viewport = GridViewport {
+        x: 0,
+        y: 0,
+        width: 8 * 960,
+        height: 12 * 300,
+    };
+    let list = session.layout(0, &viewport);
+    let geometry = session.geometry(0);
+
+    // The rectangle a given cell occupies, so a fill can be attributed to a
+    // cell rather than to "somewhere in the list".
+    let painted = |row: u32, col: u32| -> Option<String> {
+        let x = geometry.columns.offset(col);
+        let y = geometry.rows.offset(row);
+        list.items.iter().find_map(|item| match item {
+            casual_calc_layout::PaintItem::CellBackground { rect, fill }
+                if rect.x == x && rect.y == y =>
+            {
+                fill.clone()
+            }
+            _ => None,
+        })
+    };
+
+    assert_eq!(
+        painted(1, 0).as_deref(),
+        Some("FFC7CE"),
+        "A2, because D2 is 150"
+    );
+    assert_eq!(painted(2, 0), None, "A3 is not, because D3 is 50");
+    assert_eq!(
+        painted(3, 0).as_deref(),
+        Some("FFC7CE"),
+        "A4, because D4 is 900"
+    );
+
+    // And it is visible: the same sheet without the rule renders different
+    // bytes. A fill in the display list that no backend paints would pass every
+    // assertion above.
+    let with_rule = session.render_png(0, &viewport, 96).unwrap();
+    session.workbook_mut().sheets[0].conditional_formats.clear();
+    let without = session.render_png(0, &viewport, 96).unwrap();
+    assert_ne!(
+        with_rule, without,
+        "the highlight has to reach the pixels, not only the display list"
+    );
+}

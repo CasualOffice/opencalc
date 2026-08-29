@@ -171,27 +171,62 @@ pub fn visible_range(geometry: &GridGeometry, viewport: &Viewport) -> VisibleRan
 }
 
 /// Lay out only the cells intersecting `viewport` into a display list.
+///
+/// Formula conditional-format rules are not resolved — this signature has no
+/// evaluator in it. Use [`layout_viewport_with`] from a caller that has one.
 pub fn layout_viewport(
     workbook: &Workbook,
     sheet_index: usize,
     geometry: &GridGeometry,
     viewport: &Viewport,
 ) -> DisplayList {
+    layout_viewport_with(
+        workbook,
+        sheet_index,
+        geometry,
+        viewport,
+        &conditional::NoExpressions,
+    )
+}
+
+/// [`layout_viewport`], with the formula conditional-format rules decided by
+/// `exprs`.
+pub fn layout_viewport_with(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    exprs: &dyn conditional::CfExpressions,
+) -> DisplayList {
     let range = visible_range(geometry, viewport);
-    layout_range(workbook, sheet_index, geometry, range)
+    layout_range(workbook, sheet_index, geometry, range, exprs)
 }
 
 /// Lay out every populated cell of the sheet (the reference full layout).
+///
+/// As [`layout_viewport`], this resolves no formula conditional-format rules;
+/// [`layout_full_with`] takes the evaluator that can.
 pub fn layout_full(
     workbook: &Workbook,
     sheet_index: usize,
     geometry: &GridGeometry,
 ) -> DisplayList {
+    layout_full_with(workbook, sheet_index, geometry, &conditional::NoExpressions)
+}
+
+/// [`layout_full`], with the formula conditional-format rules decided by
+/// `exprs`.
+pub fn layout_full_with(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    exprs: &dyn conditional::CfExpressions,
+) -> DisplayList {
     let range = VisibleRange {
         rows: (0, u32::MAX),
         cols: (0, u32::MAX),
     };
-    layout_range(workbook, sheet_index, geometry, range)
+    layout_range(workbook, sheet_index, geometry, range, exprs)
 }
 
 fn layout_range(
@@ -199,6 +234,7 @@ fn layout_range(
     sheet_index: usize,
     geometry: &GridGeometry,
     range: VisibleRange,
+    exprs: &dyn conditional::CfExpressions,
 ) -> DisplayList {
     let mut list = DisplayList::new();
     let Some(sheet) = workbook.sheets.get(sheet_index) else {
@@ -239,6 +275,7 @@ fn layout_range(
             at.col,
             &cell.value,
             &display_text(workbook, cell),
+            exprs,
         )
     };
 

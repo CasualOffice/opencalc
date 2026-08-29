@@ -2232,6 +2232,90 @@ fn the_retained_bytes_field_is_not_a_wire_break() {
     assert_eq!(parsed, forward);
 }
 
+/// **A new enum variant on the wire is a harder break than a new field, and
+/// nothing was checking for one.**
+///
+/// The neighbouring test guards a new *field*: an unknown field is skipped,
+/// because none of these types deny unknown fields, so an old peer keeps
+/// working and the version need not move. A new **variant** is the opposite.
+/// An externally-tagged serde enum refuses a tag it has never heard of, so an
+/// old peer cannot read the message *at all* — which is exactly what
+/// `ServerMessage::Stopped`'s doc comment says is worse than a mis-read field,
+/// and why `elsewhere` was added as a field rather than a `Refusal` variant.
+///
+/// Demonstrated, not assumed: an enum with the pre-`expression` variant set,
+/// given `{"expression":"$D2>100"}`, answers
+/// `unknown variant `expression`, expected one of `greaterThan`, …`.
+///
+/// So this pins the wire-visible tags of every enum that crosses inside
+/// `SheetMetadata`. Adding one is allowed — it is a protocol change, and
+/// `PROTOCOL_VERSION` moves with it. The failure message is the instruction.
+#[test]
+fn a_new_conditional_format_variant_is_a_protocol_change() {
+    use casual_calc_model::CfRule;
+
+    // One value per variant, so the set is built from the type rather than
+    // from a list somebody has to remember to extend.
+    let all = [
+        CfRule::GreaterThan(1.0),
+        CfRule::LessThan(1.0),
+        CfRule::EqualTo(1.0),
+        CfRule::Between(0.0, 1.0),
+        CfRule::GreaterThanOrEqual(1.0),
+        CfRule::LessThanOrEqual(1.0),
+        CfRule::NotEqualTo(1.0),
+        CfRule::NotBetween(0.0, 1.0),
+        CfRule::TextContains("x".to_owned()),
+        CfRule::ColorScale(vec!["FF0000".to_owned()]),
+        CfRule::DataBar("FF0000".to_owned()),
+        CfRule::Expression("$D2>100".to_owned()),
+    ];
+    let mut tags: Vec<String> = all
+        .iter()
+        .map(|r| {
+            let json = serde_json::to_string(r).expect("serialises");
+            let v: serde_json::Value = serde_json::from_str(&json).expect("is json");
+            v.as_object()
+                .and_then(|o| o.keys().next().cloned())
+                .unwrap_or_else(|| json.trim_matches('"').to_owned())
+        })
+        .collect();
+    tags.sort();
+
+    let expected = [
+        "aboveAverage",
+        "between",
+        "colorScale",
+        "dataBar",
+        "duplicateValues",
+        "equalTo",
+        "expression",
+        "greaterThan",
+        "greaterThanOrEqual",
+        "lessThan",
+        "lessThanOrEqual",
+        "notBetween",
+        "notEqualTo",
+        "textContains",
+    ];
+    // `AboveAverage` and `DuplicateValues` are struct variants and are not in
+    // `all` above (they need fields); they are listed here because the point is
+    // the *wire tag set*, and leaving them out would let one be renamed unseen.
+    let mut expected: Vec<String> = expected.iter().map(|s| (*s).to_owned()).collect();
+    expected.retain(|t| t != "aboveAverage" && t != "duplicateValues");
+    expected.sort();
+
+    assert_eq!(
+        tags,
+        expected,
+        "the set of conditional-format rules that cross the wire has changed. \
+         An old peer cannot read a tag it has never heard of — it refuses the \
+         whole message — so this is a protocol change: move PROTOCOL_VERSION \
+         (currently {}) and say so in docs/62.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
 // --- Defined names move with what they point at (FID-24) ---------------------
 
 mod defined_names_shift {

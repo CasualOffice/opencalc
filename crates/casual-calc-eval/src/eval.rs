@@ -251,6 +251,26 @@ impl<'a> Evaluator<'a> {
         self.eval_expr_inner(sheet_index, expr).scalar()
     }
 
+    /// Evaluate an expression **as though it were the formula of the cell at
+    /// `at`** — the same tree, read from a different address.
+    ///
+    /// Since `PERF-11` a stored tree holds offsets from its holding cell, so
+    /// this is not a convenience for `ROW()`/`COLUMN()`: moving the origin *is*
+    /// the reference shift. It is what lets one parsed conditional-format
+    /// formula serve every cell of its range, exactly as one shared formula
+    /// serves a filled-down column — see
+    /// [`CfRule::Expression`](casual_calc_model::CfRule::Expression).
+    ///
+    /// The previous origin is saved and restored, so this nests inside an
+    /// ongoing evaluation without disturbing it.
+    pub fn eval_expr_at(&mut self, sheet_index: usize, at: CellRef, expr: &Expr) -> Value {
+        let previous = self.current;
+        self.current = Some((sheet_index, at));
+        let value = self.eval_expr_inner(sheet_index, expr).scalar();
+        self.current = previous;
+        value
+    }
+
     /// Evaluate an expression in an **array** context.
     ///
     /// A bare range is the difference between the two contexts: on its own it

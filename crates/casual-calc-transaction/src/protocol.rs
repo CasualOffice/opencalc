@@ -43,7 +43,7 @@ use crate::wire::WireOperation;
 /// which matters, because a bump costs every unupgraded tab its session, and
 /// spending that to add a cursor decoration would be the wrong trade. Verified,
 /// both directions, by `a_peer_that_has_never_heard_of_drafts_still_reads_a_message_carrying_one`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

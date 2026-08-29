@@ -1525,6 +1525,10 @@ fn a_cell_is_inclusive_and_negated_operators_are_imported() {
 /// type outside the modelled set, plus a `cellIs` whose operand is a formula
 /// rather than a bare number — fell to `_ => None` and vanished with no report
 /// entry, which is indistinguishable from a file that never had the rule.
+///
+/// `iconSet` is still in that set on purpose: it needs a whole presentation
+/// this model has no room for — a set of glyphs, a per-icon threshold, and a
+/// renderer that can draw them — so it stays counted rather than half-built.
 #[test]
 fn a_unrepresentable_cf_rules_are_reported_rather_than_dropped_silently() {
     const STYLES: &[u8] =
@@ -1563,17 +1567,43 @@ fn a_unrepresentable_cf_rules_are_reported_rather_than_dropped_silently() {
         ("xl/worksheets/sheet1.xml", &sheet_xml),
     ]);
     let import = import_package(bytes).unwrap();
-    assert!(
-        import.workbook.sheets[0].conditional_formats.is_empty(),
-        "none of these are representable, so none should have been kept: {:?}",
-        import.workbook.sheets[0].conditional_formats
+    // Two of these six now reach the model: the `expression` rule outright, and
+    // the `timePeriod` rule through the formula Excel writes beside it.
+    let kept = &import.workbook.sheets[0].conditional_formats;
+    assert_eq!(
+        kept.len(),
+        2,
+        "the expression rule and the time-period rule's formula: {kept:?}"
+    );
+    assert_eq!(
+        kept[0].rule,
+        casual_calc_model::CfRule::Expression("AND($A1>0,$B1<9)".to_owned()),
+        "with its formula as the file wrote it"
+    );
+    assert_eq!(
+        kept[1].rule,
+        casual_calc_model::CfRule::Expression("FLOOR(D1,1)=TODAY()-1".to_owned()),
+        "and `yesterday` as the formula that means it"
     );
     let entries = import.report.entries();
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.feature == "conditionalFormatting/expression"),
+        "an expression rule is kept whole, so it is not a loss to report: {entries:?}"
+    );
+    // Kept, and still named — the rule paints the right cells but reopens in
+    // Excel as "Use a formula" rather than "Yesterday", and a host has to be
+    // able to say so.
+    let time_period = entries
+        .iter()
+        .find(|e| e.feature == "conditionalFormatting/timePeriod")
+        .expect("a time-period rule is degraded, not silently reshaped");
+    assert_eq!(time_period.model, ModelOutcome::Degraded);
+    assert_eq!(time_period.count, 1);
     for feature in [
         "conditionalFormatting/iconSet",
-        "conditionalFormatting/expression",
         "conditionalFormatting/cellIs",
-        "conditionalFormatting/timePeriod",
         "conditionalFormatting/beginsWith",
         "conditionalFormatting/containsErrors",
     ] {
