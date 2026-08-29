@@ -440,9 +440,25 @@ pub(crate) fn html_cell_css(style: &Style) -> String {
     // at import also covers every emitter that formats a colour, and the CI
     // SEC-001 sink check cannot see this file at all: it greps `webapp/*.js`
     // and the host's HTML, so markup assembled in Rust was outside it.
+    // **An eight-digit OOXML colour is `AARRGGBB`; an eight-digit CSS colour is
+    // `RRGGBBAA`.** Emitting one as the other silently swaps alpha for red: an
+    // opaque black `FF000000` reads in CSS as `#FF0000` at zero alpha —
+    // fully transparent red. The cell loses its colour on paste and in the
+    // printout, and nothing reports it, because the string was a valid colour
+    // in both notations and only meant different things.
+    //
+    // Reordered rather than dropped: the alpha is real and the receiving
+    // application can honour it.
     let hex = |c: &String| -> Option<String> {
         let ok = matches!(c.len(), 3 | 6 | 8) && c.chars().all(|ch| ch.is_ascii_hexdigit());
-        ok.then(|| c.clone())
+        if !ok {
+            return None;
+        }
+        if c.len() == 8 {
+            let (alpha, rgb) = c.split_at(2);
+            return Some(format!("{rgb}{alpha}"));
+        }
+        Some(c.clone())
     };
     if let Some(c) = style.font_color.as_ref().and_then(hex) {
         css.push_str(&format!("color:#{c};"));

@@ -442,23 +442,93 @@ pub fn session_images(sheet: usize) -> String {
     .unwrap_or_else(|| "[]".to_owned())
 }
 
-/// Strip OOXML header/footer field codes, keeping the text between them.
+/// One piece of a resolved header or footer section.
 ///
-/// The codes are things like `&L` (left section), `&P` (page number) and
-/// `&"Arial,Bold"` (font). Printing them literally would put `&L&"Calibri"Sales`
-/// at the top of the page, which is worse than dropping them.
-pub(crate) fn strip_hf_codes(raw: &str) -> String {
-    let mut out = String::new();
+/// A page number is not a string: nothing in the engine knows which page a
+/// given line of the printout lands on, because nothing here paginates. It
+/// stays a *token* all the way to the emitter, which turns it into a CSS page
+/// counter — the one mechanism that can count pages in a document the browser
+/// is breaking up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HfPart {
+    /// Literal text, already substituted. Not yet escaped for any syntax.
+    Text(String),
+    /// `&P` — the number of the page this header is printed on.
+    PageNumber,
+    /// `&N` — how many pages the printout has in total.
+    PageCount,
+}
+
+/// The values a header/footer field code can be substituted from.
+///
+/// The engine reads no clock, so `now` is whatever the host last passed to
+/// [`crate::session_set_clock`]; `None` when it has passed none, in which case
+/// `&D` and `&T` resolve to nothing rather than to an invented date.
+pub(crate) struct HfContext<'a> {
+    /// The sheet's tab name, for `&A`.
+    pub sheet: &'a str,
+    /// The workbook's file name, for `&F`, and its path for `&Z`. Empty when
+    /// the host has not named the document.
+    pub file: &'a str,
+    /// The host's clock as a date serial, for `&D` and `&T`.
+    pub now: Option<f64>,
+}
+
+/// Resolve an OOXML header/footer string into its left, centre and right
+/// sections with every field code substituted.
+///
+/// The codes are `&L`/`&C`/`&R` (which section the text after them belongs
+/// to), value codes like `&P` (page number), `&A` (sheet name) and `&D` (date),
+/// and formatting codes like `&B` (bold) or `&"Arial,Bold"` (font). Text before
+/// any section code is centred, which is what Excel does with an unmarked
+/// header.
+///
+/// Formatting codes are consumed and dropped rather than applied. They are
+/// per-run, and the sections are emitted into CSS `content:` strings, which
+/// carry no markup — a run cannot change font in the middle of one. Dropping
+/// them loses emphasis; printing them would put `&B` on the paper.
+///
+/// This replaces a `strip_hf_codes` that turned every code into a space, so
+/// `&LSales&C&P` printed "Sales" and the page number the dialog advertises
+/// could not appear at all.
+pub(crate) fn hf_sections(raw: &str, ctx: &HfContext) -> [Vec<HfPart>; 3] {
+    let mut sections: [Vec<HfPart>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    // Unmarked text is centred, as Excel treats it.
+    let mut current = 1usize;
+    let mut buf = String::new();
+
+    // Held until the section is switched or the string ends, so consecutive
+    // literal characters become one part rather than one part each.
+    macro_rules! flush {
+        ($sections:expr, $current:expr, $buf:expr) => {
+            if !$buf.is_empty() {
+                $sections[$current].push(HfPart::Text(std::mem::take(&mut $buf)));
+            }
+        };
+    }
+
+    let stamp = |code: &str| {
+        ctx.now
+            .map(|serial| casual_calc_layout::format_number(serial, code))
+            .unwrap_or_default()
+    };
+
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '&' {
-            out.push(ch);
+            buf.push(ch);
             continue;
         }
-        match chars.peek().copied() {
+        let Some(code) = chars.next() else {
+            // A trailing bare `&` is not a code. Excel writes `&&` for a
+            // literal one, but a file that ends mid-code should still print
+            // its text rather than swallow the character.
+            buf.push('&');
+            break;
+        };
+        match code {
             // A quoted font name: skip to the closing quote.
-            Some('"') => {
-                chars.next();
+            '"' => {
                 for c in chars.by_ref() {
                     if c == '"' {
                         break;
@@ -466,27 +536,70 @@ pub(crate) fn strip_hf_codes(raw: &str) -> String {
                 }
             }
             // `&&` is a literal ampersand.
-            Some('&') => {
-                chars.next();
-                out.push('&');
-            }
+            '&' => buf.push('&'),
             // A point size is `&` followed by digits.
-            Some(d) if d.is_ascii_digit() => {
+            d if d.is_ascii_digit() => {
                 while chars.peek().is_some_and(char::is_ascii_digit) {
                     chars.next();
                 }
-                out.push(' ');
             }
-            // Every other code is a single letter. `&L`/`&C`/`&R` separate the
-            // three sections, so they become a gap rather than nothing.
-            Some(_) => {
-                chars.next();
-                out.push(' ');
+            'L' | 'C' | 'R' => {
+                flush!(sections, current, buf);
+                current = match code {
+                    'L' => 0,
+                    'C' => 1,
+                    _ => 2,
+                };
             }
-            None => {}
+            'P' => {
+                flush!(sections, current, buf);
+                sections[current].push(HfPart::PageNumber);
+            }
+            'N' => {
+                flush!(sections, current, buf);
+                sections[current].push(HfPart::PageCount);
+            }
+            'A' => buf.push_str(ctx.sheet),
+            'F' | 'Z' => buf.push_str(ctx.file),
+            'D' => buf.push_str(&stamp("yyyy-mm-dd")),
+            'T' => buf.push_str(&stamp("hh:mm:ss")),
+            // `&K` carries a six-digit colour, or a two-digit theme index and
+            // a tint; the six-digit form is the one Excel writes. Its digits
+            // are not text and must not print.
+            'K' => {
+                for _ in 0..6 {
+                    if chars.peek().is_some_and(char::is_ascii_hexdigit) {
+                        chars.next();
+                    }
+                }
+            }
+            // Every remaining code is a formatting toggle (`&B`, `&I`, `&U`,
+            // `&E`, `&S`, `&X`, `&Y`, `&O`, `&H`), a picture (`&G`), or a
+            // reserved letter. All are consumed and none print.
+            _ => {}
         }
     }
-    out.trim().to_owned()
+    flush!(sections, current, buf);
+
+    for section in &mut sections {
+        trim_edges(section);
+    }
+    sections
+}
+
+/// Drop leading and trailing whitespace from a resolved section, so a header
+/// written `&L Sales &C` does not print with the spaces that only separated
+/// its codes.
+fn trim_edges(parts: &mut Vec<HfPart>) {
+    if let Some(HfPart::Text(first)) = parts.first_mut() {
+        let trimmed = first.trim_start().to_owned();
+        *first = trimmed;
+    }
+    if let Some(HfPart::Text(last)) = parts.last_mut() {
+        let trimmed = last.trim_end().to_owned();
+        *last = trimmed;
+    }
+    parts.retain(|p| !matches!(p, HfPart::Text(t) if t.is_empty()));
 }
 
 /// The decision behind [`guard_protected`], separated from the refusal.

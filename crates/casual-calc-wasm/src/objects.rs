@@ -1404,6 +1404,21 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+thread_local! {
+    /// The last date serial the host handed to [`session_set_clock`].
+    ///
+    /// The session keeps this for the calc engine but exposes no way to read it
+    /// back, and printing needs it for the `&D`/`&T` header codes. Kept here
+    /// rather than added to the SDK surface: it is a cache of what the host
+    /// already said, not a new thing the engine knows.
+    static HOST_CLOCK: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The host's clock as a date serial, or `None` if it has never set one.
+pub(crate) fn host_clock() -> Option<f64> {
+    HOST_CLOCK.with(std::cell::Cell::get)
+}
+
 /// Tell the engine what "now" is, as a date serial, and reseed the random
 /// functions.
 ///
@@ -1414,6 +1429,7 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 /// recalculation possible.
 #[wasm_bindgen]
 pub fn session_set_clock(now_serial: f64, seed: f64) {
+    HOST_CLOCK.with(|c| c.set(now_serial.is_finite().then_some(now_serial)));
     SESSION.with(|cell| {
         if let Some(session) = cell.borrow_mut().as_mut() {
             // Through the SDK rather than poking the model: the environment is
@@ -1457,16 +1473,224 @@ pub(crate) fn format_json_number(n: f64) -> String {
     }
 }
 
+/// A length in twips as CSS pixels, at the 96 dpi CSS reference resolution.
+///
+/// The model measures the grid in twips (1/1440 in) and CSS measures it in
+/// `px` (1/96 in), so the conversion is exactly 15 twips per pixel. A default
+/// 960-twip column is 64 px, which is what the screen grid draws it as.
+fn twips_to_css_px(twips: i64) -> f64 {
+    twips as f64 / 15.0
+}
+
+/// A number for a stylesheet: at most three decimals, no trailing zeros, and
+/// the same bytes for the same input on every platform.
+fn css_num(value: f64) -> String {
+    let rounded = (value * 1000.0).round() / 1000.0;
+    // `-0` is a number CSS accepts and a diff nobody wants to explain.
+    let rounded = if rounded == 0.0 { 0.0 } else { rounded };
+    let mut s = format!("{rounded:.3}");
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
+
+/// A workbook string as a quoted CSS string, safe to place inside a `<style>`
+/// element.
+///
+/// Two escapes, for two different parsers. CSS needs `"` and `\` escaped.
+/// **HTML needs `<` escaped**, and that one is the security-relevant half: the
+/// content of a `<style>` element is raw text that ends at the first
+/// `</style`, so a header of `</style><img onerror=…>` would close the
+/// stylesheet and run script — in a popup that `document.write` gave the
+/// editor's own origin, next to the session token and the collaboration
+/// socket. `push_html_escaped` cannot help here, because `&lt;` inside a
+/// stylesheet is four literal characters, not a `<`. The CSS hex escape
+/// `\3c ` is the form both parsers agree on.
+fn css_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            // `<` and `&` cannot end the style element on their own, but a
+            // hex escape for both removes the question rather than reasoning
+            // about which sequences do.
+            '<' | '>' | '&' => out.push_str(&format!("\\{:x} ", ch as u32)),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\{:x} ", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The CSS `content` value for one header or footer section, or `None` when
+/// the section is empty.
+fn hf_content(parts: &[crate::view::HfPart]) -> Option<String> {
+    use crate::view::HfPart;
+    if parts.is_empty() {
+        return None;
+    }
+    let terms: Vec<String> = parts
+        .iter()
+        .map(|p| match p {
+            HfPart::Text(t) => css_quoted(t),
+            HfPart::PageNumber => "counter(page)".to_owned(),
+            HfPart::PageCount => "counter(pages)".to_owned(),
+        })
+        .collect();
+    Some(terms.join(" "))
+}
+
+/// The CSS border style keyword for an OOXML line-style token.
+///
+/// CSS has four line kinds where OOXML has fourteen tokens, so the mapping is
+/// lossy by construction: every dashed variant becomes `dashed` and the widths
+/// carry the distinction, which is what [`casual_calc_layout::border_width`]
+/// already decides for the screen. Sharing that function is the point — a
+/// second table here would be a second answer to "how thick is `medium`", and
+/// the disagreement would only be visible by holding a printout against a
+/// screenshot.
+fn css_border_style(token: &str) -> &'static str {
+    match token {
+        "dashed" | "mediumDashed" | "dashDot" | "dashDotDot" | "mediumDashDot"
+        | "mediumDashDotDot" | "slantDashDot" => "dashed",
+        "dotted" | "hair" => "dotted",
+        "double" => "double",
+        _ => "solid",
+    }
+}
+
+/// An OOXML colour as a CSS `#rrggbb`, or `None` when it is not one.
+///
+/// **Validated, not escaped**, for the reason [`crate::clipboard::html_cell_css`]
+/// gives at length: a colour comes out of the file verbatim and is dropped into
+/// a `style="…"` attribute in a document that runs with the editor's origin.
+/// A colour is hex or it is not a colour.
+///
+/// An eight-digit OOXML colour is `AARRGGBB`; CSS's eight-digit form is
+/// `RRGGBBAA`. Passing one through as the other is how an opaque black
+/// `FF000000` becomes a fully transparent red, so the alpha is dropped and the
+/// three colour bytes are kept.
+fn css_hex_color(raw: &str) -> Option<String> {
+    let hex = raw.strip_prefix('#').unwrap_or(raw);
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        3 | 6 => Some(format!("#{hex}")),
+        8 => Some(format!("#{}", &hex[2..])),
+        _ => None,
+    }
+}
+
+/// The CSS for a cell's four border edges, or an empty string when it has none.
+fn print_border_css(borders: &casual_calc_model::Borders) -> String {
+    let mut css = String::new();
+    let mut edge = |side: &str, e: &Option<casual_calc_model::BorderEdge>| {
+        let Some(e) = e else { return };
+        if e.style == "none" {
+            return;
+        }
+        let colour = e
+            .color
+            .as_deref()
+            .and_then(css_hex_color)
+            .unwrap_or_else(|| "#000".to_owned());
+        css.push_str(&format!(
+            "border-{side}:{}px {} {colour};",
+            casual_calc_layout::border_width(&e.style),
+            css_border_style(&e.style),
+        ));
+    };
+    edge("top", &borders.top);
+    edge("right", &borders.right);
+    edge("bottom", &borders.bottom);
+    edge("left", &borders.left);
+    css
+}
+
+/// What a merge does to one cell of the printed table.
+enum Cover {
+    /// Not merged, or merged in a way that prints nothing here.
+    Plain,
+    /// The visible top-left of a merge: `(colspan, rowspan)`.
+    Anchor(usize, usize),
+    /// Inside a merge whose anchor is already printed; emit no `<td>` at all.
+    Hidden,
+}
+
 /// A printable HTML document for a sheet, honouring its page setup.
 ///
-/// A page-setup panel that only edits the file is half a feature: the settings
-/// are invisible until the workbook is opened somewhere else. This renders what
-/// they describe — paper size and orientation as an `@page` rule, the margins,
-/// the header and footer text, and whether grid lines and row/column headings
-/// are printed.
+/// # Why HTML, and who decides where the pages break
+///
+/// The host prints this by writing it into a window and calling `print()`, so
+/// the **browser** breaks it into pages. That is a choice with a cost, and the
+/// cost was measured before it was accepted: a printout whose page breaks
+/// disagree with a preview is its own defect.
+///
+/// The alternative is for the engine to paginate — to decide which rows and
+/// which columns land on page 3 and emit one positioned block per page. It was
+/// rejected here, on three grounds:
+///
+/// 1. **There is nothing for the browser to disagree *with*.** `casual-calc-layout`
+///    does not paginate. It computes axes, viewports, display lists and charts;
+///    `grep -rn paginat crates/` finds one comment. The claim in
+///    `docs/12` §6 that "`casual-calc-layout` + `render` paginate" is not true
+///    of the code, and this function could not have wired up something that
+///    does not exist. There is also no print preview and no page-layout view
+///    (`docs/12` §3.17), so the only thing a user compares the paper against is
+///    **the screen grid** — and screen fidelity is what column widths, merges
+///    and borders buy.
+/// 2. **A paginator here would be a second layout engine for the same grid.**
+///    That is the exact fault `RND-10` removed when the canvas stopped drawing
+///    charts its own way; re-introducing it for printing would mean every
+///    layout fix had to be made twice, with the divergence invisible until
+///    somebody held a printout against a screenshot.
+/// 3. **It would still print through the browser**, so its breaks would have to
+///    be forced against the browser's own — solving a disagreement by creating
+///    one.
+///
+/// So the browser paginates, and the engine's job is to hand it the numbers
+/// rather than leave it guessing: real column widths and row heights from
+/// [`casual_calc_layout::GridGeometry`], the paper and margins as an `@page`
+/// rule, and the scale as a `zoom` on the table.
+///
+/// **The one thing the browser cannot work out is the scale**, because CSS has
+/// no fit-to-page primitive: "fit this on one page wide" is arithmetic over the
+/// grid's own widths against the printable area, and only the engine has both.
+/// [`casual_calc_layout::print::effective_scale`] computes it, and the same
+/// function will answer for the PDF writer (`IO-03`).
+///
+/// `zoom` and not `transform: scale()`: a transform does not affect layout, so
+/// the browser would paginate the *unscaled* box and the shrunken content would
+/// sit in the corner of full-size pages. `zoom` reflows, which is what makes
+/// "fit to one page wide" actually produce one page.
+///
+/// # What is carried
+///
+/// Paper size and orientation, the four margins, column widths, row heights,
+/// merges as `colspan`/`rowspan`, per-cell borders, bold/italic/colour/fill and
+/// number-formatted text, print gridlines and row/column headings, the print
+/// area, repeat-rows-at-top, manual row breaks, the three scale settings, and
+/// the header/footer field codes — including `&P`, as a CSS page counter.
 ///
 /// Rows and columns the sheet hides are left out, as they are when Excel
 /// prints. The range is the used region unless `Print_Area` names one.
+///
+/// # What is not
+///
+/// Charts, images and conditional formatting do not print; nor do manual
+/// *column* breaks, which need the pagination this deliberately does not do.
+/// Header and footer come from `oddHeader`/`oddFooter` only — the
+/// `differentFirst` and `differentOddEven` variants are not read.
 #[wasm_bindgen]
 pub fn session_print_html(sheet: usize) -> String {
     with_session(|s| {
@@ -1488,17 +1712,10 @@ pub fn session_print_html(sheet: usize) -> String {
                 .unwrap_or(fallback)
         };
 
-        // `paperSize` is an enum of numbered stock sizes; only the two in
-        // everyday use are named here, and anything else falls back to `auto`
-        // so the printer decides rather than this guessing wrong.
-        let paper = match attr(&p.page, "paperSize").as_str() {
-            "1" | "" => "letter",
-            "9" => "A4",
-            "8" => "A3",
-            "11" => "A5",
-            "5" => "legal",
-            _ => "auto",
-        };
+        // `paperSize` is an enum of numbered stock sizes; the layout crate owns
+        // the table, because a fit-to-page scale needs the paper's *extent* and
+        // not only its CSS name.
+        let paper = casual_calc_layout::print::paper(&attr(&p.page, "paperSize"));
         let landscape = attr(&p.page, "orientation") == "landscape";
         let grid = on(&p.options, "gridLines");
         let headings = on(&p.options, "headings");
@@ -1511,6 +1728,13 @@ pub fn session_print_html(sheet: usize) -> String {
         }
         if sh.cells.iter().next().is_none() {
             return String::new(); // nothing to print
+        }
+        // A merge reaches past the cells that carry a value — only its top-left
+        // holds one — so a merged banner over empty columns would otherwise
+        // fall outside the used region and print as a single narrow cell.
+        for m in &sh.merges {
+            last_row = last_row.max(m.start.row.max(m.end.row));
+            last_col = last_col.max(m.start.col.max(m.end.col));
         }
         // `Print_Area` narrows what prints; without one the used region prints.
         let (mut first_row, mut first_col) = (0u32, 0u32);
@@ -1544,12 +1768,77 @@ pub fn session_print_html(sheet: usize) -> String {
             ))
         });
 
+        // The same geometry the screen grid is drawn from. Hidden lines are
+        // already zero-sized here, so they cost nothing in the fit-to-page sum
+        // without being filtered a second time.
+        let geometry = casual_calc_layout::GridGeometry::for_sheet(sh);
+
+        // The strip carrying row numbers is a column of the printed table and
+        // therefore part of what has to fit on the paper.
+        const HEADING_COL_TWIPS: i64 = 600;
+        let (mut content_w, content_h) = casual_calc_layout::print::content_extent(
+            &geometry,
+            (first_row, last_row),
+            (first_col, last_col),
+        );
+        if headings {
+            content_w += HEADING_COL_TWIPS;
+        }
+        let page_box = casual_calc_layout::print::PageBox::new(
+            paper,
+            landscape,
+            [
+                inches("top", 0.75),
+                inches("right", 0.7),
+                inches("bottom", 0.75),
+                inches("left", 0.7),
+            ],
+        );
+        let scaling = casual_calc_layout::print::Scaling::from_print(sh);
+        let scale =
+            casual_calc_layout::print::effective_scale(scaling, (content_w, content_h), page_box);
+
         let mut out = String::new();
         out.push_str("<!doctype html><meta charset=\"utf-8\"><title>");
         push_html_escaped(&mut out, &sh.name);
         out.push_str("</title><style>");
+
+        // Header and footer live in `@page` margin boxes rather than in a
+        // `<div>` at the top of the document. Two reasons, and the first is the
+        // one the dialog promises: a page number can only be *counted*, and
+        // `counter(page)` inside a margin box is the one place CSS can count
+        // it. The second is that a margin box repeats on every page, where the
+        // `<div>` this replaces printed once — so a two-page report had a
+        // header on page one and nothing on page two.
+        //
+        // The cost is stated rather than hidden: a print engine that ignores
+        // margin boxes prints no header at all. That is the trade for `&P`
+        // working, and it is the mechanism the PDF writer (`IO-03`) will use.
+        let clock = host_clock();
+        let ctx = crate::view::HfContext {
+            sheet: &sh.name,
+            file: "",
+            now: clock,
+        };
+        let hf = |key: &str| p.header_footer_text.get(key).cloned().unwrap_or_default();
+        let mut margin_boxes = String::new();
+        for (raw, edge) in [(hf("oddHeader"), "top"), (hf("oddFooter"), "bottom")] {
+            if raw.is_empty() {
+                continue;
+            }
+            let sections = crate::view::hf_sections(&raw, &ctx);
+            for (parts, side) in sections.iter().zip(["left", "center", "right"]) {
+                if let Some(content) = hf_content(parts) {
+                    margin_boxes.push_str(&format!(
+                        "@{edge}-{side}{{content:{content};font:9pt Calibri,Arial,sans-serif;\
+                         color:#444;}}"
+                    ));
+                }
+            }
+        }
         out.push_str(&format!(
-            "@page{{size:{paper}{};margin:{}in {}in {}in {}in;}}",
+            "@page{{size:{}{};margin:{}in {}in {}in {}in;{margin_boxes}}}",
+            paper.css,
             if landscape { " landscape" } else { "" },
             inches("top", 0.75),
             inches("right", 0.7),
@@ -1566,9 +1855,8 @@ pub fn session_print_html(sheet: usize) -> String {
         out.push_str(
             "body{margin:0;font:11pt Calibri,Arial,sans-serif;color:#000;background:#fff}\
              table{border-collapse:collapse;table-layout:fixed}\
-             td,th{padding:1px 4px;white-space:pre;overflow:hidden}\
-             th{font-weight:600;background:#f0f0f0;text-align:center}\
-             .hf{font-size:9pt;color:#444}",
+             td,th{padding:1px 4px;white-space:pre;overflow:hidden;vertical-align:bottom}\
+             th{font-weight:600;background:#f0f0f0;text-align:center}",
         );
         if grid || headings {
             out.push_str("td,th{border:1px solid #b0b0b0}");
@@ -1576,30 +1864,121 @@ pub fn session_print_html(sheet: usize) -> String {
         if centre_h {
             out.push_str("table{margin-left:auto;margin-right:auto}");
         }
+        // The scale the dialog collects, finally applied. Only the table is
+        // scaled: Excel does not shrink the header and footer with the sheet,
+        // and they are in the page margins here, outside it.
+        if (scale - 1.0).abs() > f64::EPSILON {
+            out.push_str(&format!("table{{zoom:{}}}", css_num(scale)));
+        }
         out.push_str("</style>");
-
-        let hf = |key: &str| p.header_footer_text.get(key).cloned().unwrap_or_default();
-        // `&L`/`&C`/`&R` split a header into its three cells, and the rest of
-        // the field codes are dropped rather than printed as literal text.
-        let hf_html = |raw: &str| {
-            if raw.is_empty() {
-                return String::new();
-            }
-            let cleaned = strip_hf_codes(raw);
-            if cleaned.trim().is_empty() {
-                return String::new();
-            }
-            let mut h = String::from("<div class=\"hf\">");
-            push_html_escaped(&mut h, &cleaned);
-            h.push_str("</div>");
-            h
-        };
-        out.push_str(&hf_html(&hf("oddHeader")));
 
         let vis_cols: Vec<u32> = (first_col..=last_col)
             .filter(|c| !sh.hidden_cols.contains(c))
             .collect();
+
+        // Whether a row prints, and in which of the table's two sections. A
+        // repeated title row belongs to `<thead>` and nowhere else; printing it
+        // in the body as well would show it twice on the first page.
+        let row_prints = |r: u32, thead: bool| {
+            !sh.is_row_hidden(r) && title_rows.is_some_and(|(a, b)| r >= a && r <= b) == thead
+        };
+
+        // What a merge does to the cell at (r, c).
+        //
+        // Spans count *printed* lines, not model lines: a merge across a hidden
+        // column is one column narrower on paper, and one whose top-left is
+        // clipped away by the print area is anchored at the first corner that
+        // does print. Both are what Excel puts on the page, and either done the
+        // naive way produces a row with the wrong number of cells in it — an
+        // HTML table that renders as a staircase.
+        //
+        // Clipped to the section as well as the print area, because a rowspan
+        // cannot reach out of `<thead>` into the body.
+        let cover = |r: u32, c: u32, thead: bool| -> Cover {
+            let Some(m) = sh.merges.iter().find(|m| {
+                let (r0, r1) = (m.start.row.min(m.end.row), m.start.row.max(m.end.row));
+                let (c0, c1) = (m.start.col.min(m.end.col), m.start.col.max(m.end.col));
+                (r0..=r1).contains(&r) && (c0..=c1).contains(&c)
+            }) else {
+                return Cover::Plain;
+            };
+            let (r0, r1) = (m.start.row.min(m.end.row), m.start.row.max(m.end.row));
+            let (c0, c1) = (m.start.col.min(m.end.col), m.start.col.max(m.end.col));
+            let rows: Vec<u32> = (r0.max(first_row)..=r1.min(last_row))
+                .filter(|&x| row_prints(x, thead))
+                .collect();
+            let cols: Vec<u32> = (c0.max(first_col)..=c1.min(last_col))
+                .filter(|x| !sh.hidden_cols.contains(x))
+                .collect();
+            match (rows.first(), cols.first()) {
+                (Some(&ar), Some(&ac)) if (ar, ac) == (r, c) => {
+                    Cover::Anchor(cols.len(), rows.len())
+                }
+                (Some(_), Some(_)) => Cover::Hidden,
+                _ => Cover::Plain,
+            }
+        };
+
+        let push_cell = |out: &mut String, r: u32, c: u32, thead: bool| {
+            let spans = match cover(r, c, thead) {
+                Cover::Hidden => return,
+                Cover::Plain => String::new(),
+                Cover::Anchor(cols, rows) => {
+                    let mut s = String::new();
+                    if cols > 1 {
+                        s.push_str(&format!(" colspan=\"{cols}\""));
+                    }
+                    if rows > 1 {
+                        s.push_str(&format!(" rowspan=\"{rows}\""));
+                    }
+                    s
+                }
+            };
+            let cell = sh.cells.get(CellRef::new(r, c));
+            let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
+            let style = cell
+                .and_then(|cl| cl.style)
+                .and_then(|id| wb.styles.get(id));
+            let mut css = style.map(html_cell_css).unwrap_or_default();
+            if let Some(borders) = style.and_then(|st| st.border.as_ref())
+                && !borders.is_empty()
+            {
+                css.push_str(&print_border_css(borders));
+            }
+            if css.is_empty() {
+                out.push_str(&format!("<td{spans}>"));
+            } else {
+                out.push_str(&format!("<td{spans} style=\"{css}\">"));
+            }
+            push_html_escaped(out, &text);
+            out.push_str("</td>");
+        };
+
         out.push_str("<table>");
+        // The column widths, which are the difference between a printout that
+        // looks like the sheet and one that does not. `<colgroup>` is the only
+        // place a `table-layout:fixed` table takes them from.
+        out.push_str("<colgroup>");
+        if headings {
+            out.push_str(&format!(
+                "<col style=\"width:{}px\">",
+                css_num(twips_to_css_px(HEADING_COL_TWIPS))
+            ));
+        }
+        for &c in &vis_cols {
+            out.push_str(&format!(
+                "<col style=\"width:{}px\">",
+                css_num(twips_to_css_px(geometry.columns.size(c)))
+            ));
+        }
+        out.push_str("</colgroup>");
+
+        let row_open = |r: u32, broken: bool| {
+            let height = css_num(twips_to_css_px(geometry.rows.size(r)));
+            let brk = if broken { "break-before:page;" } else { "" };
+            format!("<tr style=\"{brk}height:{height}px\">")
+        };
+
         if headings {
             out.push_str("<tr><th></th>");
             for &c in &vis_cols {
@@ -1614,61 +1993,34 @@ pub fn session_print_html(sheet: usize) -> String {
         if let Some((tr0, tr1)) = title_rows {
             out.push_str("<thead>");
             for r in tr0..=tr1.min(last_row) {
-                if sh.is_row_hidden(r) {
+                if !row_prints(r, true) {
                     continue;
                 }
-                out.push_str("<tr>");
+                out.push_str(&row_open(r, false));
                 if headings {
                     out.push_str(&format!("<th>{}</th>", r + 1));
                 }
                 for &c in &vis_cols {
-                    let cell = sh.cells.get(CellRef::new(r, c));
-                    let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
-                    out.push_str("<td>");
-                    push_html_escaped(&mut out, &text);
-                    out.push_str("</td>");
+                    push_cell(&mut out, r, c, true);
                 }
                 out.push_str("</tr>");
             }
             out.push_str("</thead>");
         }
         for r in first_row..=last_row {
-            if sh.is_row_hidden(r) {
+            if !row_prints(r, false) {
                 continue;
             }
-            // A title row is already in the <thead>; printing it again in the
-            // body would show it twice on the first page.
-            if title_rows.is_some_and(|(a, b)| r >= a && r <= b) {
-                continue;
-            }
-            if row_breaks.contains(&r) {
-                out.push_str("<tr style=\"break-before:page\">");
-            } else {
-                out.push_str("<tr>");
-            }
+            out.push_str(&row_open(r, row_breaks.contains(&r)));
             if headings {
                 out.push_str(&format!("<th>{}</th>", r + 1));
             }
             for &c in &vis_cols {
-                let cell = sh.cells.get(CellRef::new(r, c));
-                let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
-                let css = cell
-                    .and_then(|cl| cl.style)
-                    .and_then(|id| wb.styles.get(id))
-                    .map(html_cell_css)
-                    .unwrap_or_default();
-                if css.is_empty() {
-                    out.push_str("<td>");
-                } else {
-                    out.push_str(&format!("<td style=\"{css}\">"));
-                }
-                push_html_escaped(&mut out, &text);
-                out.push_str("</td>");
+                push_cell(&mut out, r, c, false);
             }
             out.push_str("</tr>");
         }
         out.push_str("</table>");
-        out.push_str(&hf_html(&hf("oddFooter")));
         out
     })
     .unwrap_or_default()

@@ -1760,3 +1760,98 @@ mod charts {
         assert_eq!(back, list);
     }
 }
+
+/// Print geometry: the paper table, the printable box, and the scale the three
+/// page-setup controls work out to.
+///
+/// This arithmetic is the half of printing CSS cannot express — there is no
+/// fit-to-page primitive — so it is the half that has to be right here.
+mod print_geometry {
+    use crate::print::{PageBox, Scaling, TWIPS_PER_INCH, effective_scale, paper};
+
+    #[test]
+    fn the_named_papers_have_their_real_extents() {
+        assert_eq!(paper("1").css, "letter");
+        assert_eq!(paper("1").width, 8 * TWIPS_PER_INCH + TWIPS_PER_INCH / 2);
+        assert_eq!(paper("9").css, "A4");
+        // 210 mm x 297 mm to the nearest twip.
+        assert_eq!((paper("9").width, paper("9").height), (11906, 16838));
+        // An unnamed stock size keeps an extent to compute a scale from while
+        // letting the printer choose the sheet.
+        assert_eq!(paper("42").css, "auto");
+        assert_eq!(paper("42").width, paper("1").width);
+    }
+
+    #[test]
+    fn landscape_swaps_the_axes_and_margins_come_off_both() {
+        let portrait = PageBox::new(paper("1"), false, [0.75, 0.7, 0.75, 0.7]);
+        let landscape = PageBox::new(paper("1"), true, [0.75, 0.7, 0.75, 0.7]);
+        assert_eq!(portrait.width, 12240 - 2 * 1008);
+        assert_eq!(landscape.width, 15840 - 2 * 1008);
+        assert_eq!(landscape.height, 12240 - 2 * 1080);
+        // Margins wider than the paper must not produce a zero or negative
+        // printable area, or every scale computed from it is nonsense.
+        let absurd = PageBox::new(paper("1"), false, [20.0, 20.0, 20.0, 20.0]);
+        assert_eq!((absurd.width, absurd.height), (1, 1));
+    }
+
+    #[test]
+    fn fit_to_page_shrinks_but_never_enlarges() {
+        let page = PageBox::new(paper("1"), false, [0.75, 0.7, 0.75, 0.7]);
+        let fit = Scaling::Fit {
+            wide: Some(1),
+            tall: None,
+        };
+        // Twice the printable width fits at half scale.
+        assert!((effective_scale(fit, (page.width * 2, 100), page) - 0.5).abs() < 1e-9);
+        // A sheet narrower than the page is left alone.
+        assert!((effective_scale(fit, (page.width / 4, 100), page) - 1.0).abs() < 1e-9);
+        // Both axes constrained: the tighter one wins.
+        let both = Scaling::Fit {
+            wide: Some(1),
+            tall: Some(1),
+        };
+        let scale = effective_scale(both, (page.width * 2, page.height * 4), page);
+        assert!((scale - 0.25).abs() < 1e-9, "{scale}");
+    }
+
+    #[test]
+    fn a_percentage_is_clamped_to_the_range_the_dialog_offers() {
+        let page = PageBox::new(paper("1"), false, [0.75, 0.7, 0.75, 0.7]);
+        let at = |p| effective_scale(Scaling::Percent(p), (1000, 1000), page);
+        assert!((at(70) - 0.7).abs() < 1e-9);
+        assert!((at(0) - 0.1).abs() < 1e-9);
+        assert!((at(9999) - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_scaling_a_sheet_asks_for_comes_from_its_own_attributes() {
+        let mut sheet = casual_calc_model::Sheet::new(
+            casual_calc_model::SheetId(casual_calc_model::Id::from_parts(2, 1)),
+            "S",
+        );
+        assert_eq!(Scaling::from_print(&sheet), Scaling::Percent(100));
+
+        sheet.print.page.insert("scale".to_owned(), "70".to_owned());
+        assert_eq!(Scaling::from_print(&sheet), Scaling::Percent(70));
+
+        // `fitToPage` selects fit-to-page whatever `scale` also says, and an
+        // explicit 0 means that axis is unconstrained where an absent one
+        // means one page.
+        sheet
+            .print
+            .setup_pr
+            .insert("fitToPage".to_owned(), "1".to_owned());
+        sheet
+            .print
+            .page
+            .insert("fitToHeight".to_owned(), "0".to_owned());
+        assert_eq!(
+            Scaling::from_print(&sheet),
+            Scaling::Fit {
+                wide: Some(1),
+                tall: None
+            }
+        );
+    }
+}
