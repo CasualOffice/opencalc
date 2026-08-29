@@ -22,7 +22,7 @@ import { writeFileSync } from "node:fs";
 
 const PORT = process.env.PORT || 8123;
 const PAGE_URL = `http://127.0.0.1:${PORT}/editor.html`;
-const MAP = new URL("../../docs/68-UX-VISUAL-AUDIT.md", import.meta.url).pathname;
+const MAP = new URL("../../docs/82-UX-VISUAL-AUDIT.md", import.meta.url).pathname;
 
 const findings = [];
 const note = (area, where, what, detail) => findings.push({ area, where, what, detail });
