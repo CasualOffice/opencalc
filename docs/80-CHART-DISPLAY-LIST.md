@@ -157,21 +157,33 @@ Built, and drawing end to end from model to PNG:
 | Line, Area, Scatter | drawn |
 | Pie, Doughnut | drawn |
 | Category labels under the plot | drawn |
+| Legend, on any of the five sides | drawn (`RND-11`, commit `2ffe63f`) |
 | `ChartKind::Unsupported` | named in the picture, as the canvas names it |
 
-**Not drawn, and each is a divergence from the canvas that a reader should
+**The legend paragraph this section used to carry was true when it was written
+and is not true now, and it is worth keeping the correction visible rather than
+deleting the claim.** It said the legend is not drawn, that *"layout has no text
+advances at all"*, and that a chart with a legend therefore renders with a wider
+plot in the PNG than on screen. All three were closed by the second half of
+`RND-11` (`DOC-043`): `casual-calc-text` was created below layout to hold the
+bundled faces and `advance_width`, `label_width`
+(`crates/casual-calc-layout/src/chart.rs:359`) measures through it, and
+`legend_box`/`draw_legend` (`:377`, `:435`) are line-for-line ports of the
+canvas — including the order they take the legend off the frame, *before* the
+axis titles, or the two disagree about what is left. The plot rectangle is what
+is left over from that box, so the width error the old paragraph described was
+the error being fixed, not one being accepted. Reverting `legend_box` to `None`
+fails 5 of 6 layout tests and the render pixel test.
+
+What is honest about the result, and is the residual divergence: layout measures
+the bundled face and the canvas measures the browser's `system-ui`, so their
+plot rectangles differ slightly. That is the same disagreement those two have
+had about every other string since the PNG path existed, and it replaces an
+error the width of the whole legend.
+
+**Still not drawn, and each is a divergence from the canvas that a reader should
 know about rather than discover:**
 
-- **The legend.** The canvas sizes its legend box from `ctx.measureText` of the
-  widest series name. **Layout has no text advances at all** — it emits a
-  string and a rectangle and leaves shaping to the backend, which is ADR-008
-  working as designed. A guessed width would move the *plot rectangle*, which
-  is the one thing this port exists to prevent, so the legend is omitted and
-  its side of the frame is **not reserved**. A chart with a legend therefore
-  renders with a wider plot in the PNG than on screen. This is the largest
-  remaining divergence, and closing it needs a text-advance seam in layout —
-  which column autofit needs anyway, and which is a row of its own rather than
-  something to improvise here.
 - **The y-axis title**, which the canvas draws rotated a quarter turn.
   `PaintItem::Text` has no rotation. The space it takes **is** still reserved,
   so the plot rectangle agrees with the canvas whether or not the label is
@@ -191,7 +203,7 @@ know about rather than discover:**
   **Series** colours are unaffected: they come from the workbook's own theme
   accents and agree exactly.
 
-None of these is silent. The first two are stated here and in the module
+None of these is silent. Each is stated here and in the module
 documentation; `ChartKind::Unsupported` and an unresolvable series both write
 their condition into the picture, which is what the canvas does and is now
 possible headlessly for the first time — before this, a chart in a PNG was

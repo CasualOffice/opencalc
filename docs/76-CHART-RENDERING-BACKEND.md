@@ -17,14 +17,22 @@ dependency choice: pick a Rust charting crate, feed it the series, blit the
 result. That framing is wrong, and it is wrong in a way that would have been
 expensive to discover after the crate was in the lock file.
 
-**The plot backend already exists.** It is in `webapp/editor.js`, it is about
-three hundred lines (`drawCharts` through `drawPie`, roughly lines 250-575),
-and it draws bar, column, line, area, scatter, pie and
+**The plot backend already exists.** At the time this analysis was written it
+was in `webapp/editor.js` — about three hundred lines, `drawCharts` through
+`drawPie` — and it drew bar, column, line, area, scatter, pie and
 doughnut charts with titles, axis titles, a legend on any of five sides, and
 series colours taken from the workbook's own theme accents
 (`drawChartFrame`, `legendBox`, `drawLegend`, `drawBarChart`, `drawLineChart`,
 `drawPie`, `seriesColors`, `valueExtent`). A user looking at a chart in the
-editor is looking at a complete picture.
+editor is looking at a complete picture. **Those functions no longer exist**
+(`DOC-043`): `RND-10` deleted all 224 lines of them once the canvas began
+drawing from the engine's display list, and `RND-11` ported the plotter down to
+`crates/casual-calc-layout/src/chart.rs`, where the same names read
+`legend_box`, `draw_legend`, `push_bars`, `push_line`, `push_pie`,
+`series_colors` and `value_extent`. The paragraph is kept in the past tense
+rather than deleted, because the premise it establishes — that the work is a
+port and not a dependency choice — is the reason Option C was picked, and a
+reader who cannot see the premise cannot check the decision.
 
 **What the headless renderer is missing is not a plotter.** It is missing the
 two things underneath one:
@@ -169,9 +177,11 @@ to what the display list *is*, so it is decided in an ADR before it is built.
   a chart is geometry, and the two conditions a chart can be in that the
   picture cannot show — an unresolvable series, and a `ChartKind` this does not
   draw — write themselves into the picture as the canvas writes them ("no data",
-  "unsupported chart not drawn"). What is still *not* drawn is the legend and
-  the rotated y-axis title, named in [80](80-CHART-DISPLAY-LIST.md) §"What is
-  actually built".
+  "unsupported chart not drawn"). The legend **is** drawn — the second half of
+  `RND-11` put `advance_width` under layout in `casual-calc-text` and ported
+  `legend_box`/`draw_legend` with it. What is still *not* drawn is the rotated
+  y-axis title, named in [80](80-CHART-DISPLAY-LIST.md) §"What is actually
+  built".
 - The chart *part* is retained byte for byte and written back
   (`ChartView::part`), so nothing is lost from the **file**. What is lost is the
   picture, and only in the headless path.

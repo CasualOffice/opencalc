@@ -1,7 +1,34 @@
 # 12 — Competitive analysis
 
-**Checked 2026-08-29 against the editor served at `127.0.0.1:8123`.** Against
-**Google Sheets, Microsoft Excel, OnlyOffice, LibreOffice Calc and Univer**.
+**Checked 2026-08-29 against the editor served at `127.0.0.1:8123`; audited and
+corrected 2026-08-30.** Against **Google Sheets, Microsoft Excel, OnlyOffice,
+LibreOffice Calc and Univer**.
+
+> **Read this first if you are briefing work from this document.**
+>
+> It is the most-briefed-from document in the repository, and by 2026-08-30 it
+> had been caught wrong six times in a week — each time costing real effort,
+> because a false finding sends a round of work at something that is already
+> right. The corrections are `DOC-035`, `DOC-038`, `DOC-040`, `DOC-041`,
+> `DOC-042`, `DOC-043`, `DOC-045` and `IO-06`, and they fall into two kinds
+> worth telling apart:
+>
+> - **Findings that were never true.** Five chords in §4.1 that worked and
+>   always had; §4.6's accessibility number, which a correct mirror produces
+>   just as reliably as a broken one; §3.22's `?doc=` route, which never
+>   existed; §3.17 and §6's claim that the layout crates paginate, which
+>   `IO-03`'s cost estimate was built on.
+> - **Findings that were true and have since been fixed.** Most of §8's
+>   switching-blocker list, in a single day.
+>
+> Both kinds are corrected **in place, with the original struck rather than
+> deleted**, so a reader can see what changed and check it. Every superseded
+> claim names the row that closed it.
+>
+> **The operating rule this document now follows:** a measurement without a date
+> is a claim about a tree that has moved, and a `file:line` is only evidence if
+> somebody reads the line. Two of the six errors survived because a citation was
+> quoted and never opened.
 
 The product goal in this repository is *"a viable alternative to Excel"*. The
 owner's verdict on the current editor is *"bottom tier"*, *"third tier"*, *"not
@@ -37,7 +64,9 @@ with `session_new()` (not the demo workbook — `seed()` at
 `webapp/editor.selection.js:1701` writes its own styled sample, and a probe that
 skips `session_new` measures the sample). Existing measured sources were read
 first and built on rather than redone: `docs/47-UX-AND-FEATURE-MAP.md` (46
-driven behaviours), `docs/68-UX-VISUAL-AUDIT.md` (measured geometry),
+driven behaviours), [82](82-UX-VISUAL-AUDIT.md) (measured geometry — cited as
+`docs/68` in the first version of this document, which was the number collision
+`DOC-035` closed),
 `docs/73-EXCEL-UX-PARITY-AUDIT.md` (a reading pass, explicitly marked
 `[unverified]`), and `docs/14-EXECUTION-TRACKER.md`.
 
@@ -47,16 +76,27 @@ claim about Excel would discredit the rest.
 
 **Numbers this pass established, replacing older ones in the tree:**
 
-| Quantity | Measured | Where |
-| --- | --- | --- |
-| Engine functions | **429** | `crates/casual-calc-eval/src/functions/mod.rs:59` — `AGENTS.md:38` still says 364 |
-| WebAssembly bindings | **274** `#[wasm_bindgen]`, 239 `session_*` | `crates/casual-calc-wasm/src/` |
-| Editor commands | **197** | `listCommands()` |
-| Toolbar controls | **109** | measured at 1440×900 |
-| Crates | 16 | `crates/` |
-| Editor JavaScript | ~20,700 lines across 18 modules | `wc -l webapp/*.js` |
-| WASM payload | **7,811,572 bytes** | `HEAD /pkg/casual_calc_wasm_bg.wasm` |
-| Cold boot to `engine v0.0.0` | **334 ms** local | probe |
+| Quantity | Measured 2026-08-29 | Where | Re-derived 2026-08-30 |
+| --- | --- | --- | --- |
+| Engine functions | **429** | `crates/casual-calc-eval/src/functions/mod.rs` | **429**, and now *derived* rather than counted by hand — see below |
+| WebAssembly bindings | 274 `#[wasm_bindgen]`, 239 `session_*` | `crates/casual-calc-wasm/src/` | **277** / **241** |
+| Editor commands | **197** | `listCommands()` | not re-measured — needs a driven browser |
+| Toolbar controls | **109** | measured at 1440×900 | not re-measured — needs a driven browser |
+| Crates | 16 | `crates/` | **16** |
+| Editor JavaScript | ~20,700 lines across 18 modules | `wc -l webapp/*.js` | **~19,900** across 18 |
+| WASM payload | 7,811,572 bytes | `HEAD /pkg/casual_calc_wasm_bg.wasm` | **7,889,202 bytes** |
+| Cold boot to `engine v0.0.0` | **334 ms** local | probe | not re-measured |
+
+**Why the fourth column exists.** Everything in the second column was true on
+2026-08-29 and four of the eight had moved by the next day, because they are
+counts of a tree that is being worked on. A figure with no date is a figure that
+will be quoted after it stops being true — which is exactly `DOC-038`, below.
+The engine-function count is the one this is now safe for: `FUNCTIONS`
+(`crates/casual-calc-eval/src/functions/mod.rs`) is the declared single source
+of truth and `crates/casual-calc-eval/src/tests.rs` asserts every catalog entry
+has a dispatch arm in `call_function`, so `FUNCTIONS.len()` and the number of
+distinct dispatch names cannot drift apart — both are 429 today. The others are
+`grep` counts with nothing holding them.
 
 ---
 
@@ -152,10 +192,11 @@ the part most likely to be underestimated from the outside.
   users learn how big a sheet is, and how they get to the bottom to append. Here
   the sheet has no visible bottom. **This bug is currently the only thing
   stopping a keyboard user from reaching the crash above.**
-- **No Go To.** `Ctrl+G` and `F5` both do nothing [measured]. The Name Box
-  substitutes and is genuinely good (§5), but `F5` is thirty years of muscle
-  memory and it silently does nothing at all — the worst possible response,
-  because the user cannot tell whether they mis-pressed.
+- ~~**No Go To.** `Ctrl+G` and `F5` both do nothing.~~ **Wrong, and it always
+  was** (`DOC-045`): both chords focus the Name Box, which is this product's Go
+  To and is genuinely good (§5). Asserted since `UX-KEY-04` by
+  `tests/browser/editor.excel-keyboard-parity.spec.mjs`
+  ("Ctrl+G and F5 both reach the name box").
 - **No Go To Special** (`docs/73`). Excel's "select all blanks / all formulas /
   all constants" is the fastest route to several everyday cleanups; Sheets has
   no equivalent either, so this is Excel-only.
@@ -337,8 +378,11 @@ Excel's is how you audit a replace before committing it.
   [measured]. `docs/73` records it as view-and-delete only. There is no way to
   rename a name, change its scope, edit its range, or add a comment. Excel's Name
   Manager does all of that and is where any real workbook's names are maintained.
-- `Ctrl+F3` does nothing [measured], while the Help ▸ Keyboard shortcuts panel
-  advertises `F3` for Name Manager — an advertised chord that misses.
+- ~~`Ctrl+F3` does nothing, while the Help ▸ Keyboard shortcuts panel advertises
+  `F3` for Name Manager.~~ **Both halves were wrong** (`DOC-045`): `Ctrl+F3`
+  opens the Name Manager and always did, and the panel entry was corrected to
+  `Ctrl+F3` by `UX-KEY-04`. What is true is only the first two bullets — the
+  route in is good and there is nothing to manage once you are there.
 
 ### 3.13 Freeze panes, grouping, outlines
 
@@ -370,7 +414,7 @@ show-level-1/2, re-indexed on insert and delete.
   `Column width…` [measured], which is where Excel puts them too — so this is
   reachable, and `docs/47`'s row is about the menu bar specifically.
 - **Both ask with a raw `window.prompt`** (`UX-DLG-02`, Open, P1;
-  `docs/68` records `window.prompt` — *"Column A width (px)"*). A native browser
+  `docs/82` records `window.prompt` — *"Column A width (px)"*). A native browser
   prompt in the middle of an application is the loudest possible signal that
   something is unfinished, and it cannot be styled, validated or cancelled
   consistently.
@@ -392,7 +436,7 @@ Still open from `docs/73`, unverified: `[@Column]` structured references
 reported to evaluate to `#VALUE!`; totals-row insertion overwriting whatever is
 below; editing a header not renaming the column. `UX-TABLE-02` (Open, P1) is
 measured and real — *the header label is drawn underneath its own filter arrow*
-(`docs/68`: `{"col":3,"label":"Revenue","inkInArrowZone":6}`), and the table
+(`docs/82`: `{"col":3,"label":"Revenue","inkInArrowZone":6}`), and the table
 outline draws no border at all where the engine resolves one.
 
 ### 3.16 Paste, paste special, clipboard
@@ -411,7 +455,7 @@ vertical alignment, merges and `mso-number-format` from Excel and Sheets
   rather than opening the dialog [measured]. Excel binds `Ctrl+Alt+V`; Sheets
   binds `Ctrl+Shift+V`. An Excel user pressing `Ctrl+Alt+V` gets a status message
   that does not explain itself.
-- `docs/68` records Paste special as *"did not open — no modal or panel became
+- `docs/82` records Paste special as *"did not open — no modal or panel became
   visible"* on its own path.
 - Transpose is exclusive with the paste-type choice; outbound clipboard HTML
   carries far less than the inbound parser reads; copy drops manually hidden rows
@@ -427,39 +471,48 @@ centre across and down, a print area with "Set from selection", repeat-rows-at-t
 and header/footer fields documented with `&L &C &R &P` [measured]. That is a
 genuinely complete Page Setup and better than Google Sheets'.
 
-Printing then hands almost none of it to the output. `File ▸ Print…` and `Ctrl+P`
-both open a popup window and call `print()` [measured — one popup each]. The
-popup's HTML (`crates/casual-calc-wasm/src/objects.rs:1471`) is a bare `<table>`:
+**`IO-05` closed most of what this section reported, and the five bullets it
+carried are struck rather than deleted.** `File ▸ Print…` and `Ctrl+P` still open
+a popup window and call `print()` [measured — one popup each], and the popup's
+HTML still comes from `crates/casual-calc-wasm/src/objects.rs`. What it emits is
+no longer a bare `<table>`:
 
-- **Column widths are not emitted.** A sheet with column A set to 200 px prints
-  with `table-layout:fixed` and no `<col>` element [measured] — the printed
-  layout does not match the screen.
-- **Merged cells are not emitted** — no `colspan`/`rowspan` anywhere in the
-  generator.
-- **Cell borders do not print.** The only border rule is a blanket
-  `td,th{border:1px solid #b0b0b0}` when gridlines or headings are on
-  (`objects.rs:1574`).
-- **Scale and fit-to-page are not applied.** The emitted CSS is only
-  `@page{size:letter;margin:…}` [measured] — the three scaling controls in the
-  dialog change the saved file and not the printout.
-- **Header/footer field codes are stripped, not substituted** (`strip_hf_codes`),
-  so `&P` cannot print a page number. The dialog's own placeholder text
-  advertises `&P`.
-- No charts, no images, no conditional formatting.
+- ~~Column widths are not emitted.~~ Emitted as `<col>` elements.
+- ~~Merged cells are not emitted.~~ Emitted as `colspan`/`rowspan`
+  (`objects.rs:1624`).
+- ~~Cell borders do not print.~~ Per-cell borders, with the OOXML line-style
+  token mapped to a CSS keyword and the width from
+  `casual_calc_layout::border_width` (`print_border_css`, `:1595`).
+- ~~Scale and fit-to-page are not applied.~~ Computed by
+  `casual_calc_layout::print::effective_scale` and applied as `zoom` on the
+  table — `zoom` and not `transform: scale()`, because a transform does not
+  reflow and the browser would then paginate the unscaled box.
+- ~~Header/footer field codes are stripped.~~ Substituted.
 
-What it *does* carry: bold, fill colour and number format
-(`<td style="font-weight:bold;background-color:#FFFF00;">`, `25.00%`)
-[measured], the print area, repeat-rows via `<thead>`, and manual row breaks.
+Still absent from the printout: charts, images, conditional formatting.
 
 **No print preview, no Page Layout view, no page-break preview.** Excel has all
 three; Sheets has an in-app preview with per-page controls; OnlyOffice and
 LibreOffice both have page-break preview.
 
 **Absent: PDF export** (`IO-03`, Open, P1). `grep -ri pdf crates/ webapp/`
-returns nothing. All four competitors export PDF, and it is the format a finished
-spreadsheet most often leaves the application as. The tracker is right that
-`casual-calc-layout` and `casual-calc-render` already paginate — this is a
-writer over existing layout, not new layout.
+returns only comments naming the future writer. All four competitors export PDF,
+and it is the format a finished spreadsheet most often leaves the application as.
+
+> **This paragraph used to say the tracker is right that `casual-calc-layout`
+> and `casual-calc-render` already paginate, so PDF export is *"a writer over
+> existing layout, not new layout"*. That is false, and `IO-03`'s cost estimate
+> was built on it** (`IO-06`). Neither crate paginates:
+> `crates/casual-calc-layout/src/print.rs` opens with *"Nothing here paginates.
+> That is deliberate"*, and there are no page breaks, no headers/footers and no
+> print scaling in either. `IO-05` built the **first piece** of a paginator —
+> `casual_calc_layout::print`: paper sizes, the printable box, and the
+> fit-to-page scale, which is the one thing CSS cannot express. The decision it
+> recorded is that **the browser paginates and the engine supplies the
+> numbers**, because a paginator here would be a second layout engine for the
+> same grid — the fault `RND-10` removed — and it would still print *through*
+> the browser. PDF export cannot take that route, so **`IO-03` needs a
+> paginator, not a writer**, and it is the expensive direction of wrong.
 
 ### 3.18 Import and export
 
@@ -469,26 +522,50 @@ writer over existing layout, not new layout.
   `openable_extensions()`].
 - Downloadable: **same-format-as-opened, `.xlsx`, `.csv`, `.tsv`, `.psv`**
   [measured via `listCommands()`].
-- **`.ods` is missing from the download menu.** `format_for_extension("ods")`
-  returns `"ods"` and `casual_calc_sdk::SessionFormat::Ods` has a writer
-  (`crates/casual-calc-sdk/src/lib.rs:1575` → `casual_calc_ods::export_ods`)
-  [measured]. So the engine writes ODF and the editor offers no way to ask for
-  it. A LibreOffice user can open their file here and cannot get it back in
-  their own format unless they opened it as `.ods` in the first place.
-- **`.xlsm` is refused, and converting one loses the macros** (`IO-04`, Open,
-  P1). It is the same OOXML package as `.xlsx` with a `vbaProject.bin` part; what
-  stops it is a name check.
-- **`.xls` is refused** deliberately (BIFF8 needs a real reader).
+- ~~**`.ods` is missing from the download menu.**~~ **Closed by `IO-07`.** The
+  finding was right and its cost estimate was not: the row is listed in §6 as
+  *"host-side wiring"*, and it needed **three new WebAssembly bindings**, not a
+  menu entry. The Download submenu is now derived from `writable_extensions()`
+  the way Open is derived from `openable_extensions()`, so a new format appears
+  without anybody remembering.
+- ~~**`.xlsm` is refused, and converting one loses the macros.**~~ **Closed by
+  `IO-08`**, and retaining the bytes turned out not to be the hard part — the
+  *container* was. `SessionFormat::for_extension("xlsm")` resolves, and a macro
+  workbook is written as the macro-enabled package it is, because a plain
+  content-type declaration over a VBA project makes Excel report the file as
+  damaged and repair it *by deleting the project* (see
+  [36](36-EXPORT-AND-ROUNDTRIP-DESIGN.md) §"Two package flavours"). Converting
+  one to `.xlsx` now names the loss per format rather than asking a question
+  about a format the user did not pick. **Two residuals, both tracked:**
+  `SessionFormat::for_bytes` still cannot tell the flavours apart, so `.xlsm`
+  bytes with no filename open as `Xlsx` (`IO-09`, Open); and every macro fixture
+  in the tree is one **this engine wrote**, so the tests prove the reader and
+  writer agree and nothing about whether either matches Excel (`FID-37`, Open).
+- **`.xls` is refused** deliberately (BIFF8 needs a real reader). This is the
+  half of `IO-04` that is still open, and the row's own position is that it is
+  worth doing only if real users still have such files — which is a measurement
+  nobody has taken.
 - No Google Sheets import, no Numbers, no HTML export, no JSON export.
 
 ### 3.19 Save
 
 **Present but worse, and it is the first thing a user notices.**
 
-There is no Save. `Ctrl+S` downloads a file called **`opencalc.xlsx`** to the
-downloads folder and reports *"downloaded .xlsx"* [measured]. There is no name
-prompt, no in-place save, no autosave, no recent-files list. An hour's work with
-Excel habits produces `opencalc.xlsx`, `opencalc (1).xlsx`, `opencalc (2).xlsx`.
+**In a browser tab** there is no Save. `Ctrl+S` downloads a file called
+**`opencalc.xlsx`** to the downloads folder and reports *"downloaded .xlsx"*
+[measured]. There is no name prompt, no in-place save, no autosave, no
+recent-files list. An hour's work with Excel habits produces `opencalc.xlsx`,
+`opencalc (1).xlsx`, `opencalc (2).xlsx`.
+
+**In the desktop shell this is now a real save** (`SAVE-02`, Phase A of
+[83](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md)): `Ctrl+S` writes back to the file
+that was opened, through a temporary file in the target's own directory,
+`sync_all`, permissions carried across, then a rename over — because a save that
+fails partway must never leave the user with neither the old file nor the new
+one. Read-only is checked explicitly, since on Unix a rename over a read-only
+file succeeds and an atomic write would otherwise silently defeat the flag the
+user set. `File ▸ Download` keeps writing a copy. The browser half is
+`SAVE-03`/`SAVE-04`, still open.
 
 `beforeunload` does guard against closing a dirty tab
 (`webapp/editor.sheets.js`), which is the important half. But:
@@ -497,9 +574,19 @@ Excel habits produces `opencalc.xlsx`, `opencalc (1).xlsx`, `opencalc (2).xlsx`.
 - Sheets autosaves continuously and keeps **named version history**.
 - **`HIST-01` (Open, P1) is right that this is the largest single feature gap
   against every competitor named.** Undo is the only route backwards and it dies
-  with the tab. The collaboration server is already an append-only op log with
-  revision numbers and resume-from-revision — the history exists and nothing
-  reads it as one.
+  with the tab.
+- ~~The collaboration server is already an append-only op log with revision
+  numbers and resume-from-revision — the history exists and nothing reads it as
+  one.~~ **Measured, and it is not a history** (`SAVE-09`). There are **no
+  timestamps anywhere**, no per-revision author, roughly 400–600 ops retained,
+  Redis capped and TTL'd at 10k and one hour, the whole session evicted 30
+  seconds after the last participant leaves, and nothing persisted. It is a
+  correctly-scoped **resume buffer** that looks like a history from the outside,
+  and reading it as one is what made `HIST-01` look cheaper than it is. History
+  needs its own storage; [83](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md) §6
+  designs it as snapshots — forced rather than chosen, because revisions are
+  positional (`ADR-011` leaves no room to rewrite history) and `COL-50` plus
+  `TransformError::Unsupported` mean a log cannot be replayed reproducibly.
 
 *Does the divergence help?* No. Downloading is what a browser app does when it
 has no storage story yet; it is not a design choice and it should not be
@@ -541,22 +628,54 @@ appends, relay from any node, resume, presence and host callbacks, exercised by
 two real browsers in CI (`docs/56`/`57`/`59`, ADR-011/012/014/017 all Accepted).
 That is more collaboration engineering than most spreadsheet projects ever do.
 
-Above the line, in the editor: **no Share button, no invite, no link, no
-collaboration command of any kind.** `listCommands()` contains nothing matching
-`share|collab|invite`; the presence strip is not visible and reads "Only you"
-[measured]. A session is joined by putting `?doc=` on the URL
-(`webapp/collab.js:150`). So the only way a user starts collaborating is by
-hand-editing a query string.
+Above the line, when this was measured: **no Share button, no invite, no link,
+no collaboration command of any kind.** `listCommands()` contained nothing
+matching `share|collab|invite`; the presence strip was not visible and read
+"Only you".
+
+> **The route this section named never existed.** It said *"a session is joined
+> by putting `?doc=` on the URL (`webapp/collab.js:150`)"*. Nothing in the
+> editor has ever read `?doc=` off the **page** URL — line 150 puts `doc` on the
+> **WebSocket** URL, from a key the caller already passed in. There was no
+> user-reachable route at all, by query string or otherwise, so the sentence
+> made the gap sound like an ergonomics problem when it was a total absence.
+> This is the sharpest example of why this document dates and cites its
+> measurements: a `file:line` was quoted, and it was a line about a different
+> URL.
+
+**`COL-53` closed it.** There is now `File ▸ Share…` with a dialog for the
+collaboration server, the document key and the access token, and an invite link
+carrying `?collab=` and `?doc=` — a real page route, which the dialog reads back
+as its defaults. It is behind a **capability, off by default**: `canShare` is
+`false` in every mode preset, so `File ▸ Share…` is absent from a plain editor
+and `runCommand("file.share")` is refused until a host calls
+`setCapabilities({ canShare: true })`. The dialog states the residual
+convergence risk in plain words rather than burying it.
 
 Against that: Sheets *is* sharing. Excel has Share on the title bar. OnlyOffice
 co-edits by default when served. Univer's collaboration appears to sit in its
 commercial tier — stated as **uncertain**; do not rely on it without checking.
 
-`COL-46` (Open, **P0**) is worth naming here because it bears directly on
-whether co-editing can be turned on at all: a `$`-anchored formula rebased across
-a concurrent insert **diverges between replicas with no error raised**.
-`COL-44` (concurrent move has no OT) and `COL-47` (a refused chunk leaves the
-client permanently deaf and silent) are open alongside it.
+`COL-46` — a `$`-anchored formula rebased across a concurrent insert diverging
+between replicas with no error raised — was the P0 that made "turn sharing on"
+unanswerable. It is **Done**, as is `COL-44` (concurrent move has no OT). What
+is still open here, and is why `canShare` defaults to `false`:
+
+- **`COL-50`** (Open, P1) — an insert meeting a delete does not converge for a
+  formula **range**, and *both* answers are Excel's for the sequence that
+  produced them. It needs no formula in flight: a document holding a range
+  formula plus two ordinary concurrent structural edits is enough. Resolving it
+  is a semantics decision about what a range means across a concurrent edit, not
+  a transform bug to patch, and the property test pins the hole at exactly 68
+  pairs so it cannot be narrowed away quietly.
+- **`COL-47`** (Open, P1) — *half* fixed. The editor half is closed:
+  `socket.onmessage` now catches a throwing `receive` and reports `desynced`,
+  where before the document quietly stopped being shared and looked fine. The
+  engine half reproduces: `ClientSession` still never drops a refused chunk, so
+  one unmergeable submission blocks every later arrival and resending gets the
+  identical refusal for ever.
+- **`COL-52`** (Open, P2) — the server builds its sheet-name snapshot from a
+  workbook the committed history has already been applied to.
 
 ### 3.23 Extensibility, scripting, connected data
 
@@ -611,35 +730,64 @@ have no analogue here.
 
 Measured, one chord per fresh session, effects observed rather than assumed.
 
-| Chord | Excel does | OpenCalc does [measured] | Verdict |
-| --- | --- | --- | --- |
-| `Ctrl+1` | Format Cells | Format cells dialog | ✅ |
-| `Ctrl+K` | Insert hyperlink | Insert link dialog | ✅ |
-| `Ctrl+T` | Create table | Create table dialog | ✅ |
-| `Ctrl+F` / `Ctrl+H` | Find / Replace | Find bar | ✅ |
-| `Shift+F11` | New sheet | sheets 1→2 | ✅ |
-| `Alt+=` | AutoSum | writes `=SUM(C2:C5)` | ✅ |
-| `Ctrl+;` | Today's date | writes `2026-08-29` | ✅ |
-| `Ctrl+9` / `Ctrl+0` | Hide row / column | row height 20→0 / col 64→0 | ✅ |
-| `Ctrl+Shift+L` | Toggle filter | *"filter on"* | ✅ |
-| `Ctrl+Shift+=` | Insert cells | inserts a row | ✅ |
-| `Ctrl+-` | Delete cells | deletes a row | ✅ |
-| `Shift+F2` | Insert/edit note | Comments panel | ✅ |
-| `Ctrl+G` / `F5` | Go To | **nothing** | ❌ |
-| `Ctrl+P` | Print | opens the popup | ✅ (invisible in-page) |
-| `Ctrl+Shift+;` | Current time | **nothing** | ❌ |
-| `Ctrl+E` | Flash Fill | **nothing** | ❌ |
-| `Alt+F1` / `F11` | Chart | **nothing** | ❌ |
-| `Ctrl+Shift+O` | Select cells with notes | **nothing** | ❌ |
-| `Ctrl+Shift+U` | Expand formula bar | **nothing** | ❌ |
-| `Ctrl+F3` | Name Manager | **nothing** (Help advertises `F3`) | ❌ |
-| `Ctrl+Alt+V` | Paste Special | *"clipboard is empty"* | ❌ |
-| `Ctrl+Shift+F` | Format Cells ▸ Font | opens the **find bar** | ❌ rebound |
-| `Alt+↓` | In-column pick list | moves the selection down one | ❌ rebound |
+> **This table was wrong about six of its twenty-three rows, and the correction
+> is `DOC-045` plus `UX-KEY-04`.** The document claimed *"effects observed
+> rather than assumed"*; for six chords they were not. Three (`Ctrl+G`, `F5`,
+> `Ctrl+F3`) **always worked** and were reported dead. One (`Ctrl+Alt+V`)
+> reporting *"clipboard is empty"* against an empty clipboard is **correct
+> behaviour**, not a failure. One (`Ctrl+Shift+U`) was **worse** than reported:
+> not dead but falling through to `Ctrl+U` and silently **underlining the
+> selection** — the audit read it as dead because an underline on an empty cell
+> is invisible, which is how a chord that modifies the document passes for one
+> that does nothing. Only `Ctrl+Shift+;` was genuinely dead, and its mechanism
+> is the useful one: the key delivers `{key: ":", shift: true}` and the handler
+> tested `e.key === ";"`, so the whole time-stamp feature existed behind
+> unreachable code. All six are now asserted in
+> `tests/browser/editor.excel-keyboard-parity.spec.mjs` so they cannot be
+> re-reported. `UX-KEY-04` also fixed the two rebindings and one further hole
+> (`Ctrl+Shift+O`). The "Was" column below is the 2026-08-29 claim, kept so the
+> correction is auditable rather than invisible.
 
-Twelve of twenty-three land; nine do nothing; two are bound to something else.
-The two rebindings are the worse kind, because "nothing happened" is at least
-legible while "something else happened" costs an undo and a moment of doubt.
+| Chord | Excel does | OpenCalc does [measured 2026-08-30] | Verdict | Was |
+| --- | --- | --- | --- | --- |
+| `Ctrl+1` | Format Cells | Format cells dialog | ✅ | ✅ |
+| `Ctrl+K` | Insert hyperlink | Insert link dialog | ✅ | ✅ |
+| `Ctrl+T` | Create table | Create table dialog | ✅ | ✅ |
+| `Ctrl+F` / `Ctrl+H` | Find / Replace | Find bar | ✅ | ✅ |
+| `Shift+F11` | New sheet | sheets 1→2 | ✅ | ✅ |
+| `Alt+=` | AutoSum | writes `=SUM(C2:C5)` | ✅ | ✅ |
+| `Ctrl+;` | Today's date | writes the date | ✅ | ✅ |
+| `Ctrl+9` / `Ctrl+0` | Hide row / column | row height 20→0 / col 64→0 | ✅ | ✅ |
+| `Ctrl+Shift+L` | Toggle filter | *"filter on"* | ✅ | ✅ |
+| `Ctrl+Shift+=` | Insert cells | inserts a row | ✅ | ✅ |
+| `Ctrl+-` | Delete cells | deletes a row | ✅ | ✅ |
+| `Shift+F2` | Insert/edit note | Comments panel | ✅ | ✅ |
+| `Ctrl+P` | Print | opens the popup | ✅ (invisible in-page) | ✅ |
+| `Ctrl+G` / `F5` | Go To | reaches the Name Box | ✅ **never was broken** | ❌ |
+| `Ctrl+F3` | Name Manager | opens the Name Manager | ✅ **never was broken** | ❌ |
+| `Ctrl+Alt+V` | Paste Special | *"clipboard is empty"* on an empty clipboard | ✅ **correct behaviour** | ❌ |
+| `Ctrl+Shift+U` | Expand formula bar | expands the formula bar | ✅ (`UX-KEY-04`; was silently underlining) | ❌ |
+| `Ctrl+Shift+;` | Current time | writes the time | ✅ (`UX-KEY-04`) | ❌ |
+| `Ctrl+Shift+O` | Select cells with notes | selects every cell with a note | ✅ (`UX-KEY-04`) | ❌ |
+| `Ctrl+Shift+F` | Format Cells ▸ Font | Format cells | ✅ (`UX-KEY-04`) | ❌ rebound |
+| `Alt+↓` | In-column pick list | offers the column's entries | ✅ (`UX-KEY-04`) | ❌ rebound |
+| `Ctrl+E` | Flash Fill | **nothing** | ❌ | ❌ |
+| `Alt+F1` / `F11` | Chart | **nothing** | ❌ (`UX-KEY-05`) | ❌ |
+
+**Twenty-one of twenty-three land; two do nothing; none is bound to something
+else.** The 2026-08-29 tally of *"twelve of twenty-three … nine do nothing, two
+are bound to something else"* understated the product by nine rows, and §3.12
+and §9.6 inherited it. The two survivors are not alike, which is `UX-KEY-05`:
+`Ctrl+E` (Flash Fill) has **no engine support** at all, while `Alt+F1` is
+*insert a default chart from the selection* against an insert path that already
+exists and seven chart types that already draw — an unbound feature, not a
+missing one. `F11` (a chart **sheet**) genuinely has no model behind it.
+
+Rebindings are the worse kind of miss, which is why the two that existed were
+fixed first: "nothing happened" is at least legible, while "something else
+happened" costs an undo and a moment of doubt — and `Ctrl+Shift+U` was the
+extreme case, a chord that *silently changed formatting* and was recorded here
+as inert.
 
 Genuinely at parity beyond the table (`docs/73`, verified): Tab-runs and
 Enter-returns-to-the-starting-column — the thing most editors get wrong;
@@ -662,16 +810,26 @@ to Excel's and better than Sheets'.
 
 Where discoverability fails, it fails specifically:
 
-- **No zoom control anywhere in the chrome.** The only zoom is inside
-  `View ▸ Zoom` — the five `50%…200%` labels exist solely inside that hidden
-  submenu [measured]. Excel, Sheets, OnlyOffice and LibreOffice all put a zoom
-  readout and slider in the status bar. `docs/47` ranks this the #1 daily miss.
+- ~~**No zoom control anywhere in the chrome.**~~ **Closed** by `UX-CHROME-05`:
+  a `−`/slider/`+` and a `100%` readout now sit at the right of the status bar,
+  where Excel, Sheets, OnlyOffice and LibreOffice all put theirs. `docs/47`
+  ranked this the #1 daily miss and it was the best cost-to-benefit item on the
+  whole switching-blocker list. **Its sweep row is still weak** (`UX-MAP-04`):
+  `"the zoom level is visible without opening a menu"` probes `/\d{2,3}\s*%/`
+  over `.bottom-bar` and would be satisfied by a hard-coded `100%` that never
+  changes; the row should set a zoom first and assert the readout followed.
+  `tests/browser/editor.zoom-status.spec.mjs` does that properly, so the
+  capability is gated even though the sweep row is not.
 - **Zoom is clamped to 25–200%** against Excel's 10–400% (`docs/73`).
 - **Paste Special has no menu-bar route** (§3.16).
 - **Row height / column width have no menu-bar route** (`docs/47`: ❌).
 - **The Help ▸ Keyboard shortcuts panel lists eight rows** [measured] out of a
-  keyboard surface many times that size, and one of the eight (`F3` for Name
-  Manager) does not work.
+  keyboard surface many times that size. It used to advertise `F3` for Name
+  Manager, a chord that never worked; `UX-KEY-04` corrected the entry to
+  `Ctrl+F3`, which does, and
+  `tests/browser/editor.excel-keyboard-parity.spec.mjs` now asserts that **every
+  chord the panel advertises does something** — so the panel can go on being too
+  short, but it can no longer be wrong.
 - **No command palette.** Sheets has one (`Alt+/`); Excel has "Tell me". With 197
   commands behind eight menus, a palette would recover most of what the menu
   depth costs, and it is the cheapest discoverability win available.
@@ -688,7 +846,7 @@ preview.
 Bad, and each is a tracker row:
 
 - **A native `window.prompt` for row height and column width** (`UX-DLG-02`,
-  Open, P1; `docs/68`).
+  Open, P1; `docs/82`).
 - **Undo does not move the view to what it reversed** (`docs/47`: ❌) — undoing
   an off-screen edit is completely silent, which is how people lose confidence in
   undo.
@@ -696,7 +854,7 @@ Bad, and each is a tracker row:
   confirm, because sheet deletion is not undoable in either.
 - **A locked cell refuses after the user types, not before** (`docs/47`: ❌).
 - **Pointer targets under 24 px in the Hyperlink dialog** —
-  `{"el":"BUTTON","w":58,"h":21}` (`docs/68`).
+  `{"el":"BUTTON","w":58,"h":21}` (`docs/82`).
 - **A table header label drawn under its own filter arrow** (`UX-TABLE-02`, Open,
   P1).
 
@@ -732,9 +890,18 @@ Contrast work has been done properly: gridlines were raised from 1.13:1 to
 
 - No horizontal overflow, and the menu bar correctly collapses to
   File/Edit/View/Insert/Format/Data + `⋯` [measured] — the layout does not break.
-- **Only 5 toolbar buttons remain visible, and every one is 30 px** [measured] —
-  below the 44 px iOS and 48 px Android minimums, and below the 24 px floor
-  `docs/68` already enforces elsewhere.
+- **Every toolbar control is reachable at 390px, and the finding this section
+  used to carry was stale when it was written** (`DOC-041`). It reported *"only
+  5 toolbar buttons remain visible"* as evidence the toolbar needs rethinking.
+  `UX-MOB-01` had already added the `⋯` fold, so `scrollWidth == clientWidth`
+  and **nothing was unreachable**: five survivors plus nine rows behind `⋯`.
+  Group-collapse is the right behaviour at 390px, and wrapping the toolbar would
+  cost grid height for no reachability gain. The real defect was that the five
+  survivors and the nine folded rows were **30 px** — below the 44 px iOS and
+  48 px Android minimums, and below the 24 px floor
+  `docs/82` already enforces elsewhere. That is a hit-target problem
+  (`UX-MOB-05`), not a layout one, and the distinction matters because the two
+  have completely different fixes.
 - Tapping selects a cell [measured]; a held finger raises the context menu
   (`webapp/editor.core.js:6601`).
 - The grid gets 75% of the viewport [measured], which is fine.
@@ -747,7 +914,8 @@ that it renders, and not in the sense that anyone would choose to work in it.**
 
 ### 4.6 Accessibility
 
-**Better than the category in one respect and broken in another.**
+**Better than the category, and the "broken in another" half this section
+claimed did not reproduce.**
 
 The accessibility mirror is a real DOM tree — 805 `gridcell` elements, 36 `row`,
 24 `columnheader`, 35 `rowheader`, with absolute `aria-rowindex` values
@@ -756,11 +924,39 @@ region. `A11Y-01`'s own note is right that this is *"better than the comparable
 products"*: Sheets exposes a much thinner tree, and canvas-rendered grids
 usually expose nothing.
 
-**And it does not follow the viewport.** After moving the selection to row 201
-(scrollY 3360), the mirror's first `aria-rowindex` is still `1` [measured —
-reproduces `A11Y-01`, Open, P1]. A screen-reader user is being read a screen that
-is no longer there. An excellent mirror pointed at the wrong rows is worth less
-than a mediocre one pointed at the right ones.
+**The measurement this section used to carry does not reproduce, and the real
+defect was a different one** (`DOC-040`). It read: *"after moving the selection
+to row 201 (scrollY 3360), the mirror's first `aria-rowindex` is still 1"*. That
+probe takes `document.querySelector("[aria-rowindex]")`, which finds the
+mirror's **column-header row** — `rebuildA11yGrid` gives that
+`aria-rowindex="1"` deliberately, at every scroll position, by construction. So
+the number is produced by a correct mirror and by a broken one alike: it would
+have been satisfied by a mirror that never followed the viewport at all, and it
+was *not* satisfied by one that always did. Measured on an unmodified tree at
+`scrollY 3460`: `{firstVisibleRow: 173, mirrorFirstDataRow: 173}`. **The settled
+mirror was correct all along.**
+
+**What was real is *when*, and it was worse than the reported symptom.**
+`scheduleA11yGrid` cleared and re-armed a 120 ms settle timer on every frame, so
+a scroll that never settles never rebuilt: staleness was bounded by the length
+of the gesture and nothing else. Measured over 1.5 s of continuous wheel
+scrolling, the view was at row 380 and the mirror at row 160 — **220 rows
+behind, and unbounded in principle.** A second defect sat in the same function:
+`startGlide` never called `viewIsMoving()`, so a fling — the throw after the
+finger has gone, where neither `wheel` nor `touchmove` fires — rebuilt the
+mirror on all 40 of its frames.
+
+`A11Y-01` fixed both (`webapp/editor.core.js`, `A11Y_MAX_STALE_MS = 250`, the
+settle wait becoming `min(120, ceiling − age)`), and
+`tests/browser/editor.a11y-viewport.spec.mjs` asserts all three properties
+including the header row's `aria-rowindex="1"` at every scroll position, so the
+mis-measurement cannot be made again.
+
+**The lesson generalises, and it is why this document now dates its
+measurements**: a probe that reads the first element matching a selector, in a
+tree that has a deliberate constant at that position, measures the constant.
+Any assertion taken *after* a scroll settles is blind to a staleness bug whose
+whole nature is that it happens during motion.
 
 Also open: the missing IME path (§3.1) is an accessibility-shaped hole, not a
 polish item. There is no high-contrast theme switch beyond
@@ -778,19 +974,29 @@ What actually happens, in order, measured:
    expects them.
 3. Typing works. `Ctrl+1` opens Format Cells. `Alt+=` totals a column. `Ctrl+;`
    stamps the date. The first ten things an Excel user tries mostly land.
-4. **Then `Ctrl+S`**, and a file lands in the downloads folder called
-   `opencalc.xlsx`. This is the moment the product stops feeling like a
-   spreadsheet.
-5. `F5` to jump somewhere — nothing happens.
-6. Look for the zoom control — there is none.
-7. Look for Share — there is none.
-8. Open a real Excel workbook with formula-based conditional formatting: the
-   highlighting is gone.
-9. Print it: an unstyled table with the wrong column widths.
+4. **Then `Ctrl+S`**, and in a browser tab a file lands in the downloads folder
+   called `opencalc.xlsx`. This is the moment the product stops feeling like a
+   spreadsheet. **In the desktop shell this now saves the file** (`SAVE-02`).
+5. ~~`F5` to jump somewhere — nothing happens.~~ **Never true**: `F5` focuses
+   the Name Box (`DOC-045`).
+6. ~~Look for the zoom control — there is none.~~ **Closed** (`UX-CHROME-05`):
+   status bar, right-hand end.
+7. ~~Look for Share — there is none.~~ **Closed** (`COL-53`), though a plain
+   editor still has to be given the `canShare` capability before `File ▸ Share…`
+   appears — so an evaluator on the default build still finds nothing, which is
+   deliberate and is the honest reading of this step.
+8. ~~Open a real Excel workbook with formula-based conditional formatting: the
+   highlighting is gone.~~ **Closed** (`CF-01`, `CF-02`).
+9. ~~Print it: an unstyled table with the wrong column widths.~~ **Closed**
+   (`IO-05`) — widths, merges, borders and scaling now print. No PDF, still
+   (`IO-03`).
 
-Steps 1–3 are a genuinely good five minutes and better than this repository's own
-self-assessment suggests. Steps 4–9 are where "third tier" comes from, and none
-of them is about the toolbar.
+Steps 1–3 were a genuinely good five minutes and better than this repository's
+own self-assessment suggested. **Five of the six bad steps have closed in a day,
+and one was never true** — which is the strongest single argument in this
+document that the product's self-assessment ("bottom tier", "not usable at all")
+was measuring the map rather than the territory. What remains of the bad five
+minutes is step 4 in a browser tab, and step 7 on a default build.
 
 ---
 
@@ -857,19 +1063,31 @@ This pattern has now come up seven times and it deserves to be named as a
 category, because it is the cheapest class of gap in the product and it keeps
 being counted as a missing feature.
 
-| # | Capability | Engine | Editor | Evidence |
-| --- | --- | --- | --- | --- |
-| 1 | **ODF export** | `SessionFormat::Ods` → `export_ods` | no download entry | `sdk/src/lib.rs:1575`; measured |
-| 2 | **Collaboration** | clustered OT server, presence, resume, relay | no Share/invite command at all; `?doc=` only | measured; `webapp/collab.js:150` |
-| 3 | **Version history** | append-only op log with revisions | nothing reads it as history | `HIST-01` |
-| 4 | **Print layout** | `casual-calc-layout` + `render` paginate | print emits a bare HTML table | `IO-03`; measured |
-| 5 | **Pictures** | decode + render + SDK access | no insert command | `RND-06/12/13/14`; `docs/47` |
-| 6 | **`.xlsm`** | same OOXML package as `.xlsx` | refused by a name check | `IO-04` |
-| 7 | **Text shaping** | wired | not drawn | `P1C-003`, Partial |
+| # | Capability | 2026-08-29 claim | State on 2026-08-30 |
+| --- | --- | --- | --- |
+| 1 | **ODF export** | engine writes ODF, no download entry | **Closed** (`IO-07`) — and it was *not* host-side wiring: it needed three new WebAssembly bindings |
+| 2 | **Collaboration** | no Share/invite command; `?doc=` only | **Closed** (`COL-53`). The `?doc=` half was never true — see §3.22 |
+| 3 | **Version history** | append-only op log with revisions, nothing reads it as history | **The premise was wrong** (`SAVE-09`): the op log is a resume buffer, not a history. `HIST-01` still open, and larger than this row implied |
+| 4 | **Print layout** | `casual-calc-layout` + `render` paginate; print emits a bare table | **The premise was wrong** (`IO-06`): neither crate paginates. The printout half is closed by `IO-05`; `IO-03` needs a paginator |
+| 5 | **Pictures** | decode + render + SDK access, no insert command | Still open — `RND-06/12/13/14`, `docs/47` |
+| 6 | **`.xlsm`** | same OOXML package as `.xlsx`, refused by a name check | **Closed** (`IO-08`) — and the name check was not what stopped it; the *container* content type was |
+| 7 | **Text shaping** | wired, not drawn | **Drawn** — `draw_glyphs` has a shaped arm under the `shaping` feature (`P1C-003`; the residual is font coverage, not drawing) |
 
-Every one of these is a host-side wiring job, not new engine work. Compare the
-cost of that with §3.7's conditional formatting, which needs a new model variant,
-import, export, evaluation, UI and a fidelity test.
+> **The sentence this table used to end with was the expensive part, and it is
+> withdrawn** (`DOC-042`, `IO-06`). It read: *"Every one of these is a host-side
+> wiring job, not new engine work."* Three of the seven were not. `IO-07` needed
+> three new engine bindings; rows 3 and 4 rested on capabilities that do not
+> exist, so their fixes are new engine work of exactly the kind this category
+> was invented to distinguish from; and row 6's fix was a package-level content
+> type, not a name check. The *category* is real and worth naming — a
+> capability the engine has and no command reaches is genuinely the cheapest
+> class of gap. What is not safe is inferring the cost from membership in it.
+> **Check the seam before quoting the estimate**: the question is not "does the
+> engine do this" but "is there a binding that returns it", and those are
+> different questions that this table conflated for seven rows.
+
+Compare either with §3.7's conditional formatting, which needs a new model
+variant, import, export, evaluation, UI and a fidelity test.
 
 ---
 
@@ -894,11 +1112,11 @@ clothes.**
 
 | Divergence | What it costs |
 | --- | --- |
-| `Ctrl+S` downloads a new file each time | A folder of `opencalc (n).xlsx`. Nobody chose this. |
-| `F5` / `Ctrl+G` do nothing | Thirty years of muscle memory, answered with silence. |
-| `Ctrl+Shift+F` opens Find instead of the font control | Worse than nothing: costs an Escape and a moment of doubt. |
-| `Alt+↓` moves the selection instead of opening the pick list | Same class. |
-| Paste Special reachable only by right-click | An Excel user's `Ctrl+Alt+V` gets "clipboard is empty". |
+| `Ctrl+S` downloads a new file each time **in a browser tab** | A folder of `opencalc (n).xlsx`. Nobody chose this. Fixed in the desktop shell by `SAVE-02`; the browser half is `SAVE-03`/`SAVE-04`. |
+| ~~`F5` / `Ctrl+G` do nothing~~ | **Withdrawn** — both always reached the Name Box (`DOC-045`). |
+| ~~`Ctrl+Shift+F` opens Find instead of the font control~~ | **Fixed** by `UX-KEY-04`; it opens Format cells. |
+| ~~`Alt+↓` moves the selection instead of opening the pick list~~ | **Fixed** by `UX-KEY-04`; it offers the column's entries. |
+| ~~Paste Special reachable only by right-click~~ | **Withdrawn** — `Ctrl+Alt+V` opens the dialog; *"clipboard is empty"* against an empty clipboard is correct behaviour, not a miss (`DOC-045`). Paste Special still has no **menu-bar** route (§3.16), which is the real residual. |
 | Currency five interactions deep | Every non-US user, on their first workbook. |
 | No zoom in the chrome | Ranked the #1 daily miss by `docs/47`, and every competitor has it in the status bar. |
 | Data validation forgets the rule when reopened | Retype from scratch, every edit. |
@@ -909,7 +1127,11 @@ clothes.**
 
 The pattern in the second table is that almost none of these were decisions.
 That is the useful finding: the product is not losing on taste, it is losing on
-unfinished edges, and unfinished edges are cheaper to fix than taste.
+unfinished edges, and unfinished edges are cheaper to fix than taste. Four of
+the twelve rows have since been struck — three as fixed within a day of being
+named, one as never true — which supports the finding and also warns about the
+table: an "unfinished edge" is cheap to fix and therefore cheap to *mis-report*,
+because nobody is surprised by one.
 
 ---
 
@@ -918,6 +1140,13 @@ unfinished edges, and unfinished edges are cheaper to fix than taste.
 Ranked by whether it stops a spreadsheet user moving here today — **not** by how
 hard it is to fix.
 
+> **Ranked 2026-08-29; the state column is 2026-08-30.** Seven of the sixteen
+> moved in a day, which is the useful thing to know about this list: it is a
+> snapshot of a tree under active work, and briefing from it without checking
+> the tracker sends effort at closed rows. The ordering is deliberately **not**
+> re-sorted — a ranking is an argument about what matters, and re-sorting it
+> silently would lose the argument along with the stale entries.
+
 1. **The grid crashes at row 74,567 and the document is unrecoverable** (§3.2).
    No autosave, no history, no panic message. One diagnosed line
    (`axis.rs:218`, and `:169` alongside it). Nothing else on this list matters if
@@ -925,15 +1154,25 @@ hard it is to fix.
 2. **There is no save** (§3.19). `Ctrl+S` produces a download. No autosave, no
    version history, no in-place save (`HIST-01`, P1). Sheets users will not give
    this up; Excel users will not either.
+   **Partly closed:** the desktop shell saves in place (`SAVE-02`). The browser
+   tab, autosave and history are still open (`SAVE-03`, `SAVE-04`, `SAVE-08`),
+   and `SAVE-09` established that they need new storage rather than a reading of
+   the op log.
 3. **There is no way to share** (§3.22). A complete OT server with no button.
    And `COL-46` (P0) means two replicas of a `$`-anchored formula can diverge
    silently, so it cannot simply be switched on.
-4. **Formula-based conditional formatting does not exist and is lost on import**
-   (§3.7). Whole-row highlighting is impossible, and an Excel workbook that has
-   it arrives here without it.
+   **Closed** (`COL-53`, `COL-46`) — there is a Share dialog, behind a
+   capability that is off by default because `COL-50` is still open.
+4. ~~**Formula-based conditional formatting does not exist and is lost on
+   import**~~ (§3.7). **Closed** — `CF-01` built formula rules and stopped
+   `expression` rules being dropped on import; `CF-02` gave the editor a route
+   to them.
 5. **Printing does not reproduce the sheet, and there is no PDF** (§3.17,
-   `IO-03` P1). Column widths, merges, borders and scaling are all dropped. For
-   many users the printout *is* the deliverable.
+   `IO-03` P1). ~~Column widths, merges, borders and scaling are all dropped.~~
+   **The printout half is closed** (`IO-05`): widths, merges, per-cell borders
+   and all three scale settings are emitted. PDF is still absent, and costs
+   **more** than this entry assumed — `IO-06` established that nothing
+   paginates. For many users the printout *is* the deliverable.
 6. **Charts are seven types with no subtypes** (§3.10). No stacked, no combo, no
    secondary axis, no data labels. A stacked bar has no route at all.
 7. **No macros, no scripting, no external data** (§3.23). Deliberate for macros,
@@ -941,25 +1180,36 @@ hard it is to fix.
 8. **Pivot tables have no calculated fields, no Show Values As, no date
    grouping** (§3.9). The pivot exists; the analysis on top of it does not.
 9. **The mobile experience is a desktop layout at phone size** (§4.5). 30 px
-   targets, no touch design.
-10. **`.xlsm` is refused and converting one drops the macros; `.ods` cannot be
-    written from the UI** (§3.18, `IO-04`).
+   targets, no touch design. **Partly closed** (`UX-MOB-01`, `UX-MOB-05` — the
+   latter a P0, because a submenu opening off the right edge meant a tap could
+   delete data). `UX-MOB-06` is what is left, and each part needs a design
+   rather than a fix: no touch route to range selection, to a header-boundary
+   resize, or to the sheet-tab menu; a status bar that does not fit at 390px;
+   and no manifest, `theme-color`, `apple-touch-icon` or `color-scheme` at all.
+10. ~~**`.xlsm` is refused and converting one drops the macros; `.ods` cannot be
+    written from the UI**~~ (§3.18). **Both closed** (`IO-08`, `IO-07`).
+    `IO-04`'s remaining half is `.xls`, which is a deliberate refusal.
 11. **Comments are notes, not threads** (§3.21). No replies, no @mentions, no
     notification.
-12. **Nine Excel chords do nothing and two are rebound** (§4.1). Individually
-    minor; collectively the thing that makes the product feel foreign all day.
+12. ~~**Nine Excel chords do nothing and two are rebound**~~ (§4.1). **Two do
+    nothing and none is rebound**, and six of the eleven were never true —
+    `DOC-045` and `UX-KEY-04`. The two survivors are `Ctrl+E` (Flash Fill, no
+    engine support) and `Alt+F1`/`F11` (`UX-KEY-05`).
 13. **Name Manager cannot manage names** (§3.12).
 14. **No Flash Fill, no Subtotal, no Goal Seek, no sparklines, no pictures**
     (§3.1, §3.24, §3.25).
-15. **No zoom control in the chrome** (§4.2). Trivial to fix, ranked #1 daily
-    miss by the measured map.
-16. **The accessibility mirror does not follow the viewport** (`A11Y-01`, §4.6).
-    Blocks a class of user completely, which is why it is on this list at all
-    despite being one bug.
+15. ~~**No zoom control in the chrome**~~ (§4.2). **Closed** (`UX-CHROME-05`) —
+    a `−`/slider/`+` and a `100%` readout sit at the right of the status bar.
+16. ~~**The accessibility mirror does not follow the viewport**~~ (§4.6).
+    **Closed** (`A11Y-01`), and the reported symptom was a mis-measurement: the
+    settled mirror was always correct, and the real defect was unbounded
+    staleness *during* motion, plus a glide that rebuilt on every one of its
+    frames.
 
-Items 1, 2, 3 and 4 are the four that end an evaluation on the first day. Items
-15 and 16 are on the list because their cost-to-benefit ratio is the best of
-anything here.
+Items 1 and 2 are what end an evaluation on the first day; 3 and 4 have since
+closed. Items 15 and 16 were on the list because their cost-to-benefit ratio was
+the best of anything here, and both closed within a day of being ranked — which
+is the argument for keeping a ranking of this kind at all.
 
 ---
 
@@ -967,6 +1217,11 @@ anything here.
 
 Each of these is a row to file, not a doc edit — `docs/14` §"Where a finding
 goes" governs, and another agent owns that file.
+
+**All six were filed and five are now closed.** Their outcomes are recorded
+inline below rather than in a second list, because a contradiction that has been
+resolved and a contradiction that has not look identical from outside and the
+difference is the whole value of the section.
 
 1. **`docs/47` has two false negatives, and they are its two largest items.**
    "Ctrl+click adds a second range" and "a banked multi-range is what operations
@@ -977,30 +1232,54 @@ goes" governs, and another agent owns that file.
    multi-range. The harness that exists to stop prose drift has drifted the same
    way the prose did, and the pipeline it generates is pointing large effort at
    two solved problems.
-2. **`AGENTS.md` has drifted on two counts.** Line 38 says the engine dispatches
-   364 functions; it dispatches **429**
-   (`crates/casual-calc-eval/src/functions/mod.rs:59`). Line 116 says the
-   workspace is fifteen crates; `crates/` holds **16** (`Cargo.toml:4-19`).
-   Neither is load-bearing on its own, and both are the shape of drift that
-   `docs/14`'s own preamble was written about.
+2. **`AGENTS.md` has drifted on two counts.** It said the engine dispatches
+   364 functions; it dispatches **429**. And it said the workspace is fifteen
+   crates; `crates/` holds **16**.
+   **Half closed** (`DOC-038`). The function count was withdrawn rather than
+   corrected — `AGENTS.md` now says *"several hundred functions dispatch"* and
+   states in the same paragraph that no count is given on purpose, because a
+   figure nobody can enumerate can only be carried, not maintained. That is the
+   right resolution for a figure with no gate, and it is worth being explicit
+   that **429 is now derivable**: `FUNCTIONS`
+   (`crates/casual-calc-eval/src/functions/mod.rs`) is the declared single
+   source of truth and `crates/casual-calc-eval/src/tests.rs` asserts every
+   catalog entry has a dispatch arm, so the two cannot drift apart. Anyone who
+   wants the number should read `FUNCTIONS.len()`, not a document.
+   **The crate count is still wrong in `AGENTS.md` §"Current state"** — it says
+   fifteen and there are sixteen — and that file is outside this document's
+   reach; `DOC-046` is the row.
 3. **`docs/73` #9 implies partial-selection sorting destroys data.** Measured, it
    auto-expands to the contiguous block and preserves rows (§3.5). The concern
    the row raises does not occur. `docs/73`'s own `[unverified]` marking is doing
    its job — this is the reproduction it asked for.
-4. **`docs/68-UX-VISUAL-AUDIT.md` is numbered 68, and so is
-   `docs/68-CLIPBOARD-HTML-PASTE.md`.** Two documents share a number in a
-   repository whose tracker exists because ids were reused. **This is already a
-   red gate**, on an unmodified tree: `python3 tools/check-doc-index.py` fails
-   with *"docs/00-README.md:108: a second row claims number 68 (the first is
-   line 107); numbers are never reused"* [measured]. The brief for this document
-   also pointed at `docs/82-UX-VISUAL-AUDIT.md`, which does not exist — the
-   collision is already costing readers.
+4. **The UX visual audit was numbered 68, and so was
+   `docs/68-CLIPBOARD-HTML-PASTE.md`.** Two documents shared a number in a
+   repository whose tracker exists because ids were reused, and
+   `python3 tools/check-doc-index.py` was already red on an unmodified tree.
+   **Closed.** The audit is [82](82-UX-VISUAL-AUDIT.md), and — the half a
+   renumber alone would have missed — `tests/browser/ux-visual-audit.mjs` writes
+   `docs/82-UX-VISUAL-AUDIT.md`, so **regenerating no longer recreates the
+   collision** (`DOC-035`). A gate on the documents alone could never have been
+   the whole fix, because the generator recreated the fault with nobody having
+   touched a document.
 5. **The Page Setup dialog offers scale / fit-to-width / fit-to-height and the
    print path applies none of them** (§3.17). Under `docs/14`'s rule this is a
    control that states a contract the code does not keep, so it is a row and the
    dialog keeps its controls.
-6. **`Help ▸ Keyboard shortcuts` advertises `F3` for Name Manager; neither `F3`
-   nor `Ctrl+F3` does anything** [measured].
+   **Closed by `IO-05`** — the code was fixed and the controls kept, which is
+   what that rule is for.
+6. ~~**`Help ▸ Keyboard shortcuts` advertises `F3` for Name Manager; neither
+   `F3` nor `Ctrl+F3` does anything.**~~ **Half of this was never true**
+   (`DOC-045`): `Ctrl+F3` opened the Name Manager and always did. The advertised
+   `F3` was real and is **closed** by `UX-KEY-04`, which corrected the panel
+   entry and added a test asserting every chord the panel advertises does
+   something.
+
+**What this section is now evidence for.** Six contradictions were filed against
+other documents; **two of them were the *filing* being wrong**, not the document
+(items 2 and 6, in part, plus five of §4.1's rows). A pass that only ever finds
+other documents at fault has not checked itself, and the corrective in both
+cases was the same: read the code the claim cites, not the claim.
 
 ---
 
@@ -1018,30 +1297,41 @@ work.
   (`axis.rs:169`, `:218`). Widen to `i64` and clamp. One line each, plus a test
   that selects row 1,048,575 and is watched to fail first. This is the single
   highest-value change in the document.
-- **Wire what the engine already has** (§6): ODS in the download menu, a Share
+- ~~**Wire what the engine already has** (§6): ODS in the download menu, a Share
   button, a picture insert, `.xlsm` past the name check. Host wiring, no new
-  engine work, four separate small tasks.
-- **A real save story.** In-browser persistence (OPFS or IndexedDB), a document
-  name, autosave, and version history read off the op log that already exists
-  (`HIST-01`). Large, entirely understood, and it removes blockers #2 and part of
-  #3 at once.
-- **A PDF writer over the existing pagination** (`IO-03`). Decide Rust-side
-  versus browser print first — `docs/19`'s host-seam rule points at Rust-side.
-- **Print that reproduces the sheet.** Emit `<col>` widths, `colspan`/`rowspan`,
-  real cell borders, and the scale settings the dialog already collects.
-- **Formula-based conditional formatting and icon sets.** New model variants,
-  import, export, evaluation and UI. Understood end to end; the import site
-  already knows exactly what it is dropping (`import/src/lib.rs:1329`).
+  engine work, four separate small tasks.~~ **Three of the four are done**
+  (`IO-07`, `COL-53`, `IO-08`); picture insert remains. **And "no new engine
+  work" was wrong for two of them** — see the note under §6. The category
+  survives; the estimate attached to it does not.
+- **A real save story.** In-browser persistence (IndexedDB), a document name,
+  autosave, and version history. ~~read off the op log that already exists~~ —
+  **the op log is a resume buffer, not a history** (`SAVE-09`), so history needs
+  its own storage and its own snapshots. [83](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md)
+  designs the whole thing in three phases; Phase A (`SAVE-02`) has shipped.
+  Large, entirely understood, and it removes blocker #2.
+- **A PDF writer** (`IO-03`). ~~over the existing pagination~~ — **there is no
+  existing pagination** (`IO-06`), so this needs a paginator first and is the
+  most under-estimated item in this document. Decide Rust-side versus browser
+  print first — `docs/19`'s host-seam rule points at Rust-side, and
+  `casual_calc_layout::print` is the first piece (`IO-05`).
+- ~~**Print that reproduces the sheet.**~~ **Done** (`IO-05`).
+- ~~**Formula-based conditional formatting** and icon sets.~~ **Formula rules are
+  done** (`CF-01`, `CF-02`); icon sets remain.
 - **Chart subtypes** — stacked, 100%-stacked, combo, secondary axis, data labels.
   The display list and headless renderer are in place (`RND-10`, `RND-11`).
 - **Pivot depth** — calculated fields, Show Values As, date grouping.
-- **The nine dead chords and the two rebindings** (§4.1), plus a zoom control in
-  the status bar, a command palette, and the Paste Special / row-height /
-  column-width menu routes. Individually tiny; collectively this is what
-  "feels like Excel" is made of.
+- ~~**The nine dead chords and the two rebindings** (§4.1), plus a zoom control
+  in the status bar~~ — **both done** (`UX-KEY-04`, `UX-CHROME-05`), and six of
+  the eleven chords were never dead. What remains here is a command palette and
+  the Paste Special / row-height / column-width menu routes. Individually tiny;
+  collectively this is what "feels like Excel" is made of.
 - **A real dialog for row height and column width** (`UX-DLG-02`), retiring the
-  `window.prompt`.
-- **Make the accessibility mirror follow the viewport** (`A11Y-01`).
+  `window.prompt` at `webapp/editor.dialogs.js`. Still open, and it is the last
+  native dialog left in `webapp/` — the audit now stubs `prompt`/`confirm`/
+  `alert` at page init, so there can be no others hiding the way this one did.
+- ~~**Make the accessibility mirror follow the viewport** (`A11Y-01`).~~
+  **Done**, and the symptom that put it on the list was not the defect — see
+  §4.6.
 - **Data validation reopening with its rule**; **Name Manager that manages**;
   **more than 3 sort keys**; **Remove Duplicates with a column chooser**;
   **confirm before deleting a sheet**.
@@ -1053,12 +1343,18 @@ work.
 
 These need a decision before they need work, and picking wrong is expensive.
 
-- **Concurrent editing correctness.** `COL-46` (P0) — `$`-anchored formulas
-  diverge across a concurrent insert, silently, which is the worst class this
-  system has. `COL-44` — a concurrent move has no transform. Until both are
-  answered, sharing cannot be switched on even though the server is built. This
+- **Concurrent editing correctness.** ~~`COL-46` (P0) — `$`-anchored formulas
+  diverge across a concurrent insert. `COL-44` — a concurrent move has no
+  transform.~~ **Both answered and closed.** What is genuinely unsolved is
+  **`COL-50`**: an insert meeting a delete does not converge for a formula
+  **range**, and each of the two answers is the one Excel gives for the sequence
+  that produced it — `apply` grows a range an insert lands inside and clamps one
+  a delete overlaps, and those two rules do not commute. Resolving it means
+  choosing a rule that *does* commute, which is a semantics decision about what
+  a range means across a concurrent edit, not a transform bug to patch. It needs
+  no formula in flight, so two people doing unremarkable things reach it. This
   is the one blocker on the list that is a research problem rather than a
-  schedule.
+  schedule, and it is why `canShare` defaults to `false`.
 - **What a document *is* when there is no server.** Version history, autosave and
   change attribution all need a storage answer, and today's common case is
   local-only with no backend (`HIST-01` names this as the open question, and it
@@ -1068,10 +1364,17 @@ These need a decision before they need work, and picking wrong is expensive.
   language, what capability set, how it is bounded, whether it survives
   `unsafe_code = "forbid"` and the no-network rule — has not been designed. Every
   competitor has an answer; none of their answers is obviously portable here.
-- **IME and complex text.** Composition input (§3.1) plus `P1C-003`'s shaped text
-  that is wired and not drawn. Together these decide whether the product works
-  for CJK and Indic users at all, and the canvas rendering model is what makes it
-  hard.
+- **IME and complex text.** Composition input (§3.1) is the live half.
+  ~~plus `P1C-003`'s shaped text that is wired and not drawn~~ — **shaped text
+  is drawn**: `draw_glyphs` takes the shaped path whenever one face covers the
+  whole run, and `shape::run` returns glyphs in visual order, asserted for
+  Hebrew. What `P1C-003` still names is **font coverage**, which is a different
+  problem with a different answer: the bundled families cover Latin and Hebrew
+  and not Arabic, Devanagari, Thai or CJK, and `needs_shaping()` /
+  `shaping_available()` exist so a host can be told rather than guess. Shaping
+  is also off in the WebAssembly build by decision (ADR-018), because the
+  browser shapes the text itself. Together with IME these decide whether the
+  product works for CJK and Indic users at all.
 - **What the desktop app is.** `UX-DESK-01` (Open, P1): *"still looks like a web
   application, instead of a real desktop application"*. Not a hide-the-header
   patch — `#settings-panel` lives inside `.app-header`. The question underneath
@@ -1118,7 +1421,7 @@ The two generated maps regenerate against the same served tree:
 
 ```
 cd tests/browser && node ux-sweep.mjs --write          # docs/47
-cd tests/browser && node ux-visual-audit.mjs --write   # docs/68
+cd tests/browser && node ux-visual-audit.mjs --write   # docs/82
 ```
 
 `ux-sweep.mjs --only "<substring>"` runs one row. Before trusting a ❌ from it,

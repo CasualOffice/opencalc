@@ -52,6 +52,47 @@ There are **two writers**, chosen by whether the workbook was edited:
   produces the same bytes (golden-testable).
 - **Unsupported constructs are skipped, never emitted malformed.**
 
+## Two package flavours: `.xlsx` and `.xlsm`
+
+Added by `IO-08`; this section is the document catching up with it (`DOC-042`).
+Both writers above emit **one of two package flavours**, chosen by
+`casual_calc_export::PackageKind` (`crates/casual-calc-export/src/lib.rs:76`):
+
+| `PackageKind` | Extension | Workbook content type |
+| --- | --- | --- |
+| `Workbook` (default) | `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml` |
+| `MacroEnabled` | `.xlsm` | `application/vnd.ms-excel.sheet.macroEnabled.main+xml` |
+
+Note the second is **not** in the `openxmlformats-officedocument` namespace —
+that content type, and the VBA part itself, are the only package-level
+difference between the two flavours: same schema, same parts, same reader.
+
+**The flavour is not a naming preference, and the container is where the loss
+actually happened.** Retaining `vbaProject.bin` in the opaque side table is not
+enough on its own: a plain declaration on a package that carries a VBA project
+makes Excel report the file as damaged and repair it *by deleting the project*,
+and a macro-enabled declaration on a package with no macros makes Excel warn
+about content it will not find. So the flavour is **raised, not merely
+accepted** — `PackageKind::for_workbook` consults
+`Workbook::macro_project()` and overrides a caller who named `Workbook` for a
+workbook that carries one (`write_workbook_as`, `:134-137`). A caller that
+genuinely wants a plain `.xlsx` out of a macro workbook calls
+`Workbook::remove_macro_project()` first, which is the route that reports the
+loss rather than performing it silently.
+
+`write_workbook` picks the flavour for its caller; `write_workbook_as` is for
+the caller that wants to name it. Above the engine,
+`SessionFormat::for_extension("xlsm")` resolves and the editor's Download
+submenu is derived from `writable_extensions()`, so the flavour appears without
+anybody remembering to add it.
+
+**Known gap, tracked rather than papered over:** `SessionFormat::for_bytes`
+cannot tell the two apart, because `casual_calc_io::detect` reads only the zip's
+first local file header and both flavours start with `[Content_Types].xml`
+(`IO-09`, Open). `.xlsm` bytes arriving with **no filename** therefore open as
+`Xlsx`, and the first edit legitimately drops the macros — the loss is reported,
+but the detection is lossy.
+
 ## Opaque part merge-back
 
 Both writers re-attach the **opaque parts** the model never consumed (charts,
