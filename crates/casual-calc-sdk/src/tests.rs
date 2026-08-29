@@ -2135,6 +2135,117 @@ fn a_view_follows_its_sheet_through_an_insert() {
     );
 }
 
+/// **And back again through undo** (`FID-38`).
+///
+/// `edit` resequences and `undo` did not, so the renumbering was one-way: the
+/// insert moved the view from 0 to 1 and undoing the insert left it at 1, on a
+/// sheet that no longer exists. Nothing errors — `hides` simply answers for a
+/// key nobody will ask about again, and the rows the user hid come back
+/// visible with no way to say why.
+#[test]
+fn a_view_follows_its_sheet_back_through_an_undo() {
+    let mut session = sheet_with_subtotal();
+    session.set_personal_filter(0, BTreeSet::from([1]));
+
+    session
+        .edit(EditOperation::InsertSheet {
+            index: 0,
+            sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 2)), "Ahead")),
+        })
+        .expect("insert a sheet in front");
+    assert!(session.views().hides(1, 1), "the insert did not resequence");
+
+    session.undo().expect("undo the insert");
+
+    assert!(
+        session.views().hides(0, 1),
+        "undoing the insert left the view on index 1: it hides rows on a sheet \
+         that is gone, and the sheet it belongs to is unfiltered"
+    );
+    assert!(!session.is_row_visible(0, 1));
+}
+
+/// Redo puts it back where the edit did.
+#[test]
+fn a_view_follows_its_sheet_forward_through_a_redo() {
+    let mut session = sheet_with_subtotal();
+    session.set_personal_filter(0, BTreeSet::from([1]));
+
+    session
+        .edit(EditOperation::InsertSheet {
+            index: 0,
+            sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 2)), "Ahead")),
+        })
+        .expect("insert a sheet in front");
+    session.undo().expect("undo the insert");
+    session.redo().expect("redo the insert");
+
+    assert!(
+        session.views().hides(1, 1),
+        "redo re-inserted the sheet without renumbering the view"
+    );
+    assert!(
+        session.is_row_visible(0, 1),
+        "the re-inserted sheet inherited a filter"
+    );
+}
+
+/// **A sheet operation inside a `Batch` renumbers too** (`FID-38`).
+///
+/// The fall-through arm did not look inside a batch, and a batch is not an
+/// exotic shape here: `RemoveSheet`'s own inverse is one whenever a chart named
+/// the removed sheet, so this is the shape *undo* hands back. A batch is
+/// applied in order, so its members are resequenced in order — each sees the
+/// index space the one before it produced.
+#[test]
+fn a_view_follows_its_sheet_through_a_batched_insert() {
+    let mut session = sheet_with_subtotal();
+    session.set_personal_filter(0, BTreeSet::from([1]));
+
+    session
+        .edit(EditOperation::Batch(vec![
+            EditOperation::InsertSheet {
+                index: 0,
+                sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 2)), "Ahead")),
+            },
+            EditOperation::InsertSheet {
+                index: 0,
+                sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 3)), "Also ahead")),
+            },
+        ]))
+        .expect("insert two sheets in front, atomically");
+
+    assert!(
+        session.views().hides(2, 1),
+        "a batch of two inserts moved the sheet two places and the view none"
+    );
+    assert!(session.is_row_visible(0, 1) && session.is_row_visible(1, 1));
+}
+
+/// **`apply_raw` renumbers too** (`FID-38`).
+///
+/// It bypasses the *history*, which is what it is for, and used to bypass the
+/// renumbering with it — a different question with the same answer as
+/// [`WorkbookSession::edit`]'s, because the index a personal view is keyed by
+/// moves whether or not the move is undoable.
+#[test]
+fn a_view_follows_its_sheet_through_apply_raw() {
+    let mut session = sheet_with_subtotal();
+    session.set_personal_filter(0, BTreeSet::from([1]));
+
+    session
+        .apply_raw(EditOperation::InsertSheet {
+            index: 0,
+            sheet: Box::new(Sheet::new(SheetId(Id::from_parts(9, 2)), "Ahead")),
+        })
+        .expect("insert a sheet without recording history");
+
+    assert!(
+        session.views().hides(1, 1),
+        "apply_raw moved the sheet and left the view behind"
+    );
+}
+
 /// A session opened from a `.ods` saves back as a `.ods` (`WOPI-07`).
 ///
 /// The same rule the delimited sessions above hold, for the format a
