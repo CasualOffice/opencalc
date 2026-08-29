@@ -1,6 +1,21 @@
 # 67 — Repository Remediation Plan
 
-**Status:** Active planning baseline  
+> **Status: complete. This is no longer the work order.**
+>
+> All eighteen rows this plan sequences are `Done` — checked one at a time
+> against [14](14-EXECUTION-TRACKER.md) and
+> [14a](14a-ARCHIVE-CLOSED-WORK.md), not assumed. **Live work is in
+> [14](14-EXECUTION-TRACKER.md)**, and anything that reads this document as a
+> queue is reading the past, which is the failure `46` and `48` were both
+> caught doing.
+>
+> It is kept, not deleted, for two things that live nowhere else: the **wave
+> rule** — two units of work may run together only when they cannot touch the
+> same invariant — and the audit's own reasoning about why each defect was
+> invisible. Both are cited from CLAUDE.md.
+
+**Status:** Complete — every tracked row closed; superseded as a work order by
+[14](14-EXECUTION-TRACKER.md)  
 **Audit date:** 2026-08-14  
 **Scope:** the complete repository audit plus the failures reproduced through the
 Docker product path  

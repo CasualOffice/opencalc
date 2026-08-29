@@ -1,8 +1,19 @@
-# Design note: a precedent graph that survives the edit
+# 66 — Design note: a precedent graph that survives the edit
 
-**For** P2-002 / PERF-04. **Not yet implemented** — this is the design step, and
-it is written down first because the change touches the one part of the engine
-where being wrong is silent.
+**For** [`PERF-04`](14a-ARCHIVE-CLOSED-WORK.md) and [`PERF-06`](14-EXECUTION-TRACKER.md).
+**Built** — `casual_calc_eval::graph::Precedents` is the kept graph, with the
+row-band buckets of `PERF-06` indexing its range edges; the edit path is flat
+from ten thousand cells to a hundred thousand. §"Step five" below is the
+measurement of what it cost.
+
+This was written as the design step, before the code, because the change
+touches the one part of the engine where being wrong is silent. It is kept for
+that reasoning, not as a plan.
+
+> The row it was written for, `P2-002` ("incremental dependency graph + dirty
+> propagation"), was **closed and then deleted** rather than archived in the
+> 2026-08-18 tracker consolidation, so its id resolves to nothing. Cite
+> `PERF-04` and `PERF-06`, which survive.
 
 ## The measurement
 

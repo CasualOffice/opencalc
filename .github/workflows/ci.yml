@@ -416,6 +416,15 @@ jobs:
       # forgetting this one turned three collaboration tests red *after* a
       # merge, and only in `browser-smoke` -- a ten-minute job, on main. The
       # same drift is a one-second grep here.
+      # The index gate above proves the *map* is whole; it says nothing about
+      # the citations inside the documents, which is how this project actually
+      # refers to itself. `P2-002` was closed and then deleted rather than
+      # archived, so `docs/40` and `docs/66` cited a row that resolved to
+      # nothing -- and `66` went on saying "Not yet implemented" about a graph
+      # that had shipped. `COL-33` was cited and has never existed. Five
+      # retired numbers had no tombstone row, so they read as free (DOC-036).
+      - name: Every document, ADR and tracker row a document cites exists
+        run: python3 tools/check-doc-references.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \

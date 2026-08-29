@@ -1,4 +1,4 @@
-# Running OpenCalc
+# 65 — Running OpenCalc
 
 Two stacks, both `docker compose up`. Standalone is one collaboration node and
 is what most deployments should run. The cluster is two nodes behind a proxy

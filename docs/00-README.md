@@ -18,16 +18,20 @@ the other way around. This index is the map.
 ## Numbering discipline
 
 - Numbers are **stable and never reused.** A retired doc keeps its number with a
-  tombstone note; new docs take the next free number.
+  tombstone row here; a new doc takes **the highest number so far plus one**,
+  never the lowest free one. A vacated number that gets reused makes two
+  unrelated things share a name in the history, which is the tracker-id rule
+  ([14](14-EXECUTION-TRACKER.md)) applied to documents.
 - Ranges are conventional, mirroring the OpenDoc layout so the two engines feel
-  like siblings:
+  like siblings. They describe where a number *was* allocated, not a rule that
+  binds the next one:
   - **00–19** — foundation, process, and top-level architecture.
   - **20–28** — stable contracts (schemas, cell store, transactions, limits,
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **45–49, 54–75** — product surface: editor parity, UX map, design system,
-    per-construct design notes (added as phases open).
+  - **45–49, 54–82** — product surface: UX map, design system, and the
+    per-construct design notes and ADR notes added as phases open.
   - **50–53, 73** — measured gap trackers and audits, generated from or audited
     against the code rather than hand-maintained.
 - **The index is gated, not remembered.** `tools/check-doc-index.py` fails CI
@@ -35,8 +39,13 @@ the other way around. This index is the map.
   does not exist, or when two rows claim one number. Eight documents once
   accumulated unlisted because writing one never forced this file to change;
   now it does. A row whose own file has been superseded keeps its number and
-  links to where the content went (`29`, `31`, `50`, `60`), which the gate
-  allows deliberately.
+  links to where the content went (`18`, `29`, `31`, `33`, `45`, `46`, `50`,
+  `52`, `60`), which the gate allows deliberately.
+- **Cross-references are gated too.** `tools/check-doc-references.py` fails CI
+  when a document cites `docs/NN` for a number no file and no tombstone row
+  carries, an `ADR-NNN` the register does not list, or a tracker id no tracker
+  defines. A dead reference is worse than none, because it reads as a decision
+  recorded somewhere.
 
 ## Index
 
@@ -57,6 +66,7 @@ the other way around. This index is the map.
 | 15 | [CI & Release Gates](15-CI-AND-RELEASE-GATES.md) | The PR contract |
 | 16 | [Documentation Maintenance](16-DOCUMENTATION-MAINTENANCE.md) | Keeping docs and code in sync |
 | 17 | [Glossary](17-GLOSSARY.md) | Shared vocabulary |
+| 18 | [Support Matrix](14-EXECUTION-TRACKER.md) | **Retired 2026-08-18** — a hand-kept matrix that disagreed with the code. What is supported is measured in [53](53-FEATURE-CORRECTNESS-TRACKER.md); what is open is in 14 |
 | 19 | [Workspace Scaffold & Layer Division](19-WORKSPACE-SCAFFOLD-DESIGN.md) | Crates, the dependency DAG, the seams |
 
 ### Contracts (20–28)
@@ -71,6 +81,7 @@ the other way around. This index is the map.
 | 28 | [XLSX Package Reader](28-XLSX-PACKAGE-READER.md) | SpreadsheetML OPC admission |
 | 29 | [Phase 0 Plan & Scaffold Specs](06-ROADMAP-AND-DELIVERY.md) | Ordered F-### items + ready-to-instantiate build config |
 | 31 | [Phase D Exit Report](06-ROADMAP-AND-DELIVERY.md) | Documentation phase closure |
+| 33 | [Fidelity Ledger](51-FIDELITY-GAP-AUDIT.md) | **Retired 2026-08-14** — every row was either already in the fidelity tracker (52, also retired) or wrong. The measured register is 51 |
 
 ### Architecture pillars (30, 34, 36, 40, 42, 44)
 
@@ -83,11 +94,13 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
-### Product, UX & the SDK (45–49, 54–75)
+### Product, UX & the SDK (45–49, 54–82)
 
 | # | Title | Purpose |
 | --- | --- | --- |
-| 47 | [UX & Feature Map](47-UX-AND-FEATURE-MAP.md) | Every surface the editor exposes, and where it lives |
+| 45 | [Editor Parity Tracker](14-EXECUTION-TRACKER.md) | **Retired 2026-08-18** — declared itself superseded in its own text, and its four open rows had all shipped. Live work is in 14 |
+| 46 | [Competitive Parity Analysis](14-EXECUTION-TRACKER.md) | **Retired 2026-08-18** — a second roadmap nobody re-derived. Audited against the code: of ~100 rows, 79 done, 11 partial, 3 absent, while it marked most "Todo". Live work is in 14 |
+| 47 | [UX & Feature Map](47-UX-AND-FEATURE-MAP.md) | Every surface the editor exposes, and where it lives. **Generated** by `tests/browser/ux-sweep.mjs`; do not edit by hand |
 | 48 | [Feature Pipeline](48-FEATURE-PIPELINE.md) | What is queued, in what order, and why |
 | 49 | [Design System](49-DESIGN-SYSTEM.md) | The editor's visual language — tokens, spacing, chrome |
 | 54 | [Pivot Tables](54-PIVOT-TABLES.md) | Model, one-pass accumulation, refresh safety, `GETPIVOTDATA` |
@@ -103,7 +116,7 @@ the other way around. This index is the map.
 | 64 | [Text Shaping](64-TEXT-SHAPING.md) | ADR-018: engine/host ownership of fonts and shaping |
 | 65 | [Running OpenCalc](65-RUNNING-IT.md) | Standalone, Docker and clustered operation |
 | 66 | [Incremental Recalc Graph](66-INCREMENTAL-RECALC-GRAPH.md) | The persistent precedent graph and its invalidation discipline |
-| 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit |
+| 67 | [Repository Remediation Plan](67-REPOSITORY-REMEDIATION-PLAN.md) | Ordered correction plan from the 2026-08-14 full-repository audit. **Complete** — every row closed; kept for the wave rule and the audit's reasoning, not as a queue |
 | 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | Pasting from Excel, LibreOffice and Sheets: who parses the markup, why it is safe, and what is deliberately not mapped |
 | 69 | [Collaborative Undo Policy](69-COLLABORATIVE-UNDO-POLICY.md) | What undo *means* once somebody else has been typing — whose edit comes back, and what is refused |
 | 70 | [Comparison Semantics](70-COMPARISON-SEMANTICS.md) | What `=`, `<` and `>` mean across types, and why text and numbers never mix |
@@ -113,10 +126,10 @@ the other way around. This index is the map.
 | 75 | [Relative Formula Sharing](75-RELATIVE-FORMULA-SHARING-DESIGN.md) | One AST for a filled column: the shared-formula representation `PERF-11` needs |
 | 76 | [Drawing charts in the headless renderer](76-CHART-RENDERING-BACKEND.md) | Why the plot backend already exists in the editor, and what `RND-11` actually needs |
 | 77 | [Keeping the coordinator available](77-COORDINATOR-AVAILABILITY.md) | `ADR-020`: Sentinel over Cluster mode, and what an asynchronous failover can still lose |
+| 78 | [How the engine reaches the platform](78-HOST-CAPABILITY-SEAMS.md) | `ADR-019`: why the capability trait was never written, and why what grew instead is better |
 | 80 | [Geometry in the display list](80-CHART-DISPLAY-LIST.md) | `ADR-021`: why a chart needs shapes the display list did not have, and what that costs every backend |
 | 81 | [Desktop shell composition](81-DESKTOP-SHELL-COMPOSITION.md) | `ADR-023`: why the Tauri app depends on the SDK directly, what a separate Cargo workspace costs, and the three decisions a running shell is still needed to settle |
-| 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see |
-| 78 | [How the engine reaches the platform](78-HOST-CAPABILITY-SEAMS.md) | `ADR-019`: why the capability trait was never written, and why what grew instead is better |
+| 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see. **Generated** by `tests/browser/ux-visual-audit.mjs`; do not edit by hand |
 
 ### Measured gap trackers (50–53, 73)
 
@@ -127,16 +140,18 @@ cannot quietly disagree with what shipped.
 | --- | --- | --- |
 | 50 | [UX Completeness Tracker](73-EXCEL-UX-PARITY-AUDIT.md) | Editor gaps with severity — closed at all 63 rows |
 | 51 | [Fidelity Gap Audit](51-FIDELITY-GAP-AUDIT.md) | The measured SpreadsheetML construct register |
-| 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach |
+| 52 | [Fidelity Tracker](51-FIDELITY-GAP-AUDIT.md) | **Retired 2026-08-18** — hand-kept OOXML construct coverage that disagreed with the code; its `FID-` series was renamed `OOX-` when it collided with 14's. The measured register is 51 |
+| 53 | [Feature Correctness Tracker](53-FEATURE-CORRECTNESS-TRACKER.md) | FC-### — modelled fields that no surface could reach. **Generated** by `tools/feature-audit/inventory.py` |
 | 73 | [Excel UX Parity Audit](73-EXCEL-UX-PARITY-AUDIT.md) | What a user notices, ranked — the 2026-08-16 audit that 14's rows are created from |
 
 ## Status
 
-**Alpha — engine, editor and embeddable SDK are live.** Phases 0–1E done,
+**Alpha — engine, editor, SDK and collaboration are live.** Phases 0–1E done,
 Phase 2 (calc) substantially done, Phase 3 shipped, and the browser SDK
-published to npm as `@opencalc/sheet`. The Phase 5 concurrency model is
-**decided and unbuilt** — server-mediated OT, not a CRDT (ADR-011,
-[56](56-COLLABORATION-CONCURRENCY-DESIGN.md)).
+published to npm as `@opencalc/sheet`. Phase 5 is **decided and built** —
+server-mediated OT, not a CRDT (ADR-011,
+[56](56-COLLABORATION-CONCURRENCY-DESIGN.md)) — with a clustered server under
+`server/` that two real browsers drive in CI.
 
 `docs/` remains the source of truth for *design*: a substantial design is
 settled here before it is implemented. It is no longer the source of truth for

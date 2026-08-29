@@ -178,11 +178,17 @@ engine never calls the platform directly; anything platform-specific enters as
    it does not itself decide what to skip.
 6. **Format specifics stay in the format crates.** The model, transaction,
    layout, and eval layers are format-agnostic; adding ODS/CSV never touches them.
-7. **The engine is host-agnostic; platform access goes through a capability
-   trait.** No core crate has a `#[cfg(target_arch = "wasm32")]` fork. Threads,
-   clock, and parallelism are host-supplied, so the *same* engine runs native on
-   Tauri and as WASM on the web without divergence (ADR to be recorded at
-   Phase 0).
+7. **No engine crate names a platform.** No crate under `crates/` carries a
+   `cfg(target_os)`, `cfg(target_arch)` or `cfg(target_family)` fork, so the
+   *same* engine runs native in the desktop shell and as WebAssembly on the web
+   without divergence. Threads, clock and cancellation are host-supplied
+   through **one seam per capability, not one combined trait** — the wording
+   `ADR-019` accepted, replacing this invariant's earlier promise of a
+   host-capability trait that was never written. It is checkable, and
+   `tools/check-host-seams.py` checks it on every push. The one deliberate
+   divergence is named there: `casual-calc-render` gates shaping behind a Cargo
+   *feature* (`ADR-018`), which is a dependency chosen per build rather than the
+   engine branching on where it runs. See [78](78-HOST-CAPABILITY-SEAMS.md).
 
 ## Tooling & fixtures (outside `crates/`)
 

@@ -1,7 +1,13 @@
-# Desktop shell composition
+# 81 — Desktop shell composition
+
+**For** `ADR-023`. **Status: Accepted** — see the register
+([08](08-ADR-REGISTER.md)), which is where an ADR's status lives.
 
 How the Tauri app is put together, and why there is no crate between it and the
-SDK. Decided as `ADR-023`; `TAURI-001` is what it unblocks.
+SDK. `TAURI-001` is what it unblocks. It is `Partial` — the crate, the window
+(`TAURI-005`), the OS menu bar (`TAURI-004`) and the native engine binding
+(`TAURI-003`) all exist and CI's `desktop` job bundles them on three platforms;
+what stays open is the three things only a running shell can measure.
 
 ## The question
 

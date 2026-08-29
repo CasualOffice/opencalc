@@ -32,16 +32,19 @@ full contract. This file only restates the essentials.
 - **No silent data loss** — anything the model cannot keep is counted and
   named in a compatibility report, never dropped quietly.
 
-Current state: **alpha — engine, editor, SDK and collaboration are live.**
-Phases 0–1E done, Phase 2 (calc) substantially done, Phase 3 shipped. The
-collaboration model is **decided and built** (ADR-011/012/014/017 all Accepted;
-a clustered OT server with resume, presence and relay, exercised by two real
-browsers in CI). The SDK is published at `0.0.0` and ships no type
-declarations (`SDK-009`).
+Current state: **alpha — engine, editor, SDK, collaboration and the desktop
+shell are live.** Phases 0–1E done, Phase 2 (calc) substantially done, Phase 3
+shipped. The collaboration model is **decided and built** (ADR-011/012/014/017
+all Accepted; a clustered OT server with resume, presence and relay, exercised
+by two real browsers in CI). The SDK is published at `0.0.0` and does ship type
+declarations (`SDK-009`, Done).
 
-What is open is operational rather than architectural — no metrics, no
-published image, no Helm chart — plus the P0 rows in
-[docs/14](docs/14-EXECUTION-TRACKER.md). See AGENTS.md §"Current state".
+What is open is **not** only operational. `COL-46` is a live P0: a
+`$`-anchored formula rebased across a concurrent insert diverges between
+replicas with nothing raised anywhere. On the operational side metrics and
+images have shipped (`DEP-06`, `DEP-07`); the Helm chart is blocked on there
+being a cluster to render against (`DEP-08`). See
+[docs/14](docs/14-EXECUTION-TRACKER.md) and AGENTS.md §"Current state".
 
 ## Focus mode
 

@@ -5,9 +5,16 @@ Every mutation of the workbook model goes through **one** layer:
 inverse, and reference-rewriting rules are fixed now because three later things
 ride directly on them: undo/redo, incremental recalc (Phase 2), and
 collaboration (Phase 5). Getting this boundary right is how those phases avoid a
-do-over. The layer boundary is fixed by ADR-003; the **op set / op-schema** is a
-pending ADR ([08](08-ADR-REGISTER.md)) to be Accepted before Phase 1A editing,
-and the op schema versions independently ([02](02-ARCHITECTURE.md)).
+do-over. The layer boundary is fixed by ADR-003; the op schema versions
+independently ([02](02-ARCHITECTURE.md)).
+
+> **The op set / op-schema ADR was to be Accepted before Phase 1A editing, and
+> was never written** ([08](08-ADR-REGISTER.md) §Pending). Phase 1A shipped,
+> and then Phase 5 shipped on top of the same op set — `PROTOCOL_VERSION` is at
+> 5, and ADR-011's operational transform depends on the set being *closed*,
+> which is the property that ADR was to establish. So the set is load-bearing
+> for four accepted decisions and is itself undecided on the record. `DOC-039`
+> is the row; this paragraph is not the fix.
 
 Owning crates: `casual-calc-transaction` (the ops + inverses) and
 `casual-calc-selection` (caret/range state), over `casual-calc-model`, using

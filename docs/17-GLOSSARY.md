@@ -77,6 +77,30 @@ products, this doc fixes the meaning we use.
 - **Oracle** — an external reference (LibreOffice Calc / Excel) used to check
   computed values or rendered output.
 
+## Hosts & integration
+
+**"Host" carries two senses in this repository and both are load-bearing**, so
+they are separated here rather than merged. Which one is meant is decided by
+the document: the architecture and engine documents mean the first, the
+collaboration and WOPI documents mean the second.
+
+- **Host** *(engine sense)* — the program the engine is compiled into and which
+  owns policy: the browser editor (`casual-calc-wasm`), the desktop shell
+  (`desktop/`), the collaboration server (`server/`). AGENTS.md's rule is about
+  this one: *the engine computes; the host decides fonts, I/O, network,
+  persistence and collaboration transport.* Its seams are
+  [78](78-HOST-CAPABILITY-SEAMS.md).
+- **Host** *(storage sense)* — the system that keeps the document of record and
+  mints the tokens: a WOPI host such as Nextcloud or SharePoint
+  ([74](74-WOPI-INTEGRATION.md)), or the party a collaboration deployment posts
+  finished bytes back to ([57](57-COLLABORATION-SERVER-BOUNDARY.md)).
+- **Integrator** — the party embedding OpenCalc in their product. The preferred
+  word for the *people*, where "host" is the preferred word for the *program*.
+  **"Embedder" and "SDK consumer" are drift**: use "integrator".
+- **Embed / embedding** — putting the editor inside somebody else's page
+  through the SDK ([55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md)). Distinct
+  from *hosting*, which is compiling the engine into a program.
+
 ## Process
 
 - **ADR** — Architecture Decision Record ([08](08-ADR-REGISTER.md)).

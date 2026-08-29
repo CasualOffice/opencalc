@@ -1,10 +1,23 @@
 # 55 — SDK embedding and integration: design
 
-**Status: proposed, not built.** This is the design to agree before implementing,
-per [AGENTS.md](../AGENTS.md) — the embed surface so far was built ad hoc while
-chasing a CSS-isolation report, and that is exactly the do-over this project
-does not accept. What exists today is listed under [What is already
-true](#what-is-already-true); everything else here is a proposal.
+**Status: partly built, and overtaken in one direction.** This was written as
+the design to agree before implementing, per [AGENTS.md](../AGENTS.md) — the
+embed surface so far had been built ad hoc while chasing a CSS-isolation
+report, and that is exactly the do-over this project does not accept.
+
+Since then the packages named in §2 have shipped: `sdk/packages/engine`,
+`sdk/packages/sheet` and `sdk/packages/react` are published at `0.0.0` by an
+`sdk-v*` tag, they carry type declarations (`SDK-009`), and all five samples in
+§8 exist including `sdk/examples/host-toolbar` (`SDK-010`, which also added
+`run(id)`).
+
+**§12's decisions were not answered first, and §12 keeps its text.** Its closing
+sentence — *"Nothing beyond the prototype in §10 gets built until these are
+answered"* — is a promise the work did not keep, not a paragraph to quietly
+correct; `DOC-034` is the row. Read §10 as the state at the time of writing and
+§12 as still open, with the caveat that decision 3 (renaming the `--oc-*`
+tokens, *"cheap now and impossible after the first release"*) is being decided
+by the calendar.
 
 The goal, stated plainly: **someone installs a package into their React (or Vue,
 Svelte, plain-HTML) project, and gets a spreadsheet.** The engine is Rust

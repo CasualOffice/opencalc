@@ -1,7 +1,7 @@
 # 76 — Drawing charts in the headless renderer
 
 **Status:** decided — **Option C**, recorded as `ADR-021` in
-[80](80-CHART-DISPLAY-LIST.md) (Proposed) and built by `RND-11`. This note is
+[80](80-CHART-DISPLAY-LIST.md) (Accepted) and built by `RND-11`. This note is
 kept as the analysis that led there; the decision, the display-list contract
 and the list of what is drawn and what is not all live in
 [80](80-CHART-DISPLAY-LIST.md).

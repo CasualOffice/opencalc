@@ -1,7 +1,17 @@
 # 75 — Relative Formula Sharing (PERF-11)
 
-_Design note. Not implemented. `PERF-11` is the row; this is what agreeing to
-build looks like before anybody writes code, per [AGENTS.md](../AGENTS.md)._
+_Design note. **Built** — `PERF-11` is `Done`: `Expr::Reference` holds a
+`StoredRef` that is relative to the cell holding the formula unless
+`$`-anchored, so one tree serves a filled-down column. This is what agreeing to
+build looked like before anybody wrote code, per [AGENTS.md](../AGENTS.md), and
+it is kept for that reasoning rather than as a plan._
+
+> **One thing this change made possible is still open.** Storing references
+> relative to their own cell is also what makes an *absolute* reference the odd
+> one out under operational transform: `COL-46` (P0, open) is a `$`-anchored
+> formula silently diverging across a concurrent insert, because
+> `rebase_onto_band` shifts the cell address and carries the formula verbatim.
+> Read §"Interaction with work already landed" with that row in hand.
 
 ## The gap
 

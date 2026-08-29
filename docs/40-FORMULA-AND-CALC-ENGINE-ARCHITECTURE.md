@@ -81,16 +81,25 @@ Formulas are interned in an **AST arena** ([22](22-NORMALIZED-SCHEMA.md)): a
 filled-down column of the "same" relative formula shares one AST plus a per-cell
 origin, not N copies — essential for the 1M-cell memory budget.
 
-> **Status: evaluator implemented (Phase 2, P2-001).** `casual-calc-eval`
-> evaluates the stored formula ASTs by memoized recursive evaluation with
-> circular-reference detection, and `recalculate(workbook)` recomputes every
-> formula cell's cached value (a correct **full** recalc). Supported:
+> **Status: Phase 2 substantially done.** `casual-calc-eval` evaluates the
+> stored formula ASTs by memoized recursive evaluation with circular-reference
+> detection; `recalculate(workbook)` is the full pass and
+> `recalculate_incremental` the dirty-set one. Supported:
 > arithmetic/comparison/concat/unary operators, cell + range references (same-
-> and cross-sheet), defined names, and a starter function library (SUM, AVERAGE,
-> MIN, MAX, COUNT, IF, ABS, ROUND). Still to come: the **incremental dependency
-> graph** + dirty propagation and the <50 ms budget (P2-002), a broader
-> oracle-diffed function library (P2-003), and volatile/spill/iterative calc
-> (P2-004).
+> and cross-sheet), defined names, and a function library of several hundred
+> names dispatched from `functions::call_function` — `P2-003`'s oracle-diffed
+> library, not the eight-name starter set this paragraph used to list.
+> The **incremental dependency graph** is built and kept across edits
+> (`PERF-04`, [66](66-INCREMENTAL-RECALC-GRAPH.md)), its range edges indexed by
+> row band (`PERF-06`), and the <50 ms cap is asserted absolutely for the cold
+> first edit and for the adversarial sheet [30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)
+> defines (`PERF-07`). Volatile functions, spill/dynamic arrays and iterative
+> calculation are all in (`P2-004`).
+>
+> No count of functions is given here on purpose: the figure has been wrong in
+> every document that carried one, and nothing measures it. The list that is
+> generated rather than remembered is
+> [53](53-FEATURE-CORRECTNESS-TRACKER.md).
 
 ## `casual-calc-eval` — the engine
 

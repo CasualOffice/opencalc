@@ -1,4 +1,4 @@
-# Design note: what undo *means* when somebody else has been typing
+# 69 — Design note: what undo *means* when somebody else has been typing
 
 **For** COL-28, second half. The first half — making undo travel at all — is
 implemented: `History::undo`/`redo` return the operation they applied and the
