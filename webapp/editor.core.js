@@ -57,6 +57,7 @@ import {
   conditionDialog,
   confirmModal,
   customFormatDialog,
+  deleteSheetWithConfirm,
   formatCellsDialog,
   headerMenu,
   hyperlinkDialog,
@@ -204,8 +205,12 @@ import {
   drawCollaborators,
   drawEdge,
   drawFilterRegion,
+  FILTER_ARROW_W,
   drawFreezeDividers,
   drawMoveDropIndicator,
+  drawMoveGhost,
+  drawTableOutlines,
+  moveGhostForTest,
   drawFreezeHandles,
   drawImages,
   drawRuns,
@@ -420,6 +425,7 @@ export {
   conditionDialog,
   confirmModal,
   customFormatDialog,
+  deleteSheetWithConfirm,
   formatCellsDialog,
   headerMenu,
   hyperlinkDialog,
@@ -570,6 +576,7 @@ export {
   drawFreezeDividers,
   drawFreezeHandles,
   drawImages,
+  moveGhostForTest,
   drawRuns,
   drawStretched,
   drawTraceArrows,
@@ -2072,6 +2079,12 @@ export function draw() {
   // and painting them later covers the text. The block used to sit near the end
   // of draw() with a comment claiming otherwise — it got away with it only
   // because the two colours it used were 16%-alpha washes.
+  // Before the cell pass, because the *text* consults it: a header cell in a
+  // filter range has to keep the arrow's width clear, and reading this after
+  // the labels were laid out would have measured them against the previous
+  // frame's filters — wrong for exactly one frame, which is the frame in which
+  // a table is created.
+  refreshFilterInfo();
   tablesInView = [];
   if (wasm) {
     try { tablesInView = JSON.parse(wasm.session_tables(state.sheet)); } catch {}
@@ -2238,7 +2251,18 @@ export function draw() {
     const drawnHere = geo.colOf.has(it.c);
     if (!drawnHere && (it.w || it.cl || it.shrink)) continue; // cannot spill
     const x = drawnHere ? colXAt(it.c) : fscreenX(it.c);
-    const w = drawnHere ? colWAt(it.c) : fscreenXEnd(it.c) - x;
+    const cellW = drawnHere ? colWAt(it.c) : fscreenXEnd(it.c) - x;
+    // **A filter arrow is part of the cell, so the label does not get all of
+    // it.** `drawFilterRegion` puts the arrow in the right-hand
+    // `FILTER_ARROW_W` of every header cell in a filter range, and the text
+    // pass laid the label out against the whole cell — so a label wider than
+    // what was left was drawn *underneath* its own control ("Revenue" reading
+    // as "Revenu", with the arrow on the last letter). Every use of the cell's
+    // width below is the drawable width instead: the fit test, the spill scan,
+    // shrink-to-fit, the clip, and right/centre alignment. Zero everywhere
+    // else, so nothing but a filter header changes.
+    const arrowW = filterArrowReserve(it.r, it.c, cellW);
+    const w = Math.max(0, cellW - arrowW);
     const h = rowHAt(it.r);
     const y = textY(it, yTop, h, cellLineH(it));
     ctx.font = cellFont(it);
@@ -2400,6 +2424,25 @@ export function draw() {
     const spillLo = inFrozenCols ? 0 : Math.max(state.firstCol, F.fc);
     const spillHi = inFrozenCols ? F.fc : lastCol; // exclusive
     let clipL = x, clipR = x + w;
+    // A header label that has been shortened says so.
+    //
+    // The boundary here is a *control*, not the cell's edge, and that is what
+    // makes a hard clip the wrong choice in this one place: a reader cannot
+    // tell a truncated label from one the arrow is sitting on top of, which is
+    // the exact confusion being fixed. The ellipsis is the mark that
+    // distinguishes them. Everywhere else a clipped cell still simply clips —
+    // there the cell edge is itself the signal, and Excel does the same.
+    if (arrowW && !it.runs && tw > w - 8) {
+      const room = Math.max(0, w - 8);
+      // One estimate from the width already measured, then a walk. Header
+      // labels are short, and this runs only for the ones that do not fit, so
+      // it costs a handful of measurements on a frame with a table on it.
+      let cut = Math.min(text.length, Math.max(0, Math.floor((room / tw) * text.length)));
+      while (cut > 0 && ctx.measureText(text.slice(0, cut) + "…").width > room) cut -= 1;
+      while (cut < text.length && ctx.measureText(text.slice(0, cut + 1) + "…").width <= room) cut += 1;
+      text = cut > 0 ? text.slice(0, cut) + "…" : "";
+      tw = ctx.measureText(text).width;
+    }
     // A number never spills, not even into an empty neighbour: Excel fills the
     // cell with "#" instead, because a number cut off mid-digits still reads as
     // a real — and wrong — value. This holds under "clip" too, for the same
@@ -2504,6 +2547,12 @@ export function draw() {
     }
     ctx.restore();
   }
+
+  // A table's own outline, over its fills and its text.
+  //
+  // Before the cell borders below on purpose: a border the *file* puts on a
+  // cell is the author's and wins over the style's edge.
+  if (tablesInView.length) drawTableOutlines(withQuad, tablesInView, geo);
 
   // Cell borders (from the engine), drawn over fills/text.
   for (const it of items) {
@@ -2672,7 +2721,9 @@ export function draw() {
 
   // Autofilter header buttons, drawn before the validation chevron so the
   // active cell's own dropdown wins if the two ever land on the same cell.
-  refreshFilterInfo();
+  // (`refreshFilterInfo()` ran before the cell pass: the *text* has to know
+  // where the arrows are, so reading the model here would have laid this
+  // frame's labels out against last frame's arrows.)
   drawFilterButtons(withQuad);
   drawTraceArrows(withQuad);
 
@@ -2831,6 +2882,9 @@ export function draw() {
   drawOutlineGutter(v);
   } // end headers
   drawFreezeDividers(v);
+  // The lifted band first and the drop line over it: the line is the precise
+  // half of the feedback, so nothing translucent may sit on top of it.
+  drawMoveGhost(v);
   // After the dividers, so a drop indicator over a frozen band is still visible.
   drawMoveDropIndicator(v);
   drawFreezeHandles();
@@ -3419,6 +3473,20 @@ export let filterInfo = null;    // the *sheet's* own filter: {r0,c0,r1,c1,cols:
 let filterRegions = [];   // every filter on the sheet, tables included
 export let filterHidden = 0;     // rows hidden by all of them together
 export let filterButtons = [];   // hit targets rebuilt each frame by drawFilterButtons()
+
+/// How much of this cell belongs to a filter arrow rather than to its label.
+///
+/// Only the header row of a filter range has one, and only when the column is
+/// wide enough for `drawFilterRegion` to draw it at all — the two decisions are
+/// the same decision, so they are made from the same numbers. Everywhere else
+/// this is 0 and the text pass behaves exactly as it did.
+function filterArrowReserve(row, col, cellW) {
+  if (!(cellW >= 18)) return 0;
+  for (const region of filterRegions) {
+    if (row === region.r0 && col >= region.c0 && col <= region.c1) return FILTER_ARROW_W;
+  }
+  return 0;
+}
 
 function refreshFilterInfo() {
   filterInfo = null;
@@ -5057,12 +5125,46 @@ export let editMode = "Enter";
 // away from.
 export let editHome = null;
 
+/// Whether the active cell would refuse an edit right now.
+///
+/// Two questions, in the order that makes the second one cheap: a cell's
+/// `locked` flag means nothing at all until the sheet is protected, which is
+/// why an ordinary sheet — where every cell is locked by default — is still
+/// perfectly editable.
+///
+/// **The fallback is `locked`, and that is the engine's own default**, not a
+/// guess: `session_cell_protection` answers `locked: true` for a cell with no
+/// style of its own, which is OOXML's default and Excel's. Failing open here
+/// would let the editor accept an edit the engine is about to refuse, which is
+/// the exact trap this guard exists to close.
+export function activeCellLocked() {
+  if (!sheetProtectedNow()) return false;
+  try {
+    return !!JSON.parse(
+      wasm.session_cell_protection(state.sheet, state.sel.row, state.sel.col)).locked;
+  } catch {
+    return true;
+  }
+}
+
 export function beginEdit(surface, initial, caretAtEnd = false) {
   // A read-only session refuses the write anyway; refusing here means the user
   // is told before typing rather than after, which is the difference between a
   // mode and a trap.
   if (readOnly()) {
     statusError("this workbook is open for reading only");
+    return;
+  }
+  // The same argument, for the same reason, one rule down. A protected sheet
+  // refused the write at *commit*, so the editor opened, the user typed, and
+  // Enter threw the value away — `editor.selection.js` still carries the note
+  // that "a protected sheet appeared to accept the value". Excel does not open
+  // the editor on a locked cell at all, and now neither does this.
+  //
+  // The message is the engine's own sentence, word for word: one rule that
+  // refuses in two places must not explain itself in two ways.
+  if (activeCellLocked()) {
+    statusError("this sheet is protected — unprotect it to change locked cells");
     return;
   }
   // A pivot's report is written by the engine and rewritten on every refresh.
@@ -5943,6 +6045,23 @@ function wireEvents() {
     );
   });
 
+  // A header that is already selected, and so would start a *move* rather than
+  // a new selection. This is the same test the mousedown below makes, named
+  // once so the pointer can say so before the button goes down: a gesture that
+  // only exists once you have guessed it exists is a gesture nobody finds.
+  const grabbableHeaderAt = (px, py) => {
+    const sr = selRect();
+    if (py < HH && px >= HW) {
+      const c = colAtX(px);
+      return state.selKind === "cols" && c >= sr.c0 && c <= sr.c1;
+    }
+    if (px < HW && py >= HH) {
+      const r = rowAtY(py);
+      return state.selKind === "rows" && r >= sr.r0 && r <= sr.r1;
+    }
+    return false;
+  };
+
   canvas.addEventListener("mousedown", (e) => {
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) / state.zoom;
@@ -6065,8 +6184,20 @@ function wireEvents() {
       // Already selected, no modifier: this is a move, not a new selection.
       if (state.selKind === "cols" && !e.shiftKey && !e.metaKey && !e.ctrlKey
           && c >= sr.c0 && c <= sr.c1) {
-        state.moveDrag = { axis: "col", at: sr.c0, count: sr.c1 - sr.c0 + 1, before: sr.c0 };
+        // `px0`/`py0` is where the band was grabbed. The ghost follows the
+        // pointer by *that* offset rather than centring on it, so the band
+        // keeps the grip the user took — grab a wide band near its right edge
+        // and it does not jump left the instant you move.
+        state.moveDrag = {
+          axis: "col", at: sr.c0, count: sr.c1 - sr.c0 + 1, before: sr.c0,
+          px0: px, py0: py,
+        };
         state.dragging = true;
+        // The whole drag used to read as `cell`, because the mousemove branch
+        // that runs it returns before the idle-hover block that sets the
+        // cursor — so nothing on screen, the pointer included, said a drag was
+        // in progress. Set once here and put back on mouseup.
+        canvas.style.cursor = "grabbing";
         canvas.focus();
         return;
       }
@@ -6083,8 +6214,12 @@ function wireEvents() {
       const sr = selRect();
       if (state.selKind === "rows" && !e.shiftKey && !e.metaKey && !e.ctrlKey
           && r >= sr.r0 && r <= sr.r1) {
-        state.moveDrag = { axis: "row", at: sr.r0, count: sr.r1 - sr.r0 + 1, before: sr.r0 };
+        state.moveDrag = {
+          axis: "row", at: sr.r0, count: sr.r1 - sr.r0 + 1, before: sr.r0,
+          px0: px, py0: py,
+        };
         state.dragging = true;
+        canvas.style.cursor = "grabbing";
         canvas.focus();
         return;
       }
@@ -6112,6 +6247,14 @@ function wireEvents() {
     if (state.freezeDrag) { state.freezeDrag.px = px; state.freezeDrag.py = py; draw(); return; }
     if (state.moveDrag) {
       const d = state.moveDrag;
+      // Where the ghost is. Kept on the drag rather than in a module variable
+      // so it cannot outlive the gesture that owns it.
+      d.px = px;
+      d.py = py;
+      // The cursor is *not* set here. This branch returns before the idle-hover
+      // block below, and nothing else writes the cursor while a move drag is
+      // live, so the `grabbing` the mousedown set is still what is showing —
+      // a second assignment here would be a line no mutation could falsify.
       // The drop lands *before* a line, so the half of it the pointer is in
       // decides which side — otherwise the last column on the sheet could never
       // be dropped after.
@@ -6190,8 +6333,11 @@ function wireEvents() {
     const fh = freezeHit(px, py);
     const hb = fh ? null : boundaryAt(px, py);
     const fnew = freezeHandleAt(px, py);
+    // Resizing wins over grabbing: the boundary is a few pixels inside the
+    // band, and a user aiming at the line means the line.
     canvas.style.cursor = (fnew || fh || hb)
       ? ((fnew || fh || hb).axis === "col" ? "col-resize" : "row-resize")
+      : grabbableHeaderAt(px, py) ? "grab"
       : "cell";
     // Comment tooltip on hover.
     const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
@@ -6263,6 +6409,16 @@ function wireEvents() {
             : `moved ${d.count} row${d.count === 1 ? "" : "s"}`;
         } catch (why) { statusError(errText(why)); }
         invalidateGrowth();
+      }
+      // The pointer is not moving — it has just been let go — so nothing else
+      // recomputes the cursor until the user moves it again, and it would stay
+      // `grabbing` over a sheet that is no longer being dragged. Read *after*
+      // the move, so it answers for the band where it landed.
+      {
+        const r = canvas.getBoundingClientRect();
+        const ux = (e.clientX - r.left) / state.zoom;
+        const uy = (e.clientY - r.top) / state.zoom;
+        canvas.style.cursor = grabbableHeaderAt(ux, uy) ? "grab" : "cell";
       }
       draw();
       return;
@@ -7150,6 +7306,18 @@ function wireEvents() {
   byId("find-close").addEventListener("click", closeFind);
 
   byId("hdr-open").addEventListener("click", () => byId("tb-open").click());
+
+  // The control behind `toolbar.delete-sheet` (see `editor.html`). Wired
+  // through `byId`, which resolves against **this mount's root**, so an
+  // embedded editor wires its own button inside its own shadow tree and two
+  // editors on one page cannot answer for each other. Wiring it with
+  // `document.getElementById` at module scope — the obvious way — returns null
+  // in an embed, and the command would then be *listed* by an editor that
+  // could not run it.
+  //
+  // It acts on the active sheet, which is the one the tabs, the grid and every
+  // other sheet-level command already mean by "this sheet".
+  byId("tb-delete-sheet").addEventListener("click", () => deleteSheetWithConfirm(state.sheet));
 
   // Popover menus: click toggles, outside-click / Escape closes, only one open.
   const menus = [];

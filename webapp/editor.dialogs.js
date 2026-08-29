@@ -2139,15 +2139,51 @@ export function sheetMenu(i, x, y) {
     }
     menu.appendChild(document.createElement("div")).className = "menu-sep";
   }
-  item("Delete", true, () => {
-    try {
-      wasm.session_delete_sheet(i);
-      if (i <= state.sheet) state.sheet = Math.max(0, state.sheet - 1);
-      renderTabs();
-      resetView();
-    } catch (e) { statusError(errText(e)); }
-  });
+  item("Delete", true, () => deleteSheetWithConfirm(i));
   positionMenu(menu, x, y);
+}
+
+/// Delete a sheet, having asked first.
+///
+/// This used to be one click and gone: the tab menu's Delete called
+/// `session_delete_sheet` outright, taking every cell, chart, table and note on
+/// the sheet with it and breaking every formula that pointed at it — with no
+/// question, from a menu whose *other* entries are rename and a colour swatch.
+/// File ▸ New already asks before it discards a workbook, and merge, delimited
+/// export and a lossy save all confirm; this was the one destructive verb that
+/// did not.
+///
+/// **The message says undo brings it back, because it does.**
+/// `EditOperation::RemoveSheet` restores the whole sheet
+/// (`crates/casual-calc-wasm/src/sheet.rs`), so the usual "this cannot be
+/// undone" would have been a lie — and a dialog that overstates the danger
+/// teaches people to click through the ones that do not.
+///
+/// One function, reached by the menu item and by `toolbar.delete-sheet` alike:
+/// a second copy of this is how a command and a menu come to ask different
+/// questions, or one of them to stop asking.
+export async function deleteSheetWithConfirm(i) {
+  let names = [];
+  try { names = JSON.parse(wasm.session_sheet_names()); } catch {}
+  if (i < 0 || i >= names.length) return;
+  // The engine refuses this anyway, in these words. Asking first and *then*
+  // failing would be a dialog that talks somebody into a click that cannot
+  // work.
+  if (names.length <= 1) { statusError("cannot delete the last sheet"); return; }
+  const name = names[i];
+  const ok = await confirmModal(
+    `Delete "${name}"?`,
+    `Everything on "${name}" goes with it, and formulas that point at it will ` +
+      `show #REF!. Undo (Ctrl+Z) brings the sheet back.`,
+    "Delete sheet",
+  );
+  if (!ok) return;
+  try {
+    wasm.session_delete_sheet(i);
+    if (i <= state.sheet) state.sheet = Math.max(0, state.sheet - 1);
+    renderTabs();
+    resetView();
+  } catch (e) { statusError(errText(e)); }
 }
 
 export function positionMenu(menu, x, y) {

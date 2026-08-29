@@ -456,6 +456,95 @@ export function drawMoveDropIndicator(v) {
   ctx.restore();
 }
 
+/// What the last frame actually lifted; null when it lifted nothing.
+let lastGhost = null;
+
+/// The ghost the last frame drew, for the browser gate.
+///
+/// Set at the *end* of `drawMoveGhost`, after the copy has been issued — so it
+/// reports a ghost that was drawn, not merely a drag that is in progress. Null
+/// whenever nothing was lifted, a band scrolled out of view included.
+export function moveGhostForTest() {
+  return lastGhost;
+}
+
+/// The band the user is dragging, lifted off the sheet and tracking the pointer.
+///
+/// The drop line above says *where* the band would land; on its own it never
+/// said *what* was moving. The dragged column looked exactly as it had, so the
+/// gesture was legible only to somebody who already knew what they had grabbed.
+/// Excel and Sheets both answer that the same way — the band becomes a
+/// translucent floating copy and the source reads as vacated — and this is that.
+///
+/// **The copy costs one `drawImage` and measures nothing.** The band has
+/// already been painted this frame, so the ghost is those pixels copied from
+/// the canvas onto itself rather than a second pass over cells, fills and text.
+/// That matters: a reorder redraws on every pointer move, so a ghost that
+/// re-rendered the band would roughly double the cost of the most redraw-heavy
+/// gesture in the editor. It also fetches nothing from the engine — the frame
+/// window is exactly the one the frame would have had anyway.
+///
+/// Source coordinates for `drawImage` are **backing-store** pixels: the current
+/// transform applies to the destination and not to them, so they are scaled by
+/// the transform's own factors (`dpr * zoom`) rather than assumed to be 1:1.
+export function drawMoveGhost(v) {
+  lastGhost = null;
+  const d = state.moveDrag;
+  // No pointer yet: the grab is armed but the pointer has not moved, and a
+  // ghost sitting exactly on its source is just a blurrier sheet.
+  if (!d || d.px === undefined || d.px0 === undefined) return;
+  const src = d.axis === "col"
+    ? { ...spanX(d.at, d.at + d.count - 1, v), y: 0, h: v.h }
+    : { ...spanY(d.at, d.at + d.count - 1, v), x: 0, w: v.w };
+  // Scrolled off, or collapsed to nothing: there are no pixels to lift.
+  if (!(src.w > 1) || !(src.h > 1)) return;
+  const dx = d.axis === "col" ? d.px - d.px0 : 0;
+  const dy = d.axis === "row" ? d.py - d.py0 : 0;
+
+  const m = ctx.getTransform();
+  const kx = m.a || 1, ky = m.d || 1;
+  // Clamped to the bitmap: a source rectangle that runs past the edge draws
+  // nothing at all in some browsers rather than clipping, which would make the
+  // ghost vanish at the right-hand end of the sheet.
+  const bw = Math.max(0, Math.min(src.w * kx, canvas.width - src.x * kx));
+  const bh = Math.max(0, Math.min(src.h * ky, canvas.height - src.y * ky));
+  if (bw < 1 || bh < 1) return;
+  ctx.save();
+  ctx.globalAlpha = 0.62;
+  ctx.shadowColor = "rgba(15,23,42,0.35)";
+  ctx.shadowBlur = 10;
+  ctx.drawImage(
+    canvas,
+    src.x * kx, src.y * ky, bw, bh,
+    src.x + dx, src.y + dy, bw / kx, bh / ky,
+  );
+  ctx.restore();
+
+  // The source, washed out so it reads as vacated rather than merely selected.
+  // A scrim of the *page background* does that in either theme, where a fixed
+  // white or black would only work in one. The ghost's own rectangle is
+  // subtracted (`evenodd`), so a short drag does not wash out the copy it just
+  // lifted.
+  ctx.save();
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = colors.bg || "#fff";
+  ctx.beginPath();
+  ctx.rect(src.x, src.y, src.w, src.h);
+  ctx.rect(src.x + dx, src.y + dy, src.w, src.h);
+  ctx.fill("evenodd");
+  ctx.restore();
+
+  // An accent edge on the ghost, so it reads as one lifted object even where
+  // the band it copied is mostly empty cells.
+  ctx.save();
+  ctx.strokeStyle = colors.accent || "#2563eb";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(src.x + dx + 0.75, src.y + dy + 0.75, src.w - 1.5, src.h - 1.5);
+  ctx.restore();
+
+  lastGhost = { axis: d.axis, x: src.x + dx, y: src.y + dy, w: src.w, h: src.h };
+}
+
 export function drawFreezeDividers(v) {
   const F = state.freeze;
   const drag = state.freezeDrag;
@@ -515,6 +604,71 @@ export function tintColor(hex, tint) {
   return ch.map((c) => Math.round(c).toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
+/// The outer border of every table on the sheet.
+///
+/// The engine resolves a border colour for each table's style and nothing drew
+/// it: header fill, band fill and body fill were all painted, and the boundary
+/// was not, so a table read as a few shaded rows rather than as an object. The
+/// rule under the header row *was* drawn — it is what a Light style has instead
+/// of a header fill — which is why this looked done.
+///
+/// Drawn after the fills and the text, and before the cell borders the file
+/// itself carries: a border the author put on a cell is theirs and wins.
+///
+/// **Bounded by the viewport, not by the table.** A table can be a hundred
+/// thousand rows long, so the edges are walked over the *drawn* rows and
+/// columns and intersected with the table — the same reason the frame fetches
+/// only what it can show. An edge that is off screen contributes nothing to
+/// walk over.
+export function drawTableOutlines(withQuad, tables, geo) {
+  for (const t of tables) {
+    const border = "#" + t.border;
+    const yTop = rowYAt(t.r0);
+    const yBot = rowYAt(t.r1);
+    const hBot = yBot === undefined ? 0 : rowHAt(t.r1);
+    for (let i = 0; i < geo.cols; i += 1) {
+      const c = geo.colIdx[i];
+      if (c < t.c0 || c > t.c1) continue;
+      const cx = colXAt(c);
+      if (cx === undefined) continue;
+      const cw = colWAt(c);
+      if (yTop !== undefined) {
+        withQuad(t.r0, c, () => { ctx.fillStyle = border; ctx.fillRect(cx, yTop, cw, 1); });
+      }
+      if (yBot !== undefined) {
+        withQuad(t.r1, c, () => { ctx.fillStyle = border; ctx.fillRect(cx, yBot + hBot - 1, cw, 1); });
+      }
+    }
+    const xL = colXAt(t.c0);
+    const xR = colXAt(t.c1);
+    const wR = xR === undefined ? 0 : colWAt(t.c1);
+    for (let i = 0; i < geo.rows; i += 1) {
+      const r = geo.rowIdx[i];
+      if (r < t.r0 || r > t.r1) continue;
+      const ry = rowYAt(r);
+      if (ry === undefined) continue;
+      const rh = rowHAt(r);
+      if (xL !== undefined) {
+        withQuad(r, t.c0, () => { ctx.fillStyle = border; ctx.fillRect(xL, ry, 1, rh); });
+      }
+      if (xR !== undefined) {
+        withQuad(r, t.c1, () => { ctx.fillStyle = border; ctx.fillRect(xR + wR - 1, ry, 1, rh); });
+      }
+    }
+  }
+}
+
+/// The width a filter arrow reserves at the right-hand end of its header cell.
+///
+/// The glyph is 12px and sits 4px in from the cell's right edge, so it owns the
+/// last 16px; the remaining 2 is the gap that keeps a label from touching it.
+/// Not more than that: on a 64px column every pixel reserved here is a pixel of
+/// header label thrown away, and `Region` is already wider than what is left.
+/// Exported because the *text* pass has to know it too — the two used to
+/// disagree silently, and a label drawn under its own control is what that
+/// disagreement looks like.
+export const FILTER_ARROW_W = 18;
+
 export function drawFilterRegion(withQuad, filterInfo) {
   const row = filterInfo.r0;
   const y = rowYAt(row);
@@ -529,8 +683,22 @@ export function drawFilterRegion(withQuad, filterInfo) {
     const x = colXAt(col);
     if (x === undefined) continue;
     const cw = colWAt(col);
-    // Skip a column too narrow to hold the glyph without covering its label.
-    if (cw < 22) continue;
+    // **The label makes room for the arrow; the arrow does not stand aside.**
+    //
+    // This used to skip any column under 22px, under a comment claiming it was
+    // keeping the glyph off the label. It never measured a label in its life —
+    // and on every column *wider* than 22px, which is nearly all of them, the
+    // label was drawn against the full cell width and the arrow was then put on
+    // top of it: `Revenue` in a 64px column rendered as `Revenu` with the arrow
+    // over the last letter. Neither Excel nor Sheets drops the control on a
+    // narrow column, and they are right — a header you cannot filter is worse
+    // than one you cannot read in full. The text pass reserves
+    // `FILTER_ARROW_W` for this in a filter range's header row, so the two no
+    // longer draw in the same place.
+    //
+    // The floor that remains is about the *glyph*: below it there is no room
+    // for a 12px shape and 4px of margin at all.
+    if (cw < 18) continue;
     const size = 12;
     const bx = Math.round(x + cw - size - 4), by = Math.round(y + (ch - size) / 2);
     const active = filterInfo.cols.has(col);

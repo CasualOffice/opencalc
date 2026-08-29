@@ -142,3 +142,131 @@ test("dropping a column on itself changes nothing and costs no undo step", async
   // A drag that goes nowhere must not leave a step for the user to undo past.
   expect(await page.evaluate(() => window.opencalcEditor.wasmApi().session_edits_applied())).toBe(edits);
 });
+
+// --- what the drag looks like while it is happening -------------------------
+//
+// The gesture worked and told the user almost nothing: a blue line at the drop
+// boundary was the whole of it. The cursor stayed `cell` for the entire drag,
+// and the band being dragged was drawn exactly as it had been — so the line
+// said *where* and nothing said *what*. Excel and Sheets both lift the band
+// into a translucent copy that follows the pointer and leave the source looking
+// vacated; these three assert that this one does too.
+//
+// The pixel check reads the **column header strip**, not the cells. A selected
+// header is tinted, so lifting it puts a band of tinted pixels over a run of
+// plain header background — a flat, unambiguous block roughly a column wide,
+// where the cell area is mostly background copied onto background and only the
+// glyphs differ. The drop line, which existed before any of this, is three
+// pixels wide: it cannot account for a changed run of dozens.
+
+/// The colours along a horizontal run of the canvas, in canvas-logical px.
+const scanRow = (page, x0, x1, y) =>
+  page.evaluate(([x0, x1, y]) => {
+    const c = document.getElementById("grid");
+    // The bitmap is `dpr` times the CSS box; getImageData works in bitmap px.
+    const k = c.width / parseFloat(getComputedStyle(c).width);
+    const cx = c.getContext("2d");
+    const out = [];
+    for (let x = Math.round(x0); x <= Math.round(x1); x += 1) {
+      const d = cx.getImageData(Math.round(x * k), Math.round(y * k), 1, 1).data;
+      out.push([d[0], d[1], d[2]]);
+    }
+    return out;
+  }, [x0, x1, y]);
+
+const changedPx = (a, b) =>
+  a.filter((p, i) => p.some((ch, j) => Math.abs(ch - b[i][j]) > 6)).length;
+
+const cursorOf = (page) =>
+  page.evaluate(() => getComputedStyle(document.getElementById("grid")).cursor);
+
+test("the dragged band is lifted, and the cursor says a drag is happening", async ({ page }) => {
+  await boot(page);
+  const box = await page.locator("#grid").boundingBox();
+  const g = await geo(page);
+  const from = await centre(page, 0, 0);
+  const to = await centre(page, 0, 5);
+  const w = await page.evaluate(() => window.opencalcEditor.colWAt(0));
+  // The run the ghost will cover: it keeps the grip it was taken by, so a band
+  // grabbed at its centre lands centred on the pointer.
+  const runStart = to.x - w / 2 + 3;
+  const runEnd = to.x + w / 2 - 3;
+  const hdrY = g.hh / 2;
+
+  await page.mouse.click(box.x + from.x, box.y + hdrY);
+  await page.waitForTimeout(120);
+  const before = await scanRow(page, runStart, runEnd, hdrY);
+
+  await page.mouse.move(box.x + from.x, box.y + hdrY);
+  await page.mouse.down();
+  await page.mouse.move(box.x + to.x, box.y + hdrY, { steps: 12 });
+  await page.waitForTimeout(120);
+
+  expect(await cursorOf(page), "the pointer says a drag is in progress").toBe("grabbing");
+
+  // The pixels first: they are the evidence that something was *drawn*, and
+  // they are what a user sees. The hook below only corroborates it.
+  const during = await scanRow(page, runStart, runEnd, hdrY);
+  expect(changedPx(during, before),
+    `header pixels repainted under the pointer (of ${before.length})`).toBeGreaterThan(20);
+
+  // Reported at the end of the paint that drew it, so this cannot be true of a
+  // drag whose ghost was never painted.
+  const ghost = await page.evaluate(() => window.opencalcEditor.moveGhostForTest());
+  expect(ghost, "a ghost was painted this frame").not.toBeNull();
+  expect(ghost.axis).toBe("col");
+  expect(Math.abs(ghost.x + ghost.w / 2 - to.x), "and it tracks the pointer").toBeLessThan(4);
+
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => window.opencalcEditor.moveGhostForTest()),
+    "and nothing is left floating after the drop").toBeNull();
+});
+
+test("the source band is marked while it is being dragged", async ({ page }) => {
+  await boot(page);
+  const box = await page.locator("#grid").boundingBox();
+  const g = await geo(page);
+  const from = await centre(page, 0, 0);
+  const to = await centre(page, 0, 5);
+  const cell0 = await centre(page, 1, 0);
+  const w = await page.evaluate(() => window.opencalcEditor.colWAt(0));
+  const runStart = from.x - w / 2 + 4;
+  const runEnd = from.x + w / 2 - 4;
+
+  await page.mouse.click(box.x + from.x, box.y + g.hh / 2);
+  await page.waitForTimeout(120);
+  // A run across column A's own cells, well away from both the pointer and the
+  // drop line: nothing but the source marking can change these.
+  const before = await scanRow(page, runStart, runEnd, cell0.y);
+
+  await page.mouse.move(box.x + from.x, box.y + g.hh / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + to.x, box.y + g.hh / 2, { steps: 12 });
+  await page.waitForTimeout(120);
+  const during = await scanRow(page, runStart, runEnd, cell0.y);
+
+  expect(changedPx(during, before), "the band being moved no longer looks untouched")
+    .toBeGreaterThan(20);
+  await page.mouse.up();
+});
+
+test("hovering a header that would move shows the grab cursor", async ({ page }) => {
+  await boot(page);
+  const box = await page.locator("#grid").boundingBox();
+  const g = await geo(page);
+  const a = await centre(page, 0, 0);
+  const c = await centre(page, 0, 2);
+
+  // Nothing selected: this header starts a selection, not a move.
+  await page.mouse.move(box.x + a.x, box.y + g.hh / 2);
+  await page.waitForTimeout(80);
+  expect(await cursorOf(page)).toBe("cell");
+
+  await page.mouse.click(box.x + a.x, box.y + g.hh / 2);
+  // Off and back on, so the cursor is recomputed by a real hover.
+  await page.mouse.move(box.x + c.x, box.y + g.hh / 2);
+  await page.mouse.move(box.x + a.x, box.y + g.hh / 2);
+  await page.waitForTimeout(80);
+  expect(await cursorOf(page), "the selected band offers itself to be dragged").toBe("grab");
+});
