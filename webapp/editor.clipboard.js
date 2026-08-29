@@ -33,17 +33,29 @@ export function htmlText(raw) {
 /// Bytes cross to the shell, never a path — the shell owns where the file
 /// goes, and nothing in the page can ask the host process to write to a place
 /// of its choosing.
+/// Returns a promise for the native path, so a caller that must know whether
+/// the bytes actually landed can wait for it. The browser path is synchronous
+/// and resolves immediately; `Promise.resolve` keeps one shape for both.
 export function download(data, name, type) {
   const native = window.__opencalcNative;
   if (native) {
     const dot = name.lastIndexOf(".");
     const ext = dot === -1 ? "" : name.slice(dot + 1);
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    // Deliberately not awaited: `download` is synchronous for every existing
-    // caller, and making it async would change five call sites into a shape
-    // where a forgotten `await` silently drops the save.
-    native.save(bytes, ext).catch((err) => console.error("[opencalc] save", err));
-    return;
+    // **Returned, not swallowed.** This was deliberately un-awaited, on the
+    // reasoning that `download` is synchronous for every caller and making it
+    // async risks a forgotten `await` dropping a save. That reasoning had it
+    // backwards: the caller does not merely *report* the save, it calls
+    // `markSaved()` — so an un-awaited failure left the document marked saved
+    // when nothing had been written. A cancelled panel, a failed write, or the
+    // boot window where the shell still refuses everything all cleared the
+    // dirty bullet and disarmed the close warning, with the error only in the
+    // console (`SAVE-01`).
+    //
+    // The promise resolves to the written file's name, or `null` when the user
+    // cancelled — so a caller can tell "did not happen" from "went wrong", and
+    // one that ignores it behaves exactly as before.
+    return native.save(bytes, ext);
   }
   const blob = new Blob([data], { type });
   const a = document.createElement("a");
@@ -51,6 +63,7 @@ export function download(data, name, type) {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+  return Promise.resolve(name);
 }
 
 // `clipToOS` arms the engine's own clipboard and starts the marching ants before

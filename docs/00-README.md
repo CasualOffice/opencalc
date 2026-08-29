@@ -30,7 +30,7 @@ the other way around. This index is the map.
     registries, package reader).
   - **30, 34, 36, 40, 42, 44** — the performance/fidelity/export/calc/grid/
     desktop architecture pillars.
-  - **45–49, 54–82** — product surface: UX map, design system, and the
+  - **45–49, 54–83** — product surface: UX map, design system, and the
     per-construct design notes and ADR notes added as phases open.
   - **50–53, 73** — measured gap trackers and audits, generated from or audited
     against the code rather than hand-maintained.
@@ -94,7 +94,7 @@ the other way around. This index is the map.
 | 42 | [Grid Layout, Virtualization & Rendering](42-GRID-LAYOUT-AND-RENDERING-ARCHITECTURE.md) | Laying out and painting a million cells |
 | 44 | [Tauri Desktop Shell](44-TAURI-DESKTOP-SHELL-DESIGN.md) | The native desktop host — engine as native Rust |
 
-### Product, UX & the SDK (45–49, 54–82)
+### Product, UX & the SDK (45–49, 54–83)
 
 | # | Title | Purpose |
 | --- | --- | --- |
@@ -130,6 +130,7 @@ the other way around. This index is the map.
 | 80 | [Geometry in the display list](80-CHART-DISPLAY-LIST.md) | `ADR-021`: why a chart needs shapes the display list did not have, and what that costs every backend |
 | 81 | [Desktop shell composition](81-DESKTOP-SHELL-COMPOSITION.md) | `ADR-023`: why the Tauri app depends on the SDK directly, what a separate Cargo workspace costs, and the three decisions a running shell is still needed to settle |
 | 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see. **Generated** by `tests/browser/ux-visual-audit.mjs`; do not edit by hand |
+| 83 | [Save, autosave, recovery and version history](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md) | What `Ctrl+S` means in four hosts and the one rule behind it; why the collaboration op log is a resume buffer and not a history; snapshot-based versions and restore as a new operation |
 
 ### Measured gap trackers (50–53, 73)
 
