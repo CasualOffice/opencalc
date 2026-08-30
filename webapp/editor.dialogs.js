@@ -2604,24 +2604,189 @@ export function cellMenu(x, y) {
   positionMenu(menu, x, y);
 }
 
+/// The largest size this dialog will accept, in device pixels.
+///
+/// Excel's own ceilings are 255 characters of column width (~1790 px) and 409.5
+/// points of row height (~546 px); this is deliberately looser than both, and
+/// exists only so that a slipped digit — `1200` typed as `12000` — is answered
+/// in the field instead of leaving the sheet unnavigable and the mistake
+/// undoable only by Ctrl+Z. The engine itself does not bound this
+/// (`resize_px_to_twips` clamps at `i32::MAX`), so nothing below this line
+/// would refuse it.
+const MAX_SIZE_PX = 2000;
+
+/// Ask for a column width or row height — in the application, not in a browser
+/// prompt (`UX-DLG-02`).
+///
+/// This was `window.prompt("Column A width (px)", …)`, the last native dialog
+/// left in `webapp/`. A prompt cannot be styled, does not look like the
+/// application, blocks the whole page while it is open, is suppressed outright
+/// in some embeds, and in the Tauri shell renders as a *system* dialog carrying
+/// the app's URL. Excel and Sheets both spend a real modal on this, because it
+/// is a setting people change constantly.
+///
+/// **What did not change is the scope.** The size applies to every column or
+/// row in the selection, exactly as the prompt's answer did; `index` only
+/// decides whose current size is offered. The one difference a modal forces is
+/// *when* the selection is read: a prompt was synchronous, so `selRect()` after
+/// it was still the selection the menu was opened on — this captures it up
+/// front so the same is true of an answer that arrives a minute later.
 export function sizeDialog(axis, index) {
   const isCol = axis === "col";
+  const r = selRect();
+  const sheet = state.sheet;
+  // The header menu always passes the first line of the selection. The fallback
+  // is for callers that do not — `sizeDialog()` bare, which the dialog audit
+  // and `editor.dialog-grid-layout` both call — where reading `session_row_px`
+  // at `undefined` threw and the title read "Row NaN height".
+  const at = Number.isInteger(index) ? index : (isCol ? r.c0 : r.r0);
   let current = 0;
   try {
     current = isCol
-      ? JSON.parse(wasm.session_col_px(state.sheet, index, 1))[0]
-      : JSON.parse(wasm.session_row_px(state.sheet, index, 1))[0];
+      ? JSON.parse(wasm.session_col_px(sheet, at, 1))[0]
+      : JSON.parse(wasm.session_row_px(sheet, at, 1))[0];
   } catch {}
-  const label = isCol ? `Column ${colName(index)} width (px)` : `Row ${index + 1} height (px)`;
-  const answer = window.prompt(label, String(current || (isCol ? COL_W : ROW_H)));
-  if (answer === null) return;
-  const px = Math.round(parseFloat(answer));
-  if (!Number.isFinite(px) || px < 0) { status.textContent = "not a size"; return; }
-  const r = selRect();
-  tryEdit(() => {
-    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) wasm.session_set_col_width(state.sheet, c, px);
-    else for (let row = r.r0; row <= r.r1; row += 1) wasm.session_set_row_height(state.sheet, row, px);
-  });
+  const n = isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1;
+  // Sheets names the lines it is about to resize in the title, and the count is
+  // the only warning that OK will touch more than the line that was clicked.
+  const span = isCol
+    ? (n === 1 ? `column ${colName(r.c0)}` : `columns ${colName(r.c0)}–${colName(r.c1)}`)
+    : (n === 1 ? `row ${r.r0 + 1}` : `rows ${r.r0 + 1}–${r.r1 + 1}`);
+
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = `Resize ${span}`;
+  body.textContent = "";
+
+  const form = el("div", "oc-size-form");
+  const label = el("label", "oc-form-label", isCol ? "Width" : "Height");
+  label.htmlFor = "oc-size-px";
+  const cell = el("div", "oc-form-cell");
+  const line = el("div", "oc-size-line");
+  const input = el("input", "oc-form-field oc-size-field");
+  // Deliberately `text`, not `number`: a number input silently reports `""` for
+  // anything it cannot parse, which is exactly the "destroys what you typed"
+  // behaviour the prompt had. `inputmode` still brings up a numeric keypad.
+  input.type = "text";
+  input.id = "oc-size-px";
+  input.inputMode = "numeric";
+  input.autocomplete = "off";
+  input.value = String(Math.round(current || (isCol ? COL_W : ROW_H)));
+  const unit = el("span", "oc-size-unit", "px");
+  line.append(input, unit);
+  const err = el("div", "oc-form-error");
+  err.id = "oc-size-error";
+  err.hidden = true;
+  // The error lives inside the cell, never as a direct child of the grid: a
+  // `hidden` child is `display: none`, occupies no grid cell, and shifts every
+  // later child one place along. That is `editor.dialog-grid-layout`'s gate.
+  cell.append(line, err);
+  form.append(label, cell);
+
+  const actions = el("div", "oc-confirm-actions");
+  const cancel = el("button", "oc-btn", "Cancel");
+  const ok = el("button", "oc-btn primary", "OK");
+  actions.append(cancel, ok);
+  body.append(form, actions);
+  modal.hidden = false;
+
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", onCancel);
+    modal.removeEventListener("click", onBackdrop);
+  };
+  // Cancel, ✕, backdrop and Escape are one path, and that path touches no size.
+  const onCancel = () => { close(); canvas.focus(); };
+  const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+
+  const refuse = (message) => {
+    err.textContent = message;
+    err.hidden = false;
+    input.classList.add("bad");
+    input.setAttribute("aria-invalid", "true");
+    input.setAttribute("aria-describedby", err.id);
+    // The typed text stays: a refusal that clears the field makes the person
+    // retype the part that was right.
+    input.focus();
+    input.select();
+  };
+
+  const apply = () => {
+    const typed = input.value.trim();
+    const value = typed === "" ? NaN : Number(typed);
+    const what = isCol ? "width" : "height";
+    if (!Number.isFinite(value)) {
+      refuse(typed
+        ? `"${typed}" is not a number of pixels — type something like 120.`
+        : `Enter a ${what} in pixels, such as 120.`);
+      return;
+    }
+    // Not "0 hides the line": `resize_px_to_twips` floors every size at 8 px
+    // (`crates/casual-calc-wasm/src/axis.rs`), so 0 becomes 8 rather than
+    // hiding anything. Hiding is the menu's own "Hide rows/columns".
+    if (value < 0) { refuse(`A ${what} cannot be negative — use Hide to hide ${isCol ? "a column" : "a row"}.`); return; }
+    if (value > MAX_SIZE_PX) { refuse(`The largest ${what} is ${MAX_SIZE_PX} px.`); return; }
+    const px = Math.round(value);
+    close();
+    canvas.focus();
+    tryEdit(() => {
+      // One edit for the whole band, not one per line. Each
+      // `session_set_col_width` is its own `session.edit`, so the loop this
+      // replaces cost three undo steps to put back a three-column resize —
+      // while the *drag* path has always used the range call
+      // (`editor.core.js`), so the menu and the drag disagreed about what one
+      // Ctrl+Z means. The person who resizes three columns is the one who
+      // finds out.
+      if (isCol) wasm.session_set_col_width_range(sheet, r.c0, r.c1, px);
+      else wasm.session_set_row_height_range(sheet, r.r0, r.r1, px);
+    });
+    status.textContent = `resized ${span}`;
+  };
+
+  // `aria-modal` on the box is a promise to assistive technology that Tab
+  // cannot leave the dialog; nothing was keeping it, so Tab walked out into the
+  // toolbar behind the backdrop. Cycling here keeps the promise for this
+  // dialog without reaching into the ones that share `#oc-modal`.
+  const focusables = () =>
+    [...modal.querySelectorAll("input, button")].filter((n2) => !n2.disabled && n2.offsetParent !== null);
+  const onKey = (e) => {
+    // A dialog that has been replaced by another one leaves this handler
+    // installed until its own close runs; it must not act on the modal it no
+    // longer owns.
+    if (!input.isConnected) { document.removeEventListener("keydown", onKey, true); return; }
+    if (e.key === "Escape") { e.stopPropagation(); onCancel(); }
+    else if (e.key === "Enter") {
+      e.stopPropagation();
+      e.preventDefault();
+      // Enter is the OK button *unless* the person has tabbed to Cancel, where
+      // Enter has to mean the button under their finger — a dialog that
+      // commits from a focused Cancel is a dialog that cannot be backed out of
+      // from the keyboard.
+      if (document.activeElement === cancel) onCancel(); else apply();
+    } else if (e.key === "Tab") {
+      const list = focusables();
+      if (!list.length) return;
+      const i = list.indexOf(document.activeElement);
+      const next = e.shiftKey
+        ? list[(i <= 0 ? list.length : i) - 1]
+        : list[i === list.length - 1 ? 0 : i + 1];
+      e.preventDefault();
+      e.stopPropagation();
+      next.focus();
+      if (next === input) input.select();
+    }
+  };
+
+  document.addEventListener("keydown", onKey, true);
+  x.addEventListener("click", onCancel);
+  modal.addEventListener("click", onBackdrop);
+  cancel.addEventListener("click", onCancel);
+  ok.addEventListener("click", apply);
+  input.focus();
+  input.select();
 }
 
 export function headerMenu(axis, x, y) {
