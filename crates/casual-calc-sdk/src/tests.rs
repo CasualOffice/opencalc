@@ -3743,3 +3743,49 @@ mod versions {
         );
     }
 }
+
+/// A script no bundled face covers is named in the report (`FID-45`).
+///
+/// `missing_font_coverage()` has existed and been well documented for some
+/// time; what did not exist was any path that *asks* it. So a caller who
+/// rendered a PNG or a PDF and read the compatibility report — the thing whose
+/// whole job is to say what could not be carried — was told nothing, and had to
+/// know to make a second call it had no reason to suspect.
+///
+/// That is worse than the undrawn-picture case the same report already covers.
+/// A missing picture leaves an obvious hole; missing text leaves a cell that
+/// merely looks empty, which reads as an empty cell rather than as a font that
+/// was never installed.
+///
+/// Asserted through the **export path**, not by calling `missing_font_coverage`
+/// directly: calling it directly would pass whether or not anything folds it in,
+/// which is exactly the gap.
+#[test]
+fn a_script_no_face_covers_is_named_in_the_export_report() {
+    let mut session = session_with_formula();
+    // Devanagari: the bundled faces do not cover it, which `FID-45` established
+    // by putting a PNG and a PDF of the same sheet side by side.
+    let op = session.input_edit(0, CellRef::new(5, 0), "नमस्ते");
+    session.edit(op).unwrap();
+
+    let coverage = session.missing_font_coverage();
+    assert!(
+        !coverage.is_empty(),
+        "the fixture must actually use a script no bundled face covers, \
+         or this test proves nothing about reporting"
+    );
+
+    let (_bytes, report) = session.export_pdf_with_report(0).unwrap();
+    let entries = report.entries();
+    let named: Vec<&str> = entries.iter().map(|e| e.feature.as_str()).collect();
+    // Asserts the **script's own name** appears, not a keyword: the first
+    // version of this looked for "font" or "script" and failed against an entry
+    // reading "no installed face covers it", which was the assertion being
+    // wrong rather than the report. A reader needs to know *which* script to go
+    // and install, so that is what is pinned.
+    let script = coverage[0].script;
+    assert!(
+        named.iter().any(|f| f.contains(script)),
+        "a sheet in {script} exported without the report naming that script: {named:?}"
+    );
+}
