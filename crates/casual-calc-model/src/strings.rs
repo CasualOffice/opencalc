@@ -26,6 +26,26 @@ pub struct StringTable {
     /// the same string only if they are formatted the same way; keying on text
     /// alone would give the second one the first one's formatting.
     index: HashMap<(String, Vec<TextRun>), u32>,
+    /// How many leading entries **arrived with the document** rather than being
+    /// interned by this session (`FID-36`).
+    ///
+    /// The table is append-only, so provenance is a watermark rather than a
+    /// flag per entry: everything below it came out of a file or a snapshot,
+    /// everything at or above it was typed here. A writer keeps the whole
+    /// prefix — an unreferenced `<si>` in somebody's `.xlsx` is theirs and
+    /// dropping it is data loss — and keeps only the *referenced* part of the
+    /// tail, so text from an edit that was undone never reaches the file.
+    ///
+    /// A watermark also buys a property a per-entry flag would not: because the
+    /// preserved prefix is emitted whole and in order, **its indices never
+    /// move**. Anything the import kept verbatim and that names a shared string
+    /// by index still resolves after a save.
+    ///
+    /// Set by [`Self::preserve_all`] at the end of a read, and carried through a
+    /// snapshot so a document that round-trips through the collaboration server
+    /// does not silently re-launder this session's discarded text as the
+    /// document's own.
+    preserved: u32,
 }
 
 /// The serialized shape. Split out so a plain workbook's snapshot is still a
@@ -38,6 +58,14 @@ pub struct StringTableRepr {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[serde(deserialize_with = "crate::int_keys::deserialize")]
     runs: BTreeMap<u32, Vec<TextRun>>,
+    /// The provenance watermark, written only when it is not "all of them".
+    ///
+    /// Absent means every entry arrived with the document, which is what a
+    /// snapshot written before this field existed meant and what a table read
+    /// from a file means. Erring that way keeps a string rather than dropping
+    /// one, which is the right direction to be wrong in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserved: Option<u32>,
 }
 
 impl StringTable {
@@ -54,6 +82,22 @@ impl StringTable {
     /// The number of interned strings.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Declare every entry currently held as having **arrived with the
+    /// document**: a reader calls this once, after the last string the file
+    /// contributed has been interned.
+    ///
+    /// Everything interned after this point is the session's own, and a writer
+    /// may drop it once nothing refers to it. See [`Self::preserved_len`].
+    pub fn preserve_all(&mut self) {
+        self.preserved = self.entries.len() as u32;
+    }
+
+    /// How many leading entries arrived with the document — see
+    /// [`Self::preserve_all`]. Always `<= len()`.
+    pub fn preserved_len(&self) -> usize {
+        self.preserved as usize
     }
 
     /// Intern plain `value`, returning its (possibly pre-existing) id.
@@ -134,7 +178,16 @@ impl StringTable {
 
 impl From<StringTableRepr> for StringTable {
     fn from(repr: StringTableRepr) -> Self {
-        let StringTableRepr { entries, runs } = repr;
+        let StringTableRepr {
+            entries,
+            runs,
+            preserved,
+        } = repr;
+        // Clamped, not trusted: a snapshot is data, and a watermark past the
+        // end would make the writer emit entries that do not exist.
+        let preserved = preserved
+            .unwrap_or(entries.len() as u32)
+            .min(entries.len() as u32);
         let mut index = HashMap::with_capacity(entries.len());
         for (i, value) in entries.iter().enumerate() {
             let key = (
@@ -147,15 +200,21 @@ impl From<StringTableRepr> for StringTable {
             entries,
             runs,
             index,
+            preserved,
         }
     }
 }
 
 impl From<StringTable> for StringTableRepr {
     fn from(table: StringTable) -> Self {
+        // Skipped when it is "all of them", so a workbook that has only ever
+        // been read serializes to the bytes it always did.
+        let preserved =
+            (table.preserved as usize != table.entries.len()).then_some(table.preserved);
         Self {
             entries: table.entries,
             runs: table.runs,
+            preserved,
         }
     }
 }

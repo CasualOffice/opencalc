@@ -146,6 +146,12 @@ pub fn import_ods(bytes: &[u8]) -> Result<(Workbook, CompatibilityReport), OdsEr
     let (mut workbook, mut report) = read_content(&xml)?;
     read_document_meta(&mut zip, &mut workbook.properties, &mut report);
     report_unread_parts(&mut zip, &mut report);
+    // Everything interned so far came out of this document (`FID-36`).
+    // OpenDocument writes its text inside the cells, so an unreferenced entry
+    // cannot arrive this way — but the watermark is about provenance, not about
+    // how many entries happen to be orphaned, and a reader that left it at zero
+    // would be claiming this file's strings as the session's.
+    workbook.strings.preserve_all();
     Ok((workbook, report))
 }
 

@@ -95,6 +95,10 @@ pub fn read_delimited(bytes: &[u8], delimiter: u8) -> Result<Workbook, IoError> 
         }
     }
     workbook.sheets.push(sheet);
+    // Every field parsed out of the text is the document's own, not this
+    // session's — the distinction a writer uses to decide which strings it may
+    // reclaim (`FID-36`, `StringTable::preserve_all`).
+    workbook.strings.preserve_all();
     Ok(workbook)
 }
 

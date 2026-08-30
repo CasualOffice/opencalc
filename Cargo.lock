@@ -443,6 +443,7 @@ dependencies = [
  "casual-calc-render",
  "casual-calc-transaction",
  "tiny-skia",
+ "zip",
 ]
 
 [[package]]
