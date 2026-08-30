@@ -34,6 +34,8 @@ import {
   geo,
   growthBefore,
   growthDirty,
+  growthPrefix,
+  growthRows,
   growthTotal,
   hiddenColMarks,
   hiddenRowMarks,
@@ -102,18 +104,56 @@ export function rowOffsetPx(row) {
 
 export function rowAtPx(px) {
   if (growthDirty) rebuildGrowth();
-  const row = wasm.session_row_at_px(state.sheet, Math.round(px));
+  const want = Math.max(0, Math.round(px));
   // With nothing grown there is nothing to correct for, and every extra engine
-  // call rebuilds the sheet's geometry from scratch. This loop ran regardless,
-  // turning one call a frame into five on every sheet.
-  if (!growthTotal) return row;
-  let at = row;
-  for (let i = 0; i < 4; i++) {
-    const next = wasm.session_row_at_px(state.sheet, Math.round(px - growthBefore(at)));
-    if (next === at) break;
-    at = next;
+  // call rebuilds the sheet's geometry from scratch. This stays one call a
+  // frame on the ordinary sheet.
+  if (!growthTotal) return wasm.session_row_at_px(state.sheet, want);
+
+  // **A search over the growth segments, not a fixed-point iteration.**
+  //
+  // This used to iterate `session_row_at_px(px - growthBefore(guess))` four
+  // times, on the stated reasoning that "growth is monotonic, so it converges
+  // in a couple of steps". It does not converge: for a guess *above* the answer
+  // it subtracts the growth of every grown row above it, which drives the
+  // argument negative, the engine clamps that to row 0, and the next step lands
+  // back on the original guess. A 2-cycle, and it returned whichever end of it
+  // the loop happened to stop on.
+  //
+  // Measured on a reported file: `rowAtPx(200)` answered row 10, whose top edge
+  // is at 896px. At a scroll of 800 it answered a row past the last one, so the
+  // frame contained no rows at all and the grid painted blank — reported as
+  // "upper rows become empty and flicker", the flicker being that every scroll
+  // step landed somewhere different.
+  //
+  // `growthBefore` is a step function, constant between consecutive grown rows,
+  // so within one segment the inverse *is* exactly the engine's own — one call,
+  // with a fixed offset subtracted. Which segment is a monotone predicate, so
+  // it is a binary search over `growthRows` and costs log2(grown rows) engine
+  // calls rather than an unbounded guess.
+  const n = growthRows.length;
+  let lo = 0, hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    // Rows in this segment carry `growthPrefix[mid]` of growth above them; the
+    // segment ends at `growthRows[mid]`, the mid'th grown row itself.
+    const top = wasm.session_row_offset_px(state.sheet, growthRows[mid]) + growthPrefix[mid];
+    if (top <= want) lo = mid + 1; else hi = mid;
   }
-  return at;
+  // `lo` is the count of grown rows whose rendered top edge is at or *below*
+  // `want` — the loop advances while `top <= want`. Every row at the answer
+  // therefore has exactly those `lo` grown rows above it, so it carries
+  // `growthPrefix[lo]` of growth and the engine can be asked the rest directly.
+  const answer = wasm.session_row_at_px(
+    state.sheet,
+    Math.max(0, want - growthPrefix[lo]),
+  );
+  // The engine's answer can only be one segment out at the boundary, where a
+  // grown row's own band spans the pixel. Clamp into the segment rather than
+  // trusting it: the segment bound is exact and the engine does not know about
+  // growth at all.
+  const floor = lo > 0 ? growthRows[lo - 1] : 0;
+  return Math.max(floor, answer);
 }
 
 export function screenX(col) { return wasm.session_col_offset_px(state.sheet, col) - state.scrollX + HW; }
