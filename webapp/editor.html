@@ -500,10 +500,29 @@
         </button>
       </span>
       <button class="fx" id="fx-insert" title="Insert function" aria-label="Insert function">fx</button>
-      <button class="fx-expand" id="fx-expand" title="Expand the formula bar" aria-label="Expand the formula bar" aria-expanded="false">
+      <!-- **A `<textarea>`, because an `<input>` cannot wrap** (`UX-CHR-08`,
+           `docs/88` §4). Expanding the bar used to produce an 86px-tall box
+           containing one vertically-centred line: the box grew and the text did
+           not, and 58px of grid was surrendered for nothing. `white-space` does
+           not help — an `<input>` is a single line by definition, and scrolls
+           sideways instead. The in-cell editor in this same product is already a
+           `<textarea>`, for exactly this reason, with the comment saying so.
+
+           `rows="1"` keeps it one line tall when collapsed; the expanded height
+           comes from CSS. `Enter` still commits, because the key handler calls
+           `preventDefault()` before the textarea's own newline — and there is a
+           test for that, since it is the regression this change most easily
+           causes. -->
+      <textarea id="formula-input" rows="1" spellcheck="false" wrap="soft" placeholder="value or =formula"></textarea>
+      <!-- The expand control sits at the **far right edge**, which is unanimous
+           across Excel, LibreOffice, OnlyOffice and Sheets. It used to be at
+           x=160, 26px from the Name Box's own caret, where it read as a second
+           dropdown belonging to the Name Box rather than a control for the bar.
+           `Ctrl+Shift+U` was already bound and already matched Excel — the
+           shortcut was right and the control was in the wrong place. -->
+      <button class="fx-expand" id="fx-expand" title="Expand the formula bar (Ctrl+Shift+U)" aria-label="Expand the formula bar" aria-expanded="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
-      <input id="formula-input" type="text" spellcheck="false" placeholder="value or =formula" />
     </div>
 
     <div class="work-area">

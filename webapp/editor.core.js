@@ -8207,15 +8207,22 @@ function wireEvents() {
         if (pointStep(step[0], step[1], e.shiftKey)) { e.preventDefault(); return; }
       }
       if (e.key === "F4") { if (cycleAnchors()) e.preventDefault(); }
-      // Alt+Enter breaks the line inside the cell instead of committing. Only
-      // the in-cell editor can hold one — the formula bar is a single line.
-      else if (e.key === "Enter" && e.altKey && surface === inline) {
+      // Alt+Enter breaks the line inside the cell instead of committing.
+      //
+      // This used to be `&& surface === inline`, because "the formula bar is a
+      // single line" — true of an `<input>` and false the moment `UX-CHR-08`
+      // stopped it being one. Excel takes Alt+Enter in the formula bar, and the
+      // bar and the in-cell editor hold the same text, so refusing it in one of
+      // the two places that edit a cell was an inconsistency the markup imposed
+      // rather than a decision anybody made.
+      else if (e.key === "Enter" && e.altKey) {
         e.preventDefault();
         const at = surface.selectionStart;
         surface.value = surface.value.slice(0, at) + "\n" + surface.value.slice(surface.selectionEnd);
         surface.setSelectionRange(at + 1, at + 1);
         mirrorEdit();
-        positionInline();
+        // Only the in-cell editor is positioned over a cell; the bar is not.
+        if (surface === inline) positionInline();
       }
       // Ctrl+Enter fills the whole selection with the entry, as in Excel.
       else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { commitToSelection(surface.value); e.preventDefault(); }

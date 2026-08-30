@@ -477,6 +477,18 @@ jobs:
       # asks for nothing is valid, which is what makes it quiet.
       - name: An editor mounted in another page names its mode
         run: python3 tools/check-editor-mount-mode.py
+      # `REL-01`: the desktop release collected its Linux and Windows bundles
+      # and died on macOS with `shopt: globstar: invalid shell option name`.
+      # macOS ships bash 3.2, where that is an error rather than a no-op, and
+      # under `set -e` it took the step with it — so the `.dmg` was never
+      # collected while the other two platforms succeeded.
+      - name: A macOS-capable workflow step uses no bash 4 features
+        run: python3 tools/check-workflow-bashisms.py
+      # `TAURI-013`: `desktop/` is its own cargo workspace (`ADR-023`) and
+      # cannot depend on the wasm crate, so the openable-extension list is
+      # written out twice. Nothing compared them.
+      - name: The openable-extension lists agree across the workspaces
+        run: python3 tools/check-openable-extensions.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
