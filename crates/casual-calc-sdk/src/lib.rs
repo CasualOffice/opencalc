@@ -1426,6 +1426,10 @@ impl WorkbookSession {
         // The op is applied without classification, so it may have been a
         // structural one. Same reasoning as `workbook_mut` below.
         self.recalc.invalidate();
+        // Bypassing history is the point; bypassing the dirty signal was not
+        // (`FID-39`). `edits_applied` promises a host that it answers "is there
+        // unsaved work?", and this changes the document.
+        self.history.note_foreign_change();
         Ok(apply(&mut self.workbook, op)?)
     }
 
@@ -1441,6 +1445,11 @@ impl WorkbookSession {
         // caller may rewrite every formula in the book through this reference
         // and nothing would observe it.
         self.recalc.invalidate();
+        // And the dirty counter, on the same grounds (`FID-39`). Counted on
+        // handing out the reference rather than on a write, because this cannot
+        // see whether one happens — the same conservatism that drops `source`
+        // two lines above.
+        self.history.note_foreign_change();
         &mut self.workbook
     }
 
