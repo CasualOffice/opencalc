@@ -1782,7 +1782,8 @@ export function tableTextAt(r, c) {
   }
   return null;
 }
-let errorCells = new Set();   // "r,c" of cells holding an error value, likewise
+let errorCells = new Set();
+let numericTextCells = new Set(); // "r,c" of cells holding a number stored as text
 
 // What each spreadsheet error actually means, in the terms that caused it.
 // "#VALUE!" alone tells you something broke; it does not tell you what to look
@@ -3336,6 +3337,32 @@ export function draw() {
       ctx.moveTo(ex + 1, ey + 1);
       ctx.lineTo(ex + 8, ey + 1);
       ctx.lineTo(ex + 1, ey + 8);
+      ctx.closePath();
+      ctx.fill();
+    });
+  }
+
+  // **Numbers stored as text** (`DATA-NT-01`). A green triangle in the
+  // top-right, which is Excel's convention and deliberately not the top-left
+  // where the red error marker sits — a cell can be neither, and putting them
+  // in the same corner would make one hide the other.
+  //
+  // This is the cue that was missing. `SUM` over a column of text returns 0,
+  // which is what Excel returns too, and a person reading that zero had no way
+  // to tell a correct empty sum from a column an importer turned into strings.
+  numericTextCells = new Set();
+  for (const it of items) {
+    if (!it.nt) continue;
+    numericTextCells.add(it.r + "," + it.c);
+    const nx = colXAt(it.c), ny = rowYAt(it.r);
+    if (nx === undefined || ny === undefined) continue;
+    const nw = colWAt(it.c);
+    withQuad(it.r, it.c, () => {
+      ctx.fillStyle = "#2f9e44";
+      ctx.beginPath();
+      ctx.moveTo(nx + nw - 8, ny + 1);
+      ctx.lineTo(nx + nw - 1, ny + 1);
+      ctx.lineTo(nx + nw - 1, ny + 8);
       ctx.closePath();
       ctx.fill();
     });
@@ -5262,6 +5289,29 @@ function fmtBytes(n) {
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+/// Turn the selection's numbers-stored-as-text into numbers (`DATA-NT-01`).
+///
+/// The engine keeps `"10"` as text and is right to — coercing on the way in
+/// would silently change somebody's data. What this adds is a way to say "these
+/// were meant to be numbers", which is what Excel's *Convert to Number* does.
+///
+/// It reports the count rather than doing it silently: converting nothing and
+/// converting four hundred cells look identical on a screen the user is not
+/// scrolled to.
+function convertTextToNumbers() {
+  const r = effectiveRange();
+  let changed = 0;
+  try { changed = wasm.session_convert_text_to_numbers(state.sheet, r.r0, r.c0, r.r1, r.c1); }
+  catch (why) { statusError(errText(why)); return; }
+  if (!changed) {
+    status.textContent = "nothing in the selection is a number stored as text";
+    return;
+  }
+  recalculateNow();
+  draw();
+  status.textContent = `converted ${changed} cell${changed === 1 ? "" : "s"} to numbers`;
 }
 
 function buildStatsPanel(body) {
@@ -7492,6 +7542,18 @@ function wireEvents() {
       commentTip.style.left = (px + 14) + "px";
       commentTip.style.top = (py + 8) + "px";
       commentTip.hidden = false;
+    } else if (hit && numericTextCells.has(hit.row + "," + hit.col)) {
+      // **The marker has to say what it means** (`DATA-NT-01`). A green corner
+      // nobody can interpret is decoration; the whole point is that a zero from
+      // `SUM` was unexplained, and an unexplained triangle beside it is no
+      // better. It names the consequence and the fix, in that order.
+      commentTip.textContent =
+        "Number stored as text — SUM and AVERAGE skip this cell.\n"
+        + "Data ▸ Convert text to numbers fixes the selection.";
+      commentTip.style.whiteSpace = "pre-line";
+      commentTip.style.left = (px + 14) + "px";
+      commentTip.style.top = (py + 8) + "px";
+      commentTip.hidden = false;
     } else if (hit && linkCells.has(hit.row + "," + hit.col)) {
       let link = null;
       try { link = JSON.parse(wasm.session_hyperlink_at(state.sheet, hit.row, hit.col)); } catch {}
@@ -9657,6 +9719,10 @@ function wireEvents() {
         ] },
         ["Remove duplicates…", () => removeDuplicates()],
         ["Text to columns…", () => textToColumnsDialog()],
+        // `DATA-NT-01`. Beside the other repairs an imported sheet needs,
+        // because that is where the problem comes from: a CSV or a paste whose
+        // numbers arrived quoted.
+        ["Convert text to numbers", () => convertTextToNumbers()],
         ["Filter", () => toggleFilter()],
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Clear my view", () => clearMyView()],

@@ -672,6 +672,43 @@ pub fn session_cells(
             if matches!(cell.value, CellValue::Error(_)) {
                 extra.push_str(",\"er\":1");
             }
+            // **A number stored as text** (`DATA-NT-01`).
+            //
+            // The engine is right to keep it as text — `="10"<"9"` is `TRUE`,
+            // and coercing on the way in would silently change somebody's data.
+            // What was missing is that nothing *said so*: `SUM` over a column
+            // of text returns 0, which is what Excel returns too, and a person
+            // reading a zero has no way to tell a correct empty sum from a
+            // column the importer turned into strings.
+            //
+            // Decided here rather than in the host, because the host would have
+            // to re-derive "is this a literal string that looks like a number"
+            // from display text and get the edge cases wrong. A formula is
+            // excluded: Excel flags constants, and a formula that returns text
+            // is a formula whose *result* the author chose.
+            if cell.formula.is_none()
+                && matches!(
+                    cell.value,
+                    CellValue::SharedString(_) | CellValue::InlineString(_)
+                )
+            {
+                let text = value_text(wb, &cell.value);
+                let trimmed = text.trim();
+                // Non-empty, and parses as a finite number. `"  "` is not a
+                // number and neither is `"NaN"` or `"inf"`, both of which
+                // `f64::from_str` accepts and neither of which a spreadsheet
+                // means by a number stored as text.
+                if !trimmed.is_empty()
+                    && trimmed.parse::<f64>().is_ok_and(f64::is_finite)
+                    && !trimmed.eq_ignore_ascii_case("nan")
+                    && !trimmed.eq_ignore_ascii_case("inf")
+                    && !trimmed.eq_ignore_ascii_case("infinity")
+                    && !trimmed.eq_ignore_ascii_case("-inf")
+                    && !trimmed.eq_ignore_ascii_case("-infinity")
+                {
+                    extra.push_str(",\"nt\":1");
+                }
+            }
             if let Some((frac, color)) = &bar {
                 extra.push_str(&format!(
                     ",\"bar\":{:.4},\"barc\":{}",
