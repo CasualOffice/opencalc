@@ -736,24 +736,72 @@ fixed-position overlays, and `100vh` measuring the window inside a shadow root.
 
 ## 12. Decisions needed
 
+**All nine are now answered** (`DOC-034`). Seven of them were answered by the
+first release happening rather than by anybody choosing, which is the finding
+this section exists to record: §12 closed with *"nothing beyond the prototype in
+§10 gets built until these are answered"*, and three npm packages published with
+seven still open. What follows is what shipped, written down as a decision so
+that changing it is a decision too.
+
 1. ~~CDN single-file build, or bundler-only?~~ **Answered: no CDN.** Assets are
    same-origin with the host, because a Web Worker cannot be built from a
-   cross-origin URL and shipping from a CDN would foreclose the worker before
-   we get to choose. §3.
-2. Both transports, or pick one?
-3. Rename the theme tokens to typed names now?
-4. One change event per operation-with-range, rather than per cell?
-5. Custom JS functions, given they break replayable determinism?
-6. ~~Cross-origin iframe deployment in scope?~~ **Answered: no.** A cross-origin
-   frame means *we* host it, which is the thing §3 rules out. The iframe
-   transport, if built, is served from the host's own origin like everything
-   else — so it is an isolation boundary, not a hosting model.
-7. Is `preview` a mode, or a preset over `readOnly` + no chrome?
-8. **Web Worker: now or later?** Same-origin assets (§3) keep the door open, and
-   the promise-returning API means moving the engine into a worker does not
-   change the public surface. The open part is *when*: it changes how the canvas
-   gets its visible cells, which is a design job rather than a flag. §3d argues
-   for later, with the performance increment. Confirm.
-9. Localized **function names** (`SUMME`) — out of scope for now, per §5g?
+   cross-origin URL and shipping from a CDN would foreclose the worker before we
+   get to choose. §3.
 
-Nothing beyond the prototype in §10 gets built until these are answered.
+2. ~~Both transports, or pick one?~~ **Answered: one, the direct same-origin
+   mount.** It is the only one built and the only one the examples use. The
+   iframe transport is not withdrawn — decision 6 already settled that if it is
+   built it is served from the host's own origin, so it is an isolation boundary
+   rather than a hosting model — but it is not in the shipped surface and no
+   consumer can be relying on it.
+
+3. ~~Rename the theme tokens to typed names now?~~ **Answered: no. The
+   `--oc-*` names stay.** §1 called the rename *"cheap now and impossible after
+   the first release"*, and the first release has happened: three packages are
+   published and the 32 names are public API, set by hosts in their own
+   stylesheets. Renaming now would break every consumer that themed an embed, to
+   buy a naming convention.
+
+   **The names are written down in [`sdk/theme-tokens.json`](../sdk/theme-tokens.json)**,
+   which is the answer to "what are the token names now?" that this row asked
+   for. `tools/check-theme-tokens.py` asserts `webapp/embed.js` advertises
+   exactly that set, in that order — order included, because a host builds a
+   theme picker from it. Before, the gate could say every advertised token was
+   *honoured* and nothing could say they were the names anybody meant to
+   publish.
+
+4. ~~One change event per operation-with-range, rather than per cell?~~
+   **Answered: per range.** `onChanged` carries `e.range`, which is what shipped
+   and what the React package documents. A per-cell event would make a
+   thousand-cell paste a thousand callbacks.
+
+5. ~~Custom JS functions, given they break replayable determinism?~~
+   **Answered: not built, and not while the argument stands.** Nothing in the
+   published surface registers a function. The determinism objection is not
+   softened by time: a workbook whose values depend on host JavaScript cannot be
+   recalculated by anything but that host, which takes the file out of the
+   format. If it is ever built it needs its own design, not a flag.
+
+6. ~~Cross-origin iframe deployment in scope?~~ **Answered: no.** A cross-origin
+   frame means *we* host it, which is the thing §3 rules out.
+
+7. ~~Is `preview` a mode, or a preset over `readOnly` + no chrome?~~
+   **Answered: a preset, not a mode.** The shipped mode vocabulary is
+   `standalone`, `embedded` and `wopi`; `preview` is none of them.
+   `examples/viewer` states the distinction as the reason the two are shown on
+   one page: `view` is an **access level** and `preview` is a **presentation**,
+   and both refuse writes in the engine rather than by hiding chrome.
+
+8. ~~Web Worker: now or later?~~ **Answered: later, and nothing has been spent
+   on it.** No worker is constructed anywhere. Same-origin assets (§3) and the
+   promise-returning API keep the door open at no cost, which is what §3d argued
+   for; the open part was *when*, and the answer is that it has not started.
+
+9. ~~Localized function names (`SUMME`)?~~ **Answered: out of scope, unbuilt.**
+   Nothing in the engine maps a localized name.
+
+**The rule this section set is kept differently now.** "Nothing gets built until
+these are answered" was not enforceable by anything, and was not enforced. What
+is enforceable is the part that costs money to get wrong: the published token
+names have a manifest and a gate. The rest are recorded here so that the next
+change to any of them is a change to a written decision.
