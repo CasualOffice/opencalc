@@ -56,7 +56,7 @@ pub fn session_chart_items(
 }
 
 /// A chart's definition as the host edits it. Distinct from the payload
-/// `session_charts` returns, which carries *resolved values* for drawing.
+/// `session_chart_items` returns, which carries *resolved values* for drawing.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChartWire {
@@ -1444,34 +1444,10 @@ pub fn session_set_clock(now_serial: f64, seed: f64) {
     });
 }
 
-/// The lowercase name the host switches on.
-pub(crate) fn chart_kind_name(kind: casual_calc_model::ChartKind) -> &'static str {
-    use casual_calc_model::ChartKind as K;
-    match kind {
-        K::Bar => "bar",
-        K::Column => "column",
-        K::Line => "line",
-        K::Area => "area",
-        K::Pie => "pie",
-        K::Doughnut => "doughnut",
-        K::Scatter => "scatter",
-        K::Unsupported => "unsupported",
-    }
-}
-
-/// A finite number as JSON, or `null`. `NaN` and infinities are not JSON, and
-/// emitting them bare produces a payload the host cannot parse at all.
-pub(crate) fn format_json_number(n: f64) -> String {
-    if n.is_finite() {
-        let mut s = n.to_string();
-        if s.ends_with(".0") {
-            s.truncate(s.len() - 2);
-        }
-        s
-    } else {
-        "null".to_owned()
-    }
-}
+// `chart_kind_name` and `format_json_number` stood here until `CHT-13`. Both
+// existed only for the resolved-values payload `session_charts` returned, and
+// `chart_kind_name` was a second copy of `chart_kind_token` above — the one
+// the chart *definition* wire still uses.
 
 /// A length in twips as CSS pixels, at the 96 dpi CSS reference resolution.
 ///

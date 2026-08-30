@@ -11,7 +11,7 @@
 //! That is the shape `RND-05` had, and it is fixed the same way: the logic was
 //! never missing, it was in the wrong crate. It lives here now, where layout
 //! can reach it and the WebAssembly bindings still can, so the canvas and the
-//! PNG cannot resolve a range differently — `session_charts` calls this rather
+//! PNG cannot resolve a range differently — `session_chart_items` calls this rather
 //! than owning a second copy.
 //!
 //! Like the rest of layout, this reads the model's **cached** cell values and
@@ -20,7 +20,8 @@
 //! # The bound, and why it is here rather than in the plot (`CHT-11`)
 //!
 //! This module is the one place every chart range is read: `push_bars`,
-//! `push_line`, `push_pie` and the host's own `session_charts` all arrive here.
+//! `push_line`, `push_pie` and the host's own `session_chart_items` all arrive
+//! here.
 //! It is therefore where a range's *size* has to be capped, and until
 //! [`MAX_SERIES_POINTS`] it was not capped at all. A series reference is a
 //! string out of an untrusted `.xlsx`, and `$A$1:$XFD$1048576` names

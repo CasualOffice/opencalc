@@ -150,7 +150,7 @@ Built, and drawing end to end from model to PNG:
 
 | Piece | State |
 | --- | --- |
-| `chart_data::ref_cells` / `ref_text` / `ref_numbers` | moved down, `session_charts` delegates |
+| `chart_data::ref_cells` / `ref_text` / `ref_numbers` | moved down, `session_chart_items` delegates |
 | Frame ground, border, title, "no data" note | drawn |
 | Value axis, zero line, axis extreme labels | drawn |
 | Bar, Column | drawn |
