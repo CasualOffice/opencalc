@@ -7,6 +7,7 @@
 // differently from the way it is developed is a gate that can pass on a build
 // nobody can reproduce.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,9 +126,138 @@ async function refuseForeignServers() {
 // `--list` starts no servers and loads nothing into a browser, so it cannot be
 // wrong about which tree it tested. Refusing it would be a gate firing on a
 // command it does not apply to, which is how people learn to route around one.
+/// Refuse a `webapp/pkg` older than the Rust it was built from (`CI-027`).
+///
+/// `CI-025` established that the served *JavaScript* is this working tree's.
+/// The wasm is the input it does not cover: `webapp/pkg` is gitignored, so the
+/// build on disk survives a branch switch, a `git checkout --`, a stash and a
+/// revert. It is whatever was last built, not what the source says.
+///
+/// That cost this session three misleading runs. Once it failed three
+/// `editor.drafts` tests on a branch whose source was **correct** — the build
+/// was left over from a mutation experiment — which reads exactly like a
+/// regression in the change under test. Once a worker measured nothing for an
+/// hour against a `pkg` that predated the engine change it was testing.
+///
+/// **Content first, timestamps only as a fallback** — and the first draft of
+/// this got that backwards. It compared mtimes alone, on the reasoning that
+/// "was this built after the source moved" is the one question a timestamp
+/// answers. It is, and it is the wrong question: a branch switch rewrites every
+/// source mtime without changing a byte, so the check fired on a build that was
+/// perfectly current. A gate that cries wolf after every checkout is one people
+/// route around, which is the failure mode this repository keeps finding in its
+/// own instruments.
+///
+/// So `tools/build-wasm.py` records a hash of the sources it built from, and
+/// this compares that. The mtime path remains for a build made by calling
+/// `wasm-pack` directly, where there is no hash to trust — it errs toward
+/// asking for a rebuild, which costs three minutes against a misleading run.
+function refuseStaleWasm() {
+  const pkg = path.join(WEBAPP, "pkg");
+  let built = 0;
+  try {
+    for (const f of fs.readdirSync(pkg)) {
+      if (!f.endsWith(".wasm") && !f.endsWith(".js")) continue;
+      built = Math.max(built, fs.statSync(path.join(pkg, f)).mtimeMs);
+    }
+  } catch {
+    // No `pkg` at all is not this check's business: the suite fails plainly on
+    // a missing engine, and CI builds it as its own step.
+    return;
+  }
+  if (!built) return;
+
+  const root = path.resolve(WEBAPP, "..");
+  const crates = path.join(root, "crates");
+
+  // The recorded hash is exact, so it settles the question either way.
+  const stamped = (() => {
+    try { return fs.readFileSync(path.join(pkg, ".oc-source-hash"), "utf8").trim(); }
+    catch { return null; }
+  })();
+  if (stamped) {
+    const names = [];
+    const collect = (dir) => {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.isDirectory()) { if (e.name !== "target") collect(path.join(dir, e.name)); continue; }
+        if (e.name.endsWith(".rs") || e.name === "Cargo.toml") names.push(path.join(dir, e.name));
+      }
+    };
+    collect(crates);
+    // Sorted by the relative path, and hashed in that order, because
+    // `tools/build-wasm.py` does the same. Sorting absolute paths, or sorting
+    // by path segments as Python's `Path` does, gives a different order on the
+    // same tree — and a different order is a different digest.
+    const rels = names.map((f) => path.relative(root, f)).sort();
+    const h = crypto.createHash("sha256");
+    for (const rel of rels) {
+      h.update(rel);
+      h.update(fs.readFileSync(path.join(root, rel)));
+    }
+    try { h.update(fs.readFileSync(path.join(root, "Cargo.lock"))); } catch { /* absent is fine */ }
+    if (h.digest("hex") === stamped) return;
+    throw new Error(
+      [
+        "browser-smoke will not run against a wasm build older than its source.",
+        "",
+        "  webapp/pkg was built from a different set of engine sources than the",
+        "  ones on disk now (compared by content, not timestamps).",
+        "",
+        "`webapp/pkg` is gitignored, so it outlives the source it came from and",
+        "fails in whatever way that older source did — which reads as a regression",
+        "in whatever you are changing now (CI-027). Rebuild it:",
+        "",
+        "  python3 tools/build-wasm.py",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  let newest = 0;
+  let newestFile = "";
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      // `target/` is build output, not source, and it is enormous.
+      if (e.isDirectory()) { if (e.name !== "target") walk(path.join(dir, e.name)); continue; }
+      if (!e.name.endsWith(".rs") && e.name !== "Cargo.toml") continue;
+      const full = path.join(dir, e.name);
+      const m = fs.statSync(full).mtimeMs;
+      if (m > newest) { newest = m; newestFile = path.relative(path.resolve(WEBAPP, ".."), full); }
+    }
+  };
+  walk(crates);
+  if (newest <= built) return;
+
+  throw new Error(
+    [
+      "browser-smoke will not run against a wasm build older than its source.",
+      "",
+      `  ${newestFile}`,
+      `    changed ${new Date(newest).toISOString()}`,
+      `  webapp/pkg`,
+      `    built   ${new Date(built).toISOString()}`,
+      "",
+      "`webapp/pkg` is gitignored, so it outlives the source it came from and",
+      "fails in whatever way that older source did — which reads as a regression",
+      "in whatever you are changing now (CI-027). Rebuild it:",
+      "",
+      "  (cd crates/casual-calc-wasm && wasm-pack build --release --target web \\",
+      "     --out-dir ../../webapp/pkg)",
+      "",
+    ].join("\n"),
+  );
+}
+
 const startsServers =
   process.env.TEST_WORKER_INDEX === undefined && !process.argv.includes("--list");
-if (startsServers) await refuseForeignServers();
+if (startsServers) {
+  await refuseForeignServers();
+  refuseStaleWasm();
+}
 
 export default defineConfig({
   testDir: ".",

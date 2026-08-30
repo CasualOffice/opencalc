@@ -613,8 +613,14 @@ jobs:
       # Built here, never taken from the tree: `webapp/pkg/` is not committed,
       # and a gate that would accept a stale build is a gate that cannot catch
       # a stale build.
+      # Through the script, not `wasm-pack` directly, so CI exercises the same
+      # path a laptop does: it records a hash of the sources it built from, and
+      # `playwright.config.mjs` refuses a `webapp/pkg` that does not match
+      # (`CI-027`). Calling `wasm-pack` here would leave CI on the timestamp
+      # fallback and the hash path untested until it broke on somebody's
+      # machine.
       - name: Build the engine for the browser
-        run: wasm-pack build crates/casual-calc-wasm --release --target web --out-dir "$PWD/webapp/pkg"
+        run: python3 tools/build-wasm.py
       # The collaboration suite runs two browsers against the real server
       # binary. Built as its own step so a compile failure says so, instead of
       # surfacing as Playwright giving up on a port that never opened — and so
