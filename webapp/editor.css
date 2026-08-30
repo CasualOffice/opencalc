@@ -1578,6 +1578,24 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 .oc-table-form .oc-table-styles { margin-bottom: 0; }
 .oc-table-form .oc-check { cursor: pointer; }
 
+/* Column width / row height (UX-DLG-02) — the same two-column form as
+   `.oc-table-form`, because it is the same kind of question asked of the same
+   modal, and one dialog idiom is the point. The field is a number's width
+   rather than the column's: a box sized for a paragraph invites a paragraph.
+   The unit sits beside it instead of inside the label, so the answer and what
+   it is measured in read as one line. */
+.oc-size-form {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px; align-items: center; margin: 0 0 14px;
+}
+/* The label lines up with the *field*, not with the middle of the cell: the
+   cell grows downwards when a refusal appears under the box, and centring
+   slid "Width" half an error message down the dialog. */
+.oc-size-form .oc-form-label { align-self: start; padding-top: 7px; }
+.oc-size-line { display: flex; align-items: baseline; gap: 6px; }
+.oc-size-form .oc-size-field { width: 92px; flex: 0 0 auto; text-align: right; }
+.oc-size-unit { font-size: 12px; color: var(--oc-muted-text-color); }
+
 /* One row per table column in the totals picker: label, then its function. */
 .oc-totals-grid {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
