@@ -72,10 +72,13 @@ test("the web strip carries the document's name and save state, not the product'
     const el = document.querySelector(".app-header");
     return {
       text: el.textContent.replace(/\s+/g, " ").trim(),
-      marks: el.querySelectorAll(".brand-logo, .tb-brand, .badge").length,
+      // `.brand-logo` is deliberately absent here (`UX-CHR-10`): a mark is
+      // not a name, and the strip is the only thing identifying the
+      // application in a browser tab. The wordmark and version pill stay out.
+      marks: el.querySelectorAll(".tb-brand, .badge").length,
     };
   });
-  expect(product.marks, `the product mark is still in the strip: ${product.text}`).toBe(0);
+  expect(product.marks, `a wordmark or version pill is still in the strip: ${product.text}`).toBe(0);
   expect(product.text, "the strip still names the product").not.toMatch(/OpenCalc|Alpha|engine v/);
 
   // And it names the document instead — the name it was opened under, and

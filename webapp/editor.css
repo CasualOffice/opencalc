@@ -2201,3 +2201,27 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 12px; text-align: left; flex: 1 1 auto;
 }
+
+/* The strip's logo and its renameable name (`UX-CHR-10`). */
+.brand-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; flex: 0 0 auto; margin-right: 2px;
+  color: var(--oc-accent-color); text-decoration: none; border-radius: 5px;
+}
+.brand-logo:hover { background: var(--oc-popover-background-color); }
+/* The name reads as text until it is hovered, then as something you can act on.
+   A control that always looks like a control puts a button in the title area;
+   one that never does hides the only route to renaming. */
+button.doc-name {
+  font: inherit; color: inherit; background: none; border: 0; cursor: text;
+  padding: 2px 6px; border-radius: 5px; max-width: 42ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+button.doc-name:hover { background: var(--oc-popover-background-color); }
+button.doc-name:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+.doc-rename {
+  font: inherit; color: var(--oc-text-color); padding: 2px 6px; width: 24ch;
+  background: var(--oc-background-color);
+  border: 1px solid var(--oc-accent-color); border-radius: 5px;
+}
+.doc-rename:focus { outline: none; box-shadow: 0 0 0 3px var(--oc-accent-ring); }
