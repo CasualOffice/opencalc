@@ -988,13 +988,6 @@ jobs:
       # The Tauri v2 prerequisites for Debian/Ubuntu. `4.1`, not `4.0`: Tauri 2
       # links against the GTK4-era webkit2gtk and the older `-dev` package
       # satisfies the build without satisfying the link.
-      # **The desktop shell's own lint** (`CI-034`). `cargo clippy --workspace`
-      # in the `lint` job reaches only the root workspace, so this one was never
-      # linted by anything CI runs. It lives here rather than in `lint` because
-      # clippy compiles, and compiling Tauri needs the webview and GTK packages
-      # this job installs and that one does not.
-      - name: Lint the desktop shell
-        run: cargo clippy --manifest-path desktop/Cargo.toml --all-targets --locked -- -D warnings
       - name: Install the Linux webview and bundler dependencies
         if: runner.os == 'Linux'
         run: |
@@ -1028,6 +1021,16 @@ jobs:
       - name: The desktop shell's own tests
         if: runner.os == 'Linux'
         run: cargo test --manifest-path desktop/Cargo.toml
+      # **The desktop shell's own lint** (`CI-034`). `cargo clippy --workspace`
+      # in the `lint` job reaches only the root workspace, so this one was never
+      # linted by anything CI runs. It lives here rather than in `lint` because
+      # clippy compiles, and compiling Tauri needs the webview and GTK packages
+      # this job installs and that one does not — which is why it sits *after*
+      # the apt step rather than before it. The first version of this ran two
+      # steps too early and died on `Package 'glib-2.0' ... not found`, having
+      # claimed in its own comment to be where the packages already were.
+      - name: Lint the desktop shell
+        run: cargo clippy --manifest-path desktop/Cargo.toml --all-targets --locked -- -D warnings
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
       # Unsigned. `tauri build` runs `cargo build --release`, which is where
