@@ -1938,9 +1938,21 @@ pub fn session_print_html(sheet: usize) -> String {
         if centre_h {
             out.push_str("table{margin-left:auto;margin-right:auto}");
         }
-        // The scale the dialog collects, finally applied. Only the table is
-        // scaled: Excel does not shrink the header and footer with the sheet,
-        // and they are in the page margins here, outside it.
+        // The scale the dialog collects, finally applied — to the table only.
+        //
+        // **This used to claim Excel does not scale the header and footer with
+        // the sheet. It does** (`IO-11`): `scaleWithDoc` defaults to true, and
+        // the PDF path honours it since `IO-10`. What is true is that *this*
+        // path cannot — the header lives in a CSS page-margin box, outside the
+        // element `zoom` applies to, because the browser paginates here
+        // (`IO-06`). So a fit-to-page workbook's header prints at a different
+        // size in the browser than in the PDF, from one file.
+        //
+        // Stated rather than corrected, because correcting the sentence and
+        // leaving the behaviour is how a gap stops being counted. The same
+        // paragraph applies to `differentFirst` and `differentOddEven` above:
+        // this path reads `oddHeader`/`oddFooter` only, since it never learns
+        // which page is first.
         if (scale - 1.0).abs() > f64::EPSILON {
             out.push_str(&format!("table{{zoom:{}}}", css_num(scale)));
         }
