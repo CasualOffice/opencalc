@@ -203,6 +203,7 @@ import {
   cellFont,
   cellLineH,
   contrastInk,
+  currentTheme,
   drawChartSelection,
   drawCollaboratorDraft,
   drawCollaborators,
@@ -597,6 +598,7 @@ export {
   cellFont,
   cellLineH,
   contrastInk,
+  currentTheme,
   drawChartSelection,
   drawCollaboratorDraft,
   drawCollaborators,
@@ -1102,11 +1104,131 @@ export function setCapabilities(partial) {
 /// mount and the shell element for a shadow mount, and it is an ancestor of
 /// `.app-header` in both, so `.oc-chrome-embedded .app-header` still bites
 /// without the stylesheet changing.
+/// **Hiding a menu requires evidence that another menu exists** (`UX-CHR-02`).
+///
+/// `?chrome=native` is a *request*, and it arrives on a URL — anybody who can
+/// hand somebody a link chooses it. `UX-DESK-01` treated it as proof, so
+/// `.oc-chrome-native #menubar { display: none }` fired in an ordinary browser
+/// too: the branding strip went, the menu bar went, and **nothing drew a menu
+/// in their place.** No File menu, no View menu, and — because the only theme
+/// control at the time was a `<select>` inside the gear that lived in the
+/// hidden strip — no way to change the theme at all. A user was stranded by a
+/// query string.
+///
+/// Nothing in the browser suite could see it, which is why it shipped: those
+/// tests run in a browser, where `?chrome=native` changes CSS and no native bar
+/// exists to notice the absence of. The tests now install the shell's bridge to
+/// say "a native menu exists", which is the only way to tell the two apart.
+///
+/// Three signals, in the order they can arrive, and any one is enough:
+///
+/// - **`window.__TAURI__`** — Tauri installs its API bundle at document start
+///   (`withGlobalTauri` in `desktop/tauri.conf.json`), so this is true before
+///   this module evaluates. It is the only one that arrives early enough to
+///   avoid a frame with both bars, which is the whole reason to check it.
+/// - **`window.__opencalcNative`** — the shell's own bridge, and the object
+///   `applyCommandRules()` already calls `publishMenu()` on. The same
+///   `BOOTSTRAP` that installs it publishes the menu, so its presence *is* the
+///   native bar. It is injected on `PageLoadEvent::Finished` — after this
+///   editor has booted — so it cannot be the only check.
+/// - **`opencalc-native-ready`** — dispatched by that bootstrap once the menu
+///   has been published. The backstop: a shell that changes how it installs
+///   itself still lands here.
+///
+/// Latching rather than re-asking: once a native menu has been drawn it does
+/// not un-draw, and a `setCapabilities` call in between must not make the bar
+/// reappear underneath it.
+let nativeMenuSeen = false;
+
+function nativeMenuIsDrawn() {
+  if (nativeMenuSeen) return true;
+  if (typeof window !== "undefined" && (window.__opencalcNative || window.__TAURI__)) {
+    nativeMenuSeen = true;
+  }
+  return nativeMenuSeen;
+}
+
 export function applyModeChrome() {
-  setNativeChrome(capabilities.chrome === "native");
-  placeNativeChrome(capabilities.chrome === "native");
+  const native = capabilities.chrome === "native";
+  setNativeChrome(native);
+  placeNativeChrome(native);
+  // **The two halves of desktop chrome, separated.** Density and the branding
+  // strip need no native bar to be correct — the strip holds identity and the
+  // gear, `placeNativeChrome()` has already moved the status line and the
+  // roster somewhere visible, and Settings is reachable from the menus. The
+  // *menu bar* is the one region whose removal takes a capability away with
+  // nothing replacing it, so it alone waits for the evidence.
+  const root = document.documentElement;
+  const menuGone = native && nativeMenuIsDrawn();
+  const changed = root.classList.contains("oc-native-menu") !== menuGone;
+  root.classList.toggle("oc-native-menu", menuGone);
   const scope = ocRoot === document ? document.documentElement : qs(".editor-body");
   scope?.classList.toggle("oc-chrome-embedded", capabilities.chrome === "embedded");
+  applyModeLabels();
+  // The bar's height is the sheet's the moment the bar goes, and that moment is
+  // now sometimes *after* boot — the shell's bridge arrives on page-load-finish.
+  // Without this the canvas keeps the size it was laid out at and the grid ends
+  // 30px short of the window it is supposed to fill. Guarded because the first
+  // `applyModeChrome()` of a boot runs before the canvas is bound.
+  if (changed) { try { resize(); } catch {} }
+}
+
+// The backstop signal, armed once. `applyModeChrome()` is idempotent, so
+// re-running it on an event that may never come costs nothing.
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("opencalc-native-ready", () => {
+    nativeMenuSeen = true;
+    try { applyModeChrome(); } catch {}
+  }, { once: true });
+}
+
+/// **Wording that belongs to the chrome, not to the command** (`TAURI-009`).
+///
+/// Reported on the desktop build: a desktop application offers *"Download ▸
+/// Excel"* where every desktop application on every platform says *Save As*.
+/// Downloading is what a browser does — a file lands in a folder the user did
+/// not choose and the document has no home to go back to; a desktop app writes
+/// a file. Both sentences are true, in different shells, of the same command.
+///
+/// So the **id does not move.** `commandId()` derives it from the English label
+/// at build time, and those ids are a published dispatch surface — the desktop
+/// shell's native menu holds `file.download.excel-xlsx` and nothing else, hosts
+/// name them in `setCommandRules`, and `CAPABILITY_COMMANDS` matches them with
+/// `/^file\.download/`. Renaming the *menu* must not rename the *command*, or
+/// `canSaveAs` silently stops governing the six entries it exists to govern.
+/// Only `data-oc-label` and the visible text change.
+///
+/// `data-oc-label` rather than the rendered text alone, because `relabel()`
+/// re-derives every label from it on a locale change and would otherwise put
+/// the web wording back in a native window. The web wording is parked in
+/// `data-oc-label-web` the first time this runs, so leaving desktop chrome
+/// restores it — `setCapabilities({ mode })` is a host surface and every other
+/// part of this move is reversible.
+const NATIVE_LABELS = {
+  // The submenu itself. Its contents are conversions the engine says it can
+  // write, and "export" is what every desktop office application calls that.
+  "file.download": "Export",
+  // The one entry that is not a conversion: it writes the document back in the
+  // kind of file it came from, without adopting the result as the window's save
+  // target. Excel calls exactly that "Save a Copy".
+  "file.download.same-format-as-opened": "Save a copy…",
+};
+
+function applyModeLabels() {
+  const native = capabilities.chrome === "native";
+  for (const [id, nativeLabel] of Object.entries(NATIVE_LABELS)) {
+    const node = qs(`[data-oc-command="${CSS.escape(id)}"]`);
+    if (!node) continue; // the menu bar is built after the first boot call
+    if (node.dataset.ocLabelWeb === undefined) node.dataset.ocLabelWeb = node.dataset.ocLabel ?? "";
+    const label = native ? nativeLabel : node.dataset.ocLabelWeb;
+    node.dataset.ocLabel = label;
+    // The same lookup `relabel()` does, so a catalogue entry for this command
+    // still wins and this is not a second translation path.
+    const text = t(`command.${id}`, label);
+    const slot = node.querySelector(".mi-label");
+    if (slot) slot.textContent = text;
+    else node.textContent = text;
+  }
 }
 
 /// Where each node's markup put it, so a mode change can put it back.
@@ -1185,12 +1307,20 @@ function placeNativeChrome(on) {
 /// `file.download.csv-csv`), so `/^file\.download/` covers the submenu opener
 /// and all five entries under it — the six the audit counted.
 const CAPABILITY_COMMANDS = {
-  // `header.open` is the header's folder button and `toolbar.open` is the
-  // hidden `<input type=file>` both it and the menu item click. Hiding the menu
-  // item alone would leave the button, which is the one a user actually reaches
-  // for.
-  canOpen: [/^file\.new$/, /^file\.open$/, /^header\.open$/, /^toolbar\.open$/],
-  canSaveAs: [/^file\.download/],
+  // `toolbar.open` is the hidden `<input type=file>` the menu item clicks.
+  // Hiding the menu item alone would leave the input runnable through
+  // `runCommand`, which is the whole point of listing it here.
+  //
+  // `header.open` used to be a third entry: the branding strip's folder button.
+  // The button is gone (`UX-CHR-01`) and so is the id — `listCommands()` reads
+  // the live DOM, so there is nothing left for a pattern here to match.
+  canOpen: [/^file\.new$/, /^file\.open$/, /^toolbar\.open$/],
+  // `file.save` joins the six Download entries rather than getting a capability
+  // of its own: it is the same permission — may this user take the document out
+  // of the editor — asked by the command that writes it back to its own file.
+  // A mode that hid the submenu and left Save listed would have taken nothing
+  // away, which is the failure this table exists to prevent.
+  canSaveAs: [/^file\.download/, /^file\.save$/],
   canPrint: [/^file\.print$/],
   // `File ▸ Share…`. Off in every preset while `COL-46` is open, so the command
   // is absent from `listCommands()` *and* refused by `runCommand` — the rule
@@ -1200,10 +1330,35 @@ const CAPABILITY_COMMANDS = {
   canShare: [/^file\.share$/],
 };
 
-/// True when some capability of this mode forbids the command.
+/// Commands that exist in **one chrome only** (`TAURI-009`).
+///
+/// Deliberately not a capability. A capability is a permission a host grants —
+/// "may this user take a copy out" — and a host can turn one on. This is a fact
+/// about the shell the editor is running in, and no host setting changes it:
+/// `File ▸ Save` commits the document to the file the shell holds
+/// (`docs/83` §2), and in a browser tab there is no such file. `Ctrl+S` there
+/// writes a copy into the downloads folder, which the Download submenu already
+/// says out loud — a second entry saying "Save" for the same act would be the
+/// desktop vocabulary leaking into the web build, which is `TAURI-009`'s own
+/// complaint pointing the other way.
+///
+/// Routed through `capabilityForbids` rather than a class set by hand, because
+/// `applyCommandRules()` restores anything it did not itself hide: a
+/// `oc-cmd-hidden` added from outside that function is removed on its next
+/// pass. One gate, one table, and `listCommands()`/`menuModel()`/`runCommand`
+/// all agree by construction.
+const CHROME_ONLY = {
+  native: [/^file\.save$/],
+};
+
+/// True when some capability of this mode, or the chrome it runs in, forbids
+/// the command.
 export function capabilityForbids(id) {
   for (const [cap, patterns] of Object.entries(CAPABILITY_COMMANDS)) {
     if (capabilities[cap] === false && patterns.some((re) => re.test(id))) return true;
+  }
+  for (const [chrome, patterns] of Object.entries(CHROME_ONLY)) {
+    if (capabilities.chrome !== chrome && patterns.some((re) => re.test(id))) return true;
   }
   return false;
 }
@@ -8114,8 +8269,6 @@ function wireEvents() {
   byId("replace-all").addEventListener("click", replaceAll);
   byId("find-close").addEventListener("click", closeFind);
 
-  byId("hdr-open").addEventListener("click", () => byId("tb-open").click());
-
   // The control behind `toolbar.delete-sheet` (see `editor.html`). Wired
   // through `byId`, which resolves against **this mount's root**, so an
   // embedded editor wires its own button inside its own shadow tree and two
@@ -8430,8 +8583,6 @@ function wireEvents() {
     const offered = JSON.parse(wasm.openable_extensions());
     if (offered.length) {
       byId("tb-open").accept = offered.join(",");
-      // The tooltip was a third copy of the same list.
-      byId("hdr-open")?.setAttribute("title", `Open a file (${offered.join(", ")})`);
     }
   } catch {}
   // Keep the desktop window's title on the document.
@@ -8822,6 +8973,18 @@ function wireEvents() {
           stopMarch(); wasm.session_new(); newDocument(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
         }],
         ["Open…", clickEl("#tb-open")],
+        // **The save nobody opens a menu for, finally in the menu**
+        // (`TAURI-009`). `Ctrl+S` has committed the document to its own file
+        // since `SAVE-02`, and it was reachable by that chord alone: a desktop
+        // application whose File menu offers no Save is one a user assumes
+        // cannot save.
+        //
+        // Native chrome only, and `CHROME_ONLY` is the gate. In a browser tab
+        // this same call writes a copy into the downloads folder — there is no
+        // file to commit to — and the Download submenu below already says that
+        // in the right words. Two entries doing one thing under two names is
+        // the confusion this row is about, pointing the other way.
+        ["Save", () => saveAs("native"), "Ctrl+S"],
         // Built from `writable_extensions()` rather than written out here, the
         // same way Open is built from `openable_extensions()`. A format the
         // engine learns then appears without anyone remembering — `.ods` and
@@ -8831,6 +8994,12 @@ function wireEvents() {
         // `"download"` is the intent: these write a copy. `Ctrl+S` saves in
         // place, and the entry that gives back the kind of file that was
         // opened must not quietly become that.
+        //
+        // "Download" is the *web* wording and the id is derived from it; in
+        // desktop chrome the same node reads "Export" and its first entry reads
+        // "Save a copy…" (`NATIVE_LABELS`, `TAURI-009`). The id stays
+        // `file.download.*` in both, because that is what the native menu, the
+        // host command rules and `canSaveAs` all dispatch on.
         { sub: "Download", items: downloadItems() },
         // The only route into the collaboration server that is not a host
         // writing JavaScript. Hidden while `COL-46` is open — `canShare` is
@@ -8917,6 +9086,22 @@ function wireEvents() {
         // every save without ever being shown.
         ["Formulas instead of results", () => setViewOption("formulas"), "Ctrl+`", () => viewOn("formulas")],
         ["Zero values", () => setViewOption("zeros"), null, () => viewOn("zeros")],
+        // **Theme is a display option, so it lives with the display options**
+        // (`UX-CHR-01`). It was a `<select>` inside the settings gear popover:
+        // two clicks, in the branding strip, and a different mental model from
+        // the four siblings directly above this line. Excel and Sheets both put
+        // the appearance toggle in a View menu; neither hides it behind a gear
+        // in the title area.
+        //
+        // Ticked from `currentTheme()` — the *choice* — not from the rendered
+        // theme. `document.documentElement.dataset.theme` is absent for "Auto"
+        // and for a light system alike, so reading it back would tick Light in
+        // a window the user had set to Auto.
+        { sub: "Theme", items: [
+          ["Auto", () => applyTheme("auto"), null, () => currentTheme() === "auto"],
+          ["Light", () => applyTheme("light"), null, () => currentTheme() === "light"],
+          ["Dark", () => applyTheme("dark"), null, () => currentTheme() === "dark"],
+        ] },
         { sub: "Zoom", items: [
           ["50%", () => setZoom(0.5), null, () => state.zoom === 0.5],
           ["75%", () => setZoom(0.75), null, () => state.zoom === 0.75],
@@ -9403,7 +9588,6 @@ function wireSettings() {
   const gear = byId("tb-settings");
   const panel = byId("settings-panel");
   const scrim = byId("settings-scrim");
-  const themeSel = byId("set-theme");
 
   /// Is the gear actually on screen? `getClientRects()` rather than a class or
   /// a mode check: the header is hidden by desktop chrome, by `?hide=header`,
@@ -9466,7 +9650,13 @@ function wireSettings() {
     // in the grid. The anchored form is left alone — a popover that steals
     // focus from the sheet on a stray gear click is worse than one that does
     // not.
-    if (!panel.classList.contains("anchored")) themeSel.focus();
+    // Theme used to be this panel's first control and so was what took focus.
+    // It is `View ▸ Theme` now (`UX-CHR-01`), so focus goes to whatever the
+    // panel's first focusable is — asked of the DOM rather than named, or the
+    // next control to move takes the keyboard with it.
+    if (!panel.classList.contains("anchored")) {
+      panel.querySelector("select, input, button:not(.settings-close)")?.focus();
+    }
   };
   openSettings = open;
 
@@ -9489,7 +9679,6 @@ function wireSettings() {
   // A window that changed size moved the gear; a panel still pinned to where it
   // used to be is the defect `anchorMenu()`'s callers already re-run for.
   window.addEventListener("resize", () => { if (!panel.hidden) place(); });
-  themeSel.addEventListener("change", () => applyTheme(themeSel.value));
   for (const b of qsa("#set-accent button")) {
     b.addEventListener("click", () => applyAccent(b.dataset.c));
   }
@@ -9505,9 +9694,13 @@ function wireSettings() {
   scroll.addEventListener("input", () => setScroll(parseFloat(scroll.value), true));
 
   // Restore saved preferences (default scroll speed is 0.80).
-  const theme = localStorage.getItem("oc-theme") || "auto";
-  themeSel.value = theme;
-  applyTheme(theme);
+  //
+  // Theme is still restored here even though its control has moved to
+  // `View ▸ Theme`: this runs at boot and the menu does not, and a window that
+  // came up light because nobody had opened a menu yet would be the whole
+  // feature lost. `applyTheme` is what records the choice `currentTheme()`
+  // reports, so the tick in that menu is right on the first open.
+  applyTheme(localStorage.getItem("oc-theme") || "auto");
   const accent = localStorage.getItem("oc-accent");
   if (accent) applyAccent(accent);
   const savedScroll = parseFloat(localStorage.getItem("oc-scroll"));
@@ -10105,12 +10298,13 @@ async function main() {
   for (const node of qsa("[id^='tb-']")) {
     if (!node.dataset.ocCommand) node.dataset.ocCommand = `toolbar.${node.id.slice(3)}`;
   }
-  // The header's Open button, which had no command id at all and so could not
-  // be hidden by anything. It clicks the same `#tb-open` picker `File ▸ Open`
-  // does, so hiding the menu item and leaving this one takes the command away
-  // from nobody — it is the button a user actually reaches for.
-  const hdrOpen = byId("hdr-open");
-  if (hdrOpen && !hdrOpen.dataset.ocCommand) hdrOpen.dataset.ocCommand = "header.open";
+  // There is no `header.open` any more. The branding strip's folder button was
+  // a second route to `File ▸ Open` sitting in the one region that should carry
+  // identity and document state only, and in desktop chrome — where the strip
+  // is not drawn — it left `listCommands()` naming a command with nothing to
+  // click (`UX-CHR-01`, `UX-DESK-05`). Both the button and the id went; the
+  // capability is `File ▸ Open`'s and the operating system's own menu bar.
+  //
   // Tooltips are the toolbar's only text, so they are what a translated
   // toolbar translates. The English one is kept as the fallback.
   //

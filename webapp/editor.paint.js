@@ -827,7 +827,25 @@ export function paintRefTokens() {
   mirror.scrollTop = surface.scrollTop;
 }
 
+/// **What the user chose**, which is not the same as what is on screen.
+///
+/// `ocThemeHost.dataset.theme` is absent for two different reasons — "Auto",
+/// and "Light" on a build that has not been asked yet — so it cannot answer
+/// this. `View ▸ Theme` ticks the chosen option, and a tick that reads the
+/// *rendered* theme would put the mark on Light whenever the operating system
+/// was light, in a window whose setting is Auto (`UX-CHR-01`).
+///
+/// Held here rather than read back from `localStorage` on every menu open: the
+/// storage is where the choice survives a reload, and this is where it lives
+/// while the page is up. They are set together, one line apart, below.
+let themeChoice = localStorage.getItem("oc-theme") || "auto";
+
+export function currentTheme() {
+  return themeChoice;
+}
+
 export function applyTheme(theme) {
+  themeChoice = theme;
   if (theme === "auto") delete ocThemeHost.dataset.theme;
   else ocThemeHost.dataset.theme = theme;
   localStorage.setItem("oc-theme", theme);
