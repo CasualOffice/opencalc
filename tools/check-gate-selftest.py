@@ -113,6 +113,37 @@ def main() -> int:
     if seen != ["REAL-01"]:
         problems.append(f"`rows()` does not skip fenced examples: saw {seen}")
 
+    # **A gate must survive a workflow whose matrix is an expression**
+    # (`CI-033`). `ci.yml`'s `desktop` job builds its `include` with
+    # `fromJSON(...)`, so YAML hands back a *string* where a list of dicts used
+    # to be. `check-workflow-bashisms.py` walked it as a list and died with
+    # `'str' object has no attribute 'values'`, taking main red — the two
+    # changes were mine, made an hour apart, and each was verified alone.
+    #
+    # The three shapes below are the ones a real workflow produces. A crash
+    # here is the failure being guarded: a gate that raises does not report a
+    # finding, it reports nothing, and CI shows a red job with a traceback
+    # instead of an answer.
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "bashisms", TOOLS / "check-workflow-bashisms.py"
+        )
+        bashisms = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bashisms)
+        for shape in (
+            {"runs-on": "${{ matrix.os }}", "strategy": {"matrix": "${{ fromJSON(x) }}"}},
+            {"runs-on": "${{ matrix.os }}", "strategy": {"matrix": {"include": "${{ fromJSON(x) }}"}}},
+            {"runs-on": "${{ matrix.os }}", "strategy": {"matrix": {"include": ["macos-latest"]}}},
+        ):
+            bashisms.runners_for(shape)
+    except Exception as exc:  # noqa: BLE001 — any raise at all is the finding
+        problems.append(
+            f"`check-workflow-bashisms.runners_for` raises on an expression-valued "
+            f"matrix: {exc!r}. A gate that raises reports nothing, not nothing-wrong"
+        )
+
     copies = []
     for gate in sorted(TOOLS.glob("check-*.py")):
         if gate.name == "check-gate-selftest.py":

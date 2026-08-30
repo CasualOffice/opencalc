@@ -59,12 +59,33 @@ def runners_for(job: dict) -> list[str]:
 
     if any("matrix." in l for l in labels):
         matrix = (job.get("strategy") or {}).get("matrix") or {}
-        for key, val in matrix.items():
-            if key == "include":
-                for entry in val or []:
-                    labels += [str(v) for v in (entry or {}).values()]
-            elif isinstance(val, list):
-                labels += [str(v) for v in val]
+        # **A matrix key may be an expression rather than a value.** `ci.yml`'s
+        # `desktop` job builds its `include` with `fromJSON(...)`, so what YAML
+        # hands back here is a *string* — and the first version of this walked
+        # it as a list of dicts and crashed with `'str' object has no attribute
+        # 'values'`, taking main red. The two changes were made an hour apart
+        # and each was verified alone.
+        #
+        # An expression cannot be resolved statically, so it is read
+        # conservatively: the raw text counts as a label, and the runner
+        # patterns below match against it. A `fromJSON` literal naming
+        # `macos-latest` therefore puts the job in scope, which is the safe
+        # direction — the cost of being wrong is checking a job that never runs
+        # on macOS, against missing one that does.
+        if isinstance(matrix, str):
+            labels.append(matrix)
+        else:
+            for key, val in matrix.items():
+                if isinstance(val, str):
+                    labels.append(val)
+                elif key == "include":
+                    for entry in val or []:
+                        if isinstance(entry, dict):
+                            labels += [str(v) for v in entry.values()]
+                        else:
+                            labels.append(str(entry))
+                elif isinstance(val, list):
+                    labels += [str(v) for v in val]
     return labels
 
 
