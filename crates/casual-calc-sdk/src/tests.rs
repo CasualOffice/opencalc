@@ -3438,3 +3438,308 @@ mod pdf_export {
         );
     }
 }
+
+/// Version history through the facade a host actually calls (`SAVE-08`).
+///
+/// The unit-level properties — what the ring evicts, how a diff crosses two
+/// identifier spaces, that a restore converges two replicas without moving a
+/// revision number — live in `casual-calc-transaction`'s `version_tests`. What
+/// is asserted here is the part only the session knows: what a restore does to
+/// the undo stack, and what it does to the version list on its way past.
+mod versions {
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId};
+
+    use crate::{SdkError, SessionConfig, VersionKind, WorkbookSession};
+
+    fn seeded() -> WorkbookSession {
+        let mut session = WorkbookSession::with_sheet();
+        for row in 0..4u32 {
+            session
+                .edit(crate::EditOperation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(row, 0),
+                    cell: Some(Cell::value(CellValue::Number(f64::from(row)))),
+                })
+                .expect("edit");
+        }
+        session.clear_history();
+        session
+    }
+
+    fn number(session: &WorkbookSession, row: u32) -> CellValue {
+        session.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .map_or(CellValue::Empty, |cell| cell.value.clone())
+    }
+
+    #[test]
+    fn a_version_is_captured_named_and_listed_with_the_time_the_host_gave() {
+        let mut session = seeded();
+        let captured = session
+            .capture_version(
+                VersionKind::Named,
+                Some("first draft".to_owned()),
+                1_700_000_000_000,
+            )
+            .expect("captures");
+        assert!(captured.stored);
+
+        let listed: Vec<_> = session.versions().visible().cloned().collect();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_deref(), Some("first draft"));
+        assert_eq!(listed[0].kind, VersionKind::Named);
+        assert_eq!(listed[0].captured_at_ms, 1_700_000_000_000);
+        assert!(listed[0].byte_len > 0);
+    }
+
+    #[test]
+    fn capturing_a_version_is_a_read_and_does_not_dirty_the_document() {
+        let mut session = seeded();
+        let before = session.edits_applied();
+        session
+            .capture_version(VersionKind::Autosave, None, 1_000)
+            .expect("captures");
+        assert_eq!(
+            session.edits_applied(),
+            before,
+            "an autosave that dirtied the document it was recording would make \
+             the dirty flag useless"
+        );
+        assert!(!session.can_undo(), "and it is not on the undo stack");
+    }
+
+    #[test]
+    fn a_restore_is_one_undo_step_and_leaves_the_earlier_stack_alone() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("before".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+
+        // Two ordinary edits, so there is a stack for the restore to sit on top
+        // of rather than replace.
+        for row in 0..2u32 {
+            session
+                .edit(crate::EditOperation::SetCell {
+                    sheet: 0,
+                    at: CellRef::new(row, 0),
+                    cell: Some(Cell::value(CellValue::Number(900.0 + f64::from(row)))),
+                })
+                .expect("edit");
+        }
+        assert_eq!(number(&session, 0), CellValue::Number(900.0));
+
+        let restored = session.restore_version(version, 2_000).expect("restores");
+        assert_eq!(restored.report.cells_changed, 2);
+        assert_eq!(number(&session, 0), CellValue::Number(0.0));
+
+        // One Ctrl+Z reverses the whole restore, not one cell of it.
+        session.undo().expect("undo");
+        assert_eq!(
+            number(&session, 0),
+            CellValue::Number(900.0),
+            "a batch has one combined inverse"
+        );
+        // And the edits that came before it are still there, in order.
+        session.undo().expect("undo");
+        assert_eq!(number(&session, 1), CellValue::Number(1.0));
+        session.undo().expect("undo");
+        assert_eq!(number(&session, 0), CellValue::Number(0.0));
+        assert!(
+            !session.can_undo(),
+            "the stack was not rewritten, only added to"
+        );
+    }
+
+    #[test]
+    fn a_restore_clears_the_redo_stack_because_it_is_a_new_edit() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("before".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        session
+            .edit(crate::EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(900.0))),
+            })
+            .expect("edit");
+        session.undo().expect("undo");
+        assert!(session.can_redo());
+
+        session
+            .edit(crate::EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(3, 0),
+                cell: Some(Cell::value(CellValue::Number(77.0))),
+            })
+            .expect("edit");
+        session.restore_version(version, 2_000).expect("restores");
+        assert!(
+            !session.can_redo(),
+            "every new edit clears redo, and a restore is a new edit"
+        );
+    }
+
+    #[test]
+    fn a_restore_preserves_the_present_as_a_version_first() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("before".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        session
+            .edit(crate::EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(900.0))),
+            })
+            .expect("edit");
+
+        let restored = session.restore_version(version, 2_000).expect("restores");
+        let preserved = restored.preserved.expect("the present was kept");
+        assert_ne!(preserved, version);
+
+        // And it really is the state that was departed from: restoring *it*
+        // brings the edit back.
+        session.restore_version(preserved, 3_000).expect("restores");
+        assert_eq!(
+            number(&session, 0),
+            CellValue::Number(900.0),
+            "reaching the past never costs what the user had"
+        );
+    }
+
+    #[test]
+    fn restoring_a_version_the_document_already_matches_changes_nothing() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("now".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        let held = session.versions().len();
+        let applied = session.edits_applied();
+
+        let restored = session.restore_version(version, 2_000).expect("restores");
+        assert!(restored.report.is_empty());
+        assert_eq!(restored.preserved, None, "nothing was departed from");
+        assert_eq!(session.versions().len(), held, "and nothing was stored");
+        assert_eq!(session.edits_applied(), applied);
+        assert!(
+            !session.can_undo(),
+            "an edit that changed nothing leaves no entry"
+        );
+    }
+
+    #[test]
+    fn a_restore_brings_back_a_deleted_sheet() {
+        let mut session = seeded();
+        session
+            .edit(crate::EditOperation::InsertSheet {
+                index: 1,
+                sheet: Box::new(Sheet::new(SheetId(Id::from_parts(77, 1)), "Data")),
+            })
+            .expect("edit");
+        let version = session
+            .capture_version(VersionKind::Named, Some("with Data".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        session
+            .edit(crate::EditOperation::RemoveSheet { index: 1 })
+            .expect("edit");
+        assert_eq!(session.workbook().sheets.len(), 1);
+
+        let restored = session.restore_version(version, 2_000).expect("restores");
+        assert_eq!(restored.report.sheets_added, 1);
+        assert_eq!(session.workbook().sheets[1].name, "Data");
+    }
+
+    #[test]
+    fn a_read_only_session_refuses_a_restore_before_it_touches_anything() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("before".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        session
+            .edit(crate::EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(900.0))),
+            })
+            .expect("edit");
+
+        *session.config_mut() = SessionConfig::new().read_only();
+        let held = session.versions().len();
+        let refused = session.restore_version(version, 2_000);
+        assert!(matches!(refused, Err(SdkError::ReadOnly)), "{refused:?}");
+        assert_eq!(number(&session, 0), CellValue::Number(900.0));
+        assert_eq!(
+            session.versions().len(),
+            held,
+            "a session that was always going to refuse must not have grown a version on the way"
+        );
+    }
+
+    #[test]
+    fn restoring_a_version_this_document_does_not_hold_says_so() {
+        let mut session = seeded();
+        let refused = session.restore_version(crate::VersionId(999), 1_000);
+        assert!(
+            matches!(refused, Err(SdkError::NoSuchVersion(id)) if id == crate::VersionId(999)),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_can_persist_the_versions_and_put_them_back() {
+        let mut session = seeded();
+        session
+            .capture_version(VersionKind::Named, Some("kept".to_owned()), 1_000)
+            .expect("captures");
+        let policy = session.versions().policy();
+        let stored = session.versions().clone().into_parts();
+
+        let mut reopened = seeded();
+        assert!(
+            reopened.versions().is_empty(),
+            "a fresh session starts with no past"
+        );
+        reopened.set_versions(crate::VersionStore::from_parts(policy, stored));
+        let listed: Vec<_> = reopened.versions().visible().cloned().collect();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_deref(), Some("kept"));
+        // And it is usable, not merely listed.
+        reopened
+            .restore_version(listed[0].id, 2_000)
+            .expect("restores from a store that came out of the host's storage");
+    }
+
+    #[test]
+    fn a_restore_travels_to_collaborators_as_ordinary_edits() {
+        let mut session = seeded();
+        let version = session
+            .capture_version(VersionKind::Named, Some("before".to_owned()), 1_000)
+            .expect("captures")
+            .id;
+        session.record_applied();
+        session
+            .edit(crate::EditOperation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::Number(900.0))),
+            })
+            .expect("edit");
+        let _ = session.take_applied();
+
+        session.restore_version(version, 2_000).expect("restores");
+        let sent = session.take_applied();
+        assert_eq!(sent.len(), 1, "one batch, not one message per cell");
+        assert!(
+            matches!(&sent[0], crate::EditOperation::Batch(ops) if !ops.is_empty()),
+            "co-editors see edits arriving, because that is what they are"
+        );
+    }
+}
