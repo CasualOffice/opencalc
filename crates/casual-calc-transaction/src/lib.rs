@@ -523,8 +523,26 @@ fn take_retained(workbook: &mut Workbook, paths: &BTreeSet<String>) -> RetainedB
     taken
 }
 
-/// A closed set of atomic edit operations. Every operation is invertible; the
-/// inverse of any operation is expressible as a `SetCell` (or a `Batch` of them).
+/// The atomic edit operations, **closed at a given `PROTOCOL_VERSION`** rather
+/// than closed for all time (`ADR-024`).
+///
+/// This said "a closed set" until `DOC-039` went looking, and the history says
+/// otherwise: `MoveColumns`, `MoveRows` and `MoveRange` joined on 2026-08-29,
+/// three weeks after the rest and long after Phase 5 shipped on top of it. The
+/// weaker claim is the true one and is also the one operational transform needs
+/// — totality *per version*, never immutability across time.
+///
+/// Adding a variant is therefore a **hard** wire break: an old client cannot
+/// read the tag, so it is refused rather than misled. That is the opposite of an
+/// additive field on `SheetMetadata`, which is the *quiet* break — a new variant
+/// announces itself, a new field does not.
+///
+/// Two obligations come with a new variant, both enforced rather than asserted.
+/// It must be invertible: the inverse of any operation is expressible as a
+/// `SetCell` (or a `Batch` of them), which is what lets an undo travel as an
+/// ordinary edit. And it must arrive with its transform row — `transform_tests`
+/// pins the complete refusal surface, so a pair that starts refusing fails a
+/// test that names it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Operation {
