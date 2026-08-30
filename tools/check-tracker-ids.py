@@ -40,6 +40,9 @@ import re
 import sys
 from collections import defaultdict
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tracker_rows import ID_ROW  # noqa: E402
+
 # The documents that carry `| ID | ...` rows other things cite by id.
 TRACKERS = [
     "docs/14-EXECUTION-TRACKER.md",
@@ -56,13 +59,17 @@ TRACKERS = [
 # A leading table cell holding something id-shaped: `| FID-19 |`, `| UX-NAV-01 |`.
 # Deliberately anchored to the start of a row so prose mentioning an id — which
 # is a *reference*, not a definition — is not counted as one.
-ID_ROW = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|")
+#
+# This pattern was right and now lives in `tracker_rows`, imported above. Two
+# later gates re-derived it instead of importing it, guessed narrower, and were
+# blind to 47 rows this one always saw. `check-gate-selftest` now refuses a
+# second copy.
 
 # The live tracker, and the vocabulary it publishes for its own `St` column.
 LIVE = "docs/14-EXECUTION-TRACKER.md"
 STATUSES = {"Open", "WIP", "Partial", "Blocked", "Designed", "Done", "Dropped"}
 # `| ID | Title | St | ...` — the third cell.
-ROW_STATUS = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|[^|]*\|\s*([^|]*?)\s*\|")
+ROW_STATUS = re.compile(ID_ROW.pattern + r"[^|]*\|\s*([^|]*?)\s*\|")
 
 
 def main() -> int:

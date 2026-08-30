@@ -18,12 +18,13 @@ commits, so a working margin is left. What is refused is the accumulation.
 """
 
 import pathlib
-import re
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tracker_rows import cells, rows  # noqa: E402
 
 TRACKER = pathlib.Path("docs/14-EXECUTION-TRACKER.md")
 ARCHIVE = "docs/14a-ARCHIVE-CLOSED-WORK.md"
-ROW = re.compile(r"^\| [A-Z][A-Z0-9]*(?:-[A-Z]+)*-[0-9]+ \|")
 CLOSED = {"Done", "Dropped", "Accepted"}
 
 # Below this, closed rows are the ordinary lag between closing a row and
@@ -35,36 +36,29 @@ FLOOR = 20
 SHARE = 0.5
 
 
-def status(line: str) -> str:
-    cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
-    return cells[2] if len(cells) > 2 else ""
-
-
 def main() -> int:
     if not TRACKER.is_file():
         print(f"{TRACKER} not found", file=sys.stderr)
         return 1
 
-    fenced = False
-    rows = []
-    for line in TRACKER.read_text(encoding="utf-8").splitlines():
-        # The preamble documents the row format inside a fence; reading those
-        # examples as rows is a mistake `check-tracker-shape` already made once.
-        if line.startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and ROW.match(line):
-            rows.append(status(line))
+    # The row pattern and the fence skipping are the shared ones. This gate
+    # used to carry a private, narrower copy that could not see `UX-P08a` or
+    # `UX-A11Y-01`, so it reported "0 closed" over a tracker holding four
+    # closed rows — a false green on the one number it exists to report.
+    statuses = [
+        cells(line)[2] if len(cells(line)) > 2 else ""
+        for _, _, line in rows(TRACKER.read_text(encoding="utf-8"))
+    ]
 
-    if not rows:
+    if not statuses:
         print("tracker freshness: no rows to weigh", file=sys.stderr)
         return 1
 
-    closed = sum(1 for s in rows if s in CLOSED)
-    share = closed / len(rows)
+    closed = sum(1 for s in statuses if s in CLOSED)
+    share = closed / len(statuses)
     if closed >= FLOOR and share > SHARE:
         print(
-            f"{TRACKER}: {closed} of {len(rows)} rows are closed "
+            f"{TRACKER}: {closed} of {len(statuses)} rows are closed "
             f"({share:.0%}) — the live tracker is mostly not live work.",
             file=sys.stderr,
         )
@@ -78,7 +72,7 @@ def main() -> int:
         return 1
 
     print(
-        f"tracker freshness: {len(rows) - closed} of {len(rows)} rows are open work "
+        f"tracker freshness: {len(statuses) - closed} of {len(statuses)} rows are open work "
         f"({closed} closed, awaiting the sweep)"
     )
     return 0

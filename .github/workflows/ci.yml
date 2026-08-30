@@ -456,6 +456,14 @@ jobs:
       # sweeping it out stay separate commits.
       - name: The live tracker is mostly live work
         run: python3 tools/check-tracker-freshness.py
+      # Eighteen gates guarded this repository and nothing guarded them. Two
+      # of them had re-derived "what a tracker row looks like" and guessed
+      # narrower than the trackers, so 47 rows were invisible to both and both
+      # printed green — a gate that cannot see a row cannot fail on it
+      # (`CI-024`). This also refuses a second private copy of the pattern,
+      # which is the part that stops it recurring.
+      - name: The gates pass their own checks
+        run: python3 tools/check-gate-selftest.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \

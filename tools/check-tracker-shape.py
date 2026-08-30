@@ -22,28 +22,20 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tracker_rows import ID_ROW, cells  # noqa: E402
+
 ROOT = pathlib.Path(".")
 TRACKERS = [
     "docs/14-EXECUTION-TRACKER.md",
     "docs/14a-ARCHIVE-CLOSED-WORK.md",
     "docs/53-FEATURE-CORRECTNESS-TRACKER.md",
 ]
-# A row starts with an id: `| ABC-01 |`. Header and separator rows do not.
-# A real id carries a series and a number — `COL-28`, `UX-MOB-05`. The header's
-# own first cell is `ID`, which the looser pattern matched, so the header was
-# reported as a row that appears before its own header.
-ROW = re.compile(r"^\| [A-Z][A-Z0-9]*(?:-[A-Z]+)*-[0-9]+ \|")
 SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 
 
 def width(line: str) -> int:
-    """Columns in a markdown row, honouring `\\|` as an escape.
-
-    Markdown does not end a cell on an escaped pipe, so neither can this — a
-    gate that counted them would demand an escape and then reject the escaped
-    row, which is a gate nobody can satisfy.
-    """
-    return len(re.split(r"(?<!\\)\|", line.strip().strip("|")))
+    return len(cells(line))
 
 
 def main() -> int:
@@ -56,7 +48,13 @@ def main() -> int:
             continue
 
         # (line number, id, width, the width its own table declared or None)
-        rows: list[tuple[int, str, int, int | None]] = []
+        #
+        # Walked line by line rather than through `tracker_rows.rows()`,
+        # because a row's declared width comes from the separator *above* it and
+        # that ordering has to be preserved. The row pattern is still the shared
+        # one — this gate used to carry a private, narrower copy and could not
+        # see 47 rows because of it.
+        found: list[tuple[int, str, int, int | None]] = []
         declared = None
         fenced = False
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -72,10 +70,11 @@ def main() -> int:
             if SEPARATOR.match(line):
                 declared = width(line)
                 continue
-            if ROW.match(line):
-                rows.append((number, line.split("|")[1].strip(), width(line), declared))
+            match = ID_ROW.match(line)
+            if match:
+                found.append((number, match.group(1), width(line), declared))
 
-        if not rows:
+        if not found:
             continue
 
         # **A table with no header is not checked, and that is said out loud.**
@@ -85,21 +84,21 @@ def main() -> int:
         # this gate cannot prove are wrong: a majority is evidence, not a
         # specification. Giving that table a header is what would make it
         # checkable, and that is a change to the document, not to this gate.
-        unheadered = sum(1 for _, _, _, dec in rows if dec is None)
+        unheadered = sum(1 for _, _, _, dec in found if dec is None)
         if unheadered:
             skipped.append(f"{name}: {unheadered} row(s) in a table with no header")
 
-        for number, rid, found, dec in rows:
+        for number, rid, wide, dec in found:
             if dec is None:
                 continue
             checked += 1
-            if found == dec:
+            if wide == dec:
                 continue
             more = (
-                "an unescaped `|` in the prose" if found > dec else "a missing column"
+                "an unescaped `|` in the prose" if wide > dec else "a missing column"
             )
             problems.append(
-                f"{name}:{number}: {rid} has {found} columns where its table "
+                f"{name}:{number}: {rid} has {wide} columns where its table "
                 f"declares {dec} — most likely {more}. Every column after the "
                 f"break shifts, so anything reading one by position reads the "
                 f"wrong cell; escape the pipe as `\\|`"
