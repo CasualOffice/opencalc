@@ -46,7 +46,7 @@ jobs:
       - name: Check the site is complete
         run: |
           set -euo pipefail
-          for f in index.html editor.html docs.html embed.html \
+          for f in index.html editor.html docs.html embed.html download.html \
                    editor.js embed.js collab.js style.css editor.css \
                    pkg/casual_calc_wasm_bg.wasm fonts/Carlito-Regular.ttf; do
             [ -s "site/$f" ] || { echo "::error::site/$f is missing or empty"; exit 1; }

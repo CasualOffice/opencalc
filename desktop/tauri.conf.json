@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Untitled — OpenCalc",
+        "title": "Untitled \u2014 OpenCalc",
         "width": 1280,
         "height": 800,
         "minWidth": 640,
@@ -26,14 +26,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "category": "Productivity",
-    "copyright": "Copyright © CasualOffice. Licensed under Apache-2.0.",
+    "copyright": "Copyright \u00a9 CasualOffice. Licensed under Apache-2.0.",
     "shortDescription": "A spreadsheet that reads and writes .xlsx.",
     "longDescription": "OpenCalc opens, edits and saves Excel workbooks, comma-, tab- and pipe-separated text, with a calculation engine that runs entirely on this machine.",
     "fileAssociations": [
       {
-        "ext": ["xlsx"],
+        "ext": [
+          "xlsx"
+        ],
         "name": "Excel Workbook",
         "description": "Excel Workbook",
         "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -41,7 +46,9 @@
         "rank": "Default"
       },
       {
-        "ext": ["xlsm"],
+        "ext": [
+          "xlsm"
+        ],
         "name": "Excel Macro-Enabled Workbook",
         "description": "Excel Macro-Enabled Workbook",
         "mimeType": "application/vnd.ms-excel.sheet.macroEnabled.12",
@@ -49,7 +56,9 @@
         "rank": "Default"
       },
       {
-        "ext": ["ods"],
+        "ext": [
+          "ods"
+        ],
         "name": "OpenDocument Spreadsheet",
         "description": "OpenDocument Spreadsheet",
         "mimeType": "application/vnd.oasis.opendocument.spreadsheet",
@@ -57,7 +66,9 @@
         "rank": "Default"
       },
       {
-        "ext": ["csv"],
+        "ext": [
+          "csv"
+        ],
         "name": "Comma-separated values",
         "description": "Comma-separated values",
         "mimeType": "text/csv",
@@ -65,7 +76,10 @@
         "rank": "Alternate"
       },
       {
-        "ext": ["tsv", "tab"],
+        "ext": [
+          "tsv",
+          "tab"
+        ],
         "name": "Tab-separated values",
         "description": "Tab-separated values",
         "mimeType": "text/tab-separated-values",
@@ -73,7 +87,9 @@
         "rank": "Alternate"
       },
       {
-        "ext": ["psv"],
+        "ext": [
+          "psv"
+        ],
         "name": "Pipe-separated values",
         "description": "Pipe-separated values",
         "role": "Editor",
@@ -81,7 +97,8 @@
       }
     ],
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
     },
     "linux": {
       "deb": {
