@@ -377,6 +377,7 @@ import {
   needsRecalc,
   openBytes,
   documentName,
+  setDocumentName,
   printSheet,
   readOnly,
   readOutline,
@@ -769,6 +770,7 @@ export {
   needsRecalc,
   openBytes,
   documentName,
+  setDocumentName,
   printSheet,
   readOnly,
   readOutline,
@@ -8693,6 +8695,46 @@ function wireEvents() {
     };
     publish();
     setInterval(publish, 250);
+
+    // --- Renaming, from the strip (`UX-CHR-10`) ---------------------------
+    //
+    // The button is swapped for an input rather than the input being always
+    // present and styled to look like text: an always-live text field in the
+    // title area is something a stray keystroke edits, and this is the one
+    // string that reaches a native window title.
+    const renameEl = byId("doc-rename");
+    if (nameEl && renameEl) {
+      const stop = (commit) => {
+        if (renameEl.hidden) return;
+        // Read before hiding: hiding first drops the value on some engines.
+        const typed = renameEl.value;
+        renameEl.hidden = true;
+        nameEl.hidden = false;
+        if (commit) setDocumentName(typed);
+        // `first` forces the next poll to write even if the name did not
+        // change, so an abandoned rename cannot leave a stale strip.
+        first = true;
+        publish();
+        canvas?.focus();
+      };
+      nameEl.addEventListener("click", () => {
+        renameEl.value = documentName() || "";
+        renameEl.hidden = false;
+        nameEl.hidden = true;
+        renameEl.focus();
+        renameEl.select();
+      });
+      renameEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); stop(true); }
+        else if (e.key === "Escape") { e.preventDefault(); stop(false); }
+        // The grid's own key handling must not see a keystroke meant for a name
+        // — `t` would otherwise start a cell edit behind the rename.
+        e.stopPropagation();
+      });
+      // Clicking away commits, which is what every competitor's title field
+      // does and what a user who has typed a name and moved on expects.
+      renameEl.addEventListener("blur", () => stop(true));
+    }
   }
 
   // The desktop shell replaces the webview's file picker with the platform's.

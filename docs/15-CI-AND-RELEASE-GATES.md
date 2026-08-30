@@ -9,6 +9,25 @@ which gates are not yet built.
 > `docs`, `wasm`, `benchmark-smoke`, `sdk-types`, `browser-smoke`,
 > `oracle-diff`, `repository-policy`, `fuzz-build`, `docker-build`,
 > `dependency-policy`, `desktop`, and a three-platform `platform` matrix
+
+**Four of these run on main and not on every pull request** (`CI-030`):
+`benchmark-smoke`, `fuzz-build` and `docker-build` are skipped on a pull
+request, and `desktop` drops to Linux alone. The reason is arithmetic rather
+than taste — the organisation's entire allowance is **20 concurrent jobs shared
+across 17 repositories**, and one run of this workflow was taking 19 of them, so
+a pull request here stalled every other repository for ten minutes.
+
+**What that trades is real and is stated here rather than left to be
+discovered.** A pull request can now be green where main is not: a macOS-only
+bundling break, an image that stops building, or a fuzz target that stops
+compiling will be caught on main, an hour later, instead of in review. That is
+the same window `CI-031` describes for merge results, widened deliberately. The
+jobs were chosen because a failure in any of them is a *build* failure somebody
+fixes forward, not a correctness failure that should never have merged —
+`oracle-diff`, `browser-smoke`, `test` and the three-platform `platform` matrix
+all still run on every pull request, and they are the ones that answer whether
+the change is right.
+
 > including MSRV. Two more run on a schedule in `security.yml`: `advisories`
 > and `fuzz-campaign`.
 >
@@ -27,12 +46,12 @@ which gates are not yet built.
 | `test` | `cargo test --workspace --all-features --locked` (+ doc tests) | Correctness, determinism, round-trip, recalc goldens |
 | `docs` | `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings` | Doc builds; intra-doc links valid |
 | `wasm` | `cargo check --target wasm32-unknown-unknown --workspace --exclude casual-calc-collab-server` | The **engine** stays WASM-clean. The collaboration server is a host (ADR-012) with an async runtime and an HTTP stack, and was never meant to run in a browser |
-| `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq` | Perf harness shape + determinism (**implemented**, F-007) |
-| `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged | Fuzz targets compile (**implemented**, F-008) |
+| `benchmark-smoke` | run `casual-calc-benchmark --smoke`, validate JSON shape with `jq`. **Main only** (`CI-030`) | Perf harness shape + determinism (**implemented**, F-007) |
+| `fuzz-build` | build cargo-fuzz targets on pinned nightly; assert `fuzz/Cargo.lock` unchanged. **Main only** (`CI-030`) | Fuzz targets compile (**implemented**, F-008) |
 | `platform` | matrix: macOS-arm64 + Windows-x64 full tests; **MSRV** check | Cross-platform + minimum Rust |
 | `sdk-types` | `npm ci && npm test` in `sdk/types` | The published `.d.ts` surface compiles under `strict` **and** names only methods that exist — a declaration nothing compiles against drifts (`SDK-009`) |
-| `docker-build` | build every image in the repository | A Dockerfile that stops building fails here rather than at an integrator (`DEP-07`) |
-| `desktop` | `tauri build` on macOS, Windows and Linux, one bundle format each | The desktop shell's own Cargo workspace still builds — the gate `CI-014` had to add for `fuzz/` after a signature change broke it silently, present from the day the workspace existed (`ADR-023`) |
+| `docker-build` | build every image in the repository. **Main only** (`CI-030`) | A Dockerfile that stops building fails here rather than at an integrator (`DEP-07`) |
+| `desktop` | `tauri build`, one bundle format each: **all three platforms on main, Linux alone on a pull request** (`CI-030`) | The desktop shell's own Cargo workspace still builds — the gate `CI-014` had to add for `fuzz/` after a signature change broke it silently, present from the day the workspace existed (`ADR-023`) |
 | `dependency-policy` | `cargo deny check bans licenses sources` + `cargo audit --deny warnings` | Supply-chain policy |
 | `repository-policy` | fixture manifest SHA-256 check; reject merge-conflict markers | Repo integrity (**implemented**, F-006) |
 | `oracle-diff` | recalculate a corpus in LibreOffice Calc and diff the values; re-save a feature workbook through it and diff the structure | The evaluator and the **writer**, against an implementation that shares neither our code nor our reading of the spec (**implemented**, P2-003 + P1B-003) |

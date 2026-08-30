@@ -168,6 +168,11 @@ jobs:
         run: cargo test -p casual-calc-render --no-default-features
 
   benchmark-smoke:
+    # **Main only** (`CI-030`). a performance smoke test; a regression here is not something a reviewer acts on inside the pull request, and main runs it on every merge.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -697,6 +702,11 @@ jobs:
           retention-days: 14
 
   fuzz-build:
+    # **Main only** (`CI-030`). compiles the fuzz targets without running them; breakage is a build error main catches within the hour.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -767,6 +777,11 @@ jobs:
   # Also asserts the standalone stack comes up and answers through its proxy,
   # which is what PROD-12 was about: the page and the socket on one origin.
   docker-build:
+    # **Main only** (`CI-030`). builds the server image; `release-images.yml` is what publishes one, and main proves it still builds.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -913,25 +928,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # **One bundle format per platform, chosen for what CI can produce
-          # without a network round-trip to somebody else's tooling.**
-          # `--bundles all` on Linux also builds an AppImage, which downloads
-          # linuxdeploy at build time; the `.deb` is produced from the packages
-          # apt already installed below. On macOS the `.app` *is* the
-          # application — a `.dmg` is a disk image wrapped around it and needs a
-          # mountable volume, which is a flake this job does not need to buy.
-          - os: ubuntu-latest
-            bundles: deb
-            # A directory for `.app`, a file for the rest, so the assertion
-            # below has to know which it is looking for.
-            artifact: target/release/bundle/deb
-          - os: macos-latest
-            bundles: app
-            artifact: target/release/bundle/macos
-          - os: windows-latest
-            bundles: nsis
-            artifact: target/release/bundle/nsis
+        # **One bundle format per platform, chosen for what CI can produce
+        # without a network round-trip to somebody else's tooling.**
+        # `--bundles all` on Linux also builds an AppImage, which downloads
+        # linuxdeploy at build time; the `.deb` is produced from the packages
+        # apt already installed below. On macOS the `.app` *is* the application
+        # — a `.dmg` is a disk image wrapped around it and needs a mountable
+        # volume, which is a flake this job does not need to buy. `artifact` is
+        # a directory for `.app` and a file for the rest, so the assertion below
+        # has to know which it is looking for.
+        #
+        # **Three platforms on main, Linux alone on a pull request**
+        # (`CI-030`). Bundling is where the platforms genuinely differ, so main
+        # keeps all three; a pull request keeps the one that catches a broken
+        # Tauri config, which is what almost every failure here has been.
+        #
+        # **Written as `fromJSON`, because `exclude` does not work here.** The
+        # first attempt excluded `macos-latest` and `windows-latest` on a pull
+        # request and produced a run with **no `desktop` job at all**: GitHub
+        # applies `exclude` to the base matrix and *then* adds `include`
+        # entries, so against an include-only matrix it excludes nothing and
+        # leaves nothing. That removed the whole platform's coverage rather than
+        # two thirds of it, and silently — the job was simply absent from the
+        # run, which reads as "not applicable" rather than as an error. Found by
+        # counting the jobs the branch's own run produced, which is the only way
+        # this was ever going to be found.
+        include: ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-latest","bundles":"deb","artifact":"target/release/bundle/deb"}]'
+          || '[{"os":"ubuntu-latest","bundles":"deb","artifact":"target/release/bundle/deb"},{"os":"macos-latest","bundles":"app","artifact":"target/release/bundle/macos"},{"os":"windows-latest","bundles":"nsis","artifact":"target/release/bundle/nsis"}]') }}
     runs-on: ${{ matrix.os }}
     # Windows runners default to `pwsh`, and every `run:` below is bash — the
     # same bash the rest of this workflow is written in. Set once here rather

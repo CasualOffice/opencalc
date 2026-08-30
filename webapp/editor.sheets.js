@@ -1010,6 +1010,23 @@ export function documentName() {
   return openedName;
 }
 
+/// Rename the document (`UX-CHR-10`).
+///
+/// This is the *name*, not a file: nothing is written anywhere, and the next
+/// Save As still asks. What it changes is what the strip says, what the desktop
+/// window's title bar says, and what a later save offers as the default — which
+/// is the whole of what a rename means before there is a file on disk.
+///
+/// An empty or whitespace-only name is refused rather than stored. A document
+/// called "" reads as untitled everywhere it is shown, so storing it would be a
+/// state the user cannot see and cannot get out of except by renaming again.
+export function setDocumentName(name) {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return false;
+  openedName = trimmed;
+  return true;
+}
+
 export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   let bytes = raw;
   const dot = name.lastIndexOf(".");

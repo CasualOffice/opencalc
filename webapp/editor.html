@@ -44,11 +44,33 @@
            - Open (folder icon)  →  `File ▸ Open` alone, already, by
              `UX-CHR-01`. -->
     <header class="app-header">
+      <!-- **The mark comes back; the wordmark does not** (`UX-CHR-10`).
+           `UX-CHR-03` deleted the logo along with the wordmark, the `Alpha`
+           pill and `engine v0.0.0`, and that went one item too far. What
+           `docs/88` measured was that no competitor spends a strip *naming the
+           product in words* — and a mark is not that. A browser tab has no
+           chrome of its own, so this is the only thing on screen identifying
+           which application is running, which is why every web application
+           keeps one and why the desktop shell, which has an OS title bar
+           saying it already, still does not. -->
+      <a class="brand-logo" href="./" title="OpenCalc" aria-label="OpenCalc home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" class="icon" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2.5"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/></svg>
+      </a>
       <span class="doc-identity">
         <!-- `documentName()` or, before anything has been opened, the same
              words the File menu's New uses. Written by `renderDocumentIdentity`
              with `textContent`: a file name is somebody else's text. -->
-        <span class="doc-name" id="doc-name">Untitled workbook</span>
+        <!-- **A name you can read and not change is a caption** (`UX-CHR-10`).
+             Excel, Sheets, OnlyOffice and LibreOffice all rename from the title
+             area. The only route here was Save As, which is a different
+             operation with different consequences — it writes a file.
+
+             A button rather than a `contenteditable`: this has to be reachable
+             by keyboard and announce itself as something that does something,
+             and `contenteditable` announces as a text region whose contents are
+             already live. The input replaces it only while renaming. -->
+        <button class="doc-name" id="doc-name" type="button" title="Rename (click)" aria-label="Rename the document">Untitled workbook</button>
+        <input class="doc-rename" id="doc-rename" hidden spellcheck="false" aria-label="Document name" />
         <!-- Save state, in a browser tab's own vocabulary: `isDirty()` here
              means "changes that have not been written out", which is what the
              New / Open confirmations already say. -->

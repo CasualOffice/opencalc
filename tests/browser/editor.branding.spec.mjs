@@ -63,10 +63,19 @@ test("no region of the chrome names a product", async ({ page }) => {
       strip: text(".app-header"),
       menubar: text("#menubar"),
       statusbar: text(".bottom-bar"),
-      wordmarks: document.querySelectorAll(".tb-brand, .brand-logo, .badge").length,
+      // **`.brand-logo` is deliberately not in this list** (`UX-CHR-10`).
+      // `UX-CHR-03` forbade all three and that went one item too far: what
+      // `docs/88` measured was that no competitor spends a strip *naming the
+      // product in words*. A mark is not a name, a browser tab has no chrome
+      // of its own to carry one, and the strip lost the only thing on screen
+      // identifying which application was running. The wordmark and the
+      // version pill stay out, and the text assertion below is what actually
+      // holds the line — it fails on the product's name appearing anywhere in
+      // the chrome, however it got there.
+      wordmarks: document.querySelectorAll(".tb-brand, .badge").length,
     };
   });
-  expect(chrome.wordmarks, "a wordmark, logo or version pill is back in the chrome").toBe(0);
+  expect(chrome.wordmarks, "a wordmark or version pill is back in the chrome").toBe(0);
   for (const [region, said] of Object.entries(chrome)) {
     if (region === "wordmarks") continue;
     expect(said, `${region} names a product: ${said}`).not.toMatch(/Ledgerly|OpenCalc/);
