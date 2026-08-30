@@ -7,6 +7,10 @@
 // differently from the way it is developed is a gate that can pass on a build
 // nobody can reproduce.
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { defineConfig, devices } from "@playwright/test";
 
 /// Nothing else in the project listens here; 8099 is `serve.py`'s own default
@@ -24,6 +28,106 @@ const COLLAB_PORT = Number(process.env.OPENCALC_COLLAB_PORT ?? 8125);
 /// possible is a bad trade.
 const EVICT_PORT = Number(process.env.OPENCALC_EVICT_PORT ?? 8126);
 const SECRET = process.env.OPENCALC_TEST_SECRET ?? "browser-smoke-only-not-a-deployment-secret";
+
+/// This checkout's `webapp/`, which is the tree the run is supposed to test.
+const WEBAPP = path.resolve(fileURLToPath(new URL("../../webapp", import.meta.url)));
+
+/// What is on a port, if anything.
+///
+/// `null` means nothing is listening. An object means something is, and it is
+/// whatever `serve.py`'s identity endpoint said — `{}` when the occupant is
+/// listening but is not our server, or is not answering.
+async function occupant(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/__opencalc__`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok ? await res.json() : {};
+  } catch (err) {
+    // Nothing accepted the connection: the port is free, which is the only
+    // outcome that lets the run proceed. Everything else — a timeout, a socket
+    // hangup, a body that is not JSON — is an occupied port.
+    const code = err?.cause?.code ?? err?.code;
+    if (code === "ECONNREFUSED" || code === "ECONNRESET") return null;
+    return {};
+  }
+}
+
+function sameDir(a, b) {
+  if (!a || !b) return false;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return path.resolve(a) === path.resolve(b);
+  }
+}
+
+/// Refuse to run against a server this run did not start.
+///
+/// `reuseExistingServer` used to be `!process.env.CI`, so a local run attached
+/// to whatever was already on its port. Several agents run this suite on one
+/// machine, `serve.py` looks the same from the outside whichever checkout it
+/// serves, and the module URLs did not move when a module changed — so a run
+/// silently loaded *another tree's* editor and passed. Two hours went into a
+/// fix that was never loaded (`CI-025`). A green run that tested somebody
+/// else's code is worse than a red one, because nothing about it invites a
+/// second look.
+///
+/// `reuseExistingServer: false` below is the enforcement — Playwright will not
+/// attach to a stranger. This is the *message*: Playwright's own refusal ends
+/// with "or set reuseExistingServer:true", which is the one thing that must
+/// not be done here, and it cannot say whose server it found.
+///
+/// Runs at config load, because the web servers are started before
+/// `globalSetup` and a check that runs after them is a check that has already
+/// let the run attach. Skipped in worker processes, which load this same file
+/// while our own servers are up and would otherwise all refuse.
+async function refuseForeignServers() {
+  const ports = [
+    ["OPENCALC_SMOKE_PORT", PORT, "the editor (serve.py)"],
+    ["OPENCALC_ORIGIN_PORT", ORIGIN_PORT, "the integrator's origin"],
+    ["OPENCALC_COLLAB_PORT", COLLAB_PORT, "the collaboration server"],
+    ["OPENCALC_EVICT_PORT", EVICT_PORT, "the idle-eviction collaboration server"],
+  ];
+  const busy = [];
+  for (const [envVar, port, role] of ports) {
+    const who = await occupant(port);
+    if (!who) continue;
+    let whose = "something this run did not start";
+    if (who.root && sameDir(who.root, WEBAPP)) {
+      whose = `a serve.py left over from an earlier run of this checkout (pid ${who.pid})`;
+    } else if (who.root) {
+      whose = `another checkout's serve.py: ${who.root} (pid ${who.pid})\n      this checkout is ${WEBAPP}`;
+    }
+    busy.push(`  port ${port} (${envVar}) — ${role}\n      ${whose}`);
+  }
+  if (!busy.length) return;
+  throw new Error(
+    [
+      "browser-smoke will not run against a server it did not start.",
+      "",
+      ...busy,
+      "",
+      "A run that attaches to another checkout's server tests that tree and",
+      "passes on code you never wrote (CI-025). Stop the server, or give this",
+      "run four ports nothing else is on — these are only an example:",
+      "",
+      `  OPENCALC_SMOKE_PORT=${PORT + 100} OPENCALC_ORIGIN_PORT=${ORIGIN_PORT + 100} \\`,
+      `  OPENCALC_COLLAB_PORT=${COLLAB_PORT + 100} OPENCALC_EVICT_PORT=${EVICT_PORT + 100} npm test`,
+      "",
+    ].join("\n"),
+  );
+}
+
+// `TEST_WORKER_INDEX` is set only in Playwright's worker processes. They load
+// this config too, and by then the run's own servers are listening.
+//
+// `--list` starts no servers and loads nothing into a browser, so it cannot be
+// wrong about which tree it tested. Refusing it would be a gate firing on a
+// command it does not apply to, which is how people learn to route around one.
+const startsServers =
+  process.env.TEST_WORKER_INDEX === undefined && !process.argv.includes("--list");
+if (startsServers) await refuseForeignServers();
 
 export default defineConfig({
   testDir: ".",
@@ -53,7 +157,15 @@ export default defineConfig({
     {
       command: `python3 ../../webapp/serve.py ${PORT}`,
       url: `http://127.0.0.1:${PORT}/editor.html`,
-      reuseExistingServer: !process.env.CI,
+      // Never reused, locally or in CI. This used to be `!process.env.CI`,
+      // which meant a local run adopted whatever was on the port — and on a
+      // machine running several agents' suites at once that was routinely
+      // another checkout's `serve.py`, serving another tree's `webapp/`
+      // (`CI-025`). The same applies to the three servers below: a shared
+      // collaboration server would give one suite another suite's documents.
+      // `refuseForeignServers()` above says whose server it found before
+      // Playwright gets as far as its own, less helpful, refusal.
+      reuseExistingServer: false,
       timeout: 30_000,
       stdout: "ignore",
       stderr: "pipe",
@@ -64,7 +176,7 @@ export default defineConfig({
     {
       command: `python3 -m http.server ${ORIGIN_PORT} --bind 127.0.0.1 --directory ../../fixtures/generated`,
       url: `http://127.0.0.1:${ORIGIN_PORT}/minimal.xlsx`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000,
       stdout: "ignore",
       stderr: "pipe",
@@ -77,7 +189,7 @@ export default defineConfig({
     {
       command: "cargo run --locked -p casual-calc-collab-server",
       url: `http://127.0.0.1:${COLLAB_PORT}/healthz`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       // A cold compile of the server and its dependency tree, on a CI runner.
       timeout: 300_000,
       cwd: "../..",
@@ -112,7 +224,7 @@ export default defineConfig({
     {
       command: "cargo run --locked -p casual-calc-collab-server",
       url: `http://127.0.0.1:${EVICT_PORT}/healthz`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 300_000,
       cwd: "../..",
       stdout: "ignore",
