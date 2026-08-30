@@ -42,6 +42,27 @@ test("the document can be renamed from the strip", async ({ page }) => {
     "the strip shows a name the document does not have").toBe("Quarterly figures");
 });
 
+/// **The field opens holding the name the strip was showing.**
+///
+/// `documentName()` is `null` until a file has been opened, so seeding from it
+/// replaced "Untitled workbook" with an empty box on every new workbook — the
+/// label vanished and nothing legible took its place, which reads as a control
+/// that does not work. Reported exactly that way.
+test("the rename field opens with the name already in it", async ({ page }) => {
+  await boot(page);
+  const shown = (await page.locator("#doc-name").textContent()).trim();
+  await page.click("#doc-name");
+  const input = page.locator("#doc-rename");
+  await expect(input).toBeVisible();
+  expect(await input.inputValue(),
+    `the field opened empty while the strip was showing "${shown}"`).toBe(shown);
+
+  // And it occupies roughly the label's own footprint, so the strip does not
+  // jump sideways under the pointer that just clicked it.
+  const box = await input.boundingBox();
+  expect(box.width, "the rename field is far wider than the name it replaced").toBeLessThan(460);
+});
+
 /// **Escape restores, and does not commit half a rename.**
 test("Escape abandons a rename", async ({ page }) => {
   await boot(page);

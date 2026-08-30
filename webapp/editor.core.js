@@ -344,6 +344,7 @@ import {
   selectForTest,
   selectRow,
   selectRowsSpan,
+  cellBoxForTest,
   selectionRectForTest,
   shiftIsRisky,
   sortRange,
@@ -737,6 +738,7 @@ export {
   selectForTest,
   selectRow,
   selectRowsSpan,
+  cellBoxForTest,
   selectionRectForTest,
   shiftIsRisky,
   sortRange,
@@ -2290,6 +2292,20 @@ export const firstBodyRow = () => geo.rowIdx[state.freeze.fr] ?? state.firstRow;
 // preference, not a property of the document.
 const HEADER_COLLAPSE_KEY = "oc.headerCollapsed";
 let headerCollapsed = false;
+/// Is this cell inside the current selection — the anchor range or any banked
+/// range of a multi-range selection (`UX-SEL-06`)?
+///
+/// A whole-column or whole-row selection is expressed as a rect spanning the
+/// sheet, so this needs no special case for either.
+function cellIsSelected(r, c) {
+  const a = selRect();
+  if (r >= a.r0 && r <= a.r1 && c >= a.c0 && c <= a.c1) return true;
+  for (const rg of state.ranges) {
+    if (r >= rg.r0 && r <= rg.r1 && c >= rg.c0 && c <= rg.c1) return true;
+  }
+  return false;
+}
+
 function setHeaderCollapsed(collapsed) {
   headerCollapsed = collapsed;
   const hdr = qs(".app-header");
@@ -2368,13 +2384,13 @@ export function draw() {
     ctx.beginPath();
     ctx.rect(q.x, q.y, q.w, q.h);
     ctx.clip();
-    ctx.fillStyle = colors.sel;
-    ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
-    // Extra banked ranges of a multi-range selection get the same tint.
-    for (const rg of state.ranges) {
-      const ex = spanX(rg.c0, rg.c1, v), ey = spanY(rg.r0, rg.r1, v);
-      ctx.fillRect(ex.x, ey.y, ex.w, ey.h);
-    }
+    // **The tint is not painted here any more** (`UX-SEL-06`). It used to be,
+    // and every opaque fill drawn afterwards erased it: table shading, banded
+    // rows, conditional formatting, any cell with a background. Selecting a
+    // column tinted the empty cells and none of the filled ones, so in a table
+    // the only surviving mark was the active cell's outline — reported exactly
+    // that way. It is painted below instead, after the fills. This pass keeps
+    // the gridlines, which must stay under everything.
     if (gridHidden) { ctx.restore(); continue; }
     ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
@@ -2666,6 +2682,34 @@ export function draw() {
       ctx.fillRect(x + 1, y + 1, w, h);
     });
   }
+  // **The selection tint, over everything that paints a background**
+  // (`UX-SEL-06`).
+  //
+  // Below the table shading and the cell fills, and above nothing else — the
+  // text pass runs after this, so a selected cell's value stays as readable as
+  // an unselected one's.
+  //
+  // `--oc-selection-color` is translucent by design (`rgba(…, .10)`), which is
+  // what makes one pass serve both cases: over white it composites to exactly
+  // the tint this used to draw, and over a table's fill it reads as the same
+  // selection rather than replacing the fill.
+  if (state.selKind !== "none") {
+    for (const q of quads) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(q.x, q.y, q.w, q.h);
+      ctx.clip();
+      ctx.fillStyle = colors.sel;
+      ctx.fillRect(sX.x, sY.y, sX.w, sY.h);
+      // Banked ranges of a multi-range selection get the same tint.
+      for (const rg of state.ranges) {
+        const ex = spanX(rg.c0, rg.c1, v), ey = spanY(rg.r0, rg.r1, v);
+        ctx.fillRect(ex.x, ey.y, ex.w, ey.h);
+      }
+      ctx.restore();
+    }
+  }
+
   // The merges touching each drawn row. Built once per frame so the text pass
   // can ask "is this cell inside a merge?" with a lookup over the one or two
   // merges on its row, instead of scanning the whole sheet's merge list for
@@ -8784,7 +8828,20 @@ function wireEvents() {
         canvas?.focus();
       };
       nameEl.addEventListener("click", () => {
-        renameEl.value = documentName() || "";
+        // **Seeded with what the strip is showing, not with `documentName()`.**
+        // That returns `null` until a file has been opened, so on a new
+        // workbook clicking the name replaced "Untitled workbook" with an empty
+        // box — the label vanished and nothing appeared to take its place,
+        // which reads as a control that does not work rather than as a rename
+        // waiting for input. Reported exactly that way.
+        renameEl.value = documentName() || nameEl.textContent.trim();
+        // **Sized to the label it replaces**, with room to type a little more.
+        // A fixed width made the strip jump the moment the field appeared —
+        // the name moved sideways under the pointer that had just clicked it,
+        // which is the opposite of what a rename should feel like. Bounded so a
+        // very long name cannot push the save state off the strip.
+        const w = Math.min(420, Math.max(160, nameEl.offsetWidth + 28));
+        renameEl.style.width = `${w}px`;
         renameEl.hidden = false;
         nameEl.hidden = true;
         renameEl.focus();
