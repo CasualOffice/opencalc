@@ -36,7 +36,8 @@ pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
 };
 pub use pivot::{
-    PivotAggregate, PivotAxisField, PivotFilterField, PivotSort, PivotTable, PivotValueField,
+    PivotAggregate, PivotAxisField, PivotBaseItem, PivotCalculatedField, PivotFilterField,
+    PivotGroup, PivotGroupBy, PivotShowAs, PivotSort, PivotTable, PivotValueField,
 };
 pub use sheet::{
     AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat, CustomFilter,
