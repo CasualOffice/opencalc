@@ -13,10 +13,20 @@
 //
 //   - **Bigger.** Menu rows, header buttons, toolbar buttons and the formula
 //     bar's three smallest controls.
-//   - **And not at the sheet's expense.** UX-EDIT-01 settled that every pixel of
-//     chrome comes out of the grid, so `#grid` has to be exactly as tall as it
-//     was, and the page must not widen. Both were violated by the first attempt
-//     at this: growing the status bar's zoom controls pushed the document to
+//   - **And at a bounded, accounted-for cost to the sheet.** UX-EDIT-01 settled
+//     that every pixel of chrome comes out of the grid, and this asserted the
+//     strict form of it — `#grid` exactly as tall with a finger as with a mouse
+//     — which held while the web toolbar was 48px and had room for a 44px
+//     target inside it. `UX-CHR-05` collapsed the web and desktop metrics into
+//     one measured set (a 42px toolbar of 28px buttons), and a 44px target does
+//     not fit in a 42px band. The two bands that hold one now grow back under
+//     `(pointer: coarse)` and a phone gives up 12px of sheet; what is asserted
+//     is that the loss is *exactly* that band growth and no more. See the
+//     assertion itself for why not growing them would have been worse than the
+//     12px: `.toolbar` is `overflow-y: hidden`, so the floor would have read as
+//     kept while the control was clipped.
+//     The page must also not widen. That was violated by the first attempt at
+//     this: growing the status bar's zoom controls pushed the document to
 //     439px on a 390px screen, and Chrome rescaled the whole layout viewport to
 //     fit — 844px of window reporting itself as 951. `editor.narrow-screens`
 //     already forbids that, but only with a mouse, so a rule that fires solely
@@ -52,7 +62,7 @@ const openMenuRows = (page) => page.evaluate(() => {
 });
 
 for (const size of TOUCH) {
-  test(`menu rows are 44px on a ${size.name}, and the sheet pays nothing for it`, async ({ browser }) => {
+  test(`menu rows are 44px on a ${size.name}, and the sheet pays only the bands that hold one`, async ({ browser }) => {
     // Two contexts at the same size — one with a finger, one with a mouse. The
     // difference between them *is* the change, which is the only way to show
     // that nothing here leaked onto the desktop.
@@ -98,9 +108,42 @@ for (const size of TOUCH) {
     await fine.keyboard.press("Escape");
     await coarse.waitForTimeout(150);
 
-    // The sheet pays nothing. Same viewport, same grid, finger or mouse.
-    const gridOf = (page) => page.evaluate(() => Math.round(document.querySelector("#grid").getBoundingClientRect().height));
-    expect(await gridOf(coarse), "the grid lost height to the chrome").toBe(await gridOf(fine));
+    // **The sheet pays the two bands that hold a 44px control, and nothing
+    // else** — and this used to say "the sheet pays nothing".
+    //
+    // It could, while the web toolbar was 48px and its buttons 30: a finger's
+    // 44px fitted in the room the band already had. `UX-CHR-05` collapsed the
+    // web and desktop metric sets into one and the surviving set is the
+    // measured, desktop one — a 42px toolbar of 28px buttons and a 36px formula
+    // bar — which has no such room. A 44px target does not fit in a 42px band,
+    // and `.toolbar` is `overflow-y: hidden`, so *not* growing the band would
+    // have clipped the target to 41px while `getBoundingClientRect` went on
+    // reporting 44: the floor would read as kept and would not be. So the two
+    // bands that hold one grow back to their touch heights under
+    // `(pointer: coarse)` and a phone gives up 12px of sheet for it.
+    //
+    // The invariant that remains is the one that was actually at stake: the
+    // growth is **bounded and accounted for**. Every pixel the coarse chrome
+    // costs the grid is a band that had to hold a floor-sized control, computed
+    // here rather than written down, so a rule that quietly takes height for
+    // anything else still fails. Two chromes' worth of density and a 44px
+    // finger cannot both be free, and this is where the trade is recorded.
+    const chromeOf = (page) => page.evaluate(() => {
+      const h = (sel) => document.querySelector(sel).getBoundingClientRect().height;
+      return { grid: Math.round(h("#grid")), toolbar: h(".toolbar"), formulaBar: h(".formula-bar") };
+    });
+    const coarseChrome = await chromeOf(coarse);
+    const fineChrome = await chromeOf(fine);
+    const bandGrowth = Math.round(
+      (coarseChrome.toolbar - fineChrome.toolbar) + (coarseChrome.formulaBar - fineChrome.formulaBar),
+    );
+    expect(coarseChrome.grid, `the grid lost ${fineChrome.grid - coarseChrome.grid}px to the chrome ` +
+      `where the bands grew ${bandGrowth}px`).toBe(fineChrome.grid - bandGrowth);
+    // And the bands may only grow by what a floor-sized control needs. 16px is
+    // the two bands at 48 and 40, which is where they were before `UX-CHR-05`
+    // tightened them and is the most a touch pointer may ever cost the sheet.
+    expect(bandGrowth, "a coarse pointer is taking more height than its floors need")
+      .toBeLessThanOrEqual(16);
 
     // And the page does not widen — the failure the first attempt at this hit,
     // and the one `editor.narrow-screens` cannot see because it uses a mouse.

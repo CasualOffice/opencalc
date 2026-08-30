@@ -1,47 +1,105 @@
 // White-labelling, in a browser.
 //
 // An integrator reselling a spreadsheet editor cannot ship one with somebody
-// else's name in the toolbar — every product in this market has this, and it is
-// what the WOPI adapter configures when it points its iframe at the editor
-// (docs/74).
+// else's name in it — every product in this market has this, and it is what the
+// WOPI adapter configures when it points its iframe at the editor (docs/74).
+//
+// **What carries the brand changed in `UX-CHR-03`, and this file changed with
+// it.** It used to be `.tb-brand`, the wordmark in the branding strip, and
+// these tests asserted the strip showed the configured name. That strip names
+// the *document* now: none of Excel, LibreOffice Calc, OnlyOffice, Google
+// Sheets or Numbers names its product inside the document window, and an
+// integrator wants no product name in the chrome even more than they want their
+// own in it. So the brand's surfaces are the two every one of those five uses —
+// the window (here, the tab's title) and Help ▸ About — and the strongest thing
+// this file can now assert is the *absence* of a wordmark in the chrome
+// together with the presence of the brand where a user goes to look for it.
 //
 // This is a browser gate rather than a unit test because the whole feature is
 // "what does the page say", and the two ways it breaks are both in the DOM: a
-// name that never reaches the toolbar, and a name that reaches it as markup.
+// name that never reaches the user, and a name that reaches them as markup.
 
 import { expect, test } from "@playwright/test";
 
-/// **A brand on the URL replaces the product name a user can see.**
-test("the toolbar and title carry the configured brand", async ({ page }) => {
-  await page.goto("/editor.html?brand=Ledgerly");
+async function boot(page, query = "") {
+  await page.goto(`/editor.html${query}`);
+  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+}
 
-  await expect(page.locator(".tb-brand")).toHaveText("Ledgerly");
+/** The text of Help ▸ About, opened by the id the native menu dispatches with. */
+async function about(page) {
+  await page.evaluate(() => {
+    const id = window.opencalcEditor.listCommands().find((c) => c.startsWith("help.about"));
+    window.opencalcEditor.runCommand(id);
+  });
+  await expect(page.locator(".oc-modal:not([hidden])")).toBeVisible();
+  return {
+    title: (await page.locator("#oc-modal-title").textContent()).trim(),
+    body: (await page.locator("#oc-modal-body").textContent()).trim(),
+  };
+}
+
+/// **A brand on the URL replaces the product name a user can see.**
+test("the title and Help ▸ About carry the configured brand", async ({ page }) => {
+  await boot(page, "?brand=Ledgerly");
+
   await expect(page).toHaveTitle("Ledgerly");
+  const dialog = await about(page);
+  expect(dialog.title).toBe("About Ledgerly");
+  expect(dialog.body).toContain("Ledgerly");
+});
+
+/// **And no wordmark comes back into the chrome to disagree with it.**
+///
+/// The failure this guards is not cosmetic: a strip that still said *OpenCalc*
+/// while the title said *Ledgerly* would put two product names on one screen,
+/// which is worse for a reseller than either name alone.
+test("no region of the chrome names a product", async ({ page }) => {
+  await boot(page, "?brand=Ledgerly");
+
+  const chrome = await page.evaluate(() => {
+    const text = (sel) => document.querySelector(sel)?.textContent.replace(/\s+/g, " ").trim() ?? "";
+    return {
+      strip: text(".app-header"),
+      menubar: text("#menubar"),
+      statusbar: text(".bottom-bar"),
+      wordmarks: document.querySelectorAll(".tb-brand, .brand-logo, .badge").length,
+    };
+  });
+  expect(chrome.wordmarks, "a wordmark, logo or version pill is back in the chrome").toBe(0);
+  for (const [region, said] of Object.entries(chrome)) {
+    if (region === "wordmarks") continue;
+    expect(said, `${region} names a product: ${said}`).not.toMatch(/Ledgerly|OpenCalc/);
+  }
 });
 
 /// **Unconfigured, it is OpenCalc.**
 ///
-/// The default has to survive, because the overwhelming majority of
-/// deployments never set this and a blank toolbar would be the regression.
-test("an unbranded page keeps the product name", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator(".tb-brand")).toHaveText("OpenCalc");
+/// The default has to survive, because the overwhelming majority of deployments
+/// never set this and a nameless About dialog would be the regression.
+test("an unbranded page keeps the product name where the brand lives", async ({ page }) => {
+  await boot(page);
+  const dialog = await about(page);
+  expect(dialog.title).toBe("About OpenCalc");
 });
 
 /// **A brand is text, not markup.**
 ///
-/// It arrives on a URL, so anybody who can hand a user a link chooses it. A
-/// name written into `innerHTML` is a cross-site scripting hole reachable by
-/// sending someone a link to their own editor.
+/// It arrives on a URL, so anybody who can hand a user a link chooses it. The
+/// dialog is where this matters most and always did: `BRAND` reaches
+/// `innerHTML` there, which is the one place in this feature where a name
+/// becomes markup unless something stops it.
 test("a brand containing markup is shown, not executed", async ({ page }) => {
   const attack = "<img src=x onerror=\"window.__owned=1\">Acme";
-  await page.goto(`/editor.html?brand=${encodeURIComponent(attack)}`);
+  await boot(page, `?brand=${encodeURIComponent(attack)}`);
 
+  const dialog = await about(page);
   // Shown verbatim: the tag is characters on the screen.
-  await expect(page.locator(".tb-brand")).toHaveText(attack);
+  expect(dialog.body).toContain(attack);
+  expect(dialog.title).toBe(`About ${attack}`);
   // And nothing ran.
   expect(await page.evaluate(() => window.__owned)).toBeUndefined();
-  expect(await page.locator(".tb-brand img").count()).toBe(0);
+  expect(await page.locator("#oc-modal-body img").count()).toBe(0);
 });
 
 /// **An accent colour is applied, and only if it is a colour.**
