@@ -84,8 +84,17 @@ pub fn command_ids(menus: &[Menu]) -> Vec<String> {
     out
 }
 
-/// Commands whose native accelerator must be released while a cell is being
-/// edited (`TAURI-012`).
+/// Commands whose native accelerator would have to be released while a cell
+/// is being edited (`TAURI-012`).
+///
+/// **Nothing consults this today** (`TAURI-015`). The way it was wired — the
+/// editor reporting edit state and the shell rebuilding the whole menu each
+/// time — put an `app.set_menu()` call on the start and end of every cell
+/// edit, in the one code path no test here can observe, and it shipped in
+/// `desktop-v0.0.0`. It is kept, with its tests, because the *knowledge* is
+/// right and only the delivery was wrong: when this is done again it must be
+/// per-item (`set_accelerator(None)` on a held handle), never a rebuild, and
+/// it must be exercised in a real window before it ships.
 ///
 /// **A native menu accelerator is consumed before the webview sees the key.**
 /// That is the whole difference between this shell and the browser build, and

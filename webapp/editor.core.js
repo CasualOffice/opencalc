@@ -6011,27 +6011,6 @@ export function cellsFromClipboardHtml(html) {
 // the same typing that autocompletes in a cell does nothing up there.
 export let editSurface = null;
 
-/// Tell the desktop shell whether a cell is open for editing (`TAURI-012`).
-///
-/// **A native menu accelerator is consumed before the webview sees the key.**
-/// In a browser, `Cmd+T` mid-formula reaches this module's key handler and
-/// cycles the reference's anchors, which is what Excel's own Mac table says it
-/// should. In a desktop window the menu ate it first and opened a modal over a
-/// half-typed formula — so the shell build was *worse* than the browser one.
-///
-/// The shell cannot know what a keystroke means; only this module knows whether
-/// a cell is open. So it says, and the shell releases the colliding chords for
-/// as long as the edit lasts.
-///
-/// A no-op in a browser, where `window.__opencalcNative` is absent and the key
-/// already arrives here — which is the behaviour being restored.
-let lastEditingReported = null;
-function reportEditing(editing) {
-  if (editing === lastEditingReported) return;
-  lastEditingReported = editing;
-  const native = window.__opencalcNative;
-  if (native && native.setEditing) native.setEditing(editing).catch(() => {});
-}
 // The cell's text when the edit began, for Escape to restore.
 export let editOriginal = "";
 // How the edit started: typing a fresh value ("Enter") or opening the existing
@@ -6147,7 +6126,6 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
     return;
   }
   editSurface = surface;
-  reportEditing(true);
   state.editing = true;
   // Where this edit will be written. Reference picking may walk to another
   // sheet, so the target cannot simply be "wherever the selection is now".
@@ -6204,7 +6182,6 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
 export function endEdit(refocus = true) {
   const was = editSurface;
   editSurface = null;
-  reportEditing(false);
   state.editing = false;
   // The range-finder outlines are painted into the canvas, so dropping them
   // needs a repaint — otherwise they linger over the grid after the edit ends.
