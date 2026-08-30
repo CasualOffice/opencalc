@@ -18,7 +18,8 @@ use casual_calc_model::{Id, Workbook};
 use casual_calc_render::pdf::{PdfBand, PdfMetadata, PdfPage, write_pdf};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
-    Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, undo_would_discard,
+    Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, restore,
+    undo_would_discard,
 };
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
@@ -38,6 +39,14 @@ pub use casual_calc_model::{Cell, CellRef, CellValue, Sheet, SheetId, Style};
 // package was missing.
 pub use casual_calc_render::{ImageReport, UndrawnImage, UndrawnReason};
 pub use casual_calc_transaction::{Operation as EditOperation, SheetMetadata};
+// Version history's vocabulary, for the same reason as the reports above: a
+// host lists versions, persists them and puts them back, and every one of those
+// signatures names a type from here (`SAVE-08`).
+pub use casual_calc_transaction::restore::{RestoreReport, Unexpressed};
+pub use casual_calc_transaction::version::{
+    Captured, RetentionPolicy, Version, VersionError, VersionId, VersionKind, VersionSnapshot,
+    VersionStore,
+};
 
 pub use casual_calc_ooxml::OoxmlLimits;
 
@@ -330,6 +339,14 @@ pub enum SdkError {
     /// `COL-28`). Refused, and refused loudly: the alternative is a structural
     /// undo that destroys work no undo stack anywhere can bring back.
     UndoWouldDiscard(WouldDiscard),
+    /// A version could not be captured or kept — see [`VersionError`].
+    Version(VersionError),
+    /// A restore named a version this session's store does not hold.
+    ///
+    /// Its own variant rather than an `Option`, because the two ways to get
+    /// here are different mistakes: an id from another document, or an id the
+    /// retention ring has since evicted. Both need saying.
+    NoSuchVersion(VersionId),
 }
 
 impl core::fmt::Display for SdkError {
@@ -343,6 +360,10 @@ impl core::fmt::Display for SdkError {
             SdkError::Edit(e) => write!(f, "{e}"),
             SdkError::Model(e) => write!(f, "{e}"),
             SdkError::ReadOnly => f.write_str("this workbook is open for reading only"),
+            SdkError::Version(e) => write!(f, "{e}"),
+            SdkError::NoSuchVersion(id) => {
+                write!(f, "there is no version {id} in this document's history")
+            }
             SdkError::UndoWouldDiscard(what) => {
                 let (line, kind) = match what.axis {
                     Axis::Row => (what.at + 1, if what.count == 1 { "row" } else { "rows" }),
@@ -402,6 +423,30 @@ impl From<TxnError> for SdkError {
         SdkError::Edit(e)
     }
 }
+impl From<VersionError> for SdkError {
+    fn from(e: VersionError) -> Self {
+        SdkError::Version(e)
+    }
+}
+
+/// What a restore did.
+///
+/// Returned by [`WorkbookSession::restore_version`]. `preserved` is what
+/// docs/83 §6.4 calls the version list gaining an entry: the state the document
+/// was in a moment before, kept so the restore is itself reachable in the
+/// history. Rendering that entry — "Restored to 14:32 today" — is the host's,
+/// because the words are UI and the engine does not write UI.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Restored {
+    /// What changed, and what could not be expressed.
+    pub report: RestoreReport,
+    /// The version whose content is now in the document.
+    pub restored_from: VersionId,
+    /// The version holding the state the document was in immediately before,
+    /// or `None` when the restore changed nothing and there was nothing to
+    /// preserve.
+    pub preserved: Option<VersionId>,
+}
 
 /// An open workbook and its editing state.
 #[derive(Debug)]
@@ -455,6 +500,16 @@ pub struct WorkbookSession {
     /// people hold different numbers for the same cell. Never relayed, never
     /// undoable, never saved.
     views: PersonalViews,
+    /// This document's past: named versions and the ring that bounds them
+    /// (`SAVE-08`, docs/83 §6).
+    ///
+    /// Held here and **not persisted here**. The engine computes; where the
+    /// bytes live is the host's (AGENTS.md), so a session starts with an empty
+    /// store and a host that has a store puts it back with
+    /// [`set_versions`](Self::set_versions). A host with nowhere to put it gets
+    /// a list that dies with the tab, which docs/83 §6.3 says must be labelled
+    /// as such rather than called version history.
+    versions: VersionStore,
 }
 
 /// Whether a number-format code renders everything as text — OOXML's `@`.
@@ -536,6 +591,7 @@ impl WorkbookSession {
             applied: None,
             recalc: Recalculator::new(),
             views: PersonalViews::new(),
+            versions: VersionStore::new(),
             // Nothing was opened, so the format is the one this engine writes
             // by default.
             format: SessionFormat::Xlsx,
@@ -569,6 +625,7 @@ impl WorkbookSession {
             applied: None,
             recalc: Recalculator::new(),
             views: PersonalViews::new(),
+            versions: VersionStore::new(),
             format: SessionFormat::Xlsx,
             // Not opened from a package, so there is nothing to give back
             // unchanged.
@@ -633,6 +690,7 @@ impl WorkbookSession {
             applied: None,
             recalc: Recalculator::new(),
             views: PersonalViews::new(),
+            versions: VersionStore::new(),
             format: SessionFormat::Xlsx,
             source: Some(source),
         })
@@ -744,6 +802,7 @@ impl WorkbookSession {
             applied: None,
             recalc: Recalculator::new(),
             views: PersonalViews::new(),
+            versions: VersionStore::new(),
             format: SessionFormat::Ods,
             // Same guarantee as a package: opened and not edited saves as
             // itself, byte for byte. It matters more here than anywhere, since
@@ -801,6 +860,7 @@ impl WorkbookSession {
             applied: None,
             recalc: Recalculator::new(),
             views: PersonalViews::new(),
+            versions: VersionStore::new(),
             format: SessionFormat::Delimited(delimiter),
             // Same guarantee as a package: opened and not edited saves as
             // itself, byte for byte. Without it, merely opening a file
@@ -1342,6 +1402,187 @@ impl WorkbookSession {
             .as_mut()
             .map(core::mem::take)
             .unwrap_or_default()
+    }
+
+    // ---------------------------------------------------------------
+    // Version history (`SAVE-08`, docs/83 §6)
+    // ---------------------------------------------------------------
+
+    /// This document's versions, for a list.
+    ///
+    /// [`VersionStore::visible`] is what a panel shows — newest first, hidden
+    /// entries left out.
+    #[must_use]
+    pub fn versions(&self) -> &VersionStore {
+        &self.versions
+    }
+
+    /// The version store, to name, hide or re-policy an entry.
+    pub fn versions_mut(&mut self) -> &mut VersionStore {
+        &mut self.versions
+    }
+
+    /// Install the versions a host has loaded from its own storage.
+    ///
+    /// The other half of [`VersionStore::into_parts`]. Ids continue past the
+    /// highest that comes back, so a version restored from IndexedDB and a
+    /// version captured afterwards cannot collide.
+    pub fn set_versions(&mut self, versions: VersionStore) {
+        self.versions = versions;
+    }
+
+    /// Capture the document as it stands as a new version.
+    ///
+    /// `captured_at_ms` is the host's clock — this crate reads no clock, for
+    /// the reasons on [`Version::captured_at_ms`] — and `name` promotes the
+    /// entry to [`VersionKind::Named`], which the retention ring will not
+    /// evict.
+    ///
+    /// **A capture is a read.** It does not touch the workbook, the undo stack,
+    /// or [`edits_applied`](Self::edits_applied): taking a photograph of a
+    /// document is not editing it, and an autosave that dirtied the document it
+    /// was recording would make the dirty flag useless.
+    ///
+    /// The cost is one [`Workbook::to_snapshot`], which is the same
+    /// serialization the collaboration server already performs and which scales
+    /// with populated cells. See the `version` module for what it measures at.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Version`] when the workbook cannot be serialized, when one
+    /// snapshot exceeds the whole retention budget, or when the versions the
+    /// ring may not evict already fill it.
+    pub fn capture_version(
+        &mut self,
+        kind: VersionKind,
+        name: Option<String>,
+        captured_at_ms: i64,
+    ) -> Result<Captured, SdkError> {
+        Ok(self
+            .versions
+            .capture(&self.workbook, kind, name, captured_at_ms, 0)?)
+    }
+
+    /// The same, recording the collaboration revision the snapshot sits at.
+    ///
+    /// A collaborative host knows the revision and a local one does not, which
+    /// is the whole difference between the two entry points. Recording it makes
+    /// a version answerable to the question a support case actually asks — "was
+    /// this before or after the change we are looking at" — and it is the one
+    /// fact the op log cannot supply later, because the log will be gone
+    /// (`SAVE-09`).
+    ///
+    /// # Errors
+    ///
+    /// As [`capture_version`](Self::capture_version).
+    pub fn capture_version_at(
+        &mut self,
+        kind: VersionKind,
+        name: Option<String>,
+        captured_at_ms: i64,
+        revision: u64,
+    ) -> Result<Captured, SdkError> {
+        Ok(self
+            .versions
+            .capture(&self.workbook, kind, name, captured_at_ms, revision)?)
+    }
+
+    /// What restoring `id` would do, without doing it.
+    ///
+    /// For a host that wants to say "this will change 412 cells and cannot
+    /// bring back the sheet's images" before a user commits to it. The returned
+    /// [`RestoreReport::op`] is the same operation
+    /// [`restore_version`](Self::restore_version) would apply, already localised
+    /// into this workbook's identifiers.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::NoSuchVersion`] if the store does not hold `id`, and
+    /// [`SdkError::Model`] if its bytes are not a workbook this engine accepts.
+    pub fn plan_restore(&mut self, id: VersionId) -> Result<RestoreReport, SdkError> {
+        let snapshot = self
+            .versions
+            .get(id)
+            .ok_or(SdkError::NoSuchVersion(id))?
+            .workbook()?;
+        Ok(restore::plan(&mut self.workbook, &snapshot))
+    }
+
+    /// Restore version `id` — as a **new operation**, never as a rewind.
+    ///
+    /// Three things happen, in this order, and the order is the safety
+    /// argument:
+    ///
+    /// 1. **The present is captured**, as [`VersionKind::Saved`], so reaching
+    ///    the past can never cost the user what they had. If that capture
+    ///    cannot be stored the restore is refused and nothing changes — a full
+    ///    store is a reason to say so, not a reason to proceed without a way
+    ///    back. A capture identical to the newest version stores nothing and
+    ///    resolves to it, so restoring twice does not accumulate copies, and a
+    ///    restore that would change nothing captures nothing at all.
+    /// 2. The difference between the document and the snapshot is computed and
+    ///    applied through [`edit`](Self::edit) as a single
+    ///    [`EditOperation::Batch`].
+    /// 3. The report says what it did, and what it could not express.
+    ///
+    /// # What it does to the undo stack
+    ///
+    /// **One entry, and nothing else.** A batch has one combined inverse, so a
+    /// single Ctrl+Z reverses the whole restore rather than unpicking it cell by
+    /// cell. Everything already on the stack stays exactly where it was — the
+    /// past is not rewritten here either. The redo stack is cleared, because a
+    /// restore is a new edit and every new edit clears it. A restore that
+    /// changes nothing leaves no entry at all and leaves redo alone, by the same
+    /// rule that already governs a keystroke that changed nothing.
+    ///
+    /// The undo *label* is generic — [`undo_label`](Self::undo_label) describes
+    /// a batch by its first member — so a host that wants the menu to read
+    /// "Undo restore" supplies that text itself.
+    ///
+    /// # Collaboration
+    ///
+    /// The batch rides the ordinary outgoing log, so co-editors see edits
+    /// arriving, which is what they are. Revision numbers only ever increase.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::ReadOnly`], [`SdkError::NoSuchVersion`], [`SdkError::Model`]
+    /// if the stored bytes are not a workbook, [`SdkError::Version`] if the
+    /// present cannot be preserved, and [`SdkError::Edit`] if the batch is
+    /// refused.
+    pub fn restore_version(&mut self, id: VersionId, at_ms: i64) -> Result<Restored, SdkError> {
+        // Before the snapshot is even parsed: a read-only session must not have
+        // its version store grown by an edit it was always going to refuse.
+        if self.config.read_only {
+            return Err(SdkError::ReadOnly);
+        }
+        let snapshot = self
+            .versions
+            .get(id)
+            .ok_or(SdkError::NoSuchVersion(id))?
+            .workbook()?;
+        // Planned **before** the present is preserved, so that restoring to a
+        // version the document already matches costs nothing at all: an empty
+        // plan interns nothing and captures nothing, where capturing first
+        // would leave behind a version of a state that was never departed from
+        // — and one the ring may not evict, because it is a `Saved`.
+        let report = restore::plan(&mut self.workbook, &snapshot);
+        if report.is_empty() {
+            return Ok(Restored {
+                report,
+                restored_from: id,
+                preserved: None,
+            });
+        }
+        let preserved =
+            self.versions
+                .capture(&self.workbook, VersionKind::Saved, None, at_ms, 0)?;
+        self.edit(report.op.clone())?;
+        Ok(Restored {
+            report,
+            restored_from: id,
+            preserved: Some(preserved.id),
+        })
     }
 
     /// Discard the undo history, making the current state the document's

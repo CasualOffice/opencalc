@@ -21,6 +21,7 @@ use casual_calc_model::{
 };
 
 pub mod protocol;
+pub mod restore;
 pub mod session;
 #[cfg(test)]
 mod session_tests;
@@ -30,6 +31,9 @@ pub mod transform;
 mod transform_move_tests;
 #[cfg(test)]
 mod transform_tests;
+pub mod version;
+#[cfg(test)]
+mod version_tests;
 pub mod wire;
 
 pub use structural::{Axis, defined_names_after_move, repointed_after_move};
