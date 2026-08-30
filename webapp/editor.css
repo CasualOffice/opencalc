@@ -308,24 +308,53 @@ body {
 }
 /* Folded away by the menu bar's caret, handing its 52px to the grid. */
 .app-header.collapsed { display: none; }
-.brand-logo { display: inline-flex; width: 22px; height: 22px; color: var(--oc-accent-color); flex: 0 0 auto; }
-.brand-logo .icon { width: 100%; height: 100%; }
-.tb-brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; color: var(--oc-text-color); text-decoration: none; }
-/* Alpha badge — pill with a status dot. */
-.badge {
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px;
-  border-radius: 999px; border: 1px solid var(--oc-control-border-color); background: var(--oc-surface-color);
-  font-size: 11.5px; font-weight: 600; color: #454b57; letter-spacing: .01em; white-space: nowrap;
+/* **What this strip says** (`UX-CHR-03`, `docs/88` §2).
+ *
+ * A document name and its save state, drawn the way a title bar draws them —
+ * the name in the page's own text colour at the weight of a title, the state
+ * beside it as fine print. There is no logo, no wordmark, no `Alpha` pill and
+ * no version here any more: none of Excel, LibreOffice Calc, OnlyOffice,
+ * Google Sheets or Numbers names its product inside the document window, and
+ * this region was the largest single reason the editor read as a web page.
+ *
+ * Deleted rather than restyled: `.brand-logo`, `.tb-brand` and `.badge` are
+ * gone from this file, so the class cannot quietly come back with a rule
+ * already waiting for it. */
+.doc-identity { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
+.doc-name {
+  font-weight: 600; font-size: 14px; letter-spacing: -0.01em; color: var(--oc-text-color);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(52vw, 460px);
 }
-.badge .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--oc-success-color); }
+/* Fine print, and never a colour: "unsaved" here is a fact about a browser tab,
+   not a warning. `.autosave-state` in the status bar is the one that shouts,
+   because that one says the safety net has stopped. */
+.doc-state { font-size: 11.5px; color: var(--oc-faint-text-color); white-space: nowrap; }
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
+/* **One metric set, not two** (`UX-CHR-05`, `docs/88` §3.2).
+ *
+ * These numbers used to be the *web* ones — a 48px band of 30px buttons with a
+ * 10px gap — and `.oc-chrome-native` carried a second, tighter set to correct
+ * them for the desktop. Two sets of metrics for one editor drift, and they had:
+ * the desktop block reached fourteen selectors, three of which had to be
+ * removed again in `UX-DESK-01` for having shrunk a control below what the page
+ * already drew. The desktop set was the one that had been measured against
+ * LibreOffice, OnlyOffice and Excel, so it is the one that survives, here, for
+ * both mounts. `docs/88` §7's "one composition, three mounts" is what is left:
+ * the chromes now differ in *regions* — who draws the menu bar, and whether a
+ * document strip is needed — and in nothing else.
+ *
+ * The 16px icon does not shrink with the band: LibreOffice's *small* icon size
+ * is 16, and shrinking the glyph would trade a dense toolbar for an unreadable
+ * one. Under `(pointer: coarse)` the bands go back to their touch heights —
+ * that is a different question (what is doing the pointing) and lives in its
+ * own media query at the end of this file. */
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 48px;
-  padding: 0 12px;
+  gap: 6px;
+  height: 41px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--oc-border-color);
   background: var(--oc-background-color);
   flex: 0 0 auto;
@@ -338,7 +367,7 @@ body {
 }
 /* A group's collapsed form: a labeled button shown in place of the group. */
 .tb-collapsed {
-  width: auto !important; padding: 0 8px !important; gap: 4px;
+  width: auto !important; height: 28px; padding: 0 8px !important; gap: 4px;
   font-size: 12px; font-weight: 600; color: var(--oc-icon-color); white-space: nowrap;
 }
 /* Must out-specify `.toolbar .tb-btn` (same 0,2,0 but declared later), or a
@@ -649,15 +678,33 @@ body {
   border-radius: 5px; padding: 1px 6px;
 }
 .oc-modal-body .kb-row { display: flex; justify-content: space-between; gap: 20px; padding: 3px 0; }
-/* A grouped-pill cluster of icon buttons. */
+/* **A group is a rule, and nothing else** (`UX-CHR-05`, `docs/88` §3.1).
+ *
+ * This was a filled 10px-radius capsule *and* a 1px `.tb-sep` — the same
+ * statement made twice, and weakly: the fill is `--oc-surface-color` on a white
+ * bar, a 3% luminance step, which is below the threshold at which a boundary
+ * reads at all. Saying it twice weakly is worse than saying it once clearly,
+ * and a filled rounded container behind a row of icons is a segmented-control
+ * idiom from mobile design systems — Material Design 3's own toolbar guidance
+ * says to avoid rounded corners on the container because it implies the
+ * container expands on interaction, which is exactly how the bar was read.
+ *
+ * All four desktop competitors use a rule alone, and two of them declare it as
+ * a first-class element: LibreOffice's `<toolbar:toolbarseparator/>` in
+ * `standardbar.xml`, OnlyOffice's `separator.short` as a `border-left`.
+ *
+ * It is also 25px per boundary cheaper — a 10px gap, a rule with `margin: 0
+ * 2px`, another 10px gap, plus 4px of capsule padding — which is about 200px of
+ * the 1463px the bar needed, spent restating a grouping the rule already made
+ * (`docs/88` §1.1). The budget is now `6px rule 6px`. */
 .tb-group {
-  display: flex; align-items: center; gap: 2px; padding: 2px;
-  border-radius: 10px; background: var(--oc-surface-color);
+  display: flex; align-items: center; gap: 2px; padding: 0;
+  border-radius: 0; background: transparent;
 }
-/* Bordered controls (font / size) sit directly on the bar, not in a pill. */
-.tb-group.controls { background: transparent; padding: 0; gap: 6px; }
+/* Bordered controls (font / size) need more air between them than icons do. */
+.tb-group.controls { gap: 4px; }
 .tb-select {
-  height: 30px; padding: 0 9px; border: 1px solid var(--oc-control-border-color); border-radius: 8px;
+  height: 28px; padding: 0 9px; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
   background: var(--oc-background-color); color: var(--oc-text-color); font-size: 12.5px; cursor: pointer; max-width: 132px;
 }
 .tb-select:hover { border-color: var(--oc-border-hover-color); }
@@ -700,9 +747,20 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .icon { width: 16px; height: 16px; display: block; }
 .icon-sm { width: 13px; height: 13px; display: block; }
 
-/* Pill icon buttons: transparent, lift to white on hover, white+accent when on. */
+/* Icon buttons: transparent, lift to white on hover, white+accent when on.
+ *
+ * **28px, and a 3px radius** (`UX-CHR-05`). `docs/88` §3.2 decides 26; this is
+ * 28 and the difference is on the record rather than silent, because 26 is the
+ * number `UX-DESK-01` already put in a desktop window and then *corrected* on
+ * measurement — LibreOffice's toolbar buttons run ~26-30, OnlyOffice's 32-36,
+ * Excel's ribbon larger again, and ~28 is where a mouse target starts needing
+ * aim. `docs/88`'s table reads "now (desktop) 26x26" against a tree that
+ * predates that correction, so its 26 is a restatement of the defect rather
+ * than a decision about it, and `editor.native-chrome` asserts the 28px floor
+ * outright. The radius is the design's: 8px is a pill, and OnlyOffice sets
+ * `--border-radius-button-toolbar: 1px`. */
 .toolbar .tb-btn, .tb-file {
-  width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 3px;
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent; color: var(--oc-icon-color); cursor: pointer; transition: background .1s, color .1s, box-shadow .1s;
 }
@@ -810,7 +868,12 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 }
 .popmenu button:hover { background: var(--oc-surface-color); }
 .tb-file input { display: none; }
-.tb-sep { width: 1px; height: 22px; background: var(--oc-border-color); margin: 0 2px; flex: 0 0 auto; }
+/* The only statement of grouping there is (`UX-CHR-05`). Its `margin: 0 2px`
+   is folded into the bar's own 6px gap rather than added on top of it: the
+   budget is `6px rule 6px`, and the margin was 28px of the toolbar's width
+   across seven boundaries — enough that the first draft of `docs/88`
+   mis-measured the bar by exactly that amount. */
+.tb-sep { width: 1px; height: 20px; background: var(--oc-border-color); margin: 0; flex: 0 0 auto; }
 
 /* Swatch popover (font color, fill color). */
 .swatch-menu { flex-direction: row; flex-wrap: wrap; width: 152px; gap: 6px; padding: 8px; }
@@ -902,7 +965,15 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   width: 90px; padding: 3px 6px; border: 1px solid var(--oc-accent-color); border-radius: 5px;
   background: var(--oc-background-color); color: var(--oc-text-color); font-size: 13px; font-weight: 600; outline: none;
 }
-.tb-status { color: var(--oc-faint-text-color); font-size: 12px; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+/* The engine/document line. It is a **status bar** item now, in every chrome
+   (`UX-CHR-03`) — it used to sit in the branding strip and be relocated here by
+   `placeNativeChrome()` for the desktop alone. No `max-width`: down here it
+   competes with a status bar rather than with a brand mark, and a truncated
+   error message is the one thing this line must not be. */
+.tb-status {
+  color: var(--oc-faint-text-color); font-size: 12px; white-space: nowrap;
+  min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis;
+}
 /* The offer to re-run a job that was stopped for taking too long (`SEC-017`).
    A sibling of the status text, not a child: `.tb-status` is one ellipsised
    line with a `max-width`, so a control inside it is clipped out of reach. */
@@ -912,19 +983,19 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   /* The tint mirror is absolutely positioned against this box, so it has to be
      the offset parent — otherwise the mirror anchors to the page. */
   position: relative;
-  display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px;
+  display: flex; align-items: center; gap: 8px; height: 35px; padding: 0 8px;
   border-bottom: 1px solid var(--oc-border-color); background: var(--oc-background-color); flex: 0 0 auto;
 }
 /* Name box (higher specificity than `.formula-bar input` so it stays narrow). */
 .formula-bar .cell-ref {
-  flex: 0 0 auto; width: 84px; height: 28px; text-align: center; font-family: var(--oc-mono-font-family); font-weight: 600;
+  flex: 0 0 auto; width: 84px; height: 26px; text-align: center; font-family: var(--oc-mono-font-family); font-weight: 600;
   font-size: 12.5px; color: var(--oc-text-color); padding: 0 6px; border: 1px solid var(--oc-control-border-color);
-  border-radius: 8px; background: var(--oc-background-color);
+  border-radius: 6px; background: var(--oc-background-color);
 }
 .formula-bar .cell-ref:focus { outline: none; border-color: var(--oc-accent-color); }
 .formula-bar .fx { font-family: Georgia, serif; font-style: italic; font-size: 14px; color: var(--oc-muted-text-color); padding: 0 2px; flex: 0 0 auto; }
 .formula-bar input#formula-input {
-  flex: 1; height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--oc-control-border-color);
+  flex: 1; height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--oc-control-border-color);
   background: var(--oc-background-color); color: var(--oc-text-color); font-family: var(--oc-mono-font-family); font-size: 13px;
 }
 .formula-bar input#formula-input:focus {
@@ -932,17 +1003,17 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 }
 
 .bottom-bar {
-  display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px; flex: 0 0 auto;
   border-top: 1px solid var(--oc-border-color); background: var(--oc-background-color);
 }
 /* Sheet tabs live in a grouped pill (like the toolbar clusters). */
 .sheet-tabs {
-  display: flex; align-items: center; gap: 2px; padding: 2px;
-  border-radius: 9px; background: var(--oc-surface-color);
+  display: flex; align-items: center; gap: 2px; padding: 1px;
+  border-radius: 7px; background: var(--oc-surface-color);
   flex: 0 1 auto; overflow-x: auto; min-width: 0;
 }
 .sheet-tab {
-  height: 26px; padding: 0 12px; border: 0; border-radius: 7px;
+  height: 26px; padding: 0 10px; border: 0; border-radius: 6px;
   background: transparent; color: var(--oc-muted-text-color); font-size: 12.5px; font-weight: 600;
   cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 7px;
 }
@@ -952,13 +1023,22 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .sheet-tab.active { background: var(--oc-background-color); color: var(--oc-text-color); box-shadow: var(--oc-control-shadow); }
 .sheet-tab.active::before { display: inline-block; background: var(--oc-x-tab-color, var(--oc-accent-color)); }
 .sheet-tab.dragging { opacity: 0.45; }
-/* Floating glass selection summary (Sum / Avg / Count), bottom-right of grid. */
+/* **The selection summary is text in the status bar** (`UX-CHR-04`).
+ *
+ * Everything that made it a panel is deleted rather than overridden: the
+ * `position: absolute` at `bottom: 16px; right: 24px`, the `z-index`, the 11px
+ * radius, the border, the translucent `color-mix` background, the
+ * `backdrop-filter: saturate(1.5) blur(14px)` and the popover shadow. A rule
+ * left behind is a treatment waiting to be re-applied by the next selector that
+ * matches, and this one covered the cells it was describing.
+ *
+ * What is left is a bar item: three statistics, nowrap, in the status bar's own
+ * muted type. `:empty` still hides it — `updateStats()` clears the text for a
+ * single-cell selection — so the bar gives the space back rather than holding
+ * an empty box, which is what Sheets' summary and AG Grid's status bar do. */
 .sel-stats {
-  position: absolute; bottom: 16px; right: 24px; z-index: 8; white-space: nowrap;
-  display: none; align-items: center; gap: 14px; padding: 8px 15px;
-  border-radius: 11px; border: 1px solid var(--oc-control-border-color);
-  background: color-mix(in srgb, var(--oc-background-color) 86%, transparent);
-  backdrop-filter: saturate(1.5) blur(14px); box-shadow: var(--oc-popover-shadow);
+  display: none; align-items: center; gap: 12px; white-space: nowrap;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   color: var(--oc-muted-text-color); font-size: 12px;
 }
 .sel-stats:not(:empty) { display: inline-flex; }
@@ -1051,6 +1131,23 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   .cell-mode { display: none; }
   .bottom-status-more { display: none; }
   .zoom-widget { padding-left: 6px; margin-left: 0; }
+  /* **The status line yields before the tabs do** (`UX-CHR-03`).
+     `#tb-status` is a status-bar item in every chrome now, and on a 390px phone
+     that is one more claimant in a bar that already did not fit: the tab pill
+     went from holding its 134px of tabs to 123px, which is the sliver
+     `editor.touch` watches for. Shrink order rather than a second placement —
+     the tab strip is the only route to another sheet and the status line is a
+     readout, so the readout ellipsises first. `UX-MOB-07` is the open row for
+     what this bar should actually do at this width. */
+  .bottom-bar .tb-status { flex-shrink: 999; }
+  /* The selection summary is a status-bar item now (`UX-CHR-04`), and this bar
+     does not fit its own contents at 390px — `#sheet-tabs` is squeezed to 4px
+     there. Three statistics would push the document past the viewport, which is
+     the failure `editor.narrow-screens` and `editor.touch-targets` both watch
+     for. `UX-MOB-07` is the open row for what this bar should do narrow; until
+     it is answered the summary is the item that yields, because it is the only
+     one here that is a *readout* of something the grid is already showing. */
+  .bottom-bar .sel-stats { display: none; }
 }
 /* Tab-color picker inside the sheet context menu. */
 .menu-label { font-size: 11px; color: var(--oc-muted-text-color); padding: 2px 10px; text-transform: uppercase; letter-spacing: .04em; }
@@ -1282,7 +1379,7 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 }
 /* Cell mode (Ready / Enter / Edit / Point), as in Excel's status bar. */
 .cell-mode {
-  margin-left: 12px; padding: 2px 8px; border-radius: 6px;
+  margin-left: 8px; padding: 1px 7px; border-radius: 6px;
   background: var(--oc-surface-color); color: var(--oc-muted-text-color); font-size: 12px; flex: 0 0 auto;
 }
 /* A <textarea> so a cell can hold a hard line break (Alt+Enter). Sized by
@@ -1930,14 +2027,12 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    visible and cannot act. */
 .oc-chrome-native #hdr-collapse { display: none; }
 
-/* (2) The status bar carries the engine/document line, in the position Excel's
-   mode indicator and LibreOffice's modification flag occupy. `max-width` is
-   dropped from `.tb-status`'s 320px because down here it is competing with a
-   status bar rather than with a brand mark, and a truncated error message is
-   the one thing this line must not be. */
-.oc-chrome-native .bottom-bar .tb-status {
-  font-size: 12px; max-width: none; min-width: 0; flex: 0 1 auto;
-}
+/* (2) The status bar carries the engine/document line in **every** chrome now
+   (`UX-CHR-03`): `#tb-status` is authored in `.bottom-bar` in `editor.html` and
+   styled by `.tb-status` above, so there is nothing left for this chrome to
+   correct. What was here — dropping the 320px `max-width` so an error message
+   is not truncated — became the base rule when the branding strip it was
+   competing with stopped existing. */
 /* (5) A web page's reassurance about the network. */
 .oc-chrome-native .bottom-status { display: none; }
 /* `.bottom-status` is what carried the `margin-left: auto` that splits this bar
@@ -1965,67 +2060,28 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    rather than restated at 22: a rule that sets a property to the value it
    already has is a rule the next reader has to check. */
 
-/* (3) Native metrics. **Dense, and then one step too dense** (`UX-DESK-01`,
-   corrected here).
+/* (3) Native metrics — **there are none any more** (`UX-CHR-05`).
  *
- * The first pass put 26px controls in a 36px band and took the toolbar,
- * formula bar and status bar from 49/41/41 down to 37/33/31 — +114px of sheet,
- * 19% more grid, and a desktop window whose buttons were smaller than any
- * application it is meant to sit beside. Measured against the field rather than
- * against taste: OnlyOffice's desktop toolbar buttons run 32–36px, Excel's
- * ribbon is larger again, and LibreOffice — the smallest of the three —
- * defaults to 24px icons in buttons of roughly 26–30px. 26 was under all of
- * them, and under the ~28px mark where a *mouse* target starts needing aim.
- * That is not the 44px touch rule, which is a different band and lives under
- * `@media (pointer: coarse)` below; it is the desktop floor.
+ * Fourteen selectors lived here, restating every band and control of the
+ * toolbar, the formula bar and the status bar at a tighter size for the
+ * desktop. They were the measured set — `UX-DESK-01` argued them against
+ * LibreOffice (~26-30px toolbar buttons), OnlyOffice (32-36) and Excel, and
+ * corrected its own first pass upward for having gone below all three — and the
+ * web set was simply the loose one. So the measured numbers moved into the base
+ * rules and this block went, rather than the other way round.
  *
- * So the controls come back to **28px** — the bottom of the comfortable range
- * rather than below it — and each band is sized to hold one with a visible
- * gutter: 42/36/35 against the page's 49/41/41. Still 85% of the web metric in
- * every band, still 102px more sheet than a browser tab, and no longer the
- * smallest toolbar on the machine.
+ * **Two metric sets is the defect, not the sizes.** They drift, and had: a
+ * `height: 20px` on the roster chip and a 24px sheet tab both made a desktop
+ * control *smaller* than the page's own, which is the opposite of density, and
+ * neither was visible from either side alone. `editor.chrome-composition`
+ * asserts the two chromes measure equal, band for band and control for control,
+ * so a third number cannot appear here without a test noticing.
  *
- * **The type was never the problem, and this was worth measuring before
- * assuming it.** In the first pass the formula input, the name box, the sheet
- * tabs, the status line and the zoom readout all kept their web font size
- * exactly; the *only* text that shrank was the font-name and font-size fields,
- * by half a pixel. So there is no `font-size` here at all now — the desktop and
- * the page share one type scale and differ only in box metrics, which is what
- * "one editor with two densities" is supposed to mean. `editor.native-chrome`
- * asserts it, per element: nothing in this chrome may render smaller text than
- * the same thing renders in the page.
- *
- * The 16px icon is unchanged, because LibreOffice's *small* icon is 16 and
- * shrinking the glyph as well would trade a dense toolbar for an unreadable
- * one. Heights are one less than the rendered band: each of these carries a 1px
- * border that `box-sizing` does not fold in. */
-.oc-chrome-native .toolbar { height: 41px; gap: 6px; padding: 0 8px; }
-.oc-chrome-native .toolbar .tb-btn, .oc-chrome-native .toolbar .tb-file {
-  width: 28px; height: 28px; border-radius: 6px;
-}
-.oc-chrome-native .toolbar .tb-group { gap: 1px; padding: 1px; border-radius: 8px; }
-.oc-chrome-native .toolbar .tb-group.controls { gap: 4px; }
-.oc-chrome-native .toolbar .tb-select,
-.oc-chrome-native .toolbar input.tb-size,
-.oc-chrome-native .toolbar input.tb-font { height: 28px; border-radius: 6px; }
-.oc-chrome-native .toolbar .tb-sep { height: 20px; }
-.oc-chrome-native .toolbar .tb-collapsed { height: 28px; }
-/* The formula bar is one text field and a name box, and the input matches the
-   toolbar's control height — which is the pairing the page already makes, at
-   30 and 30. 41px of band around it is web padding; 36 is not. */
-.oc-chrome-native .formula-bar { height: 35px; gap: 8px; padding: 0 8px; }
-.oc-chrome-native .formula-bar .cell-ref,
-.oc-chrome-native .formula-bar input#formula-input { height: 26px; border-radius: 6px; }
-.oc-chrome-native .bottom-bar { height: 34px; gap: 8px; padding: 0 8px; }
-.oc-chrome-native .sheet-tabs { border-radius: 7px; padding: 1px; }
-/* The sheet tabs are the only thing in this band a pointer has to hit, and they
-   keep the page's own 26px rather than getting a smaller number of their own.
-   **This one was caught by the floor rather than by judgement**: 24px looked
-   like a consistent correction beside the 28px buttons, and it is *below* what
-   the page already draws — the band tightens from 41 to 35 around a control
-   that does not move at all, which is what density is supposed to mean. */
-.oc-chrome-native .sheet-tab { height: 26px; padding: 0 10px; border-radius: 6px; }
-.oc-chrome-native .cell-mode { margin-left: 8px; padding: 1px 7px; }
+ * What is left in this file for `.oc-chrome-native` is *regions and policy* —
+ * who draws the menu bar, whether a document strip is needed, and whether a
+ * browser tab's reassurance about the network belongs in an installed
+ * application — which is what `docs/88` §7 means by one composition and three
+ * mounts. */
 
 /* --- Column stats ---------------------------------------------------------- */
 /* Dense on purpose: this is a panel somebody reads at a glance while clicking
@@ -2090,11 +2146,23 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   .ctx-menu button,
   .tb-more-flyout button { min-height: 44px; }
 
-  /* Header, 52px tall; its buttons were 32. */
+  /* Header, 52px tall; its buttons were 32. (`.tb-brand` was here too, and the
+     wordmark it sized is gone — `UX-CHR-03`.) */
   .tb-icon { width: 44px; height: 44px; }
-  .tb-brand { display: inline-flex; align-items: center; min-height: 44px; }
 
-  /* Toolbar, 48px tall; its buttons were 30. Widening them cannot push the
+  /* **The bands keep their touch heights** (`UX-CHR-05`).
+   *
+   * `UX-CHR-05` tightened the bands to one desktop metric set — 42/36/35
+   * rendered, against 49/41/41 — and that is a *mouse* decision. This media
+   * query is the other question, the one the block above already states: not
+   * how wide the window is but what is doing the pointing. A 44px button in a
+   * 42px band overflows it, so the bands that hold one go back to the heights
+   * they were sized at. The grid pays nothing either way, because a coarse
+   * pointer and a fine one never share a viewport. */
+  .toolbar { height: 48px; }
+  .formula-bar { height: 40px; }
+
+  /* Toolbar, 48px tall; its buttons were 28. Widening them cannot push the
      page sideways: `.toolbar` is its own overflow-x scroller and `reflowToolbar`
      folds whatever stops fitting into `⋯`. */
   .toolbar .tb-btn, .tb-file { width: 44px; height: 44px; }

@@ -104,32 +104,34 @@ export function updateStats() {
   // Fold the per-range stats together (disjoint Ctrl+click ranges; overlaps,
   // which Excel also double-counts, are rare).
   let sum = 0, numeric = 0, count = 0;
-  let min = Infinity, max = -Infinity;
   for (const r of rs) {
     const st = JSON.parse(wasm.session_range_stats(state.sheet, r.r0, r.c0, r.r1, r.c1));
     sum += st.sum || 0; numeric += st.numeric || 0; count += st.count || 0;
-    // The engine has always computed these; the bar just never showed them.
-    if (st.numeric) {
-      if (st.min !== undefined) min = Math.min(min, st.min);
-      if (st.max !== undefined) max = Math.max(max, st.max);
-    }
   }
+  // **Excel's default three, in Excel's order and Excel's wording**
+  // (`UX-CHR-04`, `docs/88` §5).
+  //
+  // This showed six — `Sum · Avg · Min · Max · Numbers · Count` — in a frosted
+  // panel over the cells it was describing. Six is more than any competitor's
+  // default bar OnlyOffice's five, and none of them floats it. Now that the
+  // summary is text in the status bar it shares that bar with the sheet tabs,
+  // the mode indicator, the engine line and zoom, so what it shows has to be
+  // what a user asked for: Excel shows `Average: 3   Count: 5   Sum: 15` and
+  // adds the rest by right-clicking the bar, which is the follow-on `docs/88`
+  // §5 names and `UX-MOB-07`'s narrow-bar question will meet.
+  //
+  // Min and Max were folded here and are not any more: `session_range_stats`
+  // returns them in the same call, so the right-click menu `docs/88` §5 names
+  // can read them when it is built, and a fold whose result nothing draws is
+  // dead arithmetic in a function that runs on every drag-select frame.
   const parts = [];
-  if (numeric > 0) {
-    parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
-    parts.push(`Avg: <b>${fmtNum(sum / numeric)}</b>`);
-    if (Number.isFinite(min)) parts.push(`Min: <b>${fmtNum(min)}</b>`);
-    if (Number.isFinite(max)) parts.push(`Max: <b>${fmtNum(max)}</b>`);
-    // Excel distinguishes "how many cells have anything" from "how many are
-    // numbers"; with both shown, a stray text cell in a numeric column is
-    // visible instead of quietly skewing the average.
-    if (numeric !== count) parts.push(`Numbers: <b>${numeric}</b>`);
-  }
+  if (numeric > 0) parts.push(`Average: <b>${fmtNum(sum / numeric)}</b>`);
   parts.push(`Count: <b>${count}</b>`);
+  if (numeric > 0) parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
   // oc-safe-html: every part is a number this function computed, joined
   // with non-breaking spaces. No workbook text reaches here.
   // oc-safe-html: see the note above.
-  selStats.innerHTML = parts.join("&nbsp;&nbsp;&nbsp;");
+  selStats.innerHTML = parts.join("&nbsp;&nbsp;");
 }
 
 // --- What the whole selection carries, not just its corner -----------------

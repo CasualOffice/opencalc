@@ -273,22 +273,31 @@ test("the collaborator roster is still visible when the OS draws the menu", asyn
     .toBeLessThan(40);
 });
 
-/// **A native toolbar is tighter than a web one — and tighter is not smaller.**
+/// **One toolbar, drawn at one set of metrics — and tighter is not smaller.**
 ///
 /// LibreOffice's toolbar icons are 16/24/32 with 24 the default, and a platform
 /// menu bar is ~20-24px; the one tall band in the set, Excel's ribbon, ships
-/// with three documented ways to collapse it. Asserted as a *comparison*
-/// throughout, so a redesign of the page's own metrics is not a false failure
-/// here — the invariant is the relationship between the two chromes, not that
-/// the toolbar is any particular number of pixels.
+/// with three documented ways to collapse it.
 ///
-/// **Both ends are pinned, because only one end used to be.** The first cut of
-/// this asserted `native < web` and `grid > web + 90` and nothing else, so it
-/// was satisfied by a toolbar of any size at all down to zero — and the metric
-/// it passed on put 26px buttons in a desktop window, smaller than LibreOffice
-/// (~26-30), well under OnlyOffice (32-36), and under the ~28px mark where a
-/// mouse target starts needing aim. The floors below are what the next person
-/// tidying these numbers has to argue with.
+/// **This test used to assert the opposite of what it asserts now, and the
+/// reversal is the point.** It read `native < web`, band for band, because
+/// there were two metric sets and the desktop's was the tight one. That is the
+/// defect `UX-CHR-05` closed: two sets drift, and these had — a `height: 20px`
+/// on the roster chip and a 24px sheet tab each made a *desktop* control
+/// smaller than the page's own, which is the opposite of density and was
+/// invisible from either side alone. The desktop numbers were the measured
+/// ones, so they became the only ones; the claim is now that the two chromes
+/// measure equal, and that what a desktop window gains is the two *regions* it
+/// does not draw.
+///
+/// **Both ends are still pinned, because only one end used to be.** The first
+/// cut of this asserted `native < web` and `grid > web + 90` and nothing else,
+/// so it was satisfied by a toolbar of any size at all down to zero — and the
+/// metric it passed on put 26px buttons in a desktop window, smaller than
+/// LibreOffice (~26-30), well under OnlyOffice (32-36), and under the ~28px
+/// mark where a mouse target starts needing aim. That floor is absolute now
+/// rather than relative to the page's own control, which is what it always
+/// claimed to be and what a single metric set forces it to say out loud.
 const BANDS = [".toolbar", ".formula-bar", ".bottom-bar"];
 
 /// Controls the native metrics resize, and the text they carry. Measured by
@@ -307,7 +316,7 @@ const NATIVE_TEXT = [
   ".toolbar .tb-select", ".toolbar input.tb-font", ".toolbar input.tb-size", "#zoom-level",
 ];
 
-test("desktop chrome is denser than the page's, and the sheet gets the difference", async ({ page }) => {
+test("the desktop and the page share one metric set, and the sheet gets the regions", async ({ page }) => {
   // Wide enough that no toolbar group has collapsed into a flyout, or half
   // these controls measure 0x0 because they are not on the bar at all.
   await page.setViewportSize({ width: 1600, height: 900 });
@@ -328,6 +337,11 @@ test("desktop chrome is denser than the page's, and the sheet gets the differenc
       }
       return {
         band: Object.fromEntries(bands.map((s) => [s, h(s)])),
+        // The two regions desktop chrome does not draw, measured wherever this
+        // runs — which is why it is part of `metrics()` and not a second
+        // evaluate afterwards: read after the shell has booted, both are 0 and
+        // the assertion below compares 84 against nothing.
+        region: { header: h(".app-header"), menubar: h("#menubar") },
         grid: h("#grid"),
         box,
         type,
@@ -339,38 +353,60 @@ test("desktop chrome is denser than the page's, and the sheet gets the differenc
   await bootShell(page);
   const native = await metrics();
 
-  // --- Denser, still. The claim `UX-DESK-01` was right about. ---------------
-  for (const sel of BANDS) {
-    expect(native.band[sel], `${sel} is not tighter than the page's`).toBeLessThan(web.band[sel]);
-  }
-  // The header (53px) and the menu bar (30px), plus the band savings. Asserted
-  // loosely, because the exact number is a metric and the claim is not.
-  expect(native.grid - web.grid, "and every pixel of it goes to the sheet").toBeGreaterThan(90);
-
-  // --- And not smaller than the applications it sits beside. ----------------
+  // --- Dense, and now dense in **both** chromes (`UX-CHR-05`). --------------
   //
-  // A floor as a *proportion* of the page's own band: dense, and never dense by
-  // more than a fifth. 82% rather than a pixel count so this survives a redesign
-  // of the web metrics, which is the same reason the line above is a comparison.
+  // This asserted `native < web`, band for band, and it was right for as long
+  // as there were two metric sets. There are not: the desktop numbers were the
+  // measured ones — argued against LibreOffice, OnlyOffice and Excel and
+  // corrected upward once for having gone below all three — and the web set was
+  // simply the loose one, so `UX-CHR-05` moved the measured numbers into the
+  // base rules and deleted `.oc-chrome-native`'s metric block. Equality is
+  // therefore the stronger claim, not a weaker one: `UX-DESK-01`'s density is
+  // kept *and* the page gets it too, and neither chrome can drift from the
+  // other by a number nobody is comparing.
   for (const sel of BANDS) {
-    const ratio = native.band[sel] / web.band[sel];
-    expect(ratio, `${sel} shrank to ${(ratio * 100).toFixed(1)}% of the page's — ` +
-      `${native.band[sel]}px against ${web.band[sel]}px`).toBeGreaterThanOrEqual(0.82);
+    expect(native.band[sel], `${sel} is a second metric set: ` +
+      `${native.band[sel]}px in a desktop window against ${web.band[sel]}px in the page`)
+      .toBe(web.band[sel]);
   }
+  // What the desktop window still gains is **regions**, not pixels off a band:
+  // it draws no branding strip (the OS title bar carries the document) and no
+  // menu bar (the OS draws one). Asserted as exactly those two, rather than as
+  // a loose floor, because "the difference is the regions we dropped" is the
+  // claim — a grid that gained more than that has taken it from somewhere
+  // unaccounted for.
+  const dropped = web.region.header + web.region.menubar;
+  expect(native.grid - web.grid, `the sheet gained ${native.grid - web.grid}px where the strip ` +
+    `(${web.region.header}px) and the menu bar (${web.region.menubar}px) are what desktop chrome drops`)
+    .toBeCloseTo(dropped, 0);
+  // And they are gone rather than merely shorter, which is the other way the
+  // arithmetic above could come out right.
+  expect(native.region, "a region desktop chrome does not draw is still taking height")
+    .toEqual({ header: 0, menubar: 0 });
 
-  // **No pointer target is under 28px unless it already was in the page.**
+  // **No pointer target is under 28px, in either chrome.**
   //
-  // Written as `min(web, 28)` rather than a flat 28 so this cannot fail for a
-  // control the *web* chrome also draws small — the claim is about what desktop
-  // density is allowed to take away, not about the editor's whole control set.
+  // This was `min(web, 28)` — a floor relative to the page's own control, which
+  // was the right shape while the page had a second set of metrics to be
+  // measured against. With one set it would assert nothing at all: web and
+  // native are the same number, so any pair of equal values passes. It is a
+  // flat 28 now, which is what its own prose always claimed — LibreOffice's
+  // toolbar buttons run ~26-30, OnlyOffice's 32-36, Excel's ribbon larger
+  // again, and ~28 is where a mouse target starts needing aim. It is also the
+  // floor `docs/88` §3.2's "26 x 26" would have gone under; that table reads
+  // "now (desktop) 26x26" against a tree that predates this correction.
+  //
+  // One exception, named rather than derived: the sheet tab is 26px and has
+  // been in the page as well, so it is a metric this editor chose and not
+  // something desktop density took away. Written down here because with one
+  // metric set `web` can no longer disagree and so can no longer say it.
+  const FLOOR = { ".sheet-tab": 26 };
   const measured = Object.keys(native.box);
   expect(measured.length, "nothing was measurable; the selectors have moved")
     .toBeGreaterThanOrEqual(NATIVE_CONTROLS.length - 1);
   for (const sel of measured) {
-    if (!web.box[sel]) continue;
-    const floor = Math.min(web.box[sel].h, 28);
-    expect(native.box[sel].h, `${sel} is ${native.box[sel].h}px in a desktop window ` +
-      `(${web.box[sel].h}px in the page) — under the ~28px a mouse needs`)
+    const floor = FLOOR[sel] ?? 28;
+    expect(native.box[sel].h, `${sel} is ${native.box[sel].h}px — under the ${floor}px it is held to`)
       .toBeGreaterThanOrEqual(floor);
   }
 
@@ -393,20 +429,32 @@ test("desktop chrome is denser than the page's, and the sheet gets the differenc
 /// `setCapabilities({ mode })` is a host surface, so a relocation has to be
 /// reversible; a one-way move would leave the page's own header permanently
 /// missing its status line the moment anything switched modes.
-test("leaving desktop chrome puts the moved nodes back", async ({ page }) => {
+test("leaving desktop chrome puts the moved node back", async ({ page }) => {
   await boot(page, "?chrome=native");
-  expect((await seen(page, "#tb-status")).inBottomBar).toBe(true);
+  expect(
+    await page.evaluate(() => !!document.querySelector(".bottom-bar #presence")),
+    "the roster was never relocated",
+  ).toBe(true);
 
   await page.evaluate(() => window.opencalcEditor.setCapabilities({ mode: "standalone" }));
   await expect(page.locator(".app-header")).toBeVisible();
 
-  const status = await seen(page, "#tb-status");
-  expect(status.inBottomBar, "the status line went home").toBe(false);
-  expect(status.painted, "and is on screen in the header").toBe(true);
   expect(
     await page.evaluate(() => !!document.querySelector("#menubar #presence")),
-    "so did the roster",
+    "the roster went home",
   ).toBe(true);
+
+  // **`#tb-status` is not in this list any more, and that is the fix rather
+  // than a gap in it** (`UX-CHR-03`). It was relocated because it lived in the
+  // branding strip and desktop chrome dropped that strip; the strip now carries
+  // the *document*, and the status line is authored in `.bottom-bar` for every
+  // chrome — so there is nothing to move and nothing to put back. Asserted here,
+  // at the moment a mode is turned off, because "the node stayed where it
+  // belongs" and "the relocation quietly stopped working" look identical from
+  // the desktop side alone.
+  const status = await seen(page, "#tb-status");
+  expect(status.inBottomBar, "the status line moved out of the status bar").toBe(true);
+  expect(status.painted, "and it cannot be read").toBe(true);
 });
 
 

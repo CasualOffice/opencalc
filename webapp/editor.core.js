@@ -840,11 +840,16 @@ const HIDDEN_CHROME = (PARAMS.get("hide") || "")
 
 /// Text that is about to become markup.
 
-if (BRAND !== "OpenCalc") {
-  document.title = BRAND;
-  // `textContent`, not innerHTML: this is a name, and names contain `&`.
-  for (const node of document.querySelectorAll(".tb-brand")) node.textContent = BRAND;
-}
+// **The brand has no wordmark in the chrome to reach any more** (`UX-CHR-03`).
+//
+// It used to be written into `.tb-brand`, the product name in the branding
+// strip. That strip names the *document* now, because none of the five
+// applications this editor is measured against names its product inside the
+// document window — and an integrator reselling the editor wants *no* product
+// name in the chrome even more than they want their own. What is left carrying
+// the brand is the tab's own title and `Help ▸ About`, which is where five of
+// five put it, and `editor.branding` asserts both.
+if (BRAND !== "OpenCalc") document.title = BRAND;
 if (ACCENT) document.documentElement.style.setProperty("--oc-accent-color", ACCENT);
 
 // Applied to the root, because `.oc-hide-header` and its siblings are written
@@ -1266,10 +1271,16 @@ function moveChrome(node, into, before) {
 /// that way, because hiding them would take a capability away rather than
 /// relocate it, and both live inside a region desktop chrome removes:
 ///
-/// - **`#tb-status`** is the engine version, the open/save progress line and
-///   every error the editor reports, and it sat in the branding strip. Excel,
-///   LibreOffice and OnlyOffice all put document state in the status bar and
-///   none of them puts any of it above the menu bar, so that is where it goes.
+/// - **`#tb-status`** *used* to be moved here. It is the engine version, the
+///   open/save progress line and every error the editor reports, and it sat in
+///   the branding strip — so desktop chrome, which drops that strip, had to
+///   relocate it or lose it. `UX-CHR-03` deleted the *product* strip's contents
+///   outright and authored `#tb-status` into `.bottom-bar` in `editor.html`,
+///   where Excel, LibreOffice and OnlyOffice all keep document state, for every
+///   chrome. Nothing in that argument was ever desktop-only; it was above the
+///   menu bar because the branding strip was. So this function no longer names
+///   it: a node that is already where every mode wants it needs no mode to
+///   move it.
 /// - **`#presence`** is the collaborator roster, and `COL-33` put it in the
 ///   menu bar *specifically* so it would not fold away with the page header —
 ///   then `.oc-chrome-native #menubar { display: none }` folded the menu bar
@@ -1281,10 +1292,9 @@ function moveChrome(node, into, before) {
 /// missing its status line.
 function placeNativeChrome(on) {
   const bottom = qs(".bottom-bar");
-  const status = byId("tb-status");
   const presence = byId("presence");
   if (!bottom) return;
-  for (const node of [status, presence]) {
+  for (const node of [presence]) {
     if (!node) continue;
     // Before the language picker, which is the last item of the status bar's
     // left-hand group. `?? null` rather than a second lookup: `insertBefore`
@@ -8585,25 +8595,49 @@ function wireEvents() {
       byId("tb-open").accept = offered.join(",");
     }
   } catch {}
-  // Keep the desktop window's title on the document.
+  // **Which document this is, and whether it has been written out.**
+  //
+  // Two consumers of one fact, which is why they are one poller. The desktop
+  // shell's window title is the original (`desktop/src/title.rs` renders
+  // `figures.xlsx — OpenCalc` with an unsaved marker); the browser's document
+  // strip is `UX-CHR-03`'s, and it exists **because a browser tab has no title
+  // bar**. All five applications `docs/88` measures name the document in one,
+  // and the desktop shell does too — so the region is deleted there and kept
+  // here, carrying the same two values the title bar carries and nothing else.
   //
   // Polled, not pushed, for the same reason `isDirty()` is derived rather than
   // tallied: a push from every write path is a list of write paths, and the
   // one that gets left out is always the one added last — which shows up as a
   // window that claims to be saved while it is not. Nothing crosses the bridge
-  // unless the answer changed, so the steady state costs one comparison.
-  if (window.__opencalcNative) {
-    let lastName, lastDirty;
-    setInterval(() => {
-      const native = window.__opencalcNative;
-      if (!native) return;
+  // and nothing is written to the DOM unless the answer changed, so the steady
+  // state costs one comparison.
+  //
+  // `textContent`, never markup: a file name is text somebody else chose, and
+  // this one arrives from a file picker.
+  {
+    const nameEl = byId("doc-name");
+    const stateEl = byId("doc-state");
+    let lastName, lastDirty, first = true;
+    const publish = () => {
       const name = documentName();
       const dirty = isDirty();
-      if (name === lastName && dirty === lastDirty) return;
+      if (!first && name === lastName && dirty === lastDirty) return;
+      first = false;
       lastName = name;
       lastDirty = dirty;
-      native.setDocument(name, dirty).catch(() => {});
-    }, 250);
+      // "Untitled workbook" rather than a blank: a strip whose whole job is to
+      // say which document you have open must say something when the answer is
+      // "one you started here", which is what File ▸ New calls it too.
+      if (nameEl) nameEl.textContent = name || "Untitled workbook";
+      // A browser tab's vocabulary. `isDirty()` here means "changes that have
+      // not been written out", which is the sentence the New and Open
+      // confirmations already use — there is no file on disk to be behind.
+      if (stateEl) stateEl.textContent = dirty ? "Unsaved changes" : "Saved";
+      const native = window.__opencalcNative;
+      if (native) native.setDocument(name, dirty).catch(() => {});
+    };
+    publish();
+    setInterval(publish, 250);
   }
 
   // The desktop shell replaces the webview's file picker with the platform's.
@@ -8945,10 +8979,23 @@ function wireEvents() {
       showModal("Keyboard shortcuts", rows.map(([a, b]) =>
         `<div class="kb-row"><span>${a}</span><span>${b.replace(/(\S+)/g, "<kbd>$1</kbd>").replace(/<kbd>\/<\/kbd>/g, "/")}</span></div>`).join(""));
     }
+    /// **Where the version lives** (`UX-CHR-03`).
+    ///
+    /// It used to be a badge in the branding strip — `Alpha` and
+    /// `engine v0.0.0`, development state in the chrome of every session, which
+    /// not one of Excel, LibreOffice, OnlyOffice, Sheets or Numbers does. All
+    /// five put it behind Help ▸ About, and so does this.
+    ///
+    /// Read from `wasm.version()` rather than written out here. The literal
+    /// this replaces said `v0.0.0` and was right by coincidence: two statements
+    /// of one version drift, and the one nobody looks at is the one in the
+    /// dialog nobody opens.
     function showAbout() {
+      let engine = "";
+      try { engine = wasm ? String(wasm.version()) : ""; } catch {}
       showModal(`About ${BRAND}`,
         `<p>${htmlText(BRAND)} — a deterministic, embeddable spreadsheet engine for <code>.xlsx</code>, CSV, TSV and PSV.</p>
-         <p style="margin-top:10px;color:var(--oc-muted-text-color)">Engine <b>v0.0.0</b> · Alpha · <a href="./index.html">Home</a></p>`);
+         <p style="margin-top:10px;color:var(--oc-muted-text-color)">Engine <b>v${htmlText(engine)}</b> · Alpha · <a href="./index.html">Home</a></p>`);
     }
 
     const MENUS = [
