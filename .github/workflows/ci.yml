@@ -168,6 +168,11 @@ jobs:
         run: cargo test -p casual-calc-render --no-default-features
 
   benchmark-smoke:
+    # **Main only** (`CI-030`). a performance smoke test; a regression here is not something a reviewer acts on inside the pull request, and main runs it on every merge.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -685,6 +690,11 @@ jobs:
           retention-days: 14
 
   fuzz-build:
+    # **Main only** (`CI-030`). compiles the fuzz targets without running them; breakage is a build error main catches within the hour.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -755,6 +765,11 @@ jobs:
   # Also asserts the standalone stack comes up and answers through its proxy,
   # which is what PROD-12 was about: the page and the socket on one origin.
   docker-build:
+    # **Main only** (`CI-030`). builds the server image; `release-images.yml` is what publishes one, and main proves it still builds.
+    # The org's whole allowance is 20 concurrent jobs across 17
+    # repositories, and one run of this workflow was taking 19 of
+    # them — so a pull request here stalled every other repository.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -901,6 +916,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # **Three platforms on main, one on a pull request** (`CI-030`). Bundling
+        # is where the platforms genuinely differ, so main keeps all three; a
+        # pull request keeps the one that catches a broken Tauri config, which is
+        # what almost every failure here has been.
+        #
+        # The exclusion is by `os` rather than by rewriting the matrix, so the
+        # three entries below stay the single description of what is built.
+        exclude:
+          - os: ${{ github.event_name == 'pull_request' && 'macos-latest' || '' }}
+          - os: ${{ github.event_name == 'pull_request' && 'windows-latest' || '' }}
         include:
           # **One bundle format per platform, chosen for what CI can produce
           # without a network round-trip to somebody else's tooling.**
