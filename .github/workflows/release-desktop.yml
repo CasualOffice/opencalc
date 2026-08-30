@@ -121,7 +121,13 @@ jobs:
       - name: Collect what was built, with checksums
         run: |
           set -euo pipefail
-          shopt -s nullglob globstar
+          # **`nullglob` only.** `globstar` is a bash 4 option and macOS ships
+          # bash 3.2, where `shopt -s globstar` is an error rather than a
+          # no-op — and under `set -e` that killed the step, so the `.dmg`
+          # was never collected while Linux and Windows both succeeded.
+          # None of the globs above use `**`, so it was never needed.
+          # Asserted by `tools/check-workflow-bashisms.py`.
+          shopt -s nullglob
           mkdir -p out
           found=0
           for f in ${{ matrix.glob }}; do
