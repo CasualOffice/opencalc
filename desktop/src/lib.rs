@@ -19,6 +19,7 @@
 
 pub mod assets;
 pub mod dialog;
+pub mod launch;
 pub mod menu;
 pub mod save;
 pub mod session;

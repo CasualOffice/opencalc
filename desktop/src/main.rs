@@ -33,14 +33,24 @@
 //! no path and returns only a base name, so the shape is unchanged: the webview
 //! still cannot name a destination, only "the one the user already chose".
 //!
+//! `TAURI-010` widens *where a path may come from* by exactly one source, and
+//! restates the invariant rather than weakening it: **a path may cross into
+//! this process only from the platform** — a file panel, or the operating
+//! system handing this application a file to open (`argv` on Windows and Linux,
+//! `RunEvent::Opened` on macOS) — and it never crosses back out. The webview
+//! still cannot name a file; it can only collect the one the platform already
+//! named. See [`casual_calc_desktop::launch`] and [`take_pending_open`].
+//!
 //! [`docs/83`]: ../../docs/83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md
 
 // The window is the point of this binary; there is nothing to print.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use casual_calc_desktop::dialog;
+use casual_calc_desktop::launch::{self, PendingOpen};
 use casual_calc_desktop::menu::{self, Menu as MenuModel, Node};
 use casual_calc_desktop::save::{SaveTarget, write_in_place};
 use casual_calc_desktop::session::{Capabilities, Session};
@@ -65,12 +75,18 @@ use tauri_plugin_dialog::DialogExt;
 /// would make `Ctrl+S` work once. What it costs is the one piece of shell state
 /// that has to be actively cleared — on `File ▸ New`, and on an open that did
 /// not take — and [`SaveTarget`] holds that reasoning.
+///
+/// `pending` is the third hand-off and the one with a *time* problem rather
+/// than a memory one: a file the operating system asked this application to
+/// open, which on macOS can be delivered before the window exists. See
+/// [`PendingOpen`] for why readiness is stored beside it rather than inferred.
 #[derive(Default)]
 struct Shell {
     session: Mutex<Session>,
     opened: Mutex<Option<Vec<u8>>>,
     staged: Mutex<Option<Vec<u8>>>,
     target: Mutex<SaveTarget>,
+    pending: Mutex<PendingOpen>,
 }
 
 /// A poisoned lock is a panic somewhere else; say so rather than panicking too.
@@ -260,6 +276,96 @@ fn take_opened_bytes(window: WebviewWindow) -> Result<Response, String> {
     Ok(Response::new(bytes))
 }
 
+/// Collect the file the operating system asked this application to open.
+///
+/// The webview's half of `TAURI-010`. It is called once when the bridge becomes
+/// ready — which is what marks the shell ready, so a file handed over *later*
+/// can be nudged rather than silently queued — and again whenever the shell
+/// evaluates [`OPEN_HANDED_OVER`] into the page.
+///
+/// `Ok(None)` is the ordinary answer: most launches open nothing. It is not an
+/// error and must not read as one, because it happens every time the
+/// application is started from its icon.
+///
+/// The bytes go through the same door a panel's do — staged in `opened` and
+/// collected by [`take_opened_bytes`] — rather than being returned here, for
+/// the reason [`Opened`] gives: a `Vec<u8>` inside a JSON response is one
+/// number per byte.
+///
+/// **This is the only place a path enters the process without a panel**, and it
+/// is still not the webview naming one: the path came from the platform, the
+/// webview cannot influence which, and no path goes back out. `guard_open`
+/// applies exactly as it does to `native_open` — a mode whose host owns the
+/// document does not acquire a different one because Finder asked.
+///
+/// `async` for the reason [`native_save_target`] is, minus the panel: this
+/// reads a whole workbook off disk, and a synchronous Tauri command runs on the
+/// thread that also draws. A hundred-megabyte file collected there is a window
+/// that stops repainting for as long as the filesystem takes — on the very
+/// first frame the user ever sees, since this is what a launch calls.
+#[tauri::command]
+async fn take_pending_open(app: AppHandle) -> Result<Option<Opened>, String> {
+    let shell = app.state::<Shell>();
+    // Taking marks the webview ready even when nothing is waiting, and it is
+    // done before the guard so that a refused open still leaves the shell able
+    // to nudge the next one.
+    let Some(path) = locked(&shell.pending)?.take() else {
+        return Ok(None);
+    };
+    locked(&shell.session)?.guard_open()?;
+
+    let bytes = std::fs::read(&path).map_err(|why| format!("could not read the file: {why}"))?;
+    let name = dialog::base_name(&path.to_string_lossy());
+    let size = bytes.len();
+    *locked(&shell.opened)? = Some(bytes);
+    // Armed, not adopted — the same distinction `native_open` makes, and for
+    // the same reason: the bytes have not been parsed yet, and a `Ctrl+S`
+    // pointed at a file the window failed to open is worse than no target.
+    locked(&shell.target)?.arm(path);
+    Ok(Some(Opened { name, size }))
+}
+
+/// What the shell evaluates into the page when a file arrives after the webview
+/// is already running — a second document double-clicked while the window is
+/// open.
+///
+/// `window.eval` rather than an event, because the dispatch that already works
+/// in this file is an eval (`on_menu_event`) and `window.__TAURI__.event` is one
+/// more piece of the global API this bridge would have to depend on being
+/// present. The first launch does not need this at all: the webview asks on its
+/// own as soon as it is ready.
+const OPEN_HANDED_OVER: &str = "try { window.__opencalcNative.openHandedOver() } \
+     catch (e) { console.error('[opencalc] open-file', e) }";
+
+/// The operating system has asked this application to open `path`.
+///
+/// Both platform routes end here — `argv` on Windows and Linux, `RunEvent::
+/// Opened` on macOS — so there is one policy and not two that drift.
+///
+/// A path the engine cannot open is dropped in silence. It is not the same as
+/// a *panel* returning something unreadable: nobody chose this file in this
+/// application, and an error dialog raised by an argument nobody typed is
+/// noise. See [`launch::opens_here`].
+fn hand_over(app: &AppHandle, path: PathBuf) {
+    if !launch::opens_here(&path) {
+        return;
+    }
+    let nudge = {
+        let shell = app.state::<Shell>();
+        let Ok(mut pending) = shell.pending.lock() else {
+            return;
+        };
+        pending.queue(path)
+    };
+    // Only when the webview has already collected once. Evaluating into a page
+    // that has not installed the bridge yet does nothing at all, which is
+    // exactly how a first-launch file gets lost — so that case waits for the
+    // webview to come and ask instead.
+    if nudge && let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(OPEN_HANDED_OVER);
+    }
+}
+
 /// Hand the shell the bytes to write, before a save panel is raised.
 ///
 /// Synchronous and does no work beyond a move: a command that borrows the
@@ -420,12 +526,15 @@ async fn native_save_target(app: AppHandle, force: bool) -> Result<SavedToTarget
 /// only ever exists in this binary. Instead the shell installs the thing it can
 /// provide, and the editor asks whether `window.__opencalcNative` is there.
 ///
-/// Seven functions, and each is a native capability rather than a policy:
+/// Nine functions, and each is a native capability rather than a policy:
 /// `open()` raises the panel and returns bytes, `save()` writes them through
 /// one, `saveTarget()` writes them back to the file the window was opened from,
 /// `clearSaveTarget()` says this is a different document now, `setDocument()`
 /// moves the title bar, `syncCapabilities()` re-reports what the mode allows,
-/// `publishMenu()` rebuilds the bar. *When* to call them is the editor's
+/// `publishMenu()` rebuilds the bar, and `openHandedOver()` /
+/// `disownHandedOver()` collect the file the operating system asked this
+/// application to open — or say that it did not become the document.
+/// *When* to call them is the editor's
 /// decision, made where the editor's own rules live — which is why the editor,
 /// not this bridge, decides that `Ctrl+S` means `saveTarget` and
 /// `File ▸ Download` means `save`.
@@ -515,16 +624,97 @@ const BOOTSTRAP: &str = r#"(function () {
     async clearSaveTarget() {
       await invoke("clear_save_target");
     },
+    // Open the file the operating system handed this application, if it handed
+    // one over (`TAURI-010`).
+    //
+    // Called twice for two different moments and the second is the one that is
+    // usually missing: once by the ready loop below, which is a launch by
+    // double-click, and once per `window.eval` from the shell, which is a
+    // *second* file double-clicked while this window is already open. A build
+    // that only does the first works perfectly until somebody opens a second
+    // spreadsheet, and then does nothing with no error anywhere.
+    //
+    // The body is the `#tb-open` handler's, minus the panel: the same dirty
+    // check, the same `openBytes`, the same `setDocument`. Deliberately here in
+    // the bridge rather than in `editor.core.js` — there is nothing for a
+    // browser tab to do with a file the operating system handed over, so the
+    // editor would have to guard every line of it against a host that only
+    // exists in this binary.
+    async openHandedOver() {
+      const e = editor();
+      if (!e || !e.openBytes) return;
+      // Before the invoke: the shell's `guard_open` reads the last report, and
+      // this is reachable at any time — including before the ready loop has
+      // sent one, if the shell nudges an already-loaded page.
+      await native.syncCapabilities();
+      const handed = await invoke("take_pending_open");
+      if (!handed) return; // the ordinary launch: nothing was handed over
+      const bytes = new Uint8Array(await invoke("take_opened_bytes"));
+      // A second activation can land on a window with unsaved work in it. The
+      // first launch never asks, because a blank document is not dirty.
+      if (e.isDirty && e.isDirty() && e.confirmModal) {
+        const ok = await e.confirmModal(
+          "Open " + handed.name + "?",
+          "This workbook has changes that have not been saved. Opening another discards them, and undo will not bring them back.",
+          "Discard and open",
+        );
+        if (!ok) return await native.disownHandedOver();
+      }
+      if (e.openBytes(bytes, handed.name)) {
+        e.markSaved();
+        await native.setDocument(handed.name, false);
+      } else {
+        // `openBytes` has already put the engine's sentence in the status bar.
+        // What it cannot do is tell the shell, and the shell has a path armed.
+        await native.disownHandedOver();
+      }
+    },
+    // Say that the handed-over file did **not** become this document.
+    //
+    // `take_pending_open` arms a save target the way `native_open` does, and
+    // `set_document` is what promotes or drops it. But the shell is only told
+    // when the name or the dirty flag *changes*, and neither does when the open
+    // is declined or refused — so the armed candidate would sit there until
+    // something else moved it. Re-reporting the document that is actually on
+    // screen is the drop: `SaveTarget::observe_document` discards a candidate
+    // whose name does not match what the webview says it is showing.
+    async disownHandedOver() {
+      const e = editor();
+      if (!e || !e.documentName) return;
+      await native.setDocument(e.documentName(), !!(e.isDirty && e.isDirty()));
+    },
   };
   window.__opencalcNative = native;
 
   // The editor builds its menus during boot, so the model is asked for after
   // the page settles rather than at window creation.
+  //
+  // **A non-empty model, not merely the function.** `window.opencalcEditor` is
+  // the module namespace and appears the moment the WebAssembly binary loads —
+  // which is *before* `wasm.session_new()`, with an `await` in between for the
+  // host's fonts. Waiting on `e.menuModel` alone could therefore fire in that
+  // gap, and `openHandedOver()` there would open the user's file into a session
+  // that boot then replaces with an empty one: the file opens, and a moment
+  // later the window is blank, which is this row's defect arriving by a
+  // different road. `menuModel()` reads the live DOM and `#menubar` is empty
+  // until `buildMenuBar()`, which runs after `session_new()` — so a model with
+  // entries in it is the signal that the editor is actually up.
   (function wait() {
     const e = editor();
-    if (e && e.menuModel) {
+    let ready = false;
+    try {
+      ready = !!(e && e.menuModel && e.menuModel().length);
+    } catch (err) {
+      ready = false;
+    }
+    if (ready) {
       native.publishMenu().catch((err) => console.error("[opencalc] menu", err));
       native.syncCapabilities().catch((err) => console.error("[opencalc] capabilities", err));
+      // The file this application was launched to open, if it was launched to
+      // open one. After `syncCapabilities` is *requested* but not awaited —
+      // `openHandedOver` re-syncs before it asks the shell for anything, so the
+      // guard reads a fresh report either way.
+      native.openHandedOver().catch((err) => console.error("[opencalc] open-file", err));
       window.dispatchEvent(new CustomEvent("opencalc-native-ready"));
     } else {
       setTimeout(wait, 60);
@@ -546,6 +736,7 @@ fn main() {
             native_save,
             native_save_target,
             clear_save_target,
+            take_pending_open,
         ])
         .on_menu_event(|app, event| {
             // The id is the editor's own command id, so this is the whole of
@@ -586,8 +777,39 @@ fn main() {
             // reads `Untitled — OpenCalc` rather than the product name alone.
             let _ = window.set_title(&Session::default().title());
             let _ = app.emit("ready", ());
+            // The Windows and Linux route (`TAURI-010`): a double-click puts
+            // the path in `argv`. Queued rather than opened — there is a window
+            // here but no editor in it yet, and the webview collects when it is
+            // ready. macOS never arrives this way; see the run handler below.
+            if let Some(path) = launch::path_from_args(std::env::args_os()) {
+                hand_over(app.handle(), path);
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the application");
+        .build(tauri::generate_context!())
+        .expect("the application")
+        // `build` + `run` rather than `Builder::run`, and the whole reason is
+        // the arm below: `RunEvent` is not reachable from the short form.
+        //
+        // Underscore-prefixed because on Windows and Linux nothing in here uses
+        // them — `RunEvent::Opened` is compiled out on those platforms, since
+        // Tauri only defines the variant where the operating system sends it.
+        .run(|_app, _event| {
+            // **macOS's only route.** Finder does not pass a path in `argv` to
+            // a bundled application; it calls `application:openURLs:`, which
+            // arrives here — on first launch *and* every time another file is
+            // double-clicked while this window is open.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                for url in urls {
+                    // `to_file_path` rather than string surgery: it rejects the
+                    // non-file URLs this event also carries, and it does the
+                    // percent-decoding that turns `Q3%20figures.xlsx` back into
+                    // a name the filesystem has.
+                    if let Ok(path) = url.to_file_path() {
+                        hand_over(_app, path);
+                    }
+                }
+            }
+        });
 }
