@@ -740,15 +740,25 @@ const BOOTSTRAP: &str = r#"(function () {
 /// Only ever sets the latch to true. A cancelled close simply never calls this,
 /// which leaves the window open with nothing to undo.
 #[tauri::command]
-fn agree_to_close(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result<(), String> {
+fn agree_to_close(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+    quit: bool,
+) -> Result<(), String> {
     use tauri::Manager as _;
     shell
         .closing
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    // Closing the window rather than exiting the process: the window event
-    // fires again, sees the latch, and lets it through — one path out, whether
-    // the user used the close button, the menu or a keystroke.
-    if let Some(window) = app.get_webview_window("main") {
+    // **What was asked decides what happens** (`TAURI-014`). Closing a window
+    // and quitting the application are two different requests, and answering
+    // one with the other is its own defect: a user who pressed Cmd+Q and got a
+    // closed window with the process still running has been ignored, and one
+    // who clicked the close button and lost the application has lost more than
+    // they asked to.
+    if quit {
+        // The exit event fires again, sees the latch, and lets it through.
+        app.exit(0);
+    } else if let Some(window) = app.get_webview_window("main") {
         window.close().map_err(|why| why.to_string())?;
     }
     Ok(())
@@ -807,7 +817,7 @@ fn main() {
             let Some(view) = window.app_handle().get_webview_window("main") else {
                 return;
             };
-            let _ = view.eval(casual_calc_desktop::close::CONFIRM_CLOSE);
+            let _ = view.eval(casual_calc_desktop::close::confirm_close(false));
         })
         .on_menu_event(|app, event| {
             // The id is the editor's own command id, so this is the whole of
@@ -866,6 +876,25 @@ fn main() {
         // them — `RunEvent::Opened` is compiled out on those platforms, since
         // Tauri only defines the variant where the operating system sends it.
         .run(|_app, _event| {
+            // **Quitting is a second route out, and it does not come through
+            // the window** (`TAURI-014`). macOS Cmd+Q terminates the
+            // application: `RunEvent::ExitRequested`, never
+            // `WindowEvent::CloseRequested`. `TAURI-011` closed the window
+            // route and deliberately left this one open rather than claiming
+            // both; this is the other half, reusing the same script and the
+            // same latch so there is one question and one answer, not two that
+            // can disagree.
+            if let tauri::RunEvent::ExitRequested { api, .. } = &_event {
+                use tauri::Manager as _;
+                let shell = _app.state::<Shell>();
+                let agreed = shell.closing.load(std::sync::atomic::Ordering::SeqCst);
+                if casual_calc_desktop::close::should_prevent(agreed) {
+                    api.prevent_exit();
+                    if let Some(view) = _app.get_webview_window("main") {
+                        let _ = view.eval(casual_calc_desktop::close::confirm_close(true));
+                    }
+                }
+            }
             // **macOS's only route.** Finder does not pass a path in `argv` to
             // a bundled application; it calls `application:openURLs:`, which
             // arrives here — on first launch *and* every time another file is
