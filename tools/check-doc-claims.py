@@ -157,6 +157,15 @@ def main():
             # 8", "goes to 2 ... it has since moved on" are records of a change
             # and are correct as written. `docs/61` documents the bump that ADR
             # made and would otherwise be reported for stating history.
+            # **This cannot tell an asserted number from a rejected one.**
+            # `docs/84` carried a sentence saying the tempting conclusion that
+            # the version could stay where it was is *wrong* — correct prose,
+            # read here as a stale claim. Excluding negations with a regex over
+            # one line is not possible, so the document was reworded to name the
+            # transition instead. If this fires on a sentence that is right,
+            # prefer rewording the sentence over widening this pattern: the
+            # version number is what an old client is refused on, and a gate
+            # that learns to ignore more spellings of it will miss the real one.
             TRANSITION = re.compile(
                 r"->|→|moves?\s+to|goes\s+to|bumped?\s+to|moved\s+on|raise[sd]?\s+to"
             )

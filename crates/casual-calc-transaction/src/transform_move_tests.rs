@@ -475,6 +475,7 @@ fn a_pending_chart_series_follows_a_concurrent_column_drag() {
         name: "Amount".into(),
         categories: None,
         values: "S!$B$1:$B$10".into(),
+        ..ChartSeries::default()
     });
     data.charts.push(chart);
     // A pivot whose *source* is on the sheet being dragged. Its report block is

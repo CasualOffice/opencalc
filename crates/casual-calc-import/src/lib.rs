@@ -622,10 +622,20 @@ fn is_modelled(kind: PartKind, rel_type: &str) -> bool {
 /// its *own* relationships, so two hops are needed. Anything that fails to
 /// resolve is skipped rather than reported: the part is still retained and
 /// still written back, so the only cost is a chart that does not appear.
+///
+/// **What a chart part says and the model cannot draw is reported** (`CHT-05`).
+/// It used to be silent: a stacked column, a 100%-stacked bar, a combination
+/// chart and a secondary-axis chart each produced a display list identical to a
+/// clustered control and *zero* compatibility entries, so a user was shown a
+/// picture that was not their chart and told nothing. Most of that is now
+/// modelled; what is still not — a chart type with no picture, a label showing
+/// something other than a value, a trendline, an axis with its own scale — is
+/// named here rather than dropped in silence.
 #[allow(clippy::type_complexity)]
 fn read_sheet_drawings(
     package: &mut SpreadsheetPackage,
     sheet_part: &str,
+    report: &mut CompatibilityReport,
 ) -> Result<
     (
         Vec<casual_calc_model::ChartView>,
@@ -665,6 +675,30 @@ fn read_sheet_drawings(
         }
         if rel.rel_type.ends_with(CHART_REL_SUFFIX) {
             let spec = chart::parse_chart(&package.read_part(&target)?)?;
+            let kind = spec
+                .kind
+                .unwrap_or(casual_calc_model::ChartKind::Unsupported);
+            // The picture is missing, and the part is kept: a reader that only
+            // sees the chart frame's "unsupported chart not drawn" note learns
+            // nothing about whether the file still holds it.
+            if kind == casual_calc_model::ChartKind::Unsupported {
+                report.record(
+                    chart::ChartGap::Type.feature(),
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::Preserved,
+                );
+            }
+            for gap in &spec.gaps {
+                report.record(
+                    gap.feature(),
+                    // Every one of these has a picture that is *nearly* the
+                    // file's — the chart draws, and one property of it is not
+                    // the one that was asked for. `Omitted` is reserved for the
+                    // type itself, where nothing is drawn at all.
+                    ModelOutcome::Degraded,
+                    RetentionOutcome::Preserved,
+                );
+            }
             charts.push(casual_calc_model::ChartView {
                 // Numbered below, once the whole list is known, so the ids
                 // follow document order rather than relationship order.
@@ -672,9 +706,8 @@ fn read_sheet_drawings(
                 anchor: anchor.range,
                 from_offset: anchor.from_offset,
                 to_offset: anchor.to_offset,
-                kind: spec
-                    .kind
-                    .unwrap_or(casual_calc_model::ChartKind::Unsupported),
+                kind,
+                grouping: spec.grouping,
                 title: spec.title,
                 series: spec.series,
                 legend: spec.legend,
@@ -1604,7 +1637,7 @@ pub fn import_package_cancellable(
         // Charts, read for display only. The parts stay retained and are
         // written back from their own bytes; this is the projection a renderer
         // needs, so a chart it cannot decode simply does not draw.
-        let drawn = read_sheet_drawings(&mut package, &part)?;
+        let drawn = read_sheet_drawings(&mut package, &part, &mut report)?;
         sheet.charts = drawn.0;
         sheet.images = drawn.1;
         // Identity, in document order, so opening the same file twice — or on

@@ -1341,6 +1341,7 @@ mod charts {
             name: String::new(),
             categories: None,
             values: format!("$A$1:$A${}", values.len()),
+            ..ChartSeries::default()
         }];
         sheet.charts.push(chart);
         wb.sheets.push(sheet);

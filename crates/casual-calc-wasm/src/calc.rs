@@ -201,6 +201,7 @@ mod chart_frame_payload {
             anchor: CellRange::new(CellRef::new(0, 8), CellRef::new(20, 16)),
             from_offset: Emu { x: 0, y: 0 },
             to_offset: Emu { x: 0, y: 0 },
+            grouping: None,
             kind: ChartKind::Line,
             title: "Revenue".to_owned(),
             series: (0..series)
@@ -208,6 +209,7 @@ mod chart_frame_payload {
                     name: format!("S{c}"),
                     categories: Some(format!("Sheet1!$A$1:$A${rows}")),
                     values: format!("Sheet1!${0}$1:${0}${rows}", col(c)),
+                    ..ChartSeries::default()
                 })
                 .collect(),
             legend: Some("r".to_owned()),
@@ -230,6 +232,7 @@ mod chart_frame_payload {
             anchor: CellRange::new(CellRef::new(0, 8), CellRef::new(20, 16)),
             from_offset: Emu { x: 0, y: 0 },
             to_offset: Emu { x: 0, y: 0 },
+            grouping: None,
             kind: ChartKind::Line,
             title: "Revenue".to_owned(),
             series: (0..series)
@@ -237,6 +240,7 @@ mod chart_frame_payload {
                     name: format!("S{c}"),
                     categories: Some("Sheet1!$A$1:$A$1048576".to_owned()),
                     values: format!("Sheet1!${0}$1:${0}$1048576", col(c)),
+                    ..ChartSeries::default()
                 })
                 .collect(),
             legend: Some("r".to_owned()),

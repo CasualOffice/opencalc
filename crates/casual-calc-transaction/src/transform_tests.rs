@@ -1009,6 +1009,7 @@ fn a_pending_chart_series_follows_a_concurrent_insert() {
         name: "Amount".into(),
         categories: None,
         values: "S!$D$2:$D$11".into(),
+        ..ChartSeries::default()
     });
     data.charts.push(chart);
 

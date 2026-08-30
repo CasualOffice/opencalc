@@ -43,7 +43,19 @@ use crate::wire::WireOperation;
 /// which matters, because a bump costs every unupgraded tab its session, and
 /// spending that to add a cursor decoration would be the wrong trade. Verified,
 /// both directions, by `a_peer_that_has_never_heard_of_drafts_still_reads_a_message_carrying_one`.
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// **8 is a chart change, and that is not a contradiction of the paragraph
+/// above** (`CHT-07`). `Draft` did not move it because an old peer skipping an
+/// optional field still reads the message the sender meant. Charts are the
+/// other case: `SheetMetadata` field 19 `CHARTS` is a **whole-vector replace**,
+/// so an old client that cannot see `grouping` does not merely ignore it — it
+/// **writes the vector back without it on its next submit**, and the sender's
+/// stacked chart becomes clustered for everyone. That is the *quiet* break 62's
+/// rule is about: the two peers interpret the same message differently, and the
+/// one that loses says nothing. `COL-54`'s new enum variant was the loud kind,
+/// and loud is better. So the version moves for a change that does not look
+/// like a wire change at all, which is exactly when this rule earns its keep.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

@@ -2061,6 +2061,7 @@ mod retained_part_tests {
             anchor: CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
             from_offset: Emu { x: 0, y: 0 },
             to_offset: Emu { x: 0, y: 0 },
+            grouping: None,
             kind: ChartKind::Bar,
             title: "Revenue".to_owned(),
             series: Vec::new(),

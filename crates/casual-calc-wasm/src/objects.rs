@@ -88,12 +88,29 @@ pub(crate) struct ChartWire {
     x_title: String,
     #[serde(default)]
     y_title: String,
+    /// `clustered`, `stacked`, `percentStacked`, `standard`, or absent.
+    ///
+    /// **Absent means "not stated", not "none"** — see [`SeriesWire`]. A panel
+    /// that has never heard of stacking sends a chart back without this field,
+    /// and reading that as `None` would convert a stacked chart to a clustered
+    /// one on a retitle, which is the loss the field exists to stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grouping: Option<String>,
     /// Whether this still writes back from a retained part. Read-only: it is
     /// cleared by editing, not by asking.
     #[serde(default)]
     imported: bool,
 }
 
+/// One series as the host edits it.
+///
+/// **Every field a host may not know about is an `Option`, and `None` means
+/// "unchanged"**, not "off". `session_set_chart` replaces the whole series
+/// vector, so a panel written before stacking existed sends back a chart with
+/// no `kind`, no `secondaryAxis` and no `dataLabels` — and taking those at face
+/// value would silently flatten a combination chart on an unrelated edit. The
+/// wire distinguishes "the user turned it off" from "this client cannot say",
+/// which a bare `bool` cannot.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SeriesWire {
@@ -104,6 +121,16 @@ pub(crate) struct SeriesWire {
     categories: Option<String>,
     /// The formula naming the plotted values.
     values: String,
+    /// This series' own chart kind in a combination chart, or absent for the
+    /// chart's own. An empty string is "the chart's kind", stated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    /// Whether it is plotted against the secondary value axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secondary_axis: Option<bool>,
+    /// Whether each of its points shows its value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_labels: Option<bool>,
 }
 
 pub(crate) fn chart_kind_token(kind: ChartKind) -> &'static str {
@@ -131,6 +158,62 @@ pub(crate) fn chart_kind_from(token: &str) -> ChartKind {
     }
 }
 
+/// The chart's new series list, taking from `previous` whatever the host did
+/// not state.
+///
+/// **A field the panel cannot say must not be a field the panel can clear.**
+/// `session_set_chart` replaces the whole vector and is what a retitle, a drag
+/// and a resize all route through, so a client that has never heard of stacking
+/// or of a combination chart would otherwise flatten one on an edit that had
+/// nothing to do with it (`CHT-05`).
+///
+/// Matched by position, which is the same correspondence `retune_series` uses
+/// for a retained part's nth `<c:ser>`. A panel that reorders or adds series
+/// and cannot state these fields loses them for the series that moved —
+/// visible, and far smaller than dropping them for every chart on every drag.
+fn merged_series(
+    wire: Vec<SeriesWire>,
+    previous: &[casual_calc_model::ChartSeries],
+) -> Vec<casual_calc_model::ChartSeries> {
+    wire.into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let was = previous.get(i);
+            casual_calc_model::ChartSeries {
+                name: s.name,
+                categories: s.categories.filter(|c| !c.trim().is_empty()),
+                values: s.values,
+                kind: match s.kind.as_deref() {
+                    // Stated, and stated as "the chart's own kind".
+                    Some("") => None,
+                    Some(token) => Some(chart_kind_from(token)),
+                    None => was.and_then(|w| w.kind),
+                },
+                secondary_axis: s
+                    .secondary_axis
+                    .unwrap_or_else(|| was.is_some_and(|w| w.secondary_axis)),
+                data_labels: s
+                    .data_labels
+                    .unwrap_or_else(|| was.is_some_and(|w| w.data_labels)),
+            }
+        })
+        .collect()
+}
+
+/// `<c:grouping val>` as the host spells it, or `None` for a token this does
+/// not know — which leaves the chart's own grouping alone rather than clearing
+/// it on a typo.
+pub(crate) fn chart_grouping_from(token: &str) -> Option<casual_calc_model::ChartGrouping> {
+    use casual_calc_model::ChartGrouping as G;
+    match token {
+        "clustered" => Some(G::Clustered),
+        "stacked" => Some(G::Stacked),
+        "percentStacked" => Some(G::PercentStacked),
+        "standard" => Some(G::Standard),
+        _ => None,
+    }
+}
+
 pub(crate) fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
     ChartWire {
         id: chart.id,
@@ -150,6 +233,9 @@ pub(crate) fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
                 name: s.name.clone(),
                 categories: s.categories.clone(),
                 values: s.values.clone(),
+                kind: s.kind.map(|k| chart_kind_token(k).to_owned()),
+                secondary_axis: Some(s.secondary_axis),
+                data_labels: Some(s.data_labels),
             })
             .collect(),
         legend: chart.legend.clone(),
@@ -157,6 +243,7 @@ pub(crate) fn chart_to_wire(chart: &ChartView, index: usize) -> ChartWire {
         to_offset: [chart.to_offset.x, chart.to_offset.y],
         x_title: chart.x_title.clone(),
         y_title: chart.y_title.clone(),
+        grouping: chart.grouping.map(|g| g.as_str().to_owned()),
         imported: chart.part.is_some(),
     }
 }
@@ -454,6 +541,9 @@ pub fn session_create_chart(
                 },
                 categories: categories.clone(),
                 values: abs_ref(&name, first_data_row, c, rr1, c),
+                // A chart being inserted is one kind, on one axis, with no
+                // labels; the panel turns those on afterwards.
+                ..casual_calc_model::ChartSeries::default()
             });
         }
         Some((series, sh.charts.len()))
@@ -488,6 +578,13 @@ pub fn session_create_chart(
 /// This is what detaches an imported chart: the retained part described the
 /// chart as it was, and keeping it would leave the file disagreeing with
 /// itself. Returns the part path dropped, or `""`.
+///
+/// **A field the host did not send keeps the value the chart already had**
+/// (`CHT-05`). This call replaces the whole chart, and it is what a retitle, a
+/// drag and a resize all route through — so reading an absent `grouping` as
+/// "no grouping" would convert a stacked chart into a clustered one because
+/// somebody moved it two cells to the left. The panel that cannot yet say
+/// "stacked" must not be able to say "not stacked" by staying quiet.
 #[wasm_bindgen]
 pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<String, JsError> {
     let wire: ChartWire =
@@ -503,15 +600,16 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
             CellRef::new(wire.anchor[0], wire.anchor[1]),
             CellRef::new(wire.anchor[2], wire.anchor[3]),
         );
-        chart.series = wire
-            .series
-            .into_iter()
-            .map(|s| casual_calc_model::ChartSeries {
-                name: s.name,
-                categories: s.categories.filter(|c| !c.trim().is_empty()),
-                values: s.values,
-            })
-            .collect();
+        if let Some(stated) = wire.grouping.as_deref() {
+            chart.grouping = chart_grouping_from(stated);
+        }
+        // Matched by position, which is the same correspondence `retune_series`
+        // uses for a retained part's nth `<c:ser>`. A panel that reorders or
+        // adds series and cannot state these fields loses them for the series
+        // that moved — visible, and far smaller than dropping them for every
+        // chart on every drag.
+        let previous = std::mem::take(&mut chart.series);
+        chart.series = merged_series(wire.series, &previous);
         chart.legend = wire.legend.filter(|p| !p.is_empty());
         chart.from_offset = casual_calc_model::Emu {
             x: wire.from_offset[0],
@@ -2000,4 +2098,110 @@ pub fn session_print_html(sheet: usize) -> String {
         out
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod chart_wire_tests {
+    use super::{ChartWire, SeriesWire, merged_series};
+    use casual_calc_model::{ChartGrouping, ChartKind, ChartSeries};
+
+    fn stacked_combo() -> Vec<ChartSeries> {
+        vec![
+            ChartSeries {
+                name: "Rev".to_owned(),
+                values: "S!$B$2:$B$4".to_owned(),
+                data_labels: true,
+                ..ChartSeries::default()
+            },
+            ChartSeries {
+                name: "Margin".to_owned(),
+                values: "S!$D$2:$D$4".to_owned(),
+                kind: Some(ChartKind::Line),
+                secondary_axis: true,
+                ..ChartSeries::default()
+            },
+        ]
+    }
+
+    /// **The quiet way the loss comes back.** A panel that has never heard of a
+    /// secondary axis sends the chart back without the field, and reading that
+    /// as "not on the secondary axis" converts the chart because somebody
+    /// dragged it — the same defect as the writer's hardcoded `clustered`, one
+    /// layer up.
+    #[test]
+    fn a_field_the_host_did_not_state_is_not_a_field_the_host_cleared() {
+        let json = r#"{"index":0,"kind":"column","anchor":[0,0,9,5],
+            "series":[{"name":"Rev","values":"S!$B$2:$B$4"},
+                      {"name":"Margin","values":"S!$D$2:$D$4"}]}"#;
+        let wire: ChartWire = serde_json::from_str(json).expect("an old panel's payload parses");
+        assert_eq!(wire.grouping, None, "the field was not stated");
+
+        let merged = merged_series(wire.series, &stacked_combo());
+        assert!(merged[0].data_labels, "labels were silently turned off");
+        assert_eq!(
+            merged[1].kind,
+            Some(ChartKind::Line),
+            "the combination was silently flattened"
+        );
+        assert!(
+            merged[1].secondary_axis,
+            "the secondary axis was silently dropped"
+        );
+    }
+
+    /// And a host that *does* state them is obeyed, including when it states
+    /// them off — otherwise the fields could be set and never cleared.
+    #[test]
+    fn a_field_the_host_did_state_is_taken_at_its_word() {
+        let json = r#"{"index":0,"kind":"column","anchor":[0,0,9,5],"grouping":"stacked",
+            "series":[{"name":"Rev","values":"S!$B$2:$B$4","dataLabels":false},
+                      {"name":"Margin","values":"S!$D$2:$D$4","kind":"","secondaryAxis":false}]}"#;
+        let wire: ChartWire = serde_json::from_str(json).expect("parses");
+        assert_eq!(wire.grouping.as_deref(), Some("stacked"));
+        assert_eq!(
+            super::chart_grouping_from("stacked"),
+            Some(ChartGrouping::Stacked)
+        );
+
+        let merged = merged_series(wire.series, &stacked_combo());
+        assert!(!merged[0].data_labels);
+        assert_eq!(merged[1].kind, None, "an empty kind is the chart's own");
+        assert!(!merged[1].secondary_axis);
+    }
+
+    /// A series the chart did not have before takes the defaults rather than
+    /// the ones belonging to whatever sat at that index.
+    #[test]
+    fn a_new_series_does_not_inherit_from_a_shorter_list() {
+        let wire = vec![
+            SeriesWire {
+                name: "Rev".to_owned(),
+                categories: None,
+                values: "S!$B$2:$B$4".to_owned(),
+                kind: None,
+                secondary_axis: None,
+                data_labels: None,
+            },
+            SeriesWire {
+                name: "New".to_owned(),
+                categories: None,
+                values: "S!$C$2:$C$4".to_owned(),
+                kind: None,
+                secondary_axis: None,
+                data_labels: None,
+            },
+        ];
+        let merged = merged_series(wire, &stacked_combo()[..1]);
+        assert!(merged[0].data_labels);
+        assert_eq!(merged[1].kind, None);
+        assert!(!merged[1].secondary_axis);
+        assert!(!merged[1].data_labels);
+    }
+
+    /// An unknown grouping token leaves the chart's own alone rather than
+    /// clearing it, so a typo cannot convert a chart either.
+    #[test]
+    fn an_unknown_grouping_token_is_not_a_clearing() {
+        assert_eq!(super::chart_grouping_from("diagonal"), None);
+    }
 }

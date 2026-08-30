@@ -53,6 +53,76 @@ pub enum ChartKind {
     Unsupported,
 }
 
+/// How a chart group combines the series that share it — `<c:grouping val>`.
+///
+/// **A field rather than a set of [`ChartKind`] variants**, because OOXML makes
+/// it a sibling of `<c:barDir>` inside the same `<c:barChart>` rather than a
+/// different element. Folding it into the kind would be a cross product —
+/// `{Bar, Column, Line, Area} × {clustered, stacked, percentStacked}` is twelve
+/// variants for one attribute — and `ChartKind` crosses the collaboration wire
+/// as an externally-tagged enum, where a tag an old peer has never heard of
+/// makes the whole message unreadable (`COL-54`). The existing `Bar`/`Column`
+/// split is not a counter-example: those are two pictures with different axis
+/// orientation, and a stacked column is the same picture stacked.
+///
+/// This is the **union** of the two OOXML types, which differ by one value:
+/// `ST_BarGrouping` takes all four, while `ST_Grouping` — `<c:lineChart>` and
+/// `<c:areaChart>` — has no `clustered`. One enum covering both beats two that
+/// differ by a variant; the importer refuses whichever the group's own element
+/// does not permit, so a `Clustered` line chart never gets in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChartGrouping {
+    /// Series side by side, each measured from the axis. `<c:barChart>` only.
+    Clustered,
+    /// Series measured from the top of the one before, so the group's height
+    /// is their sum.
+    Stacked,
+    /// Stacked and normalised, so every group fills the plot and a band's
+    /// height is its share.
+    PercentStacked,
+    /// Series overlaid, each measured from the axis. The schema default for
+    /// `<c:lineChart>` and `<c:areaChart>`.
+    Standard,
+}
+
+impl ChartGrouping {
+    /// The `<c:grouping val>` spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clustered => "clustered",
+            Self::Stacked => "stacked",
+            Self::PercentStacked => "percentStacked",
+            Self::Standard => "standard",
+        }
+    }
+
+    /// The grouping `val` denotes for a group element named `element`, or
+    /// `None` when that element's own schema type does not permit it.
+    ///
+    /// `clustered` is refused for a line or area group rather than mapped to
+    /// something near it: `ST_Grouping` has no such value, so a file spelling
+    /// one is malformed and guessing at it would write a package Excel rejects.
+    #[must_use]
+    pub fn from_val(element: &str, val: &str) -> Option<Self> {
+        let bar = matches!(element, "barChart" | "bar3DChart");
+        match val {
+            "clustered" if bar => Some(Self::Clustered),
+            "stacked" => Some(Self::Stacked),
+            "percentStacked" => Some(Self::PercentStacked),
+            "standard" if !bar => Some(Self::Standard),
+            _ => None,
+        }
+    }
+
+    /// Whether series in this grouping sit on top of one another.
+    #[must_use]
+    pub fn is_stacked(self) -> bool {
+        matches!(self, Self::Stacked | Self::PercentStacked)
+    }
+}
+
 /// One series within a chart.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +138,44 @@ pub struct ChartSeries {
     /// The formula naming the plotted (y) values.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub values: String,
+    /// The chart group this series belongs to, when it differs from the
+    /// chart's own [`ChartView::kind`]. `None` is every series of a
+    /// single-group chart, so nothing is written for one.
+    ///
+    /// This is what makes a **combination** chart expressible. The importer
+    /// already flattened every `<c:ser>` from every group into one list, so a
+    /// combo chart's data has always survived; the only fact that was lost is
+    /// which group each series came from, and this is that fact.
+    ///
+    /// Per-series rather than a `Vec<ChartGroup>` because the model does not
+    /// own axes: a group layer would restructure `resolve`, `series_colors`,
+    /// `retune_series`'s nth-`<c:ser>` correspondence and the wire shape to
+    /// express something the flat list already carries. **The cost is named**:
+    /// two groups of the same type with different groupings — a stacked bar
+    /// group beside a clustered one — cannot be told apart here. That stays in
+    /// the retained-part regime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ChartKind>,
+    /// Whether this series is plotted against the secondary value axis.
+    ///
+    /// A flag rather than a `ChartAxis` object, because what makes a missing
+    /// secondary axis fatal is not tick control — it is that a series
+    /// **disappears**. Revenue in millions beside a margin percentage on one
+    /// shared extent makes the margin series 0.000058 px of a 200 px plot: it
+    /// is drawn, and it is invisible. A boolean fixes that completely, and a
+    /// flag is derivable from an axis object, so a later `ChartAxis` does not
+    /// have to undo this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secondary_axis: bool,
+    /// `<c:dLbls><c:showVal val="1"/>`: draw each point's value beside it.
+    ///
+    /// Values only. `<c:dLbls>` can also show the category name, the series
+    /// name, the legend key, a percentage and leader lines; `showVal` is the
+    /// one that is reached for, and each of the others is a separate flag that
+    /// can be added additively later. What is read and not expressed is
+    /// reported rather than dropped in silence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub data_labels: bool,
 }
 
 /// A frame's offset into the cell it is anchored to, in EMUs.
@@ -145,6 +253,19 @@ pub struct ChartView {
     pub to_offset: Emu,
     /// What it draws.
     pub kind: ChartKind,
+    /// `<c:grouping val>` for the chart's own group: how the series that share
+    /// [`Self::kind`] combine.
+    ///
+    /// `None` is the group element's own schema default — `clustered` for a
+    /// bar or column chart, `standard` for a line or an area — and is what
+    /// every chart written before this field existed carries, so a snapshot
+    /// round-trips unchanged (ADR-010).
+    ///
+    /// Meaningless for a pie, a doughnut or a scatter, which have no groups.
+    /// The plotter ignores it for those and the importer does not set it, so a
+    /// `Stacked` pie is a decision rather than a discovery: it does nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouping: Option<ChartGrouping>,
     /// The title, empty when the chart has none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
@@ -182,6 +303,7 @@ impl ChartView {
             from_offset: Emu::default(),
             to_offset: Emu::default(),
             kind,
+            grouping: None,
             title: String::new(),
             series: Vec::new(),
             legend: None,
