@@ -4072,6 +4072,757 @@ fn a_created_pivot_is_written_as_a_pivot_and_reads_back() {
     assert_eq!(read[0].values[0].aggregate, PivotAggregate::Sum);
 }
 
+// ---------------------------------------------------------------------------
+// `docs/85` §9 row **B** — the exporter says what the model means.
+//
+// The cache is written `saveData="0" refreshOnLoad="1"`, so **Excel rebuilds
+// the whole report from the definition when the file is opened**. A feature the
+// definition does not state is therefore a feature the reopened file does not
+// have — it comes back as raw sums under our caption, which is `PIV-05`'s P0
+// written from the writing end (`docs/85` §1.4).
+//
+// The model has nowhere to hold Show Values As, grouping or a calculated field
+// yet; those fields arrive with slices C, D and E, each paying a protocol bump
+// this slice does not. So these tests hand the writer a
+// [`crate::pivot::PivotDerived`] directly — the seam
+// [`crate::pivot::PivotDerived::of`] will read off the model once it can — and
+// assert the **bytes**, because a file-format change is bytes and nothing else.
+// ---------------------------------------------------------------------------
+
+/// A workbook with a `Data` sheet whose header row is `headers`, and an empty
+/// `Report` sheet for a pivot to sit on.
+#[cfg(test)]
+fn pivot_workbook(headers: &[&str]) -> (casual_calc_model::Workbook, casual_calc_model::SheetId) {
+    use casual_calc_model::{CellRef, Id, Sheet, SheetId, Workbook};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let data_id = SheetId(Id::from_parts(2, 1));
+    wb.sheets.push(Sheet::new(data_id, "Data"));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(3, 1)), "Report"));
+    for (col, name) in headers.iter().enumerate() {
+        let id = wb.strings.intern(name);
+        wb.sheets[0].cells.set(
+            CellRef::new(0, col as u32),
+            casual_calc_model::Cell {
+                value: casual_calc_model::CellValue::SharedString(id),
+                ..Default::default()
+            },
+        );
+    }
+    (wb, data_id)
+}
+
+/// A pivot over the whole of `Data`, anchored on `Report`.
+#[cfg(test)]
+fn pivot_over(data_id: casual_calc_model::SheetId, width: u32) -> casual_calc_model::PivotTable {
+    use casual_calc_model::{CellRange, CellRef, PivotTable};
+
+    PivotTable::new(
+        7,
+        "Sales".into(),
+        data_id,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(9, width - 1)),
+        CellRef::new(2, 0),
+    )
+}
+
+#[cfg(test)]
+fn value(source_column: u32, name: &str) -> casual_calc_model::PivotValueField {
+    casual_calc_model::PivotValueField {
+        source_column,
+        aggregate: casual_calc_model::PivotAggregate::Sum,
+        name: name.into(),
+        number_format: None,
+    }
+}
+
+#[cfg(test)]
+fn axis(source_column: u32) -> casual_calc_model::PivotAxisField {
+    casual_calc_model::PivotAxisField {
+        source_column,
+        sort: casual_calc_model::PivotSort::Ascending,
+        subtotal: true,
+    }
+}
+
+/// The two parts one authored pivot produces, as `(cache, table)`.
+#[cfg(test)]
+fn pivot_parts(
+    wb: &casual_calc_model::Workbook,
+    derived: &crate::pivot::PivotDerived,
+) -> (String, String) {
+    let built = crate::pivot::build_with(wb, &wb.sheets[1], 1, 1, std::slice::from_ref(derived));
+    let cache = built
+        .parts
+        .iter()
+        .find(|(path, _)| path.contains("pivotCacheDefinition"))
+        .expect("a cache definition")
+        .1
+        .clone();
+    let table = built
+        .parts
+        .iter()
+        .find(|(path, _)| path.contains("pivotTables/"))
+        .expect("a table definition")
+        .1
+        .clone();
+    (cache, table)
+}
+
+/// **A measure with no derivation keeps the bytes it has always had.**
+///
+/// The point of this test is not that the writer works — the test above covers
+/// that — but that the seam is *inert*. `PivotDerived::of` answers "nothing
+/// derived" until slices C/D/E give the model somewhere to hold it, so every
+/// pivot written today must come out identical to one written before this
+/// change. If this ever disagrees with the empty-derivation output, the seam
+/// has started deciding something on its own.
+#[test]
+fn an_undived_measure_is_written_exactly_as_it_was_before_the_derived_half_existed() {
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Rep", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(2, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let (cache, table) = pivot_parts(&wb, &crate::pivot::PivotDerived::default());
+    assert!(
+        table.contains(
+            r#"<dataField name="Total" fld="2" subtotal="sum" baseField="0" baseItem="0"/>"#
+        ),
+        "an ordinary measure keeps `baseField=\"0\" baseItem=\"0\"` and states no mode: {table}"
+    );
+    assert!(
+        !table.contains("showDataAs"),
+        "`normal` is the schema's default and writing it would change every file: {table}"
+    );
+    assert!(
+        cache.contains(r#"<cacheField name="Region" numFmtId="0"><sharedItems/></cacheField>"#),
+        "and a source cache field grows neither a formula nor a fieldGroup: {cache}"
+    );
+    assert!(
+        !cache.contains("databaseField") && !cache.contains("fieldGroup"),
+        "{cache}"
+    );
+
+    // The two paths must agree byte for byte, which is what makes the seam
+    // inert rather than merely usually-empty.
+    let built = crate::pivot::build(&wb, &wb.sheets[1], 1, 1);
+    assert_eq!(
+        built.parts,
+        crate::pivot::build_with(
+            &wb,
+            &wb.sheets[1],
+            1,
+            1,
+            &[crate::pivot::PivotDerived::default()]
+        )
+        .parts,
+        "reading the derivation off the model and being handed an empty one \
+         must produce the same file"
+    );
+}
+
+/// **`<pivotTableDefinition>` carries the `@dataCaption` the schema requires.**
+///
+/// `use="required"` (`schemas/ooxml/sml.xsd:1096`), and every pivot this module
+/// has written since `PIV-02` omitted it — so the part did not validate. Found
+/// by running one of the written parts through `xmllint` against the vendored
+/// schema, which nothing had done: LibreOffice reads the part happily either
+/// way, so the tolerant oracle this repository has could not see it.
+///
+/// It is not a defect of the derived half, and it is fixed here because a
+/// document that fails to validate is a worse place to add new attributes than
+/// one that validates.
+#[test]
+fn a_pivot_table_definition_carries_the_data_caption_the_schema_makes_required() {
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Amount"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(1, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let (_, table) = pivot_parts(&wb, &crate::pivot::PivotDerived::default());
+    assert!(
+        table.contains(r#" dataCaption="Values" "#),
+        "`@dataCaption` is required, and `Values` is what Excel writes: {table}"
+    );
+}
+
+/// **A `% of Grand Total` measure says so in the file.**
+///
+/// This is the P0 the row exists to prevent. `refreshOnLoad="1"` means Excel
+/// recomputes the report on open; a `<dataField>` with no `@showDataAs` is a
+/// plain sum, so the reopened file shows raw sums under a caption reading
+/// `% of Grand Total` — `PIV-05` again, from the writing end (`docs/85` §1.4).
+///
+/// `@baseItem` moves to `1048832`, "no item chosen": the schema's default
+/// (`sml.xsd:1279`) and what a real `showDataAs="percentOfTotal"` carries — see
+/// the fixture at `crates/casual-calc-import/src/tests.rs:1679`.
+#[test]
+fn a_show_values_as_measure_states_its_mode_instead_of_being_rebuilt_as_a_sum() {
+    use crate::pivot::{PivotDerived, PivotValueDerived};
+    use casual_calc_model::PivotShowAs;
+
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Rep", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(2, "% of Grand Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            show_as: Some(PivotShowAs::PercentOfTotal),
+            ..Default::default()
+        },
+    );
+
+    let (_, table) = pivot_parts(&wb, &derived);
+    assert!(
+        table.contains(
+            r#"<dataField name="% of Grand Total" fld="2" subtotal="sum" showDataAs="percentOfTotal" baseField="0" baseItem="1048832"/>"#
+        ),
+        "the caption and the arithmetic must arrive together: {table}"
+    );
+}
+
+/// **A base-relative mode carries its base field and base item.**
+///
+/// `difference`, `percent`, `percentDiff` and `runTotal` are refused by the
+/// first release (`docs/85` §7) precisely because they need these two, and the
+/// writer has to be able to state them before the release that honours them —
+/// otherwise adding the mode later is a file-format change as well as a
+/// behaviour one.
+#[test]
+fn a_base_relative_mode_carries_its_base_field_and_item() {
+    use crate::pivot::{PivotDerived, PivotValueDerived};
+    use casual_calc_model::{PivotBaseItem, PivotShowAs};
+
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Rep", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(2, "vs West"));
+    pivot.values.push(value(2, "vs previous"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            show_as: Some(PivotShowAs::Percent),
+            base_field: Some(0),
+            base_item: Some(PivotBaseItem::Item(3)),
+            ..Default::default()
+        },
+    );
+    derived.values.insert(
+        1,
+        PivotValueDerived {
+            show_as: Some(PivotShowAs::RunTotal),
+            base_field: Some(1),
+            base_item: Some(PivotBaseItem::Previous),
+            ..Default::default()
+        },
+    );
+
+    let (_, table) = pivot_parts(&wb, &derived);
+    assert!(
+        table.contains(
+            r#"<dataField name="vs West" fld="2" subtotal="sum" showDataAs="percent" baseField="0" baseItem="3"/>"#
+        ),
+        "{table}"
+    );
+    assert!(
+        table.contains(
+            r#"<dataField name="vs previous" fld="2" subtotal="sum" showDataAs="runTotal" baseField="1" baseItem="1048828"/>"#
+        ),
+        "{table}"
+    );
+}
+
+/// **A base field that is not a source column is not written.**
+///
+/// `@baseField` is a *cache* field index and `docs/85` §8 makes the model's
+/// `base_field` a `source_column`, which `structural.rs` renumbers with the
+/// sheet (`PIV-06`, `PIV-08`). One past the source columns names a calculated
+/// or a group field, which is not a thing a measure can be relative to; writing
+/// it would be a plausible number pointing at the wrong field.
+#[test]
+fn a_base_field_past_the_source_columns_falls_back_rather_than_naming_a_derived_one() {
+    use crate::pivot::{PivotDerived, PivotValueDerived};
+    use casual_calc_model::PivotShowAs;
+
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Amount"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(1, "vs base"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            show_as: Some(PivotShowAs::Difference),
+            base_field: Some(9),
+            ..Default::default()
+        },
+    );
+
+    let (_, table) = pivot_parts(&wb, &derived);
+    assert!(
+        table.contains(r#"showDataAs="difference" baseField="0" baseItem="1048832""#),
+        "{table}"
+    );
+}
+
+/// **Three group levels over one date column are three cache fields.**
+///
+/// Excel's Group dialog with Years, Quarters and Months ticked puts *three*
+/// fields on the row axis, each a cache field with `@base` naming the original
+/// (`docs/85` §3.2). Our model says the same thing as three `PivotAxisField`s
+/// on one `source_column` with three different groups, and translating that
+/// into OOXML's single cache-field space is this module's job.
+///
+/// **Where this diverges from Excel, deliberately.** Excel puts the *finest*
+/// level on the base cache field itself and derives only the coarser ones. Here
+/// the base field is never grouped and every level is derived, because the base
+/// column can also be on an axis ungrouped in the same pivot, and one rule that
+/// covers both beats two rules with an ordering question between them. The base
+/// field is still written — it is what `@base` points at — but it is on no
+/// axis.
+#[test]
+fn a_date_column_grouped_three_ways_becomes_three_cache_fields_the_row_axis_names() {
+    use crate::pivot::{PivotAxisKind, PivotDerived};
+    use casual_calc_model::{PivotGroup, PivotGroupBy};
+
+    let (mut wb, data_id) = pivot_workbook(&["Date", "Amount"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    pivot.rows.push(axis(0));
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(1, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let group = |by| PivotGroup {
+        by,
+        interval: None,
+        start: None,
+        end: None,
+    };
+    let mut derived = PivotDerived::default();
+    derived
+        .groups
+        .insert((PivotAxisKind::Rows, 0), group(PivotGroupBy::Years));
+    derived
+        .groups
+        .insert((PivotAxisKind::Rows, 1), group(PivotGroupBy::Quarters));
+    derived
+        .groups
+        .insert((PivotAxisKind::Rows, 2), group(PivotGroupBy::Months));
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    assert!(cache.contains(r#"<cacheFields count="5">"#), "{cache}");
+    for (name, token) in [
+        ("Years", "years"),
+        ("Quarters", "quarters"),
+        ("Months", "months"),
+    ] {
+        assert!(
+            cache.contains(&format!(
+                "<cacheField name=\"{name}\" numFmtId=\"0\" databaseField=\"0\"><sharedItems/>\
+<fieldGroup base=\"0\"><rangePr groupBy=\"{token}\"/></fieldGroup></cacheField>"
+            )),
+            "{name} must be a derived field bucketing cache field 0: {cache}"
+        );
+    }
+    assert!(
+        table.contains(
+            r#"<rowFields count="3"><field x="2"/><field x="3"/><field x="4"/></rowFields>"#
+        ),
+        "the axis names the derived fields, not the column they came from: {table}"
+    );
+    assert!(
+        table.contains(r#"<pivotFields count="5"><pivotField showAll="0"/><pivotField dataField="1" showAll="0"/>"#),
+        "the base column is written and is on no axis: {table}"
+    );
+}
+
+/// **A group's interval and numeric bounds reach the file; a date bound does
+/// not, and that is stated rather than silent.**
+///
+/// `@startNum`/`@endNum` are numbers. The seven time units want
+/// `@startDate`/`@endDate`, which are `xsd:dateTime`, and turning a serial into
+/// one needs a calendar this crate cannot reach — `serial_to_ymd` is in
+/// `casual-calc-layout`, which is not a dependency and making it one is a DAG
+/// change rather than an export change. It costs nothing in the first release,
+/// whose three honoured units are all auto-bounded (`docs/85` §5.2).
+#[test]
+fn a_numeric_group_carries_its_bounds_and_a_dated_one_carries_its_interval_only() {
+    use crate::pivot::{PivotAxisKind, PivotDerived};
+    use casual_calc_model::{PivotGroup, PivotGroupBy};
+
+    let (mut wb, data_id) = pivot_workbook(&["Score", "Date", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.rows.push(axis(1));
+    pivot.values.push(value(2, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.groups.insert(
+        (PivotAxisKind::Rows, 0),
+        PivotGroup {
+            by: PivotGroupBy::Range,
+            interval: Some(10.0),
+            start: Some(0.0),
+            end: Some(100.0),
+        },
+    );
+    derived.groups.insert(
+        (PivotAxisKind::Rows, 1),
+        PivotGroup {
+            by: PivotGroupBy::Years,
+            interval: Some(2.0),
+            start: Some(45_000.0),
+            end: None,
+        },
+    );
+
+    let (cache, _) = pivot_parts(&wb, &derived);
+    assert!(
+        cache.contains(
+            r#"<rangePr groupBy="range" autoStart="0" startNum="0" autoEnd="0" endNum="100" groupInterval="10"/>"#
+        ),
+        "a numeric group states its own bounds: {cache}"
+    );
+    assert!(
+        cache.contains(r#"<rangePr groupBy="years" groupInterval="2"/>"#),
+        "a dated one keeps its interval and leaves the bounds automatic: {cache}"
+    );
+}
+
+/// **A calculated field is a cache field with a formula and no source column.**
+///
+/// `<cacheField @formula databaseField="0">` is how Excel is told the field is
+/// computed; without `databaseField="0"` it looks for a source column of that
+/// name and does not find one. The measure's `fld` points past the source
+/// columns at it, which is OOXML's single index space and exactly the collision
+/// `docs/85` §5.3 refuses to reintroduce into the *model* — the translation
+/// lives here and nowhere else.
+///
+/// The written `@subtotal` is `sum` whatever the model's aggregate says, because
+/// Excel applies the formula rather than an aggregate and the aggregate is not
+/// read for a calculated measure.
+#[test]
+fn a_calculated_field_is_a_cache_field_with_a_formula_and_the_measure_points_past_the_source() {
+    use crate::pivot::{PivotDerived, PivotValueDerived};
+    use casual_calc_model::{PivotAggregate, PivotCalculatedField};
+
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Rep", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(2, "Total"));
+    let mut bonus = value(0, "");
+    bonus.aggregate = PivotAggregate::Average;
+    pivot.values.push(bonus);
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.calculated.push(PivotCalculatedField {
+        name: "Bonus".into(),
+        formula: "Amount*0.1".into(),
+        number_format: None,
+    });
+    derived.values.insert(
+        1,
+        PivotValueDerived {
+            calculated: Some(0),
+            ..Default::default()
+        },
+    );
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    assert!(cache.contains(r#"<cacheFields count="4">"#), "{cache}");
+    assert!(
+        cache.contains(
+            r#"<cacheField name="Bonus" numFmtId="0" formula="Amount*0.1" databaseField="0"><sharedItems/></cacheField>"#
+        ),
+        "{cache}"
+    );
+    assert!(
+        table.contains(
+            r#"<dataField name="Bonus" fld="3" subtotal="sum" baseField="0" baseItem="0"/>"#
+        ),
+        "the measure names the calculated cache field, and `sum` rather than the \
+         aggregate it will never apply: {table}"
+    );
+    assert!(
+        table.contains(
+            r#"<pivotFields count="4"><pivotField axis="axisRow" showAll="0"><items count="1"><item t="default"/></items></pivotField><pivotField showAll="0"/><pivotField dataField="1" showAll="0"/><pivotField dataField="1" showAll="0"/></pivotFields>"#
+        ),
+        "the calculated field is a measure like any other: {table}"
+    );
+}
+
+/// **A formula's XML is escaped, and a derived field never takes a name another
+/// field already has.**
+///
+/// Excel refuses two cache fields sharing a name, and it uniquifies the same way
+/// — a second `Years` level is `Years2`. A `<` in a formula is legal in Excel's
+/// pivot dialect and would end the attribute early if it reached the file raw.
+#[test]
+fn a_derived_field_name_never_collides_and_a_formula_is_escaped() {
+    use crate::pivot::{PivotAxisKind, PivotDerived, PivotValueDerived};
+    use casual_calc_model::{PivotCalculatedField, PivotGroup, PivotGroupBy};
+
+    let (mut wb, data_id) = pivot_workbook(&["Opened", "Closed", "Years", "Amount"]);
+    let mut pivot = pivot_over(data_id, 4);
+    pivot.rows.push(axis(0));
+    pivot.rows.push(axis(1));
+    pivot.values.push(value(3, ""));
+    wb.sheets[1].pivots.push(pivot);
+
+    let group = PivotGroup {
+        by: PivotGroupBy::Years,
+        interval: None,
+        start: None,
+        end: None,
+    };
+    let mut derived = PivotDerived::default();
+    derived.groups.insert((PivotAxisKind::Rows, 0), group);
+    derived.groups.insert((PivotAxisKind::Rows, 1), group);
+    derived.calculated.push(PivotCalculatedField {
+        name: "Amount".into(),
+        formula: r#"IF(Amount<0,"under & over",Amount)"#.into(),
+        number_format: None,
+    });
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            calculated: Some(0),
+            ..Default::default()
+        },
+    );
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    assert!(
+        cache.contains(
+            r#"<cacheField name="Amount2" numFmtId="0" formula="IF(Amount&lt;0,&quot;under &amp; over&quot;,Amount)" databaseField="0">"#
+        ),
+        "the calculated field steps around the source column of the same name, \
+         and its formula is escaped: {cache}"
+    );
+    assert!(
+        cache.contains(r#"name="Years2""#) && cache.contains(r#"name="Years3""#),
+        "two group levels step around the source column already called Years: {cache}"
+    );
+    assert!(
+        table.contains(r#"<rowFields count="2"><field x="5"/><field x="6"/></rowFields>"#),
+        "and the axis names them: {table}"
+    );
+    assert!(
+        table.contains(r#"<dataField name="Amount2" fld="4""#),
+        "an unnamed measure over a calculated field takes the field's own \
+         written name, not the source column's: {table}"
+    );
+}
+
+/// **Two slots asking for the same bucketing of the same column are two
+/// fields, not one.**
+///
+/// Folding them into one looks like the tidy answer and is the wrong one: the
+/// single field would be named by both `<rowFields>` and `<pageFields>`, which
+/// is a field on two axes, and `<pivotField @axis>` can carry only one. A second
+/// cache field with the same `@base` and the same `<rangePr>` is redundant; a
+/// field on two axes is unreadable. This was caught by running the writer, not
+/// by reading it — the first version deduplicated.
+#[test]
+fn one_bucketing_asked_for_by_two_slots_is_two_cache_fields_so_neither_is_on_two_axes() {
+    use crate::pivot::{PivotAxisKind, PivotDerived};
+    use casual_calc_model::{PivotFilterField, PivotGroup, PivotGroupBy};
+
+    let (mut wb, data_id) = pivot_workbook(&["Date", "Amount"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    pivot.filters.push(PivotFilterField {
+        source_column: 0,
+        selected: Vec::new(),
+    });
+    pivot.values.push(value(1, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let group = PivotGroup {
+        by: PivotGroupBy::Months,
+        interval: None,
+        start: None,
+        end: None,
+    };
+    let mut derived = PivotDerived::default();
+    derived.groups.insert((PivotAxisKind::Rows, 0), group);
+    derived.groups.insert((PivotAxisKind::Filters, 0), group);
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    assert!(
+        cache.contains(r#"<cacheFields count="4">"#),
+        "one derived field per slot: {cache}"
+    );
+    assert!(
+        cache.contains(r#"name="Months""#) && cache.contains(r#"name="Months2""#),
+        "{cache}"
+    );
+    assert!(
+        table.contains(r#"<rowFields count="1"><field x="2"/></rowFields>"#)
+            && table
+                .contains(r#"<pageFields count="1"><pageField fld="3" hier="-1"/></pageFields>"#),
+        "each slot names its own: {table}"
+    );
+    assert!(
+        table.contains(
+            r#"<pivotField axis="axisRow" showAll="0"><items count="1"><item t="default"/></items></pivotField><pivotField axis="axisPage" showAll="0"><items count="1"><item t="default"/></items></pivotField></pivotFields>"#
+        ),
+        "and each carries the one `@axis` a field can carry: {table}"
+    );
+}
+
+/// **A calculated index past the end of the list falls back to the source
+/// column.**
+///
+/// `fld` past the field count is the one way to make Excel offer to repair the
+/// file. Nothing in the model can produce it today — the field does not exist —
+/// and this keeps that true for the release that adds it.
+#[test]
+fn a_calculated_index_with_no_field_behind_it_never_reaches_the_file() {
+    use crate::pivot::{PivotDerived, PivotValueDerived};
+
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Amount"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    pivot.values.push(value(1, "Total"));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            calculated: Some(4),
+            ..Default::default()
+        },
+    );
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    assert!(cache.contains(r#"<cacheFields count="2">"#), "{cache}");
+    assert!(
+        table.contains(r#"<dataField name="Total" fld="1" subtotal="sum""#),
+        "{table}"
+    );
+}
+
+/// **A package carrying all three still hangs together, and our own reader
+/// still gets a pivot back.**
+///
+/// The parts are spliced into a written `.xlsx` because `write_workbook` reads
+/// the derivation off the model, which cannot hold one yet; the bytes are the
+/// ones slices C/D/E will produce through the ordinary path. The importer
+/// reports the three as losses today (`PIV-05`) and *removing* those counters is
+/// slice F — what matters here is that the definition is still readable as a
+/// pivot rather than being dropped.
+#[test]
+fn a_package_carrying_all_three_derivations_is_still_read_back_as_a_pivot() {
+    use crate::pivot::{PivotAxisKind, PivotDerived, PivotValueDerived};
+    use casual_calc_model::{
+        PivotAggregate, PivotCalculatedField, PivotGroup, PivotGroupBy, PivotShowAs,
+    };
+
+    let (mut wb, data_id) = pivot_workbook(&["Date", "Region", "Amount"]);
+    let mut pivot = pivot_over(data_id, 3);
+    pivot.rows.push(axis(0));
+    pivot.rows.push(axis(1));
+    pivot.values.push(value(2, "% of Grand Total"));
+    pivot.values.push(value(0, "Bonus"));
+    pivot.output = Some(casual_calc_model::CellRange::new(
+        casual_calc_model::CellRef::new(2, 0),
+        casual_calc_model::CellRef::new(5, 3),
+    ));
+    wb.sheets[1].pivots.push(pivot);
+
+    let mut derived = PivotDerived::default();
+    derived.groups.insert(
+        (PivotAxisKind::Rows, 0),
+        PivotGroup {
+            by: PivotGroupBy::Years,
+            interval: None,
+            start: None,
+            end: None,
+        },
+    );
+    derived.calculated.push(PivotCalculatedField {
+        name: "Bonus".into(),
+        formula: "Amount*0.1".into(),
+        number_format: None,
+    });
+    derived.values.insert(
+        0,
+        PivotValueDerived {
+            show_as: Some(PivotShowAs::PercentOfTotal),
+            ..Default::default()
+        },
+    );
+    derived.values.insert(
+        1,
+        PivotValueDerived {
+            calculated: Some(0),
+            ..Default::default()
+        },
+    );
+
+    let (cache, table) = pivot_parts(&wb, &derived);
+    let written = write_workbook(&wb).expect("a workbook with a created pivot saves");
+    let spliced = replace_parts(
+        &written,
+        &[
+            ("xl/pivotCache/pivotCacheDefinition1.xml", cache.as_bytes()),
+            ("xl/pivotTables/pivotTable1.xml", table.as_bytes()),
+        ],
+    );
+
+    let back = import_package(spliced).unwrap().workbook;
+    let read = &back.sheets[1].pivots;
+    assert_eq!(read.len(), 1, "the pivot survives all three: {table}");
+    assert_eq!(read[0].name, "Sales");
+    // `Amount` is cache field 2 and is the only measure the importer keeps: the
+    // `% of Grand Total` one is dropped as a `shown_as` loss and `Bonus` as a
+    // `calculated_fields` loss, which is `PIV-05`'s honest accounting and what
+    // slice F removes.
+    assert_eq!(read[0].values.len(), 1, "{:?}", read[0].values);
+    assert_eq!(read[0].values[0].aggregate, PivotAggregate::Sum);
+}
+
+/// Rebuild a `.xlsx` with some of its parts replaced. Used to hand a reader
+/// bytes the ordinary write path cannot produce yet.
+#[cfg(test)]
+fn replace_parts(package: &[u8], replacements: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Read;
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(package)).unwrap();
+    let mut out = ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).unwrap();
+        let name = file.name().to_owned();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        if let Some((_, replacement)) = replacements.iter().find(|(path, _)| *path == name) {
+            data = replacement.to_vec();
+        }
+        out.start_file(&name, opts).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    out.finish().unwrap().into_inner()
+}
+
 /// A `.xlsx` whose sheet carries one `<cfRule type="expression">` over
 /// `A2:H10` — the whole-row highlight every real workbook uses — plus a `<dxf>`
 /// for it to paint with.

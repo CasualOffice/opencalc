@@ -131,6 +131,273 @@ pub enum PivotSort {
     DataSource,
 }
 
+/// How a measure is reported: as the aggregate itself, or as a derivation of
+/// it.
+///
+/// These are OOXML's `dataField/@showDataAs` values (`ST_ShowDataAs`,
+/// `schemas/ooxml/sml.xsd:1515`), and all nine are here deliberately even
+/// though the first release honours five. A new externally-tagged variant is a
+/// break an old peer cannot read at all (`COL-54`), so completing the set once
+/// — in the release that has working behaviour behind it — makes every later
+/// mode a *behaviour* change rather than a second protocol change. See
+/// `docs/85` §5.1.
+///
+/// **Nothing on [`PivotValueField`] carries this yet.** The field that does
+/// arrives with `docs/85` §9 slice C, which is what pays the protocol bump;
+/// the vocabulary is here because slice B — the exporter — cannot write
+/// `@showDataAs` without a type that names the tokens, and naming them
+/// anywhere else would mean naming them twice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotShowAs {
+    /// The aggregate, undivided. The schema's default.
+    #[default]
+    Normal,
+    /// The aggregate minus the base item's.
+    Difference,
+    /// The aggregate over the base item's.
+    Percent,
+    /// The difference from the base item, over the base item.
+    PercentDiff,
+    /// A running total along the base field.
+    RunTotal,
+    /// The aggregate over its row's total.
+    PercentOfRow,
+    /// The aggregate over its column's total.
+    PercentOfCol,
+    /// The aggregate over the grand total.
+    PercentOfTotal,
+    /// `v · grand / (row · col)` — how far the cell departs from what the
+    /// margins alone would predict.
+    Index,
+}
+
+impl PivotShowAs {
+    /// The OOXML `@showDataAs` token, which is also the wire name.
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Difference => "difference",
+            Self::Percent => "percent",
+            Self::PercentDiff => "percentDiff",
+            Self::RunTotal => "runTotal",
+            Self::PercentOfRow => "percentOfRow",
+            Self::PercentOfCol => "percentOfCol",
+            Self::PercentOfTotal => "percentOfTotal",
+            Self::Index => "index",
+        }
+    }
+
+    /// Parse an OOXML `@showDataAs` token. Unknown tokens fall back to
+    /// [`Self::Normal`], which is the schema's own default.
+    #[must_use]
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "difference" => Self::Difference,
+            "percent" => Self::Percent,
+            "percentDiff" => Self::PercentDiff,
+            "runTotal" => Self::RunTotal,
+            "percentOfRow" => Self::PercentOfRow,
+            "percentOfCol" => Self::PercentOfCol,
+            "percentOfTotal" => Self::PercentOfTotal,
+            "index" => Self::Index,
+            _ => Self::Normal,
+        }
+    }
+
+    /// Whether this mode reads a base field and a base item at all.
+    ///
+    /// The five that do not are the ones whose base is a truncation of the
+    /// cell's own key, and they are the five the first release honours
+    /// (`docs/85` §5.1).
+    #[must_use]
+    pub fn needs_base(self) -> bool {
+        matches!(
+            self,
+            Self::Difference | Self::Percent | Self::PercentDiff | Self::RunTotal
+        )
+    }
+}
+
+/// Which item of the base field a base-relative [`PivotShowAs`] measures
+/// against.
+///
+/// `@baseItem` is an item index with two reserved values above any real one,
+/// so it is a small addressing space rather than a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotBaseItem {
+    /// Excel's *(previous)*: the item before this one, in the base field's own
+    /// order.
+    Previous,
+    /// Excel's *(next)*.
+    Next,
+    /// A specific item of the base field, by index.
+    Item(u32),
+}
+
+impl PivotBaseItem {
+    /// `@baseItem`'s value when nothing is chosen.
+    ///
+    /// The schema's default (`sml.xsd:1279`), and what a
+    /// `<dataField showDataAs="percentOfTotal">` carries — see the fixture at
+    /// `crates/casual-calc-import/src/tests.rs:1679`.
+    pub const UNSET: u32 = 1_048_832;
+    /// `@baseItem`'s reserved value for *(previous)*.
+    ///
+    /// **Not verified against a file Excel wrote.** [`Self::UNSET`] is pinned
+    /// by the schema and by a fixture; these two reserved encodings are pinned
+    /// by neither. They are unreachable in the first release, because the four
+    /// modes that need a base item are refused (`docs/85` §7), and they must be
+    /// checked against a real file before any of those modes lands.
+    pub const PREVIOUS: u32 = 1_048_828;
+    /// `@baseItem`'s reserved value for *(next)*. See [`Self::PREVIOUS`] for
+    /// how far this is checked.
+    pub const NEXT: u32 = 1_048_829;
+
+    /// The number `@baseItem` carries for this choice.
+    #[must_use]
+    pub fn token(self) -> u32 {
+        match self {
+            Self::Previous => Self::PREVIOUS,
+            Self::Next => Self::NEXT,
+            Self::Item(index) => index,
+        }
+    }
+}
+
+/// The unit a [`PivotGroup`] buckets by.
+///
+/// OOXML's `ST_GroupBy` (`schemas/ooxml/sml.xsd:805`). All eight are here for
+/// the reason [`PivotShowAs`] carries all nine; the first release honours
+/// `Years`, `Quarters` and `Months`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotGroupBy {
+    /// Numeric buckets of a fixed width — Excel's *starting at / ending at /
+    /// by*. The schema's default.
+    #[default]
+    Range,
+    /// Seconds within the minute.
+    Seconds,
+    /// Minutes within the hour.
+    Minutes,
+    /// Hours within the day.
+    Hours,
+    /// Days within the year.
+    Days,
+    /// Months, pooled across years.
+    Months,
+    /// Quarters, pooled across years.
+    Quarters,
+    /// Years.
+    Years,
+}
+
+impl PivotGroupBy {
+    /// The OOXML `@groupBy` token, which is also the wire name.
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Range => "range",
+            Self::Seconds => "seconds",
+            Self::Minutes => "minutes",
+            Self::Hours => "hours",
+            Self::Days => "days",
+            Self::Months => "months",
+            Self::Quarters => "quarters",
+            Self::Years => "years",
+        }
+    }
+
+    /// Parse an OOXML `@groupBy` token. Unknown tokens fall back to
+    /// [`Self::Range`], which is the schema's own default.
+    #[must_use]
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "seconds" => Self::Seconds,
+            "minutes" => Self::Minutes,
+            "hours" => Self::Hours,
+            "days" => Self::Days,
+            "months" => Self::Months,
+            "quarters" => Self::Quarters,
+            "years" => Self::Years,
+            _ => Self::Range,
+        }
+    }
+
+    /// The name Excel gives the cache field a group level creates, as it
+    /// appears in the field list.
+    ///
+    /// `Range` has none: Excel groups a numeric field in place and the field
+    /// keeps its own name.
+    #[must_use]
+    pub fn caption(self) -> Option<&'static str> {
+        match self {
+            Self::Range => None,
+            Self::Seconds => Some("Seconds"),
+            Self::Minutes => Some("Minutes"),
+            Self::Hours => Some("Hours"),
+            Self::Days => Some("Days"),
+            Self::Months => Some("Months"),
+            Self::Quarters => Some("Quarters"),
+            Self::Years => Some("Years"),
+        }
+    }
+}
+
+/// Bucketing applied to a field's values before they are grouped by.
+///
+/// `<cacheField><fieldGroup><rangePr>`. Grouping changes an item's *key*, not
+/// its label: a month's key is the ordinal `1..12`, so ascending order is
+/// January-first rather than alphabetical. See `docs/85` §5.2.
+///
+/// As with [`PivotShowAs`], no field on [`PivotAxisField`] or
+/// [`PivotFilterField`] carries this yet; that arrives with `docs/85` §9 slice
+/// D.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotGroup {
+    /// `@groupBy`.
+    pub by: PivotGroupBy,
+    /// `@groupInterval`. Unset is the schema's `1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// `@startNum` / `@startDate`, as a serial. Unset is `@autoStart`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f64>,
+    /// `@endNum` / `@endDate`, as a serial. Unset is `@autoEnd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+}
+
+/// A field computed from the aggregated values rather than read from the
+/// source.
+///
+/// `<cacheField @formula databaseField="0">`. Excel binds each field name in
+/// the formula to the **sum** of that field over the group and applies the
+/// formula once, so `Units*Price` reports `SUM(Units) × SUM(Price)` and the
+/// column does not add up. That is what this file's `@formula` means to Excel
+/// when it is reopened, which is why it is the binding here — any other one
+/// would give a single file two answers. See `docs/85` §3.3 and §12 Q1.
+///
+/// No field on [`PivotTable`] carries these yet; that arrives with `docs/85`
+/// §9 slice E.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotCalculatedField {
+    /// The field's name, which is what the field list and the report caption
+    /// show.
+    pub name: String,
+    /// The formula text, in Excel's pivot dialect: field names and operators,
+    /// no cell references, no ranges, no defined names.
+    pub formula: String,
+    /// A number-format code applied to the results, e.g. `0.00%`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<String>,
+}
+
 /// A field placed on the row or column axis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
