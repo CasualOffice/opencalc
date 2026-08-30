@@ -825,7 +825,30 @@ grep -rn "pivotShowAs" schemas          # no matches: the 2010 modes are x14
 
 ---
 
-## 12. What this note does not decide
+## 12. Decided by the product owner, 2026-08-30
+
+Both questions below were put to the product owner and answered. They are kept
+in full rather than deleted, because a decision is only worth as much as the
+alternative it was chosen over.
+
+**Q1 is settled: Excel's binding.** Asked which to take, the answer was "do what
+our competitors use" — and for this question the two competitors do not
+disagree in a way that leaves room. Excel's binding is the one that survives the
+round trip: `<cacheField @formula>` is what we write, Excel reads it as the sum
+of the source field, and choosing anything else hands one file two answers
+depending on who opens it. Sheets' explicit-aggregate shape is what a user
+usually *means*, and it is not available to a document that has to be an `.xlsx`
+— it would need a formula language of our own and a file Excel refreshes
+differently from us. If that shape is ever wanted it is an **additional**
+feature that does not round-trip, not a different reading of this one.
+
+**Q2 is settled: three releases.** §1.2 measured the failure as a refusal rather
+than a corruption, which makes the cost a fleet cost — every unupgraded tab
+loses its session at each bump — and not a data risk. Three keeps each feature's
+wire change independently revertible, which is worth more than the two bumps it
+saves.
+
+## 12a. What this note still does not decide
 
 **Q1 — what a calculated field's operands bind to.** §5.3 decides *Excel*: every
 field name in the formula means the **sum** of that source field over the group,
