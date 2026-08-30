@@ -99,8 +99,14 @@ impl Config {
             internal_url: internal_url.trim_end_matches('/').to_owned(),
             collab_url: std::env::var("OPENCALC_COLLAB_URL")
                 .unwrap_or_else(|_| "/collab".to_owned()),
+            // `?mode=wopi` is not decoration. An editor in a frame that says
+            // nothing now defaults to `embedded` (`UX-EMBED-02`), and `wopi`
+            // and `embedded` differ on exactly one axis: `chrome`. The `wopi`
+            // preset keeps `"web"` on purpose — the editor *is* the frame and
+            // draws its own chrome, the way Office Online does — so an
+            // unmarked WOPI frame would silently lose its header.
             editor_url: std::env::var("OPENCALC_EDITOR_URL")
-                .unwrap_or_else(|_| "/editor/editor.html".to_owned()),
+                .unwrap_or_else(|_| "/editor/editor.html?mode=wopi".to_owned()),
             secret,
             audience: std::env::var("OPENCALC_AUDIENCE")
                 .unwrap_or_else(|_| "opencalc-collab".to_owned()),

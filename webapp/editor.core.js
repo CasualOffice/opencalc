@@ -948,22 +948,66 @@ const MODE_PRESETS = {
 
 export const MODES = Object.keys(MODE_PRESETS);
 
-/// The mode this page was booted in.
+/// **The mode somebody asked for, or `null` when nobody did.**
 ///
 /// Filtered against the known list rather than trusted, for the same reason
 /// `?hide=` is: it arrives on a URL, so anybody who can hand somebody a link
-/// chooses it. An unknown value falls back to `standalone` rather than to
-/// something restrictive — a typo must not silently take a user's Save away,
-/// and `standalone` is what a page with no `?mode=` at all gets.
+/// chooses it. An unknown value is not a mode, so it reads as nobody having
+/// asked, and the default below decides.
 ///
 /// `?chrome=native` is kept as an alias for `?mode=desktop`. `desktop/src/main.rs`
 /// appends it and `editor.native-chrome.spec.mjs` asserts it; a URL contract a
 /// shipped host already uses is not something to break for tidiness.
-function askedMode() {
+///
+/// "Was this chosen?" is a different question from "what is it?", and both
+/// `askedMode()` and `setMountRoot()` have to ask the first one: an explicit
+/// `?mode=` is a ceiling somebody set deliberately, and a default must never
+/// overwrite it (`UX-EMBED-02`).
+function explicitMode() {
   const asked = (PARAMS.get("mode") || "").trim().toLowerCase();
   if (MODES.includes(asked)) return asked;
   if (PARAMS.get("chrome") === "native") return "desktop";
-  return "standalone";
+  return null;
+}
+
+/// Whether this document is inside somebody else's page.
+///
+/// The frame half of the embedding question, answerable at module-eval time —
+/// which it has to be, because `capabilityModeName` is initialised from
+/// `askedMode()` on the next line but one. The shadow-root half cannot be:
+/// `<opencalc-sheet>` calls `setMountRoot()` *after* this module has finished
+/// evaluating, so that case is caught there instead.
+function insideAnotherPage() {
+  try {
+    return window.top !== window;
+  } catch {
+    // A cross-origin parent throws on access, which is itself the answer — and
+    // the answer is "yes", so the throw must not be read as "no".
+    return true;
+  }
+}
+
+/// The mode this page was booted in: what was asked for, or what the mount says.
+function askedMode() {
+  const asked = explicitMode();
+  if (asked) return asked;
+  // **An embed that says nothing is an embed, not a standalone editor.**
+  //
+  // Measured before this line existed: a framed `editor.html` and an
+  // `<opencalc-sheet>` both resolved to `standalone`, so both were
+  // byte-identical to our own page — `canOpen` true, so `File ▸ New` and
+  // `File ▸ Open` were listed *and runnable* and a visitor could replace the
+  // host's document from inside the host's own page; `canSaveAs` true, so
+  // eight download entries the host never authorised; `canShare` true, in
+  // somebody else's product, when starting a session is the host's decision;
+  // and `chrome: "web"`, so our branding strip sat inside their page.
+  //
+  // Restrictive-by-default is the opposite of the `?mode=nonsense` rule above,
+  // and deliberately so: a typo on *our* page must not take a user's Save
+  // away, but a document that belongs to a host must not be handed out on the
+  // strength of the host having said nothing. An embedder who does want the
+  // wider set asks for it — this changes the default, not the ceiling.
+  return insideAnotherPage() ? "embedded" : "standalone";
 }
 
 /// Host overrides, applied on top of the preset. Empty until a host calls
@@ -1046,12 +1090,22 @@ export function setCapabilities(partial) {
 /// `setNativeChrome` is `TAURI-004`'s, unchanged — the native bar is handed
 /// over by adding a class to the root and the nodes stay in the document.
 /// `oc-chrome-embedded` is its sibling for the third presentation.
+///
+/// **`oc-chrome-embedded` is stamped on this mount, not on the page.**
+///
+/// It used to go on `document.documentElement` unconditionally, which was
+/// harmless only while the embedded chrome was unreachable from a shadow-root
+/// mount. Now that an `<opencalc-sheet>` resolves to `embedded` by default
+/// (`UX-EMBED-02`), that `<html>` is the *host's*: the class would cross the
+/// shadow boundary in the one direction the boundary exists to prevent and
+/// hide the host's own `.app-header`. `.editor-body` is `<body>` for a page
+/// mount and the shell element for a shadow mount, and it is an ancestor of
+/// `.app-header` in both, so `.oc-chrome-embedded .app-header` still bites
+/// without the stylesheet changing.
 export function applyModeChrome() {
   setNativeChrome(capabilities.chrome === "native");
-  document.documentElement.classList.toggle(
-    "oc-chrome-embedded",
-    capabilities.chrome === "embedded",
-  );
+  const scope = ocRoot === document ? document.documentElement : qs(".editor-body");
+  scope?.classList.toggle("oc-chrome-embedded", capabilities.chrome === "embedded");
 }
 
 /// Which capability governs which command ids.
@@ -1143,10 +1197,22 @@ export let ocOverlayHost = document.body;
 export let ocThemeHost = document.documentElement;
 
 /// Point the editor at a mount root. Called by the embed wrapper before `main`.
+///
+/// **A root that is not the document decides the mode as well as the DOM.**
+/// `askedMode()` cannot see this case: it runs while this module is still
+/// evaluating, and `<opencalc-sheet>` calls this afterwards — so a shadow-root
+/// embed reached `resolveCapabilities()` as `standalone` and got every
+/// permission there is (`UX-EMBED-02`). An explicit `?mode=` still wins, for
+/// the same reason it does in `askedMode()`: this changes the default, not the
+/// ceiling.
 export function setMountRoot(root) {
   ocRoot = root;
   ocOverlayHost = root === document ? document.body : root;
   ocThemeHost = root === document ? document.documentElement : root.host;
+  if (root !== document && explicitMode() === null) {
+    capabilityModeName = "embedded";
+    capabilities = resolveCapabilities();
+  }
 }
 
 /// Whether this editor **is** the page, rather than a part of somebody else's.

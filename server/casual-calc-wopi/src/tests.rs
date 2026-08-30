@@ -215,7 +215,7 @@ async fn adapter_with_proof(key: Option<&[u8]>) -> (String, Option<Arc<crate::pr
         public_url: "http://calc.example".into(),
         internal_url: "http://wopi:8090".into(),
         collab_url: "ws://calc.example/collab".into(),
-        editor_url: "/editor/editor.html".into(),
+        editor_url: "/editor/editor.html?mode=wopi".into(),
         secret: "0123456789abcdef".into(),
         audience: "opencalc-collab".into(),
         allowed_hosts: ["127.0.0.1".to_owned()].into_iter().collect(),
