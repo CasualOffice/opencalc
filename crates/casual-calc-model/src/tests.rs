@@ -1211,3 +1211,91 @@ fn inclusive_and_negated_cf_rules_decide_their_boundaries() {
         assert!(CfRule::Between(2.0, 10.0).matches_number(n), "{n}");
     }
 }
+
+/// The provenance watermark on the string table (`FID-36`): which entries
+/// arrived with the document, and which this session interned and may therefore
+/// abandon.
+mod string_provenance {
+    use crate::{Id, StringTable, Workbook};
+
+    #[test]
+    fn a_new_table_has_preserved_nothing() {
+        let mut table = StringTable::new();
+        table.intern("typed here");
+        assert_eq!(
+            table.preserved_len(),
+            0,
+            "a string this session interned was counted as the document's"
+        );
+    }
+
+    #[test]
+    fn preserve_all_marks_what_is_there_and_nothing_after_it() {
+        let mut table = StringTable::new();
+        table.intern("from the file");
+        table.preserve_all();
+        table.intern("typed here");
+        assert_eq!(table.preserved_len(), 1);
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn the_watermark_survives_a_snapshot_round_trip() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.strings.intern("from the file");
+        wb.strings.preserve_all();
+        wb.strings.intern("typed here");
+
+        let bytes = wb.to_snapshot().expect("serialises");
+        let back = Workbook::from_snapshot(&bytes).expect("loads");
+        assert_eq!(
+            back.strings.preserved_len(),
+            1,
+            "the round trip re-labelled this session's string as the document's"
+        );
+    }
+
+    /// A snapshot written before the field existed says nothing about
+    /// provenance. The safe reading is "all of it came with the document",
+    /// which keeps strings rather than dropping them — and it is also what a
+    /// fully-preserved table serialises to, since the field is skipped then.
+    #[test]
+    fn an_older_snapshot_reads_as_entirely_preserved() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.strings.intern("a");
+        wb.strings.intern("b");
+        wb.strings.preserve_all();
+
+        let json = String::from_utf8(wb.to_snapshot().expect("serialises")).unwrap();
+        assert!(
+            !json.contains("preserved"),
+            "a wholly preserved table should not have written the field at all: {json}"
+        );
+
+        let back = Workbook::from_snapshot(json.as_bytes()).expect("loads");
+        assert_eq!(back.strings.len(), 2);
+        assert_eq!(
+            back.strings.preserved_len(),
+            2,
+            "a snapshot with no watermark must not be read as having none"
+        );
+    }
+
+    /// A watermark past the end of the table would make a writer emit entries
+    /// that are not there. A snapshot is data, so it is clamped, not trusted.
+    #[test]
+    fn a_watermark_past_the_end_is_clamped() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.strings.intern("a");
+        wb.strings.intern("b");
+        wb.strings.preserve_all();
+        wb.strings.intern("c");
+
+        let json = String::from_utf8(wb.to_snapshot().expect("serialises")).unwrap();
+        assert!(json.contains(r#""preserved":2"#), "{json}");
+        let tampered = json.replace(r#""preserved":2"#, r#""preserved":99"#);
+
+        let back = Workbook::from_snapshot(tampered.as_bytes()).expect("loads");
+        assert_eq!(back.strings.preserved_len(), 3);
+    }
+}

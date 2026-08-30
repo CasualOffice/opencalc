@@ -1676,6 +1676,15 @@ pub fn import_package_cancellable(
     // is a table needs that table already read.
     read_pivots(&mut package, &mut workbook, &mut report)?;
 
+    // Every string this file contributed is now interned — the shared table
+    // first, then the inline ones the worksheets carried. Mark them as the
+    // document's own, so a writer keeps them even when no cell refers to them
+    // (an unreferenced `<si>` is the author's, and dropping it is data loss)
+    // while anything interned from here on is this session's and may be
+    // reclaimed once nothing points at it. See `StringTable::preserve_all`
+    // and `FID-36`.
+    workbook.strings.preserve_all();
+
     workbook.validate()?;
     Ok(Import { workbook, report })
 }

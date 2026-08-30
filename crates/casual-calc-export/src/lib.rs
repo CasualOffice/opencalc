@@ -24,7 +24,7 @@ use casual_calc_formula::{Expr, column_to_letters, qualify_bound_names, qualify_
 use casual_calc_model::{
     AutoFilter, BorderEdge, Borders, Cell, CellRange, CellValue, CfRule, ConditionalFormat, DvKind,
     DvOperator, ErrorValue, FilterRule, GradientFill, HAlign, RetainedRel, RunFont, Sheet, SheetId,
-    Style, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
+    StringId, Style, Table, ThemeTint, Underline, VAlign, VertAlign, Workbook, from_micro,
 };
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -104,6 +104,93 @@ impl PackageKind {
     }
 }
 
+/// Which shared strings reach the package, and at what index (`FID-36`).
+///
+/// The model's table is append-only and a [`StringId`](casual_calc_model::StringId)
+/// *is* an index into it, so it cannot be compacted in place — the undo stack,
+/// the clipboard and a collaboration session all hold ids that would then
+/// resolve to somebody else's text. The pruning therefore happens **here**, at
+/// the moment of writing, and the model is left alone.
+///
+/// Two kinds of entry are emitted, and telling them apart is the whole of the
+/// decision:
+///
+/// - Everything **below the table's preserved watermark** arrived with the
+///   document. It is written whether or not a cell refers to it: an
+///   unreferenced `<si>` in the file somebody opened is theirs, and dropping it
+///   would be exactly the silent data loss AGENTS.md forbids. Because the whole
+///   prefix is emitted in order, these entries keep the indices they had, so
+///   anything retained verbatim that names a shared string by index still
+///   resolves.
+/// - Everything **at or above it** this session interned. Those are emitted
+///   only while a cell still refers to them, which is what stops the text of an
+///   edit that was undone — or of a formula result that was recalculated away —
+///   from reaching a file the user hands to somebody else.
+struct SharedStrings {
+    /// Model index → index in the written `<sst>`, or `None` when the entry is
+    /// not written at all.
+    emitted_at: Vec<Option<u32>>,
+    /// Model indices in written order.
+    order: Vec<u32>,
+}
+
+impl SharedStrings {
+    /// Decide the table for `workbook`. One pass over the populated cells,
+    /// skipped entirely when the workbook has interned nothing of its own.
+    fn plan(workbook: &Workbook) -> Self {
+        let len = workbook.strings.len();
+        let preserved = workbook.strings.preserved_len().min(len);
+        // Nothing this session interned, so nothing is reclaimable and the
+        // cells need not be walked: a freshly opened workbook pays nothing.
+        if preserved == len {
+            return Self {
+                emitted_at: (0..len as u32).map(Some).collect(),
+                order: (0..len as u32).collect(),
+            };
+        }
+        // Only the tail can be dropped, so only the tail is tracked — one bool
+        // per string this session interned, not one per string in the workbook.
+        let mut used = vec![false; len - preserved];
+        for sheet in &workbook.sheets {
+            for (_, cell) in sheet.cells.iter() {
+                let id = match &cell.value {
+                    CellValue::SharedString(id) | CellValue::InlineString(id) => *id,
+                    _ => continue,
+                };
+                if let Some(index) = workbook.strings.index_of(id)
+                    && (index as usize) >= preserved
+                {
+                    used[index as usize - preserved] = true;
+                }
+            }
+        }
+        let mut emitted_at = Vec::with_capacity(len);
+        let mut order = Vec::with_capacity(len);
+        for index in 0..len as u32 {
+            let keep = (index as usize) < preserved || used[index as usize - preserved];
+            if keep {
+                emitted_at.push(Some(order.len() as u32));
+                order.push(index);
+            } else {
+                emitted_at.push(None);
+            }
+        }
+        Self { emitted_at, order }
+    }
+
+    /// Whether any string reaches the package — and so whether the part, its
+    /// relationship and its content-type override are written at all.
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// The index to write in a cell's `<v>`, for a string that is emitted.
+    fn index_of(&self, workbook: &Workbook, id: StringId) -> Option<u32> {
+        let model = workbook.strings.index_of(id)? as usize;
+        *self.emitted_at.get(model)?
+    }
+}
+
 /// Serialize a workbook to a deterministic `.xlsx` package.
 ///
 /// A workbook still carrying a [VBA
@@ -136,7 +223,11 @@ pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u
         PackageKind::MacroEnabled => PackageKind::MacroEnabled,
         PackageKind::Workbook => kind,
     };
-    let has_strings = !workbook.strings.is_empty();
+    // Which strings reach the file, and at what index. Decided before anything
+    // is written, because the part, its relationship, its content-type override
+    // and every cell that names an index all have to agree about it.
+    let strings = SharedStrings::plan(workbook);
+    let has_strings = !strings.is_empty();
     // Conditional-format fills become `<dxfs>` in styles.xml, shared by dxfId
     // with the worksheet `<cfRule>`s — so styles.xml is written when there are
     // dxfs even if no cell carries a style.
@@ -217,7 +308,7 @@ pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u
     if has_strings {
         parts.push((
             "xl/sharedStrings.xml".to_owned(),
-            shared_strings_xml(workbook),
+            shared_strings_xml(workbook, &strings),
         ));
     }
     if has_styles {
@@ -233,7 +324,7 @@ pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u
     for (i, built) in chart_builds.iter().enumerate() {
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml(workbook, i, &dxfs, built, &sheet_rel_ids[i]),
+            worksheet_xml(workbook, i, &dxfs, built, &sheet_rel_ids[i], &strings),
         ));
     }
     // Comment parts: a comments part, a legacy VML drawing (so Excel renders the
@@ -1444,13 +1535,16 @@ fn workbook_rels(
     s
 }
 
-fn shared_strings_xml(workbook: &Workbook) -> String {
-    let count = workbook.strings.len();
+fn shared_strings_xml(workbook: &Workbook, strings: &SharedStrings) -> String {
+    let count = strings.order.len();
     let mut s =
         format!("{DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{count}\" uniqueCount=\"{count}\">");
-    for (i, text) in workbook.strings.iter().enumerate() {
-        let id = workbook.strings.id_at(i);
-        match id.and_then(|id| workbook.strings.runs(id)) {
+    for &index in &strings.order {
+        let Some(id) = workbook.strings.id_at(index as usize) else {
+            continue;
+        };
+        let text = workbook.strings.get(id).unwrap_or_default();
+        match workbook.strings.runs(id) {
             // Rich text: one `<r>` per run, each carrying its own `<rPr>`.
             // Writing the flattened `<t>` instead is what loses the formatting.
             Some(runs) => {
@@ -2247,6 +2341,7 @@ fn worksheet_xml(
     dxfs: &[Dxf],
     charts: &chart::SheetCharts,
     ids: &SheetRelIds,
+    strings: &SharedStrings,
 ) -> String {
     let sheet = &workbook.sheets[sheet_index];
     let mut s = format!("{DECL}<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_R}\">");
@@ -2490,7 +2585,7 @@ fn worksheet_xml(
         ));
         while cells.peek().is_some_and(|(at, _)| at.row == row) {
             let (at, cell) = cells.next().unwrap();
-            write_cell(&mut s, workbook, at.row, at.col, cell);
+            write_cell(&mut s, workbook, at.row, at.col, cell, strings);
         }
         s.push_str("</row>");
     }
@@ -2865,7 +2960,14 @@ fn cf_rule_body(cf: &ConditionalFormat, dxf_id: usize, priority: usize) -> Strin
     }
 }
 
-fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Cell) {
+fn write_cell(
+    s: &mut String,
+    workbook: &Workbook,
+    row: u32,
+    col: u32,
+    cell: &Cell,
+    strings: &SharedStrings,
+) {
     let reference = cell_a1(row, col);
     let style_attr = cell
         .style
@@ -2920,7 +3022,12 @@ fn write_cell(s: &mut String, workbook: &Workbook, row: u32, col: u32, cell: &Ce
             s.push_str(&format!("<v>{}</v>", escape_text(text)));
         }
         CellValue::SharedString(id) => {
-            let index = workbook.strings.index_of(*id).unwrap_or(0);
+            // The index in the *written* table, which is not the model's once
+            // strings this session abandoned have been left out (`FID-36`).
+            // Every cell reference is emitted by construction, so `None` here
+            // means an id that does not resolve in this workbook at all — the
+            // same case the previous code answered with 0.
+            let index = strings.index_of(workbook, *id).unwrap_or(0);
             s.push_str(&format!("<v>{index}</v>"));
         }
         CellValue::InlineString(id) => {
