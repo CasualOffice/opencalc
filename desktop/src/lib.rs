@@ -18,6 +18,7 @@
 //! this way, so the webview half of this app is code that already exists.
 
 pub mod assets;
+pub mod close;
 pub mod dialog;
 pub mod launch;
 pub mod menu;
