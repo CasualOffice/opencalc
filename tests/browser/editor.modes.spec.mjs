@@ -86,7 +86,20 @@ test("an unknown mode falls back to standalone, never to something restrictive",
 test("chrome=native still means desktop, because the shell appends it", async ({ page }) => {
   await boot(page, "?chrome=native");
   expect((await caps(page)).chrome).toBe("native");
-  await expect(page.locator("#menubar")).toBeHidden();
+  // The desktop *metrics* follow from the mode alone, which is what this test
+  // is about: `?chrome=native` is a URL contract `desktop/src/main.rs` already
+  // ships and it still resolves to the `desktop` preset.
+  await expect(page.locator(".app-header")).toBeHidden();
+
+  // **This used to assert `#menubar` was hidden, and that was the defect**
+  // (`UX-CHR-02`). Hiding the menu bar takes the File and View menus away, and
+  // in a browser nothing draws any in their place — a user was left with no
+  // menus and no route to the theme. The bar now waits for evidence that a
+  // native one exists, which a query string is not, so it is *visible* here.
+  // The evidence, and the reclaim it still triggers in the shell, are asserted
+  // in `editor.native-chrome.spec.mjs`, which can install that evidence.
+  await expect(page.locator("#menubar"), "a browser has no other menu to fall back on")
+    .toBeVisible();
 });
 
 test("the file picker itself refuses, not just the menu entry", async ({ page }) => {

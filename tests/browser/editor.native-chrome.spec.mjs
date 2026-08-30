@@ -20,6 +20,52 @@ async function boot(page, query = "") {
   await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
 }
 
+/// **A desktop shell, as far as the page can tell** (`UX-CHR-02`).
+///
+/// The gap this closes is the reason `UX-CHR-02` shipped at all. Every test in
+/// this file runs in a browser, where `?chrome=native` changes some CSS and no
+/// operating system draws anything — so a rule that hid the HTML menu bar *on
+/// the strength of the query string* looked correct here and stranded a real
+/// user, with no File menu, no View menu and no route to the theme. Nothing in
+/// the suite could observe the difference, because nothing in the suite could
+/// say "and a native menu exists".
+///
+/// `window.__opencalcNative` is what says it. `desktop/src/main.rs`'s
+/// `BOOTSTRAP` installs exactly this object and publishes the menu in the same
+/// breath, and `applyCommandRules()` already calls `publishMenu()` on it — so
+/// its presence *is* the native bar, in the product as well as here. Installed
+/// with `addInitScript` so it is there before the editor's own modules
+/// evaluate, which is where the shell's `withGlobalTauri` global would be.
+///
+/// Every function the editor may call is stubbed, not just the ones a given
+/// test needs: `#tb-open` is intercepted through `native.open`, the title
+/// poller calls `native.setDocument` every 250ms, and a missing one of those
+/// throws inside a timer where no assertion would ever see it.
+const installShell = (page) =>
+  page.addInitScript(() => {
+    window.__opencalcNativeCalls = [];
+    const record = (fn) => (...args) => {
+      window.__opencalcNativeCalls.push({ fn, args: args.length });
+      return Promise.resolve(null);
+    };
+    window.__opencalcNative = {
+      open: record("open"),
+      save: record("save"),
+      saveTarget: record("saveTarget"),
+      clearSaveTarget: record("clearSaveTarget"),
+      setDocument: record("setDocument"),
+      syncCapabilities: record("syncCapabilities"),
+      publishMenu: record("publishMenu"),
+    };
+  });
+
+/// The editor as the desktop shell actually presents it: the query string the
+/// shell's `tauri.conf.json` navigates to, *and* the bridge it injects.
+async function bootShell(page, query = "?chrome=native") {
+  await installShell(page);
+  await boot(page, query);
+}
+
 const model = (page) => page.evaluate(() => window.opencalcEditor.menuModel());
 
 test("the menu model describes the whole menu bar", async ({ page }) => {
@@ -65,23 +111,25 @@ test("every command in the model can be dispatched", async ({ page }) => {
   expect(unknown, "no id in the model is unknown to runCommand").toEqual([]);
 });
 
-test("chrome=native hides the HTML bar and gives the height to the grid", async ({ page }) => {
+test("the shell's chrome hides the HTML bar and gives the height to the grid", async ({ page }) => {
   await boot(page);
   const webGrid = await page.locator("#grid").boundingBox();
   const barHeight = await page.evaluate(() => document.getElementById("menubar").getBoundingClientRect().height);
   expect(barHeight, "there is a bar to reclaim").toBeGreaterThan(20);
 
-  await boot(page, "?chrome=native");
+  await bootShell(page);
   await expect(page.locator("#menubar")).toBeHidden();
   const nativeGrid = await page.locator("#grid").boundingBox();
 
   // Not merely hidden — the space it occupied goes to the sheet, which is the
   // only reason a desktop app hiding its own menu bar is an improvement.
+  // `UX-DESK-01`'s reclaim is not up for reversal by `UX-CHR-02`; what changed
+  // is who is allowed to trigger it.
   expect(nativeGrid.height, "the grid grows by roughly the bar").toBeGreaterThan(webGrid.height + barHeight - 4);
 });
 
 test("commands still run when the operating system owns the menu", async ({ page }) => {
-  await boot(page, "?chrome=native");
+  await bootShell(page);
   await expect(page.locator("#menubar")).toBeHidden();
 
   // The native menu dispatches by id into a bar the user cannot see. If hiding
@@ -158,11 +206,15 @@ test("the branding strip is gone and Settings still opens from the menu", async 
   expect(panel.onScreen, "and inside the window, not off an edge").toBe(true);
   expect(panel.parent, "it no longer lives inside the header that would hide it").not.toBe("settings");
 
-  // Usable, not merely visible. Applying a theme is the panel's whole point.
-  await page.selectOption("#set-theme", "dark");
+  // Usable, not merely visible. The theme control this used to drive has moved
+  // to `View ▸ Theme` (`UX-CHR-01`), so the panel is exercised through a
+  // setting it still owns — the claim is that a dialog opened from a menu with
+  // no gear on screen is a working dialog, not that any one control is in it.
+  await page.locator('#set-accent button[data-c="#16a34a"]').click();
   await expect
-    .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
-    .toBe("dark");
+    .poll(() => page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue("--oc-accent-color").trim()))
+    .toBe("#16a34a");
 });
 
 /// The same panel, in the page, must not have moved to look at.
@@ -221,32 +273,119 @@ test("the collaborator roster is still visible when the OS draws the menu", asyn
     .toBeLessThan(40);
 });
 
-/// **A native toolbar is tighter than a web one.**
+/// **A native toolbar is tighter than a web one — and tighter is not smaller.**
 ///
 /// LibreOffice's toolbar icons are 16/24/32 with 24 the default, and a platform
 /// menu bar is ~20-24px; the one tall band in the set, Excel's ribbon, ships
-/// with three documented ways to collapse it. Asserted as a comparison rather
-/// than against pixel constants, so a redesign of the page's own metrics is not
-/// a false failure here — the invariant is that the desktop is denser, not that
-/// it is 36px.
+/// with three documented ways to collapse it. Asserted as a *comparison*
+/// throughout, so a redesign of the page's own metrics is not a false failure
+/// here — the invariant is the relationship between the two chromes, not that
+/// the toolbar is any particular number of pixels.
+///
+/// **Both ends are pinned, because only one end used to be.** The first cut of
+/// this asserted `native < web` and `grid > web + 90` and nothing else, so it
+/// was satisfied by a toolbar of any size at all down to zero — and the metric
+/// it passed on put 26px buttons in a desktop window, smaller than LibreOffice
+/// (~26-30), well under OnlyOffice (32-36), and under the ~28px mark where a
+/// mouse target starts needing aim. The floors below are what the next person
+/// tidying these numbers has to argue with.
+const BANDS = [".toolbar", ".formula-bar", ".bottom-bar"];
+
+/// Controls the native metrics resize, and the text they carry. Measured by
+/// selector in both chromes and compared element for element.
+const NATIVE_CONTROLS = [
+  ".toolbar .tb-btn",
+  ".toolbar .tb-select",
+  ".toolbar input.tb-font",
+  ".toolbar input.tb-size",
+  "#formula-input",
+  "#cell-ref",
+  ".sheet-tab",
+];
+const NATIVE_TEXT = [
+  "#formula-input", "#cell-ref", ".sheet-tab", "#tb-status",
+  ".toolbar .tb-select", ".toolbar input.tb-font", ".toolbar input.tb-size", "#zoom-level",
+];
+
 test("desktop chrome is denser than the page's, and the sheet gets the difference", async ({ page }) => {
-  const bands = () =>
-    page.evaluate(() => {
+  // Wide enough that no toolbar group has collapsed into a flyout, or half
+  // these controls measure 0x0 because they are not on the bar at all.
+  await page.setViewportSize({ width: 1600, height: 900 });
+
+  const metrics = () =>
+    page.evaluate(({ bands, controls, text }) => {
       const h = (sel) => document.querySelector(sel).getBoundingClientRect().height;
-      return { toolbar: h(".toolbar"), formula: h(".formula-bar"), bottom: h(".bottom-bar"), grid: h("#grid") };
-    });
+      const box = {};
+      for (const sel of controls) {
+        const el = document.querySelector(sel);
+        const r = el?.getBoundingClientRect();
+        if (r && r.height > 0) box[sel] = { w: r.width, h: r.height };
+      }
+      const type = {};
+      for (const sel of text) {
+        const el = document.querySelector(sel);
+        if (el) type[sel] = parseFloat(getComputedStyle(el).fontSize);
+      }
+      return {
+        band: Object.fromEntries(bands.map((s) => [s, h(s)])),
+        grid: h("#grid"),
+        box,
+        type,
+      };
+    }, { bands: BANDS, controls: NATIVE_CONTROLS, text: NATIVE_TEXT });
 
   await boot(page);
-  const web = await bands();
-  await boot(page, "?chrome=native");
-  const native = await bands();
+  const web = await metrics();
+  await bootShell(page);
+  const native = await metrics();
 
-  expect(native.toolbar, "the toolbar is tighter").toBeLessThan(web.toolbar);
-  expect(native.formula, "so is the formula bar").toBeLessThan(web.formula);
-  expect(native.bottom, "so is the status bar").toBeLessThan(web.bottom);
+  // --- Denser, still. The claim `UX-DESK-01` was right about. ---------------
+  for (const sel of BANDS) {
+    expect(native.band[sel], `${sel} is not tighter than the page's`).toBeLessThan(web.band[sel]);
+  }
   // The header (53px) and the menu bar (30px), plus the band savings. Asserted
   // loosely, because the exact number is a metric and the claim is not.
   expect(native.grid - web.grid, "and every pixel of it goes to the sheet").toBeGreaterThan(90);
+
+  // --- And not smaller than the applications it sits beside. ----------------
+  //
+  // A floor as a *proportion* of the page's own band: dense, and never dense by
+  // more than a fifth. 82% rather than a pixel count so this survives a redesign
+  // of the web metrics, which is the same reason the line above is a comparison.
+  for (const sel of BANDS) {
+    const ratio = native.band[sel] / web.band[sel];
+    expect(ratio, `${sel} shrank to ${(ratio * 100).toFixed(1)}% of the page's — ` +
+      `${native.band[sel]}px against ${web.band[sel]}px`).toBeGreaterThanOrEqual(0.82);
+  }
+
+  // **No pointer target is under 28px unless it already was in the page.**
+  //
+  // Written as `min(web, 28)` rather than a flat 28 so this cannot fail for a
+  // control the *web* chrome also draws small — the claim is about what desktop
+  // density is allowed to take away, not about the editor's whole control set.
+  const measured = Object.keys(native.box);
+  expect(measured.length, "nothing was measurable; the selectors have moved")
+    .toBeGreaterThanOrEqual(NATIVE_CONTROLS.length - 1);
+  for (const sel of measured) {
+    if (!web.box[sel]) continue;
+    const floor = Math.min(web.box[sel].h, 28);
+    expect(native.box[sel].h, `${sel} is ${native.box[sel].h}px in a desktop window ` +
+      `(${web.box[sel].h}px in the page) — under the ~28px a mouse needs`)
+      .toBeGreaterThanOrEqual(floor);
+  }
+
+  // **Density is a box metric. It may not shrink type at all.**
+  //
+  // Worth an assertion because the reported complaint was "too small" and the
+  // obvious suspect — the font — turned out never to have moved: every one of
+  // these carried its web size already, bar the font-name and font-size fields,
+  // which lost half a pixel to a `font-size: 12px` that bought nothing. Small
+  // *text* is what "too small" usually means, so this is the half of the
+  // invariant that is easiest to break by accident.
+  for (const [sel, size] of Object.entries(native.type)) {
+    expect(size, `${sel} renders ${size}px in a desktop window and ${web.type[sel]}px in the page`)
+      .toBeGreaterThanOrEqual(web.type[sel]);
+  }
 });
 
 /// **A mode can be turned off again.**
@@ -268,4 +407,391 @@ test("leaving desktop chrome puts the moved nodes back", async ({ page }) => {
     await page.evaluate(() => !!document.querySelector("#menubar #presence")),
     "so did the roster",
   ).toBe(true);
+});
+
+
+// --- The desktop menu speaks the platform's vocabulary (`TAURI-009`) ----------
+//
+// Reported from the desktop build: it offers **"Download ▸ Excel"** where every
+// desktop application on every platform says *Save As*. Downloading is what a
+// browser does — bytes land in a folder the user did not choose and the
+// document has no home to go back to. A desktop app writes a file.
+//
+// The menu is derived from one `MENUS` literal, so the fix is one tree with two
+// vocabularies rather than a second definition of the File menu. What makes
+// that safe is that **the id does not move**: `commandId()` builds ids from the
+// English label, the native shell dispatches `file.download.excel-xlsx` and
+// nothing else, hosts name those ids in `setCommandRules`, and
+// `CAPABILITY_COMMANDS` governs the export entries with `/^file\.download/`.
+// Renaming the menu must not rename the command, or `canSaveAs` quietly stops
+// applying to the entries it exists to gate — which is why one test below
+// withholds the permission in the renamed mode and looks.
+
+/// Every label in the model, flattened, so "no entry says Download" can be
+/// asserted over the whole tree rather than over the entries we thought of.
+const labels = (page) =>
+  page.evaluate(() => {
+    const out = [];
+    const walk = (items) => {
+      for (const i of items) {
+        if (i.kind === "separator") continue;
+        out.push(i.label);
+        if (i.kind === "submenu") walk(i.items);
+      }
+    };
+    for (const m of window.opencalcEditor.menuModel()) { out.push(m.label); walk(m.items); }
+    return out;
+  });
+
+/// The File menu as label/id pairs, which is the shape both halves of this turn
+/// on: the wording a user reads, and the id the shell dispatches.
+const fileMenu = (page) =>
+  page.evaluate(() => {
+    const file = window.opencalcEditor.menuModel().find((m) => m.label === "File");
+    const out = [];
+    const walk = (items, depth) => {
+      for (const i of items) {
+        if (i.kind === "separator") continue;
+        out.push({ depth, label: i.label, id: i.id });
+        if (i.kind === "submenu") walk(i.items, depth + 1);
+      }
+    };
+    walk(file.items, 0);
+    return out;
+  });
+
+/// **No entry in a desktop window says Download.**
+test("the desktop menu says Save and Export, never Download", async ({ page }) => {
+  await boot(page, "?chrome=native");
+  const file = await fileMenu(page);
+  const top = file.filter((i) => i.depth === 0).map((i) => i.label);
+
+  expect(top.slice(0, 4), `File read ${JSON.stringify(top)}`)
+    .toEqual(["New", "Open…", "Save", "Export"]);
+  // `Ctrl+S` has committed the document to its own file since `SAVE-02` and was
+  // reachable by that chord alone. A desktop application whose File menu offers
+  // no Save is one a user concludes cannot save.
+  expect(file.find((i) => i.id === "file.save").label).toBe("Save");
+  // And the one entry under Export that is not a conversion — it writes the
+  // document back in the kind of file it came from — is named for that.
+  expect(file.find((i) => i.id === "file.download.same-format-as-opened").label)
+    .toBe("Save a copy…");
+
+  const said = (await labels(page)).filter((l) => /download/i.test(l));
+  expect(said, "a desktop window used the browser's word for writing a file").toEqual([]);
+});
+
+/// **The web build keeps saying Download, because that is what happens there.**
+///
+/// The inverse defect, and the one a careless fix introduces: in a browser tab
+/// there is no file to commit to, so an entry labelled *Save* would be the
+/// desktop vocabulary leaking the other way. `file.save` is therefore absent
+/// from the web menu entirely — and absent means unrunnable, not merely
+/// unlisted, which is the rule `runCommand` already keeps for a hidden id.
+test("the web build still says Download, and has no Save to mislead with", async ({ page }) => {
+  await boot(page);
+  const file = await fileMenu(page);
+  const top = file.filter((i) => i.depth === 0).map((i) => i.label);
+
+  expect(top.slice(0, 3)).toEqual(["New", "Open…", "Download"]);
+  expect(top, "a browser tab has no file to save to").not.toContain("Save");
+  expect(file.find((i) => i.id === "file.download.same-format-as-opened").label)
+    .toBe("Same format as opened");
+
+  expect(await page.evaluate(() => window.opencalcEditor.listCommands()))
+    .not.toContain("file.save");
+  const refused = await page.evaluate(() => {
+    try { window.opencalcEditor.runCommand("file.save"); return "it ran"; }
+    catch (e) { return e.message; }
+  });
+  expect(refused, "hidden in the menu and runnable from a script is not hidden")
+    .toMatch(/not available in this mode/);
+});
+
+/// **The wording moved; the ids did not.**
+///
+/// The whole hazard of relabelling a menu whose ids are derived from its
+/// labels. Asserted twice over, because the second half is what catches a fix
+/// that renamed the command as well: the ids are still `file.download.*`, *and*
+/// `canSaveAs` — whose only pattern for these is `/^file\.download/` — still
+/// takes every one of them away in a native window.
+test("renaming Download to Export does not rename the commands it gates", async ({ page }) => {
+  await boot(page, "?chrome=native");
+
+  const file = await fileMenu(page);
+  expect(file.find((i) => i.label === "Export").id).toBe("file.download");
+  expect(file.filter((i) => i.depth === 1).map((i) => i.id)).toEqual([
+    "file.download.same-format-as-opened",
+    "file.download.excel-xlsx",
+    "file.download.excel-macro-enabled-xlsm",
+    "file.download.opendocument-ods",
+    "file.download.csv-csv",
+    "file.download.tab-separated-tsv",
+    "file.download.pipe-separated-psv",
+  ]);
+
+  // A host withholding the permission, in the mode where the menu is renamed.
+  await page.evaluate(() => window.opencalcEditor.setCapabilities({ canSaveAs: false }));
+  const withheld = (await fileMenu(page)).map((i) => i.id);
+  expect(withheld.filter((id) => /^file\.download/.test(id)),
+    "Export survived a mode that forbids taking a copy out").toEqual([]);
+  expect(withheld, "Save survived it too").not.toContain("file.save");
+});
+
+/// **Leaving desktop chrome puts the web wording back.**
+///
+/// `setCapabilities({ mode })` is a host surface and every other part of this
+/// relocation is reversible; a one-way rename would leave a browser tab saying
+/// "Export" the moment anything had switched modes.
+test("leaving desktop chrome restores the browser's wording", async ({ page }) => {
+  await boot(page, "?chrome=native");
+  expect((await fileMenu(page)).find((i) => i.id === "file.download").label).toBe("Export");
+
+  await page.evaluate(() => window.opencalcEditor.setCapabilities({ mode: "standalone" }));
+  const web = await fileMenu(page);
+  expect(web.find((i) => i.id === "file.download").label).toBe("Download");
+  expect(web.find((i) => i.id === "file.download.same-format-as-opened").label)
+    .toBe("Same format as opened");
+  expect(web.map((i) => i.id), "Save stayed in a window with no file").not.toContain("file.save");
+
+  await page.evaluate(() => window.opencalcEditor.setCapabilities({ mode: "desktop" }));
+  expect((await fileMenu(page)).find((i) => i.id === "file.download").label).toBe("Export");
+});
+
+
+// --- Theme is a display option, and the strip is not a toolbar (`UX-CHR-01`) --
+//
+// Two placement defects reported from a running editor, both with an answer
+// already in the product.
+//
+// Theme was a `<select>` inside the settings gear popover: two clicks, in the
+// title area, and a different mental model from the four display toggles that
+// sit directly above it in the View menu — Gridlines, Cell markings, Formulas
+// instead of results, Zero values. Excel and Sheets both put the appearance
+// control in a View menu and neither hides it behind a gear.
+//
+// `#hdr-open` was a folder icon in the branding strip that clicked the same
+// picker `File ▸ Open` does. A branding strip carries identity and document
+// state; an action there duplicates a menu item and makes the region a toolbar.
+// It is also the control `UX-DESK-05` found still *listed* by `listCommands()`
+// in desktop chrome, where the strip is not drawn at all — the list naming a
+// command with nothing to click.
+
+/// Theme's own corner of the View menu, as the model reports it.
+const themeSub = (page) =>
+  page.evaluate(() => {
+    const view = window.opencalcEditor.menuModel().find((m) => m.label === "View");
+    const sub = view.items.find((i) => i.id === "view.theme");
+    return {
+      present: !!sub,
+      items: sub ? sub.items.map((i) => ({ label: i.label, id: i.id, checked: i.checked })) : [],
+      rendered: document.documentElement.dataset.theme ?? null,
+    };
+  });
+
+/// **Theme is in View, it works from there, and the tick follows the choice.**
+///
+/// The last assertion is the one a half-fix fails: a menu that applies a theme
+/// but reads its tick back from `document.documentElement.dataset.theme` cannot
+/// tell Auto from Light — that attribute is absent for both — so it would mark
+/// Light in a window the user had set to Auto.
+test("Theme is a View menu option and its tick follows the choice", async ({ page }) => {
+  await boot(page);
+
+  const at = await themeSub(page);
+  expect(at.present, "Theme is not in the View menu").toBe(true);
+  expect(at.items.map((i) => i.label)).toEqual(["Auto", "Light", "Dark"]);
+  expect(at.items.filter((i) => i.checked).map((i) => i.label), "a fresh editor is on Auto")
+    .toEqual(["Auto"]);
+
+  // Run it the way the operating system's own menu would.
+  expect(await page.evaluate(() => window.opencalcEditor.runCommand("view.theme.dark"))).toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+    .toBe("dark");
+  const dark = await themeSub(page);
+  expect(dark.items.filter((i) => i.checked).map((i) => i.label),
+    "exactly one theme is ticked, and it is the chosen one").toEqual(["Dark"]);
+
+  // Back to Auto, whose rendered state is indistinguishable from Light on a
+  // light host: the tick has to come from the choice, not from the screen.
+  await page.evaluate(() => window.opencalcEditor.runCommand("view.theme.auto"));
+  const auto = await themeSub(page);
+  expect(auto.rendered, "Auto stamps nothing, which is why it cannot be read back").toBe(null);
+  expect(auto.items.filter((i) => i.checked).map((i) => i.label),
+    "Auto was not ticked, or Light was ticked in its place").toEqual(["Auto"]);
+});
+
+/// **Moved, not copied.** Two controls for one setting drift apart, and this
+/// pair would have: the `<select>` was the only thing that knew the chosen
+/// value, so a theme picked from the menu would have left it showing the
+/// previous one — a settings panel stating the opposite of the current theme.
+test("the settings popover no longer carries a second theme control", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => window.opencalcEditor.runCommand("tools.settings"));
+  await expect(page.locator("#settings-panel")).toBeVisible();
+
+  expect(await page.locator("#set-theme").count(), "two controls for one setting").toBe(0);
+  // The panel still holds the settings that have no menu home, which is what
+  // makes the assertion above mean "theme left" rather than "the panel broke".
+  await expect(page.locator("#set-scroll")).toBeVisible();
+  await expect(page.locator("#set-accent")).toBeVisible();
+});
+
+// --- A query string is a request, not a menu (`UX-CHR-02`) -------------------
+//
+// Reported by a user running the editor: *"it doesn't have header as well as
+// file menus .. and no way on screen to change theme"*.
+//
+// `UX-DESK-01` hid the branding strip **and** the menu bar on `.oc-chrome-native`
+// alone, which `?chrome=native` sets from the URL. Inside the Tauri shell that
+// is right: the operating system draws a menu bar in its place. In an ordinary
+// browser nothing does, so the same query string produced a window with no File
+// menu, no View menu, and — the appearance control being a `<select>` inside the
+// gear that lived in the strip — no way to reach the theme at all.
+//
+// **The rule is that hiding a menu requires evidence another menu exists.** The
+// evidence is the shell's own bridge, not a request on a URL. These are the
+// tests that could not have been written before `installShell()`, and their
+// absence is exactly why this shipped: run in a browser, `?chrome=native`
+// changes CSS and nothing can tell you whether a native bar took over.
+
+/// **Asking for desktop chrome does not take the menus away.**
+test("chrome=native in a browser keeps its menu bar, because nothing replaced it", async ({ page }) => {
+  await boot(page, "?chrome=native");
+
+  await expect(page.locator("#menubar"), "the menus went and nothing drew any")
+    .toBeVisible();
+  const onBar = await page.evaluate(() =>
+    [...document.querySelectorAll(".menubar button.menu-top")]
+      .filter((b) => !b.hidden && b.getBoundingClientRect().height > 0)
+      .map((b) => b.textContent.trim()));
+  expect(onBar, "File is not on the bar").toContain("File");
+  expect(onBar, "View is not on the bar").toContain("View");
+
+  // The density half of desktop chrome is still applied — this is not a revert
+  // of `UX-DESK-01`, it is a split of what that row bundled together.
+  await expect(page.locator(".app-header")).toBeHidden();
+  expect(await page.evaluate(() => document.querySelector(".toolbar").getBoundingClientRect().height))
+    .toBeLessThan(49);
+
+  // **And the bar the fix put back may not carry a control that cannot act.**
+  //
+  // `#hdr-collapse` collapses the page header, and it lives in the menu bar —
+  // so while the bar was hidden too, nobody could see that this chrome has no
+  // header for it to collapse. Measured before it was hidden: the caret was on
+  // screen offering "Hide the page header", the header was already 0px, and
+  // clicking it moved the grid by 0px while relabelling itself "Show the page
+  // header". That is the `header.open` defect again, uncovered by fixing this
+  // one — which is the reason to assert it here rather than trust the CSS.
+  await expect(page.locator("#hdr-collapse"), "a caret that collapses a header this chrome does not draw")
+    .toBeHidden();
+});
+
+/// **The shell still gets its bar back, and the sheet still gets the height.**
+///
+/// The other half of the same claim: the fix must not be "never hide the menu
+/// bar", which would undo `UX-DESK-01` rather than correct it.
+test("the shell's bridge is the evidence that hides the bar", async ({ page }) => {
+  await boot(page, "?chrome=native");
+  const withoutShell = await page.evaluate(() => ({
+    barSeen: document.getElementById("menubar").getBoundingClientRect().height > 0,
+    grid: document.querySelector("#grid").getBoundingClientRect().height,
+  }));
+
+  await bootShell(page);
+  const withShell = await page.evaluate(() => ({
+    barSeen: document.getElementById("menubar").getBoundingClientRect().height > 0,
+    grid: document.querySelector("#grid").getBoundingClientRect().height,
+  }));
+
+  expect(withoutShell.barSeen, "a browser keeps the bar").toBe(true);
+  expect(withShell.barSeen, "the shell does not").toBe(false);
+  expect(withShell.grid - withoutShell.grid, "and the bar's height goes to the sheet")
+    .toBeGreaterThan(20);
+});
+
+/// **The theme is reachable on screen in every chrome.**
+///
+/// Location is not the promise; `UX-CHR-01` moved theme into the View menu, and
+/// that only helps if a View menu is on screen — which in `?chrome=native` it
+/// was not. So this asserts *reachability*: in each chrome, find a control a
+/// pointer can actually get to, click through to it, and watch the theme change.
+/// A rule that hides whatever holds it fails here rather than in a user report.
+for (const [name, how] of [
+  ["the page", (page) => boot(page)],
+  ["a browser asked for desktop chrome", (page) => boot(page, "?chrome=native")],
+  ["the desktop shell", (page) => bootShell(page)],
+]) {
+  test(`the theme can be changed on screen in ${name}`, async ({ page }) => {
+    await how(page);
+
+    const route = await page.evaluate(() => {
+      // Visible means painted and inside the window, not merely attached: the
+      // defect was a control that existed in a `display: none` ancestor.
+      const shown = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0;
+      };
+      // The HTML menu bar, when the editor is drawing one...
+      const view = [...document.querySelectorAll(".menubar button.menu-top")]
+        .find((b) => b.dataset.ocLabel === "View");
+      if (shown(view)) return "menubar";
+      // ...or the operating system's.
+      //
+      // **`menuModel()` alone is not evidence of a route, and this is the trap
+      // the first draft of this test fell into.** The model is derived from the
+      // DOM and a CSS-hidden ancestor does not remove a node from it, so a
+      // browser with the bar hidden reports a complete View menu that nothing
+      // is drawing — and the test passed against the exact defect it was
+      // written for. A native menu counts only when something is there to draw
+      // it, which is the same evidence `applyModeChrome()` requires.
+      const drawnNatively = !!(window.__opencalcNative || window.__TAURI__);
+      const model = window.opencalcEditor.menuModel().find((m) => m.label === "View");
+      const theme = model?.items.find((i) => i.id === "view.theme");
+      if (drawnNatively && theme && theme.items.length === 3) return "native-menu";
+      return "nowhere";
+    });
+    expect(route, "there is no route to the theme in this chrome").not.toBe("nowhere");
+
+    // Reached, not merely listed. `runCommand` refuses an id the rules have
+    // hidden, so this fails if the entry is present-but-unreachable.
+    expect(await page.evaluate(() => window.opencalcEditor.runCommand("view.theme.dark"))).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+      .toBe("dark");
+  });
+}
+
+/// **The branding strip carries identity and state, and no file action.**
+///
+/// And the id goes with the button: `listCommands()` is derived from the live
+/// DOM, so deleting the control is what makes the list stop naming it. That is
+/// `UX-DESK-05` settled in the direction that keeps "listed implies reachable
+/// by pointer" true, rather than the one that keeps the id and hides it.
+test("the branding strip holds no file action, in either chrome", async ({ page }) => {
+  await boot(page);
+
+  const inStrip = await page.evaluate(() =>
+    [...document.querySelector(".app-header").querySelectorAll("[data-oc-command]")]
+      .map((n) => n.dataset.ocCommand));
+  expect(inStrip.filter((id) => /^file\.|^header\./.test(id)),
+    `the strip is a toolbar again: ${JSON.stringify(inStrip)}`).toEqual([]);
+  expect(await page.locator("#hdr-open").count(), "the folder icon is back in the strip").toBe(0);
+
+  for (const query of ["", "?chrome=native"]) {
+    if (query) await boot(page, query);
+    const ids = await page.evaluate(() => window.opencalcEditor.listCommands());
+    expect(ids, `header.open is listed in ${query || "the page"} with nothing to click`)
+      .not.toContain("header.open");
+    const refused = await page.evaluate(() => {
+      try { window.opencalcEditor.runCommand("header.open"); return "it ran"; }
+      catch (e) { return e.message; }
+    });
+    expect(refused).toMatch(/unknown OpenCalc command/);
+    // Opening a file has not been taken away — only the second route to it.
+    expect(ids).toContain("file.open");
+  }
 });

@@ -1877,11 +1877,16 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
  *     with the header — it is **moved into the status bar** by
  *     `placeNativeChrome()`, one node in two places rather than two nodes that
  *     can disagree.
- *  3. **Bands are dense.** A menu bar is ~20–24px (24pt on macOS, `SM_CYMENU`
- *     on Windows); LibreOffice's toolbar icons are 16/24/32 with 24 the default.
- *     The one genuinely tall band in the set — Excel's ribbon — ships with three
- *     documented ways to collapse it. Our 48px toolbar of 30px pills with 10px
- *     gutters is a web control strip; below it is the native metric.
+ *  3. **Bands are dense — and dense is not small.** A menu bar is ~20–24px
+ *     (24pt on macOS, `SM_CYMENU` on Windows); LibreOffice's toolbar icons are
+ *     16/24/32 with 24 the default. The one genuinely tall band in the set —
+ *     Excel's ribbon — ships with three documented ways to collapse it. Our
+ *     49px toolbar of 30px pills with 10px gutters is a web control strip.
+ *     The first cut of the native metric went past dense into *smaller than
+ *     anything it sits beside* — 26px buttons, under LibreOffice's ~26–30 and
+ *     well under OnlyOffice's 32–36 — and the numbers below are the corrected
+ *     ones. The argument for the correction, and the measurement that showed
+ *     the type had never shrunk at all, are on the metrics block itself.
  *  4. **Settings is a dialog reached from a menu.** File ▸ Options (Excel),
  *     Tools ▸ Options… (LibreOffice), File ▸ Advanced Settings (OnlyOffice).
  *     None of the three has a gear in a corner. See `.settings-panel` above.
@@ -1897,14 +1902,33 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 /* The operating system is drawing the menu. The bar's nodes stay in the
    document — runCommand dispatches by clicking them, and the drops live in the
    overlay host anyway — but the strip itself gives its height to the sheet,
-   which is the only reason hiding it is an improvement rather than a loss. */
-.oc-chrome-native #menubar { display: none; }
+   which is the only reason hiding it is an improvement rather than a loss.
+
+   **Two classes, and the second one is the point** (`UX-CHR-02`). This used to
+   be `.oc-chrome-native` alone, so it fired on `?chrome=native` in an ordinary
+   browser — where nothing draws a menu in its place. The result was a window
+   with no File menu, no View menu and, since the appearance control then lived
+   in the gear inside the branding strip this file also hides, no route to the
+   theme at all. `.oc-native-menu` is stamped by `applyModeChrome()` only once
+   the shell has proved it exists; asking for desktop chrome is not proof.
+   Everything below this line is a *metric* and needs no such evidence. */
+.oc-chrome-native.oc-native-menu #menubar { display: none; }
 
 /* (1) The branding strip. `#settings-panel` used to live inside this and no
    longer does, which is the whole reason this line is possible — see the
    comment on `.settings-panel`. `#tb-status` and `#presence` are moved out by
    `placeNativeChrome()` before this hides what is left. */
 .oc-chrome-native .app-header { display: none; }
+
+/* And the caret that collapses it. **Found by looking, once `UX-CHR-02` put the
+   menu bar back on screen in this chrome**: `#hdr-collapse` lives in the menu
+   bar, so while that bar was also hidden nobody could see that the caret had
+   nothing left to do. Measured — the header is already 0px tall here, and
+   clicking it moved the grid by exactly nothing while relabelling itself "Show
+   the page header" for a header this chrome does not have. Same defect as the
+   branding strip's Open button on the row above: a control that is listed and
+   visible and cannot act. */
+.oc-chrome-native #hdr-collapse { display: none; }
 
 /* (2) The status bar carries the engine/document line, in the position Excel's
    mode indicator and LibreOffice's modification flag occupy. `max-width` is
@@ -1934,30 +1958,73 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    a 1280px status bar, adjacent to nothing — and no assertion in the suite
    could see it. Zoom is the only claimant. */
 .oc-chrome-native .bottom-bar .presence { margin-left: 0; }
-.oc-chrome-native .bottom-bar .presence .presence-btn { height: 20px; }
+/* There was a `height: 20px` here. `.presence-btn` is **22px in the page**, so
+   that override made the roster chip smaller in a desktop window than in a
+   browser tab — the third instance of the same slip as the sheet tabs, and one
+   more control shrunk past the thing it was being compared against. Removed
+   rather than restated at 22: a rule that sets a property to the value it
+   already has is a rule the next reader has to check. */
 
-/* (3) Native metrics. 26px controls in a 36px band, against 30px in 48px — the
-   16px icon is unchanged, because LibreOffice's *small* icon is 16 and shrinking
-   the glyph as well would trade a dense toolbar for an unreadable one. */
-.oc-chrome-native .toolbar { height: 36px; gap: 6px; padding: 0 8px; }
+/* (3) Native metrics. **Dense, and then one step too dense** (`UX-DESK-01`,
+   corrected here).
+ *
+ * The first pass put 26px controls in a 36px band and took the toolbar,
+ * formula bar and status bar from 49/41/41 down to 37/33/31 — +114px of sheet,
+ * 19% more grid, and a desktop window whose buttons were smaller than any
+ * application it is meant to sit beside. Measured against the field rather than
+ * against taste: OnlyOffice's desktop toolbar buttons run 32–36px, Excel's
+ * ribbon is larger again, and LibreOffice — the smallest of the three —
+ * defaults to 24px icons in buttons of roughly 26–30px. 26 was under all of
+ * them, and under the ~28px mark where a *mouse* target starts needing aim.
+ * That is not the 44px touch rule, which is a different band and lives under
+ * `@media (pointer: coarse)` below; it is the desktop floor.
+ *
+ * So the controls come back to **28px** — the bottom of the comfortable range
+ * rather than below it — and each band is sized to hold one with a visible
+ * gutter: 42/36/35 against the page's 49/41/41. Still 85% of the web metric in
+ * every band, still 102px more sheet than a browser tab, and no longer the
+ * smallest toolbar on the machine.
+ *
+ * **The type was never the problem, and this was worth measuring before
+ * assuming it.** In the first pass the formula input, the name box, the sheet
+ * tabs, the status line and the zoom readout all kept their web font size
+ * exactly; the *only* text that shrank was the font-name and font-size fields,
+ * by half a pixel. So there is no `font-size` here at all now — the desktop and
+ * the page share one type scale and differ only in box metrics, which is what
+ * "one editor with two densities" is supposed to mean. `editor.native-chrome`
+ * asserts it, per element: nothing in this chrome may render smaller text than
+ * the same thing renders in the page.
+ *
+ * The 16px icon is unchanged, because LibreOffice's *small* icon is 16 and
+ * shrinking the glyph as well would trade a dense toolbar for an unreadable
+ * one. Heights are one less than the rendered band: each of these carries a 1px
+ * border that `box-sizing` does not fold in. */
+.oc-chrome-native .toolbar { height: 41px; gap: 6px; padding: 0 8px; }
 .oc-chrome-native .toolbar .tb-btn, .oc-chrome-native .toolbar .tb-file {
-  width: 26px; height: 26px; border-radius: 6px;
+  width: 28px; height: 28px; border-radius: 6px;
 }
 .oc-chrome-native .toolbar .tb-group { gap: 1px; padding: 1px; border-radius: 8px; }
 .oc-chrome-native .toolbar .tb-group.controls { gap: 4px; }
 .oc-chrome-native .toolbar .tb-select,
 .oc-chrome-native .toolbar input.tb-size,
-.oc-chrome-native .toolbar input.tb-font { height: 26px; border-radius: 6px; font-size: 12px; }
-.oc-chrome-native .toolbar .tb-sep { height: 18px; }
-.oc-chrome-native .toolbar .tb-collapsed { height: 26px; }
-/* The formula bar is one text field and a name box; 40px of band around a 28px
-   input is web padding. */
-.oc-chrome-native .formula-bar { height: 32px; gap: 8px; padding: 0 8px; }
+.oc-chrome-native .toolbar input.tb-font { height: 28px; border-radius: 6px; }
+.oc-chrome-native .toolbar .tb-sep { height: 20px; }
+.oc-chrome-native .toolbar .tb-collapsed { height: 28px; }
+/* The formula bar is one text field and a name box, and the input matches the
+   toolbar's control height — which is the pairing the page already makes, at
+   30 and 30. 41px of band around it is web padding; 36 is not. */
+.oc-chrome-native .formula-bar { height: 35px; gap: 8px; padding: 0 8px; }
 .oc-chrome-native .formula-bar .cell-ref,
-.oc-chrome-native .formula-bar input#formula-input { height: 24px; border-radius: 6px; }
-.oc-chrome-native .bottom-bar { height: 30px; gap: 8px; padding: 0 8px; }
+.oc-chrome-native .formula-bar input#formula-input { height: 26px; border-radius: 6px; }
+.oc-chrome-native .bottom-bar { height: 34px; gap: 8px; padding: 0 8px; }
 .oc-chrome-native .sheet-tabs { border-radius: 7px; padding: 1px; }
-.oc-chrome-native .sheet-tab { height: 22px; padding: 0 10px; border-radius: 6px; }
+/* The sheet tabs are the only thing in this band a pointer has to hit, and they
+   keep the page's own 26px rather than getting a smaller number of their own.
+   **This one was caught by the floor rather than by judgement**: 24px looked
+   like a consistent correction beside the 28px buttons, and it is *below* what
+   the page already draws — the band tightens from 41 to 35 around a control
+   that does not move at all, which is what density is supposed to mean. */
+.oc-chrome-native .sheet-tab { height: 26px; padding: 0 10px; border-radius: 6px; }
 .oc-chrome-native .cell-mode { margin-left: 8px; padding: 1px 7px; }
 
 /* --- Column stats ---------------------------------------------------------- */

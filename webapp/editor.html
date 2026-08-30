@@ -16,9 +16,20 @@
       <span class="badge"><span class="dot"></span>Alpha</span>
       <div class="header-right">
       <span class="tb-status" id="tb-status">loading engine…</span>
-      <button id="hdr-open" class="tb-icon" title="Open a file (.xlsx, .csv, .tsv, .psv)" aria-label="Open file">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      </button>
+      <!-- **No file action lives in this strip** (`UX-CHR-01`).
+           It used to hold `#hdr-open`, a folder icon that clicked the same
+           `#tb-open` picker `File ▸ Open` does. A branding strip carries
+           identity and document state — the logo, the product name, the badge
+           and `#tb-status` — and nothing that *does* anything to the document;
+           putting a second Open there duplicated a menu item and made this
+           region a toolbar. It went rather than moving, because File ▸ Open
+           already is the route and the desktop shell's own menu bar draws it.
+
+           That also settles `UX-DESK-05` in the only direction that keeps
+           "listed implies reachable by pointer" true: `header.open` was still
+           in `listCommands()` in desktop chrome with the header hidden, so
+           the list named a command with nothing to click. Deleting the button
+           deletes the id — `listCommands()` is derived from the live DOM. -->
       <div class="settings">
         <button id="tb-settings" class="tb-icon" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -57,14 +68,19 @@
         <h2 class="settings-title" id="settings-title">Settings</h2>
         <button class="settings-close" id="settings-close" type="button" title="Close (Esc)" aria-label="Close">&times;</button>
       </div>
-      <label class="set-row">
-        <span>Theme</span>
-        <select id="set-theme">
-          <option value="auto">Auto</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </label>
+      <!-- **Theme is not here any more; it is `View ▸ Theme`** (`UX-CHR-01`).
+           It is a display option, and the View menu is where this editor's
+           display options already live — Gridlines, Cell markings, Formulas
+           instead of results, Zero values. Excel and Sheets both put the
+           appearance toggle in a View menu and neither hides it behind a gear
+           in the title area, which here cost two clicks and asked the user to
+           hold a different mental model for one setting than for its four
+           siblings.
+
+           **Moved, not copied.** Two controls for one setting drift: the
+           select was the only thing that knew the chosen value, so a change
+           made from a menu would have left it reading the previous one. The
+           choice now lives in `currentTheme()` and the menu ticks it. -->
       <label class="set-row">
         <span>Scroll speed</span>
         <span class="range-wrap">

@@ -134,7 +134,12 @@ test("the controls that were under 24px are not, on a phone", async ({ browser }
   await boot(page);
   const measured = await page.evaluate(() => {
     const out = {};
-    for (const id of ["fx-insert", "fx-expand", "name-box-list", "hdr-open", "tb-settings", "tb-undo", "hdr-collapse"]) {
+    // `hdr-open` used to be measured here too. The branding strip's folder
+    // button is gone (`UX-CHR-01`) — a file action does not belong in the one
+    // region that carries identity and document state — so there is nothing
+    // left to size. `tb-settings` below is the other 44px control in that
+    // strip and keeps the claim about it honest.
+    for (const id of ["fx-insert", "fx-expand", "name-box-list", "tb-settings", "tb-undo", "hdr-collapse"]) {
       const r = document.querySelector("#" + id).getBoundingClientRect();
       out[id] = { w: Math.round(r.width), h: Math.round(r.height) };
     }
@@ -151,7 +156,6 @@ test("the controls that were under 24px are not, on a phone", async ({ browser }
   expect(measured["name-box-list"].h, "and 22px tall").toBeGreaterThanOrEqual(24);
 
   // Header and toolbar have the room, so they get the full 44.
-  expect(measured["hdr-open"]).toMatchObject({ w: 44, h: 44 });
   expect(measured["tb-settings"]).toMatchObject({ w: 44, h: 44 });
   expect(measured["tb-undo"]).toMatchObject({ w: 44, h: 44 });
   // The menu bar is 30px tall and stays that way, so this one only clears 24.
