@@ -1104,8 +1104,73 @@ export function setCapabilities(partial) {
 /// without the stylesheet changing.
 export function applyModeChrome() {
   setNativeChrome(capabilities.chrome === "native");
+  placeNativeChrome(capabilities.chrome === "native");
   const scope = ocRoot === document ? document.documentElement : qs(".editor-body");
   scope?.classList.toggle("oc-chrome-embedded", capabilities.chrome === "embedded");
+}
+
+/// Where each node's markup put it, so a mode change can put it back.
+///
+/// Keyed by the node, holding the parent and the *next sibling* rather than an
+/// index: an index is wrong the moment anything else in that parent moves, and
+/// `buildMenuBar()` inserts eight buttons into the menu bar after boot.
+const chromeHome = new WeakMap();
+
+/// Send a node home, remembering where home was the first time it is asked.
+function homeChrome(node) {
+  const home = chromeHome.get(node);
+  if (!home || !home.parent) return;
+  // `insertBefore(node, null)` appends, which is exactly right for a node that
+  // was the last child — and `next` is `null` in precisely that case.
+  if (node.parentElement !== home.parent || node.nextElementSibling !== home.next) {
+    home.parent.insertBefore(node, home.next);
+  }
+}
+
+/// Move a node, recording where it came from the first time.
+function moveChrome(node, into, before) {
+  if (!chromeHome.has(node)) {
+    chromeHome.set(node, { parent: node.parentElement, next: node.nextElementSibling });
+  }
+  if (node.parentElement !== into || node.nextElementSibling !== (before || null)) {
+    into.insertBefore(node, before || null);
+  }
+}
+
+/// **Desktop chrome moves two things rather than hiding them** (`UX-DESK-01`).
+///
+/// The rest of the native presentation is `editor.css`'s — one class, a set of
+/// metrics, and `display: none` on the branding strip. Two nodes cannot be done
+/// that way, because hiding them would take a capability away rather than
+/// relocate it, and both live inside a region desktop chrome removes:
+///
+/// - **`#tb-status`** is the engine version, the open/save progress line and
+///   every error the editor reports, and it sat in the branding strip. Excel,
+///   LibreOffice and OnlyOffice all put document state in the status bar and
+///   none of them puts any of it above the menu bar, so that is where it goes.
+/// - **`#presence`** is the collaborator roster, and `COL-33` put it in the
+///   menu bar *specifically* so it would not fold away with the page header —
+///   then `.oc-chrome-native #menubar { display: none }` folded the menu bar
+///   away instead, and took it. Desktop mode has `canShare: true`, so this was
+///   a session whose participants the desktop user could not see.
+///
+/// Reversible, because `setCapabilities({ mode })` can turn native chrome off
+/// again and a one-way move would leave the page's own header permanently
+/// missing its status line.
+function placeNativeChrome(on) {
+  const bottom = qs(".bottom-bar");
+  const status = byId("tb-status");
+  const presence = byId("presence");
+  if (!bottom) return;
+  for (const node of [status, presence]) {
+    if (!node) continue;
+    // Before the language picker, which is the last item of the status bar's
+    // left-hand group. `?? null` rather than a second lookup: `insertBefore`
+    // with a null reference appends, which is where they belong if the picker
+    // ever goes.
+    if (on) moveChrome(node, bottom, byId("locale-picker"));
+    else homeChrome(node);
+  }
 }
 
 /// Which capability governs which command ids.
@@ -8575,7 +8640,12 @@ function wireEvents() {
           ["200%", () => setZoom(2), null, () => state.zoom === 2],
         ] },
         "sep",
-        ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
+        // Not `clickEl("#tb-settings")`. That reached the panel through a
+        // button inside the app header, so it needed the header un-collapsed
+        // first — and in desktop chrome there is no header to un-collapse
+        // (`UX-DESK-01`). `openSettings()` is the one entry point and picks
+        // its own presentation.
+        ["Settings…", () => openSettings()],
       ]],
       ["Insert", [
         ["Rows above", () => tryEdit(() => { const r = rng(); wasm.session_insert_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
@@ -8701,7 +8771,12 @@ function wireEvents() {
         ["Unhide all rows and columns", () => { const b = usedBounds(); tryEdit(() => { wasm.session_unhide_rows(state.sheet, 0, Math.max(b.rows, 1) + 1000); wasm.session_unhide_cols(state.sheet, 0, Math.max(b.cols, 1) + 1000); }); status.textContent = "all rows and columns shown"; }],
       ]],
       ["Tools", [
-        ["Settings…", () => { setHeaderCollapsed(false); clickEl("#tb-settings")(); }],
+        // Not `clickEl("#tb-settings")`. That reached the panel through a
+        // button inside the app header, so it needed the header un-collapsed
+        // first — and in desktop chrome there is no header to un-collapse
+        // (`UX-DESK-01`). `openSettings()` is the one entry point and picks
+        // its own presentation.
+        ["Settings…", () => openSettings()],
         ["Name manager…", () => openNameManager(160, 120)],
         "sep",
         // Excel's Formulas ▸ Calculation Options. A workbook saved with
@@ -9026,18 +9101,106 @@ function wireEvents() {
 
 
 
+/// Open the Settings panel from anywhere — assigned by [`wireSettings`].
+///
+/// The menu items used to reach it by un-collapsing the app header and then
+/// clicking the gear inside it, which is the whole of why hiding that header
+/// was not a one-line change: with the header gone there is no gear on screen,
+/// `setHeaderCollapsed(false)` has nothing to reveal, and the panel opened
+/// inside a `display: none` ancestor. One entry point, and it decides its own
+/// presentation from whether anything is there to anchor to.
+let openSettings = () => {};
+
 function wireSettings() {
   const gear = byId("tb-settings");
   const panel = byId("settings-panel");
+  const scrim = byId("settings-scrim");
   const themeSel = byId("set-theme");
+
+  /// Is the gear actually on screen? `getClientRects()` rather than a class or
+  /// a mode check: the header is hidden by desktop chrome, by `?hide=header`,
+  /// by `?mode=embedded` and by the collapse caret, and the question this has
+  /// to answer is the same in all four — *can this panel point at anything*.
+  const gearOnScreen = () => !!gear && gear.getClientRects().length > 0;
+
+  /// Place the panel, in whichever of its two forms applies.
+  ///
+  /// The anchored form is `anchorMenu()`'s arithmetic, kept local because that
+  /// one is a closure inside `wireEvents()` and this panel needs the *other*
+  /// branch as well. Flips above the button when there is no room below and
+  /// clamps to the viewport at both edges, so a short window does not put half
+  /// of Settings off the bottom.
+  const place = () => {
+    const anchored = gearOnScreen();
+    panel.classList.toggle("anchored", anchored);
+    scrim.hidden = anchored;
+    // `aria-modal` only in the dialog form. Claiming it for a popover the user
+    // can click straight past is a lie to a screen reader.
+    if (anchored) panel.removeAttribute("aria-modal");
+    else panel.setAttribute("aria-modal", "true");
+    if (!anchored) {
+      // The stylesheet's own centring; nothing to compute.
+      panel.style.left = panel.style.top = "";
+      return;
+    }
+    const r = gear.getBoundingClientRect();
+    panel.style.left = "0px";
+    panel.style.top = "0px";
+    const pw = panel.offsetWidth, ph = panel.offsetHeight;
+    let left = Math.max(4, Math.min(r.right - pw, window.innerWidth - 4 - pw));
+    const below = window.innerHeight - 4 - (r.bottom + 6);
+    const top = ph <= below ? r.bottom + 6 : Math.max(4, r.top - 6 - ph);
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  };
+
+  const close = () => {
+    panel.hidden = true;
+    scrim.hidden = true;
+  };
+  /// **The click that opened it must not also close it.**
+  ///
+  /// The gear stops propagation, so it never had this problem. A menu item does
+  /// not: its click bubbles to the outside-click listener below in the same
+  /// task, where the panel is already open and the target is not inside it, and
+  /// Settings opened and shut again too fast to see. Cleared on a timeout
+  /// rather than a flag the listener resets, because the listener may not run
+  /// at all — the panel can be opened from a keyboard accelerator with no click
+  /// behind it.
+  let openingClick = false;
+  const open = () => {
+    panel.hidden = false;
+    openingClick = true;
+    setTimeout(() => { openingClick = false; }, 0);
+    place();
+    // The dialog form is reached from a menu, so the pointer is nowhere near
+    // it; without this the user has a dialog on screen and the keyboard still
+    // in the grid. The anchored form is left alone — a popover that steals
+    // focus from the sheet on a stray gear click is worse than one that does
+    // not.
+    if (!panel.classList.contains("anchored")) themeSel.focus();
+  };
+  openSettings = open;
 
   gear.addEventListener("click", (e) => {
     e.stopPropagation();
-    panel.hidden = !panel.hidden;
+    if (panel.hidden) open();
+    else close();
   });
+  byId("settings-close").addEventListener("click", close);
+  scrim.addEventListener("click", close);
   document.addEventListener("click", (e) => {
-    if (!panel.contains(e.target) && e.target !== gear) panel.hidden = true;
+    if (panel.hidden || openingClick) return;
+    if (!panel.contains(e.target) && e.target !== gear && !gear.contains(e.target)) close();
   });
+  // Esc, which is what closes every other overlay here. Capture, so it reaches
+  // this before the grid's own Escape handling cancels an edit instead.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !panel.hidden) { close(); canvas?.focus(); }
+  }, true);
+  // A window that changed size moved the gear; a panel still pinned to where it
+  // used to be is the defect `anchorMenu()`'s callers already re-run for.
+  window.addEventListener("resize", () => { if (!panel.hidden) place(); });
   themeSel.addEventListener("change", () => applyTheme(themeSel.value));
   for (const b of qsa("#set-accent button")) {
     b.addEventListener("click", () => applyAccent(b.dataset.c));
@@ -9634,6 +9797,20 @@ async function main() {
   // handed the engine a clock.
   syncClock(true);
   wireEvents();
+  // **Again, because `wireEvents()` re-homes one of the nodes it moved.**
+  //
+  // The first call is before the wasm import, so the mode's chrome is decided
+  // before the first paint rather than shown and then taken away. But
+  // `wirePresence()` ends with `bar.insertBefore(box, hdr-collapse)` —
+  // deliberately, so the roster survives `buildMenuBar()` appending File…Help
+  // after it — and that put the collaborator roster straight back into the menu
+  // bar desktop chrome hides. Measured, not assumed: `#tb-status` relocated and
+  // `#presence` did not, and nothing about reading either function said why.
+  //
+  // Idempotent, so this is a re-assertion rather than a second policy: every
+  // move in `placeNativeChrome()` is a no-op when the node is already where the
+  // mode wants it.
+  try { applyModeChrome(); } catch {}
   // Toolbar controls get command ids from their element ids (`tb-bold` →
   // `toolbar.bold`), so a host hides a button by name rather than by reaching
   // into the shadow root with a selector that will move.
