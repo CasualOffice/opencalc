@@ -1304,6 +1304,17 @@ export let chartDrag = null;
 /// Handle radius, and the slop a click gets when aiming at one.
 export const CHART_HANDLE = 4;
 
+// Bytes of chart payload the last frame pulled across the WASM boundary.
+//
+// Pinned by `editor.frame-budget.spec.mjs` (`CHT-13`). Until that row this
+// frame asked for every chart's series with **every point resolved** and used
+// the anchor rectangle out of it, so the cost of drawing a chart tracked the
+// size of the range its series named — 2 MB a frame for a chart on an empty
+// sheet whose series name whole columns. A byte count is the thing that was
+// wrong; a wall-clock assertion on it would be flaky.
+let chartPayloadBytes = 0;
+export const chartPayloadBytesForTest = () => chartPayloadBytes;
+
 // Every chart on the sheet, at its anchored cells.
 //
 // A chart is anchored in *cells*, which is why it moves with the rows under it
@@ -1312,7 +1323,15 @@ function drawCharts(withQuad) {
   if (!wasm) return;
   chartFrames = [];
   let charts = [];
-  try { charts = JSON.parse(wasm.session_charts(state.sheet)); } catch { return; }
+  // Anchors only. The picture comes from `session_chart_items` below, per
+  // chart and only for the ones on screen; asking for the *data* here as well
+  // resolved every series of every chart, on and off screen, to build a
+  // rectangle out of eight integers of the answer (`CHT-13`).
+  try {
+    const payload = wasm.session_chart_frames(state.sheet);
+    chartPayloadBytes = payload.length;
+    charts = JSON.parse(payload);
+  } catch { return; }
   for (const [index, ch] of charts.entries()) {
     const { x: x0, y: y0, w, h } = anchoredRect(ch);
     // Kept for hit-testing: a chart floats over cells rather than occupying

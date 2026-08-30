@@ -115,3 +115,64 @@ test("scrolling back over drawn rows does not measure their text again", async (
   expect(s.misses, `${s.misses} re-measurements over rows already drawn (${s.hits} cached)`)
     .toBeLessThan(s.hits / 4 + 20);
 });
+
+test("a chart costs the frame its anchor, not the range its series name", async ({ page }) => {
+  // `CHT-13`. The frame asked the engine for every chart's series with every
+  // point *resolved* and used eight integers of the answer — the anchor cells
+  // and their EMU offsets — because the picture itself has come from
+  // `session_chart_items` since `RND-10`.
+  //
+  // The cost was not bounded by the data on the sheet. A series reference is a
+  // string out of an untrusted `.xlsx`, so `$H$1:$H$1048576` cost
+  // `MAX_SERIES_POINTS` nulls per series per frame with nothing in those
+  // cells: 2 MB a frame against a 16.7 ms budget, on an empty sheet.
+  //
+  // Stated as an equality rather than a ceiling. A byte budget would need
+  // re-tuning whenever a field is added; that the number does not *move* is
+  // the invariant, and it is what a regression would break.
+  await page.goto("/editor.html");
+  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+
+  const seen = await page.evaluate(async () => {
+    const ed = window.opencalcEditor;
+    const api = ed.wasmApi();
+    const settle = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    for (let i = 0; i < 5; i += 1) {
+      api.session_set_cell(0, i, 6, `R${i}`);
+      api.session_set_cell(0, i, 7, String((i + 1) * 10));
+    }
+    api.session_create_chart(0, 0, 6, 4, 7, "column");
+    ed.draw();
+    await settle();
+    const small = ed.chartPayloadBytesForTest();
+
+    // The same chart in the same place, with its references widened to whole
+    // columns — which is what a file is free to say, and what the cells hold
+    // nothing extra for.
+    const def = JSON.parse(api.session_chart_defs(0))[0];
+    const wholeColumn = (ref) => ref.replace(/\$\d+$/, () => "$1048576");
+    for (const s of def.series) {
+      s.values = wholeColumn(s.values);
+      if (s.categories) s.categories = wholeColumn(s.categories);
+    }
+    api.session_set_chart(0, 0, JSON.stringify(def));
+    ed.draw();
+    await settle();
+
+    return {
+      small,
+      whole: ed.chartPayloadBytesForTest(),
+      charts: ed.chartFrames.length,
+      widened: JSON.parse(api.session_chart_defs(0))[0].series.map((s) => s.values),
+    };
+  });
+
+  expect(seen.charts, "the chart survived the edit, so this measures something").toBe(1);
+  expect(seen.small, "the payload is not empty, so equality proves something").toBeGreaterThan(0);
+  expect(seen.widened.join(), "the references really were widened").toMatch(/1048576/);
+  expect(
+    seen.whole,
+    `${seen.whole} bytes crossed for a chart naming whole columns against ${seen.small} for the same chart naming five rows`,
+  ).toBe(seen.small);
+});

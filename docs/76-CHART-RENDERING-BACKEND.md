@@ -40,7 +40,7 @@ two things underneath one:
 1. **Resolved series values.** `ChartSeries::values` is a *formula string* —
    `Sheet1!$A$2:$A$9` — not numbers. They are resolved by `ref_numbers` and
    `ref_text` in `crates/casual-calc-wasm/src/lib.rs`, and handed to the canvas
-   by `session_charts`. `casual-calc-wasm` is a **host** crate; the render path
+   by `session_chart_items`. `casual-calc-wasm` is a **host** crate; the render path
    cannot depend on it, and must not.
 2. **Paint primitives for a plot.** `PaintItem` has rectangles, thin lines,
    text and (since this row's first half) pictures. It has no polyline, no
@@ -116,7 +116,7 @@ Three pieces, in order, each shippable on its own:
    values against the workbook's *cached* cell values, the way `layout` already
    reads them (it never invokes the calc engine). This is `ref_cells` /
    `ref_numbers` / `ref_text` moved down out of `casual-calc-wasm`, exactly as
-   `conditional.rs` was moved for `RND-05`. `session_charts` then calls it
+   `conditional.rs` was moved for `RND-05`. `session_chart_items` then calls it
    instead of owning it, so the canvas and the PNG cannot resolve a range
    differently.
 2. **Geometry in `PaintItem`** — the smallest set that covers the seven kinds:

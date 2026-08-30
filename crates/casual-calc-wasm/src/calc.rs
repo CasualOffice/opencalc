@@ -110,82 +110,193 @@ pub fn session_recalculate() -> String {
     })
 }
 
-/// The charts on a sheet, with their data already resolved, as JSON.
+/// Where each chart on a sheet is anchored, as JSON. **Anchors only.**
 ///
-/// `[{r0,c0,r1,c1,kind,title,cats:[…],series:[{name,values:[…]}]}]`. The host
-/// draws pictures; resolving `Sheet1!$B$2:$B$4` into numbers is the engine's
-/// job, and doing it here means the canvas never parses a formula.
+/// `[{r0,c0,r1,c1,fx,fy,tx,ty}]` — the anchor cells and the EMU offsets into
+/// them, which is the whole of what the host needs to turn a chart into a
+/// rectangle. Nothing here is read from a cell, so the payload is a fixed size
+/// per chart however much data the chart names.
 ///
-/// A series whose reference does not resolve is dropped rather than drawn as
-/// zeroes — a chart of flat zeroes looks like data, which is worse than a
-/// chart with one series missing.
+/// # Why this is not `session_charts` (`CHT-13`)
+///
+/// It used to be, and it also carried `cats` and `series` with **every point
+/// resolved**: `Sheet1!$B$2:$B$4` came back as numbers so the canvas would
+/// never parse a formula. That was the right shape while the canvas drew its
+/// own charts. It stopped being right at `RND-10`, which moved the picture into
+/// [`session_chart_items`](crate::session_chart_items) — the canvas has drawn
+/// from the engine's display list since, and the resolved values here have been
+/// parsed and dropped on the floor by every frame.
+///
+/// The cost was not small and it was not bounded by the data on the sheet.
+/// Measured native, release:
+///
+/// | sheet | old payload | now |
+/// | --- | --- | --- |
+/// | 10,000 rows x 6 series | 592,530 bytes, 4 ms | 61 bytes |
+/// | **empty** sheet, 6 series naming whole columns | 2,162,988 bytes, 14 ms | 61 bytes |
+///
+/// The second row is the one that matters: a series reference is a string out
+/// of an untrusted `.xlsx`, so `$A$1:$A$1048576` costs
+/// [`MAX_SERIES_POINTS`](casual_calc_layout::chart_data::MAX_SERIES_POINTS)
+/// nulls per series per frame **on a sheet with nothing in it**.
+/// [`SEC-024`'s bound](casual_calc_layout::chart_data::MAX_SERIES_POINTS)
+/// stopped that being an out-of-memory kill; it did not stop it being two
+/// megabytes a frame against a 16.7 ms budget.
 #[wasm_bindgen]
-pub fn session_charts(sheet: usize) -> String {
+pub fn session_chart_frames(sheet: usize) -> String {
     with_session(|s| {
-        let wb = s.workbook();
-        let Some(sh) = wb.sheets.get(sheet) else {
+        let Some(sh) = s.workbook().sheets.get(sheet) else {
             return "[]".to_owned();
         };
         let items: Vec<String> = sh
             .charts
             .iter()
             .map(|ch| {
-                let cats = ch
-                    .series
-                    .first()
-                    .and_then(|s| s.categories.as_deref())
-                    .map(|r| casual_calc_layout::chart_data::ref_text(wb, sheet, r))
-                    .unwrap_or_default();
-                let series: Vec<String> = ch
-                    .series
-                    .iter()
-                    .map(|se| {
-                        let values =
-                            casual_calc_layout::chart_data::ref_numbers(wb, sheet, &se.values);
-                        format!(
-                            "{{\"name\":{},\"values\":[{}]}}",
-                            json_string(&se.name),
-                            values
-                                .iter()
-                                .map(|v| match v {
-                                    Some(n) => format_json_number(*n),
-                                    None => "null".to_owned(),
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        )
-                    })
-                    .collect();
                 format!(
-                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\"kind\":{},\
-                     \"title\":{},\"legend\":{},\"xTitle\":{},\"yTitle\":{},\
-                     \"fx\":{},\"fy\":{},\"tx\":{},\"ty\":{},\
-                     \"cats\":[{}],\"series\":[{}]}}",
+                    "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{},\
+                     \"fx\":{},\"fy\":{},\"tx\":{},\"ty\":{}}}",
                     ch.anchor.start.row,
                     ch.anchor.start.col,
                     ch.anchor.end.row,
                     ch.anchor.end.col,
-                    json_string(chart_kind_name(ch.kind)),
-                    json_string(&ch.title),
-                    match &ch.legend {
-                        Some(pos) => json_string(pos),
-                        None => "null".to_owned(),
-                    },
-                    json_string(&ch.x_title),
-                    json_string(&ch.y_title),
                     ch.from_offset.x,
                     ch.from_offset.y,
                     ch.to_offset.x,
                     ch.to_offset.y,
-                    cats.iter()
-                        .map(|t| json_string(t))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    series.join(",")
                 )
             })
             .collect();
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
+}
+
+#[cfg(test)]
+mod chart_frame_payload {
+    use super::*;
+    use casual_calc_model::{
+        Cell, CellRange, CellRef, CellValue, ChartKind, ChartSeries, ChartView, Emu, Id, Sheet,
+        SheetId, Workbook,
+    };
+
+    fn book(rows: u32, series: u32) -> Workbook {
+        let mut workbook = Workbook::new(Id::from_parts(0x5742, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1");
+        for r in 0..rows {
+            let label = workbook.strings.intern(&format!("Label {r}"));
+            sheet.cells.set(
+                CellRef::new(r, 0),
+                Cell::value(CellValue::SharedString(label)),
+            );
+            for c in 0..series {
+                sheet.cells.set(
+                    CellRef::new(r, c + 1),
+                    Cell::value(CellValue::Number(f64::from(r) + f64::from(c) / 8.0)),
+                );
+            }
+        }
+        let col = |c: u32| char::from(b'B' + u8::try_from(c).unwrap());
+        sheet.charts.push(ChartView {
+            id: 1,
+            anchor: CellRange::new(CellRef::new(0, 8), CellRef::new(20, 16)),
+            from_offset: Emu { x: 0, y: 0 },
+            to_offset: Emu { x: 0, y: 0 },
+            kind: ChartKind::Line,
+            title: "Revenue".to_owned(),
+            series: (0..series)
+                .map(|c| ChartSeries {
+                    name: format!("S{c}"),
+                    categories: Some(format!("Sheet1!$A$1:$A${rows}")),
+                    values: format!("Sheet1!${0}$1:${0}${rows}", col(c)),
+                })
+                .collect(),
+            legend: Some("r".to_owned()),
+            x_title: String::new(),
+            y_title: String::new(),
+            part: None,
+        });
+        workbook.sheets.push(sheet);
+        workbook
+    }
+
+    /// An **empty** sheet whose chart names whole columns — what a `.xlsx` can
+    /// say, and what `SEC-024`'s bound leaves after capping.
+    fn empty_book_naming_whole_columns(series: u32) -> Workbook {
+        let mut workbook = Workbook::new(Id::from_parts(0x5742, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1");
+        let col = |c: u32| char::from(b'B' + u8::try_from(c).unwrap());
+        sheet.charts.push(ChartView {
+            id: 1,
+            anchor: CellRange::new(CellRef::new(0, 8), CellRef::new(20, 16)),
+            from_offset: Emu { x: 0, y: 0 },
+            to_offset: Emu { x: 0, y: 0 },
+            kind: ChartKind::Line,
+            title: "Revenue".to_owned(),
+            series: (0..series)
+                .map(|c| ChartSeries {
+                    name: format!("S{c}"),
+                    categories: Some("Sheet1!$A$1:$A$1048576".to_owned()),
+                    values: format!("Sheet1!${0}$1:${0}$1048576", col(c)),
+                })
+                .collect(),
+            legend: Some("r".to_owned()),
+            x_title: String::new(),
+            y_title: String::new(),
+            part: None,
+        });
+        workbook.sheets.push(sheet);
+        workbook
+    }
+
+    /// **A chart's per-frame payload does not depend on what its series name.**
+    ///
+    /// This is the `CHT-13` invariant, and it is asserted as an equality
+    /// between two payloads rather than as a size or a duration: a byte count
+    /// would have to be re-tuned whenever a field is added, and a wall-clock
+    /// assertion on a shared machine is a flaky test that gets deleted.
+    ///
+    /// The two workbooks are chosen so that *only* the referenced ranges
+    /// differ — the anchors, the offsets and the chart count are identical. The
+    /// first names ten thousand rows of real data; the second is an **empty**
+    /// sheet whose series each name a whole column, which is what a `.xlsx` is
+    /// free to say and what `SEC-024`'s bound leaves after capping. Under the
+    /// payload this replaced they came to 592,530 and 2,162,988 bytes.
+    #[test]
+    fn a_frame_pays_for_the_anchor_not_for_the_data() {
+        set_session(WorkbookSession::from_workbook(book(10_000, 6)));
+        let with_data = session_chart_frames(0);
+
+        set_session(WorkbookSession::from_workbook(
+            empty_book_naming_whole_columns(6),
+        ));
+        let naming_the_grid = session_chart_frames(0);
+
+        assert_eq!(
+            with_data,
+            naming_the_grid,
+            "the frame payload changed with the data the series name, so the host is \
+             paying per point for a rectangle: {} bytes against {} bytes",
+            with_data.len(),
+            naming_the_grid.len(),
+        );
+    }
+
+    /// **And the anchor is all of it.** The equality above would still hold if
+    /// both payloads resolved the *same* enormous range, so the shape is
+    /// pinned too: eight integers, and no array.
+    #[test]
+    fn the_frame_payload_is_the_anchor_and_the_offsets() {
+        set_session(WorkbookSession::from_workbook(book(10_000, 6)));
+        assert_eq!(
+            session_chart_frames(0),
+            r#"[{"r0":0,"c0":8,"r1":20,"c1":16,"fx":0,"fy":0,"tx":0,"ty":0}]"#,
+        );
+    }
+
+    /// A sheet with no charts, and a sheet index that is not a sheet.
+    #[test]
+    fn no_charts_is_an_empty_list() {
+        set_session(WorkbookSession::from_workbook(book(4, 1)));
+        assert_eq!(session_chart_frames(7), "[]");
+    }
 }
