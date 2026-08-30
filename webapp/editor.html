@@ -366,8 +366,19 @@
         <button id="tb-inc-dec" class="tb-btn glyph mono nf-dec" title="Increase decimals" aria-label="Increase decimals">.0&#8594;</button>
         <button id="tb-dec-dec" class="tb-btn glyph mono nf-dec" title="Decrease decimals" aria-label="Decrease decimals">&#8592;.0</button>
         <div class="menu-wrap">
-          <button id="tb-numfmt" class="tb-btn" title="Number format" aria-label="Number format" aria-haspopup="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+          <!-- **A readout, not just a way in** (`UX-CHR-06`, `docs/88` §3.3).
+
+               This was an icon that opened a menu of formats to *set*, and the
+               chrome had nothing that reported the format in force — so the only
+               way to learn a cell's format was to change it and look. Every
+               competitor carries this: Excel and OnlyOffice as a combo,
+               LibreOffice as a listbox, Sheets behind `123 ⌄`.
+
+               It is the widest single control on the bar at 96px, which is why
+               `UX-CHR-06` had to take a group off the toolbar to afford it. -->
+          <button id="tb-numfmt" class="tb-btn tb-combo" title="Number format" aria-label="Number format" aria-haspopup="true">
+            <span id="tb-numfmt-label" class="tb-combo-label">General</span>
+            <svg class="tbc-caret" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg>
           </button>
           <div id="numfmt-menu" class="popmenu" hidden>
             <button data-nf="">Automatic (General)</button>
@@ -430,19 +441,25 @@
       <button class="tb-btn tb-collapsed" data-for="tbg-data" title="Data" aria-haspopup="true" hidden><span>Data</span><svg class="tbc-caret" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg></button>
       <div class="tb-flyout popmenu" data-flyout="tbg-data" hidden></div>
       <span class="tb-sep"></span>
-      <div class="tb-group" id="tbg-tools" data-collapse="1">
-        <button id="tb-dv" class="tb-btn" title="Data validation" aria-label="Data validation">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l3 3 5-6"/></svg>
-        </button>
-        <button id="tb-cf" class="tb-btn" title="Conditional formatting" aria-label="Conditional formatting">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 2.5 6 9a8 8 0 1 0 12 0z"/><line x1="4.5" y1="15.5" x2="19.5" y2="15.5"/></svg>
-        </button>
-        <button id="tb-note" class="tb-btn" title="Comments (Shift+F2)" aria-label="Comments">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/></svg>
-        </button>
-      </div>
-      <button class="tb-btn tb-collapsed" data-for="tbg-tools" title="Tools" aria-haspopup="true" hidden><span>Tools</span><svg class="tbc-caret" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l4 4 4-4"/></svg></button>
-      <div class="tb-flyout popmenu" data-flyout="tbg-tools" hidden></div>
+      <!-- **`tbg-tools` is not on the toolbar** (`UX-CHR-06`, `docs/88` §3.4).
+
+           Data validation, conditional formatting and Note were here. A
+           single-row toolbar is a fixed budget, and the number-format readout
+           this group paid for is the question the chrome could not answer at
+           all — where all three of these were already answerable from the
+           menus, and Google Sheets carries none of the three on its toolbar
+           either.
+
+           They were the right group to drop on their own merits: lowest
+           collapse priority already (`data-collapse="1"`, so they were the
+           first thing the overflow hid), and the only group whose members are
+           panels rather than formatting a user applies repeatedly.
+
+           **The menu items had to be re-routed before this could happen.** All
+           three were reached by `clickEl("#tb-dv")` and friends — they clicked
+           *this* button. `clickEl` is `if (n) n.click()`, so deleting the group
+           would have turned three live menu items into silent no-ops rather
+           than into errors. They call `togglePanel` directly now. -->
       <!-- Final stage of the progressive collapse. The group flyouts handle a
            narrowing window; this handles running out of groups, which is what
            every viewport under 791px used to hit with no answer at all. -->

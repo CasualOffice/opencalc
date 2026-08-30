@@ -2189,3 +2189,15 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
      that can afford to be narrower. */
   .formula-bar input#formula-input { height: 34px; min-width: 0; }
 }
+
+/* The number-format readout (`UX-CHR-06`). A combo rather than an icon: it has
+   to be able to *say* the format, and a name needs room a 26px square has not
+   got. Fixed width, because a label that resizes with its content makes the
+   whole toolbar reflow on every selection change — and `reflowToolbar()` reads
+   the bar's width, so a growing control could collapse a group by moving the
+   cursor. */
+.tb-combo { width: 96px; padding: 0 6px; gap: 4px; justify-content: space-between; }
+.tb-combo-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; text-align: left; flex: 1 1 auto;
+}
