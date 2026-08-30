@@ -36,6 +36,8 @@ contract, and `release-images`, `release-sdk` and `security.yml` are gated by
 
 import pathlib
 import re
+
+import yaml
 import sys
 
 ROOT = pathlib.Path(".")
@@ -67,12 +69,66 @@ def job_names():
     return names
 
 
+
+# **Runners, not gates.** These two take no arguments and run *other* checks;
+# CI runs their constituents as its own jobs rather than shelling out to them,
+# which is why neither appears in a `run:` step and why neither is a broken
+# promise. That the constituents are all present is rule 3's job — it asserts
+# `ci.yml`'s job list against the table in `docs/15` — so exempting them here
+# does not leave the claim unchecked, it leaves it checked somewhere else.
+#
+# Named rather than inferred: a rule like "a script that runs other scripts is
+# exempt" would exempt any gate that grew a subprocess, which is most of them.
+RUNNERS = {"check-all.py", "check-rust.py"}
+
+
+def scripts_ci_runs():
+    """Every `tools/check-*.py` a workflow actually **executes**.
+
+    `CI-032`: this used to be `f"tools/{script}" in ci`, a substring search over
+    the concatenated text of every workflow — so **a mention inside a `#`
+    comment satisfied it**. `check-workflow-bashisms.py` was in exactly that
+    state: `REL-01`'s row named it, `release-desktop.yml` explained in a comment
+    what it asserts, this gate went green, and the check never ran in CI at all.
+    The promise "CI runs this" was kept by a sentence saying CI runs it.
+
+    So the workflow is parsed and only `run:` bodies are read — the same
+    correction `check-workflow-bashisms.py` itself needed one gate over, where
+    matching file text had to become resolving jobs.
+
+    A `run:` may be a plain string or a block scalar; both arrive here as a
+    string. Comment lines inside one are dropped, because a comment inside a
+    `run:` is no more executed than a comment beside it.
+    """
+    found = set()
+    for path in WORKFLOWS:
+        try:
+            doc = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError:
+            # A workflow that does not parse is somebody else's gate; not
+            # finding scripts in it must not read as "CI runs nothing".
+            continue
+        for job in (doc.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            for step in job.get("steps") or []:
+                body = (step or {}).get("run")
+                if not isinstance(body, str):
+                    continue
+                for line in body.splitlines():
+                    if line.strip().startswith("#"):
+                        continue
+                    found.update(SCRIPT.findall(line))
+    return found
+
+
 def main():
     if not WORKFLOWS:
         print("no workflows found", file=sys.stderr)
         return 1
 
     ci = workflow_text()
+    executed = scripts_ci_runs()
     jobs = job_names()
     problems = []
 
@@ -81,8 +137,11 @@ def main():
         for script in sorted(set(SCRIPT.findall(text))):
             if not (ROOT / "tools" / script).exists():
                 problems.append(f"{doc}: names tools/{script}, which does not exist")
-            elif f"tools/{script}" not in ci:
-                problems.append(f"{doc}: names tools/{script}, which no workflow runs")
+            elif script not in executed and script not in RUNNERS:
+                problems.append(
+                    f"{doc}: names tools/{script}, which no workflow *runs*. "
+                    f"A mention in a comment is not a gate (`CI-032`)"
+                )
 
         # A job name is only a claim when the document says it is one, so this
         # looks for the backticked name in a sentence about CI rather than for
