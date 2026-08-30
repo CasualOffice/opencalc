@@ -1012,10 +1012,15 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .formula-bar .cell-ref:focus { outline: none; background: var(--oc-popover-background-color); }
 .formula-bar .fx { font-family: Georgia, serif; font-style: italic; font-size: 14px; color: var(--oc-muted-text-color); padding: 0 2px; flex: 0 0 auto; }
 .formula-bar textarea#formula-input {
-  flex: 1; height: 26px; padding: 4px 10px; border-radius: 0; border: 0;
+  /* **`border-box`, and the height is the line's** (`UX-CHR-08` follow-up).
+     Without it the 26px height and 4px padding added to a 34px box inside a
+     36px bar, so the text sat hard against the top instead of on the bar's
+     centre line — beside a Name Box that is centred, which is what made the
+     region look broken rather than merely tight. 28px of border-box holds one
+     18px line with 5px above and below it. */
+  box-sizing: border-box;
+  flex: 1; height: 28px; padding: 5px 10px; border-radius: 0; border: 0;
   background: transparent; color: var(--oc-text-color); font-family: var(--oc-mono-font-family); font-size: 13px;
-  /* A textarea is `inline-block` and baseline-aligned by default, which leaves a
-     descender gap under it inside a 35px bar. */
   display: block; resize: none; overflow: auto; line-height: 18px;
 }
 .formula-bar textarea#formula-input:focus { outline: none; }
@@ -1657,7 +1662,7 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 /* Expanded: the text decides the height, within a bound. `84px` was a fixed
    box holding one line; a `<textarea>` fills it, and `max-height` keeps a
    500-character formula from eating the grid. */
-.formula-bar.expanded textarea#formula-input { height: 84px; max-height: 40vh; }
+.formula-bar.expanded textarea#formula-input { height: 84px; max-height: 40vh; padding-top: 5px; }
 .fn-list { max-height: 260px; overflow-y: auto; margin: 8px 0; display: flex; flex-direction: column; gap: 2px; }
 .fn-row {
   text-align: left; padding: 5px 8px; border: 0; border-radius: 5px; background: none;
@@ -2249,9 +2254,15 @@ button.doc-name {
 }
 button.doc-name:hover { background: var(--oc-popover-background-color); }
 button.doc-name:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+/* The rename field is the label, editable — not a form control dropped into the
+   title area. It keeps the label's own type and box so the text does not move
+   when it becomes editable; the only change is a hairline and a faint ground,
+   which is what the Name Box and the toolbar's own inputs use. The heavy accent
+   border and 3px focus ring it had were louder than anything else in the
+   chrome and belonged to a different design. */
 .doc-rename {
-  font: inherit; color: var(--oc-text-color); padding: 2px 6px; width: 24ch;
-  background: var(--oc-background-color);
-  border: 1px solid var(--oc-accent-color); border-radius: 5px;
+  font: inherit; color: var(--oc-text-color); padding: 2px 6px;
+  background: var(--oc-popover-background-color);
+  border: 1px solid var(--oc-control-border-color); border-radius: 5px;
 }
-.doc-rename:focus { outline: none; box-shadow: 0 0 0 3px var(--oc-accent-ring); }
+.doc-rename:focus { outline: none; border-color: var(--oc-accent-color); }

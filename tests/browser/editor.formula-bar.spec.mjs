@@ -134,3 +134,24 @@ test("the expand control is at the right end of the bar", async ({ page }) => {
   expect(chev.x - nameCaret.right,
     "the expand chevron is still sitting next to the Name Box's caret").toBeGreaterThan(200);
 });
+
+/// **The formula sits on the bar's centre line, beside a Name Box that does.**
+///
+/// The `<textarea>` was `content-box`, so a 26px height and 4px padding made a
+/// 34px control inside a 36px bar and the text sat hard against the top. Next
+/// to a centred Name Box, that is what made the region look broken rather than
+/// merely tight.
+test("the formula text is centred in the bar, like the Name Box beside it", async ({ page }) => {
+  await boot(page);
+  const centres = await page.evaluate(() => {
+    const mid = (sel) => {
+      const r = document.querySelector(sel).getBoundingClientRect();
+      return r.top + r.height / 2;
+    };
+    return { bar: mid(".formula-bar"), input: mid("#formula-input"), name: mid("#cell-ref") };
+  });
+  expect(Math.abs(centres.input - centres.bar),
+    `the formula input's centre is ${(centres.input - centres.bar).toFixed(1)}px off the bar's`).toBeLessThanOrEqual(1.5);
+  expect(Math.abs(centres.input - centres.name),
+    "the formula input and the Name Box do not share a centre line").toBeLessThanOrEqual(1.5);
+});

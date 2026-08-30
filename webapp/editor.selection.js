@@ -1777,6 +1777,20 @@ export function selectionRectForTest() {
   return effectiveRange();
 }
 
+/// Where a cell is on the canvas, in CSS pixels (`UX-SEL-06`).
+///
+/// A test that wants to know what a cell *looks like* has to read the canvas,
+/// and to read the canvas it has to know where the cell is. Computing that in
+/// the test would mean recomputing the layout the renderer just did — and
+/// agreeing with it by construction, which is how a rendering test passes
+/// against a rendering bug.
+export function cellBoxForTest(row, col) {
+  const x = colXAt(col);
+  const y = rowYAt(row);
+  if (x === undefined || y === undefined) return null;
+  return { x, y, w: colWAt(col), h: rowHAt(row) };
+}
+
 export function wasmApi() {
   return wasm;
 }
