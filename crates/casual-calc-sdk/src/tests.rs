@@ -3203,14 +3203,44 @@ mod pdf_export {
             if !stream.contains(" cm") {
                 continue;
             }
+            // Every `<hex>` a stream shows, through `Tj` or inside a `TJ`
+            // array — a shaped or kerned run is the second form, and a reader
+            // that knows only the first sees half the page.
+            //
+            // The runs are separated by a space at each `Tm`, which is where a
+            // new pen position starts, and **not** at each hex string: one
+            // kerned word is several strings inside one array, and splitting
+            // there turns "r0c0" into "r 0c 0".
             let mut page = String::new();
-            for run in stream.split("Tm <").skip(1) {
-                let hex = run.split('>').next().unwrap();
-                for chunk in hex.as_bytes().chunks(4) {
-                    let gid = u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
-                    page.push_str(map.get(&gid).map(String::as_str).unwrap_or("\u{fffd}"));
+            for token in stream.split_whitespace() {
+                if token == "Tm" {
+                    page.push(' ');
+                    continue;
                 }
-                page.push(' ');
+                let chars: Vec<char> = token.chars().collect();
+                let mut at = 0;
+                while at < chars.len() {
+                    if chars[at] == '<' && chars.get(at + 1) != Some(&'<') {
+                        let mut hex = String::new();
+                        at += 1;
+                        while at < chars.len() && chars[at] != '>' {
+                            hex.push(chars[at]);
+                            at += 1;
+                        }
+                        if hex.len().is_multiple_of(4) && hex.chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            for chunk in hex.as_bytes().chunks(4) {
+                                let gid =
+                                    u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16)
+                                        .unwrap();
+                                page.push_str(
+                                    map.get(&gid).map(String::as_str).unwrap_or("\u{fffd}"),
+                                );
+                            }
+                        }
+                    }
+                    at += 1;
+                }
             }
             pages.push(page);
         }
@@ -3327,6 +3357,84 @@ mod pdf_export {
         assert_eq!(
             session.export_pdf(0).unwrap(),
             session.export_pdf(0).unwrap()
+        );
+    }
+
+    /// **`IO-10`'s first gap, end to end: the printout is numbered.**
+    ///
+    /// Three things have to be true at once and only this test sees all three:
+    /// the paginator resolved `&P` against the page it is printed on, the
+    /// composition handed each page its own furniture, and the writer put the
+    /// glyphs on the paper where a reader can extract them. A page number that
+    /// says "1" on all four pages passes the unit tests either side of this.
+    #[test]
+    fn every_page_carries_its_own_number_and_the_total() {
+        let mut session = session(120, 2);
+        let print = &mut session.workbook_mut().sheets[0].print;
+        print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&LQuarterly".to_owned());
+        print
+            .header_footer_text
+            .insert("oddFooter".to_owned(), "&CPage &P of &N".to_owned());
+
+        let (pdf, report) = session.export_pdf_with_report(0).unwrap();
+        let pages = text_per_page(&pdf);
+        assert!(pages.len() > 1, "120 rows do not fit on one page");
+        assert!(report.entries().is_empty(), "nothing was lost: {report:?}");
+
+        let total = pages.len();
+        for (index, page) in pages.iter().enumerate() {
+            // The runs are separated by spaces in this reading, and `&P` is a
+            // run of its own; the joined form is what the page says.
+            let joined: String = page.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                joined.contains(&format!("Page{}of{total}", index + 1)),
+                "page {index} does not number itself: {joined:?}"
+            );
+            assert!(
+                joined.contains("Quarterly"),
+                "page {index} lost its header: {joined:?}"
+            );
+        }
+    }
+
+    /// A code the writer cannot draw reaches the caller's compatibility report
+    /// **by name**. A picture-shaped hole in a header is otherwise
+    /// indistinguishable from a header that never had one.
+    #[test]
+    fn a_header_code_that_cannot_be_drawn_is_named_in_the_report() {
+        let mut session = session(4, 2);
+        session.workbook_mut().sheets[0]
+            .print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&L&GAcme&RPrinted &D".to_owned());
+
+        let (_, report) = session.export_pdf_with_report(0).unwrap();
+        let named: Vec<String> = report.entries().iter().map(|e| e.feature.clone()).collect();
+        assert!(
+            named.iter().any(|n| n == "header/footer picture (&G)"),
+            "the picture was dropped without being named: {named:?}"
+        );
+        assert!(
+            named.iter().any(|n| n == "header/footer date (&D)"),
+            "no clock was given, so the date must be refused rather than blank: {named:?}"
+        );
+
+        // Given a clock, the date is drawn and no longer refused.
+        let ctx = casual_calc_layout::print::PrintContext {
+            file: "",
+            now: Some(45_000.0),
+        };
+        let (pdf, report) = session.export_pdf_with_context(0, &ctx).unwrap();
+        let named: Vec<String> = report.entries().iter().map(|e| e.feature.clone()).collect();
+        assert!(
+            !named.iter().any(|n| n == "header/footer date (&D)"),
+            "{named:?}"
+        );
+        assert!(
+            text_per_page(&pdf)[0].contains("2023-03-15"),
+            "the date the host supplied is on the paper"
         );
     }
 }

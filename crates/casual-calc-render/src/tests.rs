@@ -1634,7 +1634,7 @@ mod charts {
 mod pdf_backend {
     use casual_calc_layout::{Align, BorderLine, DisplayList, GridGeometry, PaintItem, Rect};
 
-    use crate::pdf::{PdfBand, PdfMetadata, PdfPage, write_pdf};
+    use crate::pdf::{PdfBand, PdfFurniture, PdfMetadata, PdfPage, write_pdf};
 
     fn text(content: &str) -> DisplayList {
         DisplayList {
@@ -1670,6 +1670,8 @@ mod pdf_backend {
                 origin: (0, 0),
                 gridlines,
             }],
+            header: PdfFurniture::default(),
+            footer: PdfFurniture::default(),
         }
     }
 
@@ -1791,17 +1793,66 @@ mod pdf_backend {
         map
     }
 
-    /// The glyph ids the content stream draws, in order.
-    fn drawn_glyphs(pdf: &[u8]) -> Vec<u32> {
-        let text = String::from_utf8_lossy(pdf);
+    /// Every `<hex>` string a content stream shows, whether through `Tj` or
+    /// inside a `TJ` array, in the order it is drawn.
+    ///
+    /// Both forms, because a shaped run is a `TJ` array with its kerning
+    /// between the glyphs and an unshaped one is a single string. A reader that
+    /// knows only one of the two silently sees half the page.
+    fn shown_hex(stream: &str) -> Vec<String> {
         let mut out = Vec::new();
-        for run in text.split("Tm <").skip(1) {
-            let hex = run.split('>').next().unwrap();
-            for chunk in hex.as_bytes().chunks(4) {
-                out.push(u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap());
+        let bytes: Vec<char> = stream.chars().collect();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == '<' && bytes.get(at + 1) != Some(&'<') {
+                let mut hex = String::new();
+                at += 1;
+                while at < bytes.len() && bytes[at] != '>' {
+                    hex.push(bytes[at]);
+                    at += 1;
+                }
+                if hex.len().is_multiple_of(4) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    out.push(hex);
+                }
+            }
+            at += 1;
+        }
+        out
+    }
+
+    /// The part of the file that is drawing operators, with the object
+    /// dictionaries and the embedded faces left out.
+    ///
+    /// A `ToUnicode` CMap is full of `<hex>` pairs and an embedded font is full
+    /// of anything; scanning the whole file for glyph strings reads those as
+    /// drawing, which is how a test starts passing for the wrong reason.
+    fn content_streams(pdf: &[u8]) -> String {
+        let body = String::from_utf8_lossy(pdf);
+        let mut out = String::new();
+        for chunk in body.split("endstream") {
+            let Some(at) = chunk.rfind("stream\n") else {
+                continue;
+            };
+            let stream = &chunk[at + "stream\n".len()..];
+            if stream.contains(" cm") || stream.contains(" Tf") {
+                out.push_str(stream);
+                out.push('\n');
             }
         }
         out
+    }
+
+    /// The glyph ids the content stream draws, in order.
+    fn drawn_glyphs(pdf: &[u8]) -> Vec<u32> {
+        shown_hex(&content_streams(pdf))
+            .iter()
+            .flat_map(|hex| {
+                hex.as_bytes()
+                    .chunks(4)
+                    .map(|c| u32::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     #[test]
@@ -2001,5 +2052,381 @@ mod pdf_backend {
         let mut page = one_page(&list, false);
         page.height = 0;
         assert!(write_pdf(&[page], &GridGeometry::default(), &PdfMetadata::default()).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Headers and footers (`IO-10`)
+    // -----------------------------------------------------------------------
+
+    /// Every text run the page draws, as `(baseline y in twips, the text)`.
+    ///
+    /// The y comes out of the `Tm` the run was written with, so it is read in
+    /// whatever space the enclosing matrix set up. The tests below draw
+    /// furniture on a page with **no bands**, which leaves one space: twips,
+    /// y down from the paper's top edge.
+    fn drawn_runs(pdf: &[u8]) -> Vec<Drawn> {
+        let body = String::from_utf8_lossy(pdf);
+        // Leniently: a page that drew nothing embeds no font, and the useful
+        // failure there is "no runs", not "no Type0 font".
+        let map = if body.contains("/Subtype /Type0") {
+            to_unicode(pdf)
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let stream = content_streams(pdf);
+        let tokens: Vec<&str> = stream.split_whitespace().collect();
+        let mut out: Vec<Drawn> = Vec::new();
+        let mut open: Option<Drawn> = None;
+        for (at, token) in tokens.iter().enumerate() {
+            if *token == "Tm" {
+                if let Some(drawn) = open.take()
+                    && !drawn.text.is_empty()
+                {
+                    out.push(drawn);
+                }
+                // `… x y Tm` — the pen, in whatever space the enclosing matrix
+                // set up.
+                let number = |back: usize| -> f64 {
+                    at.checked_sub(back)
+                        .and_then(|i| tokens.get(i))
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(f64::NAN)
+                };
+                open = Some(Drawn {
+                    x: number(2),
+                    y: number(1),
+                    text: String::new(),
+                });
+                continue;
+            }
+            let Some(drawn) = open.as_mut() else { continue };
+            for hex in shown_hex(token) {
+                for chunk in hex.as_bytes().chunks(4) {
+                    if let Ok(gid) = u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16)
+                        && let Some(ch) = map.get(&gid)
+                    {
+                        drawn.text.push(*ch);
+                    }
+                }
+            }
+        }
+        if let Some(drawn) = open
+            && !drawn.text.is_empty()
+        {
+            out.push(drawn);
+        }
+        out
+    }
+
+    /// One positioned run read back off the page.
+    #[derive(Debug, Clone)]
+    struct Drawn {
+        x: f64,
+        y: f64,
+        text: String,
+    }
+
+    fn run(text: &str, size_pt: f32) -> casual_calc_layout::print::HeaderRun {
+        casual_calc_layout::print::HeaderRun {
+            text: text.to_owned(),
+            font: None,
+            size_pt,
+            bold: false,
+            italic: false,
+        }
+    }
+
+    /// A page carrying nothing but its furniture, so every `Tm` in the stream
+    /// belongs to a header or a footer.
+    fn bare_page(header: PdfFurniture, footer: PdfFurniture) -> PdfPage<'static> {
+        PdfPage {
+            width: 12240,
+            height: 15840,
+            margin_left: 1008,
+            margin_top: 1080,
+            scale: 1.0,
+            bands: Vec::new(),
+            header,
+            footer,
+        }
+    }
+
+    fn furniture(sections: [Vec<Vec<casual_calc_layout::print::HeaderRun>>; 3]) -> PdfFurniture {
+        PdfFurniture {
+            sections,
+            left: 1008,
+            width: 12240 - 2 * 1008,
+            inset: 432,
+            scale: 1.0,
+        }
+    }
+
+    /// **The page number reaches the paper, and it reaches the margin.**
+    ///
+    /// The gap `IO-10` names first: `Pagination::header_twips` returned zero and
+    /// nothing drew a `&P`, so a printed sheet had no page number at all. Both
+    /// halves are asserted — that the text is there, and that it is *outside*
+    /// the printable box, because a page number drawn over the first row is not
+    /// a header.
+    #[test]
+    fn a_header_and_a_footer_are_drawn_in_the_margins() {
+        let page = bare_page(
+            furniture([Vec::new(), vec![vec![run("Sales", 9.0)]], Vec::new()]),
+            furniture([Vec::new(), vec![vec![run("Page 2 of 7", 9.0)]], Vec::new()]),
+        );
+        let (pdf, _) = write_pdf(&[page], &GridGeometry::default(), &PdfMetadata::default())
+            .expect("a page with only furniture still writes");
+        let runs = drawn_runs(&pdf);
+        assert_eq!(runs.len(), 2, "one header run and one footer run: {runs:?}");
+
+        let (header_y, footer_y) = (runs[0].y, runs[1].y);
+        assert_eq!(runs[0].text, "Sales");
+        assert_eq!(runs[1].text, "Page 2 of 7");
+        assert!(
+            header_y > 432.0 && header_y < 1080.0,
+            "the header sits between its own margin and the top of the body, at {header_y}"
+        );
+        assert!(
+            footer_y > 15840.0 - 1080.0 && footer_y < 15840.0 - 432.0,
+            "the footer sits between the bottom of the body and its own margin, at {footer_y}"
+        );
+    }
+
+    /// **A footer is anchored at its bottom, a header at its top.**
+    ///
+    /// The property that decides whether a second line is added *upwards* or
+    /// runs off the paper. Excel measures the footer margin to the bottom of
+    /// the footer, so the last line of a two-line footer sits exactly where the
+    /// only line of a one-line footer did.
+    #[test]
+    fn a_second_footer_line_grows_upward_and_leaves_the_last_where_it_was() {
+        let one = bare_page(
+            PdfFurniture::default(),
+            furniture([Vec::new(), vec![vec![run("last", 9.0)]], Vec::new()]),
+        );
+        let two = bare_page(
+            PdfFurniture::default(),
+            furniture([
+                Vec::new(),
+                vec![vec![run("first", 9.0)], vec![run("last", 9.0)]],
+                Vec::new(),
+            ]),
+        );
+        let (pdf_one, _) =
+            write_pdf(&[one], &GridGeometry::default(), &PdfMetadata::default()).unwrap();
+        let (pdf_two, _) =
+            write_pdf(&[two], &GridGeometry::default(), &PdfMetadata::default()).unwrap();
+        let one = drawn_runs(&pdf_one);
+        let two = drawn_runs(&pdf_two);
+        assert_eq!(one.len(), 1);
+        assert_eq!(two.len(), 2, "two lines: {two:?}");
+        assert_eq!(two[1].text, "last");
+        assert!(
+            (two[1].y - one[0].y).abs() < 0.01,
+            "the last line moved from {} to {} when a line was added above it",
+            one[0].y,
+            two[1].y
+        );
+        assert!(
+            two[0].y < two[1].y,
+            "the added line goes above, not below: {two:?}"
+        );
+    }
+
+    /// The three sections share the page's lines and its width. A right section
+    /// that laid out from the left would print over the centre one, which is
+    /// the kind of thing a byte assertion never sees.
+    #[test]
+    fn the_three_sections_are_left_centred_and_right_on_one_line() {
+        let page = bare_page(
+            furniture([
+                vec![vec![run("L", 9.0)]],
+                vec![vec![run("C", 9.0)]],
+                vec![vec![run("R", 9.0)]],
+            ]),
+            PdfFurniture::default(),
+        );
+        let (pdf, _) =
+            write_pdf(&[page], &GridGeometry::default(), &PdfMetadata::default()).unwrap();
+        let runs = drawn_runs(&pdf);
+        let xs: Vec<f64> = runs.iter().map(|r| r.x).collect();
+        assert_eq!(xs.len(), 3, "three sections drew three runs: {runs:?}");
+        assert!(
+            (xs[0] - 1008.0).abs() < 0.01,
+            "the left section starts at the left margin, not {}",
+            xs[0]
+        );
+        assert!(
+            xs[0] < xs[1] && xs[1] < xs[2],
+            "left, then centre, then right: {xs:?}"
+        );
+        assert!(
+            xs[2] > 12240.0 - 1008.0 - 400.0,
+            "the right section ends at the right margin, not {}",
+            xs[2]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Complex scripts (`IO-10`)
+    // -----------------------------------------------------------------------
+
+    /// **The PDF shapes what the PNG shapes.**
+    ///
+    /// `IO-10`'s sharpest edge: the raster backend shaped with `harfrust` and
+    /// this one mapped character to glyph through `cmap`, one at a time. For a
+    /// right-to-left script that is not a near miss — the word came out
+    /// **backwards**, so the same sheet was correct in the PNG and wrong in the
+    /// PDF, which is what `RND-05` exists to forbid.
+    ///
+    /// Asserted against the naive mapping rather than against fixed glyph ids,
+    /// because the ids belong to whichever face is bundled and the
+    /// *relationship* is the thing that was broken.
+    #[cfg(feature = "shaping")]
+    #[test]
+    fn a_right_to_left_word_is_drawn_in_visual_order_not_memory_order() {
+        use skrifa::MetadataProvider as _;
+
+        // Hebrew, which the bundled faces cover.
+        let word = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
+        let Some(bytes) = crate::fonts::coverage_face_bytes('\u{5d0}', false, false) else {
+            // No bundled face covers Hebrew in this build; neither backend can
+            // draw it, so there is nothing to diverge about.
+            return;
+        };
+        let list = text(word);
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+
+        let font = skrifa::FontRef::new(bytes).expect("readable");
+        let charmap = font.charmap();
+        let naive: Vec<u32> = word
+            .chars()
+            .map(|c| charmap.map(c).map(|g| g.to_u32()).unwrap_or(0))
+            .collect();
+        let drawn = drawn_glyphs(&pdf);
+        assert_eq!(
+            drawn.len(),
+            naive.len(),
+            "the same glyphs, in a different order: {drawn:?} against {naive:?}"
+        );
+        let mut reversed = naive.clone();
+        reversed.reverse();
+        assert_eq!(
+            drawn, reversed,
+            "the page must draw the last character first, as the raster backend does"
+        );
+    }
+
+    /// A shaped run cannot map glyph to character one at a time — a ligature is
+    /// one glyph for two — so it says what it means with `/ActualText`. Without
+    /// it the page draws correct Arabic and copies as nothing, which is the
+    /// failure this format is famous for.
+    #[cfg(feature = "shaping")]
+    #[test]
+    fn a_reordered_run_says_what_it_means_with_actual_text() {
+        let word = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
+        if crate::fonts::coverage_face_bytes('\u{5d0}', false, false).is_none() {
+            return;
+        }
+        let list = text(word);
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        let body = String::from_utf8_lossy(&pdf);
+        let expected: String = word
+            .encode_utf16()
+            .map(|unit| format!("{unit:04X}"))
+            .collect();
+        assert!(
+            body.contains(&format!("/ActualText <FEFF{expected}>")),
+            "the run must carry its own text in logical order"
+        );
+    }
+
+    /// Latin is shaped too — the raster backend shapes every run one face
+    /// covers — but nothing about a run without ligatures reorders or merges,
+    /// so the ordinary `ToUnicode` map still says what each glyph means. A page
+    /// that gave that up would copy as nothing in a reader that ignores
+    /// `/ActualText`, which is a regression and not a feature.
+    #[test]
+    fn latin_without_ligatures_keeps_its_per_glyph_meaning() {
+        let list = text("Total 2024");
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        let map = to_unicode(&pdf);
+        let read: String = drawn_glyphs(&pdf)
+            .into_iter()
+            .filter_map(|gid| map.get(&gid).copied())
+            .collect();
+        assert_eq!(read, "Total 2024");
+        assert!(
+            !String::from_utf8_lossy(&pdf).contains("/ActualText"),
+            "a run that maps one-to-one already says what it means"
+        );
+    }
+
+    /// **A ligature is one glyph for three characters**, so `Waffle` is the
+    /// Latin case of the same problem Arabic has: `ToUnicode` cannot say what
+    /// the `ffl` glyph means. It is the run that has to.
+    ///
+    /// This is the assertion that would have caught the first attempt here,
+    /// which took the shaper's output and left the glyph map empty for every
+    /// run — correct on paper, blank in a copy-paste.
+    #[cfg(feature = "shaping")]
+    #[test]
+    fn a_latin_ligature_says_what_it_means_with_actual_text() {
+        let list = text("Waffle");
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            drawn_glyphs(&pdf).len() < "Waffle".chars().count(),
+            "the bundled face ligates `ffl`; if it stops, this case moves"
+        );
+        let expected: String = "Waffle"
+            .encode_utf16()
+            .map(|unit| format!("{unit:04X}"))
+            .collect();
+        assert!(
+            String::from_utf8_lossy(&pdf).contains(&format!("/ActualText <FEFF{expected}>")),
+            "a ligated run must carry its own text"
+        );
+    }
+
+    /// The runs on one line share a baseline: a 20-point word beside a 9-point
+    /// one must not drop the small text to its own line.
+    #[test]
+    fn a_line_of_mixed_sizes_shares_one_baseline() {
+        let page = bare_page(
+            furniture([
+                vec![vec![run("big", 20.0), run("small", 9.0)]],
+                Vec::new(),
+                Vec::new(),
+            ]),
+            PdfFurniture::default(),
+        );
+        let (pdf, _) =
+            write_pdf(&[page], &GridGeometry::default(), &PdfMetadata::default()).unwrap();
+        let runs = drawn_runs(&pdf);
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(
+            (runs[0].y - runs[1].y).abs() < 0.01,
+            "one baseline, not {runs:?}"
+        );
     }
 }

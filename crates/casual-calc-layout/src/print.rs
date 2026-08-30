@@ -38,10 +38,14 @@
 //! (already zero-sized in [`GridGeometry`]), and merges that reach past the
 //! last cell carrying a value.
 //!
+//! Headers and footers, too: [`HeaderFooters`] parses Excel's field-code
+//! language off `<headerFooter>`, honours `differentFirst` and
+//! `differentOddEven`, and [`Pagination`] reserves the room they need above and
+//! below the printable box. `&P` can be resolved here — and only here — because
+//! this is the layer that knows how many pages there are and which one this is.
+//!
 //! ## What it does not, and the caller must not pretend otherwise
 //!
-//! * **Headers and footers.** [`Pagination::header_twips`] reserves nothing;
-//!   the margin boxes are the HTML path's, and `&P` has no counter here yet.
 //! * **Row and column headings** (`printOptions/@headings`). The HTML path
 //!   prints the `A`/`1` strips; this reserves no room for them.
 //! * **Centring** (`horizontalCentered` / `verticalCentered`). Content is
@@ -52,8 +56,11 @@
 //! * **Row height reflow.** A row taller than the printable box is put on a
 //!   page of its own and overflows it, rather than being split across two.
 //!   Excel does the same.
-//! * **`differentFirst` / `differentOddEven`.** Nothing reads them because
-//!   nothing here draws a header.
+//! * **The header/footer codes [`HeaderFooters::refused`] names.** A picture
+//!   (`&G`), a text colour (`&K`), underline, strikethrough, super/subscript,
+//!   outline and shadow are parsed, counted **by name**, and not drawn. A
+//!   caller folds that list into its compatibility report; nothing is dropped
+//!   without being said.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -393,6 +400,620 @@ pub fn scope(workbook: &Workbook, sheet_index: usize) -> Option<PrintScope> {
 }
 
 // ---------------------------------------------------------------------------
+// Headers and footers
+// ---------------------------------------------------------------------------
+
+/// The point size a header or footer run is drawn at when no `&nn` code sets
+/// one.
+///
+/// Nine points, which is what the HTML print path writes into its `@page`
+/// margin boxes. The two printouts of one workbook must not differ in the size
+/// of their page numbers, and a constant in one place is how that is kept true.
+pub const HF_DEFAULT_PT: f32 = 9.0;
+
+/// A header or footer line's height as a multiple of its largest point size.
+///
+/// Used both to **reserve** the room a header needs (here) and to **advance**
+/// the pen between its lines (in the PDF writer). One number, so the space put
+/// aside and the space used are the same space.
+pub const HF_LINE_FACTOR: f64 = 1.2;
+
+/// The most lines one header or footer may have.
+///
+/// A bound, not a preference: the string comes out of an untrusted file and
+/// every line is reserved paper. Excel's own dialog stops well short of this.
+pub const HF_MAX_LINES: usize = 32;
+
+/// The most characters one header or footer section may carry to the page.
+///
+/// Same reasoning as [`HF_MAX_LINES`]. A megabyte of `&C` text is a page that
+/// takes a minute to draw and says nothing.
+pub const HF_MAX_CHARS: usize = 4096;
+
+/// What a header or footer piece prints.
+///
+/// A page number is **not** substituted at parse time: which page a header is
+/// printed on is not known until the paginator has cut the sheet, and the same
+/// parsed header is used by every page. It stays a token until
+/// [`HeaderFooter::resolve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderField {
+    /// Literal text, with every value code already substituted.
+    Text(String),
+    /// `&P` — this page's number, plus whatever `&P+n` offsets it by.
+    PageNumber(i64),
+    /// `&N` — how many pages the printout has.
+    PageCount,
+    /// A line break, from a literal newline in the string.
+    LineBreak,
+}
+
+/// One piece of a header or footer: what it prints, and the face it prints in.
+///
+/// The style is carried per piece rather than per section because Excel's
+/// formatting codes are **toggles in a stream** — `&BTotal&B: &P` is a bold
+/// word followed by a plain one — so a section is a sequence of differently
+/// dressed runs and never one string with one font.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeaderPiece {
+    /// What this piece prints.
+    pub field: HeaderField,
+    /// The face name `&"Arial,Bold"` asked for, or `None` for the default.
+    pub font: Option<String>,
+    /// The point size, from `&nn` or [`HF_DEFAULT_PT`].
+    pub size_pt: f32,
+    /// Whether `&B`, or a `Bold` style in `&"…,…"`, is in force.
+    pub bold: bool,
+    /// Whether `&I`, or an `Italic` style, is in force.
+    pub italic: bool,
+}
+
+/// One run of a header or footer line, with its page numbers filled in.
+///
+/// The resolved form of a [`HeaderPiece`]: the same styling, and text that is
+/// finally just text. This is what a backend draws.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeaderRun {
+    /// The text to draw.
+    pub text: String,
+    /// The face name, or `None` for the document default.
+    pub font: Option<String>,
+    /// The point size.
+    pub size_pt: f32,
+    /// Bold.
+    pub bold: bool,
+    /// Italic.
+    pub italic: bool,
+}
+
+/// One header or footer: its left, centre and right sections, parsed.
+///
+/// Excel's `&L`/`&C`/`&R` split one string into three independently aligned
+/// boxes on the same lines of the page — they are not three paragraphs. Text
+/// before any of the three codes is **centred**, which is what Excel does with
+/// an unmarked header.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeaderFooter {
+    /// Left, centre and right, in that order.
+    pub sections: [Vec<HeaderPiece>; 3],
+}
+
+impl HeaderFooter {
+    /// Whether nothing at all would be drawn.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sections.iter().all(|s| {
+            s.iter()
+                .all(|p| matches!(&p.field, HeaderField::Text(t) if t.is_empty()))
+        })
+    }
+
+    /// The height this needs, in twips, at scale 1.
+    ///
+    /// The **tallest** of the three sections, because they share the lines:
+    /// a two-line centre section beside a one-line left one is a two-line
+    /// header, not a three-line one.
+    ///
+    /// Counted over the lines [`HeaderFooter::resolve`] will actually produce,
+    /// not over every newline in the file. A string with a hundred thousand of
+    /// them would otherwise reserve more paper than the sheet has and leave a
+    /// printable box of one twip — a page per row, up to the page cap, from a
+    /// header nobody could see. The bound belongs in both places or in neither.
+    #[must_use]
+    pub fn height_twips(&self) -> i64 {
+        if self.is_empty() {
+            return 0;
+        }
+        let section_height = |pieces: &Vec<HeaderPiece>| -> i64 {
+            let mut total = 0.0f64;
+            let mut line_pt = 0.0f64;
+            let mut lines = 1usize;
+            let mut any = false;
+            for piece in pieces {
+                any = true;
+                if matches!(piece.field, HeaderField::LineBreak) {
+                    if lines >= HF_MAX_LINES {
+                        break;
+                    }
+                    lines += 1;
+                    total += line_pt.max(f64::from(HF_DEFAULT_PT));
+                    line_pt = 0.0;
+                } else {
+                    line_pt = line_pt.max(f64::from(piece.size_pt));
+                }
+            }
+            if !any {
+                return 0;
+            }
+            total += line_pt.max(f64::from(HF_DEFAULT_PT));
+            (total * HF_LINE_FACTOR * TWIPS_PER_POINT).ceil() as i64
+        };
+        self.sections.iter().map(section_height).max().unwrap_or(0)
+    }
+
+    /// Fill in `&P` and `&N` for one page, and cut the sections into lines.
+    ///
+    /// The outer `Vec` of each section is its lines, top to bottom; the inner
+    /// one is the runs of that line, left to right.
+    #[must_use]
+    pub fn resolve(&self, page_number: i64, page_count: usize) -> [Vec<Vec<HeaderRun>>; 3] {
+        let mut out: [Vec<Vec<HeaderRun>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (section, lines) in self.sections.iter().zip(out.iter_mut()) {
+            let mut line: Vec<HeaderRun> = Vec::new();
+            let mut budget = HF_MAX_CHARS;
+            for piece in section {
+                let text = match &piece.field {
+                    HeaderField::LineBreak => {
+                        if lines.len() + 1 >= HF_MAX_LINES {
+                            break;
+                        }
+                        lines.push(std::mem::take(&mut line));
+                        continue;
+                    }
+                    HeaderField::Text(t) => t.clone(),
+                    HeaderField::PageNumber(offset) => {
+                        page_number.saturating_add(*offset).to_string()
+                    }
+                    HeaderField::PageCount => page_count.to_string(),
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                let text: String = text.chars().take(budget).collect();
+                budget -= text.chars().count();
+                line.push(HeaderRun {
+                    text,
+                    font: piece.font.clone(),
+                    size_pt: piece.size_pt,
+                    bold: piece.bold,
+                    italic: piece.italic,
+                });
+                if budget == 0 {
+                    break;
+                }
+            }
+            if !line.is_empty() || lines.is_empty() {
+                lines.push(line);
+            }
+            while lines.last().is_some_and(Vec::is_empty) {
+                lines.pop();
+            }
+        }
+        out
+    }
+}
+
+/// What a header/footer field code is substituted from.
+///
+/// The engine reads no clock and knows no file name — the host owns both
+/// (AGENTS.md, "the host owns policy") — so `&D`, `&T`, `&F` and `&Z` are
+/// answered from here or refused **by name**, never invented.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrintContext<'a> {
+    /// The document's file name, for `&F`, and its path for `&Z`. Empty when
+    /// the host has not named the document.
+    pub file: &'a str,
+    /// The host's clock as a date serial, for `&D` and `&T`. `None` when the
+    /// host has passed none.
+    pub now: Option<f64>,
+}
+
+/// Every header and footer a sheet prints, and the geometry they sit in.
+///
+/// # The three variants
+///
+/// `<headerFooter>` carries up to six strings. `differentFirst` makes
+/// `firstHeader`/`firstFooter` apply to page one, and `differentOddEven` makes
+/// `evenHeader`/`evenFooter` apply to even-numbered pages. Both flags select a
+/// variant **whether or not the string is there**: a sheet with
+/// `differentFirst="1"` and no `firstHeader` prints *nothing* on page one, and
+/// falling back to `oddHeader` would put a header on the title page its author
+/// deliberately cleared.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeaderFooters {
+    /// `oddHeader` — the header of every page no variant claims.
+    pub odd_header: HeaderFooter,
+    /// `oddFooter`.
+    pub odd_footer: HeaderFooter,
+    /// `evenHeader`, present exactly when `differentOddEven` is set.
+    pub even_header: Option<HeaderFooter>,
+    /// `evenFooter`, on the same condition.
+    pub even_footer: Option<HeaderFooter>,
+    /// `firstHeader`, present exactly when `differentFirst` is set.
+    pub first_header: Option<HeaderFooter>,
+    /// `firstFooter`, on the same condition.
+    pub first_footer: Option<HeaderFooter>,
+    /// Twips from the top edge of the paper to the top of the header.
+    pub header_margin: i64,
+    /// Twips from the bottom edge of the paper to the bottom of the footer.
+    pub footer_margin: i64,
+    /// `alignWithMargins`: whether the three sections lay out inside the page
+    /// margins (the default) or across the whole sheet of paper.
+    pub align_with_margins: bool,
+    /// `scaleWithDoc`: whether the text shrinks with the document's print
+    /// scale, which is Excel's default.
+    pub scale_with_doc: bool,
+    /// The codes that were understood, counted, and **not drawn**, by the name
+    /// a compatibility report should show. Ordered, so a report is
+    /// deterministic.
+    pub refused: BTreeMap<&'static str, u64>,
+}
+
+impl HeaderFooters {
+    /// The header and footer for the page at `index` in the run, printed as
+    /// page `number`.
+    ///
+    /// Odd and even are decided by the **printed** number, not the position in
+    /// the run: a report whose `firstPageNumber` is 2 opens on an even page,
+    /// and that is the number its reader sees.
+    #[must_use]
+    pub fn for_page(&self, index: usize, number: i64) -> (&HeaderFooter, &HeaderFooter) {
+        if index == 0
+            && let (Some(header), Some(footer)) = (&self.first_header, &self.first_footer)
+        {
+            return (header, footer);
+        }
+        if number % 2 == 0
+            && let (Some(header), Some(footer)) = (&self.even_header, &self.even_footer)
+        {
+            return (header, footer);
+        }
+        (&self.odd_header, &self.odd_footer)
+    }
+
+    /// The tallest header any page of this sheet can carry, in twips.
+    ///
+    /// The **maximum over the variants**, because the body has one position on
+    /// every sheet of paper: pages are cut before their numbers are known, so a
+    /// per-page reservation would make page three's rows depend on page one's
+    /// header. Excel likewise keeps one text area for the document.
+    #[must_use]
+    pub fn header_height(&self) -> i64 {
+        [
+            Some(&self.odd_header),
+            self.even_header.as_ref(),
+            self.first_header.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(HeaderFooter::height_twips)
+        .max()
+        .unwrap_or(0)
+    }
+
+    /// The tallest footer, on the same terms as [`Self::header_height`].
+    #[must_use]
+    pub fn footer_height(&self) -> i64 {
+        [
+            Some(&self.odd_footer),
+            self.even_footer.as_ref(),
+            self.first_footer.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(HeaderFooter::height_twips)
+        .max()
+        .unwrap_or(0)
+    }
+}
+
+/// Twips in one point, for the header/footer sizes quoted in points.
+const TWIPS_PER_POINT: f64 = 20.0;
+
+/// Read a sheet's `<headerFooter>` into parsed headers and footers.
+///
+/// `sheet_name` answers `&A`; `ctx` answers `&F`, `&Z`, `&D` and `&T`.
+#[must_use]
+pub fn header_footers(sheet: &Sheet, ctx: &PrintContext<'_>) -> HeaderFooters {
+    let flags = &sheet.print.header_footer;
+    let different_first = flag(flags, "differentFirst");
+    let different_odd_even = flag(flags, "differentOddEven");
+    let mut refused: BTreeMap<&'static str, u64> = BTreeMap::new();
+
+    let text = |key: &str| {
+        sheet
+            .print
+            .header_footer_text
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or_default()
+    };
+    let parse = |key: &str, refused: &mut BTreeMap<&'static str, u64>| {
+        parse_header_footer(text(key), &sheet.name, ctx, refused)
+    };
+
+    let odd_header = parse("oddHeader", &mut refused);
+    let odd_footer = parse("oddFooter", &mut refused);
+    let even_header = different_odd_even.then(|| parse("evenHeader", &mut refused));
+    let even_footer = different_odd_even.then(|| parse("evenFooter", &mut refused));
+    let first_header = different_first.then(|| parse("firstHeader", &mut refused));
+    let first_footer = different_first.then(|| parse("firstFooter", &mut refused));
+
+    // Excel's defaults, in inches, for a sheet whose `<pageMargins>` omits
+    // them: half an inch to the header and to the footer.
+    let inches = |key: &str, fallback: f64| {
+        sheet
+            .print
+            .margins
+            .get(key)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(fallback)
+            .max(0.0)
+    };
+    let twips = |v: f64| (v * TWIPS_PER_INCH as f64).round() as i64;
+
+    HeaderFooters {
+        odd_header,
+        odd_footer,
+        even_header,
+        even_footer,
+        first_header,
+        first_footer,
+        header_margin: twips(inches("header", 0.3)),
+        footer_margin: twips(inches("footer", 0.3)),
+        // Both default to true in the schema, so an absent attribute is on and
+        // only an explicit "0"/"false" turns it off.
+        align_with_margins: !off(flags, "alignWithMargins"),
+        scale_with_doc: !off(flags, "scaleWithDoc"),
+        refused,
+    }
+}
+
+/// Whether an attribute is explicitly false. Distinct from `!flag(..)`, which
+/// also answers true for an attribute that is not there at all.
+fn off(map: &BTreeMap<String, String>, key: &str) -> bool {
+    matches!(map.get(key).map(String::as_str), Some("0") | Some("false"))
+}
+
+/// Parse one header or footer string into its three sections.
+///
+/// # The language
+///
+/// `&L`, `&C` and `&R` choose the section everything after them belongs to.
+/// `&P` is the page number (and `&P+3` an offset one), `&N` the page count,
+/// `&A` the sheet name, `&F` the file name, `&Z` its path, `&D` the date, `&T`
+/// the time, and `&&` a literal ampersand. `&B` and `&I` toggle bold and
+/// italic, `&"Name,Style"` sets the face, `&nn` the point size, and
+/// `&"-,Regular"` returns to the default face.
+///
+/// Everything else — `&G` (a picture), `&K` (a colour), `&U`, `&E`, `&S`, `&X`,
+/// `&Y`, `&O`, `&H` — is consumed so its letters do not print, and counted in
+/// `refused` under the name a compatibility report shows. A code that is
+/// dropped without being counted is exactly the silent loss this workspace
+/// forbids.
+///
+/// `&D`, `&T`, `&F` and `&Z` with nothing to substitute are refused the same
+/// way rather than printing an empty string: a header that reads
+/// "Printed on" and stops is a defect a reader has to guess at.
+#[must_use]
+pub fn parse_header_footer(
+    raw: &str,
+    sheet_name: &str,
+    ctx: &PrintContext<'_>,
+    refused: &mut BTreeMap<&'static str, u64>,
+) -> HeaderFooter {
+    let mut out = HeaderFooter::default();
+    // Unmarked text is centred, as Excel treats it.
+    let mut current = 1usize;
+    let mut buf = String::new();
+    let mut style = HeaderPiece {
+        field: HeaderField::Text(String::new()),
+        font: None,
+        size_pt: HF_DEFAULT_PT,
+        bold: false,
+        italic: false,
+    };
+
+    macro_rules! flush {
+        () => {
+            if !buf.is_empty() {
+                out.sections[current].push(HeaderPiece {
+                    field: HeaderField::Text(std::mem::take(&mut buf)),
+                    ..style.clone()
+                });
+            }
+        };
+    }
+    macro_rules! push_field {
+        ($field:expr) => {{
+            flush!();
+            out.sections[current].push(HeaderPiece {
+                field: $field,
+                ..style.clone()
+            });
+        }};
+    }
+    let refuse = |code: &'static str, refused: &mut BTreeMap<&'static str, u64>| {
+        *refused.entry(code).or_insert(0) += 1;
+    };
+
+    let stamp = |code: &str| ctx.now.map(|serial| crate::format_number(serial, code));
+
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => {
+                flush!();
+                out.sections[current].push(HeaderPiece {
+                    field: HeaderField::LineBreak,
+                    ..style.clone()
+                });
+                continue;
+            }
+            // A carriage return is a line ending's other half, not text.
+            '\r' => continue,
+            c if c != '&' => {
+                buf.push(c);
+                continue;
+            }
+            _ => {}
+        }
+        let Some(code) = chars.next() else {
+            // A trailing bare `&` is not a code. Excel writes `&&` for a
+            // literal one, but a file that ends mid-code should still print its
+            // text rather than swallow the character.
+            buf.push('&');
+            break;
+        };
+        match code {
+            // A quoted face: `&"Arial,Bold Italic"`, or `&"-,Regular"` for the
+            // document's own font.
+            '"' => {
+                let mut spec = String::new();
+                for c in chars.by_ref() {
+                    if c == '"' {
+                        break;
+                    }
+                    spec.push(c);
+                }
+                flush!();
+                let (name, weight) = spec.split_once(',').unwrap_or((spec.as_str(), ""));
+                style.font = match name.trim() {
+                    "" | "-" => None,
+                    n => Some(n.to_owned()),
+                };
+                style.bold = weight.contains("Bold");
+                style.italic = weight.contains("Italic") || weight.contains("Oblique");
+            }
+            '&' => buf.push('&'),
+            // A point size is `&` followed by digits.
+            d if d.is_ascii_digit() => {
+                let mut size = String::from(d);
+                while chars.peek().is_some_and(char::is_ascii_digit) {
+                    size.push(chars.next().unwrap_or('0'));
+                }
+                flush!();
+                // Excel's own range. A file asking for 4000-point text is a
+                // page of nothing else, and one asking for zero draws nothing.
+                if let Ok(pt) = size.parse::<f32>()
+                    && (1.0..=409.0).contains(&pt)
+                {
+                    style.size_pt = pt;
+                }
+            }
+            'L' | 'C' | 'R' => {
+                flush!();
+                current = match code {
+                    'L' => 0,
+                    'C' => 1,
+                    _ => 2,
+                };
+            }
+            'P' => {
+                // `&P+3` and `&P-1` shift the printed number.
+                let mut offset = 0i64;
+                if let Some(sign @ ('+' | '-')) = chars.peek().copied() {
+                    let mut digits = String::new();
+                    let mut lookahead = chars.clone();
+                    lookahead.next();
+                    while lookahead.peek().is_some_and(char::is_ascii_digit) {
+                        digits.push(lookahead.next().unwrap_or('0'));
+                    }
+                    if let Ok(n) = digits.parse::<i64>() {
+                        offset = if sign == '-' { -n } else { n };
+                        chars = lookahead;
+                    }
+                }
+                push_field!(HeaderField::PageNumber(offset));
+            }
+            'N' => push_field!(HeaderField::PageCount),
+            'A' => buf.push_str(sheet_name),
+            'B' => {
+                flush!();
+                style.bold = !style.bold;
+            }
+            'I' => {
+                flush!();
+                style.italic = !style.italic;
+            }
+            'F' => match ctx.file {
+                "" => refuse("header/footer file name (&F)", refused),
+                file => buf.push_str(file),
+            },
+            'Z' => match ctx.file {
+                "" => refuse("header/footer file path (&Z)", refused),
+                file => buf.push_str(file),
+            },
+            'D' => match stamp("yyyy-mm-dd") {
+                Some(text) => buf.push_str(&text),
+                None => refuse("header/footer date (&D)", refused),
+            },
+            'T' => match stamp("hh:mm:ss") {
+                Some(text) => buf.push_str(&text),
+                None => refuse("header/footer time (&T)", refused),
+            },
+            // `&K` carries a six-digit colour, or a two-digit theme index and
+            // a tint. Its digits are not text and must not print.
+            'K' => {
+                for _ in 0..6 {
+                    if chars.peek().is_some_and(char::is_ascii_hexdigit) {
+                        chars.next();
+                    }
+                }
+                refuse("header/footer text colour (&K)", refused);
+            }
+            'G' => refuse("header/footer picture (&G)", refused),
+            'U' => refuse("header/footer underline (&U)", refused),
+            'E' => refuse("header/footer double underline (&E)", refused),
+            'S' => refuse("header/footer strikethrough (&S)", refused),
+            'X' => refuse("header/footer superscript (&X)", refused),
+            'Y' => refuse("header/footer subscript (&Y)", refused),
+            'O' => refuse("header/footer outline (&O)", refused),
+            'H' => refuse("header/footer shadow (&H)", refused),
+            // A reserved or unknown letter. Consumed so it does not print, and
+            // named as a whole rather than one row per letter.
+            _ => refuse("header/footer code (unrecognized)", refused),
+        }
+    }
+    flush!();
+
+    for section in &mut out.sections {
+        trim_section(section);
+    }
+    out
+}
+
+/// Drop the whitespace that only separated codes, so `&L Sales &C` prints
+/// "Sales" and not " Sales ".
+fn trim_section(pieces: &mut Vec<HeaderPiece>) {
+    if let Some(HeaderPiece {
+        field: HeaderField::Text(first),
+        ..
+    }) = pieces.first_mut()
+    {
+        *first = first.trim_start().to_owned();
+    }
+    if let Some(HeaderPiece {
+        field: HeaderField::Text(last),
+        ..
+    }) = pieces.last_mut()
+    {
+        *last = last.trim_end().to_owned();
+    }
+    pieces.retain(|p| !matches!(&p.field, HeaderField::Text(t) if t.is_empty()));
+}
+
+// ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
 
@@ -449,15 +1070,57 @@ pub struct Pagination {
     pub pages: Vec<Page>,
     /// Whether [`MAX_PAGES`] cut the run short.
     pub truncated: bool,
+    /// The headers and footers, parsed, with the margins they sit in.
+    pub header_footers: HeaderFooters,
+    /// Twips taken **out of** the printable box for the header, already
+    /// included in `margins[0]` and `page_box`. See [`Self::header_twips`].
+    pub header_reserve: i64,
+    /// The same for the footer, in `margins[2]`.
+    pub footer_reserve: i64,
+    /// The number printed on the first page: `pageSetup/@firstPageNumber` when
+    /// `useFirstPageNumber` asks for it, otherwise 1.
+    pub first_page_number: i64,
 }
 
 impl Pagination {
-    /// The twips reserved above the printable box for a header. Zero: headers
-    /// are not drawn yet, and reserving room for one that is never painted
-    /// would move every printout down the page for nothing.
+    /// The twips reserved above the printable box for the header.
+    ///
+    /// **Only what the header does not already fit into the top margin.** A
+    /// header 0.3" from the paper's edge and one 9-point line tall sits
+    /// entirely inside Excel's default 0.75" top margin, and moving the body
+    /// down for it would print a page that does not match Excel's. So the
+    /// reservation is `header margin + header height − top margin`, floored at
+    /// zero: nothing at all for an ordinary sheet, and room for the overflow
+    /// when a header is genuinely too tall.
+    ///
+    /// It is computed at **scale 1** even when `scaleWithDoc` will shrink the
+    /// text, because the scale is derived from the box this shrinks and the two
+    /// cannot both be the input. Reserving the unscaled height errs towards
+    /// leaving room, never towards printing a header over the first row.
     #[must_use]
     pub fn header_twips(&self) -> i64 {
-        0
+        self.header_reserve
+    }
+
+    /// The twips reserved below the printable box for the footer, on the same
+    /// terms as [`Self::header_twips`].
+    #[must_use]
+    pub fn footer_twips(&self) -> i64 {
+        self.footer_reserve
+    }
+
+    /// The number printed on the page at `index`.
+    #[must_use]
+    pub fn page_number(&self, index: usize) -> i64 {
+        self.first_page_number
+            .saturating_add(i64::try_from(index).unwrap_or(i64::MAX))
+    }
+
+    /// The header and footer the page at `index` carries, already chosen
+    /// between the odd, even and first variants.
+    #[must_use]
+    pub fn furniture(&self, index: usize) -> (&HeaderFooter, &HeaderFooter) {
+        self.header_footers.for_page(index, self.page_number(index))
     }
 }
 
@@ -539,6 +1202,22 @@ pub fn paginate(
     sheet_index: usize,
     geometry: &GridGeometry,
 ) -> Option<Pagination> {
+    paginate_with_context(workbook, sheet_index, geometry, &PrintContext::default())
+}
+
+/// [`paginate`], with the host values a header or footer may ask for.
+///
+/// `&D`, `&T`, `&F` and `&Z` have no answer inside the engine — it reads no
+/// clock and knows no file name — so a caller that wants them on the paper
+/// passes them here. One that does not gets them refused by name in
+/// [`HeaderFooters::refused`] rather than printed blank.
+#[must_use]
+pub fn paginate_with_context(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    ctx: &PrintContext<'_>,
+) -> Option<Pagination> {
     let sheet = workbook.sheets.get(sheet_index)?;
     let scope = scope(workbook, sheet_index)?;
 
@@ -563,8 +1242,36 @@ pub fn paginate(
         inches("bottom", 0.75),
         inches("left", 0.7),
     ];
-    let page_box = PageBox::new(paper, landscape, margins_in);
-    let margins = margins_in.map(|v| (v.max(0.0) * TWIPS_PER_INCH as f64).round() as i64);
+    let mut page_box = PageBox::new(paper, landscape, margins_in);
+    let mut margins = margins_in.map(|v| (v.max(0.0) * TWIPS_PER_INCH as f64).round() as i64);
+
+    // The header and footer come out of the paper before anything else does —
+    // before the scale, because fit-to-page fits what is left after them, and
+    // before the bands, because they are what decides how many rows a page
+    // holds. See `Pagination::header_twips` for why the reservation is an
+    // overflow and usually zero.
+    let header_footers = header_footers(sheet, ctx);
+    let header_reserve =
+        (header_footers.header_margin + header_footers.header_height() - margins[0]).max(0);
+    let footer_reserve =
+        (header_footers.footer_margin + header_footers.footer_height() - margins[2]).max(0);
+    margins[0] = margins[0].saturating_add(header_reserve);
+    margins[2] = margins[2].saturating_add(footer_reserve);
+    page_box.height = (page_box.height - header_reserve - footer_reserve).max(1);
+
+    // `firstPageNumber` only counts when `useFirstPageNumber` selects it, which
+    // is what Excel's "Auto" in the dialog means: the attribute is written
+    // whether or not the box is ticked.
+    let first_page_number = if flag(&sheet.print.page, "useFirstPageNumber") {
+        sheet
+            .print
+            .page
+            .get("firstPageNumber")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(1)
+    } else {
+        1
+    };
 
     // The repeated lines are part of what has to fit on the paper, so they are
     // in the extent the scale is computed from — otherwise "fit to one page
@@ -685,5 +1392,9 @@ pub fn paginate(
         title_height: repeat_h,
         pages,
         truncated,
+        header_footers,
+        header_reserve,
+        footer_reserve,
+        first_page_number,
     })
 }

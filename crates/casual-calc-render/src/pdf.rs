@@ -45,6 +45,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use casual_calc_layout::print::{HF_LINE_FACTOR, HeaderRun};
 use casual_calc_layout::{
     Align, BorderLine, DisplayList, GridGeometry, PaintItem, Point as LayoutPoint,
     Rect as LayoutRect,
@@ -104,6 +105,41 @@ pub struct PdfBand<'a> {
     pub gridlines: bool,
 }
 
+/// A header or footer, resolved for one page and ready to draw.
+///
+/// The runs come from [`casual_calc_layout::print`], which is the layer that
+/// knows what page this is and how many there are — `&P` cannot be answered
+/// anywhere else. This carries no field codes and no page arithmetic: by the
+/// time it reaches here it is text, a face, and a box to put it in.
+#[derive(Debug, Clone, Default)]
+pub struct PdfFurniture {
+    /// The left, centre and right sections. Each is a stack of lines, top to
+    /// bottom; each line is its runs, left to right.
+    pub sections: [Vec<Vec<HeaderRun>>; 3],
+    /// Left edge of the box the three sections lay out in, in twips from the
+    /// paper's left edge.
+    pub left: i64,
+    /// The width of that box, in twips.
+    pub width: i64,
+    /// Twips from the paper's **top** edge to the top of the first line for a
+    /// header, or from its **bottom** edge to the bottom of the last line for a
+    /// footer. Which one it is comes from the field of [`PdfPage`] it is in.
+    pub inset: i64,
+    /// A multiplier on every point size, for `scaleWithDoc`. One leaves the
+    /// text at the size the file asked for.
+    pub scale: f64,
+}
+
+impl PdfFurniture {
+    /// Whether this would put nothing on the paper.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sections
+            .iter()
+            .all(|lines| lines.iter().all(Vec::is_empty))
+    }
+}
+
 /// One sheet of paper.
 #[derive(Debug, Clone)]
 pub struct PdfPage<'a> {
@@ -119,6 +155,12 @@ pub struct PdfPage<'a> {
     pub scale: f64,
     /// The bands, in painter's order.
     pub bands: Vec<PdfBand<'a>>,
+    /// The header, drawn **above** the printable box and never scaled by
+    /// `scale` — a header is not part of the sheet, and Excel scales it only
+    /// when `scaleWithDoc` says so, which [`PdfFurniture::scale`] carries.
+    pub header: PdfFurniture,
+    /// The footer, drawn below the printable box.
+    pub footer: PdfFurniture,
 }
 
 /// What the document says about itself.
@@ -131,8 +173,15 @@ pub struct PdfMetadata {
 /// A face the document embeds, and the glyphs it was asked for.
 struct Face {
     bytes: &'static [u8],
-    /// Glyph id → the first character that mapped to it, for `ToUnicode`.
-    used: BTreeMap<u32, char>,
+    /// Glyph id → the text it stands for, for `ToUnicode` and `/W`.
+    ///
+    /// The value is **empty for a glyph whose text is carried some other way**
+    /// — a shaped run says what it means with `/ActualText`, because a ligature
+    /// is one glyph for two characters and a `bfchar` entry cannot say so per
+    /// glyph. The key is still needed: `/W` is written from these, and a glyph
+    /// with no width in it is drawn at the default 1000 and lands in the wrong
+    /// place.
+    used: BTreeMap<u32, String>,
 }
 
 /// The faces a document uses, in first-encounter order.
@@ -162,10 +211,40 @@ impl Faces {
     }
 
     /// Record that a glyph was drawn, so it reaches `/W` and `ToUnicode`.
-    fn note(&mut self, index: usize, gid: u32, ch: char) {
+    fn note(&mut self, index: usize, gid: u32, text: &str) {
         if let Some(face) = self.faces.get_mut(index) {
-            face.used.entry(gid).or_insert(ch);
+            let entry = face.used.entry(gid).or_default();
+            if entry.is_empty() {
+                entry.push_str(text);
+            }
         }
+    }
+
+    /// A glyph's advance as a fraction of the text size — **the number a viewer
+    /// will use**, which is `/W`'s rounded thousandths and not the font's exact
+    /// value.
+    ///
+    /// Read from here rather than recomputed at the point of use so that the
+    /// `TJ` adjustments and the `/W` array cannot disagree: they are the same
+    /// arithmetic, written once. A disagreement of half a thousandth per glyph
+    /// is invisible in a word and a whole glyph out by the end of a line.
+    fn advance(&self, index: usize, gid: u32) -> f64 {
+        let Some(face) = self.faces.get(index) else {
+            return 0.0;
+        };
+        let Ok(font) = FontRef::new(face.bytes) else {
+            return 0.0;
+        };
+        let upem = f64::from(
+            font.metrics(Size::unscaled(), LocationRef::default())
+                .units_per_em
+                .max(1),
+        );
+        let advance = font
+            .glyph_metrics(Size::unscaled(), LocationRef::default())
+            .advance_width(skrifa::GlyphId::new(gid))
+            .unwrap_or(0.0);
+        (f64::from(advance) * 1000.0 / upem).round() / 1000.0
     }
 }
 
@@ -360,6 +439,21 @@ fn pdf_string(text: &str) -> String {
     out
 }
 
+/// The `/ActualText` dictionary for a shaped run, as UTF-16BE.
+///
+/// A literal string cannot carry Arabic — there is no room above Latin-1 — so
+/// this is the hex form with the byte-order mark that tells a reader it is
+/// UTF-16. It is the one place in this writer that text is spelled out rather
+/// than drawn, and it is what a copy, a search, or `pdftotext` reads back.
+fn actual_text_dict(text: &str) -> String {
+    let mut out = String::from("<< /ActualText <FEFF");
+    for unit in text.encode_utf16() {
+        let _ = write!(out, "{unit:04X}");
+    }
+    out.push_str("> >>");
+    out
+}
+
 /// A number a PDF parser will accept: fixed point, never an exponent, never
 /// `NaN` or `inf` — any of which would make the file unopenable.
 fn num(value: f64) -> String {
@@ -483,7 +577,7 @@ fn write_faces(objects: &mut Objects, faces: &Faces) -> Vec<usize> {
 
 /// The `ToUnicode` CMap: what each glyph id means, so the text can be read back
 /// out of the page.
-fn to_unicode_cmap(used: &BTreeMap<u32, char>) -> String {
+fn to_unicode_cmap(used: &BTreeMap<u32, String>) -> String {
     let mut out = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
          /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
@@ -492,13 +586,16 @@ fn to_unicode_cmap(used: &BTreeMap<u32, char>) -> String {
     );
     // `bfchar` blocks are capped at 100 entries by the specification, so a
     // sheet with more than a hundred distinct glyphs needs several.
-    let entries: Vec<(u32, char)> = used.iter().map(|(&g, &c)| (g, c)).collect();
+    let entries: Vec<(u32, &str)> = used
+        .iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(&g, t)| (g, t.as_str()))
+        .collect();
     for chunk in entries.chunks(100) {
         let _ = writeln!(out, "{} beginbfchar", chunk.len());
-        for (gid, ch) in chunk {
+        for (gid, text) in chunk {
             let mut utf16 = String::new();
-            let mut buffer = [0u16; 2];
-            for unit in ch.encode_utf16(&mut buffer) {
+            for unit in text.encode_utf16() {
                 let _ = write!(utf16, "{unit:04X}");
             }
             let _ = writeln!(out, "<{gid:04X}> <{utf16}>");
@@ -578,6 +675,11 @@ fn page_content(
     }
 
     out.push_str("Q\n");
+
+    // After the bands and outside their matrix: the header and footer are in
+    // the paper's margins, where the content scale does not reach.
+    write_furniture(&mut out, &page.header, false, page.height, faces);
+    write_furniture(&mut out, &page.footer, true, page.height, faces);
     out
 }
 
@@ -922,10 +1024,31 @@ fn write_wedge(
 /// One run of characters drawn from one face.
 struct Run {
     face: usize,
-    /// Glyph id and the character it came from, in order.
-    glyphs: Vec<(u32, char)>,
+    /// The glyphs, in the order they are drawn — which for a right-to-left run
+    /// is not the order the characters were typed in.
+    glyphs: Vec<Glyph>,
     /// The run's total advance, in twips at the requested size.
     advance: f64,
+    /// What the run says, when the glyphs cannot say it themselves.
+    ///
+    /// `Some` for a shaped run, and written as `/ActualText`. A shaper joins,
+    /// reorders and ligates, so "glyph three means character three" stops being
+    /// true and a per-glyph `ToUnicode` map stops being able to express the
+    /// run: `لا` is **one** glyph for two characters. `/ActualText` is the
+    /// mechanism the format has for exactly this, and without it the page draws
+    /// correct Arabic that copies as nothing.
+    actual_text: Option<String>,
+}
+
+/// One glyph, placed.
+struct Glyph {
+    id: u32,
+    /// How far the pen moves after drawing it, in twips.
+    advance: f64,
+    /// Displacement from the pen before drawing it, in twips.
+    offset: (f64, f64),
+    /// The text this glyph stands for, or empty when the run says so instead.
+    text: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -945,16 +1068,144 @@ fn write_text(
         return;
     }
     let size = f64::from(font_pt) * TWIPS_PER_POINT;
-    let primary = fonts::face_bytes_for(font_name, bold, italic);
-    let Ok(font) = FontRef::new(primary) else {
+    let Some(shaped) = shape(content, font_name, bold, italic, size, faces) else {
         return;
     };
+
+    let (x, y, w, h) = (rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
+    let pen = match align {
+        Align::Left => x + TEXT_PAD_TWIPS,
+        Align::Right => x + w - TEXT_PAD_TWIPS - shaped.total,
+        Align::Center => x + (w - shaped.total) / 2.0,
+    };
+    // The same vertical centring the raster backend does: the ascent/descent
+    // band centred in the cell, the baseline an ascent below its top.
+    let baseline = y + ((h - (shaped.ascent - shaped.descent)) / 2.0).max(0.0) + shaped.ascent;
+
+    write_runs(
+        out,
+        &shaped.runs,
+        size,
+        pen,
+        baseline,
+        color.and_then(rgb).unwrap_or((0.0, 0.0, 0.0)),
+        faces,
+    );
+}
+
+/// A string turned into drawable runs, with the metrics a caller needs to place
+/// them.
+struct Shaped {
+    runs: Vec<Run>,
+    /// The whole string's advance, in twips.
+    total: f64,
+    /// The primary face's ascent at this size, in twips.
+    ascent: f64,
+    /// Its descent, which is negative.
+    descent: f64,
+}
+
+/// Split `content` into runs by the face that covers each character, exactly as
+/// the raster backend's per-`char` loop falls back — so the two put the same
+/// glyphs in the same places.
+///
+/// `None` when the requested face will not parse, which leaves the caller
+/// drawing nothing rather than drawing something wrong.
+fn shape(
+    content: &str,
+    font_name: Option<&str>,
+    bold: bool,
+    italic: bool,
+    size: f64,
+    faces: &mut Faces,
+) -> Option<Shaped> {
+    let primary = fonts::face_bytes_for(font_name, bold, italic);
+    let font = FontRef::new(primary).ok()?;
     let metrics = font.metrics(Size::unscaled(), LocationRef::default());
     let upem = f64::from(metrics.units_per_em.max(1));
 
-    // Split into runs by the face that covers each character, exactly as the
-    // raster backend's per-`char` loop falls back — so the two put the same
-    // glyphs in the same places.
+    // The shaper first, on exactly the terms the raster backend uses it: one
+    // face for the whole run, `crate::single_face_for` deciding which. Same
+    // rule, same call, same glyphs — which is what `RND-05` asks for, and what
+    // stopped being true the moment the PDF walked the string per `char` while
+    // the PNG shaped it. Arabic drawn per `char` is not slightly wrong: the
+    // letters do not join and the word runs backwards.
+    #[cfg(feature = "shaping")]
+    if let Some(bytes) = crate::single_face_for(content, font_name, bold, italic)
+        && let Some(placed) = crate::shape::run(bytes, content, size as f32)
+        && !placed.is_empty()
+    {
+        let index = faces.index(bytes);
+        let face_upem = upem_of(bytes, upem);
+
+        // Whether the shaper left the run one glyph per character, in order.
+        //
+        // Asked by **comparing against the naive mapping**, not guessed from
+        // the script: when the two agree, every glyph still stands for exactly
+        // one character and the ordinary `ToUnicode` map can say so, which is
+        // what a tool that ignores `/ActualText` reads. Latin text that was
+        // only kerned takes this branch and keeps the map it had. Arabic does
+        // not — the glyphs joined and reordered — and says what it means with
+        // `/ActualText` instead.
+        let naive: Option<Vec<char>> = FontRef::new(bytes).ok().and_then(|f| {
+            let charmap = f.charmap();
+            let chars: Vec<char> = content.chars().collect();
+            (chars.len() == placed.len()
+                && chars
+                    .iter()
+                    .zip(&placed)
+                    .all(|(ch, g)| charmap.map(*ch).map(|id| id.to_u32()) == Some(u32::from(g.id))))
+            .then_some(chars)
+        });
+
+        let glyphs: Vec<Glyph> = placed
+            .iter()
+            .enumerate()
+            .map(|(at, g)| Glyph {
+                id: u32::from(g.id),
+                advance: f64::from(g.advance),
+                offset: (f64::from(g.x_offset), f64::from(g.y_offset)),
+                text: naive
+                    .as_ref()
+                    .and_then(|chars| chars.get(at))
+                    .map(char::to_string)
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let advance = glyphs.iter().map(|g| g.advance).sum();
+        let shaped_metrics = FontRef::new(bytes)
+            .ok()
+            .map(|f| f.metrics(Size::unscaled(), LocationRef::default()));
+        let (ascent, descent) = shaped_metrics
+            .map(|m| {
+                (
+                    f64::from(m.ascent) / face_upem * size,
+                    f64::from(m.descent) / face_upem * size,
+                )
+            })
+            .unwrap_or((
+                f64::from(metrics.ascent) / upem * size,
+                f64::from(metrics.descent) / upem * size,
+            ));
+        return Some(Shaped {
+            runs: vec![Run {
+                face: index,
+                glyphs,
+                advance,
+                // Only when the glyphs cannot say it themselves; a run that
+                // maps one-to-one already does, through `ToUnicode`.
+                actual_text: naive.is_none().then(|| content.to_owned()),
+            }],
+            total: advance,
+            ascent,
+            descent,
+        });
+    }
+
+    // No single face covers the run — a Latin word beside a Hebrew one, where
+    // the bundled families split the coverage. Shaping is defined against one
+    // face, so this is the per-`char` path, and it is the same one the raster
+    // backend falls back to for the same reason.
     let mut runs: Vec<Run> = Vec::new();
     for ch in content.chars() {
         let (bytes, gid, advance) = match resolve(primary, &font, ch, bold, italic) {
@@ -965,62 +1216,254 @@ fn write_text(
         };
         let index = faces.index(bytes);
         let advance = advance / upem_of(bytes, upem) * size;
+        let glyph = Glyph {
+            id: gid,
+            advance,
+            offset: (0.0, 0.0),
+            text: ch.to_string(),
+        };
         match runs.last_mut() {
             Some(run) if run.face == index => {
-                run.glyphs.push((gid, ch));
+                run.glyphs.push(glyph);
                 run.advance += advance;
             }
             _ => runs.push(Run {
                 face: index,
-                glyphs: vec![(gid, ch)],
+                glyphs: vec![glyph],
                 advance,
+                actual_text: None,
             }),
         }
     }
     if runs.is_empty() {
-        return;
+        return None;
     }
+    Some(Shaped {
+        total: runs.iter().map(|r| r.advance).sum(),
+        ascent: f64::from(metrics.ascent) / upem * size,
+        descent: f64::from(metrics.descent) / upem * size,
+        runs,
+    })
+}
 
-    let total: f64 = runs.iter().map(|r| r.advance).sum();
-    let (x, y, w, h) = (rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
-    let mut pen = match align {
-        Align::Left => x + TEXT_PAD_TWIPS,
-        Align::Right => x + w - TEXT_PAD_TWIPS - total,
-        Align::Center => x + (w - total) / 2.0,
-    };
-    // The same vertical centring the raster backend does: the ascent/descent
-    // band centred in the cell, the baseline an ascent below its top.
-    let ascent = f64::from(metrics.ascent) / upem * size;
-    let descent = f64::from(metrics.descent) / upem * size;
-    let baseline = y + ((h - (ascent - descent)) / 2.0).max(0.0) + ascent;
-
-    let (r, g, b) = color.and_then(rgb).unwrap_or((0.0, 0.0, 0.0));
-    for run in &runs {
-        let mut hex = String::with_capacity(run.glyphs.len() * 4);
-        for (gid, ch) in &run.glyphs {
-            // Identity-H addresses glyphs with two bytes. No TrueType face has
-            // more than 65535, so this only ever skips a corrupt one.
-            if *gid > 0xFFFF {
-                continue;
-            }
-            let _ = write!(hex, "{gid:04X}");
-            faces.note(run.face, *gid, *ch);
+/// Emit the text operators for a row of runs starting at `pen` on `baseline`.
+///
+/// # Why a `TJ` array and not one `Tj` per glyph
+///
+/// A shaped run's advances are not the font's own: kerning closes a gap, and a
+/// mark advances nothing. A viewer moves the pen by the width in `/W`, so the
+/// difference has to be told to it. `TJ` says exactly that — a number between
+/// two glyphs displaces the pen by `-n/1000` of the text size — which keeps one
+/// text-showing operator per run instead of one per glyph, and keeps a run the
+/// shaper did not touch as compact as it was.
+///
+/// A glyph the shaper *displaced* — a mark sitting over the letter before it —
+/// cannot be said that way, because `TJ` moves only along the line. Those get
+/// their own text matrix, and only those.
+fn write_runs(
+    out: &mut String,
+    runs: &[Run],
+    size: f64,
+    mut pen: f64,
+    baseline: f64,
+    color: (f64, f64, f64),
+    faces: &mut Faces,
+) {
+    let (r, g, b) = color;
+    for run in runs {
+        // Identity-H addresses glyphs with two bytes. No TrueType face has more
+        // than 65535, so this only ever skips a corrupt one.
+        let glyphs: Vec<&Glyph> = run.glyphs.iter().filter(|g| g.id <= 0xFFFF).collect();
+        if glyphs.is_empty() {
+            pen += run.advance;
+            continue;
         }
-        if !hex.is_empty() {
-            let _ = writeln!(
-                out,
-                "BT /F{} {} Tf {} {} {} rg 1 0 0 -1 {} {} Tm <{hex}> Tj ET",
-                run.face,
-                num(size),
-                num(r),
-                num(g),
-                num(b),
-                num(pen),
-                num(baseline)
-            );
+        for glyph in &glyphs {
+            faces.note(run.face, glyph.id, &glyph.text);
+        }
+        // The width the viewer will advance by, taken from the same rounded
+        // thousandths `/W` is written with — so an adjustment computed here
+        // lands the pen exactly where the shaper put it.
+        let natural: Vec<f64> = glyphs
+            .iter()
+            .map(|g| faces.advance(run.face, g.id) * size)
+            .collect();
+
+        if let Some(text) = &run.actual_text {
+            let _ = writeln!(out, "/Span {} BDC", actual_text_dict(text));
+        }
+        let _ = writeln!(
+            out,
+            "BT /F{} {} Tf {} {} {} rg 1 0 0 -1 {} {} Tm",
+            run.face,
+            num(size),
+            num(r),
+            num(g),
+            num(b),
+            num(pen),
+            num(baseline)
+        );
+
+        // One `TJ` for as long as the glyphs sit on the line, broken only by a
+        // displaced one.
+        let mut array = String::new();
+        let mut x = pen;
+        for (index, glyph) in glyphs.iter().enumerate() {
+            if glyph.offset.1 != 0.0 {
+                // Off the line: placed absolutely, then the pen is put back.
+                flush_tj(out, &mut array);
+                let _ = writeln!(
+                    out,
+                    "1 0 0 -1 {} {} Tm <{:04X}> Tj",
+                    num(x + glyph.offset.0),
+                    num(baseline - glyph.offset.1),
+                    glyph.id
+                );
+                let _ = writeln!(
+                    out,
+                    "1 0 0 -1 {} {} Tm",
+                    num(x + glyph.advance),
+                    num(baseline)
+                );
+            } else {
+                if glyph.offset.0 != 0.0 {
+                    let _ = write!(array, "{} ", num(-glyph.offset.0 * 1000.0 / size));
+                }
+                let _ = write!(array, "<{:04X}> ", glyph.id);
+                let drift = glyph.advance - natural[index] - glyph.offset.0;
+                let adjust = -drift * 1000.0 / size;
+                // Half a thousandth of an em is `/W`'s own rounding error, and
+                // correcting below the width table's precision writes a number
+                // beside every glyph on the page to say nothing.
+                if adjust.abs() >= 0.5 {
+                    let _ = write!(array, "{} ", num(adjust));
+                }
+            }
+            x += glyph.advance;
+        }
+        flush_tj(out, &mut array);
+        out.push_str("ET\n");
+        if run.actual_text.is_some() {
+            out.push_str("EMC\n");
         }
         pen += run.advance;
     }
+}
+
+/// Close an accumulated `TJ` array, if it has anything in it.
+fn flush_tj(out: &mut String, array: &mut String) {
+    if !array.is_empty() {
+        let _ = writeln!(out, "[{}] TJ", array.trim_end());
+        array.clear();
+    }
+}
+
+/// Draw a header or footer in the paper's margins.
+///
+/// `from_bottom` picks which edge [`PdfFurniture::inset`] is measured from, and
+/// therefore which end of the block is anchored: a header grows **down** from
+/// its top and a footer grows **up** from its bottom, so adding a second line
+/// to a footer moves the first one up rather than off the paper.
+///
+/// The three sections share the lines. Left, centre and right are laid out
+/// independently on the *same* baselines, which is what makes `&L`/`&C`/`&R`
+/// one header and not three.
+fn write_furniture(
+    out: &mut String,
+    furniture: &PdfFurniture,
+    from_bottom: bool,
+    page_height: i64,
+    faces: &mut Faces,
+) {
+    if furniture.is_empty() || furniture.width <= 0 {
+        return;
+    }
+    let scale = if furniture.scale.is_finite() && furniture.scale > 0.0 {
+        furniture.scale
+    } else {
+        1.0
+    };
+
+    // Shaped once, up front: the block's height cannot be known before every
+    // line's largest face is, and a footer is placed from the bottom of the
+    // block rather than the top.
+    let lines = furniture.sections.iter().map(Vec::len).max().unwrap_or(0);
+    let mut cells: Vec<[Vec<(Shaped, f64)>; 3]> = (0..lines)
+        .map(|_| [Vec::new(), Vec::new(), Vec::new()])
+        .collect();
+    let mut heights = vec![0.0f64; lines];
+    let mut ascents = vec![0.0f64; lines];
+    for (section, section_lines) in furniture.sections.iter().enumerate() {
+        for (index, runs) in section_lines.iter().enumerate() {
+            for run in runs {
+                let size = f64::from(run.size_pt).max(0.0) * scale * TWIPS_PER_POINT;
+                if size <= 0.0 {
+                    continue;
+                }
+                let Some(shaped) = shape(
+                    &run.text,
+                    run.font.as_deref(),
+                    run.bold,
+                    run.italic,
+                    size,
+                    faces,
+                ) else {
+                    continue;
+                };
+                heights[index] = heights[index].max(size * HF_LINE_FACTOR);
+                ascents[index] = ascents[index].max(shaped.ascent);
+                cells[index][section].push((shaped, size));
+            }
+        }
+    }
+    let block: f64 = heights.iter().sum();
+    if block <= 0.0 {
+        return;
+    }
+    let origin = if from_bottom {
+        page_height as f64 - furniture.inset as f64 - block
+    } else {
+        furniture.inset as f64
+    };
+
+    // Twips, y down from the paper's top-left corner — the same convention the
+    // bands are written in, so the two coordinate systems are one.
+    let _ = writeln!(
+        out,
+        "q {} 0 0 {} 0 {} cm",
+        num(1.0 / TWIPS_PER_POINT),
+        num(-1.0 / TWIPS_PER_POINT),
+        num(page_height as f64 / TWIPS_PER_POINT)
+    );
+    let mut top = origin;
+    for (index, line) in cells.iter().enumerate() {
+        let baseline = top + ascents[index];
+        top += heights[index];
+        for (section, parts) in line.iter().enumerate() {
+            if parts.is_empty() {
+                continue;
+            }
+            let total: f64 = parts.iter().map(|(s, _)| s.total).sum();
+            let mut pen = match section {
+                0 => furniture.left as f64,
+                1 => furniture.left as f64 + (furniture.width as f64 - total) / 2.0,
+                _ => furniture.left as f64 + furniture.width as f64 - total,
+            };
+            for (shaped, size) in parts {
+                write_runs(
+                    out,
+                    &shaped.runs,
+                    *size,
+                    pen,
+                    baseline,
+                    (0.0, 0.0, 0.0),
+                    faces,
+                );
+                pen += shaped.total;
+            }
+        }
+    }
+    out.push_str("Q\n");
 }
 
 /// The units-per-em of a face, falling back to the primary's when it will not

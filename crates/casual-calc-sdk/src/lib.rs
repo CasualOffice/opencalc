@@ -13,9 +13,10 @@ use casual_calc_formula::parse;
 use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
+use casual_calc_layout::print::PrintContext;
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
 use casual_calc_model::{Id, Workbook};
-use casual_calc_render::pdf::{PdfBand, PdfMetadata, PdfPage, write_pdf};
+use casual_calc_render::pdf::{PdfBand, PdfFurniture, PdfMetadata, PdfPage, write_pdf};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
     Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, undo_would_discard,
@@ -1596,6 +1597,26 @@ impl WorkbookSession {
         &self,
         sheet_index: usize,
     ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+        self.export_pdf_with_context(sheet_index, &PrintContext::default())
+    }
+
+    /// [`export_pdf_with_report`](Self::export_pdf_with_report), with the host
+    /// values a header or footer may ask for.
+    ///
+    /// `&D`, `&T`, `&F` and `&Z` cannot be answered by the engine: it reads no
+    /// clock and knows no file name, because **the host owns policy**
+    /// (AGENTS.md). A host that wants a dated printout passes the date here.
+    /// One that does not gets those codes **refused by name** in the report —
+    /// never a header that says "Printed on" and stops.
+    ///
+    /// # Errors
+    ///
+    /// As [`export_pdf`](Self::export_pdf).
+    pub fn export_pdf_with_context(
+        &self,
+        sheet_index: usize,
+        ctx: &PrintContext<'_>,
+    ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
         let geometry = self.geometry(sheet_index);
         let title = self
             .workbook
@@ -1603,7 +1624,7 @@ impl WorkbookSession {
             .get(sheet_index)
             .map(|s| s.name.clone())
             .unwrap_or_default();
-        sheet_pdf(&self.workbook, sheet_index, &geometry, &title)
+        sheet_pdf_with_context(&self.workbook, sheet_index, &geometry, &title, ctx)
     }
 
     /// The format this session was opened from, and the one
@@ -1927,10 +1948,34 @@ pub fn sheet_pdf(
     geometry: &GridGeometry,
     title: &str,
 ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+    sheet_pdf_with_context(
+        workbook,
+        sheet_index,
+        geometry,
+        title,
+        &PrintContext::default(),
+    )
+}
+
+/// [`sheet_pdf`], with the host values `&D`, `&T`, `&F` and `&Z` are
+/// substituted from.
+///
+/// # Errors
+///
+/// As [`sheet_pdf`].
+pub fn sheet_pdf_with_context(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    title: &str,
+    ctx: &PrintContext<'_>,
+) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
     let meta = PdfMetadata {
         title: title.to_owned(),
     };
-    let Some(plan) = casual_calc_layout::print::paginate(workbook, sheet_index, geometry) else {
+    let Some(plan) =
+        casual_calc_layout::print::paginate_with_context(workbook, sheet_index, geometry, ctx)
+    else {
         // Nothing to print. A document with no pages, rather than one blank
         // page that cannot be told from a page that failed to draw.
         let (bytes, _) = write_pdf(&[], geometry, &meta)?;
@@ -2015,24 +2060,64 @@ pub fn sheet_pdf(
     } else {
         (plan.paper.width, plan.paper.height)
     };
+    // The box the header and footer lay out in. `alignWithMargins` is the
+    // difference between "line the page number up with the table" (the default,
+    // and what a reader expects) and "centre it on the sheet of paper".
+    let (furniture_left, furniture_width) = if plan.header_footers.align_with_margins {
+        (
+            plan.margins[3],
+            (width - plan.margins[3] - plan.margins[1]).max(0),
+        )
+    } else {
+        (0, width)
+    };
+    // Excel's `scaleWithDoc` shrinks the header with the sheet. The HTML print
+    // path cannot — its header is in a CSS margin box, outside the scaled table
+    // — so a fit-to-page workbook prints a slightly larger header there. The
+    // difference is stated rather than split: this is the one Excel does.
+    let furniture_scale = if plan.header_footers.scale_with_doc {
+        plan.scale
+    } else {
+        1.0
+    };
+    let total_pages = plan.pages.len();
     let pages: Vec<PdfPage<'_>> = page_specs
         .iter()
-        .map(|specs| PdfPage {
-            width,
-            height,
-            margin_left: plan.margins[3],
-            margin_top: plan.margins[0],
-            scale: plan.scale,
-            bands: specs
-                .iter()
-                .map(|spec| PdfBand {
-                    display_list: &lists[spec.list],
-                    rows: spec.rows,
-                    cols: spec.cols,
-                    origin: spec.origin,
-                    gridlines: plan.gridlines,
-                })
-                .collect(),
+        .enumerate()
+        .map(|(index, specs)| {
+            let (header, footer) = plan.furniture(index);
+            let number = plan.page_number(index);
+            PdfPage {
+                width,
+                height,
+                margin_left: plan.margins[3],
+                margin_top: plan.margins[0],
+                scale: plan.scale,
+                bands: specs
+                    .iter()
+                    .map(|spec| PdfBand {
+                        display_list: &lists[spec.list],
+                        rows: spec.rows,
+                        cols: spec.cols,
+                        origin: spec.origin,
+                        gridlines: plan.gridlines,
+                    })
+                    .collect(),
+                header: PdfFurniture {
+                    sections: header.resolve(number, total_pages),
+                    left: furniture_left,
+                    width: furniture_width,
+                    inset: plan.header_footers.header_margin,
+                    scale: furniture_scale,
+                },
+                footer: PdfFurniture {
+                    sections: footer.resolve(number, total_pages),
+                    left: furniture_left,
+                    width: furniture_width,
+                    inset: plan.header_footers.footer_margin,
+                    scale: furniture_scale,
+                },
+            }
         })
         .collect();
 
@@ -2051,6 +2136,18 @@ pub fn sheet_pdf(
             "printed pages (over the page cap)",
             ModelOutcome::Omitted,
             RetentionOutcome::NotRetained,
+        );
+    }
+    // The header/footer codes that were read, understood and not drawn. Named
+    // one by one rather than as "some header formatting": a reader who is told
+    // a *picture* is missing looks for a logo, and one told "formatting" looks
+    // for nothing.
+    for (code, count) in &plan.header_footers.refused {
+        report.record_n(
+            code,
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            *count,
         );
     }
     Ok((bytes, report))
