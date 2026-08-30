@@ -1382,6 +1382,22 @@ impl History {
         self.applied
     }
 
+    /// Count a change this history did not make (`FID-39`).
+    ///
+    /// For a caller that changes the workbook behind the history's back — the
+    /// SDK's `apply_raw` and `workbook_mut`, and the collaborative receive path
+    /// that goes through the latter. Those bypass the undo *stack* on purpose;
+    /// bypassing the **dirty signal** was never part of it, and
+    /// [`Self::edits_applied`] promises a host that the number answers "is
+    /// there unsaved work?".
+    ///
+    /// Deliberately does not touch either stack. A change nobody recorded an
+    /// inverse for is not undoable, and inventing a stack entry for it would
+    /// let Ctrl+Z walk into a state the history cannot reconstruct.
+    pub fn note_foreign_change(&mut self) {
+        self.applied += 1;
+    }
+
     /// Whether there is anything to undo.
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
@@ -1434,6 +1450,13 @@ impl History {
         // a host must transmit is the operation that ran.
         let applied = op.clone();
         let inverse = apply(workbook, op)?;
+        // An undo is an edit (`FID-39`). `edits_applied`'s doc comment always
+        // said so and reasoned from it — that this counter "can only err the
+        // other way" — while this line was missing, so the mistake it rules out
+        // was the one being made: undo an edit that was already *saved* and the
+        // document moves away from disk with the number the host compares
+        // standing still, so no close warning is shown.
+        self.applied += 1;
         self.redo.push(inverse);
         Ok(Some(applied))
     }

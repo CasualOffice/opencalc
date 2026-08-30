@@ -3075,3 +3075,49 @@ fn a_formula_conditional_format_paints_through_the_sdk_layout() {
         "the highlight has to reach the pixels, not only the display list"
     );
 }
+
+/// The documented-bypass paths still move `edits_applied` (`FID-39`).
+///
+/// `apply_raw` and `workbook_mut` bypass *history* on purpose — that is what
+/// they are for. Bypassing the **dirty signal** was never part of it. This
+/// method's doc comment promises a host that comparing the number against its
+/// save point answers "is there unsaved work?", and both of these change the
+/// document without going near `History`.
+///
+/// Both already clear `self.source` for exactly this reason — they cannot see
+/// what the caller does next, so they give up the untouched-original guarantee
+/// rather than risk handing back a stale package. The counter is conservative
+/// on the same grounds: a needless warning costs a click, and the other mistake
+/// costs the document.
+#[test]
+fn the_history_bypasses_still_move_the_dirty_counter() {
+    // A session with a real sheet: `blank()` has none, and `apply_raw` would
+    // then fail with `SheetNotFound` — a red test proving nothing about the
+    // counter.
+    let mut session = session_with_formula();
+
+    let before_raw = session.edits_applied();
+    session
+        .apply_raw(casual_calc_transaction::Operation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(1.0),
+        })
+        .unwrap();
+    assert_ne!(
+        session.edits_applied(),
+        before_raw,
+        "apply_raw changed the document without moving edits_applied, so a host \
+         comparing it against its save point reports no unsaved work"
+    );
+
+    let before_mut = session.edits_applied();
+    session.workbook_mut();
+    assert_ne!(
+        session.edits_applied(),
+        before_mut,
+        "workbook_mut hands out the right to change anything and did not move \
+         edits_applied — the same conservatism that makes it drop `source` \
+         applies here"
+    );
+}

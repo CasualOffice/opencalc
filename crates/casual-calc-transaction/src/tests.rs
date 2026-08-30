@@ -4384,3 +4384,56 @@ fn undoing_a_column_delete_restores_a_pivot_that_lives_on_another_sheet() {
         "undo restores the pivot whole: the rectangle, the dropped field and every offset"
     );
 }
+
+/// Undoing a **saved** edit must move `edits_applied` (`FID-39`).
+///
+/// The counter's own doc comment says undo counts as an edit, and reasons from
+/// it: *"undoing back to the save point still reports a difference. A needless
+/// warning costs a click; the other mistake costs the document."* `undo` did
+/// not increment it, so the mistake the comment rules out was the one the code
+/// made.
+///
+/// The failing case is not undoing an edit made *since* the save — that errs
+/// safely, reporting a needless difference. It is undoing an edit made
+/// **before** it: the document moves away from what was written to disk while
+/// the counter stays where the host recorded it, so a close warning is not
+/// shown and the work is lost without a prompt.
+#[test]
+fn undoing_a_saved_edit_is_visible_to_a_host_watching_edits_applied() {
+    let mut wb = workbook();
+    let mut history = History::new();
+    let at = CellRef::new(0, 0);
+
+    history
+        .apply(
+            &mut wb,
+            Operation::SetValue {
+                sheet: 0,
+                at,
+                value: CellValue::Number(7.0),
+            },
+        )
+        .unwrap();
+
+    // The host saves here and remembers the counter.
+    let at_save = history.edits_applied();
+    let saved_value = value_at(&wb, at);
+
+    history.undo(&mut wb).unwrap();
+
+    // The document is no longer what was saved...
+    assert_ne!(
+        value_at(&wb, at),
+        saved_value,
+        "the undo did not change the document, so this test proves nothing"
+    );
+    // ...so the number the host compares must not still match.
+    assert_ne!(
+        history.edits_applied(),
+        at_save,
+        "edits_applied did not move across an undo, so a host comparing it \
+         against its save point reports the document clean while it differs \
+         from what was written to disk — the exact failure edits_applied's own \
+         doc comment says cannot happen"
+    );
+}
