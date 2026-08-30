@@ -81,6 +81,15 @@ pub enum UndrawnReason {
         /// The declared height in pixels.
         height: u32,
     },
+    /// This backend draws no pictures at all. The PDF writer (`IO-03`): a
+    /// picture would have to be re-encoded into a PDF image XObject, which
+    /// needs a compressor this deliberately does not depend on.
+    ///
+    /// Distinct from every reason above, all of which are about *this* picture
+    /// — the media was missing, the format was exotic, the bytes were bad. This
+    /// one is about the backend, and a host should say "PDF export does not
+    /// draw pictures yet" rather than "your picture was unreadable".
+    UnsupportedByBackend,
 }
 
 impl UndrawnReason {
@@ -93,6 +102,7 @@ impl UndrawnReason {
             UndrawnReason::UnsupportedFormat(_) => "image (format not decoded)",
             UndrawnReason::Undecodable => "image (undecodable)",
             UndrawnReason::TooLarge { .. } => "image (over the pixel limit)",
+            UndrawnReason::UnsupportedByBackend => "image (not drawn by this backend)",
         }
     }
 }
@@ -109,6 +119,7 @@ impl core::fmt::Display for UndrawnReason {
                 f,
                 "{width}x{height} is over the {MAX_IMAGE_PIXELS}-pixel limit"
             ),
+            UndrawnReason::UnsupportedByBackend => f.write_str("this backend draws no pictures"),
         }
     }
 }

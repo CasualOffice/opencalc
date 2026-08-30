@@ -2627,6 +2627,347 @@ mod charts {
     }
 }
 
+/// Pagination: which rows and columns land on which sheet of paper (`IO-03`).
+///
+/// The HTML print path hands this question to the browser; a PDF has nobody to
+/// hand it to, so these are the answers the writer prints. Every one of them is
+/// a property of the *set* of pages — that it tiles the sheet without a gap,
+/// that a break lands where the file asked, that a fit-to-page setting produces
+/// the page count it names — because a single band asserted in isolation can be
+/// right while the run it belongs to is wrong.
+mod pagination {
+    use casual_calc_formula::Expr;
+    use casual_calc_model::{Cell, CellRef, CellValue, DefinedName, Id, Sheet, SheetId, Workbook};
+
+    use crate::GridGeometry;
+    use crate::print::{MAX_PAGES, paginate, scope};
+
+    /// A sheet of `rows` x `cols` populated cells, at the default line sizes.
+    fn filled(rows: u32, cols: u32) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..rows {
+            for col in 0..cols {
+                sheet.cells.set(
+                    CellRef::new(row, col),
+                    Cell::value(CellValue::Number(f64::from(row * cols + col))),
+                );
+            }
+        }
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    fn name(wb: &mut Workbook, name: &str, refers_to: &str) {
+        let sheet = wb.sheets[0].id;
+        wb.defined_names.push(DefinedName {
+            name: name.to_owned(),
+            sheet: Some(sheet),
+            formula: Expr::Raw(refers_to.to_owned()),
+        });
+    }
+
+    #[test]
+    fn an_empty_sheet_has_nothing_to_paginate() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        assert!(scope(&wb, 0).is_none());
+        assert!(paginate(&wb, 0, &GridGeometry::default()).is_none());
+        // And a sheet index nobody has.
+        assert!(paginate(&wb, 7, &GridGeometry::default()).is_none());
+    }
+
+    /// The property that matters most: every printed row appears on exactly one
+    /// page, in order. A paginator that drops a row or repeats one produces a
+    /// printout nobody can reconcile against the screen, and neither failure is
+    /// visible in a single band.
+    #[test]
+    fn the_pages_tile_the_sheet_without_a_gap_or_an_overlap() {
+        let wb = filled(300, 12);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).expect("a sheet with cells paginates");
+        assert!(plan.pages.len() > 1, "300 rows do not fit on one page");
+        assert!(!plan.truncated);
+
+        // Distinct row bands, in order, covering 0..=299 exactly once.
+        let mut rows: Vec<(u32, u32)> = plan.pages.iter().map(|p| p.rows).collect();
+        rows.dedup();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.first().unwrap().0, 0);
+        assert_eq!(rows.last().unwrap().1, 299);
+        for pair in rows.windows(2) {
+            assert_eq!(
+                pair[1].0,
+                pair[0].1 + 1,
+                "row bands must abut: {pair:?} leaves a gap or overlaps"
+            );
+        }
+
+        let mut cols: Vec<(u32, u32)> = plan.pages.iter().map(|p| p.cols).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        assert_eq!(cols.first().unwrap().0, 0);
+        assert_eq!(cols.last().unwrap().1, 11);
+        for pair in cols.windows(2) {
+            assert_eq!(pair[1].0, pair[0].1 + 1, "column bands must abut");
+        }
+        assert_eq!(plan.pages.len(), rows.len() * cols.len());
+    }
+
+    /// No band may be wider or taller than the paper it is drawn on — that is
+    /// the whole job. Checked against the printable box at the plan's own
+    /// scale, so it holds for a scaled printout too.
+    #[test]
+    fn no_band_overflows_the_printable_box() {
+        let wb = filled(200, 20);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        for page in &plan.pages {
+            let (w, h) = crate::print::content_extent(&geometry, page.rows, page.cols);
+            let single_row = page.rows.0 == page.rows.1;
+            let single_col = page.cols.0 == page.cols.1;
+            if !single_col {
+                assert!(
+                    (w as f64) * plan.scale <= plan.page_box.width as f64,
+                    "{page:?} is {w} twips wide at scale {}",
+                    plan.scale
+                );
+            }
+            if !single_row {
+                assert!(
+                    (h as f64) * plan.scale <= plan.page_box.height as f64,
+                    "{page:?}"
+                );
+            }
+        }
+    }
+
+    /// `downThenOver` is the default and puts the whole first column band on
+    /// paper before moving right; `overThenDown` reverses it. A printout
+    /// numbered the other way is collated wrong, and nothing about the pages
+    /// themselves says which is which.
+    #[test]
+    fn page_order_follows_the_files_own_setting() {
+        let wb = filled(200, 20);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let down = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!((down.pages[0].across, down.pages[0].down), (0, 0));
+        assert_eq!((down.pages[1].across, down.pages[1].down), (0, 1));
+
+        let mut wb = wb;
+        wb.sheets[0]
+            .print
+            .page
+            .insert("pageOrder".to_owned(), "overThenDown".to_owned());
+        let over = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!((over.pages[0].across, over.pages[0].down), (0, 0));
+        assert_eq!((over.pages[1].across, over.pages[1].down), (1, 0));
+        assert_eq!(over.pages.len(), down.pages.len());
+    }
+
+    /// A manual break is the one input that is not arithmetic. It must win over
+    /// "there was still room", or a user who put a break between two sections
+    /// gets them on one page anyway.
+    #[test]
+    fn a_manual_row_break_starts_a_page_even_where_there_was_room() {
+        let mut wb = filled(10, 2);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        assert_eq!(
+            paginate(&wb, 0, &geometry).unwrap().pages.len(),
+            1,
+            "ten rows fit on one page before the break"
+        );
+
+        wb.sheets[0].print.row_breaks.push(
+            [
+                ("id".to_owned(), "4".to_owned()),
+                ("man".to_owned(), "1".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.pages.len(), 2);
+        // `brk@id` is the zero-based index of the first row on the next page.
+        assert_eq!(plan.pages[0].rows, (0, 3));
+        assert_eq!(plan.pages[1].rows, (4, 9));
+    }
+
+    #[test]
+    fn a_manual_column_break_does_the_same_across() {
+        let mut wb = filled(4, 6);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        assert_eq!(paginate(&wb, 0, &geometry).unwrap().pages.len(), 1);
+
+        wb.sheets[0]
+            .print
+            .col_breaks
+            .push([("id".to_owned(), "2".to_owned())].into_iter().collect());
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.pages.len(), 2);
+        assert_eq!(plan.pages[0].cols, (0, 1));
+        assert_eq!(plan.pages[1].cols, (2, 5));
+    }
+
+    #[test]
+    fn print_area_narrows_what_paginates() {
+        let mut wb = filled(100, 10);
+        name(&mut wb, "Print_Area", "'S'!$B$2:$D$5");
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.scope.rows, (1, 4));
+        assert_eq!(plan.scope.cols, (1, 3));
+        assert_eq!(plan.pages.len(), 1);
+        assert_eq!(plan.pages[0].rows, (1, 4));
+        assert_eq!(plan.scope.extra_areas, 0);
+    }
+
+    /// A print area of several rectangles prints several groups of pages in
+    /// Excel and one here. The count is what stops that being invisible.
+    #[test]
+    fn a_multi_rectangle_print_area_is_counted_not_swallowed() {
+        let mut wb = filled(20, 20);
+        name(&mut wb, "Print_Area", "'S'!$A$1:$C$3,'S'!$F$1:$H$3");
+        let scope = scope(&wb, 0).unwrap();
+        assert_eq!(scope.cols, (0, 2));
+        assert_eq!(scope.extra_areas, 1);
+    }
+
+    /// Repeated header rows come off the body and are reserved on every page,
+    /// so page one does not show them twice and page two shows them at all.
+    #[test]
+    fn print_title_rows_leave_the_body_and_are_reserved_on_every_page() {
+        let mut wb = filled(200, 4);
+        name(&mut wb, "Print_Titles", "'S'!$1:$2");
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.scope.title_rows, Some((0, 1)));
+        assert_eq!(plan.title_height, 2 * crate::DEFAULT_ROW_HEIGHT);
+        assert_eq!(
+            plan.pages[0].rows.0, 2,
+            "the header is drawn as the repeated band, not as body"
+        );
+        // Every page's body is that much shorter, because the header is on it.
+        let without = {
+            let mut plain = wb.clone();
+            plain.defined_names.clear();
+            paginate(&plain, 0, &geometry).unwrap()
+        };
+        let rows_per_page =
+            |p: &crate::print::Pagination| p.pages[0].rows.1 - p.pages[0].rows.0 + 1;
+        assert_eq!(rows_per_page(&plan) + 2, rows_per_page(&without));
+    }
+
+    #[test]
+    fn print_title_columns_are_read_from_the_same_name() {
+        let mut wb = filled(20, 40);
+        name(&mut wb, "Print_Titles", "'S'!$A:$B,'S'!$1:$1");
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.scope.title_cols, Some((0, 1)));
+        assert_eq!(plan.scope.title_rows, Some((0, 0)));
+        assert_eq!(plan.title_width, 2 * crate::DEFAULT_COL_WIDTH);
+        assert_eq!(plan.pages[0].cols.0, 2);
+        assert_eq!(plan.pages[0].rows.0, 1);
+    }
+
+    /// The reason the scale is computed before the axis is cut: "fit to one
+    /// page wide" has to *be* one page wide, not one page wide if it happens to
+    /// work out.
+    #[test]
+    fn fit_to_one_page_wide_produces_exactly_one_column_band() {
+        let mut wb = filled(60, 30);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        assert!(
+            paginate(&wb, 0, &geometry)
+                .unwrap()
+                .pages
+                .iter()
+                .any(|p| p.across > 0),
+            "thirty columns need more than one page unscaled"
+        );
+
+        let print = &mut wb.sheets[0].print;
+        print
+            .setup_pr
+            .insert("fitToPage".to_owned(), "1".to_owned());
+        print.page.insert("fitToWidth".to_owned(), "1".to_owned());
+        print.page.insert("fitToHeight".to_owned(), "0".to_owned());
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert!(plan.scale < 1.0, "it had to shrink to fit");
+        assert!(
+            plan.pages.iter().all(|p| p.across == 0),
+            "fit-to-one-page-wide left {} column bands",
+            plan.pages.iter().map(|p| p.across).max().unwrap() + 1
+        );
+        assert!(plan.pages.iter().all(|p| p.cols == (0, 29)));
+    }
+
+    /// A row taller than the paper cannot be split, so it gets a page of its
+    /// own — and, crucially, the loop still terminates.
+    #[test]
+    fn a_line_larger_than_the_page_gets_a_page_to_itself() {
+        let mut wb = filled(3, 1);
+        for row in 0..3 {
+            wb.sheets[0].rows.sizes.insert(row, 40_000);
+        }
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.pages.len(), 3);
+        assert_eq!(plan.pages[0].rows, (0, 0));
+        assert_eq!(plan.pages[2].rows, (2, 2));
+    }
+
+    /// The bound exists because a hostile file can make the printable box one
+    /// twip tall, and every page costs a display list downstream.
+    #[test]
+    fn a_page_cap_stops_a_hostile_page_setup_rather_than_the_machine() {
+        let mut wb = filled(MAX_PAGES as u32 + 50, 1);
+        // Margins wider than the paper: `PageBox` floors the box at one twip
+        // rather than refusing, so every row becomes its own page.
+        for edge in ["top", "bottom", "left", "right"] {
+            wb.sheets[0]
+                .print
+                .margins
+                .insert(edge.to_owned(), "40".to_owned());
+        }
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert!(plan.truncated, "the cap must say it was reached");
+        assert!(plan.pages.len() <= MAX_PAGES, "{}", plan.pages.len());
+    }
+
+    #[test]
+    fn gridlines_are_off_unless_the_file_asks_for_them() {
+        let mut wb = filled(2, 2);
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        assert!(!paginate(&wb, 0, &geometry).unwrap().gridlines);
+        wb.sheets[0]
+            .print
+            .options
+            .insert("gridLines".to_owned(), "1".to_owned());
+        assert!(paginate(&wb, 0, &geometry).unwrap().gridlines);
+    }
+
+    #[test]
+    fn orientation_and_paper_reach_the_plan() {
+        let mut wb = filled(2, 2);
+        let print = &mut wb.sheets[0].print;
+        print.page.insert("paperSize".to_owned(), "9".to_owned());
+        print
+            .page
+            .insert("orientation".to_owned(), "landscape".to_owned());
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).unwrap();
+        assert_eq!(plan.paper.css, "A4");
+        assert!(plan.landscape);
+        // The box is cut from the turned paper.
+        assert!(plan.page_box.width > plan.page_box.height);
+    }
+}
+
 /// Print geometry: the paper table, the printable box, and the scale the three
 /// page-setup controls work out to.
 ///

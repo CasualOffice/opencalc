@@ -1620,3 +1620,385 @@ mod charts {
         );
     }
 }
+
+/// The PDF backend (`IO-03`).
+///
+/// The rule this module exists to keep is that **a PDF nobody opened is not a
+/// PDF**. "It compiles" says nothing about a file format, and neither does
+/// `starts_with("%PDF")` — a file can carry that and still be unopenable
+/// because its cross-reference table points at the wrong bytes, which is the
+/// single commonest way a hand-written PDF is broken. So these tests read the
+/// file back the way a viewer does: they walk the `xref`, land on each object,
+/// and pull the text out through the document's own `ToUnicode` map.
+mod pdf_backend {
+    use casual_calc_layout::{Align, BorderLine, DisplayList, GridGeometry, PaintItem, Rect};
+
+    use crate::pdf::{PdfBand, PdfMetadata, PdfPage, write_pdf};
+
+    fn text(content: &str) -> DisplayList {
+        DisplayList {
+            items: vec![PaintItem::Text {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 960,
+                    h: 300,
+                },
+                content: content.to_owned(),
+                align: Align::Left,
+                color: None,
+                bold: false,
+                italic: false,
+                font_name: None,
+                font_pt: Some(11.0),
+            }],
+        }
+    }
+
+    fn one_page(list: &DisplayList, gridlines: bool) -> PdfPage<'_> {
+        PdfPage {
+            width: 12240,
+            height: 15840,
+            margin_left: 1008,
+            margin_top: 1080,
+            scale: 1.0,
+            bands: vec![PdfBand {
+                display_list: list,
+                rows: (0, 3),
+                cols: (0, 3),
+                origin: (0, 0),
+                gridlines,
+            }],
+        }
+    }
+
+    /// A minimal reader: the byte offsets the trailer's `startxref` and the
+    /// cross-reference table lead to, resolved the way a viewer resolves them.
+    ///
+    /// Returns each object's body. A wrong offset shows up here as an object
+    /// header that is not the one the table promised — which is exactly the
+    /// failure a `%PDF` prefix check cannot see.
+    ///
+    /// **Byte offsets, over raw bytes.** The first version of this walked a
+    /// `String::from_utf8_lossy` of the file and every offset past the embedded
+    /// font was wrong, because each invalid byte in the face becomes a
+    /// three-byte replacement character — the string is longer than the file it
+    /// came from. A PDF is a binary format with byte offsets in it, and it has
+    /// to be read as one.
+    fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .rposition(|window| window == needle)
+    }
+
+    fn objects(pdf: &[u8]) -> Vec<String> {
+        let marker = find_last(pdf, b"startxref").expect("a trailer");
+        let tail = String::from_utf8_lossy(&pdf[marker..]).into_owned();
+        let start: usize = tail
+            .lines()
+            .nth(1)
+            .expect("startxref names an offset on the next line")
+            .trim()
+            .parse()
+            .expect("startxref is a byte offset");
+        assert!(
+            start < pdf.len(),
+            "startxref points past the end of the file"
+        );
+
+        // The table itself is ASCII, and it runs to the end of the file.
+        let table = String::from_utf8_lossy(&pdf[start..]).into_owned();
+        let mut lines = table.lines();
+        assert_eq!(lines.next().unwrap().trim(), "xref");
+        let header = lines.next().unwrap();
+        let count: usize = header.split_whitespace().nth(1).unwrap().parse().unwrap();
+
+        let mut out = Vec::new();
+        // Entry zero is the free-list head; the objects are 1..count.
+        lines.next();
+        for id in 1..count {
+            let entry = lines.next().expect("an xref entry per object");
+            let offset: usize = entry.split_whitespace().next().unwrap().parse().unwrap();
+            assert!(offset < pdf.len(), "object {id} is out of the file");
+            let opening = format!("{id} 0 obj");
+            assert!(
+                pdf[offset..].starts_with(opening.as_bytes()),
+                "object {id} was promised at {offset}, which holds {:?}",
+                String::from_utf8_lossy(&pdf[offset..(offset + 20).min(pdf.len())])
+            );
+            let body = &pdf[offset + opening.len()..];
+            let end = body
+                .windows(6)
+                .position(|w| w == b"endobj")
+                .expect("every object is closed");
+            out.push(String::from_utf8_lossy(&body[..end]).trim().to_owned());
+        }
+        out
+    }
+
+    /// The `ToUnicode` CMap read back: glyph id → the character it means.
+    ///
+    /// **Reached through the font dictionary's own reference**, not by scanning
+    /// the file for a `bfchar` block. The first version scanned, and it passed
+    /// with the `/ToUnicode` entry deleted from the font — the CMap object was
+    /// still in the file, just unreferenced, which is precisely the state in
+    /// which a viewer cannot extract a word. A test that finds the map by
+    /// looking everywhere is testing that the bytes exist, and the thing that
+    /// matters is that the font points at them.
+    fn to_unicode(pdf: &[u8]) -> std::collections::BTreeMap<u32, char> {
+        let objects = objects(pdf);
+        let font = objects
+            .iter()
+            .find(|o| o.contains("/Subtype /Type0"))
+            .expect("a Type0 font");
+        let at = font
+            .find("/ToUnicode ")
+            .expect("the font must name a ToUnicode CMap for its text to be readable");
+        let id: usize = font[at + "/ToUnicode ".len()..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let text = objects
+            .get(id - 1)
+            .expect("the referenced object exists")
+            .clone();
+
+        let mut map = std::collections::BTreeMap::new();
+        let mut rest = &text[..];
+        while let Some(at) = rest.find("beginbfchar") {
+            rest = &rest[at + "beginbfchar".len()..];
+            let end = rest.find("endbfchar").expect("a closed bfchar block");
+            for line in rest[..end].lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let mut parts = line.split_whitespace();
+                let gid = parts.next().unwrap().trim_matches(['<', '>']);
+                let uni = parts.next().unwrap().trim_matches(['<', '>']);
+                let gid = u32::from_str_radix(gid, 16).unwrap();
+                let units: Vec<u16> = uni
+                    .as_bytes()
+                    .chunks(4)
+                    .map(|c| u16::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+                    .collect();
+                map.insert(
+                    gid,
+                    String::from_utf16(&units).unwrap().chars().next().unwrap(),
+                );
+            }
+            rest = &rest[end..];
+        }
+        map
+    }
+
+    /// The glyph ids the content stream draws, in order.
+    fn drawn_glyphs(pdf: &[u8]) -> Vec<u32> {
+        let text = String::from_utf8_lossy(pdf);
+        let mut out = Vec::new();
+        for run in text.split("Tm <").skip(1) {
+            let hex = run.split('>').next().unwrap();
+            for chunk in hex.as_bytes().chunks(4) {
+                out.push(u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_cross_reference_table_lands_on_every_object() {
+        let list = text("Hello");
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, true)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        assert!(pdf.starts_with(b"%PDF-1.7"));
+        assert!(pdf.ends_with(b"%%EOF\n"));
+        let objects = objects(&pdf);
+        assert!(objects.iter().any(|o| o.contains("/Type /Catalog")));
+        assert!(objects.iter().any(|o| o.contains("/Type /Pages")));
+        assert!(objects.iter().any(|o| o.contains("/Type /Page ")));
+    }
+
+    /// The half of a Type0 font that decides whether the page can be read: the
+    /// face is embedded, and the map from glyph ids back to characters is
+    /// there. A page that draws correctly and copies as mojibake is the classic
+    /// way this goes wrong, and it is invisible to looking at the picture.
+    #[test]
+    fn the_text_can_be_read_back_out_through_the_documents_own_map() {
+        let list = text("Süd Ω");
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+
+        let body = String::from_utf8_lossy(&pdf);
+        assert!(
+            body.contains("/Subtype /Type0"),
+            "a simple font cannot carry Ω"
+        );
+        assert!(body.contains("/Encoding /Identity-H"));
+        assert!(body.contains("/FontFile2"), "the face must be embedded");
+        assert!(body.contains("/CIDToGIDMap /Identity"));
+
+        let map = to_unicode(&pdf);
+        let recovered: String = drawn_glyphs(&pdf)
+            .into_iter()
+            .map(|gid| *map.get(&gid).unwrap_or(&'\u{fffd}'))
+            .collect();
+        assert_eq!(recovered, "Süd Ω");
+    }
+
+    /// `/Length1` is what a viewer uses to know how much of the stream is the
+    /// font. A wrong one makes the face unusable while the file still opens.
+    #[test]
+    fn the_embedded_face_declares_its_own_length() {
+        let list = text("A");
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        let body = String::from_utf8_lossy(&pdf);
+        let at = body.find("/Length1 ").unwrap();
+        let declared: usize = body[at + 9..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let length_at = body[..at].rfind("/Length ").unwrap();
+        let length: usize = body[length_at + 8..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            declared, length,
+            "an uncompressed font stream is its own length"
+        );
+        assert!(declared > 10_000, "a real TrueType face, not a stub");
+    }
+
+    #[test]
+    fn the_same_input_writes_the_same_bytes() {
+        let list = text("determinism");
+        let go = || {
+            write_pdf(
+                &[one_page(&list, true)],
+                &GridGeometry::default(),
+                &PdfMetadata {
+                    title: "S".to_owned(),
+                },
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(go(), go());
+    }
+
+    /// Gridlines are drawn only when the page asks. Excel's default is off, and
+    /// a printout with a grid nobody asked for is as wrong as one without.
+    #[test]
+    fn gridlines_are_drawn_only_when_the_band_asks() {
+        let list = DisplayList::default();
+        let geometry = GridGeometry::default();
+        let stroked = |on: bool| {
+            let (pdf, _) =
+                write_pdf(&[one_page(&list, on)], &geometry, &PdfMetadata::default()).unwrap();
+            String::from_utf8_lossy(&pdf).matches(" m ").count()
+        };
+        assert_eq!(stroked(false), 0);
+        assert!(
+            stroked(true) >= 10,
+            "four rows and four columns make ten lines"
+        );
+    }
+
+    /// A picture cannot be drawn by this backend, and a printout with a
+    /// picture-shaped hole must not be indistinguishable from a sheet that
+    /// never had one.
+    #[test]
+    fn a_picture_is_named_rather_than_silently_skipped() {
+        let list = DisplayList {
+            items: vec![PaintItem::Image {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 960,
+                    h: 300,
+                },
+                part: "xl/media/image1.png".to_owned(),
+            }],
+        };
+        let (_, report) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(report.undrawn.len(), 1);
+        assert_eq!(report.undrawn[0].part, "xl/media/image1.png");
+        assert_eq!(
+            report.undrawn[0].reason.feature(),
+            "image (not drawn by this backend)"
+        );
+    }
+
+    #[test]
+    fn fills_and_borders_reach_the_content_stream() {
+        let list = DisplayList {
+            items: vec![
+                PaintItem::CellBackground {
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 960,
+                        h: 300,
+                    },
+                    fill: Some("FF0000".to_owned()),
+                },
+                PaintItem::CellBorder {
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 960,
+                        h: 300,
+                    },
+                    left: Some(BorderLine {
+                        width: 2,
+                        color: Some("0000FF".to_owned()),
+                    }),
+                    right: None,
+                    top: None,
+                    bottom: None,
+                },
+            ],
+        };
+        let (pdf, _) = write_pdf(
+            &[one_page(&list, false)],
+            &GridGeometry::default(),
+            &PdfMetadata::default(),
+        )
+        .unwrap();
+        let body = String::from_utf8_lossy(&pdf);
+        assert!(body.contains("1 0 0 rg"), "the red fill");
+        assert!(body.contains("0 0 1 RG"), "the blue edge");
+        // Two pixels of border at 96 dpi is thirty twips.
+        assert!(body.contains("30 w"), "{body}");
+    }
+
+    /// A zero-sized page is a file no viewer opens; substituting Letter would
+    /// hide whatever produced the zero.
+    #[test]
+    fn a_page_with_no_area_is_refused() {
+        let list = DisplayList::default();
+        let mut page = one_page(&list, false);
+        page.height = 0;
+        assert!(write_pdf(&[page], &GridGeometry::default(), &PdfMetadata::default()).is_err());
+    }
+}
