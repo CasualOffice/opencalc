@@ -55,6 +55,7 @@ mod objects;
 mod sheet;
 mod structural;
 mod style;
+mod versions;
 mod view;
 
 pub use axis::*;
@@ -172,6 +173,24 @@ pub(crate) fn set_session(session: WorkbookSession) {
 
 pub(crate) fn with_session<R>(f: impl FnOnce(&WorkbookSession) -> R) -> Option<R> {
     SESSION.with(|cell| cell.borrow().as_ref().map(f))
+}
+
+/// The mutating counterpart, for a binding that both changes the session and
+/// can fail.
+///
+/// Every such binding used to write the same six lines — borrow, `as_mut`,
+/// `ok_or_else(|| JsError::new("no session"))` — and the sameness is the point:
+/// one of them getting it wrong would report a missing session as some other
+/// error, or worse, as success. `versions.rs` is the first module written
+/// against this rather than against the pattern.
+pub(crate) fn with_session_mut<R>(
+    f: impl FnOnce(&mut WorkbookSession) -> Result<R, JsError>,
+) -> Result<R, JsError> {
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        f(session)
+    })
 }
 
 /// A cell's editable content: `=formula` for a formula cell, otherwise the
