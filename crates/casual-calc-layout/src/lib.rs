@@ -229,7 +229,18 @@ pub fn layout_full_with(
     layout_range(workbook, sheet_index, geometry, range, exprs)
 }
 
-fn layout_range(
+/// Lay out an explicit band of rows and columns.
+///
+/// The same work [`layout_viewport_with`] does, addressed by **line index**
+/// rather than by a twip rectangle. Public because a printed page is a band and
+/// not a window: the paginator ([`print::paginate`]) hands back the rows and
+/// columns that land on one sheet of paper, and going back through a viewport
+/// would mean converting them to twips and letting [`visible_range`] convert
+/// them back — which rounds at both ends and can pull in the neighbouring line.
+///
+/// Both bounds are **inclusive**. `exprs` decides the formula
+/// conditional-format rules, exactly as in [`layout_viewport_with`].
+pub fn layout_range(
     workbook: &Workbook,
     sheet_index: usize,
     geometry: &GridGeometry,

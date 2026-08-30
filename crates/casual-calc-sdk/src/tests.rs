@@ -3127,3 +3127,206 @@ fn the_history_bypasses_still_move_the_dirty_counter() {
          inside edits, so counting here double-counts every one of them"
     );
 }
+
+/// PDF export end to end (`IO-03`): a session in, a file real viewers open out.
+///
+/// The unit tests either side of this one check the paginator and the writer in
+/// isolation. What only shows up here is the **composition** — that the pages
+/// the paginator named are the bands that were laid out, moved to the right
+/// place, and that the repeated header is on every page rather than only the
+/// first. A writer and a paginator can both be right while the thing between
+/// them puts page four's rows on page one.
+mod pdf_export {
+    use casual_calc_formula::Expr;
+    use casual_calc_model::{CellRef, DefinedName, Id, Sheet, SheetId};
+
+    use crate::WorkbookSession;
+
+    fn write(session: &mut WorkbookSession, row: u32, col: u32, text: &str) {
+        let op = session.input_edit(0, CellRef::new(row, col), text);
+        session.edit(op).unwrap();
+    }
+
+    fn session(rows: u32, cols: u32) -> WorkbookSession {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Report"));
+        for row in 0..rows {
+            for col in 0..cols {
+                write(&mut session, row, col, &format!("r{row}c{col}"));
+            }
+        }
+        session
+    }
+
+    /// The characters the PDF draws on each page, recovered through the
+    /// document's own `ToUnicode` map — the same route a reader or a search box
+    /// takes, and the only one that proves the page says what it looks like it
+    /// says.
+    fn text_per_page(pdf: &[u8]) -> Vec<String> {
+        let body = String::from_utf8_lossy(pdf);
+        let mut map = std::collections::BTreeMap::new();
+        let mut rest = &body[..];
+        while let Some(at) = rest.find("beginbfchar") {
+            rest = &rest[at + "beginbfchar".len()..];
+            let end = rest.find("endbfchar").unwrap();
+            for line in rest[..end].lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let mut parts = line.split_whitespace();
+                let gid = u32::from_str_radix(parts.next().unwrap().trim_matches(['<', '>']), 16)
+                    .unwrap();
+                let uni = parts.next().unwrap().trim_matches(['<', '>']);
+                let units: Vec<u16> = uni
+                    .as_bytes()
+                    .chunks(4)
+                    .map(|c| u16::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+                    .collect();
+                map.insert(gid, String::from_utf16(&units).unwrap());
+            }
+            rest = &rest[end..];
+        }
+
+        // A content stream per page, in the order the page tree lists them.
+        //
+        // Split on the *closing* keyword and take what follows the last opener
+        // in each chunk. Splitting on `stream\n` instead does not work and the
+        // way it fails is quiet: `endstream\n` ends with `stream\n` too, so
+        // every stream gets cut four characters before its end and the search
+        // for a terminator then finds nothing at all.
+        let mut pages = Vec::new();
+        for chunk in body.split("endstream") {
+            let Some(at) = chunk.rfind("stream\n") else {
+                continue;
+            };
+            let stream = &chunk[at + "stream\n".len()..];
+            if !stream.contains(" cm") {
+                continue;
+            }
+            let mut page = String::new();
+            for run in stream.split("Tm <").skip(1) {
+                let hex = run.split('>').next().unwrap();
+                for chunk in hex.as_bytes().chunks(4) {
+                    let gid = u32::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+                    page.push_str(map.get(&gid).map(String::as_str).unwrap_or("\u{fffd}"));
+                }
+                page.push(' ');
+            }
+            pages.push(page);
+        }
+        pages
+    }
+
+    fn page_count(pdf: &[u8]) -> usize {
+        let body = String::from_utf8_lossy(pdf);
+        let at = body.find("/Type /Pages").expect("a page tree");
+        let count = body[at..].find("/Count ").expect("a count") + at + 7;
+        body[count..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .trim_end_matches('>')
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_small_sheet_exports_one_page_carrying_its_cells() {
+        let session = session(4, 3);
+        let (pdf, report) = session.export_pdf_with_report(0).unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        assert_eq!(page_count(&pdf), 1);
+        assert!(report.entries().is_empty(), "nothing was lost: {report:?}");
+
+        let pages = text_per_page(&pdf);
+        assert_eq!(pages.len(), 1);
+        for row in 0..4 {
+            for col in 0..3 {
+                assert!(
+                    pages[0].contains(&format!("r{row}c{col}")),
+                    "cell r{row}c{col} is missing from the page"
+                );
+            }
+        }
+    }
+
+    /// The composition test: a sheet too tall for one page must put each row on
+    /// exactly one page, and in order. A band placed at the wrong origin or
+    /// laid out over the wrong range shows up here and nowhere else.
+    #[test]
+    fn a_tall_sheet_splits_and_every_row_lands_on_exactly_one_page() {
+        let session = session(120, 2);
+        let (pdf, _) = session.export_pdf_with_report(0).unwrap();
+        let pages = text_per_page(&pdf);
+        assert!(pages.len() > 1, "120 rows do not fit on one page");
+        assert_eq!(page_count(&pdf), pages.len());
+
+        for row in 0..120 {
+            let needle = format!("r{row}c0");
+            let on: Vec<usize> = pages
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    // `r1c0` is a prefix of `r10c0`, so match the whole run.
+                    p.split_whitespace().any(|w| w == needle)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(on.len(), 1, "row {row} appears on pages {on:?}");
+        }
+    }
+
+    /// `Print_Titles` earns its place only if the header is on page two.
+    #[test]
+    fn a_repeated_header_row_is_on_every_page() {
+        let mut session = session(120, 2);
+        let sheet_id = session.workbook().sheets[0].id;
+        write(&mut session, 0, 0, "HEADER");
+        session.workbook_mut().defined_names.push(DefinedName {
+            name: "Print_Titles".to_owned(),
+            sheet: Some(sheet_id),
+            formula: Expr::Raw("'Report'!$1:$1".to_owned()),
+        });
+
+        let (pdf, _) = session.export_pdf_with_report(0).unwrap();
+        let pages = text_per_page(&pdf);
+        assert!(pages.len() > 1);
+        for (index, page) in pages.iter().enumerate() {
+            assert!(
+                page.contains("HEADER"),
+                "page {index} lost the repeated header row"
+            );
+        }
+        // And the header is not *also* body content on page one, which would
+        // print it twice.
+        assert_eq!(
+            pages[0]
+                .split_whitespace()
+                .filter(|w| *w == "HEADER")
+                .count(),
+            1,
+            "the header was printed twice on page one"
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_nothing_on_it_exports_a_document_with_no_pages() {
+        let mut session = WorkbookSession::blank();
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 2)), "Empty"));
+        let (pdf, _) = session.export_pdf_with_report(0).unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        assert_eq!(page_count(&pdf), 0);
+    }
+
+    #[test]
+    fn the_same_workbook_exports_the_same_bytes() {
+        let session = session(30, 3);
+        assert_eq!(
+            session.export_pdf(0).unwrap(),
+            session.export_pdf(0).unwrap()
+        );
+    }
+}

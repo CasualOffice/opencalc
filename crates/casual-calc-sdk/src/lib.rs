@@ -15,6 +15,7 @@ use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
 use casual_calc_model::{Id, Workbook};
+use casual_calc_render::pdf::{PdfBand, PdfMetadata, PdfPage, write_pdf};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
     Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, undo_would_discard,
@@ -1563,6 +1564,48 @@ impl WorkbookSession {
         Ok((png, image_loss(&images)))
     }
 
+    /// Export a sheet as a paginated PDF.
+    ///
+    /// The whole sheet, cut into pages by
+    /// [`casual_calc_layout::print::paginate`] — not a viewport. A printout is
+    /// not a screenshot, and a host asking for one wants the document, not the
+    /// part of it somebody had scrolled to.
+    ///
+    /// An empty sheet gives a PDF with no pages, which is a file every viewer
+    /// opens and shows as empty. That is deliberate: a blank sheet of paper
+    /// would be indistinguishable from a page whose content failed to draw.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Render`] if a page has no printable area at all.
+    pub fn export_pdf(&self, sheet_index: usize) -> Result<Vec<u8>, SdkError> {
+        self.export_pdf_with_report(sheet_index).map(|(pdf, _)| pdf)
+    }
+
+    /// [`export_pdf`](Self::export_pdf), and what the printout could not carry.
+    ///
+    /// The PDF backend draws no pictures (`IO-03`), so a sheet with images
+    /// gives a report naming them rather than a page with holes in it. The
+    /// report is the same [`CompatibilityReport`] the rest of this facade
+    /// speaks, so a host has one place to show loss and not two.
+    ///
+    /// # Errors
+    ///
+    /// As [`export_pdf`](Self::export_pdf).
+    pub fn export_pdf_with_report(
+        &self,
+        sheet_index: usize,
+    ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+        let geometry = self.geometry(sheet_index);
+        let title = self
+            .workbook
+            .sheets
+            .get(sheet_index)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        sheet_pdf(&self.workbook, sheet_index, &geometry, &title)
+    }
+
     /// The format this session was opened from, and the one
     /// [`save`](Self::save) writes.
     ///
@@ -1853,6 +1896,164 @@ pub fn render_sheet_png_with_report(
     Ok(render_panes_png_with_images(
         &paints, geometry, viewport, dpi, &media,
     )?)
+}
+
+/// Cut a sheet into pages and write them as a PDF.
+///
+/// The **composition** step of the PDF path, and the exact counterpart of
+/// [`render_sheet_png_with_report`]: the paginator says which rows and columns
+/// land on which sheet of paper, this lays each band out into a display list,
+/// and [`casual_calc_render::pdf::write_pdf`] executes them. Neither of the two
+/// halves knows about the other's business, which is what stops a second
+/// opinion about the page geometry existing.
+///
+/// A page is up to four bands, for the same reason a frozen sheet is up to four
+/// panes: the repeated title rows and columns hold still while the body moves
+/// under them. A band is laid out **once** and referred to from every page that
+/// shows it — the repeated header of a forty-page report is one display list,
+/// not forty.
+///
+/// The report carries three losses, all of them named rather than counted
+/// silently: pictures (this backend draws none), a print area of more than one
+/// rectangle, and a sheet so large the [page cap](casual_calc_layout::print::MAX_PAGES)
+/// cut it short.
+///
+/// # Errors
+///
+/// [`SdkError::Render`] if the paper has no area.
+pub fn sheet_pdf(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    title: &str,
+) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+    let meta = PdfMetadata {
+        title: title.to_owned(),
+    };
+    let Some(plan) = casual_calc_layout::print::paginate(workbook, sheet_index, geometry) else {
+        // Nothing to print. A document with no pages, rather than one blank
+        // page that cannot be told from a page that failed to draw.
+        let (bytes, _) = write_pdf(&[], geometry, &meta)?;
+        return Ok((bytes, CompatibilityReport::default()));
+    };
+
+    // Which bands each page is made of, before any of them has been laid out.
+    struct BandSpec {
+        list: usize,
+        rows: (u32, u32),
+        cols: (u32, u32),
+        origin: (i64, i64),
+    }
+    let title_rows = plan.scope.title_rows.filter(|_| plan.title_height > 0);
+    let title_cols = plan.scope.title_cols.filter(|_| plan.title_width > 0);
+    let mut page_specs: Vec<Vec<BandSpec>> = Vec::with_capacity(plan.pages.len());
+    for page in &plan.pages {
+        let mut specs = Vec::new();
+        // Painter's order, corner first, exactly as `panes` orders a freeze.
+        if let (Some(rows), Some(cols)) = (title_rows, title_cols) {
+            specs.push(BandSpec {
+                list: 0,
+                rows,
+                cols,
+                origin: (0, 0),
+            });
+        }
+        if let Some(rows) = title_rows {
+            specs.push(BandSpec {
+                list: 0,
+                rows,
+                cols: page.cols,
+                origin: (plan.title_width, 0),
+            });
+        }
+        if let Some(cols) = title_cols {
+            specs.push(BandSpec {
+                list: 0,
+                rows: page.rows,
+                cols,
+                origin: (0, plan.title_height),
+            });
+        }
+        specs.push(BandSpec {
+            list: 0,
+            rows: page.rows,
+            cols: page.cols,
+            origin: (plan.title_width, plan.title_height),
+        });
+        page_specs.push(specs);
+    }
+
+    // Formula conditional-format rules resolved here too: the PNG, the canvas
+    // and the printout show one sheet (`RND-05`).
+    let cf_exprs = casual_calc_eval::conditional::CfExpressionRules::new(workbook, sheet_index);
+    /// The rows and columns a band covers — what makes two bands the same
+    /// picture, and therefore the same display list.
+    type BandKey = ((u32, u32), (u32, u32));
+    let mut cache: BTreeMap<BandKey, usize> = BTreeMap::new();
+    let mut lists: Vec<DisplayList> = Vec::new();
+    for specs in &mut page_specs {
+        for spec in specs.iter_mut() {
+            let key = (spec.rows, spec.cols);
+            spec.list = *cache.entry(key).or_insert_with(|| {
+                lists.push(casual_calc_layout::layout_range(
+                    workbook,
+                    sheet_index,
+                    geometry,
+                    casual_calc_layout::VisibleRange {
+                        rows: spec.rows,
+                        cols: spec.cols,
+                    },
+                    &cf_exprs,
+                ));
+                lists.len() - 1
+            });
+        }
+    }
+
+    let (width, height) = if plan.landscape {
+        (plan.paper.height, plan.paper.width)
+    } else {
+        (plan.paper.width, plan.paper.height)
+    };
+    let pages: Vec<PdfPage<'_>> = page_specs
+        .iter()
+        .map(|specs| PdfPage {
+            width,
+            height,
+            margin_left: plan.margins[3],
+            margin_top: plan.margins[0],
+            scale: plan.scale,
+            bands: specs
+                .iter()
+                .map(|spec| PdfBand {
+                    display_list: &lists[spec.list],
+                    rows: spec.rows,
+                    cols: spec.cols,
+                    origin: spec.origin,
+                    gridlines: plan.gridlines,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let (bytes, images) = write_pdf(&pages, geometry, &meta)?;
+    let mut report = image_loss(&images);
+    if plan.scope.extra_areas > 0 {
+        report.record_n(
+            "print area (only the first rectangle)",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            u64::from(plan.scope.extra_areas),
+        );
+    }
+    if plan.truncated {
+        report.record(
+            "printed pages (over the page cap)",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    }
+    Ok((bytes, report))
 }
 
 /// The workbook's own media, as something the renderer can draw from.

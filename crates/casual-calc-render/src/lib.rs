@@ -1,4 +1,11 @@
-//! `casual-calc-render` — the CPU raster backend.
+//! `casual-calc-render` — the display-list backends: CPU raster, and PDF.
+//!
+//! Two executors of one [`DisplayList`], and that is the point of the crate
+//! rather than an accident of where the code landed. The raster one turns a
+//! viewport into pixels; [`pdf`] turns a set of already-paginated pages into a
+//! file. Neither knows anything about workbooks — both are handed lists — so a
+//! sheet that looks one way as a PNG and another as a PDF is a bug in one
+//! executor and nowhere else.
 //!
 //! Phase 1D, increment 1: executes a [`DisplayList`] for a viewport onto a
 //! `tiny-skia` pixmap and encodes a PNG. It draws the grid — a white ground,
@@ -12,6 +19,7 @@
 
 use casual_calc_text::faces as fonts;
 mod images;
+pub mod pdf;
 
 pub use casual_calc_text::faces::{
     MissingScript, missing_scripts, register_face, registered_count,
