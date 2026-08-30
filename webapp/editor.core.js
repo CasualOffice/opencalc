@@ -3369,6 +3369,7 @@ export function draw() {
   // cell leaves the viewport), instead of leaving it parked mid-air.
   if (editSurface === inline) positionInline();
   updateNameBox();
+  updateNumberFormatReadout();
   announceCell();
   scheduleA11yGrid();
   updateGridCounts();
@@ -6109,6 +6110,7 @@ export const A1 = (row, col) => colName(col) + (row + 1);
 // The structural tree is `rebuildA11yGrid` below; this is the running
 // commentary beside it. A live region is what announces a *change* — moving the
 // selection, growing it — which a static tree cannot do on its own.
+let updateNumberFormatReadout = () => {};
 export let liveEl;
 export let modeEl;
 let lastAnnounced = "";
@@ -8405,9 +8407,9 @@ function wireEvents() {
     toggleFilter();
   });
   // Tool side panel: toolbar buttons toggle it; the header ✕ and Esc close it.
-  byId("tb-dv").addEventListener("click", () => togglePanel("dv"));
-  byId("tb-cf").addEventListener("click", () => togglePanel("cf"));
-  byId("tb-note").addEventListener("click", () => togglePanel("note"));
+  // The three buttons these lines wired left the toolbar with `tbg-tools`
+  // (`UX-CHR-06`). The commands did not: the menus call `togglePanel` directly
+  // now, rather than clicking a button that is no longer there.
   byId("side-panel-close").addEventListener("click", () => closePanel());
 
   byId("tb-size-up").addEventListener("click", () => { stepFontSize(1); canvas.focus(); });
@@ -8423,6 +8425,52 @@ function wireEvents() {
     pb.addEventListener("click", () => { painter ? setPainter(null) : armPainter(false); canvas.focus(); });
     pb.addEventListener("dblclick", () => { armPainter(true); canvas.focus(); });
   }
+  // --- The number-format readout (`UX-CHR-06`) ------------------------------
+  //
+  // **Named, not echoed.** Showing the raw code (`_($* #,##0.00_);_($* (#,...`)
+  // would fill the control with something only a spreadsheet author can read,
+  // and Accounting's code is 44 characters. The names here are the ones the
+  // menu directly above already uses, so the readout and the way to change it
+  // say the same word.
+  //
+  // Anything not in this table is a custom code and reads `Custom` — which is
+  // true, is what Excel and OnlyOffice both do, and is shorter than any code
+  // would be.
+  const NF_NAMES = new Map([
+    ["", "General"],
+    ["0", "Number"], ["0.00", "Number"],
+    ["#,##0", "Thousands"], ["#,##0.00", "Thousands"],
+    ["0%", "Percent"], ["0.00%", "Percent"],
+    ["$#,##0.00", "Currency"],
+    ['_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)', "Accounting"],
+    ["yyyy-mm-dd", "Short date"], ["dddd, mmmm d, yyyy", "Long date"],
+    ["h:mm:ss AM/PM", "Time"],
+    ["0.00E+00", "Scientific"],
+    ["@", "Text"],
+  ]);
+  // The active cell's format, cached on the coordinates it was read for.
+  // `updateNumberFormatReadout` is called from the paint tail, so it runs on
+  // every frame including every scroll frame; without this it would add a wasm
+  // call and a `JSON.parse` to a path with a 60fps budget.
+  let nfSeen = null;
+  window.__ocInvalidateNfReadout = () => { nfSeen = null; };
+  updateNumberFormatReadout = function updateNumberFormatReadout() {
+    const label = byId("tb-numfmt-label");
+    if (!label || !wasm) return;
+    const key = `${state.sheet}:${state.sel.row}:${state.sel.col}`;
+    let nf = "";
+    try { nf = JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col)).nf || ""; }
+    catch { return; }
+    const seen = `${key}|${nf}`;
+    if (seen === nfSeen) return;
+    nfSeen = seen;
+    const name = NF_NAMES.get(nf) ?? "Custom";
+    label.textContent = name;
+    // The code itself is not thrown away, it moves to the tooltip: an author who
+    // needs to know whether this is `0.00` or `#,##0.00` can still find out, and
+    // both read `Number`.
+    byId("tb-numfmt").title = nf ? `Number format: ${name} (${nf})` : "Number format: General";
+  };
   byId("tb-currency").addEventListener("click", () => { setNumberFormat("$#,##0.00"); canvas.focus(); });
   // These are toggles, not one-way switches: pressing the button that is already
   // applied returns the cell to General, which is the only way back without
@@ -9176,7 +9224,7 @@ function wireEvents() {
         ["Delete rows", () => tryEdit(() => { const r = rng(); wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
         ["Delete columns", () => tryEdit(() => { const r = rng(); wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1); })],
         "sep",
-        ["Note", clickEl("#tb-note")],
+        ["Note", () => togglePanel("note")],
         "sep",
         // The context menu and Ctrl+T both reach this, but neither is somewhere
         // you look for a feature you have not met yet.
@@ -9248,7 +9296,7 @@ function wireEvents() {
           ["Text", nf("@"), null, nfIs("@")],
         ] },
         ["Custom number format…", () => customFormatDialog()],
-        ["Conditional formatting…", clickEl("#tb-cf")],
+        ["Conditional formatting…", () => togglePanel("cf")],
         "sep",
         ["Clear formatting", clearFormats],
       ]],
@@ -9264,7 +9312,7 @@ function wireEvents() {
         ["Clear all filters", () => { if (!filterInfo) { status.textContent = "no filter"; return; } tryEdit(() => wasm.session_clear_filter_rules(state.sheet)); afterFilterChange(); }],
         ["Clear my view", () => clearMyView()],
         ["Column stats…", () => openPanel("stats")],
-        ["Data validation…", clickEl("#tb-dv")],
+        ["Data validation…", () => togglePanel("dv")],
         "sep",
         ["PivotTable fields…", () => pivotDialog()],
         ["Refresh pivot", () => refreshPivotHere(), "Alt+F5"],
