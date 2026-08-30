@@ -2833,3 +2833,144 @@ mod formula_cf_tests {
         );
     }
 }
+
+/// Turn numbers stored as text into numbers (`DATA-NT-01`).
+///
+/// The counterpart to the `nt` flag `session_cells` emits. The engine is right
+/// to keep `"10"` as text — coercing on the way in would silently change
+/// somebody's data, and `="10"<"9"` being `TRUE` is the correct answer for a
+/// string. What was missing is a way to say "these are meant to be numbers",
+/// which is what Excel's *Convert to Number* does.
+///
+/// Only literal strings that parse as finite numbers are touched. A formula is
+/// left alone — its result is the author's choice — and so is anything that
+/// does not parse, so running this over a mixed column converts the numbers and
+/// leaves the labels.
+///
+/// Returns how many cells changed, so the host can say so rather than leaving
+/// the user to look.
+///
+/// # Errors
+///
+/// If there is no session, or the edit is refused (a protected sheet).
+#[wasm_bindgen]
+pub fn session_convert_text_to_numbers(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> Result<u32, JsError> {
+    guard_protected(sheet, r0, c0, r1, c1)?;
+    with_session_mut(|session| {
+        // Collected before editing: the borrow of the workbook that reads the
+        // cells cannot be held across the edit that rewrites them.
+        let mut pending: Vec<(u32, u32, f64)> = Vec::new();
+        {
+            let wb = session.workbook();
+            let Some(sh) = wb.sheets.get(sheet) else {
+                return Ok(0);
+            };
+            for row in r0..=r1 {
+                for col in c0..=c1 {
+                    let Some(cell) = sh.cells.get(CellRef::new(row, col)) else {
+                        continue;
+                    };
+                    if cell.formula.is_some() {
+                        continue;
+                    }
+                    if !matches!(
+                        cell.value,
+                        CellValue::SharedString(_) | CellValue::InlineString(_)
+                    ) {
+                        continue;
+                    }
+                    let text = value_text(wb, &cell.value);
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    // The same test the `nt` flag uses, and deliberately the
+                    // same list of refusals: a marker that says "this is a
+                    // number" and a command that then declines to convert it
+                    // would be two answers to one question.
+                    if trimmed.eq_ignore_ascii_case("nan")
+                        || trimmed.eq_ignore_ascii_case("inf")
+                        || trimmed.eq_ignore_ascii_case("infinity")
+                        || trimmed.eq_ignore_ascii_case("-inf")
+                        || trimmed.eq_ignore_ascii_case("-infinity")
+                    {
+                        continue;
+                    }
+                    if let Ok(n) = trimmed.parse::<f64>()
+                        && n.is_finite()
+                    {
+                        pending.push((row, col, n));
+                    }
+                }
+            }
+        }
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let changed = u32::try_from(pending.len()).unwrap_or(u32::MAX);
+        // One batch, so the whole conversion is a single undo step. Converting
+        // four hundred cells and then pressing Ctrl+Z four hundred times is not
+        // an undo.
+        // **The Text format has to go with the value, or nothing changes.**
+        //
+        // A cell formatted `@` re-types its input as text, so re-entering "10"
+        // into one produces the string "10" again — converting it back to
+        // exactly what the user asked to be rid of. Found by the test: three
+        // seeded cells converted to a sum of 20 instead of 60, because the two
+        // that were `@`-formatted went straight back to text and only the
+        // apostrophe one took.
+        //
+        // Excel does the same thing: *Convert to Number* moves the cell to
+        // General. Clearing only `@` and leaving every other format alone,
+        // because a number formatted as currency is still a number and its
+        // format is not the problem.
+        let mut ops: Vec<EditOperation> = Vec::new();
+        for (row, col, number) in pending {
+            let at = CellRef::new(row, col);
+            let style = session
+                .workbook()
+                .sheets
+                .get(sheet)
+                .and_then(|sh| sh.cells.get(at))
+                .and_then(|cell| cell.style)
+                .and_then(|id| session.workbook().styles.get(id))
+                .cloned();
+            if let Some(mut style) = style
+                && style.number_format.as_deref() == Some("@")
+            {
+                style.number_format = None;
+                let style_id = if style.is_default() {
+                    None
+                } else {
+                    Some(session.workbook_mut().intern_style(style))
+                };
+                ops.push(EditOperation::SetStyle {
+                    sheet,
+                    at,
+                    style: style_id,
+                });
+            }
+            // **`SetValue`, not `input_edit`.** `input_edit` decides how to
+            // type its argument by reading the cell's *current* state — and
+            // every operation in this batch is built before any of them is
+            // applied, so it would still see the `@` format this loop is
+            // clearing and re-parse the number straight back into text. That is
+            // the second half of the same bug: the test went from 20 to 20, not
+            // to 60, after the format fix alone. The value is already known to
+            // be a finite `f64`, so nothing is being parsed here on trust.
+            ops.push(EditOperation::SetValue {
+                sheet,
+                at,
+                value: CellValue::Number(number),
+            });
+        }
+        session.edit(EditOperation::Batch(ops)).map_err(js)?;
+        Ok(changed)
+    })
+}
