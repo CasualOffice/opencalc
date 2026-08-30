@@ -724,13 +724,53 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   display: inline-flex; align-items: center; justify-content: center;
 }
 .tb-icon:hover { border-color: var(--oc-border-hover-color); background: var(--oc-surface-color); color: var(--oc-text-color); }
+/* Settings, in its two forms (`UX-DESK-01`).
+ *
+ * `fixed`, not `absolute`: the panel is no longer a child of the gear's wrapper
+ * — see the comment above it in `editor.html` — so there is no positioned
+ * ancestor to hang off, and `wireSettings()`'s `place()` sets `left`/`top` in viewport
+ * coordinates the way `anchorMenu()` already does for every menu drop. The
+ * default here is the *dialog* geometry, because that is the form that must
+ * work when nothing on screen can anchor it; the anchored form overwrites
+ * `left`/`top` on open. */
 .settings-panel {
-  position: absolute; top: 40px; right: 0; z-index: 20; width: 230px;
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 70; width: 300px; box-sizing: border-box;
   background: var(--oc-popover-background-color); border: 1px solid var(--oc-control-border-color); border-radius: 12px;
   padding: 14px; box-shadow: var(--oc-popover-shadow);
   display: flex; flex-direction: column; gap: 14px;
+  max-height: calc(100vh - 32px); overflow-y: auto; overscroll-behavior: contain;
 }
 .settings-panel[hidden] { display: none; }
+/* Anchored under the gear: the web page's own presentation, unchanged to look
+   at — same 230px, same rows. `translate` is cleared because `place()` has
+   measured a real top-left for it and a half-panel offset would move it off the
+   button. */
+.settings-panel.anchored { transform: none; width: 230px; }
+/* The dialog is 70px wider than the popover, and this is what the width is for:
+   at 230px "Scroll speed" wraps onto two lines against the slider beside it,
+   which is the sort of thing that survives every assertion in the suite and is
+   obvious the moment somebody looks at a screenshot. The popover keeps its own
+   width and its own wrap — that is the page's existing layout and not this
+   row's to change. */
+.settings-panel:not(.anchored) .set-row > span:first-child { white-space: nowrap; }
+/* The dialog's title row. A popover hanging off the gear does not need one —
+   the button the user just pressed is the label — so it is only laid out in the
+   dialog form. `display: none` rather than `hidden`, so the head keeps its ids
+   for the `aria-labelledby` above in both forms. */
+.settings-head { display: none; align-items: center; justify-content: space-between; gap: 12px; }
+.settings-panel:not(.anchored) .settings-head { display: flex; }
+.settings-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--oc-text-color); }
+.settings-close {
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; flex: 0 0 auto;
+  background: transparent; color: var(--oc-muted-text-color); font-size: 18px; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.settings-close:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+/* Only under the dialog form — a popover the user can dismiss by clicking the
+   sheet must not put a sheet of glass over the sheet. */
+.settings-scrim { position: fixed; inset: 0; z-index: 69; background: rgba(15, 18, 24, .22); }
+.settings-scrim[hidden] { display: none; }
 .set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--oc-text-color); }
 .set-row select {
   padding: 6px 8px; border-radius: 8px; border: 1px solid var(--oc-border-color);
@@ -943,7 +983,9 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .autosave-state[hidden] { display: none; }
 /* Zoom, at the far right of the status bar — Excel's and Sheets' position.
    After `.bottom-status`, which carries `margin-left: auto`, so this rides the
-   right edge without a second auto margin fighting the first. */
+   right edge without a second auto margin fighting the first. Desktop chrome
+   hides `.bottom-status` and moves the margin here instead; see
+   `.oc-chrome-native .bottom-bar .zoom-widget`. */
 .zoom-widget {
   display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
   padding-left: 10px; margin-left: 4px; border-left: 1px solid var(--oc-border-color);
@@ -1770,11 +1812,112 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
    viewport zoom instead of the sheet's. */
 #grid { touch-action: none; }
 
+/* --- Desktop chrome (`chrome: "native"`, `UX-DESK-01`) ---------------------- */
+/*
+ * **Measured against what this is competing with, not against taste.** Excel,
+ * LibreOffice Calc and OnlyOffice Desktop Editors were looked at first, and
+ * they agree on five things this editor was doing the opposite of:
+ *
+ *  1. **No branding strip.** Not one of the three puts a logo, a product name
+ *     or a version badge anywhere in the document window. LibreOffice's
+ *     documented stack is title bar → menu bar → toolbars → formula bar → grid
+ *     → status bar, and the product name appears only in Help ▸ About. Ours put
+ *     a 53px strip carrying a logo, "OpenCalc", an *Alpha* pill and
+ *     "engine v0.0.0" directly under a title bar that already says
+ *     `figures.xlsx — OpenCalc`, so the product name was on screen twice and
+ *     the document's name was in the window nowhere. That strip is the single
+ *     loudest "this is a web page in a window" tell, and it is what goes.
+ *  2. **Document state belongs at the bottom.** Excel's status bar carries the
+ *     mode indicator, the selection statistics and zoom; LibreOffice's carries
+ *     sheet position, the *modified* flag and zoom; OnlyOffice's carries the
+ *     background-save state. Excel's AutoSave toggle inside the title-bar band
+ *     is the only top-placed document state in the whole set, and it is inside
+ *     the OS chrome rather than a strip below it. So `#tb-status` is not hidden
+ *     with the header — it is **moved into the status bar** by
+ *     `placeNativeChrome()`, one node in two places rather than two nodes that
+ *     can disagree.
+ *  3. **Bands are dense.** A menu bar is ~20–24px (24pt on macOS, `SM_CYMENU`
+ *     on Windows); LibreOffice's toolbar icons are 16/24/32 with 24 the default.
+ *     The one genuinely tall band in the set — Excel's ribbon — ships with three
+ *     documented ways to collapse it. Our 48px toolbar of 30px pills with 10px
+ *     gutters is a web control strip; below it is the native metric.
+ *  4. **Settings is a dialog reached from a menu.** File ▸ Options (Excel),
+ *     Tools ▸ Options… (LibreOffice), File ▸ Advanced Settings (OnlyOffice).
+ *     None of the three has a gear in a corner. See `.settings-panel` above.
+ *  5. **Nothing reassures the user about the network.** "Local only · nothing
+ *     uploaded" is a promise a *web* page has to make. In an application the
+ *     user installed it is noise in the one band that has to stay readable.
+ *
+ * What is deliberately *not* here: a second stylesheet, and any rule that
+ * changes what a control does. Every selector below is `.oc-chrome-native`
+ * plus a metric, so the desktop and the page are one editor with two densities
+ * and `?chrome=native` off gives back byte-identical web chrome. */
+
 /* The operating system is drawing the menu. The bar's nodes stay in the
    document — runCommand dispatches by clicking them, and the drops live in the
    overlay host anyway — but the strip itself gives its height to the sheet,
    which is the only reason hiding it is an improvement rather than a loss. */
 .oc-chrome-native #menubar { display: none; }
+
+/* (1) The branding strip. `#settings-panel` used to live inside this and no
+   longer does, which is the whole reason this line is possible — see the
+   comment on `.settings-panel`. `#tb-status` and `#presence` are moved out by
+   `placeNativeChrome()` before this hides what is left. */
+.oc-chrome-native .app-header { display: none; }
+
+/* (2) The status bar carries the engine/document line, in the position Excel's
+   mode indicator and LibreOffice's modification flag occupy. `max-width` is
+   dropped from `.tb-status`'s 320px because down here it is competing with a
+   status bar rather than with a brand mark, and a truncated error message is
+   the one thing this line must not be. */
+.oc-chrome-native .bottom-bar .tb-status {
+  font-size: 12px; max-width: none; min-width: 0; flex: 0 1 auto;
+}
+/* (5) A web page's reassurance about the network. */
+.oc-chrome-native .bottom-status { display: none; }
+/* `.bottom-status` is what carried the `margin-left: auto` that splits this bar
+   into a left group and a right one, and an auto margin cannot survive its own
+   `display: none` — without this the zoom control slides into the middle of the
+   bar. It moves to the zoom widget, which is last and is never hidden.
+   **Not** a spacer element: `.bottom-bar` is a `gap: 10px` flex row, so an extra
+   child costs an extra 10px of gap, and on a 390px phone that widened the
+   document past the viewport (`editor.narrow-screens`, `editor.touch-targets`).
+   The empty span looked free and was not. */
+.oc-chrome-native .bottom-bar .zoom-widget { margin-left: auto; }
+/* Relocated here by `placeNativeChrome()`; it is a chip in a menu bar there and
+   a status-bar item here, which is where OnlyOffice puts connection state.
+   **`margin-left: 0` is the load-bearing half.** `.presence` carries
+   `margin-left: auto` for the menu bar, and the note beside that rule already
+   says what two auto margins in one bar do: the free space is split and the
+   roster strands itself mid-bar. It did exactly that here — roster at x=601 in
+   a 1280px status bar, adjacent to nothing — and no assertion in the suite
+   could see it. Zoom is the only claimant. */
+.oc-chrome-native .bottom-bar .presence { margin-left: 0; }
+.oc-chrome-native .bottom-bar .presence .presence-btn { height: 20px; }
+
+/* (3) Native metrics. 26px controls in a 36px band, against 30px in 48px — the
+   16px icon is unchanged, because LibreOffice's *small* icon is 16 and shrinking
+   the glyph as well would trade a dense toolbar for an unreadable one. */
+.oc-chrome-native .toolbar { height: 36px; gap: 6px; padding: 0 8px; }
+.oc-chrome-native .toolbar .tb-btn, .oc-chrome-native .toolbar .tb-file {
+  width: 26px; height: 26px; border-radius: 6px;
+}
+.oc-chrome-native .toolbar .tb-group { gap: 1px; padding: 1px; border-radius: 8px; }
+.oc-chrome-native .toolbar .tb-group.controls { gap: 4px; }
+.oc-chrome-native .toolbar .tb-select,
+.oc-chrome-native .toolbar input.tb-size,
+.oc-chrome-native .toolbar input.tb-font { height: 26px; border-radius: 6px; font-size: 12px; }
+.oc-chrome-native .toolbar .tb-sep { height: 18px; }
+.oc-chrome-native .toolbar .tb-collapsed { height: 26px; }
+/* The formula bar is one text field and a name box; 40px of band around a 28px
+   input is web padding. */
+.oc-chrome-native .formula-bar { height: 32px; gap: 8px; padding: 0 8px; }
+.oc-chrome-native .formula-bar .cell-ref,
+.oc-chrome-native .formula-bar input#formula-input { height: 24px; border-radius: 6px; }
+.oc-chrome-native .bottom-bar { height: 30px; gap: 8px; padding: 0 8px; }
+.oc-chrome-native .sheet-tabs { border-radius: 7px; padding: 1px; }
+.oc-chrome-native .sheet-tab { height: 22px; padding: 0 10px; border-radius: 6px; }
+.oc-chrome-native .cell-mode { margin-left: 8px; padding: 1px 7px; }
 
 /* --- Column stats ---------------------------------------------------------- */
 /* Dense on purpose: this is a panel somebody reads at a glance while clicking
