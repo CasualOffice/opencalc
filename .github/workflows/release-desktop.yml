@@ -222,8 +222,18 @@ jobs:
           lists what does not yet. Notably absent: version history, and headers
           and footers in PDF export.
           EOF
+          # **Not `--prerelease`, and that is load-bearing rather than a
+          # preference.** `releases/latest/download/...` — the stable URL an
+          # updater fetches its manifest from — **skips prereleases entirely**.
+          # `release-sdk.yml` marks its releases prerelease and is right to: an
+          # npm package is found by its version, so nothing follows a "latest"
+          # URL. A desktop updater does, so copying that flag here would 404 the
+          # manifest and the update channel would fail silently, on every
+          # machine, with nothing in any log we own.
+          #
+          # Alpha is said in the title and in the notes, which is where a human
+          # reads it. The flag is not a label — it is a routing decision.
           gh release create "${GITHUB_REF_NAME:-desktop-v$version}" \
-            --title "OpenCalc Desktop ${version}" \
+            --title "OpenCalc Desktop ${version} (alpha)" \
             --notes-file notes.md \
-            --prerelease \
             release/*
