@@ -105,9 +105,52 @@ jobs:
         run: python3 tools/build-wasm.py
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
+      # **The macOS app is ad-hoc signed during bundling** — `bundle.macOS.
+      # signingIdentity: "-"` in `desktop/tauri.conf.json` (`REL-02`).
+      #
+      # Reported from a real download of 0.0.0: macOS said *"OpenCalc is damaged
+      # and can't be opened. You should move it to the Bin."* The app was not
+      # damaged, and `xattr -dr com.apple.quarantine` did **not** fix it — which
+      # is what made this worth chasing rather than filing under "unsigned
+      # builds warn".
+      #
+      # `codesign -dv` on the published bundle:
+      #
+      #     flags=0x20002(adhoc,linker-signed)
+      #     Sealed Resources=none
+      #     codesign --verify: code has no resources but signature
+      #                        indicates they must be present
+      #
+      # That is the **linker's** ad-hoc signature, not `codesign`'s. Every arm64
+      # binary must be signed to run at all, so the linker supplies one — but it
+      # seals no resource directory, and Gatekeeper validating a bundle that
+      # claims resources and has none reports the whole app as damaged. The
+      # failure is not "unsigned"; it is "signed in a way that cannot be
+      # validated", and the two want different fixes.
+      #
+      # It belongs in the Tauri config rather than in a step after this one,
+      # because `--bundles dmg` builds the `.app` and wraps it in a single
+      # command: signing afterwards would sign a copy the `.dmg` does not
+      # contain.
+      #
+      # This is **not** code signing in the Gatekeeper sense and does not replace
+      # it (`TAURI-008`). A downloaded copy still carries the quarantine
+      # attribute and still needs the one-time bypass in the notes. What it
+      # removes is the *second*, wrong error — the one telling a user to move a
+      # working application to the bin.
       - name: Build the bundle
         working-directory: desktop
         run: cargo tauri build --bundles ${{ matrix.bundles }}
+      # Asserted rather than assumed: the whole failure was a signature that
+      # existed and did not validate, so "it signed" is not the question.
+      - name: The macOS app carries a signature Gatekeeper can validate
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="$(find desktop/target/release/bundle -maxdepth 3 -name '*.app' | head -1)"
+          [ -n "$app" ] || { echo "::error::no .app was produced"; exit 1; }
+          codesign --verify --deep --strict "$app"
+          codesign -dv "$app" 2>&1 | grep -E "Signature=|Sealed Resources"
       # A bundler that was unavailable has exited 0 having emitted nothing, so
       # the artefact is looked for on disk rather than inferred from an exit
       # code. Same reasoning as `ci.yml`'s check, and the same failure it is

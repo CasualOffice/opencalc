@@ -377,3 +377,38 @@ pre {
   .window { box-shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 30px 80px rgba(0, 0, 0, .45); }
   ::selection { background: rgba(91, 140, 255, .28); }
 }
+
+/* Download page (`REL-02`). Three cards and the one-time step each operating
+   system needs — the instructions carry as much weight as the buttons, because
+   an unsigned build a user cannot open is not a download.
+
+   Built from the site's own tokens rather than new colours: a page that quotes
+   Terminal commands has to look like the rest of the site or it reads as a
+   third-party page telling you to run things. */
+.dl-grid {
+  display: grid; gap: 16px; margin-top: 22px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.dl-card {
+  border: 1px solid var(--border); border-radius: 14px; padding: 22px;
+  background: var(--panel); display: flex; flex-direction: column; gap: 10px;
+  align-items: flex-start;
+}
+.dl-card h3 { margin: 0; font-size: 17px; color: var(--fg); }
+.dl-meta { margin: 0; font-size: 13px; color: var(--muted); }
+.dl-warn { margin: 0; font-size: 12.5px; color: var(--faint); }
+.code {
+  display: block; overflow-x: auto; padding: 14px 16px; margin: 12px 0 20px;
+  border-radius: 12px; border: 1px solid var(--hair); background: var(--surface);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px; line-height: 1.75; white-space: pre; color: var(--fg);
+}
+/* The instructions read as prose, so they need prose spacing. The site's other
+   sections are card grids and set none, which left each `h3` sitting hard
+   against the paragraph above it — legible, and it read as one undivided block
+   of warnings rather than three separate platforms. */
+#bypass h3 { margin: 34px 0 10px; font-size: 17px; }
+#bypass h3:first-of-type { margin-top: 26px; }
+#bypass p { margin: 0 0 12px; max-width: 74ch; line-height: 1.7; }
+#bypass .note { margin-top: 16px; }
+#downloads .sub { margin-top: 6px; }
