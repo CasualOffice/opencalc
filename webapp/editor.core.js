@@ -1388,6 +1388,15 @@ export const state = {
   fill: null, // active drag-fill: { src:{r0,c0,r1,c1}, dst:{...} }
 };
 let fillHandleRect = null; // screen rect of the fill handle (for hit-testing)
+// The two touch range handles, in grid units, refreshed by every `draw()`.
+// `null` on either corner means that corner is scrolled out of the body and so
+// is neither drawn nor grabbable. See the design note above `touchHandleAt`.
+let touchHandles = { tl: null, br: null };
+// The live handle drag: which corner the finger has, if any. Module scope
+// rather than closure scope because `autoScrollTick` reads it.
+let handleDrag = null;
+// Whether a finger has ever touched this grid. See `touchHandlesOn`.
+let touchSeen = false;
 export let validationChevron = null; // {x,y,w,h,values} of the active cell's list-dropdown button
 let commentCells = new Set(); // "r,c" of cells with a note in view (for hover tooltip)
 // "r,c" of linked cells in view. Kept as a set rather than asked per cell so a
@@ -2946,15 +2955,78 @@ export function draw() {
     const hc = colXAt(rectSel.c1), hr = rowYAt(rectSel.r1);
     if (hc !== undefined && hr !== undefined) {
       const hx = hc + colWAt(rectSel.c1), hy = hr + rowHAt(rectSel.r1);
-      withQuad(rectSel.r1, rectSel.c1, () => {
-        ctx.fillStyle = colors.accent;
-        ctx.fillRect(hx - 3, hy - 3, 6, 6);
-        ctx.strokeStyle = colors.bg;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
-      });
+      // Not drawn where the primary pointer is coarse and the touch handle has
+      // taken the same corner. **Found by looking at a screenshot**: the 6px
+      // square peeked out from beside the 14px circle and read as a second,
+      // smaller thing to grab — on a device where it has never been grabbable,
+      // because the mouse path that owns it hit-tests within 5px of a point.
+      // `fillHandleRect` is still recorded either way, so a mouse on a hybrid
+      // device (which keeps the square, its primary pointer being fine) loses
+      // nothing.
+      if (!(coarsePrimaryPointer() && touchHandlesOn())) {
+        withQuad(rectSel.r1, rectSel.c1, () => {
+          ctx.fillStyle = colors.accent;
+          ctx.fillRect(hx - 3, hy - 3, 6, 6);
+          ctx.strokeStyle = colors.bg;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
+        });
+      }
       fillHandleRect = { x: hx, y: hy };
     }
+  }
+
+  // Touch range handles, on the block's two diagonal corners. Positions are
+  // recomputed every frame and remembered for hit-testing, exactly as the fill
+  // handle above is; a corner that has scrolled out of the body gets `null`
+  // rather than a clamped position, so a handle is never grabbable somewhere
+  // its corner is not.
+  touchHandles = { tl: null, br: null };
+  if (touchHandlesOn() && state.selKind === "cells" && !state.fill) {
+    // The outward offset is clamped back inside the corner's own pane.
+    //
+    // **Found by screenshotting a selection on A1**: the top-left handle's
+    // centre came out at (HW − 7, HH − 7), which is inside the header corner
+    // box, so the body clip erased it entirely — while `touchHandleAt` went on
+    // answering "tl" for a finger there. An affordance that is invisible and
+    // still live is the worst of both: nothing tells the user it is there, and
+    // pressing the headers starts a range drag they did not ask for. Clamping
+    // the drawn point is what makes the two agree, since both read this.
+    const pen = (row, col, x, y) => {
+      const q = quadClip(row, col, v);
+      return {
+        x: Math.min(Math.max(x, q.x + TOUCH_HANDLE_R), q.x + q.w - TOUCH_HANDLE_R),
+        y: Math.min(Math.max(y, q.y + TOUCH_HANDLE_R), q.y + q.h - TOUCH_HANDLE_R),
+      };
+    };
+    const x0 = colXAt(rectSel.c0), y0 = rowYAt(rectSel.r0);
+    const x1 = colXAt(rectSel.c1), y1 = rowYAt(rectSel.r1);
+    if (x0 !== undefined && y0 !== undefined) {
+      touchHandles.tl = pen(rectSel.r0, rectSel.c0, x0 - TOUCH_HANDLE_R, y0 - TOUCH_HANDLE_R);
+    }
+    if (x1 !== undefined && y1 !== undefined) {
+      touchHandles.br = pen(
+        rectSel.r1, rectSel.c1,
+        x1 + colWAt(rectSel.c1) + TOUCH_HANDLE_R,
+        y1 + rowHAt(rectSel.r1) + TOUCH_HANDLE_R,
+      );
+    }
+    const dot = (h, row, col) => {
+      if (!h) return;
+      withQuad(row, col, () => {
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, TOUCH_HANDLE_R, 0, Math.PI * 2);
+        ctx.fillStyle = colors.accent;
+        ctx.fill();
+        // A ring in the page background, so the handle stays visible against a
+        // dark cell fill and against the selection tint alike.
+        ctx.strokeStyle = colors.bg;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+    };
+    dot(touchHandles.tl, rectSel.r0, rectSel.c0);
+    dot(touchHandles.br, rectSel.r1, rectSel.c1);
   }
 
   // Autofilter header buttons, drawn before the validation chevron so the
@@ -3349,6 +3421,168 @@ function dataBarStyle() {
 /// keystroke that behaves differently for reasons the user cannot see — Excel
 /// shows "End Mode" for exactly that reason.
 
+// --- Touch range selection ------------------------------------------------
+//
+// **A phone had no route to a range at all.** A drag on the grid pans, which is
+// the only thing a drag can mean when it is also the scroll gesture — so the
+// single way to select `A1:C5` on a phone was to type it into the Name Box.
+// Everything a spreadsheet is for downstream of a range (sum, chart, sort,
+// format, fill, copy) was therefore reachable only by someone who already knew
+// A1 notation and was willing to type it.
+//
+// **The idiom is not invented here.** Google Sheets and Excel on a phone solve
+// this the same way, and so does every text field on both platforms: a tap
+// selects, and two draggable handles extend what is selected. Matching that
+// exactly is the whole design. A spreadsheet that invents its own touch
+// gesture charges the user for choosing it — they arrive already knowing this
+// one, and anything else has to be discovered.
+//
+// So: two circular handles, at the block's **top-left** and **bottom-right**.
+// Drag either and that corner follows the finger while the other stays put.
+//
+// Four decisions that were not obvious:
+//
+//   - **Which corner becomes the active cell.** `state.sel` is the active cell
+//     and `state.anchor` is the travelling corner (see `extend`), and typing
+//     goes to `state.sel`. Grabbing a handle therefore pins the *opposite*
+//     corner into `state.sel` and drives `state.anchor` with the finger. Drag
+//     the bottom-right handle out to C5 and the active cell is A1 — which is
+//     where Excel and Sheets both leave it, and where a user who then types
+//     expects the text to land.
+//
+//   - **The handles are offset outward, not centred on the corner.** Centred,
+//     a target big enough for a finger (Apple asks 44px, Android 48) reaches
+//     halfway across the corner cell in both directions, so every tap near the
+//     end of a selection grabs a handle instead of moving the selection. Offset
+//     by their own radius along the diagonal, most of the target lies outside
+//     the block, which is where a finger reaching for "extend this" already
+//     goes. The grab radius is still a compromise and is written down as one:
+//     `TOUCH_HANDLE_GRAB` is 18, a 36px target rather than 44, because the
+//     remaining 8px would be spent swallowing the neighbouring cell — and a
+//     missed grab costs one more tap, while a stolen tap moves the selection
+//     the user was building.
+//
+//   - **They are shown once a finger has been used, not by media query.**
+//     `(pointer: coarse)` answers "is the primary pointer coarse", which is
+//     false on a touchscreen laptop and on a tablet with a keyboard case
+//     attached — both of which are fingers when a finger is what is on the
+//     glass. `touchstart` on the grid is the evidence that settles it, and it
+//     arrives before the synthesised click that selects, so the handles are
+//     already on for the very first tap's repaint. A media-query match at load
+//     is taken as evidence too, so a phone that starts on the formula bar still
+//     gets them.
+//
+//   - **Only for cell selections.** A whole row, column or select-all has no
+//     corner on screen to grab, and Sheets shows no handles for those either.
+//
+// The handles deliberately draw *over* the 6px fill square at the bottom-right:
+// on a touch device that square was never hittable (the mouse path tests within
+// 5px of it), so there is nothing to lose and a second dot beside the handle
+// would only read as a second thing to grab.
+const TOUCH_HANDLE_R = 7; // drawn radius, grid units
+const TOUCH_HANDLE_GRAB = 18; // grab radius — see the note above
+
+/// Whether the device's *primary* pointer is a finger. Narrower than
+/// `touchHandlesOn`: a touchscreen laptop answers false here and true there,
+/// which is the distinction that decides whether a mouse-only affordance can be
+/// retired from the frame.
+function coarsePrimaryPointer() {
+  try { return window.matchMedia("(pointer: coarse)").matches; } catch { return false; }
+}
+
+/// Whether the touch selection handles are live for this session.
+function touchHandlesOn() {
+  return touchSeen || coarsePrimaryPointer();
+}
+
+/// Which handle, if either, is under (px, py) — grid units, as everywhere else
+/// in the pointer paths. Nearest wins, so a single-cell selection (whose two
+/// handles are one cell apart and can overlap on a short row) never traps the
+/// finger on the wrong corner.
+function touchHandleAt(px, py) {
+  if (!touchHandlesOn() || state.selKind !== "cells" || state.fill) return null;
+  let best = null;
+  let bestD = TOUCH_HANDLE_GRAB;
+  for (const corner of ["tl", "br"]) {
+    const h = touchHandles[corner];
+    if (!h) continue;
+    const d = Math.hypot(px - h.x, py - h.y);
+    if (d <= bestD) { best = corner; bestD = d; }
+  }
+  return best;
+}
+
+/// Begin a handle drag. Returns false when the finger was not on a handle.
+function startHandleDrag(px, py) {
+  const corner = touchHandleAt(px, py);
+  if (!corner) return false;
+  // Read the block *before* clearing the Enter/Tab navigation block: while one
+  // is running it, and not anchor..sel, is what `selRect` reports and what the
+  // handles were drawn from.
+  const r = selRect();
+  resetNavRuns();
+  endInline();
+  hideFillOptions();
+  const fixed = corner === "tl" ? { row: r.r1, col: r.c1 } : { row: r.r0, col: r.c0 };
+  const moving = corner === "tl" ? { row: r.r0, col: r.c0 } : { row: r.r1, col: r.c1 };
+  state.sel = fixed;
+  state.anchor = moving;
+  state.selKind = "cells";
+  state.ranges = [];
+  handleDrag = { corner };
+  state.dragging = true;
+  dragPos = { px, py };
+  return true;
+}
+
+/// Move the dragged corner to the cell under (px, py), clamped into the body so
+/// a finger over a header still maps to a cell.
+function moveHandleDrag(px, py) {
+  const rect = canvas.getBoundingClientRect();
+  const z = state.zoom || 1;
+  const f = state.freeze || { bodyX0: HW, bodyY0: HH };
+  dragPos = { px, py };
+  // `rect` is CSS pixels and `px` is grid units, so the far edges are divided
+  // before they are compared. (The mouse path at the `state.dragging` branch of
+  // `mousemove` does not divide, which only shows up above 100% zoom.)
+  const cx = Math.min(Math.max(px, f.bodyX0 + 1), rect.width / z - 2);
+  const cy = Math.min(Math.max(py, f.bodyY0 + 1), rect.height / z - 2);
+  const hit = cellAt(cx, cy);
+  if (hit && (hit.row !== state.anchor.row || hit.col !== state.anchor.col)) {
+    state.anchor = { row: hit.row, col: hit.col };
+    draw();
+  }
+  maybeAutoScroll();
+}
+
+/// End a handle drag, however it ended.
+function endHandleDrag() {
+  if (!handleDrag) return;
+  handleDrag = null;
+  state.dragging = false;
+  dragPos = null;
+  stopAutoScroll();
+  // The gesture is over, so the Name Box goes back to naming the active cell.
+  // `extending` is only ever cleared by `select`, and a handle drag does not go
+  // through it — so a block built with Shift+arrow and then adjusted by a finger
+  // was left reading "8R x 5C" for the rest of the session, with nothing on
+  // screen saying which cell the next keystroke would land in.
+  extending = false;
+  draw();
+}
+
+/// The handles as a test can see them: where they are, and what they are for.
+export function touchHandlesForTest() {
+  return {
+    on: touchHandlesOn(),
+    tl: touchHandles.tl ? { ...touchHandles.tl } : null,
+    br: touchHandles.br ? { ...touchHandles.br } : null,
+    grab: TOUCH_HANDLE_GRAB,
+    dragging: handleDrag ? handleDrag.corner : null,
+    active: { row: state.sel.row, col: state.sel.col },
+  };
+}
+
 // --- Edge auto-scroll while drag-selecting --------------------------------
 // When the pointer is dragged into the 28px band at a viewport edge (or past
 // it), scroll the body toward the pointer and keep extending the selection —
@@ -3369,7 +3603,14 @@ function autoScrollTick() {
   if (state.scrollX === x0 && state.scrollY === y0) return;
   if (state.headerDrag === "col") selectColumn(colAtX(cx), true);
   else if (state.headerDrag === "row") selectRow(rowAtY(cy), true);
-  else {
+  else if (handleDrag) {
+    // A touch handle moves `anchor`, not `sel` — the active cell is the corner
+    // the finger is *not* holding. Sharing this loop with the mouse and writing
+    // `sel` here would have the active cell jump to the far end the moment the
+    // drag reached the edge of the screen, and nowhere else.
+    const hit = cellAt(cx, cy);
+    if (hit) { state.anchor = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
+  } else {
     const hit = cellAt(cx, cy);
     if (hit) { state.sel = { row: hit.row, col: hit.col }; state.selKind = "cells"; }
   }
@@ -7207,10 +7448,36 @@ function wireEvents() {
     "touchstart",
     (e) => {
       if (state.editing) return;
+      // The evidence that a finger is what is pointing at this grid. Set before
+      // the gesture is classified, and before the synthesised click that a tap
+      // turns into, so the repaint that tap causes already carries handles. (It
+      // is below the `state.editing` guard rather than above it: a touch that
+      // the handler declines to act on is not evidence about anything, and the
+      // next one latches it in any case.)
+      touchSeen = true;
       if (e.touches.length === 1) {
         const t = e.touches[0];
         // Touching a gliding sheet stops it, as it does everywhere else.
         stopGlide();
+        // A selection handle takes the gesture off the pan before the pan is
+        // set up: on a phone a drag is the scroll, so the handles are the only
+        // thing that can mean "extend this range" and they have to win.
+        // `preventDefault` suppresses the synthesised click too, which is what
+        // stops a grab that turns out to be a tap from moving the selection to
+        // the cell under the handle.
+        const rect = canvas.getBoundingClientRect();
+        const hpx = (t.clientX - rect.left) / (state.zoom || 1);
+        const hpy = (t.clientY - rect.top) / (state.zoom || 1);
+        if (startHandleDrag(hpx, hpy)) {
+          pan = null;
+          pinch = null;
+          pressFired = false;
+          cancelPress();
+          canvas.focus();
+          draw();
+          e.preventDefault();
+          return;
+        }
         pressFired = false;
         pan = {
           x: t.clientX, y: t.clientY, sx: state.scrollX, sy: state.scrollY, moved: false,
@@ -7233,8 +7500,10 @@ function wireEvents() {
         }, LONG_PRESS_MS);
       } else if (e.touches.length === 2) {
         // A second finger cancels the pan rather than fighting it: the midpoint
-        // of a pinch drifts, and panning to it makes the sheet lurch.
+        // of a pinch drifts, and panning to it makes the sheet lurch. A handle
+        // drag ends for the same reason, keeping whatever range it had reached.
         pan = null;
+        endHandleDrag();
         cancelPress();
         stopGlide();
         pinch = { spread: spread(e.touches), zoom: state.zoom };
@@ -7250,6 +7519,14 @@ function wireEvents() {
       if (pinch && e.touches.length === 2) {
         const now = spread(e.touches);
         if (pinch.spread > 0) setZoom(pinch.zoom * (now / pinch.spread));
+        e.preventDefault();
+        return;
+      }
+      if (handleDrag && e.touches.length === 1) {
+        const t = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        const z = state.zoom || 1;
+        moveHandleDrag((t.clientX - rect.left) / z, (t.clientY - rect.top) / z);
         e.preventDefault();
         return;
       }
@@ -7292,6 +7569,16 @@ function wireEvents() {
   canvas.addEventListener(
     "touchend",
     (e) => {
+      // A handle drag ends here and nowhere else, and it must not also select:
+      // the click the browser synthesises where the finger lifts would land on
+      // whatever cell the handle was dragged to and collapse the range that was
+      // just built — the one outcome that makes the gesture useless.
+      if (handleDrag) {
+        endHandleDrag();
+        cancelPress();
+        e.preventDefault();
+        return;
+      }
       // A pan must not also select. The browser synthesises a click where the
       // finger lifts, so without this every swipe would move the selection to
       // wherever the drag happened to end — scrolling a sheet would silently
@@ -7315,6 +7602,7 @@ function wireEvents() {
   );
   canvas.addEventListener("touchcancel", () => {
     cancelPress();
+    endHandleDrag();
     pan = null;
     pinch = null;
   });
