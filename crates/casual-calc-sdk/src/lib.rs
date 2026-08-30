@@ -2391,7 +2391,43 @@ pub fn sheet_pdf_with_context(
             *count,
         );
     }
+    // **Text that no installed face can draw** (`FID-45`).
+    //
+    // `missing_scripts` has existed and been documented for some time, and
+    // nothing on a render path asked it — so a caller who exported a PDF and
+    // read the report, whose whole job is to say what could not be carried, was
+    // told nothing and had to know to make a second call it had no reason to
+    // suspect.
+    //
+    // Worse than the undrawn-picture case beside it: a missing picture leaves
+    // an obvious hole, where missing text leaves a cell that merely **looks
+    // empty** — indistinguishable from a cell that is.
+    //
+    // Named per script rather than per character, because "this sheet contains
+    // Devanagari and no face covering it is installed" is actionable and a list
+    // of code points is not.
+    for missing in missing_font_coverage_of(workbook) {
+        report.record(
+            &format!("text in {} (no installed face covers it)", missing.script),
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+    }
     Ok((bytes, report))
+}
+
+/// Every script in `workbook`'s text that no registered face can draw.
+///
+/// The free function behind [`WorkbookSession::missing_font_coverage`], so a
+/// render path can ask without a session. Same reasoning as that method: the
+/// string table holds every piece of text exactly once, and sheet names are
+/// excluded because this renderer never draws them.
+fn missing_font_coverage_of(workbook: &Workbook) -> Vec<casual_calc_render::MissingScript> {
+    let mut text = String::new();
+    for s in workbook.strings.iter() {
+        text.push_str(s);
+    }
+    casual_calc_render::missing_scripts(&text)
 }
 
 /// The workbook's own media, as something the renderer can draw from.
