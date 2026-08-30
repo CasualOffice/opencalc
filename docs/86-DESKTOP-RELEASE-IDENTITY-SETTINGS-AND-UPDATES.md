@@ -482,7 +482,7 @@ user cannot find, and it is the one bug every implementation of this feature
 ships once.
 
 **A file can be opened by double-clicking it, and by dropping it on the
-window.** `bundle.fileAssociations` for `.xlsx`, `.csv`, `.tsv` and `.psv` —
+window.** `bundle.fileAssociations` for **all seven** extensions the engine opens — `.xlsx`, `.xlsm`, `.ods`, `.csv`, `.tsv`, `.tab`, `.psv`. This paragraph said four until `TAURI-010` machine-checked it, missing `.ods` (`ODS-01`), `.xlsm` (`IO-08`) and `.tab` — **the same second-list-that-drifts mistake this section warns about two paragraphs above**, made by the warning itself. It is a list no document should hold: the shell now asks `SessionFormat::for_extension` and a test fails when the two disagree, which is why this sentence can be trusted and the last one could not —
 which is the set `openable_extensions()` already reports, asked of the SDK
 rather than listed, so the panel and the association cannot disagree — plus the
 argv path on Windows and Linux and `RunEvent::Opened` on macOS, which is the only
