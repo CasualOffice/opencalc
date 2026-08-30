@@ -3379,3 +3379,379 @@ mod print_geometry {
         );
     }
 }
+
+/// Headers and footers (`IO-10`): the field-code language, the variants, and
+/// the room they take out of the paper.
+mod header_footer {
+    use std::collections::BTreeMap;
+
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    use crate::GridGeometry;
+    use crate::print::{
+        HF_MAX_CHARS, HF_MAX_LINES, HeaderField, HeaderFooter, PrintContext, header_footers,
+        paginate, paginate_with_context, parse_header_footer,
+    };
+
+    fn parse(raw: &str) -> (HeaderFooter, BTreeMap<&'static str, u64>) {
+        let mut refused = BTreeMap::new();
+        let parsed = parse_header_footer(raw, "Sheet1", &PrintContext::default(), &mut refused);
+        (parsed, refused)
+    }
+
+    /// The text of one section's first line, with `&P` and `&N` filled in.
+    fn line(raw: &str, section: usize, page: i64, pages: usize) -> String {
+        let (parsed, _) = parse(raw);
+        parsed.resolve(page, pages)[section]
+            .first()
+            .map(|runs| runs.iter().map(|r| r.text.as_str()).collect::<String>())
+            .unwrap_or_default()
+    }
+
+    /// **The counter counts.** `IO-10`'s first named gap: `&P` had nothing to
+    /// resolve against, so a printed sheet carried no page number at all.
+    #[test]
+    fn the_page_counter_is_the_page_it_is_printed_on() {
+        assert_eq!(line("&CPage &P of &N", 1, 1, 4), "Page 1 of 4");
+        assert_eq!(line("&CPage &P of &N", 1, 3, 4), "Page 3 of 4");
+        // `&P+2` shifts the printed number, which is how a chapter that starts
+        // at page three is numbered.
+        assert_eq!(line("&C&P+2", 1, 1, 4), "3");
+        assert_eq!(line("&C&P-1", 1, 4, 4), "3");
+    }
+
+    /// Text before any `&L`/`&C`/`&R` is centred, and the three sections are
+    /// independent boxes rather than three paragraphs.
+    #[test]
+    fn an_unmarked_header_is_centred_and_the_sections_are_independent() {
+        assert_eq!(line("Just a title", 1, 1, 1), "Just a title");
+        assert_eq!(line("&Lleft&Ccentre&Rright", 0, 1, 1), "left");
+        assert_eq!(line("&Lleft&Ccentre&Rright", 1, 1, 1), "centre");
+        assert_eq!(line("&Lleft&Ccentre&Rright", 2, 1, 1), "right");
+    }
+
+    /// `&&` is the escape for a literal ampersand.
+    #[test]
+    fn a_doubled_ampersand_is_one_ampersand() {
+        assert_eq!(line("&CSmith && Sons", 1, 1, 1), "Smith & Sons");
+    }
+
+    /// **Nothing is dropped without being named.** Every code this cannot draw
+    /// is counted under the name a compatibility report shows — and its letters
+    /// do not leak onto the paper, which is the other half of the bargain.
+    #[test]
+    fn a_code_that_cannot_be_drawn_is_named_and_its_letters_do_not_print() {
+        let (parsed, refused) = parse("&L&GLogo&C&KFF0000Red&R&Uunder");
+        assert_eq!(
+            refused.keys().copied().collect::<Vec<_>>(),
+            [
+                "header/footer picture (&G)",
+                "header/footer text colour (&K)",
+                "header/footer underline (&U)",
+            ]
+        );
+        let resolved = parsed.resolve(1, 1);
+        let text = |section: usize| -> String {
+            resolved[section]
+                .first()
+                .map(|runs| runs.iter().map(|r| r.text.as_str()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(text(0), "Logo", "&G is consumed, the text after it is not");
+        assert_eq!(text(1), "Red", "the six colour digits are not text");
+        assert_eq!(text(2), "under");
+    }
+
+    /// The engine reads no clock and knows no file name. Asking for either
+    /// without supplying it is a **refusal by name**, not an empty string: a
+    /// header reading "Printed on" and stopping is a defect a reader has to
+    /// guess at.
+    #[test]
+    fn a_date_with_no_clock_is_refused_rather_than_printed_blank() {
+        let (parsed, refused) = parse("&LPrinted on &D at &T&R&F");
+        assert_eq!(
+            refused.keys().copied().collect::<Vec<_>>(),
+            [
+                "header/footer date (&D)",
+                "header/footer file name (&F)",
+                "header/footer time (&T)",
+            ]
+        );
+        assert!(parsed.resolve(1, 1)[2].is_empty(), "no file, no run");
+
+        let mut refused = BTreeMap::new();
+        let ctx = PrintContext {
+            file: "book.xlsx",
+            now: Some(45_000.0),
+        };
+        let dated = parse_header_footer("&L&D&R&F", "Sheet1", &ctx, &mut refused);
+        assert!(refused.is_empty(), "everything was answered: {refused:?}");
+        assert_eq!(dated.resolve(1, 1)[0][0][0].text, "2023-03-15");
+        assert_eq!(dated.resolve(1, 1)[2][0][0].text, "book.xlsx");
+    }
+
+    /// `&B` and `&"Arial,Bold Italic"` dress a run rather than printing.
+    #[test]
+    fn the_formatting_codes_that_are_supported_dress_the_run() {
+        let (parsed, refused) = parse("&C&BTotal&B: &\"Arial,Bold Italic\"&14x");
+        assert!(refused.is_empty(), "{refused:?}");
+        let runs = parsed.resolve(1, 1)[1][0].clone();
+        assert_eq!(runs[0].text, "Total");
+        assert!(runs[0].bold && !runs[0].italic);
+        assert_eq!(runs[1].text, ": ");
+        assert!(!runs[1].bold, "&B toggles off as well as on");
+        assert_eq!(runs[2].text, "x");
+        assert_eq!(runs[2].font.as_deref(), Some("Arial"));
+        assert!(runs[2].bold && runs[2].italic);
+        assert!((runs[2].size_pt - 14.0).abs() < f32::EPSILON);
+    }
+
+    /// A newline in the string is a new line on the paper.
+    #[test]
+    fn a_newline_starts_a_new_line() {
+        let (parsed, _) = parse("&Cfirst\nsecond\nthird");
+        let lines = parsed.resolve(1, 1)[1].clone();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2][0].text, "third");
+    }
+
+    fn sheet_with(rows: u32) -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for row in 0..rows {
+            sheet
+                .cells
+                .set(CellRef::new(row, 0), Cell::value(CellValue::Number(1.0)));
+        }
+        wb.sheets.push(sheet);
+        wb
+    }
+
+    /// **An ordinary header does not move the printout.** Excel's default 0.3"
+    /// header margin and a 9-point line fit inside its default 0.75" top
+    /// margin, so reserving room for them would print a page that does not
+    /// match Excel's.
+    #[test]
+    fn a_header_that_fits_the_top_margin_leaves_the_body_where_it_was() {
+        let plain = sheet_with(60);
+        let geometry = GridGeometry::for_sheet(&plain.sheets[0]);
+        let before = paginate(&plain, 0, &geometry).expect("pages");
+
+        let mut with_header = sheet_with(60);
+        with_header.sheets[0]
+            .print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&CQuarterly".to_owned());
+        let after = paginate(&with_header, 0, &geometry).expect("pages");
+
+        assert_eq!(after.header_twips(), 0, "nothing reserved");
+        assert_eq!(after.margins, before.margins);
+        assert_eq!(after.page_box, before.page_box);
+        assert_eq!(after.pages.len(), before.pages.len());
+    }
+
+    /// **A header too tall for the margin pushes the body down.** The other
+    /// half of the same rule: a three-line 24-point header cannot be drawn
+    /// inside 0.75", so the text area starts below it rather than under it.
+    #[test]
+    fn a_header_taller_than_the_top_margin_moves_the_body_down() {
+        let plain = sheet_with(200);
+        let geometry = GridGeometry::for_sheet(&plain.sheets[0]);
+        let before = paginate(&plain, 0, &geometry).expect("pages");
+
+        let mut tall = sheet_with(200);
+        tall.sheets[0].print.header_footer_text.insert(
+            "oddHeader".to_owned(),
+            "&C&24BIG\n&24BIGGER\n&24BIGGEST".to_owned(),
+        );
+        let after = paginate(&tall, 0, &geometry).expect("pages");
+
+        assert!(
+            after.header_twips() > 0,
+            "a header 0.3in down and three 24pt lines tall does not fit 0.75in"
+        );
+        assert_eq!(
+            after.margins[0],
+            before.margins[0] + after.header_twips(),
+            "the reservation is the top margin's, so the body starts below it"
+        );
+        assert_eq!(
+            after.page_box.height,
+            before.page_box.height - after.header_twips() - after.footer_twips()
+        );
+        assert!(
+            after.pages.len() >= before.pages.len(),
+            "a shorter text area cannot hold more rows per page"
+        );
+    }
+
+    /// `differentFirst` selects the first-page variant **whether or not the
+    /// file wrote one**. A sheet whose author cleared the title page's header
+    /// must print nothing there, not the ordinary header.
+    #[test]
+    fn different_first_prints_nothing_when_the_file_cleared_it() {
+        let mut wb = sheet_with(200);
+        let print = &mut wb.sheets[0].print;
+        print
+            .header_footer
+            .insert("differentFirst".to_owned(), "1".to_owned());
+        print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&Cordinary".to_owned());
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).expect("pages");
+        assert!(plan.pages.len() > 1, "the test needs a second page");
+
+        let (first, _) = plan.furniture(0);
+        let (second, _) = plan.furniture(1);
+        assert!(first.is_empty(), "page one carries the cleared variant");
+        assert_eq!(second.resolve(2, 2)[1][0][0].text, "ordinary");
+    }
+
+    /// `differentOddEven` swaps the variant by the **printed** number, which is
+    /// what a reader of a bound report sees.
+    #[test]
+    fn different_odd_even_swaps_by_the_printed_page_number() {
+        let mut wb = sheet_with(200);
+        let print = &mut wb.sheets[0].print;
+        print
+            .header_footer
+            .insert("differentOddEven".to_owned(), "1".to_owned());
+        print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&Codd".to_owned());
+        print
+            .header_footer_text
+            .insert("evenHeader".to_owned(), "&Ceven".to_owned());
+        print
+            .page
+            .insert("useFirstPageNumber".to_owned(), "1".to_owned());
+        print
+            .page
+            .insert("firstPageNumber".to_owned(), "2".to_owned());
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).expect("pages");
+        assert!(plan.pages.len() > 1, "the test needs a second page");
+
+        assert_eq!(plan.page_number(0), 2, "the file asked to start at two");
+        let text = |index: usize| {
+            let (header, _) = plan.furniture(index);
+            header.resolve(plan.page_number(index), plan.pages.len())[1][0][0]
+                .text
+                .clone()
+        };
+        assert_eq!(text(0), "even", "page two is even, even though it is first");
+        assert_eq!(text(1), "odd");
+    }
+
+    /// The two schema flags default to *on*, so only an explicit zero turns
+    /// them off — reading an absent attribute as false would move every header
+    /// to the paper's edge.
+    #[test]
+    fn align_with_margins_and_scale_with_doc_default_to_on() {
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        let read = header_footers(&sheet, &PrintContext::default());
+        assert!(read.align_with_margins && read.scale_with_doc);
+
+        sheet
+            .print
+            .header_footer
+            .insert("alignWithMargins".to_owned(), "0".to_owned());
+        let read = header_footers(&sheet, &PrintContext::default());
+        assert!(!read.align_with_margins && read.scale_with_doc);
+    }
+
+    /// `&A` is the sheet's own tab name, which is why parsing needs it.
+    #[test]
+    fn the_sheet_name_code_is_the_sheet_it_prints() {
+        let mut refused = BTreeMap::new();
+        let parsed =
+            parse_header_footer("&C&A", "Q3 Actuals", &PrintContext::default(), &mut refused);
+        assert_eq!(parsed.resolve(1, 1)[1][0][0].text, "Q3 Actuals");
+        assert!(refused.is_empty());
+    }
+
+    /// The host's values reach the plan, not only the parser.
+    #[test]
+    fn the_context_reaches_the_plan() {
+        let mut wb = sheet_with(10);
+        wb.sheets[0]
+            .print
+            .header_footer_text
+            .insert("oddHeader".to_owned(), "&C&F".to_owned());
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let ctx = PrintContext {
+            file: "ledger.xlsx",
+            now: None,
+        };
+        let plan = paginate_with_context(&wb, 0, &geometry, &ctx).expect("pages");
+        assert!(plan.header_footers.refused.is_empty());
+        let (header, _) = plan.furniture(0);
+        assert_eq!(header.resolve(1, 1)[1][0][0].text, "ledger.xlsx");
+
+        // And without it, the same file is a refusal rather than a blank.
+        let plan = paginate(&wb, 0, &geometry).expect("pages");
+        assert_eq!(
+            plan.header_footers
+                .refused
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            ["header/footer file name (&F)"]
+        );
+    }
+
+    /// A header is a string out of an untrusted file. Neither its line count
+    /// nor its length may decide how much paper or work it costs.
+    ///
+    /// The reservation is the half that bites: an unbounded height leaves a
+    /// printable box of one twip, which is a page per row up to the page cap —
+    /// a memory cost with a page count for a multiplier, from a header nobody
+    /// can see.
+    #[test]
+    fn a_hostile_header_is_bounded() {
+        let (parsed, _) = parse(&format!("&C{}", "x\n".repeat(500)));
+        assert!(
+            parsed.resolve(1, 1)[1].len() <= HF_MAX_LINES,
+            "line count is capped"
+        );
+        let mut wb = sheet_with(40);
+        wb.sheets[0].print.header_footer_text.insert(
+            "oddHeader".to_owned(),
+            format!("&C{}", "x\n".repeat(100_000)),
+        );
+        let geometry = GridGeometry::for_sheet(&wb.sheets[0]);
+        let plan = paginate(&wb, 0, &geometry).expect("pages");
+        assert!(
+            plan.page_box.height > 1,
+            "a header of a hundred thousand lines must not consume the page: \
+             box is {} twips after reserving {}",
+            plan.page_box.height,
+            plan.header_twips()
+        );
+        assert!(
+            plan.pages.len() < 40,
+            "one page per row is the failure mode"
+        );
+        let (parsed, _) = parse(&format!("&C{}", "x".repeat(100_000)));
+        let drawn: usize = parsed.resolve(1, 1)[1][0]
+            .iter()
+            .map(|r| r.text.chars().count())
+            .sum();
+        assert_eq!(drawn, HF_MAX_CHARS);
+    }
+
+    /// The parsed form must not depend on anything that moves between runs.
+    #[test]
+    fn parsing_is_deterministic() {
+        let raw = "&L&BSales&B&C&P of &N&R&G&Kff0000x";
+        let (first, first_refused) = parse(raw);
+        let (second, second_refused) = parse(raw);
+        assert_eq!(first, second);
+        assert_eq!(first_refused, second_refused);
+        assert_eq!(
+            HeaderField::Text("x".to_owned()),
+            second.sections[2][0].field
+        );
+    }
+}
