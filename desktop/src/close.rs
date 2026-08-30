@@ -37,32 +37,50 @@ pub const fn should_prevent(agreed: bool) -> bool {
     !agreed
 }
 
-/// The script asked in the webview when a close is requested.
+/// The script asked in the webview when a way out is requested.
+///
+/// `quit` says **which** way out, and it is a parameter rather than two scripts
+/// because the question is identical and only the consequence differs. Two
+/// scripts would be two places for the wording to drift, and the wording is the
+/// only thing standing between a user and lost work.
 ///
 /// Held here rather than inline so its contract is checkable: it must ask the
 /// editor whether the document is dirty, it must agree immediately when it is
 /// not, and every path through it must end in `agree_to_close` or in a
 /// deliberate cancellation. A script that can end without doing either traps
-/// the user in a window that will not shut, which is a worse failure than the
-/// one being fixed.
-pub const CONFIRM_CLOSE: &str = r#"(async () => {
+/// the user in an application that will neither close nor quit, which is a
+/// worse failure than the one being fixed.
+#[must_use]
+pub fn confirm_close(quit: bool) -> String {
+    let verb = if quit { "Quit" } else { "Close" };
+    let action = if quit { "Discard and quit" } else { "Discard and close" };
+    let what = if quit {
+        "Quitting discards them, and undo will not bring them back."
+    } else {
+        "Closing discards them, and undo will not bring them back."
+    };
+    format!(
+        r#"(async () => {{
   const e = window.opencalcEditor;
   const invoke = window.__TAURI__.core.invoke;
-  // No editor, or no way to ask: close rather than trap the user in a window
-  // that will not shut. A shell that cannot be closed is worse than one that
-  // closes without asking.
-  if (!e || !e.isDirty || !e.isDirty()) {
-    return await invoke("agree_to_close");
-  }
+  const args = {{ quit: {quit} }};
+  // No editor, or no way to ask: go rather than trap the user in an
+  // application that will not shut. One that cannot be closed is worse than one
+  // that closes without asking.
+  if (!e || !e.isDirty || !e.isDirty()) {{
+    return await invoke("agree_to_close", args);
+  }}
   const ok = e.confirmModal
     ? await e.confirmModal(
-        "Close without saving?",
-        "This workbook has changes that have not been saved. Closing discards them, and undo will not bring them back.",
-        "Discard and close",
+        "{verb} without saving?",
+        "This workbook has changes that have not been saved. {what}",
+        "{action}",
       )
     : true;
-  if (ok) await invoke("agree_to_close");
-})()"#;
+  if (ok) await invoke("agree_to_close", args);
+}})()"#
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -84,37 +102,67 @@ mod tests {
     /// The script asks the editor rather than assuming.
     #[test]
     fn the_question_is_asked_of_the_editor_and_answered_back_to_the_shell() {
-        assert!(
-            CONFIRM_CLOSE.contains("isDirty"),
-            "the script must ask whether there is unsaved work; without it every close asks, \
-             and a dialog on every close is one people learn to dismiss without reading"
-        );
-        assert!(
-            CONFIRM_CLOSE.contains("agree_to_close"),
-            "the script must be able to answer, or the window never closes"
-        );
-        assert!(
-            CONFIRM_CLOSE.contains("confirmModal"),
-            "the question must use the editor's own dialog, not a native one that looks foreign"
-        );
+        for quit in [false, true] {
+            let script = confirm_close(quit);
+            assert!(
+                script.contains("isDirty"),
+                "the script must ask whether there is unsaved work; without it every exit asks, \
+                 and a dialog every time is one people learn to dismiss without reading"
+            );
+            assert!(
+                script.contains("agree_to_close"),
+                "the script must be able to answer, or the application never shuts"
+            );
+            assert!(
+                script.contains("confirmModal"),
+                "the question must use the editor's own dialog, not a native one that looks foreign"
+            );
+        }
     }
 
-    /// A document with nothing unsaved closes without a dialog.
+    /// A document with nothing unsaved goes without asking.
     ///
     /// Asserted on the script's shape because the behaviour needs a window: the
     /// clean path must reach `agree_to_close` *before* any `confirmModal` call,
-    /// so an ordinary close costs one round trip and no question.
+    /// so an ordinary exit costs one round trip and no question.
     #[test]
     fn a_clean_document_agrees_without_asking() {
-        let agree = CONFIRM_CLOSE
-            .find("agree_to_close")
-            .expect("the script must answer");
-        let modal = CONFIRM_CLOSE
-            .find("confirmModal")
-            .expect("the script must be able to ask");
+        for quit in [false, true] {
+            let script = confirm_close(quit);
+            let agree = script.find("agree_to_close").expect("the script must answer");
+            let modal = script.find("confirmModal").expect("the script must be able to ask");
+            assert!(
+                agree < modal,
+                "the clean-document path must agree before the dialog is reached, \
+                 or every exit asks"
+            );
+        }
+    }
+
+    /// **The two ways out are told apart** (`TAURI-014`).
+    ///
+    /// Answering a quit by closing the window leaves the process running after
+    /// the user asked it to stop; answering a close by quitting takes away more
+    /// than was asked for. The script carries which one it is, and says so in
+    /// words the user reads — a dialog that says "Close" when they pressed
+    /// Cmd+Q is describing something that is not about to happen.
+    #[test]
+    fn a_quit_and_a_close_are_not_the_same_request() {
+        let closing = confirm_close(false);
+        let quitting = confirm_close(true);
+
         assert!(
-            agree < modal,
-            "the clean-document path must agree before the dialog is reached, or every close asks"
+            closing.contains("quit: false") && quitting.contains("quit: true"),
+            "the shell must be told which way out was asked for, or it answers the wrong one"
+        );
+        assert!(
+            quitting.contains("Quit without saving?") && quitting.contains("Discard and quit"),
+            "a quit must say quit: a dialog naming the wrong verb describes something that is \
+             not about to happen"
+        );
+        assert!(
+            closing.contains("Close without saving?") && closing.contains("Discard and close"),
+            "and a close must say close"
         );
     }
 }
