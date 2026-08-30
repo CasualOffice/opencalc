@@ -208,7 +208,9 @@ test.describe("sheets", () => {
     const tabs = page.locator("#sheet-tabs .sheet-tab");
     const before = await tabs.count();
 
-    await page.locator("#sheet-tabs .sheet-add").first().click();
+    // Not `#sheet-tabs .sheet-add`: the add button is pinned outside the
+    // scrolling strip, so that it cannot be scrolled out of reach (`UX-CHR-07`).
+    await page.locator(".sheet-add.sheet-new").first().click();
     await expect(tabs).toHaveCount(before + 1);
 
     // Put a value on the new sheet, then total it from the first.

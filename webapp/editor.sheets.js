@@ -48,6 +48,9 @@ import {
   statusError,
   stopMarch,
   syncClock,
+  // A live binding: `editor.core.js` assigns it at mount, and this module reads
+  // it only after boot has called `wireZoom()`.
+  tabsEl,
   tryEdit,
   wasStopped,
   wasm,
@@ -109,6 +112,200 @@ export function wireZoom() {
   // is what makes a zoom slider usable at all.
   slider?.addEventListener("input", () => setZoom(Number(slider.value) / 100));
   renderZoom();
+  // The bottom bar's other controls — the sheet-tab navigation. Mounted here
+  // because `wireZoom()` is the only function of this module the boot sequence
+  // calls, and it runs after `renderTabs()` has built the strip. See
+  // `wireSheetNav()`.
+  wireSheetNav();
+}
+
+// ---------------------------------------------------------------------------
+// The pinned sheet-navigation rail (`UX-CHR-07`).
+//
+// **The defect, from a running editor rather than from reading it.**
+// `renderTabs()` appends the add-sheet `+` and the all-sheets `☰` *into*
+// `#sheet-tabs`, which is the `overflow-x: auto` element. At 1280px the strip
+// is 796px wide and twelve default-named sheets are 897px of content, so both
+// controls are pushed past its right edge — and the strip has **no scroll
+// arrows**, so no control in the chrome brings them back. Measured: the
+// controls go out of reach at 8 sheets at 1024px, 12 at 1280px, 14 at 1440px,
+// 15 at 1512px and 20 at 1920px. A user with twelve sheets on a laptop could
+// not add a thirteenth.
+//
+// All four desktop competitors pin these outside the scroller, three of them on
+// the left, which is the only placement tabs cannot push away
+// (docs/88 §5).
+//
+// **Why the rail adopts the buttons rather than building its own.** The two
+// buttons — and the all-sheets menu behind `☰` — are built by `renderTabs()` in
+// `editor.core.js`, which rebuilds them on every render. This moves those very
+// nodes into the rail, so there is exactly one add-sheet handler and one
+// all-sheets menu in the editor; a second pair here would be a second thing to
+// keep in step, and the first one to diverge. The move is driven by a
+// `MutationObserver` because `renderTabs()` has no hook this module can take.
+//
+// The layout properties below are set on the elements rather than in
+// `editor.css`, and everything *painted* — size, radius, hover, colour — comes
+// from the existing `.sheet-add` class, so the rail stays inside the token
+// system and no rule was added to the stylesheet for it.
+
+/// The rail, and the two buttons it adopts from each render.
+let navRail = null;
+let navPrev = null;
+let navNext = null;
+let navAdd = null;
+let navAll = null;
+
+/// One chevron, in the toolbar's icon idiom.
+function chevron(points) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("class", "icon-sm");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  path.setAttribute("points", points);
+  svg.appendChild(path);
+  return svg;
+}
+
+function navButton(cls, label, points) {
+  const b = document.createElement("button");
+  // `.sheet-add` is the 26px square button of this strip; the second class is
+  // what tells the three of them apart.
+  b.className = "sheet-add " + cls;
+  b.type = "button";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.appendChild(chevron(points));
+  return b;
+}
+
+/// Scroll the strip by one tab, in `dir`.
+///
+/// By a tab rather than by a fixed number of pixels: a tab is the unit the user
+/// is looking for, and a pixel step leaves one sliced in half at the edge —
+/// which is what Excel's and OnlyOffice's single arrows avoid.
+function stepTabs(dir) {
+  const tabs = [...tabsEl.querySelectorAll(".sheet-tab")];
+  const left = tabsEl.scrollLeft;
+  const right = left + tabsEl.clientWidth;
+  if (dir > 0) {
+    const next = tabs.find((t) => t.offsetLeft + t.offsetWidth > right + 1);
+    tabsEl.scrollLeft = next
+      ? next.offsetLeft + next.offsetWidth - tabsEl.clientWidth
+      : tabsEl.scrollWidth;
+  } else {
+    const prev = tabs.reverse().find((t) => t.offsetLeft < left - 1);
+    tabsEl.scrollLeft = prev ? prev.offsetLeft : 0;
+  }
+  syncSheetNav();
+}
+
+/// Adopt whatever the last render appended, and re-state the arrows.
+///
+/// Runs after every rebuild of the strip and after every scroll of it, so it
+/// has to be cheap and idempotent — it is both: two `querySelector`s and four
+/// property writes.
+function syncSheetNav() {
+  if (!navRail || !tabsEl) return;
+
+  // A host can hide the tab strip (`.oc-hide-tabs`); the rail belongs to the
+  // strip, so it goes with it. Read from the layout rather than from the class,
+  // because the class is on an ancestor this module does not own — and a
+  // `display: none` strip reports no client rects, which is also what makes the
+  // `ResizeObserver` below the thing that notices a host toggling it.
+  const shown = tabsEl.getClientRects().length > 0;
+  navRail.style.display = shown ? "flex" : "none";
+
+  // `renderTabs()` builds a fresh pair on every render, so the old pair has to
+  // go or the rail grows one `+` per rebuild.
+  const add = tabsEl.querySelector(".sheet-add:not(.sheet-all)");
+  const all = tabsEl.querySelector(".sheet-all");
+  if (add) {
+    navAdd?.remove();
+    navAdd = add;
+    // The add button is the only one of the three with no name of its own.
+    add.classList.add("sheet-new");
+    navRail.appendChild(add);
+  }
+  if (all) {
+    navAll?.remove();
+    navAll = all;
+    navRail.appendChild(all);
+  }
+
+  // Arrows only while there is something to scroll. Excel greys them out
+  // always; here the bottom bar is shared with the cell mode, the selection
+  // summary and the zoom widget, and 52px of permanently dead control is 52px
+  // the tabs do not get on a narrow window.
+  const over = tabsEl.scrollWidth - tabsEl.clientWidth > 1;
+  const atStart = tabsEl.scrollLeft <= 0;
+  const atEnd = tabsEl.scrollLeft >= tabsEl.scrollWidth - tabsEl.clientWidth - 1;
+  for (const [b, off] of [[navPrev, atStart], [navNext, atEnd]]) {
+    // "" rather than a value: `.sheet-add`'s own `inline-flex` is what should
+    // apply when the button is shown.
+    b.style.display = over ? "" : "none";
+    b.disabled = !over || off;
+    // A disabled button still takes `:hover` from the stylesheet, which reads
+    // as live. This is the one piece of state `.sheet-add` has no rule for.
+    b.style.opacity = b.disabled ? "0.35" : "";
+    b.style.pointerEvents = b.disabled ? "none" : "";
+  }
+}
+
+/// Build the rail and start watching the strip. Called once, from `wireZoom()`.
+function wireSheetNav() {
+  if (navRail || !tabsEl || !tabsEl.parentNode) return;
+
+  navRail = document.createElement("div");
+  navRail.className = "sheet-nav";
+  navRail.id = "sheet-nav";
+  // Layout only — see the block comment above on why this is not in the
+  // stylesheet.
+  navRail.style.display = "flex";
+  navRail.style.alignItems = "center";
+  navRail.style.gap = "2px";
+  navRail.style.flex = "0 0 auto";
+
+  navPrev = navButton("sheet-scroll sheet-scroll-prev", "Scroll tabs left", "15 18 9 12 15 6");
+  navNext = navButton("sheet-scroll sheet-scroll-next", "Scroll tabs right", "9 18 15 12 9 6");
+  navPrev.addEventListener("click", () => stepTabs(-1));
+  navNext.addEventListener("click", () => stepTabs(1));
+  navRail.append(navPrev, navNext);
+
+  // Pinned to the left of the strip, which is where three of the four desktop
+  // competitors put it and the only side tabs cannot push it off.
+  tabsEl.parentNode.insertBefore(navRail, tabsEl);
+
+  // **Make the strip the tabs' `offsetParent`** — a separate defect, found
+  // while measuring this one.
+  //
+  // `renderTabs()` keeps the active tab in view with
+  // `tabsEl.scrollLeft = activeTab.offsetLeft`, which is only true if
+  // `offsetLeft` is measured inside the strip. `.sheet-tabs` is statically
+  // positioned, so it is not an `offsetParent` and the tabs measure from
+  // `<body>` instead: every one of those numbers is inflated by the strip's own
+  // distance from the left of the page. Today that is ~14px and the
+  // over-scroll is invisible; the rail moves the strip ~120px right, which
+  // would have turned an invisible bug into "jump to Sheet1 and it is not on
+  // screen". One line, and the arithmetic in `renderTabs()` becomes true
+  // instead of nearly true.
+  tabsEl.style.position = "relative";
+
+  // Three things change what the rail should show: a rebuild of the strip
+  // (adds, deletes, renames, undo), a scroll of it, and a resize of it — the
+  // last of which is also how a host hiding the strip is noticed.
+  new MutationObserver(() => syncSheetNav()).observe(tabsEl, { childList: true });
+  tabsEl.addEventListener("scroll", () => syncSheetNav(), { passive: true });
+  new ResizeObserver(() => syncSheetNav()).observe(tabsEl);
+
+  // `renderTabs()` has already run by the time boot reaches here, so the first
+  // adoption is this call rather than the observer's.
+  syncSheetNav();
 }
 
 export function commitFreezeDrag(axis, px, py) {

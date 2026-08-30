@@ -30,7 +30,10 @@ test("many sheet tabs scroll instead of overflowing the window", async ({ page }
   // directly changes the workbook without telling the editor, so the tab strip
   // never rebuilds — that is a test bug and it looked exactly like a missing
   // feature the first time this ran.
-  const add = page.locator(".sheet-add").first();
+  // `.sheet-add` is worn by three buttons in this strip — the add, the
+  // all-sheets menu and the two scroll arrows pinned beside them (`UX-CHR-07`).
+  // `.sheet-new` is the add.
+  const add = page.locator(".sheet-add.sheet-new").first();
   await expect(add, "there is no add-sheet button").toBeVisible();
   for (let i = 0; i < 24; i += 1) await add.click();
 
