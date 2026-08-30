@@ -657,3 +657,78 @@ pub fn session_set_sheet_protected(index: usize, on: bool) -> Result<(), JsError
         data.protection = on.then(casual_calc_model::SheetProtection::enabled);
     })
 }
+
+#[cfg(test)]
+mod field_code_agreement {
+    use super::*;
+
+    /// The HTML print path and the PDF must read a header the same way
+    /// (`IO-11`).
+    ///
+    /// There were two parsers for one language. `hf_sections` here, and
+    /// `casual_calc_layout::print::parse_header_footer`, which `IO-10` wrote
+    /// for the PDF. The layout one is the owner — it is the one with the
+    /// refusals, the `differentFirst`/`differentOddEven` variants and the
+    /// per-run styling — and this one silently dropped `&B` and `&I` and knew
+    /// nothing about the variants.
+    ///
+    /// The cost was one file printing two different headers: the browser's and
+    /// the PDF's, from the same bytes. `print.rs`'s own module doc names that
+    /// as the failure mode of a second implementation, which is what makes this
+    /// worth a test rather than a comment.
+    ///
+    /// Compares the **text a reader sees**, not the internal shape: the two
+    /// representations differ on purpose — CSS `content:` carries no markup, so
+    /// this side cannot express a bold run — and demanding they match
+    /// structurally would force one of them to become the other.
+    fn visible_text(parts: &[HfPart]) -> String {
+        parts
+            .iter()
+            .map(|p| match p {
+                HfPart::Text(t) => t.clone(),
+                HfPart::PageNumber => "\u{1}P".to_owned(),
+                HfPart::PageCount => "\u{1}N".to_owned(),
+            })
+            .collect()
+    }
+
+    fn layout_text(raw: &str, sheet: &str) -> [String; 3] {
+        use casual_calc_layout::print::{HeaderField, PrintContext, parse_header_footer};
+        let mut refused = std::collections::BTreeMap::new();
+        let hf = parse_header_footer(raw, sheet, &PrintContext::default(), &mut refused);
+        std::array::from_fn(|i| {
+            hf.sections[i]
+                .iter()
+                .map(|piece| match &piece.field {
+                    HeaderField::Text(t) => t.clone(),
+                    HeaderField::PageNumber(_) => "\u{1}P".to_owned(),
+                    HeaderField::PageCount => "\u{1}N".to_owned(),
+                    HeaderField::LineBreak => "\n".to_owned(),
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn both_paths_read_the_same_header_the_same_way() {
+        // `&B` and `&I` are the codes this side used to drop on the floor;
+        // a plain run either side of them is what shows the drop is silent.
+        let raw = "&LSales&C&BQ3 Summary&B page &P of &N&R&I&A";
+        let ctx = HfContext {
+            file: "",
+            now: None,
+            sheet: "Sheet1",
+        };
+        let here = hf_sections(raw, &ctx);
+        let there = layout_text(raw, "Sheet1");
+
+        for (i, name) in ["left", "centre", "right"].iter().enumerate() {
+            assert_eq!(
+                visible_text(&here[i]),
+                there[i],
+                "the {name} section reads differently in the browser and in the PDF, \
+                 from the same bytes — which is one document with two headers"
+            );
+        }
+    }
+}
