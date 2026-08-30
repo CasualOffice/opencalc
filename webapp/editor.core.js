@@ -1483,9 +1483,45 @@ export const activeEl = () => ocRoot.activeElement;
 // showRowColHeaders="0"), which is what makes the grid start at the very
 // top-left corner: everything else measures the body as "past HW/HH", so the
 // whole layout follows from these two numbers.
-const HEADER_W = 46; // row-header width (px)
-const HEADER_H = 24; // column-header height (px)
-export let HW = HEADER_W;
+// **Both were hard constants, and both were wrong** (`UX-CHR-09`, `docs/88` §6).
+//
+// The column band was 24px, the tallest of the five competitors. 20px is where
+// three of the four sit, and it is exactly Excel's default row height — which is
+// what makes the band read as "one row tall" rather than as a bar.
+//
+// The row band was a fixed 46px, wrong at both ends. At rows 1-99 the label
+// needs 6-16px and the band spent 46, giving away ~30px of grid width on every
+// frame of every ordinary sheet. At the bottom it was too narrow: `1048576`
+// measures 50px at the header's font against a 46px band, so the last rows drew
+// a **truncated number** — confirmed by driving the Name Box to `A1048576`,
+// which is the only route that jumps past the data edge.
+//
+// So the row band is derived from the digits actually reachable, and **stepped**
+// rather than continuous: a band that tracked the exact widest label would
+// reflow the entire grid while scrolling. LibreOffice's rule.
+const HEADER_H = 20; // column-header height (px)
+const HEADER_W_MIN = 30; // never narrower than this, however few the digits
+// Widths for 1..7 digits, measured once at the header's own font and cached.
+// Indexed by digit count, so `ROW_BAND[3]` is the band for rows up to 999.
+let rowBandCache = null;
+function rowBandFor(digits) {
+  if (!rowBandCache) {
+    const probe = document.createElement("canvas").getContext("2d");
+    probe.font = "12px system-ui, sans-serif";
+    rowBandCache = [0];
+    for (let d = 1; d <= 7; d++) {
+      // `8` is the widest digit in most faces, which is why LibreOffice sizes
+      // from `"8888"` rather than from the label actually on screen — the band
+      // must not change when 1999 scrolls past 8888.
+      rowBandCache.push(Math.ceil(probe.measureText("8".repeat(d)).width) + 10);
+    }
+  }
+  const d = Math.max(1, Math.min(7, digits));
+  return Math.max(HEADER_W_MIN, rowBandCache[d]);
+}
+// Seeded at the two-digit band; `syncHeaderMetrics()` sizes it properly on
+// the first frame, before anything is drawn.
+export let HW = 30;
 export let HH = HEADER_H;
 // Outline gutter: the strip left of the row headers / above the column headers
 // holding the group rails and their collapse toggles. Zero-width unless the
@@ -1496,6 +1532,10 @@ let GH = 0;
 let outlineRowMax = 0;
 let outlineColMax = 0;
 export let outlineToggles = []; // [{x,y,w,h,index,columns}] rebuilt each frame
+/// Where the select-all triangle was drawn, so a test clicks the mark rather
+/// than a coordinate it computed the same way the renderer did.
+let cornerMarkBox = null;
+export function cornerMark() { return cornerMarkBox; }
 // Re-read the active sheet's header visibility. Called at the top of measure(),
 // so every frame lays out against the current setting.
 function syncHeaderMetrics() {
@@ -1515,7 +1555,12 @@ function syncHeaderMetrics() {
   // HW/HH are the *total* inset the grid starts after, so every existing
   // geometry consumer follows the gutter without knowing it exists. The header
   // strips themselves draw from GW/GH inward.
-  HW = hidden ? 0 : HEADER_W + GW;
+  // The band is sized for the deepest row currently reachable, not for the
+  // deepest row that exists — otherwise every sheet pays for 1,048,576.
+  // `state.scroll.row` plus a viewport's worth is what the next frame can show,
+  // and the step means the answer only changes at a power of ten.
+  const deepest = Math.max(1, (state.scroll?.row ?? 0) + 200, (state.sel?.row ?? 0) + 1);
+  HW = hidden ? 0 : rowBandFor(String(deepest).length) + GW;
   HH = hidden ? 0 : HEADER_H + GH;
 }
 // One indent level, in px — Excel's is about three space-widths.
@@ -3319,6 +3364,27 @@ export function draw() {
   ctx.fillStyle = colors.headerBg;
   ctx.fillRect(0, 0, v.w, HH);
   ctx.fillRect(0, 0, HW, v.h);
+  // **A select-all mark in the corner** (`UX-CHR-09`). The corner held two
+  // freeze-drag handles and nothing that said what clicking it does — a white
+  // pill above a grey bar, which reads as debris rather than as a control.
+  // Excel draws a right-angled triangle in the lower right of the corner box;
+  // Sheets and OnlyOffice draw one too. The click already selected the sheet;
+  // what was missing was anything saying so.
+  if (HW && HH) {
+    const pad = 4;
+    const size = Math.min(HW, HH) - pad * 2;
+    cornerMarkBox = { x: HW - pad - size, y: HH - pad - size, w: size, h: size };
+    ctx.save();
+    ctx.fillStyle = colors.headerText || "#6b7280";
+    ctx.globalAlpha = 0.65;
+    ctx.beginPath();
+    ctx.moveTo(cornerMarkBox.x + size, cornerMarkBox.y);
+    ctx.lineTo(cornerMarkBox.x + size, cornerMarkBox.y + size);
+    ctx.lineTo(cornerMarkBox.x, cornerMarkBox.y + size);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
   ctx.font = "12px system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
