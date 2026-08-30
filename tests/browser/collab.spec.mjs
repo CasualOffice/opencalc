@@ -578,6 +578,151 @@ test.describe("collaboration", () => {
     await away.close();
   });
 
+  /// **A desynced client rejoins, and the notice for what that cost stays put
+  /// (`COL-56`).**
+  ///
+  /// `COL-55` made the engine stop honestly: the first arrival it cannot merge
+  /// latches the `ClientSession`, every later `receive` answers `Desynced`, and
+  /// `flush`/`resend` seal so the half-rebased work cannot be pushed into the
+  /// shared document. That is the whole of the engine's part — it has no
+  /// transport, so it can report and it cannot recover.
+  ///
+  /// **What was measured on the untouched tree**, and it is worse than the row
+  /// said. The row expected a one-shot `desynced` line overwritten by the next
+  /// status. There was no line at all: this editor's `onStatus` has no branch
+  /// for `desynced`, so `#tb-status` kept saying **"collaborating"** over a
+  /// document that had stopped being shared, and no reconnect was attempted —
+  /// `0` new sockets, `collab_unacknowledged()` still true, revision still 0
+  /// while the peer's edit was committed at 1.
+  ///
+  /// A plain `reconnect()` is not the recovery either, and that was measured
+  /// too: the server recognises the resume key, answers `resumed`, and
+  /// `collab_resume` deliberately keeps the latch — so the next arrival threw
+  /// `Desynced` again. The key has to be dropped, which is what makes the
+  /// rejoin an ordinary join the server already serves.
+  ///
+  /// The pair used here is the one `COL-44` deliberately leaves unanswered:
+  /// move-columns against move-columns. Two real browsers, the real server, and
+  /// a genuine transform refusal — not an injected frame, because an injected
+  /// frame would prove the editor handles a message the engine never latched
+  /// on.
+  test("a client that cannot merge an arrival rejoins, and the notice survives the next status", async ({
+    browser,
+  }) => {
+    const key = freshDocument();
+    const one = await browser.newPage();
+    const two = await browser.newPage();
+    await boot(one);
+    await boot(two);
+    await join(one, { document: key, user: { id: "u-one", name: "One" } });
+    await join(two, { document: key, user: { id: "u-two", name: "Two" } });
+
+    // Two instruments on the desyncing participant, and both are load-bearing.
+    //
+    // Counting sockets is how "it rejoined" is asserted as a *mechanism* rather
+    // than inferred from a status line — the defect was precisely a status that
+    // did not correspond to anything happening.
+    //
+    // Swallowing this participant's own submissions is what keeps its drag
+    // outstanding when the peer's arrives, which is the state a transform
+    // refusal needs: a chunk the server has already acknowledged is not rebased
+    // against anything and can refuse nothing. It also keeps the loss real
+    // after the rejoin, since nothing this client wrote ever reached the
+    // server.
+    await one.evaluate(() => {
+      window.__sockets = 0;
+      const Real = window.WebSocket;
+      const Counting = function (...args) {
+        window.__sockets += 1;
+        return new Real(...args);
+      };
+      Counting.prototype = Real.prototype;
+      for (const state of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) Counting[state] = Real[state];
+      window.WebSocket = Counting;
+
+      window.__swallowed = 0;
+      const send = Real.prototype.send;
+      Real.prototype.send = function (data) {
+        try {
+          if (typeof data === "string" && JSON.parse(data).type === "submit") {
+            window.__swallowed += 1;
+            return;
+          }
+        } catch {
+          // Not JSON, so not a submission. Let it through.
+        }
+        return send.call(this, data);
+      };
+    });
+
+    await one.evaluate(() => {
+      const engine = window.__editor.wasmApi();
+      engine.session_set_cell(0, 0, 2, "42");
+      engine.session_move_columns(0, 2, 1, 0);
+    });
+    await expect
+      .poll(() => one.evaluate(() => window.__swallowed), {
+        message: "the drag never reached a flush, so nothing was outstanding",
+      })
+      .toBeGreaterThan(0);
+
+    // The peer's drag, which cannot be rebased past the one above.
+    await two.evaluate(() => window.__editor.wasmApi().session_move_columns(0, 1, 3, 7));
+
+    await expect
+      .poll(() => one.evaluate(() => window.__collab.statuses.map((s) => s.state)), {
+        message: "the arrival was merged after all, so the premise is gone",
+      })
+      .toContain("desynced");
+
+    // **The rejoin.** A new socket, a second `welcome`, and the loss named
+    // before the snapshot replaced the document — `why: "desynced"`, so a host
+    // can tell this apart from a server that merely forgot the client.
+    await expect
+      .poll(() => one.evaluate(() => window.__collab.documents.map((d) => d.reason)), {
+        message: "a desynced client never rejoined: it stayed on a session it had abandoned",
+        timeout: 30_000,
+      })
+      .toEqual(["joined", "lost", "joined"]);
+    expect(
+      await one.evaluate(() => window.__collab.documents.find((d) => d.reason === "lost").why),
+    ).toBe("desynced");
+    expect(await one.evaluate(() => window.__sockets)).toBeGreaterThan(0);
+
+    // And it is a participant again rather than a page that reconnected: the
+    // engine's latch is gone, the abandoned work with it, and the revision has
+    // caught up with the peer's committed drag.
+    expect(await one.evaluate(() => window.__editor.wasmApi().collab_unacknowledged())).toBe(false);
+    expect(
+      await one.evaluate(() => window.__editor.wasmApi().collab_revision()),
+    ).toBeGreaterThan(0);
+    await setCellIn(two, 9, 0, "after the rejoin");
+    await expect
+      .poll(() => cellIn(one, 9, 0), {
+        message: "the rejoined client is still deaf to the peer it rejoined because of",
+      })
+      .toBe("after the rejoin");
+
+    // **The half that made this invisible.** The notice has to be on screen,
+    // and it has to still be there after the next ordinary status update. A
+    // plain reconnect is that update: it resumes, and `resumed` said "live"
+    // unconditionally — so the line naming the lost edits went back to
+    // "collaborating" with nothing having been acknowledged.
+    const bar = one.locator("#tb-status");
+    await expect(bar).toHaveText(/were not saved/);
+    await one.evaluate(() => window.__session.reconnect());
+    await expect
+      .poll(() => one.evaluate(() => window.__collab.documents.map((d) => d.reason)), {
+        message: "the reconnect never landed, so nothing later was tested",
+        timeout: 30_000,
+      })
+      .toContain("resumed");
+    await expect(bar).toHaveText(/were not saved/);
+
+    await one.close();
+    await two.close();
+  });
+
   test("a remote edit made during a disconnect is caught up on, not lost", async ({ browser }) => {
     const key = freshDocument();
     const away = await browser.newContext();
