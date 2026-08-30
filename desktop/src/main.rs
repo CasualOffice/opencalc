@@ -87,6 +87,13 @@ struct Shell {
     staged: Mutex<Option<Vec<u8>>>,
     target: Mutex<SaveTarget>,
     pending: Mutex<PendingOpen>,
+    /// Whether a close has already been agreed to (`TAURI-011`).
+    ///
+    /// `CloseRequested` is synchronous and asking the user is not, so the first
+    /// request is always refused and the answer arrives later through
+    /// [`agree_to_close`]. This is what stops the second request — the one the
+    /// answer triggers — from asking again forever.
+    closing: std::sync::atomic::AtomicBool,
 }
 
 /// A poisoned lock is a panic somewhere else; say so rather than panicking too.
@@ -722,6 +729,31 @@ const BOOTSTRAP: &str = r#"(function () {
   })();
 })()"#;
 
+/// The user has answered the close question; let the next request through.
+///
+/// Split from the window event because **`CloseRequested` cannot wait**. It is
+/// a synchronous callback on the event loop, and the question — "you have
+/// unsaved work, really close?" — is answered in the webview, asynchronously.
+/// So the first request is refused outright, the webview is asked, and this is
+/// how the answer comes back.
+///
+/// Only ever sets the latch to true. A cancelled close simply never calls this,
+/// which leaves the window open with nothing to undo.
+#[tauri::command]
+fn agree_to_close(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result<(), String> {
+    use tauri::Manager as _;
+    shell
+        .closing
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Closing the window rather than exiting the process: the window event
+    // fires again, sees the latch, and lets it through — one path out, whether
+    // the user used the close button, the menu or a keystroke.
+    if let Some(window) = app.get_webview_window("main") {
+        window.close().map_err(|why| why.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -737,7 +769,46 @@ fn main() {
             native_save_target,
             clear_save_target,
             take_pending_open,
+            agree_to_close,
         ])
+        // **Closing with unsaved work asks first** (`TAURI-011`).
+        //
+        // Before this, the native close button and the menu's Quit discarded
+        // unsaved work in silence: the editor's `beforeunload` is a *web*
+        // affordance and neither route goes through it. The draft autosave
+        // (`SAVE-03`) means the work is usually recoverable, but "usually
+        // recoverable from somewhere you have not been told about" is not the
+        // same as being asked.
+        //
+        // The first request is always refused, because the question cannot be
+        // answered here — see `agree_to_close`. A clean document answers
+        // itself and closes immediately, so the ordinary case costs one
+        // round trip to the webview and no dialog.
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                return;
+            }
+            use tauri::Manager as _;
+            let shell = window.state::<Shell>();
+            let agreed = shell.closing.load(std::sync::atomic::Ordering::SeqCst);
+            if !casual_calc_desktop::close::should_prevent(agreed) {
+                return; // already agreed: this is the close we asked for
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+            }
+            // Asked in the webview because the editor owns the answer: only it
+            // knows whether the document is dirty, and only it has a dialog
+            // that looks like the rest of the application.
+            //
+            // `eval` is a `WebviewWindow` method, and this callback receives a
+            // `Window` — the same distinction `on_menu_event` navigates by
+            // asking the app handle for the webview by name.
+            let Some(view) = window.app_handle().get_webview_window("main") else {
+                return;
+            };
+            let _ = view.eval(casual_calc_desktop::close::CONFIRM_CLOSE);
+        })
         .on_menu_event(|app, event| {
             // The id is the editor's own command id, so this is the whole of
             // the dispatch: no second table, no mapping to keep in step.
