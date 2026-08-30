@@ -64,6 +64,30 @@ pub struct WireOperation {
         with = "interned_keys"
     )]
     pub strings: BTreeMap<StringId, String>,
+    /// The runs of any string above that is **rich text** (`COL-62`).
+    ///
+    /// Separate from `strings` rather than replacing it, and optional, because
+    /// that is what keeps this off `PROTOCOL_VERSION`. This is the `Draft`
+    /// case, not the `CHT-07` one: `WireOperation` does not
+    /// `deny_unknown_fields`, so an old peer skips this and reads the rest
+    /// exactly as it does today — flattened, which is the behaviour it already
+    /// had — and a new peer receiving a message without it concludes "not rich
+    /// text", which is what such a sender means. Nobody is misled, so nobody is
+    /// refused, and a bump would cost every unupgraded tab its session to fix
+    /// formatting.
+    ///
+    /// Without it, `localise` re-interned through `intern_string` and the runs
+    /// were dropped: two people editing one cell of mixed bold and plain
+    /// converged on the flattened text, silently. `COL-12` fixed the *identity*
+    /// half of that class — an id meaning different things to two participants
+    /// — and this is the *content* half, where the id resolved correctly and
+    /// what it resolved to had been made poorer.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "interned_keys"
+    )]
+    pub runs: BTreeMap<StringId, Vec<casual_calc_model::TextRun>>,
 }
 
 /// Serializing a map whose key is an interned id.
@@ -158,9 +182,17 @@ impl WireOperation {
         let mut formulas = BTreeMap::new();
         let mut styles = BTreeMap::new();
         let mut strings = BTreeMap::new();
+        let mut runs = BTreeMap::new();
         visit_strings(&op, &mut |id| {
             if let Some(text) = workbook.strings.get(id) {
                 strings.insert(id, text.to_owned());
+            }
+            // Carried beside the characters, never instead of them: a receiver
+            // that cannot read this still gets the text.
+            if let Some(found) = workbook.strings.runs(id)
+                && !found.is_empty()
+            {
+                runs.insert(id, found.to_vec());
             }
         });
         visit(&op, &mut |formula, style| {
@@ -180,6 +212,7 @@ impl WireOperation {
             formulas,
             styles,
             strings,
+            runs,
         }
     }
 
@@ -195,6 +228,7 @@ impl WireOperation {
             formulas,
             styles,
             strings,
+            runs,
         } = self;
 
         let mut formula_map = BTreeMap::new();
@@ -208,7 +242,13 @@ impl WireOperation {
 
         let mut string_map = BTreeMap::new();
         for (theirs, text) in strings {
-            string_map.insert(theirs, workbook.intern_string(&text));
+            // Rich text is interned **with its runs**, the way `restore` does
+            // it. Going through the plain path here is what flattened it.
+            let mine = match runs.get(&theirs) {
+                Some(found) => workbook.intern_rich_text(found.clone()),
+                None => workbook.intern_string(&text),
+            };
+            string_map.insert(theirs, mine);
         }
         visit_strings_mut(&mut op, &mut |id| {
             // An id with no accompanying text is left alone rather than
@@ -777,5 +817,138 @@ mod string_tests {
             &sender,
         );
         assert!(wire.strings.is_empty(), "nothing to carry, nothing carried");
+    }
+}
+
+#[cfg(test)]
+mod rich_text_on_the_wire {
+    use super::*;
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, RunFont, Sheet, SheetId, TextRun};
+
+    fn book() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1"));
+        wb
+    }
+
+    /// Rich text keeps its runs when it crosses to another participant
+    /// (`COL-62`).
+    ///
+    /// `WireOperation` stored each string as a plain `String` and `localise`
+    /// re-interned it with `intern_string`, so `StringTable::runs` was dropped
+    /// on the way. Two people editing a cell with mixed bold and plain text
+    /// converged on the **flattened** text, silently — the formatting simply
+    /// stopped existing for whoever received it.
+    ///
+    /// `COL-12` fixed the *identity* half of this class, where an id meant
+    /// different things to two participants. This is the *content* half: the id
+    /// resolved correctly and what it resolved to had been made poorer.
+    ///
+    /// `restore.rs` already had the right shape — it re-interns through
+    /// `intern_rich_text` precisely so a restore does not flatten — which is
+    /// why the bug surfaced there rather than being fixed there.
+    /// A peer that has never heard of runs still reads the message
+    /// (`COL-62`).
+    ///
+    /// This is the claim that keeps the change off `PROTOCOL_VERSION`, so it is
+    /// asserted rather than argued. An old peer's `WireOperation` has no `runs`
+    /// field and does not `deny_unknown_fields`, so it skips the key and reads
+    /// the rest exactly as it does today — flattened, which is the behaviour it
+    /// already had. Nobody is misled, so nobody is refused.
+    #[test]
+    fn a_peer_that_has_never_heard_of_runs_still_reads_a_message_carrying_them() {
+        let mut sender = book();
+        let id = sender.intern_rich_text(vec![TextRun {
+            text: "Bold".to_owned(),
+            font: Some(RunFont {
+                bold: true,
+                ..RunFont::default()
+            }),
+        }]);
+        let wire = WireOperation::of(
+            Operation::SetCell {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                cell: Some(Cell::value(CellValue::SharedString(id))),
+            },
+            &sender,
+        );
+        let json = serde_json::to_string(&wire).expect("the wire form serialises");
+        assert!(
+            json.contains("runs"),
+            "the fixture must actually carry runs, or this proves nothing about ignoring them"
+        );
+
+        // An old peer's shape: every field this message has except `runs`.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct OldPeer {
+            op: serde_json::Value,
+            #[serde(default)]
+            formulas: serde_json::Value,
+            #[serde(default)]
+            styles: serde_json::Value,
+            #[serde(default)]
+            strings: serde_json::Value,
+        }
+        let read: Result<OldPeer, _> = serde_json::from_str(&json);
+        assert!(
+            read.is_ok(),
+            "a peer without `runs` must still read the message: refusing it would cost every \
+             unupgraded tab its session to deliver formatting it cannot show anyway"
+        );
+    }
+
+    #[test]
+    fn a_rich_string_crosses_with_its_formatting() {
+        let mut sender = book();
+        let runs = vec![
+            TextRun {
+                text: "Total".to_owned(),
+                font: Some(RunFont {
+                    bold: true,
+                    ..RunFont::default()
+                }),
+            },
+            TextRun {
+                text: " so far".to_owned(),
+                font: None,
+            },
+        ];
+        let id = sender.intern_rich_text(runs.clone());
+        let at = CellRef::new(0, 0);
+        let op = Operation::SetCell {
+            sheet: 0,
+            at,
+            cell: Some(Cell::value(CellValue::SharedString(id))),
+        };
+
+        let wire = WireOperation::of(op, &sender);
+
+        // A second participant, whose table has never held this string.
+        let mut receiver = book();
+        let landed = wire.localise(&mut receiver);
+        let CellValue::SharedString(theirs) = ({
+            let Operation::SetCell { cell: Some(c), .. } = &landed else {
+                panic!("the operation changed shape crossing the wire");
+            };
+            c.value.clone()
+        }) else {
+            panic!("the value stopped being a shared string");
+        };
+
+        assert_eq!(
+            receiver.strings.get(theirs),
+            Some("Total so far"),
+            "the characters must survive at all"
+        );
+        assert_eq!(
+            receiver.strings.runs(theirs).map(<[TextRun]>::to_vec),
+            Some(runs),
+            "the formatting came across with the text, not only the characters — \
+             two people editing one bold-and-plain cell must not converge on plain"
+        );
     }
 }
