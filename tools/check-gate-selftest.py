@@ -144,6 +144,66 @@ def main() -> int:
             f"matrix: {exc!r}. A gate that raises reports nothing, not nothing-wrong"
         )
 
+    # **A gate named only in a comment is not wired** (`CI-032`).
+    #
+    # `check-doc-claims.py` used to answer this with a substring search over the
+    # concatenated text of every workflow, so a `#` comment satisfied it — and
+    # `check-workflow-bashisms.py` shipped in exactly that state: named by a
+    # row, explained by a comment, run by nothing, and reported as wired.
+    #
+    # The fixture is a whole workflow rather than a line, because the rule now
+    # depends on the YAML structure — which step, and which part of it.
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "doc_claims", TOOLS / "check-doc-claims.py"
+        )
+        claims = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(claims)
+        import yaml as _yaml
+
+        def wired(workflow_text):
+            doc = _yaml.safe_load(workflow_text)
+            out = set()
+            for job in (doc.get("jobs") or {}).values():
+                for step in job.get("steps") or []:
+                    body = (step or {}).get("run")
+                    if not isinstance(body, str):
+                        continue
+                    for line in body.splitlines():
+                        if line.strip().startswith("#"):
+                            continue
+                        out.update(claims.SCRIPT.findall(line))
+            return out
+
+        commented = """
+jobs:
+  policy:
+    steps:
+      # tools/check-example.py explains what this asserts
+      - run: echo hello
+"""
+        executed = """
+jobs:
+  policy:
+    steps:
+      - run: python3 tools/check-example.py
+"""
+        if "check-example.py" in wired(commented):
+            problems.append(
+                "`check-doc-claims` counts a gate named only in a workflow comment "
+                "as wired — the hole `CI-032` records, where a promise that CI runs "
+                "a check was kept by a sentence saying CI runs it"
+            )
+        if "check-example.py" not in wired(executed):
+            problems.append(
+                "`check-doc-claims` does not see a gate that a `run:` step executes, "
+                "so it would report every wired gate as missing"
+            )
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"`check-doc-claims` could not be exercised: {exc!r}")
+
     copies = []
     for gate in sorted(TOOLS.glob("check-*.py")):
         if gate.name == "check-gate-selftest.py":
