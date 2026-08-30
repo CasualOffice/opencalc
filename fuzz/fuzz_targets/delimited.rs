@@ -53,7 +53,7 @@
 
 #![no_main]
 
-use casual_calc_io::{COMMA, PIPE, TAB, read_delimited, write_delimited};
+use casual_calc_io::{read_delimited, write_delimited, COMMA, PIPE, TAB};
 use casual_calc_model::{CellValue, Workbook};
 use libfuzzer_sys::fuzz_target;
 

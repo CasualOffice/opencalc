@@ -24,8 +24,8 @@
 #![no_main]
 
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
-use casual_calc_transaction::transform::{Side, transform};
-use casual_calc_transaction::{Operation, apply};
+use casual_calc_transaction::transform::{transform, Side};
+use casual_calc_transaction::{apply, Operation};
 use libfuzzer_sys::fuzz_target;
 
 /// A document with enough rows and columns that a structural edit has room to
@@ -79,10 +79,26 @@ fn op_from(bytes: &[u8]) -> Option<Operation> {
             at: CellRef::new(at, u32::from(*b) % 7),
             cell: Some(Cell::value(CellValue::Number(value))),
         },
-        1 => Operation::InsertRows { sheet: 0, at, count },
-        2 => Operation::DeleteRows { sheet: 0, at, count },
-        3 => Operation::InsertColumns { sheet: 0, at: at % 7, count },
-        _ => Operation::DeleteColumns { sheet: 0, at: at % 7, count },
+        1 => Operation::InsertRows {
+            sheet: 0,
+            at,
+            count,
+        },
+        2 => Operation::DeleteRows {
+            sheet: 0,
+            at,
+            count,
+        },
+        3 => Operation::InsertColumns {
+            sheet: 0,
+            at: at % 7,
+            count,
+        },
+        _ => Operation::DeleteColumns {
+            sheet: 0,
+            at: at % 7,
+            count,
+        },
     })
 }
 

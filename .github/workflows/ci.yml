@@ -45,6 +45,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/cargo-warmup
       - run: cargo fmt --all -- --check
+      # **`--all` reaches only the workspace it runs in** (`CI-034`). `desktop/`
+      # and `fuzz/` are separate Cargo workspaces (`ADR-023`), so for two
+      # releases neither was format-checked by anything CI runs — and both were
+      # unformatted on main while every job was green. `tools/check-rust.py`
+      # grew gates for the desktop pair and CI never called it: the runner was
+      # named in a comment in this file and in no `run:` step, which is
+      # `CI-032`'s hole in a second place.
+      #
+      # `cargo fmt` parses rather than compiles, so neither of these needs the
+      # webview or GTK dependencies the `desktop` job installs.
+      - run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
   lint:
     runs-on: ubuntu-latest
@@ -1009,6 +1021,16 @@ jobs:
       - name: The desktop shell's own tests
         if: runner.os == 'Linux'
         run: cargo test --manifest-path desktop/Cargo.toml
+      # **The desktop shell's own lint** (`CI-034`). `cargo clippy --workspace`
+      # in the `lint` job reaches only the root workspace, so this one was never
+      # linted by anything CI runs. It lives here rather than in `lint` because
+      # clippy compiles, and compiling Tauri needs the webview and GTK packages
+      # this job installs and that one does not — which is why it sits *after*
+      # the apt step rather than before it. The first version of this ran two
+      # steps too early and died on `Package 'glib-2.0' ... not found`, having
+      # claimed in its own comment to be where the packages already were.
+      - name: Lint the desktop shell
+        run: cargo clippy --manifest-path desktop/Cargo.toml --all-targets --locked -- -D warnings
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2.0.0" --locked
       # Unsigned. `tauri build` runs `cargo build --release`, which is where

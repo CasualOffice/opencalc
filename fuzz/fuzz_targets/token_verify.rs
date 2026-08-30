@@ -65,8 +65,5 @@ fuzz_target!(|data: &[u8]| {
         claims.aud, "opencalc-collab",
         "a token minted for another audience was accepted here"
     );
-    assert!(
-        claims.exp > 1_800_000_000,
-        "an expired token was accepted"
-    );
+    assert!(claims.exp > 1_800_000_000, "an expired token was accepted");
 });
