@@ -5115,6 +5115,7 @@ export function openPanel(tool) {
       : tool === "chart" ? "Chart"
       : tool === "page" ? "Page setup"
       : tool === "stats" ? "Column stats"
+      : tool === "history" ? "Version history"
       : "Comments";
   const body = byId("side-panel-body");
   body.textContent = "";
@@ -5125,6 +5126,7 @@ export function openPanel(tool) {
   else if (tool === "chart") buildChartPanel(body);
   else if (tool === "page") buildPagePanel(body);
   else if (tool === "stats") buildStatsPanel(body);
+  else if (tool === "history") buildHistoryPanel(body);
   else buildNotePanel(body);
   panel.hidden = false;
   resize(); // the grid narrows — refit the canvas to its new width
@@ -5137,6 +5139,131 @@ export function openPanel(tool) {
 // the part the status bar cannot give — it is how you find the one text cell
 // wrecking a SUM, or the 300 numbers stored as text that make a filter behave
 // oddly. The engine computes it (`session_column_stats`); this only lays it out.
+/// Version history (`HIST-01`).
+///
+/// The engine and SDK half was built by `SAVE-08` and nothing could reach it.
+/// Undo was the only route backwards and it dies with the tab, which is the
+/// largest single gap against every competitor named in `docs/12`.
+///
+/// **What a version is here is a snapshot, not a replayed log.** `docs/83`'s
+/// main negative result: the collaboration server's op log looks like a history
+/// and is not one — no timestamps, no per-revision author, a few hundred ops
+/// retained, evicted thirty seconds after the last participant leaves
+/// (`SAVE-09`) — and `COL-50` independently rules out the replay a log-based
+/// history would need.
+///
+/// The clock is passed in from here, because the engine has none (`AGENTS.md`).
+function buildHistoryPanel(body) {
+  const render = () => {
+    body.textContent = "";
+
+    let versions = [];
+    try { versions = JSON.parse(wasm.session_versions() || "[]"); }
+    catch (why) { statusError(errText(why)); return; }
+
+    const bar = el("div", "hist-actions");
+    const keep = el("button", "btn", "Save a version");
+    keep.title = "Capture the document as it is now";
+    keep.addEventListener("click", () => {
+      try {
+        const r = JSON.parse(wasm.session_capture_version("named", nameBox.value, Date.now()));
+        // `stored: false` is not a failure — the store resolves a capture of an
+        // unchanged document to the version already holding that state, and
+        // saying so is more honest than writing a duplicate.
+        status.textContent = r.stored ? "version saved" : "no changes since the last version";
+        nameBox.value = "";
+        render();
+      } catch (why) { statusError(errText(why)); }
+    });
+    const nameBox = el("input", "hist-name");
+    nameBox.placeholder = "Name this version (optional)";
+    nameBox.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); keep.click(); }
+      e.stopPropagation();
+    });
+    bar.appendChild(nameBox);
+    bar.appendChild(keep);
+    body.appendChild(bar);
+
+    if (!versions.length) {
+      const empty = el("div", "hist-empty",
+        "No versions yet. Saving one keeps a copy of the document you can come back to.");
+      body.appendChild(empty);
+      return;
+    }
+
+    const used = el("div", "hist-budget",
+      `${versions.length} version${versions.length === 1 ? "" : "s"}, ${fmtBytes(wasm.session_versions_bytes())}`);
+    body.appendChild(used);
+
+    const list = el("div", "hist-list");
+    for (const v of versions) {
+      const row = el("div", "hist-row");
+      const when = new Date(v.at);
+      const label = v.name || (v.kind === "saved" ? "Saved" : v.kind === "named" ? "Named" : "Autosave");
+      // `textContent` throughout: a version name is text the user typed.
+      row.appendChild(el("span", "hist-when", when.toLocaleString()));
+      row.appendChild(el("span", "hist-label", label));
+      row.appendChild(el("span", "hist-size", fmtBytes(v.bytes)));
+
+      const restore = el("button", "btn hist-restore", "Restore");
+      restore.addEventListener("click", async () => {
+        let plan;
+        try { plan = JSON.parse(wasm.session_plan_restore(v.id)); }
+        catch (why) { statusError(errText(why)); return; }
+        if (plan.empty) { status.textContent = "this version matches the document already"; return; }
+
+        // **The plan is shown before the restore, and the losses are named.**
+        // "This will change 412 cells" and "this will change 412 cells and
+        // cannot bring back two images" are different sentences, and only the
+        // second lets somebody decline for the right reason.
+        const lines = [`${plan.cellsChanged} cell${plan.cellsChanged === 1 ? "" : "s"} will change.`];
+        if (plan.sheetsAdded) lines.push(`${plan.sheetsAdded} sheet(s) will come back.`);
+        if (plan.sheetsRemoved) lines.push(`${plan.sheetsRemoved} sheet(s) will be removed.`);
+        if (plan.unexpressed.length) {
+          lines.push(`${plan.unexpressed.length} thing(s) cannot be restored: ${plan.unexpressed.join(", ")}.`);
+        }
+        lines.push("Your work as it is now is kept as a version first, so this can be undone.");
+        if (!(await confirmModal(`Restore "${label}"?`, lines.join(" "), "Restore"))) return;
+
+        try {
+          const done = JSON.parse(wasm.session_restore_version(v.id, Date.now()));
+          // One `Operation::Batch` of ordinary edits: it travels to
+          // collaborators as edits and costs exactly one undo step, because a
+          // batch has one combined inverse.
+          status.textContent = `restored — ${done.cellsChanged} cell(s) changed, undo will put it back`;
+          draw();
+          renderTabs();
+          render();
+        } catch (why) { statusError(errText(why)); }
+      });
+      row.appendChild(restore);
+
+      const hide = el("button", "btn-quiet hist-hide", "Hide");
+      hide.title = "Remove from this list. The version is kept.";
+      hide.addEventListener("click", () => {
+        wasm.session_hide_version(v.id);
+        render();
+      });
+      row.appendChild(hide);
+      list.appendChild(row);
+    }
+    body.appendChild(list);
+  };
+  render();
+}
+
+/// Bytes as a person reads them. The store counts uncompressed bytes, which is
+/// what the retention arithmetic uses — `SAVE-13` is why compressing them is the
+/// host's job and not the engine's.
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 function buildStatsPanel(body) {
   const render = () => {
     body.textContent = "";
@@ -9343,6 +9470,9 @@ function wireEvents() {
         // Where every spreadsheet puts it, and where somebody looking for "who
         // wrote this" will look first (`UX-META-01`).
         ["Properties…", () => documentPropertiesDialog()],
+        // `HIST-01`. In File rather than Tools, because it is a fact about
+        // *this document* — which is where Sheets, OnlyOffice and Excel put it.
+        ["Version history…", () => openPanel("history")],
       ]],
       ["Edit", [
         ["Undo", doUndo, "Ctrl+Z"],
