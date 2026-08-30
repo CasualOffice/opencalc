@@ -27,7 +27,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = core::str::from_utf8(data) else {
         return;
     };
-    let Ok(wire) = serde_json::from_str::<casual_calc_transaction::wire::WireOperation>(text) else {
+    let Ok(wire) = serde_json::from_str::<casual_calc_transaction::wire::WireOperation>(text)
+    else {
         // Refusing malformed input is the correct outcome and the common one.
         return;
     };

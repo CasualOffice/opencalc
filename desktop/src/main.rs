@@ -94,6 +94,15 @@ struct Shell {
     /// [`agree_to_close`]. This is what stops the second request — the one the
     /// answer triggers — from asking again forever.
     closing: std::sync::atomic::AtomicBool,
+    /// The menu model as the editor last published it, and whether a cell is
+    /// currently open for editing (`TAURI-012`).
+    ///
+    /// Kept because the native menu has to be rebuilt when the edit state
+    /// changes — the accelerators that collide with editing are released while
+    /// an edit is open — and the model is the editor's to describe, not the
+    /// shell's to reconstruct.
+    menu_model: Mutex<Option<Vec<MenuModel>>>,
+    editing: std::sync::atomic::AtomicBool,
 }
 
 /// A poisoned lock is a panic somewhere else; say so rather than panicking too.
@@ -115,7 +124,11 @@ struct Opened {
 }
 
 /// Build the platform menu from the editor's own model.
-fn build_menu(app: &AppHandle, model: &[MenuModel]) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_menu(
+    app: &AppHandle,
+    model: &[MenuModel],
+    editing: bool,
+) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     // macOS puts the application menu first and expects Quit to live in it, not
     // in File. Adding it here rather than teaching the editor about platforms.
@@ -130,13 +143,18 @@ fn build_menu(app: &AppHandle, model: &[MenuModel]) -> tauri::Result<Menu<tauri:
 
     for top in model {
         let sub = Submenu::new(app, &top.label, true)?;
-        append_nodes(app, &sub, &top.items)?;
+        append_nodes(app, &sub, &top.items, editing)?;
         menu.append(&sub)?;
     }
     Ok(menu)
 }
 
-fn append_nodes(app: &AppHandle, into: &Submenu<tauri::Wry>, nodes: &[Node]) -> tauri::Result<()> {
+fn append_nodes(
+    app: &AppHandle,
+    into: &Submenu<tauri::Wry>,
+    nodes: &[Node],
+    editing: bool,
+) -> tauri::Result<()> {
     for node in nodes {
         match node {
             Node::Separator => into.append(&PredefinedMenuItem::separator(app)?)?,
@@ -150,13 +168,24 @@ fn append_nodes(app: &AppHandle, into: &Submenu<tauri::Wry>, nodes: &[Node]) -> 
                 // The accelerator the editor already displays, translated once
                 // — so the menu shows Cmd on macOS and Ctrl elsewhere without
                 // this code knowing which machine it is on.
-                let accel = accelerator.as_deref().and_then(menu::accelerator);
+                //
+                // **Released while a cell is being edited** (`TAURI-012`): a
+                // native accelerator is consumed before the webview sees the
+                // key, so an item that overloads a chord Excel gives a second
+                // meaning to mid-edit would otherwise shadow it permanently.
+                // The item stays in the menu and stays clickable; only its key
+                // is let go, and only for as long as the edit lasts.
+                let accel = if editing && menu::releases_during_edit(id) {
+                    None
+                } else {
+                    accelerator.as_deref().and_then(menu::accelerator)
+                };
                 let item = MenuItem::with_id(app, id, label, *enabled, accel.as_deref())?;
                 into.append(&item)?;
             }
             Node::Submenu { label, items, .. } => {
                 let nested = Submenu::new(app, label, true)?;
-                append_nodes(app, &nested, items)?;
+                append_nodes(app, &nested, items, editing)?;
                 into.append(&nested)?;
             }
         }
@@ -168,8 +197,49 @@ fn append_nodes(app: &AppHandle, into: &Submenu<tauri::Wry>, nodes: &[Node]) -> 
 #[tauri::command]
 fn publish_menu(window: WebviewWindow, model: String) -> Result<(), String> {
     let parsed = menu::parse(&model).map_err(|why| format!("unreadable menu model: {why}"))?;
+    let shell = window.state::<Shell>();
+    *locked(&shell.menu_model)? = Some(parsed.clone());
+    let editing = shell.editing.load(std::sync::atomic::Ordering::Relaxed);
     let app = window.app_handle().clone();
-    let menu = build_menu(&app, &parsed).map_err(|why| why.to_string())?;
+    let menu = build_menu(&app, &parsed, editing).map_err(|why| why.to_string())?;
+    app.set_menu(menu).map_err(|why| why.to_string())?;
+    Ok(())
+}
+
+/// A cell is open for editing, or is not (`TAURI-012`).
+///
+/// **A native menu accelerator is consumed before the webview sees the key.**
+/// In a browser, `Cmd+T` in the middle of a formula reaches the editor and
+/// cycles the reference's anchors, which is what Excel's own Mac table says it
+/// should do. In this shell the menu ate it first and opened a modal over a
+/// half-typed formula — so the desktop build was *worse* than the browser one,
+/// not merely different.
+///
+/// The shell cannot know what a keystroke means; only the editor knows whether
+/// a cell is open. So the editor says so here, and the colliding accelerators
+/// are released for as long as the edit lasts.
+///
+/// **The menu is rebuilt, and only when the answer changes.** Rebuilding is the
+/// blunt instrument — Tauri has no way to clear one item's accelerator on a
+/// live menu — but an edit begins and ends at human pace, not per keystroke, so
+/// the cost lands once per edit rather than once per character. The early
+/// return is what keeps that true.
+#[tauri::command]
+fn set_editing(window: WebviewWindow, editing: bool) -> Result<(), String> {
+    let shell = window.state::<Shell>();
+    let was = shell
+        .editing
+        .swap(editing, std::sync::atomic::Ordering::Relaxed);
+    if was == editing {
+        return Ok(());
+    }
+    let model = locked(&shell.menu_model)?.clone();
+    let Some(model) = model else {
+        // No menu published yet; the flag is stored and the next publish uses it.
+        return Ok(());
+    };
+    let app = window.app_handle().clone();
+    let menu = build_menu(&app, &model, editing).map_err(|why| why.to_string())?;
     app.set_menu(menu).map_err(|why| why.to_string())?;
     Ok(())
 }
@@ -584,6 +654,13 @@ const BOOTSTRAP: &str = r#"(function () {
     async setDocument(name, dirty) {
       await invoke("set_document", { name: name == null ? null : String(name), dirty: !!dirty });
     },
+    // A cell is open for editing, or is not (`TAURI-012`). A native menu
+    // accelerator is consumed before the webview sees the key, so the shell
+    // releases the chords Excel overloads for as long as an edit lasts. Cheap
+    // to call — the command returns immediately unless the answer changed.
+    async setEditing(editing) {
+      await invoke("set_editing", { editing: !!editing });
+    },
     // Rebuild the operating system's menu bar from the editor's live DOM. The
     // model carries what is hidden and what is disabled, so anything that
     // changes those — read-only, a mode change, a capability a host withdrew —
@@ -770,6 +847,7 @@ fn main() {
         .manage(Shell::default())
         .invoke_handler(tauri::generate_handler![
             publish_menu,
+            set_editing,
             set_capabilities,
             set_document,
             native_open,

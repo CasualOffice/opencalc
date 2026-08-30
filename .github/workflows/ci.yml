@@ -45,6 +45,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/cargo-warmup
       - run: cargo fmt --all -- --check
+      # **`--all` reaches only the workspace it runs in** (`CI-034`). `desktop/`
+      # and `fuzz/` are separate Cargo workspaces (`ADR-023`), so for two
+      # releases neither was format-checked by anything CI runs — and both were
+      # unformatted on main while every job was green. `tools/check-rust.py`
+      # grew gates for the desktop pair and CI never called it: the runner was
+      # named in a comment in this file and in no `run:` step, which is
+      # `CI-032`'s hole in a second place.
+      #
+      # `cargo fmt` parses rather than compiles, so neither of these needs the
+      # webview or GTK dependencies the `desktop` job installs.
+      - run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
   lint:
     runs-on: ubuntu-latest
@@ -976,6 +988,13 @@ jobs:
       # The Tauri v2 prerequisites for Debian/Ubuntu. `4.1`, not `4.0`: Tauri 2
       # links against the GTK4-era webkit2gtk and the older `-dev` package
       # satisfies the build without satisfying the link.
+      # **The desktop shell's own lint** (`CI-034`). `cargo clippy --workspace`
+      # in the `lint` job reaches only the root workspace, so this one was never
+      # linted by anything CI runs. It lives here rather than in `lint` because
+      # clippy compiles, and compiling Tauri needs the webview and GTK packages
+      # this job installs and that one does not.
+      - name: Lint the desktop shell
+        run: cargo clippy --manifest-path desktop/Cargo.toml --all-targets --locked -- -D warnings
       - name: Install the Linux webview and bundler dependencies
         if: runner.os == 'Linux'
         run: |
