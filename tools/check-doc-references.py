@@ -43,6 +43,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tracker_rows import ID_ROW  # noqa: E402
+
 ROOT = pathlib.Path(".")
 DOCS_DIR = ROOT / "docs"
 INDEX = DOCS_DIR / "00-README.md"
@@ -83,7 +86,9 @@ NAMED_BUT_UNDEFINED = {
 }
 
 ROW = re.compile(r"^\|\s*([0-9]{2}[a-z]?)\s*\|")
-ID_ROW = re.compile(r"^\|\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*\|")
+# `ID_ROW` is imported, not defined. This gate's copy was correct — the two
+# that were not had re-derived it from the ids in front of them. A correct copy
+# is still a copy, and `check-gate-selftest` refuses them for that reason.
 DOC_CITE = re.compile(r"\bdocs/([0-9]{2}[a-z]?)\b")
 # A citation that spells out a *filename* — `docs/82-UX-VISUAL-AUDIT.md`.
 # The number check above only asks whether that number resolves, so a
