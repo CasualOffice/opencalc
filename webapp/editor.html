@@ -481,7 +481,11 @@
         <span class="sr-only">Language</span>
         <select id="locale-select" aria-label="Language"></select>
       </label>
-      <span class="bottom-status"><span class="dot"></span>Local only · nothing uploaded</span>
+      <!-- Two spans, because the tail is what a narrow bar drops. This is a
+           promise about where the document lives, so it is not hidden wholesale
+           at 390px the way "Ready" is — "Local only" still says it, in 62px
+           instead of 171. See the `max-width: 560px` block in editor.css. -->
+      <span class="bottom-status"><span class="dot"></span>Local only<span class="bottom-status-more"> · nothing uploaded</span></span>
       <!-- Autosave, when it is **not** running. `docs/83` §5.5: a standing
            indicator, "not a toast". A toast for this appears while the user is
            typing and is gone by the time they wonder whether their work is

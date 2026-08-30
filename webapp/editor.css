@@ -1011,6 +1011,47 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 /* On a narrow window the sheet tabs are what the user needs; the slider is the
    part of this that can go, because − / + / the readout still do all of it. */
 @media (max-width: 720px) { .zoom-slider { display: none; } }
+/* The status bar, laid out again for a narrow window.
+ *
+ * **Measured at 390×844 before this block**: `#sheet-tabs` was **4px wide**
+ * with 140px of content inside it — one sheet tab and the add button, clipped
+ * to a sliver two pixels of a letter wide. Not "cramped": on a phone this
+ * editor had *no visible way to see which sheet you were on, switch sheet, or
+ * add one*. It is the last item in a flex row that has `flex: 0 1 auto`, so it
+ * is the only thing that can give, and three neighbours totalling 340px took
+ * everything. `UX-MOB-05` measured it and left it, correctly — this wants the
+ * bar laid out again, not bigger buttons.
+ *
+ * A width query, not `(pointer: coarse)` like the block further down. That one
+ * argues the question is what is doing the pointing rather than how wide the
+ * window is, and it is right about touch targets. This is the opposite case:
+ * a 390px window overflows the same way with a mouse in it.
+ *
+ * What goes, in the order a spreadsheet can afford to lose it:
+ *
+ *   - **"Ready"** — Excel's desktop status idiom. 63px with its margin, and
+ *     nothing a phone user acts on; the cell mode is still in the DOM for
+ *     anything that reads it, and `#grid-live` is what actually announces.
+ *   - **the tail of the local-only notice** — not the notice. It is a promise
+ *     about where the document lives, so "Local only" stays and only
+ *     " · nothing uploaded" goes: 171px becomes 62.
+ *
+ * What stays at full size: the zoom controls (the readout is the only thing
+ * that says how far off 100% a stray pinch left you) and the tabs, which stop
+ * being the item that is squeezed and become the item that grows. */
+@media (max-width: 560px) {
+  .bottom-bar { gap: 6px; padding: 0 8px; }
+  /* A floor rather than `flex: 1`. Growing them filled a 559px bar with an
+     empty 368px pill — visible in a screenshot, invisible in the numbers, which
+     only said "it fits". The pill hugs its tabs and `.bottom-status`'s auto
+     margin takes the slack, as it does on a desktop; the floor is what stops
+     the original failure, where the one shrinkable item absorbed all of it and
+     ended up 4px wide. */
+  .sheet-tabs { min-width: 120px; }
+  .cell-mode { display: none; }
+  .bottom-status-more { display: none; }
+  .zoom-widget { padding-left: 6px; margin-left: 0; }
+}
 /* Tab-color picker inside the sheet context menu. */
 .menu-label { font-size: 11px; color: var(--oc-muted-text-color); padding: 2px 10px; text-transform: uppercase; letter-spacing: .04em; }
 .swatch-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 8px; max-width: 176px; }
