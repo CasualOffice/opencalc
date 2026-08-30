@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use casual_calc_model::{ChartKind, ChartView, Sheet, Workbook};
+use casual_calc_model::{ChartGrouping, ChartKind, ChartSeries, ChartView, Sheet, Workbook};
 
 // Shared with the other `.rels` this crate writes, so that the one rule about
 // `TargetMode` holds everywhere: a drawing hangs external relationships too —
@@ -46,6 +46,14 @@ pub const DRAWING_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedoc
 /// group and the axis definitions or Excel cannot pair them.
 const CAT_AX_ID: u32 = 111_111_111;
 const VAL_AX_ID: u32 = 222_222_222;
+/// The secondary pair, for the groups holding
+/// [`ChartSeries::secondary_axis`](casual_calc_model::ChartSeries::secondary_axis)
+/// series. A secondary axis in OOXML is a *second `<c:axId>` pair*, not a flag
+/// on the first — so it needs two more ids and two more axis definitions, and
+/// the category one is written deleted because a chart shows one set of
+/// categories however many value axes it has.
+const CAT2_AX_ID: u32 = 333_333_333;
+const VAL2_AX_ID: u32 = 444_444_444;
 
 /// Everything one sheet contributes to the package for its authored charts.
 pub struct SheetCharts {
@@ -688,30 +696,80 @@ fn uses_axes(kind: ChartKind) -> bool {
     !matches!(kind, ChartKind::Pie | ChartKind::Doughnut)
 }
 
-/// The chart-group element and its series.
+/// Whether `kind` can share one plot area with a different kind.
+///
+/// The combination family, and only it. A pie has no axes to share and a
+/// scatter's horizontal axis is a *value* axis, so neither can sit beside a
+/// column group without describing a chart Excel refuses to open. A per-series
+/// kind outside this set is ignored rather than written, which costs a picture
+/// and never a package.
+fn combinable(kind: ChartKind) -> bool {
+    matches!(
+        kind,
+        ChartKind::Bar | ChartKind::Column | ChartKind::Line | ChartKind::Area
+    )
+}
+
+/// The kind one series is drawn as: its own when the chart is a combination,
+/// the chart's otherwise.
+fn series_kind(chart: &ChartView, series: &ChartSeries) -> ChartKind {
+    match series.kind {
+        Some(k) if combinable(k) && combinable(chart.kind) => k,
+        _ => chart.kind,
+    }
+}
+
+/// The group element for a kind, and everything before its series.
 ///
 /// Child order inside a group is fixed by the schema — `barDir`, `grouping`,
-/// `varyColors`, the series, then the axis ids — and Excel refuses a package
-/// that gets it wrong rather than reordering it.
-fn plot_xml(chart: &ChartView) -> String {
-    let (element, head) = match chart.kind {
+/// `varyColors`, the series, then `overlap`, then the axis ids — and Excel
+/// refuses a package that gets it wrong rather than reordering it.
+///
+/// **The grouping is the model's, not a literal.** It used to be
+/// `clustered` for every bar and column chart and `standard` for every line
+/// and area one, so a stacked chart that had been retitled or dragged was
+/// written back as a clustered chart: an edit that has nothing to do with what
+/// the chart *is* converted it, in the file, with nothing said (`CHT-05`).
+fn group_head(kind: ChartKind, grouping: Option<ChartGrouping>) -> (&'static str, String) {
+    // `from_val` is the schema's own answer to whether this group's element
+    // permits this value: `ST_Grouping`, which is what a line or area group
+    // takes, has no `clustered`. So a grouping that does not belong falls back
+    // to the element's default rather than being written into a package Excel
+    // would refuse.
+    let of = |element: &str, default: ChartGrouping| {
+        grouping
+            .and_then(|g| ChartGrouping::from_val(element, g.as_str()))
+            .unwrap_or(default)
+            .as_str()
+    };
+    match kind {
         ChartKind::Bar => (
             "barChart",
-            "<c:barDir val=\"bar\"/><c:grouping val=\"clustered\"/><c:varyColors val=\"0\"/>"
-                .to_owned(),
+            format!(
+                "<c:barDir val=\"bar\"/><c:grouping val=\"{}\"/><c:varyColors val=\"0\"/>",
+                of("barChart", ChartGrouping::Clustered)
+            ),
         ),
         ChartKind::Column | ChartKind::Unsupported => (
             "barChart",
-            "<c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:varyColors val=\"0\"/>"
-                .to_owned(),
+            format!(
+                "<c:barDir val=\"col\"/><c:grouping val=\"{}\"/><c:varyColors val=\"0\"/>",
+                of("barChart", ChartGrouping::Clustered)
+            ),
         ),
         ChartKind::Line => (
             "lineChart",
-            "<c:grouping val=\"standard\"/><c:varyColors val=\"0\"/>".to_owned(),
+            format!(
+                "<c:grouping val=\"{}\"/><c:varyColors val=\"0\"/>",
+                of("lineChart", ChartGrouping::Standard)
+            ),
         ),
         ChartKind::Area => (
             "areaChart",
-            "<c:grouping val=\"standard\"/><c:varyColors val=\"0\"/>".to_owned(),
+            format!(
+                "<c:grouping val=\"{}\"/><c:varyColors val=\"0\"/>",
+                of("areaChart", ChartGrouping::Standard)
+            ),
         ),
         // A pie varies colour per *point* rather than per series, which is the
         // only way one series reads as several slices.
@@ -721,65 +779,142 @@ fn plot_xml(chart: &ChartView) -> String {
             "scatterChart",
             "<c:scatterStyle val=\"lineMarker\"/><c:varyColors val=\"0\"/>".to_owned(),
         ),
-    };
-    let mut s = format!("<c:{element}>{head}");
-    for (i, series) in chart.series.iter().enumerate() {
-        s.push_str(&format!(
-            "<c:ser><c:idx val=\"{i}\"/><c:order val=\"{i}\"/>"
-        ));
-        if !series.name.is_empty() {
-            s.push_str(&format!(
-                "<c:tx><c:v>{}</c:v></c:tx>",
-                escape_text(&series.name)
-            ));
+    }
+}
+
+/// The chart groups and their series.
+///
+/// **One group per consecutive run of series sharing a kind and an axis.** A
+/// combination chart is several `<c:*Chart>` elements in one `<c:plotArea>`,
+/// and a secondary axis is a group naming a second `<c:axId>` pair — neither is
+/// a property of a series in the file, so the flat model list has to be cut
+/// back into groups here. Runs rather than a gather-by-kind, because a run
+/// preserves the model's series order exactly: reading the part back gives the
+/// list it was written from, where sorting three series into two groups would
+/// not.
+fn plot_xml(chart: &ChartView) -> String {
+    let mut s = String::new();
+    let mut at = 0usize;
+    while at < chart.series.len() {
+        let kind = series_kind(chart, &chart.series[at]);
+        let secondary = chart.series[at].secondary_axis && uses_axes(chart.kind);
+        let end = chart.series[at..]
+            .iter()
+            .position(|next| {
+                series_kind(chart, next) != kind
+                    || (next.secondary_axis && uses_axes(chart.kind)) != secondary
+            })
+            .map_or(chart.series.len(), |n| at + n);
+
+        let (element, head) = group_head(kind, chart.grouping);
+        s.push_str(&format!("<c:{element}>{head}"));
+        for (i, series) in chart.series[at..end].iter().enumerate() {
+            s.push_str(&series_xml(kind, at + i, series));
         }
-        // A line or scatter series carries its marker setting before the data,
-        // and a scatter with no marker and no line plots nothing visible.
-        if matches!(chart.kind, ChartKind::Line | ChartKind::Scatter) {
-            s.push_str("<c:marker><c:symbol val=\"circle\"/></c:marker>");
+        // Stacked bars that do not overlap sit side by side, which is the
+        // clustered picture with a taller axis — the loss this whole change
+        // exists to stop, reintroduced by an omitted element.
+        if matches!(kind, ChartKind::Bar | ChartKind::Column)
+            && chart.grouping.is_some_and(ChartGrouping::is_stacked)
+        {
+            s.push_str("<c:overlap val=\"100\"/>");
         }
-        let (cat_tag, val_tag) = if chart.kind == ChartKind::Scatter {
-            ("xVal", "yVal")
-        } else {
-            ("cat", "val")
-        };
-        if let Some(categories) = &series.categories {
-            // A scatter's horizontal values are numbers; every other chart's
-            // categories are labels, and the wrong reference kind makes Excel
-            // read the labels as zeroes.
-            let inner = if chart.kind == ChartKind::Scatter {
-                "numRef"
+        if uses_axes(kind) {
+            let (cat, val) = if secondary {
+                (CAT2_AX_ID, VAL2_AX_ID)
             } else {
-                "strRef"
+                (CAT_AX_ID, VAL_AX_ID)
             };
+            s.push_str(&format!("<c:axId val=\"{cat}\"/><c:axId val=\"{val}\"/>"));
+        }
+        s.push_str(&format!("</c:{element}>"));
+        at = end;
+    }
+    if chart.series.is_empty() {
+        // A chart with no series still needs a group, or there is nothing for
+        // the axis ids to pair with and Excel reports a repair.
+        let (element, head) = group_head(chart.kind, chart.grouping);
+        s.push_str(&format!("<c:{element}>{head}"));
+        if uses_axes(chart.kind) {
             s.push_str(&format!(
-                "<c:{cat_tag}><c:{inner}><c:f>{}</c:f></c:{inner}></c:{cat_tag}>",
-                escape_text(categories)
+                "<c:axId val=\"{CAT_AX_ID}\"/><c:axId val=\"{VAL_AX_ID}\"/>"
             ));
         }
-        s.push_str(&format!(
-            "<c:{val_tag}><c:numRef><c:f>{}</c:f></c:numRef></c:{val_tag}>",
-            escape_text(&series.values)
-        ));
-        if chart.kind == ChartKind::Line {
-            s.push_str("<c:smooth val=\"0\"/>");
-        }
-        s.push_str("</c:ser>");
+        s.push_str(&format!("</c:{element}>"));
     }
-    if uses_axes(chart.kind) {
-        s.push_str(&format!(
-            "<c:axId val=\"{CAT_AX_ID}\"/><c:axId val=\"{VAL_AX_ID}\"/>"
-        ));
-    }
-    s.push_str(&format!("</c:{element}>"));
     s
 }
 
-/// The two axis definitions, paired to the group by id.
+/// One `<c:ser>`.
+///
+/// `idx` is its index in the *model's* list rather than in its group, so the
+/// series keeps its palette slot and its plot order when a combination chart
+/// splits it into a second group.
+fn series_xml(kind: ChartKind, idx: usize, series: &ChartSeries) -> String {
+    let mut s = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
+    if !series.name.is_empty() {
+        s.push_str(&format!(
+            "<c:tx><c:v>{}</c:v></c:tx>",
+            escape_text(&series.name)
+        ));
+    }
+    // A line or scatter series carries its marker setting before the data,
+    // and a scatter with no marker and no line plots nothing visible.
+    if matches!(kind, ChartKind::Line | ChartKind::Scatter) {
+        s.push_str("<c:marker><c:symbol val=\"circle\"/></c:marker>");
+    }
+    // After the marker and before the data, which is where every `CT_*Ser` in
+    // the schema puts it. The five `show*` siblings are written explicitly and
+    // off: their defaults differ by chart type — a pie shows percentages —
+    // so leaving them unsaid means a label that says something else.
+    if series.data_labels {
+        s.push_str(
+            "<c:dLbls><c:showLegendKey val=\"0\"/><c:showVal val=\"1\"/>\
+<c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/>\
+<c:showBubbleSize val=\"0\"/></c:dLbls>",
+        );
+    }
+    let (cat_tag, val_tag) = if kind == ChartKind::Scatter {
+        ("xVal", "yVal")
+    } else {
+        ("cat", "val")
+    };
+    if let Some(categories) = &series.categories {
+        // A scatter's horizontal values are numbers; every other chart's
+        // categories are labels, and the wrong reference kind makes Excel
+        // read the labels as zeroes.
+        let inner = if kind == ChartKind::Scatter {
+            "numRef"
+        } else {
+            "strRef"
+        };
+        s.push_str(&format!(
+            "<c:{cat_tag}><c:{inner}><c:f>{}</c:f></c:{inner}></c:{cat_tag}>",
+            escape_text(categories)
+        ));
+    }
+    s.push_str(&format!(
+        "<c:{val_tag}><c:numRef><c:f>{}</c:f></c:numRef></c:{val_tag}>",
+        escape_text(&series.values)
+    ));
+    if kind == ChartKind::Line {
+        s.push_str("<c:smooth val=\"0\"/>");
+    }
+    s.push_str("</c:ser>");
+    s
+}
+
+/// The axis definitions, paired to the groups by id.
 ///
 /// A scatter's horizontal axis is a *value* axis, not a category axis: it plots
 /// numbers, and writing a `catAx` for it makes Excel space the points evenly
 /// and lose the very relationship the chart is drawn to show.
+///
+/// **A second pair follows when any series is on the secondary axis.** Its
+/// value axis sits on the right and crosses the category axis at its maximum,
+/// which is what puts it opposite the primary one; its category axis is written
+/// `delete="1"`, because a chart shows one set of category labels however many
+/// value axes measure against them.
 fn axes_xml(chart: &ChartView) -> String {
     let horizontal = if chart.kind == ChartKind::Scatter {
         "valAx"
@@ -803,7 +938,22 @@ fn axes_xml(chart: &ChartView) -> String {
         s.push_str(&title_xml(&chart.y_title));
     }
     s.push_str(&format!("<c:crossAx val=\"{CAT_AX_ID}\"/></c:valAx>"));
+    if has_secondary(chart) {
+        s.push_str(&format!(
+            "<c:{horizontal}><c:axId val=\"{CAT2_AX_ID}\"/>\
+<c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"1\"/><c:axPos val=\"b\"/>\
+<c:crossAx val=\"{VAL2_AX_ID}\"/></c:{horizontal}>\
+<c:valAx><c:axId val=\"{VAL2_AX_ID}\"/>\
+<c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"r\"/>\
+<c:crossAx val=\"{CAT2_AX_ID}\"/><c:crosses val=\"max\"/></c:valAx>"
+        ));
+    }
     s
+}
+
+/// Whether any series asks for the secondary value axis.
+fn has_secondary(chart: &ChartView) -> bool {
+    uses_axes(chart.kind) && chart.series.iter().any(|s| s.secondary_axis)
 }
 
 /// The content-type overrides an authored-chart package needs, keyed by part

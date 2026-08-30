@@ -29,7 +29,7 @@ mod workbook;
 
 pub use cancel::{CANCEL_CHECK_INTERVAL, Cancel, CancelFlag, Never, should_check};
 pub use cell::{Cell, CellFlags};
-pub use chart::{ChartKind, ChartSeries, ChartView, Emu, ImageView};
+pub use chart::{ChartGrouping, ChartKind, ChartSeries, ChartView, Emu, ImageView};
 pub use defined_name::DefinedName;
 pub use error::ModelError;
 pub use ids::{

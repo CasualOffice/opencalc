@@ -326,8 +326,8 @@ sufficient.
 
 **What the field costs, stated plainly.** It is additive under ADR-010, so
 `SCHEMA_VERSION` does not move and an old snapshot round-trips unchanged. But
-it is **not** free on the wire, and the tempting conclusion that
-`PROTOCOL_VERSION` can stay at 7 is wrong. `SheetMetadata` carries charts as
+it is **not** free on the wire, and the tempting conclusion that the protocol
+version can stay where it is, is wrong. `SheetMetadata` carries charts as
 field 19, `CHARTS` (`crates/casual-calc-transaction/src/lib.rs:300`), and that
 field is a **whole-vector replace**. An old client parses the message fine,
 drops `grouping` because serde ignores unknown fields, and then — the next time

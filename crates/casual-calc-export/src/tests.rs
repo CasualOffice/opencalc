@@ -3042,6 +3042,7 @@ fn authored_chart_workbook() -> casual_calc_model::Workbook {
         name: "Revenue".to_owned(),
         categories: Some("Sales!$A$2:$A$4".to_owned()),
         values: "Sales!$B$2:$B$4".to_owned(),
+        ..ChartSeries::default()
     });
     sheet.charts.push(chart);
     wb.sheets.push(sheet);
@@ -3201,6 +3202,7 @@ fn an_authored_chart_joins_a_retained_drawing_instead_of_replacing_it() {
         name: "Added".to_owned(),
         categories: None,
         values: "Sheet1!$A$1:$A$1".to_owned(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
 
@@ -3740,6 +3742,7 @@ fn a_retained_chart_part_is_re_emitted_with_its_shifted_series() {
         name: "Amount".into(),
         categories: Some("S!$A$4:$A$13".into()),
         values: "S!$D$4:$D$13".into(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
 
@@ -3803,6 +3806,7 @@ fn an_unshifted_retained_chart_part_is_written_back_unchanged() {
         name: String::new(),
         categories: None,
         values: "S!$D$2:$D$11".into(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
 
@@ -4138,4 +4142,369 @@ fn an_expression_conditional_format_survives_a_round_trip() {
         back.sheets[0].conditional_formats, wb.sheets[0].conditional_formats,
         "import -> write -> import is a fixed point for an expression rule"
     );
+}
+
+// --- CHT-05: an edit must not convert a chart into a different chart --------
+//
+// The measured defect: the writer spelled `<c:grouping val="clustered"/>` as a
+// literal for every bar and column chart, so a stacked chart that had been
+// **retitled, dragged or resized** — all of which route through
+// `session_set_chart` and therefore through `ChartView::detach` — was written
+// back to the file as a clustered chart. Not a picture that was wrong on
+// screen: the `.xlsx` on disk stopped saying what the author wrote, with
+// nothing reported and nothing in the user's action to suggest a conversion.
+//
+// Retention is not what protects against this. All six probe packages
+// round-trip byte-identical while they are *unedited*, because `retune_series`
+// rewrites series references inside the retained part. It is the moment the
+// part is dropped that the model becomes the whole of the chart, and the model
+// had no grouping, no second group and no second axis to give back.
+
+mod chart_survives_an_edit {
+    use super::*;
+    use casual_calc_model::{CellRange, CellRef, ChartGrouping, ChartKind};
+
+    fn ser(idx: usize, name: &str, col: &str, dlbls: &str) -> String {
+        format!(
+            "<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/><c:tx><c:v>{name}</c:v></c:tx>{dlbls}\
+<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$4</c:f></c:strRef></c:cat>\
+<c:val><c:numRef><c:f>Sheet1!${col}$2:${col}$4</c:f></c:numRef></c:val></c:ser>"
+        )
+    }
+
+    fn axes(cat: u32, val: u32) -> String {
+        format!(
+            "<c:catAx><c:axId val=\"{cat}\"/><c:crossAx val=\"{val}\"/></c:catAx>\
+<c:valAx><c:axId val=\"{val}\"/><c:crossAx val=\"{cat}\"/></c:valAx>"
+        )
+    }
+
+    fn chart_part(plot: &str) -> Vec<u8> {
+        format!(
+            "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" \
+xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
+<c:chart><c:plotArea><c:layout/>{plot}</c:plotArea>\
+<c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>"
+        )
+        .into_bytes()
+    }
+
+    const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <xdr:twoCellAnchor>
+        <xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+        <xdr:to><xdr:col>12</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>16</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+        <xdr:graphicFrame><a:graphic><a:graphicData><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame>
+        <xdr:clientData/>
+      </xdr:twoCellAnchor>
+    </xdr:wsDr>"#;
+
+    fn package(chart: &[u8]) -> Vec<u8> {
+        zip_parts(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+                  <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+                </Types>"#,
+            ),
+            ("_rels/.rels", ROOT_RELS),
+            ("xl/workbook.xml", WORKBOOK),
+            ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+            (
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                  <sheetData>
+                    <row r="2"><c r="B2"><v>100</v></c><c r="C2"><v>60</v></c><c r="D2"><v>0.4</v></c></row>
+                    <row r="3"><c r="B3"><v>120</v></c><c r="C3"><v>70</v></c><c r="D3"><v>0.42</v></c></row>
+                    <row r="4"><c r="B4"><v>140</v></c><c r="C4"><v>80</v></c><c r="D4"><v>0.43</v></c></row>
+                  </sheetData>
+                  <drawing r:id="rId9"/>
+                </worksheet>"#,
+            ),
+            (
+                "xl/worksheets/_rels/sheet1.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+                </Relationships>"#,
+            ),
+            ("xl/drawings/drawing1.xml", DRAWING),
+            (
+                "xl/drawings/_rels/drawing1.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+                </Relationships>"#,
+            ),
+            ("xl/charts/chart1.xml", chart),
+        ])
+    }
+
+    /// Open the package, drag the chart two columns to the left, save. The drag
+    /// is deliberately something that has **nothing to do with what the chart
+    /// is** — it changes only the anchor.
+    fn opened_dragged_and_saved(chart: &[u8]) -> (casual_calc_model::Workbook, String) {
+        let mut wb = import_package(package(chart)).unwrap().workbook;
+        {
+            let c = &mut wb.sheets[0].charts[0];
+            assert!(c.part.is_some(), "the chart came from a file");
+            c.anchor = CellRange::new(
+                CellRef::new(c.anchor.start.row, 3),
+                CellRef::new(c.anchor.end.row, 10),
+            );
+            // What `session_set_chart` does on any edit: the retained part no
+            // longer describes the chart, so it stops being authoritative.
+            c.detach();
+        }
+        let written = write_workbook(&wb).unwrap();
+        let part = xml_of(&written, "xl/charts/chart1.xml");
+        (wb, part)
+    }
+
+    /// **The one that matters most.** Dragging a stacked chart used to convert
+    /// it, in the file, to a clustered one.
+    #[test]
+    fn dragging_a_stacked_chart_does_not_make_it_a_clustered_chart() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"stacked\"/><c:varyColors val=\"0\"/>{}{}\
+<c:overlap val=\"100\"/><c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Cost", "C", ""),
+            axes(111, 222)
+        ));
+        let (wb, part) = opened_dragged_and_saved(&source);
+
+        assert_eq!(
+            wb.sheets[0].charts[0].grouping,
+            Some(ChartGrouping::Stacked),
+            "the model kept what the file said"
+        );
+        assert!(
+            part.contains("<c:grouping val=\"stacked\"/>"),
+            "the written part is still a stacked chart:\n{part}"
+        );
+        assert!(
+            !part.contains("clustered"),
+            "the written part says clustered:\n{part}"
+        );
+        // Without this Excel draws the bands side by side, which is the
+        // clustered picture again with a taller axis.
+        assert!(
+            part.contains("<c:overlap val=\"100\"/>"),
+            "a stacked group needs its overlap:\n{part}"
+        );
+        // And it reads back as the chart it was, which is what makes the
+        // survival a round trip rather than one lucky write.
+        let back = import_package(write_workbook(&wb).unwrap())
+            .unwrap()
+            .workbook;
+        assert_eq!(
+            back.sheets[0].charts[0].grouping,
+            Some(ChartGrouping::Stacked)
+        );
+    }
+
+    #[test]
+    fn dragging_a_percent_stacked_chart_keeps_it_normalised() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"bar\"/><c:grouping val=\"percentStacked\"/>{}{}\
+<c:overlap val=\"100\"/><c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Cost", "C", ""),
+            axes(111, 222)
+        ));
+        let (_, part) = opened_dragged_and_saved(&source);
+        assert!(
+            part.contains("<c:grouping val=\"percentStacked\"/>"),
+            "{part}"
+        );
+        assert!(part.contains("<c:barDir val=\"bar\"/>"), "{part}");
+    }
+
+    /// A combination chart used to come back as one group: the line series was
+    /// written as a third column, so the file lost the line.
+    #[test]
+    fn dragging_a_combination_chart_keeps_both_of_its_groups() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>{}{}\
+<c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>\
+<c:lineChart><c:grouping val=\"standard\"/>{}\
+<c:axId val=\"111\"/><c:axId val=\"222\"/></c:lineChart>{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Cost", "C", ""),
+            ser(2, "Margin", "D", ""),
+            axes(111, 222)
+        ));
+        let (wb, part) = opened_dragged_and_saved(&source);
+
+        assert_eq!(wb.sheets[0].charts[0].series[2].kind, Some(ChartKind::Line));
+        assert!(part.contains("<c:barChart>"), "{part}");
+        assert!(part.contains("<c:lineChart>"), "{part}");
+        // The two bars in the first group, the line on its own.
+        assert_eq!(part.matches("<c:ser>").count(), 3, "{part}");
+        // Series order survives, which is what makes a run-based split worth
+        // preferring to a gather by kind.
+        let back = import_package(write_workbook(&wb).unwrap())
+            .unwrap()
+            .workbook;
+        let names: Vec<&str> = back.sheets[0].charts[0]
+            .series
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["Rev", "Cost", "Margin"]);
+        assert_eq!(
+            back.sheets[0].charts[0].series[2].kind,
+            Some(ChartKind::Line)
+        );
+    }
+
+    /// A secondary axis is a second `<c:axId>` pair and a second `<c:valAx>`.
+    /// Dragging the chart used to leave one value axis, which puts a margin
+    /// percentage on a revenue scale — drawn, and invisible.
+    #[test]
+    fn dragging_a_secondary_axis_chart_keeps_the_second_axis() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>{}\
+<c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>\
+<c:lineChart><c:grouping val=\"standard\"/>{}\
+<c:axId val=\"333\"/><c:axId val=\"444\"/></c:lineChart>{}{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Margin", "D", ""),
+            axes(111, 222),
+            axes(333, 444)
+        ));
+        let (wb, part) = opened_dragged_and_saved(&source);
+
+        assert!(wb.sheets[0].charts[0].series[1].secondary_axis);
+        assert_eq!(
+            part.matches("<c:valAx>").count(),
+            2,
+            "two value axes, not one:\n{part}"
+        );
+        assert!(
+            part.contains("<c:crosses val=\"max\"/>"),
+            "the second axis sits opposite the first:\n{part}"
+        );
+        let back = import_package(write_workbook(&wb).unwrap())
+            .unwrap()
+            .workbook;
+        assert!(back.sheets[0].charts[0].series[1].secondary_axis);
+        assert!(!back.sheets[0].charts[0].series[0].secondary_axis);
+    }
+
+    #[test]
+    fn dragging_a_labelled_chart_keeps_its_labels() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>{}\
+<c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>{}",
+            ser(0, "Rev", "B", "<c:dLbls><c:showVal val=\"1\"/></c:dLbls>"),
+            axes(111, 222)
+        ));
+        let (wb, part) = opened_dragged_and_saved(&source);
+        assert!(wb.sheets[0].charts[0].series[0].data_labels);
+        assert!(part.contains("<c:showVal val=\"1\"/>"), "{part}");
+        // The other five are written explicitly off: their defaults differ by
+        // chart type, so leaving them unsaid means a label that says something
+        // other than the value.
+        assert!(part.contains("<c:showPercent val=\"0\"/>"), "{part}");
+        let back = import_package(write_workbook(&wb).unwrap())
+            .unwrap()
+            .workbook;
+        assert!(back.sheets[0].charts[0].series[0].data_labels);
+    }
+
+    /// The control: a clustered chart is written exactly as it was before this
+    /// change, so nothing was fixed by making every chart stacked.
+    #[test]
+    fn a_clustered_chart_is_still_written_clustered() {
+        let source = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>{}{}\
+<c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Cost", "C", ""),
+            axes(111, 222)
+        ));
+        let (_, part) = opened_dragged_and_saved(&source);
+        assert!(part.contains("<c:grouping val=\"clustered\"/>"), "{part}");
+        assert!(!part.contains("<c:overlap"), "{part}");
+        assert_eq!(part.matches("<c:valAx>").count(), 1, "{part}");
+        assert!(!part.contains("<c:dLbls>"), "{part}");
+    }
+
+    /// A grouping the group's own element cannot take is written as that
+    /// element's default rather than as itself: `ST_Grouping` has no
+    /// `clustered`, and a package that says otherwise is one Excel refuses.
+    #[test]
+    fn a_line_group_never_writes_clustered() {
+        let mut chart = casual_calc_model::ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            ChartKind::Line,
+        );
+        chart.grouping = Some(ChartGrouping::Clustered);
+        chart.series.push(casual_calc_model::ChartSeries {
+            values: "Sheet1!$B$2:$B$4".to_owned(),
+            ..Default::default()
+        });
+        let xml = crate::chart::chart_xml(&chart);
+        assert!(xml.contains("<c:grouping val=\"standard\"/>"), "{xml}");
+        assert!(!xml.contains("clustered"), "{xml}");
+    }
+
+    /// **`compatibility entries mentioning "chart": 0` — in every one of six
+    /// packages, including four the engine drew wrongly.** AGENTS.md forbids
+    /// silent loss, and the chart path reported nothing at all: not the type it
+    /// could not draw, not the label kind it ignored, not the axis scale it
+    /// discarded. Four of those six are modelled now; what is still not is
+    /// named here rather than dropped in silence.
+    #[test]
+    fn a_chart_the_model_cannot_draw_is_named_in_the_report() {
+        let radar = chart_part(
+            "<c:radarChart><c:radarStyle val=\"marker\"/>\
+<c:ser><c:tx><c:v>Rev</c:v></c:tx>\
+<c:dLbls><c:showPercent val=\"1\"/></c:dLbls>\
+<c:trendline><c:trendlineType val=\"linear\"/></c:trendline>\
+<c:val><c:numRef><c:f>Sheet1!$B$2:$B$4</c:f></c:numRef></c:val></c:ser>\
+</c:radarChart>",
+        );
+        let report = import_package(package(&radar)).unwrap().report;
+        let named: Vec<String> = report
+            .entries()
+            .iter()
+            .filter(|e| e.feature.starts_with("chart/"))
+            .map(|e| e.feature.clone())
+            .collect();
+        assert!(
+            named.contains(&"chart/unsupportedType".to_owned()),
+            "{named:?}"
+        );
+        assert!(named.contains(&"chart/dLbls/kind".to_owned()), "{named:?}");
+        assert!(named.contains(&"chart/trendline".to_owned()), "{named:?}");
+        // Retained either way — a refused chart type is a lost picture, never a
+        // lost file, and the report has to say which.
+        for entry in report.entries() {
+            if entry.feature.starts_with("chart/") {
+                assert_eq!(
+                    entry.retention,
+                    casual_calc_import::RetentionOutcome::Preserved
+                );
+            }
+        }
+
+        // And a chart the model *can* express reports nothing, so the entries
+        // above are a signal rather than noise every chart carries.
+        let plain = chart_part(&format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"stacked\"/>{}\
+<c:overlap val=\"100\"/><c:axId val=\"111\"/><c:axId val=\"222\"/></c:barChart>{}",
+            ser(0, "Rev", "B", "<c:dLbls><c:showVal val=\"1\"/></c:dLbls>"),
+            axes(111, 222)
+        ));
+        let quiet: Vec<String> = import_package(package(&plain))
+            .unwrap()
+            .report
+            .entries()
+            .iter()
+            .filter(|e| e.feature.starts_with("chart/"))
+            .map(|e| e.feature.clone())
+            .collect();
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
 }

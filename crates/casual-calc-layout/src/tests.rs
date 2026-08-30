@@ -1256,8 +1256,8 @@ mod charts {
     };
 
     use crate::chart::{
-        MAX_LINE_POINTS, MAX_PIE_WEDGES, MAX_SCATTER_MARKERS, PX, resolve, series_colors,
-        value_extent,
+        MAX_LABEL_POINTS, MAX_LINE_POINTS, MAX_PIE_WEDGES, MAX_SCATTER_MARKERS, PX, resolve,
+        series_colors, value_extent,
     };
     use crate::chart_data::{MAX_SERIES_POINTS, ref_cells, ref_numbers, ref_text};
     use crate::{GridGeometry, PaintItem, Point, layout_full};
@@ -1409,6 +1409,7 @@ mod charts {
                 name: String::new(),
                 categories: None,
                 values: (*v).to_owned(),
+                ..ChartSeries::default()
             })
             .collect();
         ch
@@ -1593,6 +1594,7 @@ mod charts {
             name: "A series with a very long name indeed".to_owned(),
             categories: None,
             values: "$A$1:$A$3".to_owned(),
+            ..ChartSeries::default()
         }];
         chart.legend = Some("r".to_owned());
         wb.sheets[0].charts.push(chart);
@@ -1938,6 +1940,7 @@ mod charts {
                 name: String::new(),
                 categories: None,
                 values: v.clone(),
+                ..ChartSeries::default()
             })
             .collect();
         ch
@@ -2624,6 +2627,320 @@ mod charts {
         let palette = series_colors(&wb, 10);
         let fills: Vec<String> = drawn.into_iter().map(|(_, _, f)| f).collect();
         assert_eq!(fills, palette, "the wedges lost their own colours");
+    }
+
+    // --- CHT-05: the picture stops being a plausible lie --------------------
+    //
+    // The measured defect: a stacked column, a 100%-stacked bar, a combination
+    // chart and a secondary-axis chart each produced a display list
+    // **identical to a clustered control** — same items, same fills, same
+    // geometry — and the compatibility report named a chart zero times. A user
+    // was shown a picture that was not their chart, and told nothing.
+    //
+    // Item counts are not enough to pin this. Stacking is documented to change
+    // the arithmetic and not the item count, so these assert **geometry**: how
+    // wide a bar is, where its top and bottom sit, and what the axis says.
+
+    /// A three-category workbook: `B` is 100/120/140, `C` is 60/70/80, `D` is a
+    /// margin in the range 0.4..0.43 — three orders of magnitude below `B`,
+    /// which is the disparity a secondary axis exists for.
+    fn stacking_workbook() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        let mut s = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
+        for (row, (b, c, d)) in [
+            (100.0, 60.0, 0.40),
+            (120.0, 70.0, 0.42),
+            (140.0, 80.0, 0.43),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = u32::try_from(row).expect("fits");
+            s.cells
+                .set(CellRef::new(r, 1), Cell::value(CellValue::Number(b)));
+            s.cells
+                .set(CellRef::new(r, 2), Cell::value(CellValue::Number(c)));
+            s.cells
+                .set(CellRef::new(r, 3), Cell::value(CellValue::Number(d)));
+        }
+        wb.sheets.push(s);
+        wb
+    }
+
+    /// A column chart over `B` and `C`, in a 400x300 frame.
+    fn two_series_chart() -> ChartView {
+        let mut ch = ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            ChartKind::Column,
+        );
+        ch.series = ["$B$1:$B$3", "$C$1:$C$3"]
+            .iter()
+            .map(|v| ChartSeries {
+                values: (*v).to_owned(),
+                ..ChartSeries::default()
+            })
+            .collect();
+        ch
+    }
+
+    fn drawn(chart: &ChartView) -> crate::DisplayList {
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &stacking_workbook(), 0, chart, frame_400x300());
+        list
+    }
+
+    /// Every bar rectangle as `(x0, x1, y0, y1, fill)`, in emission order.
+    fn bars(list: &crate::DisplayList) -> Vec<(i64, i64, i64, i64, String)> {
+        polygons(list)
+            .into_iter()
+            // The frame's own ground is a polygon too, and it is the only
+            // white one.
+            .filter(|(_, fill)| fill != "FFFFFF")
+            .map(|(points, fill)| {
+                let xs: Vec<i64> = points.iter().map(|p| p.x).collect();
+                let ys: Vec<i64> = points.iter().map(|p| p.y).collect();
+                (
+                    *xs.iter().min().expect("a rectangle"),
+                    *xs.iter().max().expect("a rectangle"),
+                    *ys.iter().min().expect("a rectangle"),
+                    *ys.iter().max().expect("a rectangle"),
+                    fill,
+                )
+            })
+            .collect()
+    }
+
+    fn texts(list: &crate::DisplayList) -> Vec<String> {
+        list.items
+            .iter()
+            .filter_map(|i| match i {
+                PaintItem::Text { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The finding, refuted.** A stacked chart used to draw exactly the
+    /// clustered control: two half-width bars side by side, both measured from
+    /// the axis, on an extent of 140. Stacking is one full-width bar per
+    /// category, the second band sitting on the first, on an extent of 220.
+    #[test]
+    fn a_stacked_chart_no_longer_draws_the_clustered_picture() {
+        let control = two_series_chart();
+        let mut stacked = two_series_chart();
+        stacked.grouping = Some(casual_calc_model::ChartGrouping::Stacked);
+
+        let control_bars = bars(&drawn(&control));
+        let stacked_bars = bars(&drawn(&stacked));
+        assert_eq!(
+            control_bars.len(),
+            stacked_bars.len(),
+            "stacking changes the arithmetic, not the item count"
+        );
+        assert_ne!(
+            control_bars, stacked_bars,
+            "the stacked chart is still drawn as the clustered one"
+        );
+
+        // The axis covers the sum, not the tallest single value.
+        assert!(
+            texts(&drawn(&control)).contains(&"140".to_owned()),
+            "{:?}",
+            texts(&drawn(&control))
+        );
+        assert!(
+            texts(&drawn(&stacked)).contains(&"220".to_owned()),
+            "{:?}",
+            texts(&drawn(&stacked))
+        );
+
+        // One lane, not two: a stacked bar is as wide as its whole group.
+        let width = |b: &(i64, i64, i64, i64, String)| b.1 - b.0;
+        assert!(
+            width(&stacked_bars[0]) > width(&control_bars[0]) * 3 / 2,
+            "stacked {} vs clustered {}",
+            width(&stacked_bars[0]),
+            width(&control_bars[0])
+        );
+        // And the two series share one x position rather than sitting apart.
+        assert_eq!(stacked_bars[0].0, stacked_bars[1].0);
+        assert_ne!(control_bars[0].0, control_bars[1].0);
+        // The second band starts exactly where the first ends — that abutment
+        // *is* stacking, and a chart drawing both from the axis has none of it.
+        assert_eq!(
+            stacked_bars[1].3, stacked_bars[0].2,
+            "the second band sits on top of the first: {stacked_bars:?}"
+        );
+    }
+
+    /// 100%-stacking normalises every category to the whole, so every column
+    /// reaches the top of the plot whatever its total — which is the one thing
+    /// that distinguishes it from plain stacking on the screen.
+    #[test]
+    fn a_percent_stacked_chart_fills_every_column() {
+        let mut chart = two_series_chart();
+        chart.grouping = Some(casual_calc_model::ChartGrouping::PercentStacked);
+        let list = drawn(&chart);
+        assert!(
+            texts(&list).contains(&"100".to_owned()),
+            "{:?}",
+            texts(&list)
+        );
+
+        let drawn_bars = bars(&list);
+        // Six bars: three categories, two bands each. The top of each category's
+        // upper band is the same, because each category is a whole.
+        assert_eq!(drawn_bars.len(), 6, "{drawn_bars:?}");
+        let tops: Vec<i64> = drawn_bars.iter().skip(1).step_by(2).map(|b| b.2).collect();
+        assert!(
+            tops.windows(2).all(|w| w[0] == w[1]),
+            "every column should reach the top: {tops:?}"
+        );
+        // The categories have different totals (160, 190, 220), so a *stacked*
+        // chart of the same data does not do this — which is what makes the
+        // assertion above discriminating rather than vacuous.
+        let mut stacked = two_series_chart();
+        stacked.grouping = Some(casual_calc_model::ChartGrouping::Stacked);
+        let stacked_tops: Vec<i64> = bars(&drawn(&stacked))
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|b| b.2)
+            .collect();
+        assert!(
+            stacked_tops.windows(2).any(|w| w[0] != w[1]),
+            "{stacked_tops:?}"
+        );
+    }
+
+    /// A combination chart used to draw its line series as a third column. The
+    /// line is a polyline now, and there is one fewer bar for it.
+    #[test]
+    fn a_combination_chart_draws_its_line_as_a_line() {
+        let control = two_series_chart();
+        let mut combo = two_series_chart();
+        combo.series[1].kind = Some(ChartKind::Line);
+
+        let control_list = drawn(&control);
+        let combo_list = drawn(&combo);
+        assert_eq!(bars(&control_list).len(), 6);
+        assert_eq!(
+            bars(&combo_list).len(),
+            3,
+            "only the first series is still bars"
+        );
+        let polylines = |l: &crate::DisplayList| {
+            l.items
+                .iter()
+                .filter(|i| matches!(i, PaintItem::Polyline { .. }))
+                .count()
+        };
+        assert_eq!(
+            polylines(&combo_list),
+            polylines(&control_list) + 1,
+            "the line series draws a line"
+        );
+        // The second series keeps its own colour: a combination chart draws in
+        // two passes, and a colour taken from a position within one of them is
+        // not the colour the legend drew.
+        let palette = series_colors(&stacking_workbook(), 2);
+        assert!(bars(&combo_list).iter().all(|b| b.4 == palette[0]));
+    }
+
+    /// **The scale disparity, which is the whole of the switching blocker.** A
+    /// margin of 0.4 beside revenue of 140 on one shared extent is a bar under
+    /// a pixel tall — drawn, and invisible. Its own axis makes it a chart.
+    #[test]
+    fn a_secondary_axis_series_is_measured_against_its_own_extent() {
+        let mut shared = two_series_chart();
+        shared.series[1].values = "$D$1:$D$3".to_owned();
+        let mut split = shared.clone();
+        split.series[1].secondary_axis = true;
+
+        let shared_bars = bars(&drawn(&shared));
+        let split_bars = bars(&drawn(&split));
+        let height = |b: &(i64, i64, i64, i64, String)| b.3 - b.2;
+
+        // On one axis the margin bars collapse to the minimum mark.
+        let margin_shared: Vec<i64> = shared_bars.iter().skip(1).step_by(2).map(height).collect();
+        assert!(
+            margin_shared.iter().all(|h| *h <= (PX as i64)),
+            "expected invisible bars on a shared axis: {margin_shared:?}"
+        );
+        let margin_split: Vec<i64> = split_bars.iter().skip(1).step_by(2).map(height).collect();
+        assert!(
+            margin_split.iter().all(|h| *h > (10.0 * PX) as i64),
+            "the secondary axis should give the margin series a real height: {margin_split:?}"
+        );
+
+        // And the second axis is drawn: its extent is the margin's, so the
+        // plot now carries a `0.43` label it did not have.
+        let labels = texts(&drawn(&split));
+        assert!(labels.contains(&"0.43".to_owned()), "{labels:?}");
+        assert!(!texts(&drawn(&shared)).contains(&"0.43".to_owned()));
+    }
+
+    /// Data labels are a `Text` per plotted point, and the value they carry is
+    /// the file's own — not the stacked position, which would be a second wrong
+    /// picture on top of the first.
+    #[test]
+    fn data_labels_show_the_value_the_file_holds() {
+        let mut chart = two_series_chart();
+        chart.series[0].data_labels = true;
+        let before = texts(&drawn(&two_series_chart()));
+        let after = texts(&drawn(&chart));
+        assert_eq!(after.len(), before.len() + 3, "one label per point");
+        for v in ["100", "120", "140"] {
+            assert!(after.contains(&v.to_owned()), "{after:?}");
+        }
+
+        // Stacked, the label still reads the value and not the running total.
+        let mut stacked = chart.clone();
+        stacked.series[1].data_labels = true;
+        stacked.grouping = Some(casual_calc_model::ChartGrouping::Stacked);
+        let labels = texts(&drawn(&stacked));
+        assert!(labels.contains(&"60".to_owned()), "{labels:?}");
+        assert!(
+            !labels.contains(&"160".to_owned()),
+            "a label showed the stacked position: {labels:?}"
+        );
+    }
+
+    /// **The cap is part of the feature.** A label is a `Text` item per point on
+    /// a path that had to be capped in the first place, so past
+    /// `MAX_LABEL_POINTS` the plot draws none rather than labelling a prefix and
+    /// stopping — which would read as data that ends.
+    #[test]
+    fn a_series_past_the_label_cap_is_not_labelled() {
+        let rows = u32::try_from(MAX_LABEL_POINTS + 1).expect("fits");
+        let wb = wide_workbook(rows, 1, 7);
+        let mut chart = wide_chart(rows, 1);
+        chart.series[0].data_labels = true;
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        let labelled = texts(&list).len();
+
+        let rows = u32::try_from(MAX_LABEL_POINTS).expect("fits");
+        let wb = wide_workbook(rows, 1, 7);
+        let mut chart = wide_chart(rows, 1);
+        chart.series[0].data_labels = true;
+        let mut list = crate::DisplayList::new();
+        crate::chart::push_chart(&mut list, &wb, 0, &chart, frame_400x300());
+        assert!(
+            texts(&list).len() > labelled,
+            "at the cap the labels are drawn, past it none are"
+        );
+    }
+
+    /// A grouping on a kind that has no groups does nothing, stated as a
+    /// decision rather than found as a surprise.
+    #[test]
+    fn a_grouping_on_a_pie_changes_nothing() {
+        let mut pie = two_series_chart();
+        pie.kind = ChartKind::Pie;
+        let plain = drawn(&pie);
+        pie.grouping = Some(casual_calc_model::ChartGrouping::Stacked);
+        assert_eq!(drawn(&pie).items.len(), plain.items.len());
     }
 }
 

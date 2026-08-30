@@ -1417,11 +1417,13 @@ fn workbook_with_a_cross_sheet_chart() -> Workbook {
         name: "Rev".to_owned(),
         categories: Some("S!$A$2:$A$4".to_owned()),
         values: "S!$B$2:$B$4".to_owned(),
+        ..ChartSeries::default()
     });
     chart.series.push(ChartSeries {
         name: "FromOther".to_owned(),
         categories: Some("Other!$A$1:$A$3".to_owned()),
         values: "Other!$B$1:$B$3".to_owned(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
     wb
@@ -2887,6 +2889,7 @@ fn insert_rows_moves_charts_images_and_pivots() {
         name: "Amount".into(),
         categories: Some("S!$A$2:$A$11".into()),
         values: "S!$D$2:$D$11".into(),
+        ..ChartSeries::default()
     });
     sheet.charts.push(chart);
     sheet.images.push(ImageView {
@@ -3018,6 +3021,7 @@ fn delete_rows_clamps_charts_and_images_and_breaks_lost_series() {
         name: "kept".into(),
         categories: None,
         values: "S!$D$1:$D$20".into(),
+        ..ChartSeries::default()
     });
     sheet.charts.push(straddling);
     // J5:J6 is wholly inside the band and goes with it.
@@ -3026,6 +3030,7 @@ fn delete_rows_clamps_charts_and_images_and_breaks_lost_series() {
         name: "gone".into(),
         categories: None,
         values: "S!$E$5:$E$6".into(),
+        ..ChartSeries::default()
     });
     sheet.charts.push(doomed);
     sheet.images.push(ImageView {
@@ -3141,6 +3146,7 @@ fn a_shifted_series_keeps_the_quoting_its_sheet_name_needs() {
         name: "Amount".into(),
         categories: None,
         values: "'My Data'!$D$2:$D$11".into(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
 
@@ -3175,6 +3181,7 @@ fn a_series_on_another_sheet_is_not_touched_or_reformatted() {
         name: "Amount".into(),
         categories: None,
         values: "Other!$D$2:$D$11".into(),
+        ..ChartSeries::default()
     });
     wb.sheets[0].charts.push(chart);
 

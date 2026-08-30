@@ -58,7 +58,7 @@
 //!   are the light-theme values. The **series** colours are not affected: those
 //!   come from the workbook's own theme accents, and agree exactly.
 
-use casual_calc_model::{ChartKind, ChartView, Workbook};
+use casual_calc_model::{ChartGrouping, ChartKind, ChartView, Workbook};
 
 use crate::chart_data::{ref_strip, ref_text, strip_numbers};
 use crate::display::{Align, DisplayList, PaintItem, Point, Rect};
@@ -193,6 +193,23 @@ pub struct ResolvedSeries {
     /// cannot make the reader allocate without limit. Non-zero is a **loss**,
     /// so the legend says so rather than the picture quietly showing a prefix.
     pub truncated: usize,
+    /// What this series is drawn as: its own kind in a combination chart, and
+    /// the chart's kind otherwise. Resolved here so the plotter never has to
+    /// pair a resolved series back up with the model series it came from —
+    /// which it could not do anyway, since a series that resolved to nothing
+    /// is dropped and the two lists stop being index-aligned.
+    pub kind: ChartKind,
+    /// Whether it is measured against the secondary value axis.
+    pub secondary_axis: bool,
+    /// Whether each of its points is labelled with its value.
+    pub data_labels: bool,
+    /// Its palette slot, which is its position among the series that survived
+    /// resolution — the index [`series_color`] is asked for.
+    ///
+    /// Carried rather than recomputed because a combination chart draws its
+    /// bars and its lines in two passes, and a colour taken from a position in
+    /// one of those passes is not the colour the legend drew.
+    pub slot: usize,
 }
 
 /// A chart's series and category labels, resolved against the cached values.
@@ -218,7 +235,7 @@ pub fn resolve(
         .and_then(|s| s.categories.as_deref())
         .map(|r| ref_text(workbook, sheet_index, r))
         .unwrap_or_default();
-    let series = chart
+    let mut series: Vec<ResolvedSeries> = chart
         .series
         .iter()
         .map(|se| {
@@ -235,23 +252,90 @@ pub fn resolve(
                     .unwrap_or_default(),
                 broken: strip.is_none(),
                 truncated: strip.map_or(0, |s| s.truncated),
+                // A per-series kind only means anything where the chart has
+                // groups to combine. A pie has none, so a `Line` on one of its
+                // series is ignored rather than drawn over the slices.
+                kind: match se.kind {
+                    Some(k) if combinable(k) && combinable(chart.kind) => k,
+                    _ => chart.kind,
+                },
+                secondary_axis: se.secondary_axis,
+                data_labels: se.data_labels,
+                slot: 0,
             }
         })
         .filter(|s| s.broken || s.values.iter().any(Option::is_some))
         .collect();
+    // After the filter, so the palette is the one the legend draws — which is
+    // the behaviour that was already here, now written down rather than implied
+    // by an `enumerate` at each use.
+    for (i, s) in series.iter_mut().enumerate() {
+        s.slot = i;
+    }
     (cats, series)
+}
+
+/// Whether `kind` can share one plot area with a different kind.
+///
+/// The combination family, and only it. A pie has no axes to share; a scatter's
+/// horizontal axis is a value axis rather than a category axis, so its points
+/// do not land on the same x positions as a column's. Mixing either with a
+/// column would draw a picture that is not a chart of anything.
+fn combinable(kind: ChartKind) -> bool {
+    matches!(
+        kind,
+        ChartKind::Bar | ChartKind::Column | ChartKind::Line | ChartKind::Area
+    )
 }
 
 /// The value range an axis has to cover, always including zero so a bar's
 /// length is proportional to its value.
 #[must_use]
 pub fn value_extent(series: &[ResolvedSeries]) -> (f64, f64) {
-    let mut lo = 0.0f64;
-    let mut hi = 0.0f64;
-    for s in series {
-        for v in s.values.iter().flatten() {
-            lo = lo.min(*v);
-            hi = hi.max(*v);
+    extent_of(&series.iter().collect::<Vec<_>>(), None)
+}
+
+/// The percent-stacked axis, in percent rather than in fractions.
+///
+/// The axis labels are the display list's only statement of what the numbers
+/// are, and it has no percent format — so `0` and `100` say "a share of the
+/// whole" where `0` and `1` would read as a chart of ones.
+const PERCENT_FULL: f64 = 100.0;
+
+/// The value range an axis has to cover for `series` under `grouping`.
+///
+/// **Stacking changes the extent, not only the geometry.** A stacked column of
+/// 100 and 140 reaches 240, and an axis measured on the individual values
+/// would clip it at 140 — which is how a stacked chart drawn on a clustered
+/// extent comes out with bars running off the top of the plot rather than
+/// merely looking wrong.
+fn extent_of(series: &[&ResolvedSeries], grouping: Option<ChartGrouping>) -> (f64, f64) {
+    let (mut lo, mut hi) = (0.0f64, 0.0f64);
+    match grouping {
+        // Normalised, so the axis is the whole and nothing else.
+        Some(ChartGrouping::PercentStacked) => hi = PERCENT_FULL,
+        Some(ChartGrouping::Stacked) => {
+            let points = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+            for i in 0..points {
+                // Positive and negative stack away from zero in opposite
+                // directions, so the two run in separate totals — one signed
+                // sum would let a negative shorten the positive stack it is
+                // drawn nowhere near.
+                let (mut up, mut down) = (0.0f64, 0.0f64);
+                for v in series.iter().filter_map(|s| s.values.get(i)).flatten() {
+                    if *v >= 0.0 { up += *v } else { down += *v }
+                }
+                lo = lo.min(down);
+                hi = hi.max(up);
+            }
+        }
+        _ => {
+            for s in series {
+                for v in s.values.iter().flatten() {
+                    lo = lo.min(*v);
+                    hi = hi.max(*v);
+                }
+            }
         }
     }
     // A flat series would otherwise divide by zero when it is scaled.
@@ -259,6 +343,23 @@ pub fn value_extent(series: &[ResolvedSeries]) -> (f64, f64) {
         hi = lo + 1.0;
     }
     (lo, hi)
+}
+
+/// The grouping that applies to `kind`, or `None` where the kind has no groups.
+///
+/// A `Stacked` on a pie or a scatter is meaningless, and this is where that is
+/// decided rather than discovered: the model may carry one, and the plotter
+/// ignores it.
+fn grouping_for(kind: ChartKind, grouping: Option<ChartGrouping>) -> Option<ChartGrouping> {
+    let g = grouping?;
+    match kind {
+        ChartKind::Bar | ChartKind::Column | ChartKind::Line | ChartKind::Area
+            if g.is_stacked() =>
+        {
+            Some(g)
+        }
+        _ => None,
+    }
 }
 
 /// A plot rectangle in twips, kept in floating point while it is whittled down
@@ -640,11 +741,12 @@ pub fn push_chart(
 
     match chart.kind {
         ChartKind::Pie | ChartKind::Doughnut => push_pie(list, workbook, chart, &series, plot),
-        ChartKind::Line | ChartKind::Area | ChartKind::Scatter => {
-            push_line(list, workbook, chart.kind, &cats, &series, plot);
-        }
-        ChartKind::Bar | ChartKind::Column => {
-            push_bars(list, workbook, chart.kind, &cats, &series, plot);
+        ChartKind::Line
+        | ChartKind::Area
+        | ChartKind::Scatter
+        | ChartKind::Bar
+        | ChartKind::Column => {
+            push_xy(list, workbook, chart, &cats, &series, plot);
         }
         ChartKind::Unsupported => {
             // The same note the canvas leaves, in the same place: visibly
@@ -658,6 +760,157 @@ pub fn push_chart(
             ));
         }
     }
+}
+
+/// One series and the axis it is measured against.
+///
+/// A chart may have two value axes, and a bar's height is `(hi - v) / (hi -
+/// lo)` of the plot for **its** axis. Carrying the scale beside the series is
+/// what lets one bar plot draw series measured against two different extents
+/// without a second pass over the geometry.
+#[derive(Debug, Clone, Copy)]
+struct Scaled<'a> {
+    series: &'a ResolvedSeries,
+    lo: f64,
+    hi: f64,
+    /// Where this axis' zero sits, which is what a bar is measured from so a
+    /// negative value draws downward.
+    zero_y: f64,
+}
+
+impl Scaled<'_> {
+    /// Where a value sits in the plot, vertically.
+    fn y(&self, plot: Plot, v: f64) -> f64 {
+        plot.y + plot.h * ((self.hi - v) / (self.hi - self.lo))
+    }
+}
+
+/// The most points a series will label. Above it, labels are not drawn.
+///
+/// **Part of the feature, not a follow-up.** A data label is a
+/// [`PaintItem::Text`] per point, so labels roughly double a bar plot's item
+/// count and add text shaping to a path `CHT-06` had to cap in the first place.
+/// Two hundred labels do not fit across a 400 px plot in any case — they would
+/// be two pixels apart — so the cap costs nothing a reader could have used, and
+/// the chart says so rather than quietly drawing fewer.
+pub const MAX_LABEL_POINTS: usize = 200;
+
+/// Everything with a category axis and a value axis: bars, columns, lines,
+/// areas and scatters, in any combination.
+///
+/// One function rather than the two this used to dispatch between, because a
+/// **combination** chart is not one kind or the other — the bars and the lines
+/// share a plot, a category axis and a set of x positions, and drawing them in
+/// two independent passes would give each its own extent and its own bar width.
+///
+/// The **secondary axis** is measured here for the same reason. On one shared
+/// extent, a margin percentage beside revenue in millions is 0.000058 px of a
+/// 200 px plot: the series is drawn, and it is invisible.
+fn push_xy(
+    list: &mut DisplayList,
+    workbook: &Workbook,
+    chart: &ChartView,
+    cats: &[String],
+    series: &[ResolvedSeries],
+    plot: Plot,
+) {
+    let primary: Vec<&ResolvedSeries> = series.iter().filter(|s| !s.secondary_axis).collect();
+    let secondary: Vec<&ResolvedSeries> = series.iter().filter(|s| s.secondary_axis).collect();
+    // A chart whose every series asks for the secondary axis has one axis, not
+    // an empty primary one: "secondary" is a relation, and there is nothing
+    // here for it to be secondary to.
+    let (primary, secondary) = if primary.is_empty() {
+        (secondary, Vec::new())
+    } else {
+        (primary, secondary)
+    };
+
+    let grouping = grouping_for(chart.kind, chart.grouping);
+    let (lo, hi) = extent_of(&primary, grouping);
+    let zero_y = push_axes(list, plot, lo, hi);
+    let mut scaled: Vec<Scaled> = primary
+        .iter()
+        .map(|s| Scaled {
+            series: s,
+            lo,
+            hi,
+            zero_y,
+        })
+        .collect();
+    if !secondary.is_empty() {
+        let (lo2, hi2) = extent_of(&secondary, grouping);
+        let zero2 = push_secondary_axis(list, plot, lo2, hi2);
+        scaled.extend(secondary.iter().map(|s| Scaled {
+            series: s,
+            lo: lo2,
+            hi: hi2,
+            zero_y: zero2,
+        }));
+    }
+    // Back into plot order, so the display list does not depend on which axis a
+    // series happens to be on — two charts differing only in that would
+    // otherwise emit their items in different orders.
+    scaled.sort_by_key(|s| s.series.slot);
+
+    let points = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+    let bars: Vec<Scaled> = scaled
+        .iter()
+        .filter(|s| matches!(s.series.kind, ChartKind::Bar | ChartKind::Column))
+        .copied()
+        .collect();
+    let lines: Vec<Scaled> = scaled
+        .iter()
+        .filter(|s| !matches!(s.series.kind, ChartKind::Bar | ChartKind::Column))
+        .copied()
+        .collect();
+
+    if !bars.is_empty() {
+        push_bars(list, workbook, &bars, plot, grouping, points, series.len());
+    }
+    if !lines.is_empty() {
+        push_line(list, workbook, &lines, plot, points, series.len());
+    }
+    push_category_labels(list, chart.kind, cats, plot, points);
+}
+
+/// The second value axis, on the right, returning its zero line's y.
+///
+/// No zero *line* is drawn for it: the primary axis already drew one across the
+/// plot, and a second horizontal rule at a different height reads as data.
+fn push_secondary_axis(list: &mut DisplayList, plot: Plot, lo: f64, hi: f64) -> f64 {
+    list.items.push(PaintItem::Polyline {
+        points: vec![
+            point(plot.x + plot.w, plot.y),
+            point(plot.x + plot.w, plot.y + plot.h),
+        ],
+        width: round(PX),
+        color: CHART_AXIS.to_owned(),
+    });
+    let label_w = 34.0 * PX;
+    for (value, cy) in [(hi, plot.y + 4.0 * PX), (lo, plot.y + plot.h - 4.0 * PX)] {
+        list.items.push(text_at(
+            line(plot.x + plot.w + 3.0 * PX, cy - 4.5 * PX, label_w, 9.0 * PX),
+            axis_label(value),
+            Align::Left,
+            CHART_MUTED,
+        ));
+    }
+    plot.y + plot.h * (hi / (hi - lo))
+}
+
+/// A point's value, beside the mark that draws it.
+///
+/// Nothing is drawn past [`MAX_LABEL_POINTS`]; the caller decides that once for
+/// the whole plot rather than per point, so a chart either labels its series or
+/// says it did not.
+fn push_label(list: &mut DisplayList, x: f64, y: f64, value: f64) {
+    let width = 40.0 * PX;
+    list.items.push(text_at(
+        line(x - width / 2.0, y - 11.0 * PX, width, 9.0 * PX),
+        axis_label(value),
+        Align::Center,
+        CHART_FG,
+    ));
 }
 
 /// The value axis and the zero line, returning the zero line's y.
@@ -755,21 +1008,31 @@ fn bucket(g: usize, groups: usize, points: usize) -> (usize, usize) {
     (g * points / groups, (g + 1) * points / groups)
 }
 
+/// The bar and column plot.
+///
+/// **Stacking is a change to the arithmetic, not to the item count.** A stacked
+/// bar is the same polygon at a different `y0`: every category gets one column
+/// the full width of its group, and each series' band is measured from the top
+/// of the one before it rather than from the axis. Clustered is unchanged —
+/// bands side by side, each from the axis.
 fn push_bars(
     list: &mut DisplayList,
     workbook: &Workbook,
-    kind: ChartKind,
-    cats: &[String],
-    series: &[ResolvedSeries],
+    series: &[Scaled],
     plot: Plot,
+    grouping: Option<ChartGrouping>,
+    points: usize,
+    plot_series: usize,
 ) {
-    let (lo, hi) = value_extent(series);
-    let zero_y = push_axes(list, plot, lo, hi);
-    let cols = series_colors(workbook, series.len());
-    let points = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+    let stacked = grouping.is_some_and(ChartGrouping::is_stacked);
+    let percent = grouping == Some(ChartGrouping::PercentStacked);
     if points == 0 {
         return;
     }
+    // Whether the plot labels its points at all, decided once for the whole
+    // plot: a chart that labelled its first two hundred points and stopped
+    // would read as data that ends.
+    let label = series.iter().any(|s| s.series.data_labels) && points <= MAX_LABEL_POINTS;
     // **The bound, and what it costs.** Past what the plot can resolve, points
     // are bucketed and each bucket draws one rectangle per series spanning that
     // bucket's minimum to its maximum. No value is dropped and no outlier is
@@ -778,40 +1041,111 @@ fn push_bars(
     // the individual bars covered. What is given up is *horizontal* resolution
     // — which point inside the bucket held which value — below the width of one
     // bar, which is under a pixel and could not be read either way (`CHT-06`).
-    let groups = bar_groups(plot.w, series.len(), points);
+    // The **plot's** ceiling, shared across every series on it — the rule
+    // `MAX_LINE_POINTS` and `MAX_SCATTER_MARKERS` already state. A combination
+    // chart's bars must not get the whole allowance and leave nothing for its
+    // lines, and a stacked plot must not resolve more groups than a clustered
+    // one of the same data because it happens to draw them in one lane.
+    let groups = bar_groups(plot.w, plot_series, points);
     let group_w = plot.w / groups as f64;
     // Every "1" in the canvas's arithmetic is one *pixel*; in twips it is
     // fifteen. Getting that wrong is invisible at a glance and a whole pixel
     // wide in the picture, which is how a bar came out a pixel too wide here.
-    let bar_w = (group_w * 0.7 / series.len() as f64).max(PX);
+    //
+    // **Stacked columns share one bar.** The width is the group's rather than
+    // the group's divided by the series count, which is the visible difference
+    // between a stacked chart and a clustered one before any value is plotted.
+    let lanes = if stacked { 1 } else { series.len() };
+    let bar_w = (group_w * 0.7 / lanes as f64).max(PX);
     for g in 0..groups {
         let (from, to) = bucket(g, groups, points);
+        // Where the next band starts, tracked separately above and below the
+        // axis: positive and negative stack away from zero in opposite
+        // directions. `lo` and `hi` are the bucket's own extremes, kept apart
+        // so a bucket holding several points still covers exactly the values
+        // its individual bars covered (`CHT-06`'s rule, carried into stacking).
+        let (mut up_lo, mut up_hi, mut down_lo, mut down_hi) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        // What the whole category adds up to, for the percent-stacked scale.
+        let total: f64 = if percent {
+            series
+                .iter()
+                .filter_map(|s| bucket_span(s.series, from, to))
+                .map(|(min, max)| (min.abs()).max(max.abs()))
+                .sum()
+        } else {
+            0.0
+        };
         for (si, s) in series.iter().enumerate() {
-            let mut span: Option<(f64, f64)> = None;
-            // Clamped, not `get(from..to)`: the point count is the *longest*
-            // series', so a shorter one has buckets that overrun its end, and an
-            // out-of-bounds slice would return `None` for the whole bucket —
-            // silently dropping the points at its start that do exist.
-            let end = to.min(s.values.len());
-            for v in s.values[from.min(end)..end].iter().flatten() {
-                span = Some(match span {
-                    None => (*v, *v),
-                    Some((min, max)) => (min.min(*v), max.max(*v)),
-                });
-            }
-            let Some((min, max)) = span else {
+            let Some((min, max)) = bucket_span(s.series, from, to) else {
                 continue;
             };
-            let bx = plot.x + g as f64 * group_w + group_w * 0.15 + si as f64 * bar_w;
-            let top = plot.y + plot.h * ((hi - max) / (hi - lo));
-            let bottom = plot.y + plot.h * ((hi - min) / (hi - lo));
-            // A negative value draws downward from the zero line, which is why
-            // the rectangle is measured from it rather than from the axis. With
-            // one point in the bucket `top == bottom` and this is the single
-            // bar it always was.
-            let y0 = top.min(zero_y);
+            // Normalised to a share of the category, which is what
+            // `percentStacked` means and what makes every column reach the top.
+            let (min, max) = if percent {
+                if total <= 0.0 {
+                    continue;
+                }
+                (min / total * PERCENT_FULL, max / total * PERCENT_FULL)
+            } else {
+                (min, max)
+            };
+            let (base_lo, base_hi) = if !stacked {
+                (0.0, 0.0)
+            } else if max >= 0.0 {
+                (up_lo, up_hi)
+            } else {
+                (down_lo, down_hi)
+            };
+            // **The band runs from the base to the base plus the value**, not
+            // between the bucket's two extremes: with one point in the bucket
+            // `min == max`, and measuring the band between them would make
+            // every stacked bar zero high. Where a bucket does hold several
+            // points, the four candidate edges are taken together, so the ink
+            // still covers exactly what the individual bands covered
+            // (`CHT-06`'s rule).
+            let (from_v, to_v) = if stacked {
+                let edges = [base_lo, base_hi, base_lo + min, base_hi + max];
+                (
+                    edges.iter().copied().fold(f64::INFINITY, f64::min),
+                    edges.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                )
+            } else {
+                (min, max)
+            };
+            if stacked {
+                if max >= 0.0 {
+                    up_lo = base_lo + min;
+                    up_hi = base_hi + max;
+                } else {
+                    down_lo = base_lo + min;
+                    down_hi = base_hi + max;
+                }
+            }
+            // A stacked band is measured from the top of the one before it; a
+            // clustered bar from the axis. Both are a rectangle between two
+            // values, which is why one expression covers them: the clustered
+            // case has a base of zero, and `s.zero_y` is where zero sits.
+            let lane = if stacked { 0 } else { si };
+            let bx = plot.x + g as f64 * group_w + group_w * 0.15 + lane as f64 * bar_w;
+            let edges = [s.y(plot, from_v), s.y(plot, to_v), s.zero_y];
+            let (y0, y1) = if stacked {
+                // Never clamped to the axis: a band that does not touch zero is
+                // exactly what stacking is.
+                let a = edges[0].min(edges[1]);
+                let b = edges[0].max(edges[1]);
+                (a, b)
+            } else {
+                // A negative value draws downward from the zero line, which is
+                // why the rectangle is measured from it rather than from the
+                // axis. With one point in the bucket `top == bottom` and this
+                // is the single bar it always was.
+                (
+                    edges[0].min(edges[1]).min(s.zero_y),
+                    edges[0].max(edges[1]).max(s.zero_y),
+                )
+            };
             let bh = {
-                let d = bottom.max(zero_y) - y0;
+                let d = y1 - y0;
                 // A zero value still shows a one-pixel mark on the axis rather
                 // than nothing, so a zero and a gap look different.
                 if d == 0.0 { PX } else { d }
@@ -824,11 +1158,34 @@ fn push_bars(
                     point(bx + bw, y0 + bh),
                     point(bx, y0 + bh),
                 ],
-                fill: cols[si].clone(),
+                fill: series_color(workbook, s.series.slot),
             });
+            if label && s.series.data_labels {
+                // The value the file holds, not the stacked or normalised
+                // position: a label that read `240` on a band worth `140`
+                // would be a second wrong picture on top of the first.
+                push_label(list, bx + bw / 2.0, y0, max);
+            }
         }
     }
-    push_category_labels(list, kind, cats, plot, points);
+}
+
+/// One bucket's lowest and highest value in `series`, or `None` when it holds
+/// no value at all.
+fn bucket_span(series: &ResolvedSeries, from: usize, to: usize) -> Option<(f64, f64)> {
+    // Clamped, not `get(from..to)`: the point count is the *longest* series',
+    // so a shorter one has buckets that overrun its end, and an out-of-bounds
+    // slice would return `None` for the whole bucket — silently dropping the
+    // points at its start that do exist.
+    let end = to.min(series.values.len());
+    let mut span: Option<(f64, f64)> = None;
+    for v in series.values[from.min(end)..end].iter().flatten() {
+        span = Some(match span {
+            None => (*v, *v),
+            Some((min, max)) => (min.min(*v), max.max(*v)),
+        });
+    }
+    span
 }
 
 /// The most points one polyline will carry, whatever the series' length.
@@ -871,38 +1228,47 @@ pub const MAX_PIE_WEDGES: usize = 1024;
 /// closer than this overlap by more than half.
 const MARKER_PX: f64 = 4.0;
 
+/// The line, area and scatter plot.
+///
+/// `points` and `plot_series` are the **plot's**, not this call's: in a
+/// combination chart the lines share their x positions with the bars beside
+/// them, and share the item ceiling with them too.
 fn push_line(
     list: &mut DisplayList,
     workbook: &Workbook,
-    kind: ChartKind,
-    cats: &[String],
-    series: &[ResolvedSeries],
+    series: &[Scaled],
     plot: Plot,
+    points: usize,
+    plot_series: usize,
 ) {
-    let (lo, hi) = value_extent(series);
-    push_axes(list, plot, lo, hi);
-    let cols = series_colors(workbook, series.len());
-    let points = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
     let step = if points > 1 {
         plot.w / (points - 1) as f64
     } else {
         0.0
     };
-    let frame = Frame {
-        plot,
-        step,
-        lo,
-        hi,
-        series: series.len().max(1),
-    };
-    for (si, s) in series.iter().enumerate() {
-        if kind == ChartKind::Scatter {
-            push_markers(list, s, &cols[si], frame);
+    let label = series.iter().any(|s| s.series.data_labels) && points <= MAX_LABEL_POINTS;
+    for s in series {
+        let frame = Frame {
+            plot,
+            step,
+            lo: s.lo,
+            hi: s.hi,
+            series: plot_series.max(1),
+        };
+        let color = series_color(workbook, s.series.slot);
+        if s.series.kind == ChartKind::Scatter {
+            push_markers(list, s.series, &color, frame);
         } else {
-            push_polyline(list, s, &cols[si], frame);
+            push_polyline(list, s.series, &color, frame);
+        }
+        if label && s.series.data_labels {
+            for (i, v) in s.series.values.iter().enumerate() {
+                if let Some(v) = v {
+                    push_label(list, frame.x(i), frame.y(*v), *v);
+                }
+            }
         }
     }
-    push_category_labels(list, kind, cats, plot, points);
 }
 
 /// Everything a series plot needs that is the same for every series on it.
