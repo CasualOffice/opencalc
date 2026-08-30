@@ -627,3 +627,104 @@ fn overlapping_but_unequal_move_bands_are_refused() {
         Err(TransformError::Unsupported { .. })
     ));
 }
+
+/// The **complete** set of pairs this transform refuses, pinned (`COL-61`).
+///
+/// Every other test here asks whether one pair behaves. None of them asks the
+/// question this one does: *what is the whole refusal surface?* Nothing did,
+/// and the module docs drifted because of it — [`crate::transform`]'s "What is
+/// not handled yet" names two cases, and there are three. The missing one is
+/// two line moves whose source bands overlap, which is the only one of the
+/// three a user reaches by ordinary dragging, and it is what latched the
+/// session behind `COL-55` and `COL-56`.
+///
+/// A refusal is not a bug — `TransformError::Unsupported` is the honest answer
+/// where a wrong answer would diverge the replicas silently. What is a bug is a
+/// refusal **nobody wrote down**, because the module docs are where a caller
+/// looks to find out what it must handle. So this asserts the set exactly:
+/// widening it fails here, and the fix is to document the new case as well as
+/// to intend it.
+///
+/// Geometries, not just variant pairs. Move-against-move transforms cleanly
+/// when the bands are disjoint, identical, crossing or adjacent, and refuses
+/// only on overlap — so a matrix over variant pairs alone would have found
+/// nothing and reported the surface as one case wide.
+#[test]
+fn the_refusal_surface_is_exactly_these_cases() {
+    let mut base = seed();
+    let names: Vec<(String, SheetId)> = base
+        .sheets
+        .iter()
+        .map(|sheet| (sheet.name.clone(), sheet.id))
+        .collect();
+
+    let mc = |at, count, before| Operation::MoveColumns {
+        sheet: 0,
+        at,
+        count,
+        before,
+    };
+    let cases: Vec<(&str, Operation, Operation)> = vec![
+        ("move/move identical", mc(2, 1, 6), mc(2, 1, 6)),
+        ("move/move disjoint", mc(2, 1, 6), mc(10, 1, 14)),
+        ("move/move same source", mc(2, 1, 6), mc(2, 1, 9)),
+        ("move/move same target", mc(2, 1, 6), mc(3, 1, 6)),
+        ("move/move overlapping bands", mc(2, 3, 9), mc(3, 3, 12)),
+        ("move/move nested bands", mc(2, 4, 10), mc(3, 1, 11)),
+        ("move/move crossing", mc(2, 2, 8), mc(7, 2, 1)),
+        ("move/move adjacent", mc(2, 1, 3), mc(3, 1, 4)),
+        (
+            "sheet move/sheet move",
+            Operation::MoveSheet { from: 0, to: 1 },
+            Operation::MoveSheet { from: 1, to: 0 },
+        ),
+        (
+            "move/insert columns",
+            mc(2, 1, 6),
+            Operation::InsertColumns {
+                sheet: 0,
+                at: 3,
+                count: 1,
+            },
+        ),
+        (
+            "move/delete columns",
+            mc(2, 1, 6),
+            Operation::DeleteColumns {
+                sheet: 0,
+                at: 3,
+                count: 1,
+            },
+        ),
+    ];
+
+    let mut refused: Vec<String> = Vec::new();
+    for (name, subject, against) in &cases {
+        for side in [Side::Earlier, Side::Later] {
+            if let Err(TransformError::Unsupported { .. }) =
+                transform_with_formulas(subject, against, side, &names, &mut base)
+            {
+                refused.push(format!("{name} ({side:?})"));
+            }
+        }
+    }
+    refused.sort();
+
+    // Each entry is a case the module docs must name. Adding one here without
+    // adding it there is the drift this test exists to stop.
+    let expected = vec![
+        "move/move nested bands (Earlier)",
+        "move/move nested bands (Later)",
+        "move/move overlapping bands (Earlier)",
+        "move/move overlapping bands (Later)",
+        "sheet move/sheet move (Earlier)",
+        "sheet move/sheet move (Later)",
+    ];
+    assert_eq!(
+        refused, expected,
+        "the set of refused pairs changed. A refusal is the honest answer where \
+         a wrong one would diverge the replicas silently — but an *undocumented* \
+         refusal is a caller discovering it in production. Update \
+         `transform`'s \"What is not handled yet\" as well as this list."
+    );
+}

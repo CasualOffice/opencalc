@@ -40,7 +40,23 @@
 //! operation that writes content while leaving the style alone, and it carries
 //! a value, so the formula has nowhere to go.
 //!
-//! Both return [`TransformError::Unsupported`] rather than an answer. Returning
+//! **Two concurrent line moves whose source bands overlap** — two
+//! [`Operation::MoveColumns`] (or [`Operation::MoveRows`]) where neither band
+//! contains the other exactly. Disjoint, identical, crossing and adjacent bands
+//! all transform; only a partial overlap has no answer, because the two moves
+//! disagree about which lines they are carrying. **This is the one of the three
+//! a user reaches by ordinary dragging**, and it is what latches the session
+//! behind `COL-55` and `COL-56`.
+//!
+//! This case went undocumented for the three weeks the move operations existed
+//! (`COL-61`). Every test here asked whether one pair behaves; none asked what
+//! the whole refusal surface *is*, so nothing noticed the list was short.
+//! `transform_move_tests::the_refusal_surface_is_exactly_these_cases` now pins
+//! it, and fails when a refusal is added without being written here. (Named in
+//! prose, not as an intra-doc link: it is `cfg(test)`, so a link to it is a
+//! broken one under `-D warnings`.)
+//!
+//! All three return [`TransformError::Unsupported`] rather than an answer. Returning
 //! the untransformed op would be silently wrong, and silently wrong is the one
 //! outcome this layer must not produce: the two clients would diverge and
 //! nothing would say so.
