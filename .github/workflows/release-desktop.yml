@@ -1,0 +1,229 @@
+# Publishing the desktop application (`TAURI-007`).
+#
+# **This builds nothing new.** `ci.yml`'s `desktop:` job already compiles the
+# shell on all three platforms on every push — it installs the webview and GTK
+# dependencies, builds the WebAssembly engine fresh, runs the desktop tests and
+# asserts a bundle was actually produced. What was missing was a way to *get*
+# those bundles, so this promotes the same build to a GitHub Release.
+#
+# Two differences from the per-PR job, both deliberate:
+#
+#   - **The bundle formats are the ones a person downloads**, not the ones
+#     cheapest to build. `ci.yml` builds a macOS `.app` because a `.dmg` needs a
+#     mountable volume, and a `.deb` because an AppImage downloads `linuxdeploy`
+#     at build time. Both are right for a job that runs on every push and wrong
+#     for a release, where the question is what somebody can double-click.
+#   - **Every artefact carries a SHA-256.** The builds are unsigned (see below),
+#     so a checksum is the only thing a downloader can check at all.
+#
+# ## Unsigned, on purpose
+#
+# `TAURI-008`: these are development alpha builds and there is no Apple
+# Developer ID or Authenticode certificate. The consequence is not a warning, it
+# is a refusal — macOS quarantines a downloaded `.app` and Gatekeeper reports it
+# as *damaged*, which is Apple's wording for unsigned and misleads every user
+# who reads it. So the release notes carry the bypass for each platform, and say
+# why. Shipping unsigned silently would be worse than not shipping.
+#
+# Auto-update is **not** blocked by that. Tauri's updater verifies its own
+# minisign signature, which is unrelated to an OS code-signing certificate.
+#
+# ## Dry run
+#
+# `workflow_dispatch` with `dry_run: true` builds and uploads the artefacts to
+# the workflow run without creating a release, which is how the pipeline gets
+# exercised without spending a tag. `release-sdk.yml` has the same affordance
+# for the same reason.
+name: release-desktop
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload artefacts without creating a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bundles: deb,appimage
+            glob: desktop/target/release/bundle/{deb/*.deb,appimage/*.AppImage}
+          - os: macos-latest
+            bundles: dmg
+            glob: desktop/target/release/bundle/dmg/*.dmg
+          - os: windows-latest
+            bundles: nsis
+            glob: desktop/target/release/bundle/nsis/*.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Two lockfiles, two warm-ups: `desktop/` resolves its own (ADR-023) and
+      # the engine crates are built here too.
+      - uses: ./.github/actions/cargo-warmup
+      - uses: ./.github/actions/cargo-warmup
+        with:
+          manifest-path: desktop/Cargo.toml
+      - name: Install the Linux webview and bundler dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            file
+      - name: Install wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+      # Built here and never taken from the tree: `webapp/pkg/` is gitignored,
+      # so a bundle assembled from whatever a checkout happens to contain is a
+      # bundle assembled from nothing. `CI-027` is the same hazard one level
+      # down — a build older than its own source.
+      - name: Build the engine the webview loads
+        run: python3 tools/build-wasm.py
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+      - name: Build the bundle
+        working-directory: desktop
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
+      # A bundler that was unavailable has exited 0 having emitted nothing, so
+      # the artefact is looked for on disk rather than inferred from an exit
+      # code. Same reasoning as `ci.yml`'s check, and the same failure it is
+      # against.
+      # The glob is interpolated by GitHub into the *script text*, which is what
+      # makes the Linux entry's braces work: bash performs brace expansion
+      # before parameter expansion, so the same pattern held in a shell variable
+      # would expand to nothing and this step would refuse a bundle that exists.
+      # Exercised locally against a fake bundle tree — two files collected, and
+      # exit 1 when the directory is empty.
+      - name: Collect what was built, with checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          mkdir -p out
+          found=0
+          for f in ${{ matrix.glob }}; do
+            cp "$f" out/
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no ${{ matrix.bundles }} bundle was produced on ${{ matrix.os }}"
+            find desktop/target/release/bundle -maxdepth 3 2>/dev/null || echo "(no bundle directory at all)"
+            exit 1
+          fi
+          cd out
+          # **Portable on purpose.** `sha256sum` is absent on macOS, and I could
+          # not establish that `shasum` is on the Windows runner's bash — a
+          # checksum step that works on two platforms and fails on the third
+          # fails at release time, which is the worst moment to find out. So:
+          # whichever of the three exists.
+          sum256() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"
+            elif command -v shasum   >/dev/null 2>&1; then shasum -a 256 "$1"
+            else openssl dgst -sha256 -r "$1"; fi
+          }
+          for f in *; do sum256 "$f" >> SHA256SUMS.txt; done
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    needs: bundle
+    if: github.event_name == 'push' || inputs.dry_run == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+      - name: Gather every platform's bundles into one directory
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f ! -name SHA256SUMS.txt -exec cp {} release/ \;
+          # One checksum file for the release, rebuilt rather than concatenated:
+          # the per-job files carry each runner's own path prefixes.
+          cd release
+          sum256() {
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"
+            elif command -v shasum   >/dev/null 2>&1; then shasum -a 256 "$1"
+            else openssl dgst -sha256 -r "$1"; fi
+          }
+          for f in *; do sum256 "$f" >> ../SHA256SUMS.txt; done
+          mv ../SHA256SUMS.txt .
+          ls -la
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import json;print(json.load(open('desktop/tauri.conf.json'))['version'])")"
+          cat > notes.md <<'EOF'
+          A development build of the OpenCalc desktop application, for macOS,
+          Windows and Linux.
+
+          ### These builds are not code-signed
+
+          Alpha software, and no Apple Developer or Authenticode certificate. The
+          operating systems will say so, and on macOS the wording is misleading —
+          it reports an unsigned application as **damaged**, which it is not.
+
+          **macOS** — after moving the app to Applications:
+
+          ```
+          xattr -dr com.apple.quarantine /Applications/OpenCalc.app
+          ```
+
+          Or right-click the app, choose **Open**, and confirm once.
+
+          **Windows** — SmartScreen hides the installer behind **More info → Run
+          anyway**.
+
+          **Linux** — the `.deb` installs normally. The AppImage needs the
+          executable bit: `chmod +x OpenCalc*.AppImage`.
+
+          ### Verifying what you downloaded
+
+          `SHA256SUMS.txt` lists a checksum for every file. Since nothing here is
+          signed, that checksum is the only thing you can actually check:
+
+          ```
+          shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+          ```
+
+          ### What this is
+
+          Alpha. The engine, editor, collaboration and SDK all work; the tracker
+          lists what does not yet. Notably absent: version history, and headers
+          and footers in PDF export.
+          EOF
+          gh release create "${GITHUB_REF_NAME:-desktop-v$version}" \
+            --title "OpenCalc Desktop ${version}" \
+            --notes-file notes.md \
+            --prerelease \
+            release/*
