@@ -987,20 +987,38 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   border-bottom: 1px solid var(--oc-border-color); background: var(--oc-background-color); flex: 0 0 auto;
 }
 /* Name box (higher specificity than `.formula-bar input` so it stays narrow). */
+/* **One flat bar with a single seam, not two bordered controls on a plate**
+   (`UX-CHR-08`, `docs/88` §4). The Name Box and the input were independently
+   bordered 6px-radius controls floating on the bar with 63px of buttons between
+   them, which is an HTML form rather than a formula bar. All four desktop
+   competitors draw one surface with a 1px rule after the Name Box: OnlyOffice
+   literally `--celleditor-cell-name-border-right`, LibreOffice an
+   `InsertSeparator(1)` immediately after the widget, Sheets a vertical divider,
+   Excel a divider that doubles as the resize grip.
+
+   The Name Box keeps its 112px — that width was already right, measured against
+   Excel's 110-130 and OnlyOffice's exact 100. What was wrong was the box drawn
+   around it. */
 .formula-bar .cell-ref {
-  flex: 0 0 auto; width: 84px; height: 26px; text-align: center; font-family: var(--oc-mono-font-family); font-weight: 600;
-  font-size: 12.5px; color: var(--oc-text-color); padding: 0 6px; border: 1px solid var(--oc-control-border-color);
-  border-radius: 6px; background: var(--oc-background-color);
+  /* 28px, not 26. It was 26 plus a 1px border on each side, and dropping the
+     border dropped the box under the 28px floor `UX-CHR-01` asserts — caught by
+     `the desktop and the page share one metric set`, which is what that floor is
+     for. The border went; the target size it was accidentally providing must
+     not. */
+  flex: 0 0 auto; width: 84px; height: 28px; text-align: center; font-family: var(--oc-mono-font-family); font-weight: 600;
+  font-size: 12.5px; color: var(--oc-text-color); padding: 0 6px; border: 0;
+  border-radius: 0; background: transparent;
 }
-.formula-bar .cell-ref:focus { outline: none; border-color: var(--oc-accent-color); }
+.formula-bar .cell-ref:focus { outline: none; background: var(--oc-popover-background-color); }
 .formula-bar .fx { font-family: Georgia, serif; font-style: italic; font-size: 14px; color: var(--oc-muted-text-color); padding: 0 2px; flex: 0 0 auto; }
-.formula-bar input#formula-input {
-  flex: 1; height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--oc-control-border-color);
-  background: var(--oc-background-color); color: var(--oc-text-color); font-family: var(--oc-mono-font-family); font-size: 13px;
+.formula-bar textarea#formula-input {
+  flex: 1; height: 26px; padding: 4px 10px; border-radius: 0; border: 0;
+  background: transparent; color: var(--oc-text-color); font-family: var(--oc-mono-font-family); font-size: 13px;
+  /* A textarea is `inline-block` and baseline-aligned by default, which leaves a
+     descender gap under it inside a 35px bar. */
+  display: block; resize: none; overflow: auto; line-height: 18px;
 }
-.formula-bar input#formula-input:focus {
-  outline: none; border-color: var(--oc-accent-color); box-shadow: 0 0 0 3px var(--oc-accent-ring);
-}
+.formula-bar textarea#formula-input:focus { outline: none; }
 
 .bottom-bar {
   display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px; flex: 0 0 auto;
@@ -1560,9 +1578,9 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
   color: var(--oc-text-color); background: transparent; z-index: 0;
   border-style: solid; border-color: transparent;
 }
-/* Specificity has to clear `.formula-bar input#formula-input`, which is where
+/* Specificity has to clear `.formula-bar textarea#formula-input`, which is where
    the bar's own colour comes from — a plain `#formula-input.tinted` loses. */
-.formula-bar input#formula-input.tinted, textarea.inline-edit.tinted {
+.formula-bar textarea#formula-input.tinted, textarea.inline-edit.tinted {
   z-index: 1; background: transparent;
   /* Transparent glyphs, visible caret — `caret-color` is what keeps the caret
      from disappearing along with the text. */
@@ -1584,8 +1602,8 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
    
    It only appeared once `.tinted` was added, which happens the moment a
    reference is recognised — so it read as "typing =2*A2 broke the grid". */
-.formula-bar input#formula-input.tinted { position: relative; }
-.formula-bar input#formula-input.tinted::selection,
+.formula-bar textarea#formula-input.tinted { position: relative; }
+.formula-bar textarea#formula-input.tinted::selection,
 textarea.inline-edit.tinted::selection {
   /* Selection has to stay visible even though the glyphs are transparent. */
   color: transparent; background: var(--oc-selection-color, rgba(47,109,246,.28));
@@ -1605,7 +1623,12 @@ textarea.inline-edit.tinted::selection {
 .cf-preset.on { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 
 /* Name box + its defined-names caret. */
-.name-box { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
+/* The seam. On the wrapper rather than on either control, so it does not
+   move when focus does and there is exactly one of it. */
+.name-box {
+  position: relative; display: inline-flex; align-items: center; flex: 0 0 auto;
+  border-right: 1px solid var(--oc-border-color); padding-right: 6px; margin-right: 2px;
+}
 .name-caret {
   position: absolute; right: 2px; width: 18px; height: 22px; padding: 0; border: 0;
   background: none; color: var(--oc-icon-color); cursor: pointer; display: flex;
@@ -1625,9 +1648,16 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
   display: flex; align-items: center;
 }
 .fx-expand[aria-expanded="true"] svg { transform: rotate(180deg); }
+/* Last in the flow and pinned to the right edge (`UX-CHR-08`). `margin-left:
+   auto` rather than a spacer element: the input is `flex: 1` and already
+   takes the slack, so this only has to stop the chevron riding along with it. */
+.formula-bar .fx-expand { margin-left: auto; flex: 0 0 auto; }
 /* Expanded formula bar: a multi-line box for formulas that do not fit on one. */
 .formula-bar.expanded { height: auto; align-items: flex-start; padding-top: 6px; padding-bottom: 6px; }
-.formula-bar.expanded input#formula-input { height: 84px; }
+/* Expanded: the text decides the height, within a bound. `84px` was a fixed
+   box holding one line; a `<textarea>` fills it, and `max-height` keeps a
+   500-character formula from eating the grid. */
+.formula-bar.expanded textarea#formula-input { height: 84px; max-height: 40vh; }
 .fn-list { max-height: 260px; overflow-y: auto; margin: 8px 0; display: flex; flex-direction: column; gap: 2px; }
 .fn-row {
   text-align: left; padding: 5px 8px; border: 0; border-radius: 5px; background: none;
@@ -2187,7 +2217,7 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
      precisely the failure UX-EDIT-01 fixed for the toolbar. The formula bar is
      not a scroller and should not become one; the input is the one thing in it
      that can afford to be narrower. */
-  .formula-bar input#formula-input { height: 34px; min-width: 0; }
+  .formula-bar textarea#formula-input { height: 34px; min-width: 0; }
 }
 
 /* The number-format readout (`UX-CHR-06`). A combo rather than an icon: it has
