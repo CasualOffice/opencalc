@@ -1445,11 +1445,22 @@ impl WorkbookSession {
         // caller may rewrite every formula in the book through this reference
         // and nothing would observe it.
         self.recalc.invalidate();
-        // And the dirty counter, on the same grounds (`FID-39`). Counted on
-        // handing out the reference rather than on a write, because this cannot
-        // see whether one happens — the same conservatism that drops `source`
-        // two lines above.
-        self.history.note_foreign_change();
+        // **The dirty counter is deliberately not moved here** (`FID-44`).
+        //
+        // `FID-39` did move it, on the reasoning that this cannot see whether a
+        // write happens so it should assume one — the same conservatism that
+        // drops `source` two lines above. That was wrong about *who calls this*.
+        // `workbook_mut` is not only a host's escape hatch: the wasm layer uses
+        // it as an ordinary accessor **inside** an edit, to intern a style or
+        // store a formula. So every such edit counted twice, and the editor's
+        // draft bar — which reads this number and states it to the user —
+        // reported an edit count that had roughly doubled. Three browser tests
+        // caught it on `main`; the workspace tests could not, because nothing
+        // in Rust reads the count the way that bar does.
+        //
+        // `source` can be conservative because a needless re-serialize costs
+        // only time. A count is *shown to a person*, so an over-count is not
+        // the safe direction — it is a wrong statement.
         &mut self.workbook
     }
 

@@ -3111,13 +3111,19 @@ fn the_history_bypasses_still_move_the_dirty_counter() {
          comparing it against its save point reports no unsaved work"
     );
 
+    // **And `workbook_mut` deliberately does not** (`FID-44`). It reads as the
+    // same case and is not: the wasm layer calls it as an ordinary accessor
+    // *inside* an edit — to intern a style, to store a formula — so counting
+    // here made every such edit count twice and the editor's draft bar told the
+    // user a number that had roughly doubled. `source` can be conservative
+    // because a needless re-serialize costs only time; a count is shown to a
+    // person, so an over-count is a wrong statement rather than a safe one.
     let before_mut = session.edits_applied();
     session.workbook_mut();
-    assert_ne!(
+    assert_eq!(
         session.edits_applied(),
         before_mut,
-        "workbook_mut hands out the right to change anything and did not move \
-         edits_applied — the same conservatism that makes it drop `source` \
-         applies here"
+        "workbook_mut moved the dirty counter — it is used as a plain accessor \
+         inside edits, so counting here double-counts every one of them"
     );
 }
