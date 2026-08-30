@@ -122,7 +122,11 @@
   // stacks under ours and a user sees two, which is what running the Docker
   // stack looks like today. `<opencalc-sheet>` hides the header by default for
   // the same reason; an iframe had no way to ask until now.
-  frame.src = "/editor/editor.html?fonts=/api/fonts&hide=header";
+  // `mode=embedded` is what this frame now resolves to by default
+  // (`UX-EMBED-02`), and it is the right answer — this host owns the
+  // document. Named rather than inherited: a shipped product should not
+  // change behaviour because a default moved underneath it.
+  frame.src = "/editor/editor.html?mode=embedded&fonts=/api/fonts&hide=header";
   frame.addEventListener("load", async () => {
     const win = frame.contentWindow;
     // Wait for the engine, which the editor signals by writing its version into

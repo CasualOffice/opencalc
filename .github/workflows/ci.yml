@@ -464,6 +464,14 @@ jobs:
       # which is the part that stops it recurring.
       - name: The gates pass their own checks
         run: python3 tools/check-gate-selftest.py
+      # `UX-EMBED-02` moved a default: a frame or shadow root that says nothing
+      # now resolves to `embedded`, not `standalone`. That is right, and it
+      # moved underneath three shipped callers — the costly one being WOPI,
+      # where `wopi` and `embedded` differ on exactly one axis (`chrome`), so
+      # the frame silently lost its header and nothing failed. A mount that
+      # asks for nothing is valid, which is what makes it quiet.
+      - name: An editor mounted in another page names its mode
+        run: python3 tools/check-editor-mount-mode.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \

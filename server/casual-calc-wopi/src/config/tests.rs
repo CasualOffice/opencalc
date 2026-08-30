@@ -10,7 +10,7 @@ fn config(hosts: &[&str], allow_plain: bool) -> Config {
         public_url: "https://calc.example".into(),
         internal_url: "http://wopi:8090".into(),
         collab_url: "/collab".into(),
-        editor_url: "/editor/editor.html".into(),
+        editor_url: "/editor/editor.html?mode=wopi".into(),
         secret: "0123456789abcdef".into(),
         audience: "opencalc-collab".into(),
         allowed_hosts: hosts.iter().map(|h| (*h).to_owned()).collect(),

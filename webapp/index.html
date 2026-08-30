@@ -59,7 +59,10 @@
             <span class="wdot"></span><span class="wdot"></span><span class="wdot"></span>
             <span class="window-title">OpenCalc — running in this page, client-side</span>
           </div>
-          <iframe src="./editor.html" title="OpenCalc editor" loading="lazy"></iframe>
+          <!-- `?mode=standalone` because this is a demo of the full editor, and a
+               frame that says nothing is now an embed (`UX-EMBED-02`) — which
+               would hide the branding strip and the downloads this is showing off. -->
+          <iframe src="./editor.html?mode=standalone" title="OpenCalc editor" loading="lazy"></iframe>
         </div>
 
         <!-- Stat strip -->
