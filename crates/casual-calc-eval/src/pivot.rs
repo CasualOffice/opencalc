@@ -294,7 +294,9 @@ pub fn field_items(workbook: &Workbook, pivot: &PivotTable, source_column: u32) 
     for row in (pivot.source.start.row + 1)..=pivot.source.end.row {
         seen.insert(key_at(workbook, sheet, CellRef::new(row, col)));
     }
-    seen.into_iter().map(|k| key_text(&k)).collect()
+    let format = column_format(workbook, sheet, pivot, source_column);
+    let display = Display::new(format.as_deref(), workbook.date1904);
+    seen.into_iter().map(|k| display.text(&k)).collect()
 }
 
 fn source_sheet<'a>(workbook: &'a Workbook, pivot: &PivotTable) -> Option<&'a Sheet> {
@@ -326,8 +328,15 @@ fn key_at(workbook: &Workbook, sheet: &Sheet, at: CellRef) -> PKey {
     }
 }
 
-/// How an item reads on screen — and, because a page filter stores its
-/// selection as text, the identity a filter compares against.
+/// An item's **identity**: the text a stored page-filter selection and a
+/// `GETPIVOTDATA` criterion are compared against.
+///
+/// Deliberately format-blind, and deliberately unchanged by
+/// [`docs/85`](../../../docs/85-PIVOT-DERIVED-FIELDS-AND-GROUPING.md) §10.
+/// `PivotFilterField::selected` is *persisted*, so a snapshot written before a
+/// field's number format existed still names its items this way; re-rendering
+/// the identity would stop those selections matching, silently and only for
+/// the workbooks that had used the feature.
 fn key_text(key: &PKey) -> String {
     match key {
         PKey::Number(n) => casual_calc_layout::format_general(*n),
@@ -336,6 +345,124 @@ fn key_text(key: &PKey) -> String {
         PKey::Error(e) => e.to_string(),
         PKey::Blank => BLANK_ITEM.to_owned(),
     }
+}
+
+/// How a field's items **read on screen**, which is not the same question as
+/// [`key_text`]'s.
+///
+/// A pivot groups by a cell's *value*, and a date is a serial number, so a
+/// column of dates grouped by day produced row labels reading `45306` — the
+/// value the cell holds, not the date it shows (`docs/85` §1.3). The number
+/// format is a property of the field rather than of the record, which is also
+/// how OOXML carries it (`<cacheField @numFmtId>`), so it is resolved once per
+/// field and applied to every item of it.
+#[derive(Debug, Clone, Copy)]
+struct Display<'a> {
+    format: Option<&'a str>,
+    date1904: bool,
+}
+
+impl<'a> Display<'a> {
+    fn new(format: Option<&'a str>, date1904: bool) -> Self {
+        Self { format, date1904 }
+    }
+
+    /// The item as a reader sees it.
+    fn text(self, key: &PKey) -> String {
+        match (key, self.format) {
+            (PKey::Number(n), Some(code)) => self.number(*n, code),
+            _ => key_text(key),
+        }
+    }
+
+    /// Whether `wanted` names this item — either as it reads on screen or as
+    /// [`key_text`] spells it.
+    ///
+    /// Both, because the two are the same string for every field that carries
+    /// no format, and where they differ a selection may have been stored under
+    /// either: before this seam existed the panel offered the identity form,
+    /// and it now offers the display form. Accepting only one of them would
+    /// break exactly the workbooks that had used a formatted field. This
+    /// widens what matches, so it cannot make a previously-matching selection
+    /// stop matching.
+    ///
+    /// A page filter compares exactly and `GETPIVOTDATA` ignores case; the
+    /// caller says which, because changing either of those is a separate
+    /// decision from spelling an item correctly.
+    fn names(self, key: &PKey, wanted: &str, ignore_case: bool) -> bool {
+        let same = |got: String| {
+            if ignore_case {
+                got.eq_ignore_ascii_case(wanted)
+            } else {
+                got == wanted
+            }
+        };
+        same(key_text(key)) || same(self.text(key))
+    }
+
+    /// The value and format a report cell should carry for this item.
+    ///
+    /// A formatted number stays a **number** — Excel writes a pivot's date
+    /// labels as serials with a date format, and a text label would stop the
+    /// column sorting, filtering or calculating as dates.
+    fn cell(self, key: &PKey) -> (Value, Option<String>) {
+        match (key, self.format) {
+            (PKey::Number(n), Some(code)) => (Value::Number(*n), Some(code.to_owned())),
+            _ => (Value::Text(self.text(key)), None),
+        }
+    }
+
+    fn number(self, value: f64, code: &str) -> String {
+        if self.date1904 {
+            casual_calc_layout::format_number_1904(value, code)
+        } else {
+            casual_calc_layout::format_number(value, code)
+        }
+    }
+}
+
+/// The number format a field's items are displayed with: the one carried by
+/// the **first data cell of its column that holds a value**.
+///
+/// Three properties, and each of them is why it is not "the first cell that has
+/// a format" or "the commonest format":
+///
+/// - **Deterministic**, so two refreshes of one workbook lay out identically.
+/// - **Independent of the page filters**, so narrowing a filter cannot respell
+///   the items that survive it. That is why this reads the column rather than
+///   the records `read_records` keeps, even though keeping it would be free.
+/// - **Bounded**, so it does not add a full column scan per field to every
+///   refresh at the capacity target [30](../../../docs/30-PERFORMANCE-AND-CAPACITY-TARGETS.md)
+///   sets. Stopping at the first *formatted* cell would scan the whole column
+///   whenever there is none, which is the ordinary case for a text field.
+///
+/// The cost is a column whose first record is unformatted and whose rest are
+/// dates, which reads as it did before. A field's format is a property of the
+/// field in OOXML too — `<cacheField @numFmtId>` is one attribute, not one per
+/// record — so a column with two formats in it has no single right answer here.
+fn column_format(
+    workbook: &Workbook,
+    sheet: &Sheet,
+    pivot: &PivotTable,
+    source_column: u32,
+) -> Option<String> {
+    let col = pivot.source.start.col + source_column;
+    if col > pivot.source.end.col {
+        return None;
+    }
+    for row in (pivot.source.start.row + 1)..=pivot.source.end.row {
+        let Some(cell) = sheet.cells.get(CellRef::new(row, col)) else {
+            continue;
+        };
+        if matches!(cell.value, CellValue::Empty) {
+            continue;
+        }
+        return cell
+            .style
+            .and_then(|style| workbook.styles.get(style))
+            .and_then(|style| style.number_format.clone());
+    }
+    None
 }
 
 /// One source row, reduced to what this pivot needs of it.
@@ -353,10 +480,22 @@ struct Axis {
     items: Vec<PKey>,
     /// Item -> its index in `items`, so a record is placed in one lookup.
     index: BTreeMap<PKey, u32>,
+    /// The field's number format, if its cells carry one. Held on the axis
+    /// rather than looked up per label, because it is a property of the field.
+    format: Option<String>,
 }
 
 impl Axis {
-    fn build(mut items: Vec<PKey>, sort: PivotSort, first_seen: &[PKey]) -> Self {
+    fn display(&self, date1904: bool) -> Display<'_> {
+        Display::new(self.format.as_deref(), date1904)
+    }
+
+    fn build(
+        mut items: Vec<PKey>,
+        sort: PivotSort,
+        first_seen: &[PKey],
+        format: Option<String>,
+    ) -> Self {
         match sort {
             PivotSort::Ascending => items.sort(),
             PivotSort::Descending => {
@@ -372,7 +511,11 @@ impl Axis {
             .enumerate()
             .map(|(i, k)| (k.clone(), i as u32))
             .collect();
-        Self { items, index }
+        Self {
+            items,
+            index,
+            format,
+        }
     }
 }
 
@@ -408,18 +551,34 @@ fn read_records(workbook: &Workbook, pivot: &PivotTable) -> Result<Source, Pivot
         .map(|f| f.source_column)
         .collect();
 
+    // A page filter compares text, so it needs the same field format the report
+    // labels use. Resolved once per filter rather than per row, and not at all
+    // for a filter in the `(All)` state, which compares nothing.
+    let filter_displays: Vec<Option<String>> = pivot
+        .filters
+        .iter()
+        .map(|f| {
+            (!f.selected.is_empty())
+                .then(|| column_format(workbook, sheet, pivot, f.source_column))
+                .flatten()
+        })
+        .collect();
+
     for row in (pivot.source.start.row + 1)..=pivot.source.end.row {
         // A page filter with no selection is the `(All)` state and narrows
         // nothing; only a non-empty list excludes anything.
-        let excluded = pivot.filters.iter().any(|f| {
+        let excluded = pivot.filters.iter().enumerate().any(|(i, f)| {
             if f.selected.is_empty() {
                 return false;
             }
             let Some(col) = at(f.source_column) else {
                 return false;
             };
+            let key = key_at(workbook, sheet, CellRef::new(row, col));
+            let display = Display::new(filter_displays[i].as_deref(), workbook.date1904);
             !f.selected
-                .contains(&key_text(&key_at(workbook, sheet, CellRef::new(row, col))))
+                .iter()
+                .any(|want| display.names(&key, want, false))
         });
         if excluded {
             continue;
@@ -476,6 +635,7 @@ fn read_records(workbook: &Workbook, pivot: &PivotTable) -> Result<Source, Pivot
             distinct.into_iter().collect(),
             field.sort,
             &first_seen,
+            column_format(workbook, sheet, pivot, field.source_column),
         ));
     }
 
@@ -583,10 +743,11 @@ pub fn lookup(
     let mut targets: Vec<(usize, u32)> = Vec::new();
     for (slot, item) in wanted {
         let axis = axes.get(slot).ok_or(ErrorValue::Ref)?;
+        let display = axis.display(workbook.date1904);
         let found = axis
             .items
             .iter()
-            .position(|k| key_text(k).eq_ignore_ascii_case(item))
+            .position(|k| display.names(k, item, true))
             .ok_or(ErrorValue::Ref)?;
         targets.push((slot, found as u32));
     }
@@ -827,33 +988,38 @@ pub fn compute(workbook: &Workbook, pivot: &PivotTable) -> Result<PivotReport, P
             let mut previous: Option<&Prefix> = None;
             for (slot, prefix) in col_slots.iter().enumerate() {
                 let column = data_c0 + slot as u32 * value_count;
-                let (text, kind) = if prefix.len() > depth {
+                let ((value, format), kind) = if prefix.len() > depth {
                     let changed = previous
                         .is_none_or(|p| p.len() <= depth || p[..=depth] != prefix[..=depth]);
                     if !changed {
                         previous = Some(prefix);
                         continue;
                     }
+                    // An item label is the item itself, so a date reads as a
+                    // date rather than as its serial (docs/85 §10).
                     (
-                        key_text(&axis.items[prefix[depth] as usize]),
+                        axis.display(workbook.date1904)
+                            .cell(&axis.items[prefix[depth] as usize]),
                         PivotCellKind::Header,
                     )
                 } else if depth == prefix.len() {
                     // A short prefix here is a subtotal or the grand total: the
-                    // line stops before this field, and the label says so.
+                    // line stops before this field, and the label says so. A
+                    // caption that decorates an item is text, because
+                    // `2024-01-15 Total` is not a number.
                     let label = if prefix.is_empty() {
                         GRAND_TOTAL.to_owned()
                     } else {
+                        let outer = &col_axes[prefix.len() - 1];
                         format!(
                             "{} Total",
-                            key_text(
-                                &col_axes[prefix.len() - 1].items
-                                    [prefix[prefix.len() - 1] as usize]
-                            )
+                            outer
+                                .display(workbook.date1904)
+                                .text(&outer.items[prefix[prefix.len() - 1] as usize])
                         )
                     };
                     (
-                        label,
+                        (Value::Text(label), None),
                         if prefix.is_empty() {
                             PivotCellKind::GrandTotal
                         } else {
@@ -866,9 +1032,9 @@ pub fn compute(workbook: &Workbook, pivot: &PivotTable) -> Result<PivotReport, P
                 };
                 cells.push(PivotCell {
                     at: CellRef::new(row, column),
-                    value: Value::Text(text),
+                    value,
                     kind,
-                    number_format: None,
+                    number_format: format,
                 });
                 previous = Some(prefix);
             }
@@ -928,21 +1094,26 @@ pub fn compute(workbook: &Workbook, pivot: &PivotTable) -> Result<PivotReport, P
                     if same {
                         continue;
                     }
+                    let (value, format) = axis
+                        .display(workbook.date1904)
+                        .cell(&axis.items[p[depth] as usize]);
                     cells.push(PivotCell {
                         at: CellRef::new(row, c0 + depth as u32),
-                        value: Value::Text(key_text(&axis.items[p[depth] as usize])),
+                        value,
                         kind: PivotCellKind::RowLabel,
-                        number_format: None,
+                        number_format: format,
                     });
                 }
             }
             Line::Subtotal(p) => {
                 let depth = p.len() - 1;
+                let axis = &row_axes[depth];
                 cells.push(PivotCell {
                     at: CellRef::new(row, c0 + depth as u32),
                     value: Value::Text(format!(
                         "{} Total",
-                        key_text(&row_axes[depth].items[p[depth] as usize])
+                        axis.display(workbook.date1904)
+                            .text(&axis.items[p[depth] as usize])
                     )),
                     kind: PivotCellKind::Subtotal,
                     number_format: None,

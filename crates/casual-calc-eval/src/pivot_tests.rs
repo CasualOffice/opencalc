@@ -8,7 +8,7 @@
 use casual_calc_formula::stored::Origin;
 use casual_calc_model::{
     Cell, CellRange, CellRef, CellValue, Id, PivotAggregate, PivotAxisField, PivotFilterField,
-    PivotSort, PivotTable, PivotValueField, Sheet, SheetId, Workbook,
+    PivotSort, PivotTable, PivotValueField, Sheet, SheetId, Style, Workbook,
 };
 
 use crate::pivot::{self, PivotError};
@@ -76,6 +76,12 @@ fn pivot(wb: &Workbook) -> PivotTable {
 
 /// Render the pivot's output as rows of trimmed display text, so a test reads
 /// like the block on screen.
+///
+/// A cell's own number format is applied, because a report cell may carry one:
+/// a measure has always been able to, and since `docs/85` §10 an item label
+/// can too. Rendering with `format_general` regardless would have shown a date
+/// label as its serial and made the defect that note measures invisible to
+/// every test in this file.
 fn render(wb: &Workbook, range: CellRange) -> Vec<Vec<String>> {
     (range.start.row..=range.end.row)
         .map(|row| {
@@ -84,7 +90,14 @@ fn render(wb: &Workbook, range: CellRange) -> Vec<Vec<String>> {
                     None => String::new(),
                     Some(cell) => match &cell.value {
                         CellValue::Empty => String::new(),
-                        CellValue::Number(n) => casual_calc_layout::format_general(*n),
+                        CellValue::Number(n) => match cell
+                            .style
+                            .and_then(|id| wb.styles.get(id))
+                            .and_then(|style| style.number_format.as_deref())
+                        {
+                            Some(code) => casual_calc_layout::format_number(*n, code),
+                            None => casual_calc_layout::format_general(*n),
+                        },
                         CellValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
                         CellValue::Error(e) => e.to_string(),
                         CellValue::SharedString(id) | CellValue::InlineString(id) => {
@@ -948,5 +961,240 @@ fn getpivotdata_honours_the_pivots_own_page_filter() {
             r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Region","East")"#
         ),
         "80"
+    );
+}
+
+// --- An item reads as itself, not as its serial (docs/85 §10) ---------------
+//
+// A pivot groups by a cell's *value*, and a date is a serial number, so a date
+// column on an axis produced row labels reading `45306`. The source shows
+// `2024-01-15`; the report showed a five-digit integer, as text, with no number
+// format — measured in `docs/85` §1.3.
+
+/// 2024-01-15 and 2024-02-01, in the 1900 system, two regions each.
+const DATED: &[(f64, &str, f64)] = &[
+    (45306.0, "West", 10.0),
+    (45306.0, "East", 20.0),
+    (45323.0, "West", 30.0),
+    (45323.0, "East", 40.0),
+];
+
+/// A three-column source whose first column is dates styled `yyyy-mm-dd`.
+fn dated_workbook() -> Workbook {
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "Data");
+    for (c, text) in ["Date", "Region", "Amount"].iter().enumerate() {
+        let id = wb.intern_string(text);
+        sheet.cells.set(
+            CellRef::new(0, c as u32),
+            Cell::value(CellValue::SharedString(id)),
+        );
+    }
+    let dated = wb.styles.intern(Style {
+        number_format: Some("yyyy-mm-dd".to_owned()),
+        ..Style::default()
+    });
+    for (r, (serial, region, amount)) in DATED.iter().enumerate() {
+        let row = r as u32 + 1;
+        let mut date = Cell::value(CellValue::Number(*serial));
+        date.style = Some(dated);
+        sheet.cells.set(CellRef::new(row, 0), date);
+        let id = wb.intern_string(region);
+        sheet.cells.set(
+            CellRef::new(row, 1),
+            Cell::value(CellValue::SharedString(id)),
+        );
+        sheet.cells.set(
+            CellRef::new(row, 2),
+            Cell::value(CellValue::Number(*amount)),
+        );
+    }
+    wb.sheets.push(sheet);
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 2)), "Report"));
+    wb
+}
+
+fn dated_pivot(wb: &Workbook) -> PivotTable {
+    PivotTable::new(
+        1,
+        "Dates".to_owned(),
+        wb.sheets[0].id,
+        CellRange::new(CellRef::new(0, 0), CellRef::new(DATED.len() as u32, 2)),
+        CellRef::new(0, 0),
+    )
+}
+
+#[test]
+fn a_date_row_field_is_labelled_as_a_date_and_not_as_its_serial() {
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(0));
+    p.rows.push(axis(1));
+    p.values.push(sum(2));
+    // Every label the date field produces: the leaf rows and the subtotal
+    // caption that decorates one. The subtotal is included on purpose — it is
+    // built by a different branch, so a fix that reached only the leaf labels
+    // would leave `45306 Total` sitting under `2024-01-15`.
+    assert_eq!(
+        install(&mut wb, p),
+        vec![
+            vec!["Date", "Region", "Sum of Amount"],
+            vec!["2024-01-15", "East", "20"],
+            vec!["", "West", "10"],
+            vec!["2024-01-15 Total", "", "30"],
+            vec!["2024-02-01", "East", "40"],
+            vec!["", "West", "30"],
+            vec!["2024-02-01 Total", "", "70"],
+            vec!["Grand Total", "", "100"],
+        ]
+    );
+}
+
+#[test]
+fn a_date_column_field_is_labelled_as_a_date_too() {
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(1));
+    p.cols.push(axis(0));
+    p.values.push(sum(2));
+    assert_eq!(
+        install(&mut wb, p),
+        vec![
+            vec!["Sum of Amount", "Date", "", ""],
+            vec!["Region", "2024-01-15", "2024-02-01", "Grand Total"],
+            vec!["East", "20", "40", "60"],
+            vec!["West", "10", "30", "40"],
+            vec!["Grand Total", "30", "70", "100"],
+        ]
+    );
+}
+
+#[test]
+fn a_date_label_is_written_as_a_number_so_the_column_still_holds_dates() {
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(0));
+    p.values.push(sum(2));
+    install(&mut wb, p);
+    // The first leaf label, under the header row.
+    let cell = wb.sheets[1]
+        .cells
+        .get(CellRef::new(1, 0))
+        .expect("a label cell")
+        .clone();
+    assert_eq!(
+        cell.value,
+        CellValue::Number(45306.0),
+        "a date label written as text is a column that no longer sorts, \
+         filters or calculates as dates — Excel writes the serial and lets \
+         the format say what it is"
+    );
+    assert_eq!(
+        cell.style
+            .and_then(|id| wb.styles.get(id))
+            .and_then(|s| s.number_format.as_deref()),
+        Some("yyyy-mm-dd"),
+        "the number went in without the format that makes it a date"
+    );
+}
+
+#[test]
+fn a_page_filter_selection_stored_before_this_still_matches() {
+    // `PivotFilterField::selected` is persisted. A snapshot written when the
+    // panel offered `45306` must keep filtering after the panel starts
+    // offering `2024-01-15`, or the feature silently unfilters exactly the
+    // workbooks that had used it.
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(1));
+    p.filters.push(PivotFilterField {
+        source_column: 0,
+        selected: vec!["45306".to_owned()],
+    });
+    p.values.push(sum(2));
+    let grid = install(&mut wb, p);
+    assert_eq!(
+        grid.last().expect("a grand total"),
+        &vec!["Grand Total", "30"],
+        "the serial-spelled selection stopped narrowing the report: {grid:?}"
+    );
+}
+
+#[test]
+fn a_page_filter_selection_made_from_the_displayed_item_matches() {
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(1));
+    p.filters.push(PivotFilterField {
+        source_column: 0,
+        selected: vec!["2024-02-01".to_owned()],
+    });
+    p.values.push(sum(2));
+    let grid = install(&mut wb, p);
+    assert_eq!(
+        grid.last().expect("a grand total"),
+        &vec!["Grand Total", "70"],
+        "the item as the panel now spells it did not match: {grid:?}"
+    );
+}
+
+#[test]
+fn a_filter_dropdown_lists_dates_the_way_the_report_labels_them() {
+    let wb = dated_workbook();
+    let p = dated_pivot(&wb);
+    assert_eq!(
+        pivot::field_items(&wb, &p, 0),
+        vec!["2024-01-15".to_owned(), "2024-02-01".to_owned()],
+        "the dropdown offers one spelling and the report shows another"
+    );
+}
+
+#[test]
+fn a_blank_leading_record_does_not_cost_the_field_its_format() {
+    // The field's format is the one on its first cell that holds a *value*, so
+    // a gap at the top of the column is skipped rather than deciding that the
+    // field has no format. Blanks at the top of a column are ordinary; a field
+    // silently losing its format because of one is not.
+    let mut wb = dated_workbook();
+    wb.sheets[0].cells.set(CellRef::new(1, 0), Cell::default());
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(0));
+    p.values.push(sum(2));
+    assert_eq!(
+        install(&mut wb, p),
+        vec![
+            vec!["Date", "Sum of Amount"],
+            vec!["2024-01-15", "20"],
+            vec!["2024-02-01", "70"],
+            vec!["(blank)", "10"],
+            vec!["Grand Total", "100"],
+        ]
+    );
+}
+
+#[test]
+fn getpivotdata_names_a_date_item_either_way() {
+    let mut wb = dated_workbook();
+    let mut p = dated_pivot(&wb);
+    p.rows.push(axis(0));
+    p.values.push(sum(2));
+    wb.sheets[1].pivots.push(p);
+    pivot::refresh(&mut wb, 1, 0).expect("refresh");
+    // As the report spells it...
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Date","2024-01-15")"#
+        ),
+        "30"
+    );
+    // ...and as a formula written before this change spelled it.
+    assert_eq!(
+        ask(
+            &mut wb,
+            r#"GETPIVOTDATA("Sum of Amount",'Report'!A1,"Date","45306")"#
+        ),
+        "30"
     );
 }
