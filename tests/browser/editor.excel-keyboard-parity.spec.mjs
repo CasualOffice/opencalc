@@ -231,6 +231,43 @@ test("the shortcuts panel names Ctrl+F3, not the F3 that never worked", async ({
 // `prep` runs on a freshly reset document, so a chord whose effect depends on
 // history (undo, paste) has one.
 const ADVERTISED = [
+  // The file chords (`TAURI-012`). `Ctrl+S` was advertised by nothing and bound
+  // all along; `Ctrl+O` and `Ctrl+N` were bound by nothing and are now both.
+  //
+  // New confirms before discarding, and Open raises a file picker — neither
+  // leaves a mark on the sheet, so "does something" is read from the dialog and
+  // from the picker being clicked rather than from a cell changing. That is the
+  // same accommodation the `Ctrl+V` row below already makes, for the same
+  // reason: the question is whether the advertised command is live.
+  {
+    label: "Ctrl+N",
+    chord: "Control+n",
+    // The confirmation before discarding is the evidence, and it lands in the
+    // snapshot as `#oc-modal-title`.
+    prep: (p) => edit(p, 0, 0, "unsaved"),
+  },
+  {
+    // Open raises the operating system's file picker, which leaves **no mark**
+    // on the page — so the snapshot alone reports it as a chord that did
+    // nothing. The mark is made by the editor's own click arriving at the real
+    // `#tb-open` input: the listener is installed here and set by the editor,
+    // never by the test, which is the difference between observing the command
+    // and staging it.
+    label: "Ctrl+O",
+    chord: "Control+o",
+    deliver: async (p) => {
+      await p.evaluate(() => {
+        const input = document.querySelector("#tb-open");
+        delete input.dataset.ocPressed;
+        input.addEventListener("click", (e) => {
+          e.preventDefault(); // no picker in a headless run
+          input.dataset.ocPressed = "1";
+        }, { once: true });
+      });
+      await p.keyboard.press("Control+o");
+    },
+  },
+  { label: "Ctrl+S", chord: "Control+s" },
   { label: "Ctrl+Z", chord: "Control+z", prep: (p) => edit(p, 0, 0, "changed") },
   { label: "Ctrl+Shift+Z", chord: "Control+Shift+z", prep: async (p) => { await edit(p, 0, 0, "changed"); await press(p, "Control+z"); } },
   { label: "Ctrl+X", chord: "Control+x" },
@@ -299,6 +336,9 @@ const observe = (page) => page.evaluate(() => {
     document.querySelector(".formula-bar").className,
     document.querySelector("#cell-ref").value,
     document.querySelector("#tb-status").textContent,
+    // Set by the editor's own click reaching `#tb-open` (`TAURI-012`); empty
+    // otherwise. A file picker changes nothing else on the page.
+    document.querySelector("#tb-open").dataset.ocPressed ?? "",
     JSON.stringify(window.opencalcEditor.selectionRectForTest()),
     a.session_cell_format(0, 2, 2),
     [...document.querySelectorAll(".popmenu")].filter((e) => !e.hidden).map((e) => e.id).join(","),

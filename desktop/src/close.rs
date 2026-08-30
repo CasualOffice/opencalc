@@ -53,7 +53,11 @@ pub const fn should_prevent(agreed: bool) -> bool {
 #[must_use]
 pub fn confirm_close(quit: bool) -> String {
     let verb = if quit { "Quit" } else { "Close" };
-    let action = if quit { "Discard and quit" } else { "Discard and close" };
+    let action = if quit {
+        "Discard and quit"
+    } else {
+        "Discard and close"
+    };
     let what = if quit {
         "Quitting discards them, and undo will not bring them back."
     } else {
@@ -129,8 +133,12 @@ mod tests {
     fn a_clean_document_agrees_without_asking() {
         for quit in [false, true] {
             let script = confirm_close(quit);
-            let agree = script.find("agree_to_close").expect("the script must answer");
-            let modal = script.find("confirmModal").expect("the script must be able to ask");
+            let agree = script
+                .find("agree_to_close")
+                .expect("the script must answer");
+            let modal = script
+                .find("confirmModal")
+                .expect("the script must be able to ask");
             assert!(
                 agree < modal,
                 "the clean-document path must agree before the dialog is reached, \

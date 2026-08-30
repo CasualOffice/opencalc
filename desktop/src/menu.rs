@@ -84,6 +84,39 @@ pub fn command_ids(menus: &[Menu]) -> Vec<String> {
     out
 }
 
+/// Commands whose native accelerator must be released while a cell is being
+/// edited (`TAURI-012`).
+///
+/// **A native menu accelerator is consumed before the webview sees the key.**
+/// That is the whole difference between this shell and the browser build, and
+/// it makes the desktop *worse* rather than neutral: in a browser, `Cmd+T`
+/// mid-formula reaches the editor's own handler and cycles the reference's
+/// anchors. Here the menu ate it first and opened a modal over a half-typed
+/// formula.
+///
+/// Microsoft's own Mac table gives `Cmd+T` **both** meanings — "cycle
+/// absolute/relative references" and "create Table" — disambiguated by edit
+/// mode. We took the Table half and none of the disambiguation.
+///
+/// The shell cannot know what a keystroke means; only the editor knows whether
+/// a cell is open. So the editor says, and the shell does the one thing it can:
+/// while an edit is open it releases the colliding accelerators, and the
+/// keystroke reaches the webview exactly as it would in a browser.
+///
+/// **The set is deliberately small.** Releasing the whole menu during an edit
+/// would be a different bug — Save is the shortcut people press *because* they
+/// have been typing, and taking it away mid-edit is the moment it matters most.
+/// Only chords Excel itself overloads are listed.
+pub fn releases_during_edit(id: &str) -> bool {
+    matches!(
+        id,
+        // `Cmd+T` / `Ctrl+T`: create Table, against Excel's anchor cycle.
+        "insert.table"
+            // `Shift+Cmd+T` on a Mac, so the same physical key with a shift.
+            | "formula.autosum"
+    )
+}
+
 /// Translate the shortcut the HTML menu displays into a native accelerator.
 ///
 /// The editor writes Windows-style labels — `Ctrl+S`, `Ctrl+Shift+L` — because
@@ -119,7 +152,17 @@ pub fn accelerator(label: &str) -> Option<String> {
             continue;
         }
         match part.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" | "cmd" | "command" => parts.push("CmdOrCtrl".to_owned()),
+            // **`Ctrl` folds; `Control` does not** (`TAURI-012`).
+            //
+            // `CmdOrCtrl` is right when the platforms differ only in which
+            // modifier they *name* — which is the ordinary case, and why the
+            // editor's Windows-style labels can be written once. It is wrong
+            // when they genuinely differ: Excel's insert-date is `Control+;` on
+            // a Mac and `Ctrl+;` on Windows, the *same* physical key, which
+            // folding would turn into `⌘;` and lose. Insert-time really is
+            // `Cmd+;`. So a label that says `Control` is taken at its word.
+            "control" => parts.push("Ctrl".to_owned()),
+            "ctrl" | "cmd" | "command" => parts.push("CmdOrCtrl".to_owned()),
             "shift" => parts.push("Shift".to_owned()),
             "alt" | "option" => parts.push("Alt".to_owned()),
             other => {
@@ -192,6 +235,58 @@ mod tests {
                 "file.save"
             ]
         );
+    }
+
+    /// **A native accelerator is consumed before the webview sees the key**
+    /// (`TAURI-012`).
+    ///
+    /// That is the whole difference between the desktop shell and the browser
+    /// build, and it makes the desktop *worse* rather than neutral: in a
+    /// browser, `Cmd+T` mid-formula reaches the editor's own handler and cycles
+    /// the reference's anchors. Here the menu eats it first and opens a modal
+    /// over a half-typed formula.
+    ///
+    /// Microsoft's own Mac table gives `Cmd+T` **both** meanings — "cycle
+    /// absolute/relative references" and "create Table" — disambiguated by edit
+    /// mode. We took the Table half and none of the disambiguation.
+    ///
+    /// The shell cannot know what the keystroke means, so it does the one thing
+    /// it can: while a cell is being edited it releases the accelerators that
+    /// collide, and the webview gets the key it would have got in a browser.
+    #[test]
+    fn an_accelerator_that_collides_with_editing_is_released_while_editing() {
+        // Excel's own overload, and the one that was reported.
+        assert!(releases_during_edit("insert.table"));
+        // AutoSum is `Shift+Cmd+T` on a Mac, so it collides with the same key.
+        assert!(releases_during_edit("formula.autosum"));
+        // F4 cycles anchors in Excel and is not a menu accelerator here, but
+        // the anchor cycle is the behaviour being protected, so a menu item
+        // that ever takes F4 must be in this set rather than silently shadow it.
+        assert!(releases_during_edit("insert.table"));
+
+        // Everything a person still expects to work mid-edit stays bound.
+        // Releasing the whole menu during an edit would be a different bug:
+        // Save is the one people press *because* they have been typing.
+        assert!(!releases_during_edit("file.save"));
+        assert!(!releases_during_edit("file.open"));
+        assert!(!releases_during_edit("edit.undo"));
+    }
+
+    /// **Folding `Cmd` into `Ctrl` is not sufficient, and the chords prove it.**
+    ///
+    /// `CmdOrCtrl` is right when the two platforms differ only in which
+    /// modifier they name. They do not always: Excel's insert-date is
+    /// `Control+;` on a Mac and `Ctrl+;` on Windows — the *same* physical
+    /// modifier, which `CmdOrCtrl` would wrongly turn into `⌘;` — while
+    /// insert-time really is `Cmd+;`. AutoSum is `Shift+Cmd+T` against
+    /// Windows' `Alt+=`, which is not the same chord at all.
+    #[test]
+    fn a_chord_that_differs_by_platform_is_not_folded() {
+        // `Control+;` names the control key on both platforms. On macOS that is
+        // `Ctrl`, not `Cmd`, so folding it loses Excel's actual binding.
+        assert_eq!(accelerator("Control+;").as_deref(), Some("Ctrl+;"));
+        // And the ordinary case still folds, because that is what it is for.
+        assert_eq!(accelerator("Ctrl+S").as_deref(), Some("CmdOrCtrl+S"));
     }
 
     #[test]

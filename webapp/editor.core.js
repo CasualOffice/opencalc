@@ -5883,6 +5883,28 @@ export function cellsFromClipboardHtml(html) {
 // than off the in-cell editor. Without this the formula bar is a dumb text box:
 // the same typing that autocompletes in a cell does nothing up there.
 export let editSurface = null;
+
+/// Tell the desktop shell whether a cell is open for editing (`TAURI-012`).
+///
+/// **A native menu accelerator is consumed before the webview sees the key.**
+/// In a browser, `Cmd+T` mid-formula reaches this module's key handler and
+/// cycles the reference's anchors, which is what Excel's own Mac table says it
+/// should. In a desktop window the menu ate it first and opened a modal over a
+/// half-typed formula — so the shell build was *worse* than the browser one.
+///
+/// The shell cannot know what a keystroke means; only this module knows whether
+/// a cell is open. So it says, and the shell releases the colliding chords for
+/// as long as the edit lasts.
+///
+/// A no-op in a browser, where `window.__opencalcNative` is absent and the key
+/// already arrives here — which is the behaviour being restored.
+let lastEditingReported = null;
+function reportEditing(editing) {
+  if (editing === lastEditingReported) return;
+  lastEditingReported = editing;
+  const native = window.__opencalcNative;
+  if (native && native.setEditing) native.setEditing(editing).catch(() => {});
+}
 // The cell's text when the edit began, for Escape to restore.
 export let editOriginal = "";
 // How the edit started: typing a fresh value ("Enter") or opening the existing
@@ -5998,6 +6020,7 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
     return;
   }
   editSurface = surface;
+  reportEditing(true);
   state.editing = true;
   // Where this edit will be written. Reference picking may walk to another
   // sheet, so the target cannot simply be "wherever the selection is now".
@@ -6054,6 +6077,7 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
 export function endEdit(refocus = true) {
   const was = editSurface;
   editSurface = null;
+  reportEditing(false);
   state.editing = false;
   // The range-finder outlines are painted into the canvas, so dropping them
   // needs a repaint — otherwise they linger over the grid after the edit ends.
@@ -8135,6 +8159,25 @@ function wireEvents() {
         await saveAs("native");
         return;
       }
+      // **`Ctrl+O` and `Ctrl+N` were not bound at all** (`TAURI-012`).
+      //
+      // The browser's own Open-file and New-window dialogs took them. In a
+      // desktop window that is plainly wrong; in a tab it is still not what
+      // somebody inside a spreadsheet means by either chord. They route to the
+      // same two File menu entries rather than to their own implementations, so
+      // a capability that hides the menu item hides the chord with it — the
+      // `Ctrl+S` reasoning above, applied to its neighbours.
+      if (k === "o" || k === "n") {
+        e.preventDefault();
+        // Through `runCommand`, not through a second implementation. The id is
+        // the same one the File menu entry carries, so a capability that hides
+        // the entry refuses the chord too — `runCommand` returns false rather
+        // than acting — and New keeps its confirmation, which is the whole
+        // reason it must not be reimplemented here: it is the most destructive
+        // verb in the application.
+        runCommand(k === "o" ? "file.open" : "file.new");
+        return;
+      }
       if (k === "c") { await doCopy(); e.preventDefault(); return; }
       if (k === "x") { await doCut(); e.preventDefault(); return; }
       if (k === "v" && e.shiftKey) { doPasteMode("values"); e.preventDefault(); return; }
@@ -9181,6 +9224,10 @@ function wireEvents() {
     // is broken, and they are half right.
     function showShortcuts() {
       const rows = [
+        // **The file chords come first, and `Ctrl+S` was missing entirely**
+        // (`TAURI-012`). This dialog is the only in-app shortcut reference, and
+        // the one chord nobody opens a menu for was the one it did not list.
+        ["New / Open / Save", "Ctrl+N / Ctrl+O / Ctrl+S"],
         ["Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"],
         ["Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"],
         ["Bold / Italic / Underline", "Ctrl+B / Ctrl+I / Ctrl+U"],

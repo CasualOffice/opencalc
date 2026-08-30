@@ -107,6 +107,16 @@ GATES = [
         None,
     ),
     (
+        # **`fuzz/` had no format gate either**, which is the same omission one
+        # workspace over: `check-rust.py` grew a desktop format gate when that
+        # gap was found and did not grow the fuzz one at the same time, because
+        # the fix was written against the workspace that had just failed rather
+        # than against the rule. Five files were unformatted on `main`.
+        "fuzz targets format",
+        ["cargo", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"],
+        None,
+    ),
+    (
         "desktop shell clippy",
         [
             "cargo", "clippy", "--manifest-path", "desktop/Cargo.toml",
