@@ -115,6 +115,21 @@ export function collaborate({
   /// notice is not erased by a socket that came back before the user looked.
   let lostUnsent = false;
 
+  /// Whether the rejoin for a desync has already been started on this socket.
+  ///
+  /// The engine latches on the first unmergeable arrival and answers `Desynced`
+  /// for **every** later one (`COL-55`), so a burst of relayed edits throws once
+  /// per message. Without this, each throw would rotate the key and close the
+  /// socket again, and the client would thrash instead of rejoining. Cleared in
+  /// `onclose`, so a second desync after a successful rejoin is answered the
+  /// same way — under the ordinary backoff, which is what stops a document that
+  /// desyncs every time from spinning.
+  let rejoining = false;
+  /// Set when the join now being made is the recovery from a desync, so the
+  /// `welcome` that answers it can say *why* the unacknowledged work is gone.
+  /// Cleared by that welcome.
+  let desynced = false;
+
   // This editor's claim to be the participant it was, for reconnecting.
   //
   // Generated once and held for the life of this session — deliberately *not*
@@ -124,7 +139,11 @@ export function collaborate({
   //
   // Not a secret and not treated as one: the token is what authorises, and the
   // server only honours a key for the user it issued it to. See ADR-015.
-  const resumeKey = newKey();
+  //
+  // **Rotated in exactly one place**, `rejoin()`, and that is the whole
+  // recovery from a desync: a key the server does not recognise is an ordinary
+  // join, and an ordinary join comes back with a snapshot.
+  let resumeKey = newKey();
 
   /// Where the engine believes the document is. Sent on a reconnect so the
   /// server knows what to catch us up on.
@@ -182,16 +201,28 @@ export function collaborate({
       // Reported, not swallowed. This is the one failure where carrying on
       // silently is worse than stopping, because the user goes on typing into
       // a document they believe is shared.
+      //
+      // **And acted on** (`COL-56`). Reporting was only ever half of it: the
+      // engine has latched, so this transport is now attached to a session that
+      // refuses every arrival and sends nothing — a client in name only. The
+      // status was the sole trace of that, and this editor has no line for
+      // `desynced` at all, so the measured symptom was a status bar still
+      // reading "collaborating" over a document that had stopped being shared.
+      // `rejoin()` is the recovery the engine was designed around.
       try {
         receive(message);
       } catch (err) {
         status("desynced", String(err && err.message ? err.message : err));
+        rejoin();
       }
     };
 
     socket.onclose = () => {
       stopTimers();
       joined = false;
+      // Per socket, not per session: the guard exists to collapse a burst of
+      // throws into one rejoin, and this socket is already gone.
+      rejoining = false;
       if (closed) return;
       // Full jitter. Without it every client of a server that restarted
       // reconnects at the same instant and knocks it over again — and the
@@ -255,10 +286,29 @@ export function collaborate({
         // prevent. Announcing it is the honest remedy, and it has to happen
         // first.
         const losing = everJoined && wasm.collab_unacknowledged();
+        // **Two different events reach this line, and a user told the wrong one
+        // is a user misinformed rather than informed.** An unresumed reconnect
+        // is a server that forgot us — a rolling deploy, a rebalance, an
+        // evicted document. A desync is this client abandoning a state it can
+        // no longer defend (`COL-55`). The cost is identical and the cause is
+        // not, so it is named.
+        //
+        // Nothing here can save the work either way, and the reason is the same
+        // in both: those operations were written against a revision this client
+        // no longer holds, and re-applying them untransformed is exactly the
+        // divergence the transform exists to prevent. What is offered is that
+        // the loss is **named before the snapshot lands**, which is why this
+        // runs first — afterwards there is nothing left to ask about.
+        //
+        // The status detail keeps answering **what** went — that is the
+        // question a status line answers, and it is the same answer either way
+        // — and the cause rides on the document event, where a host that wants
+        // to word it differently can read it.
+        const why = desynced ? "desynced" : "unresumed";
         if (losing) {
           lostUnsent = true;
           status("lost", "unsentEdits");
-          onDocument({ reason: "lost", revision: message.revision });
+          onDocument({ reason: "lost", why, revision: message.revision });
         }
         // The snapshot is the document as everyone else has it *at this
         // revision*. Loading the file instead would start this participant at
@@ -268,7 +318,14 @@ export function collaborate({
         // array of numbers, and the binding takes a byte slice. Handing it the
         // plain array throws at the boundary rather than converting.
         wasm.session_load_snapshot(new Uint8Array(message.snapshot));
+        // `collab_begin`, not `collab_resume`, is what clears a latched
+        // session: it replaces the `ClientSession` outright, and
+        // `session_load_snapshot` above replaced the workbook and its applied
+        // log with it. So the desync is over exactly here, and only here — a
+        // resume deliberately keeps the latch, which is why `rejoin()` has to
+        // make the server *unable* to resume us.
         wasm.collab_begin(message.client, message.revision);
+        desynced = false;
         joined = true;
         everJoined = true;
         revision = message.revision;
@@ -302,7 +359,18 @@ export function collaborate({
           onDocument({ reason: "remote", revision, stale: true });
         }
         onDocument({ reason: "resumed", revision, editable: message.editable });
-        status("live");
+        // **Held while something is still lost**, exactly as the `welcome`
+        // above holds it, and for the reason `lostUnsent` exists at all: "live"
+        // is what erases the notice, and a notice erased by the *next* socket
+        // event is a notice nobody reads. This branch said it unconditionally,
+        // so a reconnect that resumed — the ordinary case, since a rotated key
+        // is recognised the moment the rejoin succeeds — wiped the loss notice
+        // with nothing having been acknowledged. Measured: the status line went
+        // from naming the lost edits back to "collaborating" on the next
+        // reconnect, which is the same disappearing-notice failure `COL-56` is
+        // about, one socket later. `ack` is the only thing that clears it, and
+        // it clears it because work made *since* the loss has landed.
+        if (!lostUnsent) status("live");
         startTimers();
         flush();
         break;
@@ -534,6 +602,49 @@ export function collaborate({
     wasm.collab_end();
     socket?.close();
     socket = null;
+  }
+
+  /// Stop being this participant, and come back as a new one (`COL-56`).
+  ///
+  /// The recovery from a desync, and it is deliberately an **ordinary** one:
+  /// close the socket, drop the resume key, reconnect, take the `welcome`
+  /// snapshot. No message, no field and no enum variant crosses the wire for
+  /// it, so the server needs to know nothing it does not already.
+  ///
+  /// **A plain `reconnect()` is not this, and does not work.** Measured: the
+  /// socket comes back, the server recognises the key and answers `resumed`,
+  /// and `collab_resume` deliberately *keeps* the engine's latch — a resume
+  /// asserts continuity, which is the one thing that is false here. The very
+  /// next relayed operation throws `Desynced` again. So the key has to go: an
+  /// unrecognised one is an ordinary join, and an ordinary join is answered
+  /// with a snapshot.
+  ///
+  /// **What it costs, and why nothing is offered instead of a warning.**
+  /// Everything unacknowledged — `collab_unacknowledged()` still answers, and
+  /// the `welcome` above asks it before the snapshot lands, so the loss is
+  /// named rather than silent. It cannot be kept: those edits were written
+  /// against a revision this client has abandoned, and the document they were
+  /// written against is itself missing a committed revision, so preserving
+  /// either would be preserving a divergence rather than rescuing work.
+  function rejoin() {
+    if (closed || rejoining) return;
+    rejoining = true;
+    desynced = true;
+    resumeKey = newKey();
+    // Zero rather than where this client thought it was. The key is new, so
+    // the revision is not consulted — but a client that has abandoned its
+    // history has no business claiming a place in one.
+    revision = 0;
+    joined = false;
+    // The outstanding chunks are sealed by the engine and are not coming back;
+    // a resend flag surviving into the new session would ask it to send work
+    // the old one owned.
+    mustResend = false;
+    stopTimers();
+    // Through `onclose`, which is the same path a real drop takes — and which
+    // applies the ordinary backoff, so a document that desyncs on every join
+    // slows down instead of hammering the server.
+    socket?.close();
   }
 
   /// Drop the connection and start a new one now.
