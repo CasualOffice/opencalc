@@ -132,6 +132,7 @@ the other way around. This index is the map.
 | 82 | [Visual audit](82-UX-VISUAL-AUDIT.md) | Measured layout defects in the real chrome — what a behaviour sweep cannot see. **Generated** by `tests/browser/ux-visual-audit.mjs`; do not edit by hand |
 | 83 | [Save, autosave, recovery and version history](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md) | What `Ctrl+S` means in four hosts and the one rule behind it; why the collaboration op log is a resume buffer and not a history; snapshot-based versions and restore as a new operation |
 | 84 | [Chart expressiveness](84-CHART-EXPRESSIVENESS.md) | Stacking, combination, a secondary axis and data labels: why the file survives but the picture lies, why grouping is a field and not a `ChartKind`, what a chart costs per frame, and the forty-odd chart types deliberately refused |
+| 85 | [Calculated fields, Show Values As and date grouping](85-PIVOT-DERIVED-FIELDS-AND-GROUPING.md) | The three things a pivot cannot yet analyse: why the accumulator map is the evaluation domain, why an additive pivot field is the *loud* wire break where a chart's was quiet, which of Excel's fifteen Show Values As modes are refused and on what basis, and the one decision left to the product owner |
 
 ### Measured gap trackers (50–53, 73)
 
