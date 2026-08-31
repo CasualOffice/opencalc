@@ -353,6 +353,7 @@ import {
   stepFrom,
   stepWithin,
   toggleFilter,
+  syncVolatileClock,
   tryEdit,
   updateCellMode,
   updateNameBox,
@@ -10954,6 +10955,11 @@ async function main() {
   // because a browser that will not store a draft must still open the editor.
   // A crash-recovery feature that stops the editor booting has recovered
   // nothing.
+  // **Before the first paint, so a file that opens with `TODAY()` in it shows
+  // today** (`CALC-VOL-01`). Without this the first thing a user sees is a date
+  // formula reading 1899-12-30, corrected only by an edit they had no reason to
+  // make.
+  syncVolatileClock();
   await initDrafts().catch((err) => console.error("[opencalc] drafts", err));
   // **The history has to outlive the tab** (`HIST-03`). Failure is silent by
   // design: a browser with no IndexedDB, a full quota or a corrupted row must

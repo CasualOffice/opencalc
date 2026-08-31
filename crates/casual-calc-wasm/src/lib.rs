@@ -167,7 +167,30 @@ pub fn eval_formula(input: &str) -> String {
     value_text(&workbook, &value)
 }
 
+thread_local! {
+    /// The clock and seed the host last supplied (`CALC-VOL-01`).
+    ///
+    /// `volatile_now` lives on the `Workbook` and is `#[serde(skip)]`, which is
+    /// right — it is environment, not document state. The consequence is that
+    /// **every new session starts at zero**, so `File ▸ New` or opening a file
+    /// would return `TODAY()` to 1899-12-30 until the next edit happened to
+    /// refresh it.
+    ///
+    /// Remembered here so a host supplies the clock once and every session
+    /// after it inherits one. The host still refreshes it before each edit and
+    /// each recalculation, which is what keeps `NOW()` current — this only
+    /// stops a *new* session starting blind.
+    static VOLATILE: core::cell::Cell<(f64, u64)> = const { core::cell::Cell::new((0.0, 0)) };
+}
+
 pub(crate) fn set_session(session: WorkbookSession) {
+    let mut session = session;
+    let (now, seed) = VOLATILE.with(core::cell::Cell::get);
+    if now != 0.0 {
+        let wb = session.workbook_mut();
+        wb.volatile_now = now;
+        wb.volatile_seed = seed;
+    }
     SESSION.with(|cell| *cell.borrow_mut() = Some(session));
 }
 

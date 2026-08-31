@@ -1639,7 +1639,40 @@ export function insertRef(text) {
   updateRefSpans();
 }
 
+/// The Excel serial for right now, in **local** time (`CALC-VOL-01`).
+///
+/// Whole days since 1899-12-30, with the time of day as the fraction; 25569 is
+/// 1970-01-01, which is where the epoch lands on that scale.
+///
+/// Local, not UTC, because that is what `TODAY` means to a person: a
+/// spreadsheet that rolls over at midnight UTC shows yesterday's date to most
+/// of the world for part of every day. `getTimezoneOffset` is minutes to *add*
+/// to local time to reach UTC, so it is subtracted here.
+export function excelSerialNow() {
+  const now = new Date();
+  const local = now.getTime() - now.getTimezoneOffset() * 60_000;
+  return local / 86_400_000 + 25569;
+}
+
+/// Give the engine the clock and seed its volatile functions read.
+///
+/// The engine deliberately reads no clock — a calc engine that reaches for the
+/// wall clock cannot be tested or replayed — so the host supplies one. **No
+/// host ever did**, which is why `TODAY()` returned 0 and `RAND()` returned one
+/// fixed sequence for as long as those functions have existed.
+///
+/// Called before each edit and each explicit recalculation rather than once at
+/// load: that is what makes `NOW()` current and `RAND()` reroll, which is what
+/// Excel does on every recalculation.
+export function syncVolatileClock() {
+  try { wasm.session_set_volatile(excelSerialNow(), Date.now() % 9007199254740991); }
+  catch { /* an engine that has not booted yet has nothing to tell */ }
+}
+
 export function tryEdit(fn) {
+  // Before the edit, because an edit recalculates: setting the clock afterwards
+  // would date every volatile cell one edit behind.
+  syncVolatileClock();
   try { fn(); } catch (e) { statusError(errText(e)); }
   // Any edit can add, remove or re-wrap a grown row, so the growth map — and
   // every offset derived from it — has to be rebuilt.

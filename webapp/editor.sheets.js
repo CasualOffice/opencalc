@@ -6,6 +6,7 @@
 // function below only *reads* it, which is what made the move safe to do
 // without touching a single body.
 
+import { syncVolatileClock } from "./editor.selection.js";
 import {
   A1,
   HH,
@@ -431,6 +432,9 @@ export function setCalculationMode(mode) {
 }
 
 export function recalculateNow(budgetMs = undefined) {
+  // An explicit recalculation is exactly when Excel rerolls `RAND` and moves
+  // `NOW` on, so the clock is refreshed first (`CALC-VOL-01`).
+  syncVolatileClock();
   let outcome = "full";
   clearKeepWaiting();
   tryEdit(() => {
