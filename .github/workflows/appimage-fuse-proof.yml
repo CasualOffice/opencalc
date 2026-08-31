@@ -41,14 +41,15 @@ jobs:
       - name: What glibc does the shipped AppImage actually demand?
         shell: bash
         run: |
-          set -uo pipefail
+          set +e   # objdump exits nonzero on non-ELF files; GitHub's shell adds -e
           ./App.AppImage --appimage-extract >/dev/null
           echo "--- layout ---"
           ls -la squashfs-root/usr/bin/ 2>/dev/null || ls -la squashfs-root
           find squashfs-root -type f \( -perm -u+x -o -name '*.so*' \) -print0 > files.z
           echo "--- ELF files scanned: $(tr -cd '\0' < files.z | wc -c) ---"
-          xargs -0 -r -a files.z objdump -T 2>/dev/null \
-            | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV > vers.txt
+          xargs -0 -r -a files.z objdump -T 2>/dev/null > syms.txt
+          grep -oE 'GLIBC_[0-9.]+' syms.txt | sed 's/GLIBC_//' | sort -uV > vers.txt
+          echo "--- symbol lines: $(wc -l < syms.txt), distinct glibc versions: $(wc -l < vers.txt) ---"
           echo "--- every GLIBC version required, highest last ---"
           tail -8 vers.txt
           top="$(tail -1 vers.txt)"
