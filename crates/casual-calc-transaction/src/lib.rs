@@ -1501,3 +1501,39 @@ impl History {
 
 #[cfg(test)]
 mod tests;
+
+/// Which cells an operation **writes**, for attribution (`HIST-02`).
+///
+/// Deliberately narrower than the SDK's `recalc_plan`, which answers a different
+/// question. A formula whose result changed because a precedent moved was not
+/// *edited* by anybody — Excel does not credit the author of `A1` with every
+/// cell that sums it, and neither should this. So only the addresses an
+/// operation writes directly are returned.
+///
+/// Structural operations return nothing on purpose. Inserting a row moves a
+/// thousand cells without authoring any of them, and stamping the mover's name
+/// across a sheet they did not write is worse than saying nothing: it is
+/// confident and wrong, where silence is merely incomplete.
+#[must_use]
+pub fn written_cells(op: &Operation) -> Vec<(usize, CellRef)> {
+    let mut out = Vec::new();
+    collect_written(op, &mut out);
+    out
+}
+
+fn collect_written(op: &Operation, out: &mut Vec<(usize, CellRef)>) {
+    match op {
+        Operation::SetCell { sheet, at, .. }
+        | Operation::SetValue { sheet, at, .. }
+        | Operation::ClearCell { sheet, at, .. } => out.push((*sheet, *at)),
+        // A style change is an edit of the cell's appearance and is attributed:
+        // "who made this red" is the same question as "who typed this".
+        Operation::SetStyle { sheet, at, .. } => out.push((*sheet, *at)),
+        Operation::Batch(ops) => {
+            for inner in ops {
+                collect_written(inner, out);
+            }
+        }
+        _ => {}
+    }
+}

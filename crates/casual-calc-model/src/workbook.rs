@@ -7,6 +7,7 @@ use casual_calc_formula::Expr;
 use casual_calc_formula::stored::{ABSOLUTE, Origin};
 use serde::{Deserialize, Serialize};
 
+use crate::author::AuthorTable;
 use crate::defined_name::DefinedName;
 use crate::error::ModelError;
 use crate::ids::{FormulaHandle, Id, StringId, StyleId};
@@ -314,6 +315,14 @@ pub struct Workbook {
     /// The interned style table cells reference.
     #[serde(default, skip_serializing_if = "StyleTable::is_empty")]
     pub styles: StyleTable,
+    /// The interned authors [`Sheet::attribution`](crate::Sheet::attribution)
+    /// references (`HIST-02`).
+    ///
+    /// Skipped when empty, which is every workbook without collaboration — a
+    /// local session has one author and it is you, so a name would be noise and
+    /// a table would be bytes spent saying so.
+    #[serde(default, skip_serializing_if = "AuthorTable::is_empty")]
+    pub authors: AuthorTable,
     /// The formula AST arena; `Cell::formula` indexes into it (the reserved calc
     /// seam). ASTs are parsed at import; the calc engine evaluates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -522,6 +531,7 @@ impl Workbook {
             workbook_id,
             strings: StringTable::new(),
             styles: StyleTable::new(),
+            authors: AuthorTable::new(),
             formulas: Vec::new(),
             formula_index: BTreeMap::new(),
             defined_names: Vec::new(),

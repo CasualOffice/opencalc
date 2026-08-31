@@ -696,6 +696,12 @@ fn every_sheet_field_is_carried_by_an_operation_or_counted_as_unexpressed() {
         name: _,
         // Carried by `SetCell`, one per differing address.
         cells: _,
+        // **Counted as unexpressed, not carried** (`HIST-02`). A restore emits
+        // cell operations and attribution lives on the sheet, so nothing
+        // re-stamps it — which is the half that matters. Carrying the
+        // snapshot's authorship across would need a new `Operation` variant and
+        // therefore a protocol bump; `HIST-04` holds that.
+        attribution: _,
         // Carried by `SetTabColor`.
         tab_color: _,
         // Carried by `SetSheetMetadata` — the twenty-three fields of

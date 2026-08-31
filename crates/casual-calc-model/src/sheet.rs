@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::author::AuthorId;
 use crate::chart::{ChartView, ImageView};
 use crate::ids::SheetId;
 use crate::store::{CellRange, CellRef, CellStore};
@@ -139,6 +140,21 @@ impl OutlinePr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Sheet {
+    /// Who last changed each attributed cell (`HIST-02`).
+    ///
+    /// **A side map, not a field on [`Cell`](crate::Cell).** The first attempt put an
+    /// `Option<AuthorId>` on the cell — four bytes, which struct alignment
+    /// rounded to eight, taking the record from 32 to 40 and the million-cell
+    /// budget with it. `memory_ceiling.rs` caught that, and it was right to:
+    /// eight megabytes on every workbook to answer a question that only has an
+    /// answer in a shared one.
+    ///
+    /// Here the cost is proportional to **cells somebody actually edited while
+    /// collaborating**, not to cells. A local session pays nothing — the map is
+    /// empty, and `skip_serializing_if` keeps it out of the file entirely.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attribution: BTreeMap<CellRef, AuthorId>,
+
     /// Stable sheet identity.
     pub id: SheetId,
     /// Display name (tab label).
@@ -1225,6 +1241,7 @@ impl Sheet {
     /// A new empty sheet.
     pub fn new(id: SheetId, name: impl Into<String>) -> Self {
         Self {
+            attribution: BTreeMap::new(),
             id,
             name: name.into(),
             cells: CellStore::new(),

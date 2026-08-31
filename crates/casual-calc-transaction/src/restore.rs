@@ -151,6 +151,21 @@ impl Interner {
         mine
     }
 
+    // **A restore does not touch attribution, and that is deliberate**
+    // (`HIST-02`, and `HIST-04` for the part left open).
+    //
+    // `docs/89` §7 item 6 said a restore must carry the snapshot's authorship
+    // across rather than re-stamping every cell with whoever pressed the
+    // button. Re-stamping is the dangerous half and it cannot happen: a restore
+    // emits a batch of *cell* operations, and attribution lives on the sheet,
+    // so nothing here writes it.
+    //
+    // Carrying it across is the other half, and it needs an operation kind that
+    // sets attribution — which is a new `Operation` variant and therefore
+    // `CHT-07`'s *loud* wire break, in a P2 about showing a name on hover. So
+    // the restored cells keep whatever attribution they had, which is stale
+    // rather than wrong-and-confident, and `HIST-04` carries the rest.
+
     fn style(&mut self, live: &mut Workbook, from: &Workbook, id: StyleId) -> Option<StyleId> {
         if let Some(&mine) = self.styles.get(&id) {
             return Some(mine);
@@ -269,6 +284,18 @@ fn unexpressed_sheet_fields(
             field,
         });
     };
+    // **Attribution is reported, not carried** (`HIST-02`; `HIST-04` for the
+    // rest). Re-stamping is the dangerous half and cannot happen — a restore
+    // emits *cell* operations and attribution lives on the sheet, so nothing
+    // here writes it. Carrying the snapshot's authorship across is the other
+    // half, and it needs an operation kind that sets attribution: a new
+    // `Operation` variant, which is `CHT-07`'s loud wire break, inside a P2
+    // about showing a name on hover. So the restored cells keep whatever
+    // attribution they had, and the report says so rather than letting a stale
+    // name read as a restored one.
+    if mine.attribution != theirs.attribution {
+        note("attribution");
+    }
     if mine.outline != theirs.outline {
         note("outline");
     }
