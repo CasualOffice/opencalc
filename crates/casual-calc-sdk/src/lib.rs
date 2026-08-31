@@ -15,12 +15,12 @@ use casual_calc_import::{ImportError, import_package_cancellable};
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::print::PrintContext;
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
-use casual_calc_model::{Id, Workbook};
+use casual_calc_model::{Author, AuthorId, Id, Workbook};
 use casual_calc_render::pdf::{PdfBand, PdfFurniture, PdfMetadata, PdfPage, write_pdf};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
     Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, restore,
-    undo_would_discard,
+    undo_would_discard, written_cells,
 };
 
 // Re-export the vocabulary a host needs, so embedders depend on one crate.
@@ -454,6 +454,10 @@ pub struct Restored {
 pub struct WorkbookSession {
     workbook: Workbook,
     history: History,
+    /// Who this session's edits are by (`HIST-02`), interned into the
+    /// workbook's author table. `None` in a local session, where there is one
+    /// author and naming them would be noise.
+    author: Option<AuthorId>,
     report: CompatibilityReport,
     config: SessionConfig,
     /// The mode in force, after resolving the config against the file.
@@ -583,6 +587,7 @@ impl WorkbookSession {
         let mut workbook = Workbook::new(Id::from_parts(SESSION_NAMESPACE, 1));
         apply_environment(&mut workbook, &config);
         Self {
+            author: None,
             calculation: config.calculation.unwrap_or_default(),
             history: History::with_depth(config.undo_depth),
             workbook,
@@ -617,6 +622,7 @@ impl WorkbookSession {
         apply_environment(&mut workbook, &config);
         recalculate(&mut workbook);
         Self {
+            author: None,
             calculation: config.calculation.unwrap_or_default(),
             history: History::with_depth(config.undo_depth),
             workbook,
@@ -679,6 +685,7 @@ impl WorkbookSession {
             recalculate(&mut workbook);
         }
         Ok(Self {
+            author: None,
             workbook,
             history: History::with_depth(config.undo_depth),
             report: outcome.report,
@@ -794,6 +801,7 @@ impl WorkbookSession {
         // with itself.
         recalculate(&mut workbook);
         Ok(Self {
+            author: None,
             calculation: config.calculation.unwrap_or_default(),
             history: History::with_depth(config.undo_depth),
             workbook,
@@ -848,6 +856,7 @@ impl WorkbookSession {
         // any other — `stale` false and cached values current.
         recalculate(&mut workbook);
         Ok(Self {
+            author: None,
             calculation: config.calculation.unwrap_or_default(),
             history: History::with_depth(config.undo_depth),
             workbook,
@@ -1229,7 +1238,23 @@ impl WorkbookSession {
         // rows on whichever sheet inherits the number, with nothing on the wire
         // to explain it and nothing in the history to undo.
         self.resequence_views(&op);
+        // **Attributed after the edit lands, and only if it landed.** A refused
+        // edit that left a name behind would be attribution for something that
+        // did not happen — the same reasoning that moved the outgoing-log write
+        // below `apply` rather than above it.
+        //
+        // Only the cells the operation *writes*: a formula whose result changed
+        // because a precedent moved was not edited by anybody, and a structural
+        // move authors nothing (`written_cells`).
+        let attributed = self.author.map(|who| (who, written_cells(&op)));
         self.history.apply(&mut self.workbook, op)?;
+        if let Some((who, cells)) = attributed {
+            for (sheet, at) in cells {
+                if let Some(sh) = self.workbook.sheets.get_mut(sheet) {
+                    sh.attribution.insert(at, who);
+                }
+            }
+        }
         if let Some(narrowed) = candidate
             && let Some(log) = self.applied.as_mut()
         {
@@ -1428,6 +1453,26 @@ impl WorkbookSession {
     /// The other half of [`VersionStore::into_parts`]. Ids continue past the
     /// highest that comes back, so a version restored from IndexedDB and a
     /// version captured afterwards cannot collide.
+    /// Who this session's edits are by (`HIST-02`).
+    ///
+    /// `None` — the default — means a local session, where there is one author
+    /// and it is you: a name would be noise and the attribution map stays
+    /// empty, which is what keeps the cost at zero for every workbook that is
+    /// not shared.
+    ///
+    /// The host supplies this, and supplies whatever identity it has. The name
+    /// is for display and the id is what is compared; see
+    /// [`AuthorTable::intern`](casual_calc_model::AuthorTable::intern).
+    pub fn set_author(&mut self, author: Option<Author>) {
+        self.author = author.map(|a| self.workbook.authors.intern(a));
+    }
+
+    /// The interned author this session stamps its edits with, if any.
+    #[must_use]
+    pub const fn author(&self) -> Option<AuthorId> {
+        self.author
+    }
+
     pub fn set_versions(&mut self, versions: VersionStore) {
         self.versions = versions;
     }

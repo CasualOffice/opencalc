@@ -3789,3 +3789,133 @@ fn a_script_no_face_covers_is_named_in_the_export_report() {
         "a sheet in {script} exported without the report naming that script: {named:?}"
     );
 }
+
+/// Attribution: who last changed a cell (`HIST-02`).
+mod attribution {
+    use super::*;
+    use casual_calc_model::Author;
+
+    fn who(name: &str, id: &str) -> Author {
+        Author {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    /// **A local session attributes nothing, and that is what keeps it free.**
+    ///
+    /// One author, and it is you. The map stays empty, so a workbook that is
+    /// never shared carries no attribution and serialises none.
+    #[test]
+    fn a_session_with_no_author_attributes_nothing() {
+        let mut s = WorkbookSession::with_sheet();
+        let op = s.input_edit(0, CellRef::new(0, 0), "hello");
+        s.edit(op).expect("edit");
+        assert!(
+            s.workbook().sheets[0].attribution.is_empty(),
+            "a local session wrote attribution, which every unshared workbook \
+             would then pay for"
+        );
+    }
+
+    #[test]
+    fn an_edit_is_attributed_to_the_session_author() {
+        let mut s = WorkbookSession::with_sheet();
+        s.set_author(Some(who("Priya", "u_1")));
+        let op = s.input_edit(0, CellRef::new(2, 3), "42");
+        s.edit(op).expect("edit");
+
+        let id = s.workbook().sheets[0]
+            .attribution
+            .get(&CellRef::new(2, 3))
+            .copied()
+            .expect("the edited cell is not attributed");
+        assert_eq!(
+            s.workbook().authors.get(id).map(|a| a.name.as_str()),
+            Some("Priya")
+        );
+    }
+
+    /// **A refused edit leaves no name behind.**
+    ///
+    /// Attribution for something that did not happen is worse than none — the
+    /// same reasoning that put the outgoing-log write below `apply` rather than
+    /// above it.
+    #[test]
+    fn a_refused_edit_attributes_nothing() {
+        let mut s = WorkbookSession::with_sheet_from(SessionConfig::default().read_only());
+        s.set_author(Some(who("Priya", "u_1")));
+        let op = s.input_edit(0, CellRef::new(0, 0), "nope");
+        assert!(s.edit(op).is_err(), "a read-only session accepted an edit");
+        assert!(
+            s.workbook().sheets[0].attribution.is_empty(),
+            "a refused edit left an author behind"
+        );
+    }
+
+    /// **The id is the identity; the name is display.**
+    ///
+    /// Two people called Alex are two authors, and one who renames themselves
+    /// is still one. This is the whole of what the host's id buys, and the
+    /// answer would be different — and wrong — if `intern` matched on the name.
+    #[test]
+    fn two_people_sharing_a_name_are_two_authors() {
+        let mut wb = casual_calc_model::Workbook::new(casual_calc_model::Id::from_parts(1, 1));
+        let a = wb.authors.intern(who("Alex", "u_1"));
+        let b = wb.authors.intern(who("Alex", "u_2"));
+        assert_ne!(
+            a, b,
+            "two ids collapsed into one author because they share a name"
+        );
+        assert_eq!(wb.authors.len(), 2);
+    }
+
+    #[test]
+    fn renaming_yourself_does_not_make_you_a_second_author() {
+        let mut wb = casual_calc_model::Workbook::new(casual_calc_model::Id::from_parts(1, 1));
+        let first = wb.authors.intern(who("Alex", "u_1"));
+        let after = wb.authors.intern(who("Alex Chen", "u_1"));
+        assert_eq!(first, after, "a rename created a second author");
+        assert_eq!(wb.authors.len(), 1);
+        // And the cells already attributed show the new name.
+        assert_eq!(
+            wb.authors.get(first).map(|a| a.name.as_str()),
+            Some("Alex Chen")
+        );
+    }
+
+    /// **Without a host id, the name is the identity** — which is exactly
+    /// today's behaviour for a host that supplies nothing, and no worse.
+    #[test]
+    fn without_an_id_the_name_is_the_identity() {
+        let mut wb = casual_calc_model::Workbook::new(casual_calc_model::Id::from_parts(1, 1));
+        let a = wb.authors.intern(who("Alex", ""));
+        let b = wb.authors.intern(who("Alex", ""));
+        assert_eq!(a, b);
+        assert_eq!(wb.authors.len(), 1);
+    }
+
+    /// **A recalculated cell was not edited by anybody.**
+    ///
+    /// Excel does not credit the author of `A1` with every cell that sums it,
+    /// and `written_cells` is narrower than `recalc_plan` for exactly this.
+    #[test]
+    fn a_dependent_formula_is_not_attributed_to_whoever_moved_its_precedent() {
+        let mut s = WorkbookSession::with_sheet();
+        let op = s.input_edit(0, CellRef::new(1, 0), "=A1*2");
+        s.edit(op).expect("formula");
+        s.set_author(Some(who("Priya", "u_1")));
+        let op = s.input_edit(0, CellRef::new(0, 0), "10");
+        s.edit(op).expect("edit");
+
+        let sheet = &s.workbook().sheets[0];
+        assert!(
+            sheet.attribution.contains_key(&CellRef::new(0, 0)),
+            "the edited cell is not attributed"
+        );
+        assert!(
+            !sheet.attribution.contains_key(&CellRef::new(1, 0)),
+            "the dependent formula was attributed to somebody who never touched it"
+        );
+    }
+}
