@@ -26,45 +26,60 @@ jobs:
           chmod +x App.AppImage
           ls -la App.AppImage
 
+      # The runner ships /usr/bin/fusermount (FUSE 2), which a stock Ubuntu
+      # 22.04 or 24.04 desktop does NOT — those have fusermount3 only. That
+      # difference is exactly why this shipped: CI is not a user's machine.
+      # Hiding the FUSE 2 binary while leaving fusermount3 in place models a
+      # stock desktop precisely.
+      - name: Make this runner look like a stock Ubuntu desktop
+        run: |
+          set -euo pipefail
+          sudo mv /usr/bin/fusermount /usr/bin/fusermount.hidden
+          echo "fusermount  : $(command -v fusermount || echo 'ABSENT — as on stock 22.04')"
+          echo "fusermount3 : $(command -v fusermount3 || echo 'ABSENT')"
+
       - name: RED — the published AppImage cannot mount here
         run: |
           set +e
-          out="$(./App.AppImage --appimage-mount 2>&1)"; rc=$?
+          out="$(timeout 30 ./App.AppImage --appimage-mount 2>&1)"; rc=$?
           echo "exit=$rc"; echo "$out"
-          if [ $rc -eq 0 ]; then
-            echo "::error::it mounted — REL-09 does not reproduce, do not ship the fix on this evidence"
+          if [ $rc -eq 124 ]; then
+            echo "::error::it mounted and blocked — REL-09 does not reproduce"
             exit 1
           fi
-          echo "REPRODUCED: a stock runner cannot run the shipped AppImage"
+          if [ $rc -eq 0 ]; then
+            echo "::error::it mounted — REL-09 does not reproduce"
+            exit 1
+          fi
+          echo "REPRODUCED: a stock desktop cannot run the AppImage v0.0.1 shipped"
 
       - name: Repack it onto the static runtime, which carries its own FUSE
         run: |
           set -euo pipefail
-          ./App.AppImage --appimage-extract >/dev/null   # works without FUSE
+          ./App.AppImage --appimage-extract >/dev/null   # needs no FUSE at all
           curl -fsSL -o runtime-x86_64 \
             https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-          chmod +x runtime-x86_64
           curl -fsSL -o appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
+          chmod +x runtime-x86_64 appimagetool
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
             --runtime-file runtime-x86_64 squashfs-root Fixed.AppImage
           chmod +x Fixed.AppImage
-          ls -la Fixed.AppImage
+          ls -la App.AppImage Fixed.AppImage
 
-      - name: GREEN — the repacked AppImage mounts on the same runner
+      - name: GREEN — the repacked AppImage mounts on that same stock machine
         run: |
           set -euo pipefail
-          ./Fixed.AppImage --appimage-mount > mnt.txt 2>&1 &
+          command -v fusermount && { echo "::error::fusermount came back; the test is void"; exit 1; }
+          timeout 40 ./Fixed.AppImage --appimage-mount > mnt.txt 2>&1 &
           pid=$!
-          for _ in $(seq 1 20); do [ -s mnt.txt ] && break; sleep 1; done
+          for _ in $(seq 1 25); do [ -s mnt.txt ] && break; sleep 1; done
           cat mnt.txt
           mp="$(head -1 mnt.txt)"
           if [ -d "$mp" ] && [ -e "$mp/AppRun" ]; then
-            echo "FIXED: mounted at $mp with no libfuse2 on this machine"
-            kill $pid 2>/dev/null || true
+            echo "FIXED: mounted at $mp with no FUSE 2 on this machine"
           else
             echo "::error::the repacked AppImage did not mount either"
-            kill $pid 2>/dev/null || true
-            exit 1
+            kill $pid 2>/dev/null || true; exit 1
           fi
+          kill $pid 2>/dev/null || true
