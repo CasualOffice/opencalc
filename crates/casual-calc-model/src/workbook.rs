@@ -315,7 +315,8 @@ pub struct Workbook {
     /// The interned style table cells reference.
     #[serde(default, skip_serializing_if = "StyleTable::is_empty")]
     pub styles: StyleTable,
-    /// The interned authors [`Cell::last_edited_by`] references (`HIST-02`).
+    /// The interned authors [`Sheet::attribution`](crate::Sheet::attribution)
+    /// references (`HIST-02`).
     ///
     /// Skipped when empty, which is every workbook without collaboration — a
     /// local session has one author and it is you, so a name would be noise and

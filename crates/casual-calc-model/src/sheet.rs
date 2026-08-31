@@ -142,7 +142,7 @@ impl OutlinePr {
 pub struct Sheet {
     /// Who last changed each attributed cell (`HIST-02`).
     ///
-    /// **A side map, not a field on [`Cell`].** The first attempt put an
+    /// **A side map, not a field on [`Cell`](crate::Cell).** The first attempt put an
     /// `Option<AuthorId>` on the cell — four bytes, which struct alignment
     /// rounded to eight, taking the record from 32 to 40 and the million-cell
     /// budget with it. `memory_ceiling.rs` caught that, and it was right to:

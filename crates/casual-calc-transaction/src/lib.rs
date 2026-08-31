@@ -1504,7 +1504,7 @@ mod tests;
 
 /// Which cells an operation **writes**, for attribution (`HIST-02`).
 ///
-/// Deliberately narrower than [`recalc_plan`], which answers a different
+/// Deliberately narrower than the SDK's `recalc_plan`, which answers a different
 /// question. A formula whose result changed because a precedent moved was not
 /// *edited* by anybody — Excel does not credit the author of `A1` with every
 /// cell that sums it, and neither should this. So only the addresses an
