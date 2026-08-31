@@ -625,3 +625,55 @@ pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
     })
     .unwrap_or_default()
 }
+
+/// Who last changed a cell, or empty (`HIST-02`).
+///
+/// Returns the display name. The host's opaque id is what the model *compares*
+/// — two people called Alex are two authors — but it is not something to show
+/// somebody, and a binding that returned it would invite a host to draw it.
+///
+/// Empty in every local session, where there is one author and it is you, and
+/// empty for every cell of a file just opened: attribution does not survive a
+/// round-trip through `.xlsx`, because OOXML revision tracking is a different
+/// and larger format. The editor says "since this file was opened" where it
+/// shows the name, rather than letting an absence read as "nobody".
+#[wasm_bindgen]
+#[must_use]
+pub fn session_cell_author(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return String::new();
+        };
+        sh.attribution
+            .get(&CellRef::new(row, col))
+            .and_then(|id| wb.authors.get(*id))
+            .map(|a| a.name.clone())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// Tell the engine who this session's edits are by (`HIST-02`).
+///
+/// `id` is the host's own opaque key — its user id, a JWT subject, anything —
+/// and is what identity is decided by. `name` is for display only. A host that
+/// has no id passes an empty one, and the name becomes the identity, which is
+/// exactly what a host supplying nothing has today.
+///
+/// Passing an empty name clears the author, which is what a session that stops
+/// being collaborative should do rather than keep stamping a stale name.
+#[wasm_bindgen]
+pub fn session_set_author(id: &str, name: &str) {
+    let _ = with_session_mut(|s| {
+        if name.trim().is_empty() {
+            s.set_author(None);
+        } else {
+            s.set_author(Some(casual_calc_model::Author {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            }));
+        }
+        Ok(())
+    });
+}

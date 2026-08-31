@@ -26,7 +26,9 @@
 use std::collections::BTreeMap;
 
 use casual_calc_formula::Expr;
-use casual_calc_model::{CellValue, FormulaHandle, Sheet, StringId, Style, StyleId, Workbook};
+use casual_calc_model::{
+    Author, CellValue, FormulaHandle, Sheet, StringId, Style, StyleId, Workbook,
+};
 
 use crate::Operation;
 
@@ -40,6 +42,22 @@ use crate::Operation;
 pub struct WireOperation {
     /// The operation, with the sender's handles still in it.
     pub op: Operation,
+    /// Who made this edit (`HIST-02`), as a value rather than an id.
+    ///
+    /// An `AuthorId` is replica-local exactly as a `StringId` is — the tables
+    /// number independently — so sending the id would mean *the sender's* third
+    /// author, which is somebody else on the receiver. The author travels whole
+    /// and the receiver interns it, which is the same shape as `runs` in
+    /// `COL-62` and for the same reason.
+    ///
+    /// **`PROTOCOL_VERSION` does not move for this**, and that is the `Draft`
+    /// case rather than `CHT-07`'s: this struct does not `deny_unknown_fields`,
+    /// so an old peer skips the key and reads the rest exactly as before —
+    /// unattributed, which is the behaviour it already had — and a new peer
+    /// seeing no author concludes "not stated", which is what such a sender
+    /// means. Nobody is misled, so nobody is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Author>,
     /// Every formula the operation's handles refer to, by the sender's index.
     #[serde(with = "interned_keys")]
     pub formulas: BTreeMap<FormulaHandle, Expr>,
@@ -178,6 +196,18 @@ impl WireOperation {
     /// [`Self::localise`] sees the same absence the sender had rather than a
     /// silently different formula.
     #[must_use]
+    /// The same, attributed to whoever made it (`HIST-02`).
+    ///
+    /// Separate from [`of`](Self::of) rather than replacing it: the author is a
+    /// property of the *session* that made the submission and cannot be read
+    /// off the workbook, and every existing caller is a path where there is no
+    /// author to state.
+    pub fn of_by(op: Operation, workbook: &Workbook, author: Option<Author>) -> Self {
+        let mut wire = Self::of(op, workbook);
+        wire.author = author;
+        wire
+    }
+
     pub fn of(op: Operation, workbook: &Workbook) -> Self {
         let mut formulas = BTreeMap::new();
         let mut styles = BTreeMap::new();
@@ -208,6 +238,8 @@ impl WireOperation {
             }
         });
         Self {
+            // `of` states no author; `of_by` is the path that does.
+            author: None,
             op,
             formulas,
             styles,
@@ -229,7 +261,11 @@ impl WireOperation {
             styles,
             strings,
             runs,
+            author,
         } = self;
+        // Interned on arrival, exactly as the strings and styles below are. The
+        // id it produces belongs to *this* workbook.
+        let author = author.map(|a| workbook.authors.intern(a));
 
         let mut formula_map = BTreeMap::new();
         for (theirs, expr) in formulas {
@@ -268,6 +304,24 @@ impl WireOperation {
             *formula = formula.and_then(|handle| formula_map.get(&handle).copied());
             *style = style.and_then(|id| style_map.get(&id).copied());
         });
+        // **Attribution is stamped here rather than after the apply**, which is
+        // the opposite of what the local path does, and the reason is the
+        // difference between the two paths. A local edit may be refused, and a
+        // name left behind for an edit that did not happen is a lie. An
+        // operation arriving here has already been accepted by the server and
+        // applied by every other participant — if *this* replica then refuses
+        // it, the replicas have diverged, which is a far larger problem than a
+        // map entry, and the entry is not the harm.
+        //
+        // Only the cells the operation writes; a dependent recalculated by it
+        // was not edited by anybody (`written_cells`).
+        if let Some(who) = author {
+            for (sheet, at) in crate::written_cells(&op) {
+                if let Some(sh) = workbook.sheets.get_mut(sheet) {
+                    sh.attribution.insert(at, who);
+                }
+            }
+        }
         op
     }
 }
@@ -950,5 +1004,119 @@ mod rich_text_on_the_wire {
             "the formatting came across with the text, not only the characters — \
              two people editing one bold-and-plain cell must not converge on plain"
         );
+    }
+}
+
+/// Attribution on the wire (`HIST-02`).
+#[cfg(test)]
+mod attribution_on_the_wire {
+    use super::*;
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId};
+
+    fn workbook() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(0x5742, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1"));
+        wb
+    }
+
+    fn set(at: CellRef, text: &str, wb: &mut Workbook) -> Operation {
+        let id = wb.intern_string(text);
+        Operation::SetCell {
+            sheet: 0,
+            at,
+            cell: Some(Cell::value(CellValue::SharedString(id))),
+        }
+    }
+
+    /// **The author crosses with the edit, and is interned on arrival.**
+    ///
+    /// An `AuthorId` is replica-local exactly as a `StringId` is, so sending the
+    /// id would mean *the sender's* third author — somebody else on the
+    /// receiver. This is the same failure `COL-12` found for strings.
+    #[test]
+    fn an_edit_arrives_attributed_to_the_person_who_made_it() {
+        let mut sender = workbook();
+        let op = set(CellRef::new(0, 0), "hello", &mut sender);
+        let who = Author {
+            id: "u_7".to_owned(),
+            name: "Priya".to_owned(),
+        };
+        let wire = WireOperation::of_by(op, &sender, Some(who));
+
+        // A receiver that already knows somebody else, so the ids cannot line
+        // up by accident — which is the whole point of interning on arrival.
+        let mut receiver = workbook();
+        receiver.authors.intern(Author {
+            id: "u_1".to_owned(),
+            name: "Someone Else".to_owned(),
+        });
+
+        let localised = wire.localise(&mut receiver);
+        casual_calc_transaction_apply(&mut receiver, localised);
+
+        let id = receiver.sheets[0]
+            .attribution
+            .get(&CellRef::new(0, 0))
+            .copied()
+            .expect("the arriving edit was not attributed");
+        assert_eq!(
+            receiver.authors.get(id).map(|a| a.name.as_str()),
+            Some("Priya"),
+            "the author arrived as the sender's id and resolved to the wrong person"
+        );
+    }
+
+    /// **A peer that has never heard of authorship still reads the message.**
+    ///
+    /// This is why `PROTOCOL_VERSION` does not move — the same `Draft` case as
+    /// `COL-62`, and it is a test rather than a paragraph for the same reason.
+    #[test]
+    fn a_peer_that_predates_attribution_still_reads_a_message_carrying_it() {
+        #[derive(serde::Deserialize)]
+        struct OldWireOperation {
+            #[allow(dead_code)]
+            op: Operation,
+        }
+
+        let mut sender = workbook();
+        let op = set(CellRef::new(1, 1), "hi", &mut sender);
+        let wire = WireOperation::of_by(
+            op,
+            &sender,
+            Some(Author {
+                id: "u_7".to_owned(),
+                name: "Priya".to_owned(),
+            }),
+        );
+        let json = serde_json::to_string(&wire).expect("encode");
+        assert!(
+            json.contains("Priya"),
+            "the fixture carries no author, so it cannot show that one is skippable"
+        );
+        serde_json::from_str::<OldWireOperation>(&json)
+            .expect("a peer without the author field refused a message carrying one");
+    }
+
+    /// **An unattributed edit stays unattributed**, and costs no bytes saying so.
+    #[test]
+    fn an_edit_with_no_author_writes_no_attribution_and_no_key() {
+        let mut sender = workbook();
+        let op = set(CellRef::new(0, 0), "x", &mut sender);
+        let wire = WireOperation::of(op, &sender);
+        let json = serde_json::to_string(&wire).expect("encode");
+        assert!(
+            !json.contains("author"),
+            "an absent author still spent a key"
+        );
+
+        let mut receiver = workbook();
+        let localised = wire.localise(&mut receiver);
+        casual_calc_transaction_apply(&mut receiver, localised);
+        assert!(receiver.sheets[0].attribution.is_empty());
+    }
+
+    fn casual_calc_transaction_apply(wb: &mut Workbook, op: Operation) {
+        crate::apply(wb, op).expect("apply");
     }
 }
