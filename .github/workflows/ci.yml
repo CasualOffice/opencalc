@@ -501,6 +501,12 @@ jobs:
       # written out twice. Nothing compared them.
       - name: The openable-extension lists agree across the workspaces
         run: python3 tools/check-openable-extensions.py
+      # `REL-05`: three packages publish from one tag and the release workflow
+      # compares that tag with one of them, so a sibling pin left at the old
+      # version publishes `react@0.0.1` depending on `sheet@0.0.0` — which npm
+      # resolves rather than refuses.
+      - name: The SDK packages agree on a version
+        run: python3 tools/check-sdk-versions.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
