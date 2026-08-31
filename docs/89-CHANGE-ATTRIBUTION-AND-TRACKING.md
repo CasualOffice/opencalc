@@ -105,11 +105,28 @@ model. A `String` per cell at a million cells is a million allocations to say
 "Priya" a million times, and the store is already careful enough that
 `PERF-11` changed how *every reference* is stored to avoid exactly this.
 
-**[proposed] An interned `AuthorId(u32)` and a side table.** The same shape the
-model already uses for strings and styles: `Cell` grows one `Option<AuthorId>`
-— four bytes, and `Option<NonZeroU32>` makes it four, not eight — and the
-workbook holds `authors: Vec<Author>` where `Author { name, id }`. Ten
-collaborators cost ten entries.
+**[refused, and this note was wrong] `Cell` grows one `Option<AuthorId>`.**
+The arithmetic here said four bytes, because `Option<NonZeroU32>` is four. It
+is — and the *struct* went from 32 bytes to 40, because alignment rounds the
+whole record up. `memory_ceiling.rs` failed the moment it was tried:
+
+    a cell is 40 bytes against a ceiling of 32. At the 1M-cell target
+    every byte added here is a megabyte of the budget.
+
+Eight megabytes on every workbook, to answer a question that only has an answer
+in a shared one. The gate was right and the design was wrong, which is the
+reason the gate exists.
+
+**[built] An interned `AuthorId` and a side map on the sheet.** `Author` and
+`AuthorTable` are interned exactly as strings and styles are — ten collaborators
+cost ten entries — and the cell reference lives in
+`Sheet::attribution: BTreeMap<CellRef, AuthorId>`.
+
+The cost is then proportional to **cells somebody actually edited while
+collaborating**, not to cells. A local session pays nothing: the map is empty,
+`skip_serializing_if` keeps it out of the file, and `Cell` is 32 bytes again.
+That is a better shape than the one this note proposed, and it was found by
+running the tests rather than by thinking harder.
 
 **[proposed] A timestamp is *not* per cell.** "Edited by Priya" is the question
 people ask; "edited by Priya at 14:32:07" is a question they ask about one cell,
@@ -174,25 +191,66 @@ that the chrome has a fixed budget and this feature does not earn a region.
 | 3 | `author` on `WireOperation`, no version bump, old peers skip it | 1 |
 | 4 | The server relays it unchanged — it is not the server's to invent | 3 |
 | 5 | The editor's hover line, tinted by presence colour | 1, 2 |
-| 6 | A version restore does **not** re-stamp; the original author survives | 1 |
+| 6 | A version restore does **not** re-stamp — free, given the shape | 1 |
+| 7 | A restore *carries* the snapshot's authorship — needs an operation kind, so a protocol bump (`HIST-04`) | 3 |
 
-Item 6 is the one to get wrong. `restore_version` applies ordinary edits, and
-the naive implementation stamps them with whoever pressed the button —
-rewriting the past into a single author's name. There should be a test that
-restores somebody else's work and asserts the attribution did not move.
+Item 6 was named as the one to get wrong, and the side map made it free: a
+restore emits *cell* operations and attribution lives on the sheet, so nothing
+re-stamps it. That is the dangerous half, and it cannot happen.
+
+The other half is item 7 and it is **not** free. Carrying the snapshot's
+authorship across needs an operation that sets attribution — a new `Operation`
+variant, which is `CHT-07`'s *loud* wire break, inside a P2 about showing a name
+on hover. So a restore leaves attribution standing and **reports it as
+unexpressed**, which is where every other thing a restore cannot carry is
+already named. Stale rather than wrong-and-confident, and said out loud.
 
 ---
 
-## 8. The open question
+## 8. The question, answered
 
 **Is a name enough, or does this need a stable identity?**
 
 `Presence.name` is a display string the host supplies. Two people called *Alex*
-are one author under a name and two under a JWT `sub`. Using `sub` is more
-correct and means the model holds something that identifies a *person*, which is
-a privacy surface a spreadsheet did not previously have — and `AGENTS.md` puts
-that decision with the product owner rather than with an implementer.
+are one author under a name and two under a stable id; a person who renames
+themselves mid-session is one author under an id and two under a name.
 
-The proposal here is **the host's opaque author id, defaulting to the presence
-name**, so a host that has real identity can supply it and one that has not is
-no worse off than today.
+**Answered: the host's opaque author id, falling back to the display name.**
+[decided]
+
+The host supplies an `authorId` on the join handshake — its own user key, or the
+JWT `sub`, or anything opaque it likes — and that is what the model stores and
+compares. When it supplies none, the display name *is* the identity, which is
+exactly today's behaviour and no worse.
+
+The reason to prefer this over reading `sub` directly, which the server already
+verifies and could use for free: **it keeps the privacy decision with the party
+that owns it.** Putting an identity provider's subject into the workbook model
+means putting it into version snapshots and anything that serialises them, and
+that is a stronger commitment than a spreadsheet has made before. An integrator
+who wants it says so; one who does not is not opted in on their behalf.
+
+The name still travels, for display. It is not the identity.
+
+## 9. What a saved file loses, and where that is said
+
+Attribution does not survive a round-trip: OOXML revision tracking is a
+different and larger format, and `IO-*` would have to carry it.
+
+**Answered: the hover says so, and nothing interrupts a save.** [decided]
+
+    Last changed by Alex Chen,
+    since this file was opened.
+
+One clause, in the place the claim is made. It prevents the one wrong belief
+that matters — that reopening the file will still show who did what — at the
+moment somebody is looking at the attribution, rather than at the moment they
+are trying to save.
+
+The alternatives were considered and declined. A dialog on first save is
+unmissable and interrupts a save to report something the user cannot act on. The
+compatibility report is where every other lossy conversion is named and would be
+consistent, but it is read after the fact, if at all — and unlike an image that
+silently vanishes, attribution *looks* present in the reopened file, because the
+cells are all still there. That is what makes the in-place sentence the right
+one: the correction has to sit next to the claim.
