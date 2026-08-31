@@ -58,6 +58,24 @@ const median = async (page, probe, burnMs) => stats(
   (await page.evaluate(measureCalls, { probe, reps: 20, warmup: 5, burnMs })).ms,
 ).p50;
 
+/// The display period, measured on the machine rather than assumed.
+///
+/// `PERF-13`'s signature is that the report **equals** this number, so this is
+/// the thing a probe has to be distinguishable *from*. Bounding the draw probe
+/// against `HALF` instead was a wall-clock budget in disguise — the one thing
+/// the header of this file promises it does not contain — and it failed on
+/// main at `4.10ms`, drawing 720 cells on a contended runner.
+const displayPeriod = (page) => page.evaluate(() => new Promise((res) => {
+  const ts = [];
+  const tick = (t) => {
+    ts.push(t);
+    if (ts.length < 12) { requestAnimationFrame(tick); return; }
+    const d = ts.slice(1).map((v, i) => v - ts[i]).sort((a, b) => a - b);
+    res(d[d.length >> 1]);
+  };
+  requestAnimationFrame(tick);
+}));
+
 test("the call timing mode attributes a cost of a size the test chose", async ({ page }) => {
   await boot(page);
 
@@ -85,11 +103,21 @@ test("the call timing mode attributes a cost of a size the test chose", async ({
     + `nothing; anything near the display period means the interval is being reported `
     + `instead of the work, which is what PERF-13 is.`,
   ).toBeLessThan(HALF);
+  // **Against the display period, not against `HALF`.** `idleQuiet` above can
+  // use a fixed bound because an empty probe costs nothing anywhere. This probe
+  // draws 720 cells, so its cost is a property of the machine, and any constant
+  // ceiling is a performance budget on a shared runner — which is the flaky
+  // test this file's header promises not to be, and which it became at 4.10ms
+  // against a 4ms bound. What `PERF-13` looks like is the report *equalling*
+  // the period, so that is what has to be excluded.
+  const period = await displayPeriod(page);
+  const drawCeiling = Math.max(period * 0.75, HALF);
   expect(
     drawQuiet,
-    `a draw of a 60x12 sheet measured ${drawQuiet.toFixed(2)}ms, at or past the display `
-    + `period — the same symptom on a probe that does real work.`,
-  ).toBeLessThan(HALF);
+    `a draw of a 60x12 sheet measured ${drawQuiet.toFixed(2)}ms against a display period of `
+    + `${period.toFixed(2)}ms, at or past ${drawCeiling.toFixed(2)}ms — the interval is being `
+    + `reported instead of the work, which is what PERF-13 is.`,
+  ).toBeLessThan(drawCeiling);
 
   // **And it does see a cost that is there.** The busy-wait is at least
   // `BURN_MS` by construction, so noise can only push this further past the
