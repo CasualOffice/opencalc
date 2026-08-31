@@ -1,8 +1,8 @@
 {
   "name": "@opencalc/engine",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
-  "description": "The OpenCalc spreadsheet engine as WebAssembly — read, recalculate and write .xlsx with no DOM and no CSS. Deterministic, and safe with untrusted files.",
+  "description": "The OpenCalc spreadsheet engine as WebAssembly \u2014 read, recalculate and write .xlsx with no DOM and no CSS. Deterministic, and safe with untrusted files.",
   "keywords": [
     "spreadsheet",
     "xlsx",
