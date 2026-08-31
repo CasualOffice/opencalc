@@ -66,9 +66,9 @@
           </div>
           <div class="dl-card">
             <h3>Linux</h3>
-            <p class="dl-meta">Debian / Ubuntu · 10.1 MB</p>
-            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.0/OpenCalc_0.0.0_amd64.deb">Download .deb</a>
-            <p class="dl-meta">Or the portable <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.0/OpenCalc_0.0.0_amd64.AppImage">AppImage</a> (84.6 MB).</p>
+            <p class="dl-meta">Portable AppImage · 84.6 MB · works on 22.04 and later</p>
+            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.0/OpenCalc_0.0.0_amd64.AppImage">Download AppImage</a>
+            <p class="dl-meta">Or the <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.0/OpenCalc_0.0.0_amd64.deb">.deb</a> (10.1 MB) — <strong>Ubuntu 23.04 or later only</strong>. <a href="#linux">Why.</a></p>
           </div>
         </div>
       </div>
@@ -87,7 +87,26 @@
           careful.
         </p>
 
-        <h3 id="mac">macOS — “OpenCalc is damaged and can’t be opened”</h3>
+        <h3 id="mac">macOS — two different messages, two different fixes</h3>
+        <p>
+          macOS shows one of two dialogs, and they are not the same problem.
+          Read which one you got before running anything.
+        </p>
+        <p>
+          <strong>“Apple could not verify OpenCalc is free of malware.”</strong>
+          This is the ordinary unsigned-application block. Clearing the
+          “downloaded from the internet” flag is the whole fix:
+        </p>
+        <pre class="code"><code>xattr -dr com.apple.quarantine /Applications/OpenCalc.app</code></pre>
+        <p>
+          On macOS 15 and later the old right-click&nbsp;→&nbsp;Open trick no
+          longer works; if you would rather not use Terminal, open
+          <strong>System&nbsp;Settings&nbsp;→&nbsp;Privacy&nbsp;&amp;&nbsp;Security</strong>,
+          scroll to the message about OpenCalc, and click
+          <strong>Open&nbsp;Anyway</strong>.
+        </p>
+
+        <h3>macOS — “OpenCalc is damaged and can’t be opened”</h3>
         <p>
           <strong>It is not damaged.</strong> That is the wording macOS uses when
           it cannot validate a signature, and it is the same message you would
@@ -120,12 +139,38 @@ codesign --force --deep --sign - /Applications/OpenCalc.app</code></pre>
           nothing to change in your settings.
         </p>
 
-        <h3 id="linux">Linux</h3>
-        <p>The <code>.deb</code> installs normally:</p>
-        <pre class="code"><code>sudo dpkg -i OpenCalc_0.0.0_amd64.deb</code></pre>
-        <p>The AppImage needs the executable bit before it will run:</p>
+        <h3 id="linux">Linux — the AppImage is the one that works everywhere</h3>
+        <p>
+          It needs the executable bit before it will run. Double-clicking a file
+          without it does nothing at all, with no message — which is the most
+          common reason this appears not to have downloaded properly.
+        </p>
         <pre class="code"><code>chmod +x OpenCalc_0.0.0_amd64.AppImage
 ./OpenCalc_0.0.0_amd64.AppImage</code></pre>
+        <p>
+          <strong>If it still does nothing</strong>, you are missing FUSE 2.
+          AppImages mount themselves with it, Ubuntu 24.04 ships only FUSE 3,
+          and the failure is silent. Either install it once, or skip it
+          entirely — the second line needs nothing installed:
+        </p>
+        <pre class="code"><code>sudo apt install libfuse2t64      # Ubuntu 24.04
+sudo apt install libfuse2         # Ubuntu 22.04
+
+./OpenCalc_0.0.0_amd64.AppImage --appimage-extract-and-run   # or no install at all</code></pre>
+
+        <h3 id="deb">The <code>.deb</code> needs Ubuntu 23.04 or later</h3>
+        <p>
+          It declares <code>libwebkit2gtk-4.1-0</code>, and that package does not
+          exist before Ubuntu 23.04 — 22.04 LTS has <code>4.0</code>. On 22.04
+          the install fails outright with an unmet dependency, which is a
+          limitation of this build and not something you can configure around.
+        </p>
+        <p>
+          Use the AppImage there. It carries its own copy of webkit2gtk and GTK
+          — that is what the 84 MB is — so it does not use the system's at all.
+        </p>
+        <pre class="code"><code>sudo dpkg -i OpenCalc_0.0.0_amd64.deb    # Ubuntu 23.04+
+sudo apt -f install                      # if it reports missing dependencies</code></pre>
 
         <h3 id="verify">Checking what you downloaded</h3>
         <p>
