@@ -222,3 +222,81 @@ pub fn session_restore_version(id: f64, at_ms: f64) -> Result<String, JsError> {
         .to_string())
     })
 }
+
+// --- Persistence (`HIST-03`) ------------------------------------------------
+//
+// `SAVE-08` made the store host-agnostic with `into_parts`/`from_parts` for
+// exactly this, and `HIST-01` reached it from the editor — but nothing carried
+// it across a reload, so a version survived until the tab closed and no longer.
+// A history you lose by pressing F5 is not a history.
+//
+// Three bindings rather than one blob, because the host stores it in two pieces
+// and should not have to take a megabyte apart to read a date. The metadata is
+// small, JSON, and enough to draw the whole panel; the bytes are fetched only
+// when a version is actually restored. It is the same split
+// `webapp/editor.drafts.js` already keeps for drafts (`meta` and `bytes` object
+// stores), for the same reason.
+
+/// Every version's metadata, **including hidden ones**, oldest first.
+///
+/// Deliberately not [`session_versions`], which omits hidden entries because a
+/// panel should not show them. Persistence is a different question: hiding is a
+/// display choice the user made and losing it on reload would un-hide
+/// everything they had tidied away.
+#[wasm_bindgen]
+pub fn session_versions_manifest() -> String {
+    with_session(|s| {
+        let all: Vec<&casual_calc_transaction::version::Version> = s.versions().versions().collect();
+        serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_owned())
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// One version's snapshot bytes, for the host to write to its own store.
+///
+/// # Errors
+///
+/// If there is no session, or no version with that id.
+#[wasm_bindgen]
+pub fn session_version_bytes(id: f64) -> Result<Vec<u8>, JsError> {
+    with_session(|s| {
+        s.versions()
+            .get(casual_calc_transaction::version::VersionId(id as u64))
+            .map(|entry| entry.bytes.clone())
+    })
+    .flatten()
+    .ok_or_else(|| JsError::new("no such version"))
+}
+
+/// Put a version back exactly as it was, from the host's store.
+///
+/// The id, kind, name, capture time and revision all come back with it: a
+/// restored history whose ids were renumbered would be a different history, and
+/// the id is what the panel and `restore_version` address a version by.
+///
+/// Adding an id the store already holds replaces it rather than duplicating,
+/// so a host that loads twice — a double `initVersions`, a reconnect — does not
+/// end up showing everything twice.
+///
+/// # Errors
+///
+/// If there is no session, or the metadata is not a version.
+#[wasm_bindgen]
+pub fn session_version_add(meta: &str, bytes: Vec<u8>) -> Result<(), JsError> {
+    let version: casual_calc_transaction::version::Version =
+        serde_json::from_str(meta).map_err(|why| JsError::new(&format!("bad version: {why}")))?;
+    with_session_mut(|s| {
+        // The policy travels with the entries: `from_parts` takes one, and a
+        // store rebuilt under the default would quietly change which versions
+        // the retention ring may discard.
+        let policy = s.versions().policy();
+        let store = core::mem::take(s.versions_mut());
+        let mut entries = store.into_parts();
+        entries.retain(|entry| entry.version.id != version.id);
+        entries.push(casual_calc_transaction::version::VersionSnapshot { version, bytes });
+        s.set_versions(casual_calc_transaction::version::VersionStore::from_parts(
+            policy, entries,
+        ));
+        Ok(())
+    })
+}

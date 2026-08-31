@@ -412,6 +412,18 @@ import {
 // cannot check that autosave is running — and an autosave nobody can observe is
 // how one stops without anybody noticing.
 import { initDrafts } from "./editor.drafts.js";
+import { forgetVersions, loadVersions, persistVersions } from "./editor.versions.js";
+
+/// Re-read this document's versions from storage (`HIST-03`).
+///
+/// Boot does this once, and a test that changes documents in one tab needs it
+/// again — as would a host that swaps the open document without a reload, which
+/// is what `setDocumentName` amounts to. Exported rather than inlined into the
+/// test so the reload path a user gets and the one a test exercises are the
+/// same function.
+export function reloadVersionsForTest() {
+  return loadVersions(wasm);
+}
 export {
   autosaveFault,
   breakDraftStoreForTest,
@@ -5194,6 +5206,10 @@ function buildHistoryPanel(body) {
     keep.addEventListener("click", () => {
       try {
         const r = JSON.parse(wasm.session_capture_version("named", nameBox.value, Date.now()));
+        // Written to storage on the same action that created it, rather than on
+        // a timer: a version the user asked for and a reload lost would be
+        // worse than no version, because they would believe they had it.
+        persistVersions(wasm).catch(() => {});
         // `stored: false` is not a failure — the store resolves a capture of an
         // unchanged document to the version already holding that state, and
         // saying so is more honest than writing a duplicate.
@@ -5258,6 +5274,9 @@ function buildHistoryPanel(body) {
           // One `Operation::Batch` of ordinary edits: it travels to
           // collaborators as edits and costs exactly one undo step, because a
           // batch has one combined inverse.
+          // The restore captured the present as a version before it landed;
+          // that one is the way back, so it has to reach storage too.
+          persistVersions(wasm).catch(() => {});
           status.textContent = `restored — ${done.cellsChanged} cell(s) changed, undo will put it back`;
           draw();
           renderTabs();
@@ -5270,6 +5289,10 @@ function buildHistoryPanel(body) {
       hide.title = "Remove from this list. The version is kept.";
       hide.addEventListener("click", () => {
         wasm.session_hide_version(v.id);
+        // Hiding is a display choice, and losing it on reload would un-hide
+        // everything the user had tidied away — which is why the manifest
+        // carries hidden entries rather than omitting them.
+        persistVersions(wasm).catch(() => {});
         render();
       });
       row.appendChild(hide);
@@ -9474,6 +9497,12 @@ function wireEvents() {
           // go past, but that is a second definition of one fact and this is
           // the one that holds in a browser tab too.
           stopMarch(); wasm.session_new(); newDocument(); imageCache.clear(); state.sheet = 0; seed(); renderTabs();
+          // A new workbook is a different document and must not inherit
+          // the previous one's versions (`HIST-03`). Forgetting is done
+          // *after* `newDocument()` clears the name, so it removes the
+          // bucket the new document will use rather than the old one's —
+          // which would have deleted the history of the file just closed.
+          forgetVersions().catch(() => {});
         }],
         ["Open…", clickEl("#tb-open")],
         // **The save nobody opens a menu for, finally in the menu**
@@ -10895,6 +10924,12 @@ async function main() {
   // A crash-recovery feature that stops the editor booting has recovered
   // nothing.
   await initDrafts().catch((err) => console.error("[opencalc] drafts", err));
+  // **The history has to outlive the tab** (`HIST-03`). Failure is silent by
+  // design: a browser with no IndexedDB, a full quota or a corrupted row must
+  // produce an editor with no history, never an editor that will not start.
+  loadVersions(wasm)
+    .then((n) => { if (n) status.textContent = `${n} saved version${n === 1 ? "" : "s"} restored`; })
+    .catch((err) => console.error("[opencalc] versions", err));
 }
 
 /// Start the editor against the current mount root.
