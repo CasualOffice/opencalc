@@ -2,7 +2,9 @@
 # that the shipped AppImage cannot mount and that a static runtime fixes it.
 # Deleted before merge — the permanent check lives in `release-desktop.yml`.
 name: appimage-fuse-proof
-on: workflow_dispatch
+on:
+  push:
+    branches: [fix/rel-09-appimage-without-libfuse2]
 
 jobs:
   proof:
@@ -53,8 +55,16 @@ jobs:
       - name: GREEN — the repacked AppImage mounts on the same runner
         run: |
           set -euo pipefail
-          mnt="$(./Fixed.AppImage --appimage-mount & sleep 4; true)"
-          out="$(timeout 20 ./Fixed.AppImage --appimage-mount 2>&1 & sleep 5; kill %1 2>/dev/null; true)"
-          echo "$out"
-          ./Fixed.AppImage --appimage-extract >/dev/null && echo "payload readable"
-          echo "FIXED: no libfuse2 on this machine, and it mounted"
+          ./Fixed.AppImage --appimage-mount > mnt.txt 2>&1 &
+          pid=$!
+          for _ in $(seq 1 20); do [ -s mnt.txt ] && break; sleep 1; done
+          cat mnt.txt
+          mp="$(head -1 mnt.txt)"
+          if [ -d "$mp" ] && [ -e "$mp/AppRun" ]; then
+            echo "FIXED: mounted at $mp with no libfuse2 on this machine"
+            kill $pid 2>/dev/null || true
+          else
+            echo "::error::the repacked AppImage did not mount either"
+            kill $pid 2>/dev/null || true
+            exit 1
+          fi
