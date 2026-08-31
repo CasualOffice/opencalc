@@ -5192,6 +5192,18 @@ export function openPanel(tool) {
 /// history would need.
 ///
 /// The clock is passed in from here, because the engine has none (`AGENTS.md`).
+/// Who last changed a cell, or empty (`HIST-02`).
+///
+/// Asked per hover rather than kept in a set the way errors and numeric text
+/// are: those are drawn every frame and so are collected during the paint,
+/// where this is read once when somebody points at a cell. Collecting it per
+/// frame would cost a wasm call per visible cell to answer a question almost
+/// nobody asks of almost every cell.
+function cellAuthor(row, col) {
+  try { return wasm.session_cell_author(state.sheet, row, col) || ""; }
+  catch { return ""; }
+}
+
 function buildHistoryPanel(body) {
   const render = () => {
     body.textContent = "";
@@ -7561,6 +7573,25 @@ function wireEvents() {
       } catch {}
       const help = ERROR_HELP[code] || "This formula could not be calculated.";
       commentTip.textContent = input.startsWith("=") ? `${code} — ${help}\n${input}` : `${code} — ${help}`;
+      commentTip.style.whiteSpace = "pre-line";
+      commentTip.style.left = (px + 14) + "px";
+      commentTip.style.top = (py + 8) + "px";
+      commentTip.hidden = false;
+    } else if (hit && cellAuthor(hit.row, hit.col)) {
+      // **Who last changed this cell** (`HIST-02`).
+      //
+      // On the hover rather than as a marker on the cell: the grid already
+      // draws a red corner for an error and a green one for a number stored as
+      // text, and a third would make a shared sheet read as a defect list. This
+      // is information worth having on ask, which is what a tooltip is.
+      //
+      // **"since this file was opened" is not a hedge.** Attribution does not
+      // survive a round-trip — OOXML revision tracking is a different and
+      // larger format — and unlike an image that visibly vanishes, attribution
+      // *looks* present in a reopened file because the cells are all still
+      // there. The correction has to sit next to the claim, which is here.
+      commentTip.textContent =
+        `Last changed by ${cellAuthor(hit.row, hit.col)},\nsince this file was opened.`;
       commentTip.style.whiteSpace = "pre-line";
       commentTip.style.left = (px + 14) + "px";
       commentTip.style.top = (py + 8) + "px";
