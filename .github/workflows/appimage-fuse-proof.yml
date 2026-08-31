@@ -1,61 +1,62 @@
-# Temporary harness for `REL-09`: proves, on a real runner with no libfuse2,
-# that the shipped AppImage cannot mount and that a static runtime fixes it.
-# Deleted before merge — the permanent check lives in `release-desktop.yml`.
+# Temporary harness for `REL-09`. Deleted before merge.
+#
+# Established already, on runs of this file:
+#   * FUSE was REFUTED — with /usr/bin/fusermount moved away and only
+#     fusermount3 left (a stock 22.04), the shipped AppImage mounted fine.
+#   * glibc REPRODUCED — the shipped AppImage requires glibc 2.39 across its
+#     176 ELF files; Ubuntu 22.04 ships 2.35, so it cannot start there.
+#
+# This run tests the fix: build the same Linux leg on ubuntu-22.04 instead of
+# ubuntu-latest, and assert nothing in the bundle demands more than 2.35.
 name: appimage-fuse-proof
 on:
   push:
     branches: [fix/rel-09-appimage-without-libfuse2]
 
 jobs:
-  proof:
-    runs-on: ubuntu-latest
-    steps:
-      - name: This runner is what a user's stock machine looks like
-        run: |
-          set -euo pipefail
-          . /etc/os-release && echo "runner: $PRETTY_NAME"
-          echo "fusermount  : $(command -v fusermount || echo 'ABSENT')"
-          echo "fusermount3 : $(command -v fusermount3 || echo 'ABSENT')"
-          dpkg -l | grep -E 'libfuse2|^ii  fuse ' || echo "libfuse2: NOT INSTALLED"
-
-      - name: Fetch the AppImage that v0.0.1 actually published
-        run: |
-          set -euo pipefail
-          curl -fsSL -o App.AppImage \
-            https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_amd64.AppImage
-          chmod +x App.AppImage
-          ls -la App.AppImage
-
-      # The runner ships /usr/bin/fusermount (FUSE 2), which a stock Ubuntu
-      # 22.04 or 24.04 desktop does NOT — those have fusermount3 only. That
-      # difference is exactly why this shipped: CI is not a user's machine.
-      # Hiding the FUSE 2 binary while leaving fusermount3 in place models a
-      # stock desktop precisely.
-      # The FUSE hypothesis was tested and REFUTED: with /usr/bin/fusermount
-      # moved away and only fusermount3 left — a stock 22.04 desktop — the
-      # published AppImage mounted and blocked (exit 124). It does not need
-      # FUSE 2. So the question is what else differs on 22.04, and the
-      # candidate is glibc: this is built on ubuntu-latest, which is 24.04
-      # (glibc 2.39), and 22.04 has 2.35. An AppImage bundles its libraries
-      # but NOT libc, so it must be built on the oldest distro it claims.
-      - name: What glibc does the shipped AppImage actually demand?
+  build-on-2204:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: . /etc/os-release && echo "building on $PRETTY_NAME (glibc $(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$'))"
+      - uses: ./.github/actions/cargo-warmup
+      - uses: ./.github/actions/cargo-warmup
+        with:
+          manifest-path: desktop/Cargo.toml
+      - name: Install the Linux webview and bundler dependencies
         run: |
-          set +e   # objdump exits nonzero on non-ELF files; GitHub's shell adds -e
-          ./App.AppImage --appimage-extract >/dev/null
-          echo "--- layout ---"
-          ls -la squashfs-root/usr/bin/ 2>/dev/null || ls -la squashfs-root
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev file
+      - name: Install wasm-pack
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+      - name: Build the engine the webview loads
+        run: python3 tools/build-wasm.py
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+      - name: Bundle
+        run: cargo tauri build --bundles deb,appimage
+      - name: THE TEST — nothing in the bundle may need more than glibc 2.35
+        run: |
+          set +e
+          img="$(find desktop/target/release/bundle/appimage -name '*.AppImage' -print -quit)"
+          echo "built: $img"
+          chmod +x "$img"
+          "$img" --appimage-extract >/dev/null
           find squashfs-root -type f \( -perm -u+x -o -name '*.so*' \) -print0 > files.z
-          echo "--- ELF files scanned: $(tr -cd '\0' < files.z | wc -c) ---"
           xargs -0 -r -a files.z objdump -T 2>/dev/null > syms.txt
           grep -oE 'GLIBC_[0-9.]+' syms.txt | sed 's/GLIBC_//' | sort -uV > vers.txt
-          echo "--- symbol lines: $(wc -l < syms.txt), distinct glibc versions: $(wc -l < vers.txt) ---"
-          echo "--- every GLIBC version required, highest last ---"
-          tail -8 vers.txt
+          echo "--- glibc versions required, highest last ---"; tail -8 vers.txt
           top="$(tail -1 vers.txt)"
-          echo "highest required: glibc $top   (Ubuntu 22.04 LTS ships 2.35)"
+          echo "highest required: glibc $top"
           if [ "$(printf '%s\n2.35\n' "$top" | sort -V | tail -1)" != "2.35" ]; then
-            echo "REPRODUCED: needs glibc $top; Ubuntu 22.04 has 2.35, so it cannot start there"
-          else
-            echo "NOT REPRODUCED: glibc $top runs on 22.04; the cause is something else"
+            echo "::error::still needs glibc $top — Ubuntu 22.04 has 2.35"
+            exit 1
           fi
+          echo "FIXED: highest requirement is glibc $top, which 22.04 satisfies"
