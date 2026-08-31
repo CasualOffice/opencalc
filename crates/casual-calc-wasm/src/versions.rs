@@ -246,7 +246,8 @@ pub fn session_restore_version(id: f64, at_ms: f64) -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn session_versions_manifest() -> String {
     with_session(|s| {
-        let all: Vec<&casual_calc_transaction::version::Version> = s.versions().versions().collect();
+        let all: Vec<&casual_calc_transaction::version::Version> =
+            s.versions().versions().collect();
         serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_owned())
     })
     .unwrap_or_else(|| "[]".to_owned())
