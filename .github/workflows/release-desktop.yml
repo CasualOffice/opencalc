@@ -143,12 +143,32 @@ jobs:
         run: cargo tauri build --bundles ${{ matrix.bundles }}
       # Asserted rather than assumed: the whole failure was a signature that
       # existed and did not validate, so "it signed" is not the question.
-      - name: The macOS app carries a signature Gatekeeper can validate
+      # **Verified inside the `.dmg`, because that is the artefact somebody
+      # downloads** (`REL-07`).
+      #
+      # The first version of this looked for the `.app` on disk and failed the
+      # `0.0.1` release with `no .app was produced`. The build was fine — the
+      # log above it reads `Signing …OpenCalc.app`, `replacing existing
+      # signature`, and then `Cleaning …OpenCalc.app`: the dmg bundler removes
+      # the `.app` once it has been wrapped. So the check ran after its subject
+      # had been tidied away, and reported a missing bundle as a missing build.
+      #
+      # Mounting the image is also the more honest check. The `.app` on disk is
+      # an intermediate; the copy inside the `.dmg` is what a user gets, and
+      # nothing had ever confirmed the two were the same.
+      - name: The macOS app inside the .dmg carries a signature Gatekeeper can validate
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          app="$(find desktop/target/release/bundle -maxdepth 3 -name '*.app' | head -1)"
-          [ -n "$app" ] || { echo "::error::no .app was produced"; exit 1; }
+          dmg="$(find desktop/target/release/bundle -maxdepth 3 -name '*.dmg' | head -1)"
+          [ -n "$dmg" ] || { echo "::error::no .dmg was produced"; exit 1; }
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -quiet -mountpoint "$mount" "$dmg"
+          # `trap` rather than a trailing detach: a failing `codesign` must not
+          # leave the image mounted for the rest of the job.
+          trap 'hdiutil detach -quiet "$mount" || true' EXIT
+          app="$(find "$mount" -maxdepth 2 -name '*.app' | head -1)"
+          [ -n "$app" ] || { echo "::error::the .dmg contains no .app"; ls -la "$mount"; exit 1; }
           codesign --verify --deep --strict "$app"
           codesign -dv "$app" 2>&1 | grep -E "Signature=|Sealed Resources"
       # A bundler that was unavailable has exited 0 having emitted nothing, so
