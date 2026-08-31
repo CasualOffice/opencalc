@@ -39,24 +39,22 @@ jobs:
       # (glibc 2.39), and 22.04 has 2.35. An AppImage bundles its libraries
       # but NOT libc, so it must be built on the oldest distro it claims.
       - name: What glibc does the shipped AppImage actually demand?
+        shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./App.AppImage --appimage-extract >/dev/null
-          bin="squashfs-root/usr/bin/opencalc"
-          [ -f "$bin" ] || bin="$(find squashfs-root -type f -perm -u+x \
-            -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print | head -1)"
-          echo "binary: $bin"
-          echo "--- highest GLIBC_ version the executable requires ---"
-          objdump -T "$bin" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -5
-          echo "--- and across every bundled .so ---"
-          find squashfs-root -name '*.so*' -type f -print0 \
-            | xargs -0 -r objdump -T 2>/dev/null \
-            | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -5
-          echo "--- Ubuntu 22.04 LTS ships glibc 2.35 ---"
-          top="$( { objdump -T "$bin" 2>/dev/null; find squashfs-root -name '*.so*' -type f -print0 | xargs -0 -r objdump -T 2>/dev/null; } | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-          echo "highest required: glibc $top"
+          echo "--- layout ---"
+          ls -la squashfs-root/usr/bin/ 2>/dev/null || ls -la squashfs-root
+          find squashfs-root -type f \( -perm -u+x -o -name '*.so*' \) -print0 > files.z
+          echo "--- ELF files scanned: $(tr -cd '\0' < files.z | wc -c) ---"
+          xargs -0 -r -a files.z objdump -T 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV > vers.txt
+          echo "--- every GLIBC version required, highest last ---"
+          tail -8 vers.txt
+          top="$(tail -1 vers.txt)"
+          echo "highest required: glibc $top   (Ubuntu 22.04 LTS ships 2.35)"
           if [ "$(printf '%s\n2.35\n' "$top" | sort -V | tail -1)" != "2.35" ]; then
-            echo "REPRODUCED: needs glibc $top, but Ubuntu 22.04 has 2.35 — it cannot start there"
+            echo "REPRODUCED: needs glibc $top; Ubuntu 22.04 has 2.35, so it cannot start there"
           else
             echo "NOT REPRODUCED: glibc $top runs on 22.04; the cause is something else"
           fi
