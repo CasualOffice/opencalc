@@ -110,8 +110,28 @@ pub fn command_ids(menus: &[Menu]) -> Vec<String> {
 pub fn releases_during_edit(id: &str) -> bool {
     matches!(
         id,
-        // `Cmd+T` / `Ctrl+T`: create Table, against Excel's anchor cycle.
-        "insert.table"
+        // **The clipboard, undo and select-all mean something else inside a
+        // cell editor** (`TAURI-016`). This is the same defect as the Table
+        // one below and by far the more common: in Excel, mid-edit `Cmd+C`
+        // copies the *selected text*, `Cmd+Z` undoes *typing*, and `Cmd+A`
+        // selects the text in the cell. A native accelerator is consumed before
+        // the webview sees the key, so on the desktop each of these ran the
+        // *document* command instead — copying cells while somebody was copying
+        // part of a formula, and undoing an edit while they were undoing a
+        // keystroke.
+        //
+        // Released only while an edit is open, so outside one they are the
+        // document commands they should be.
+        "edit.undo"
+            | "edit.redo"
+            | "edit.cut"
+            | "edit.copy"
+            | "edit.paste"
+            | "edit.select-all"
+            // `Cmd+T` / `Ctrl+T`: create Table, against Excel's anchor cycle.
+            // Microsoft's own Mac table gives the chord both meanings and
+            // disambiguates by edit mode; we took the Table half.
+            | "insert.table"
             // `Shift+Cmd+T` on a Mac, so the same physical key with a shift.
             | "formula.autosum"
     )
@@ -253,6 +273,61 @@ mod tests {
     /// The shell cannot know what the keystroke means, so it does the one thing
     /// it can: while a cell is being edited it releases the accelerators that
     /// collide, and the webview gets the key it would have got in a browser.
+    /// **The clipboard, undo and select-all mean something else mid-edit**
+    /// (`TAURI-016`).
+    ///
+    /// This is the same defect as the Table one and by far the more common. In
+    /// Excel, `Cmd+C` inside a cell editor copies the *selected text*, `Cmd+Z`
+    /// undoes *typing*, and `Cmd+A` selects the text in the cell. A native
+    /// accelerator is consumed before the webview sees the key, so on the
+    /// desktop each of these ran the *document* command instead: copying cells
+    /// while somebody was copying part of a formula, and undoing an edit while
+    /// they were undoing a keystroke.
+    ///
+    /// Measured rather than guessed — the menu claims twenty accelerators, and
+    /// these are the six whose meaning changes inside an editor.
+    #[test]
+    fn the_chords_that_mean_something_else_mid_edit_are_released() {
+        for id in [
+            "edit.undo",
+            "edit.redo",
+            "edit.cut",
+            "edit.copy",
+            "edit.paste",
+            "edit.select-all",
+        ] {
+            assert!(
+                releases_during_edit(id),
+                "{id} keeps its accelerator mid-edit, so the document command \
+                 runs while somebody is editing text"
+            );
+        }
+    }
+
+    /// **And the ones that mean the same thing keep theirs.**
+    ///
+    /// Releasing the whole menu during an edit would be a different bug: these
+    /// are chords a person presses *because* they have been typing, and taking
+    /// them away is worst at exactly that moment.
+    #[test]
+    fn a_chord_that_means_the_same_thing_mid_edit_keeps_its_accelerator() {
+        for id in [
+            "file.save",
+            "file.open",
+            "file.print",
+            "format.bold",
+            "format.italic",
+            "format.underline",
+            "edit.find-replace",
+            "tools.calculation.calculate-now",
+        ] {
+            assert!(
+                !releases_during_edit(id),
+                "{id} loses its accelerator mid-edit, and means the same thing there"
+            );
+        }
+    }
+
     #[test]
     fn an_accelerator_that_collides_with_editing_is_released_while_editing() {
         // Excel's own overload, and the one that was reported.
@@ -269,7 +344,14 @@ mod tests {
         // Save is the one people press *because* they have been typing.
         assert!(!releases_during_edit("file.save"));
         assert!(!releases_during_edit("file.open"));
-        assert!(!releases_during_edit("edit.undo"));
+        // **`edit.undo` used to be asserted here, and that was wrong**
+        // (`TAURI-016`). The reasoning was "a person still expects undo to
+        // work", which is true and is not the question: mid-edit, Excel's
+        // `Cmd+Z` undoes *typing*, and the document undo firing instead throws
+        // away a keystroke they wanted and a cell edit they did not. It is in
+        // the released set now, and
+        // `the_chords_that_mean_something_else_mid_edit_are_released` is where
+        // that is stated.
     }
 
     /// **Folding `Cmd` into `Ctrl` is not sufficient, and the chords prove it.**
