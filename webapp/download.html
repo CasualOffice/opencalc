@@ -51,6 +51,24 @@
       <div class="wrap">
         <h2>Downloads</h2>
         <p class="sub">Version 0.0.1. Checksums for every file are in <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
+        <!-- **The visitor's own platform, resolved before they read anything**
+             (`REL-06`). Three cards is the right *reference*, and it is the
+             wrong first thing to meet: somebody who came to download does not
+             want to work out which row is theirs, and on a phone the three
+             stack so the answer is below the fold. The detected card is
+             promoted and the others stay, because detection is a guess and a
+             guess that hides the alternatives is worse than no guess.
+
+             No script, no download, no page: the button below is a real link
+             that works with JavaScript disabled, and the enhancement only
+             *reorders* what is already there. -->
+        <div id="detected" class="dl-detected" hidden>
+          <p class="dl-detected-label">Detected: <strong id="detected-os">your platform</strong></p>
+          <a id="detected-link" class="btn btn-ink btn-lg" href="#downloads">Download</a>
+          <p class="dl-meta" id="detected-note"></p>
+          <p class="dl-warn"><a href="#bypass" id="detected-bypass">What your computer will say the first time →</a></p>
+        </div>
+
         <div class="dl-grid">
           <div class="dl-card">
             <h3>macOS</h3>
@@ -203,5 +221,46 @@ sudo apt -f install                      # if it reports missing dependencies</c
         </div>
       </div>
     </footer>
+
+    <script>
+      // Which build this visitor wants (`REL-06`).
+      //
+      // `navigator.userAgentData.platform` where it exists, falling back to the
+      // user-agent string — and **falling back to showing nothing** rather than
+      // to a guess, because a wrong download is worse than a visitor reading
+      // three short cards. Apple Silicon is not distinguishable from Intel in a
+      // browser, so the macOS note says what the build is rather than pretending
+      // to know what the machine is.
+      (function () {
+        var BASE = "https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/";
+        var ua = navigator.userAgent || "";
+        var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+        var hay = (plat + " " + ua).toLowerCase();
+        var pick = null;
+        if (hay.indexOf("mac") >= 0) {
+          pick = { os: "macOS", file: "OpenCalc_0.0.1_aarch64.dmg", label: "Download the .dmg",
+                   note: "Apple Silicon. On an Intel Mac, use the web editor \u2014 it is the same engine.",
+                   bypass: "#mac" };
+        } else if (hay.indexOf("win") >= 0) {
+          pick = { os: "Windows", file: "OpenCalc_0.0.1_x64-setup.exe", label: "Download the installer",
+                   note: "64-bit. SmartScreen will interrupt once.", bypass: "#windows" };
+        } else if (hay.indexOf("linux") >= 0 || hay.indexOf("x11") >= 0) {
+          pick = { os: "Linux", file: "OpenCalc_0.0.1_amd64.AppImage", label: "Download the AppImage",
+                   note: "Works on 22.04 and later. The .deb needs Ubuntu 23.04 or newer.",
+                   bypass: "#linux" };
+        }
+        // A phone or tablet is not a desktop download, whatever it reports.
+        if (/android|iphone|ipad|ipod/.test(hay)) pick = null;
+        if (!pick) return;
+        var box = document.getElementById("detected");
+        document.getElementById("detected-os").textContent = pick.os;
+        var link = document.getElementById("detected-link");
+        link.href = BASE + pick.file;
+        link.textContent = pick.label;
+        document.getElementById("detected-note").textContent = pick.note;
+        document.getElementById("detected-bypass").setAttribute("href", pick.bypass);
+        box.hidden = false;
+      })();
+    </script>
   </body>
 </html>

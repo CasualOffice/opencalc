@@ -412,3 +412,16 @@ pre {
 #bypass p { margin: 0 0 12px; max-width: 74ch; line-height: 1.7; }
 #bypass .note { margin-top: 16px; }
 #downloads .sub { margin-top: 6px; }
+/* The detected-platform block (`REL-06`). Deliberately quieter than a hero and
+   louder than a card: it is an answer to "which one is mine", not a second
+   pitch. It sits above the three cards and never replaces them, because
+   detection is a guess and a guess that hides the alternatives is worse than no
+   guess at all. */
+.dl-detected {
+  margin-top: 22px; padding: 20px 22px; border-radius: 14px;
+  border: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+}
+.dl-detected-label { margin: 0; font-size: 13px; color: var(--muted); }
+.dl-detected-label strong { color: var(--fg); }
+.dl-detected .dl-meta, .dl-detected .dl-warn { margin: 0; }
