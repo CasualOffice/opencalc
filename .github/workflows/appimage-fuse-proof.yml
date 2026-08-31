@@ -31,55 +31,32 @@ jobs:
       # difference is exactly why this shipped: CI is not a user's machine.
       # Hiding the FUSE 2 binary while leaving fusermount3 in place models a
       # stock desktop precisely.
-      - name: Make this runner look like a stock Ubuntu desktop
+      # The FUSE hypothesis was tested and REFUTED: with /usr/bin/fusermount
+      # moved away and only fusermount3 left — a stock 22.04 desktop — the
+      # published AppImage mounted and blocked (exit 124). It does not need
+      # FUSE 2. So the question is what else differs on 22.04, and the
+      # candidate is glibc: this is built on ubuntu-latest, which is 24.04
+      # (glibc 2.39), and 22.04 has 2.35. An AppImage bundles its libraries
+      # but NOT libc, so it must be built on the oldest distro it claims.
+      - name: What glibc does the shipped AppImage actually demand?
         run: |
           set -euo pipefail
-          sudo mv /usr/bin/fusermount /usr/bin/fusermount.hidden
-          echo "fusermount  : $(command -v fusermount || echo 'ABSENT — as on stock 22.04')"
-          echo "fusermount3 : $(command -v fusermount3 || echo 'ABSENT')"
-
-      - name: RED — the published AppImage cannot mount here
-        run: |
-          set +e
-          out="$(timeout 30 ./App.AppImage --appimage-mount 2>&1)"; rc=$?
-          echo "exit=$rc"; echo "$out"
-          if [ $rc -eq 124 ]; then
-            echo "::error::it mounted and blocked — REL-09 does not reproduce"
-            exit 1
-          fi
-          if [ $rc -eq 0 ]; then
-            echo "::error::it mounted — REL-09 does not reproduce"
-            exit 1
-          fi
-          echo "REPRODUCED: a stock desktop cannot run the AppImage v0.0.1 shipped"
-
-      - name: Repack it onto the static runtime, which carries its own FUSE
-        run: |
-          set -euo pipefail
-          ./App.AppImage --appimage-extract >/dev/null   # needs no FUSE at all
-          curl -fsSL -o runtime-x86_64 \
-            https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-          curl -fsSL -o appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x runtime-x86_64 appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
-            --runtime-file runtime-x86_64 squashfs-root Fixed.AppImage
-          chmod +x Fixed.AppImage
-          ls -la App.AppImage Fixed.AppImage
-
-      - name: GREEN — the repacked AppImage mounts on that same stock machine
-        run: |
-          set -euo pipefail
-          command -v fusermount && { echo "::error::fusermount came back; the test is void"; exit 1; }
-          timeout 40 ./Fixed.AppImage --appimage-mount > mnt.txt 2>&1 &
-          pid=$!
-          for _ in $(seq 1 25); do [ -s mnt.txt ] && break; sleep 1; done
-          cat mnt.txt
-          mp="$(head -1 mnt.txt)"
-          if [ -d "$mp" ] && [ -e "$mp/AppRun" ]; then
-            echo "FIXED: mounted at $mp with no FUSE 2 on this machine"
+          ./App.AppImage --appimage-extract >/dev/null
+          bin="squashfs-root/usr/bin/opencalc"
+          [ -f "$bin" ] || bin="$(find squashfs-root -type f -perm -u+x \
+            -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print | head -1)"
+          echo "binary: $bin"
+          echo "--- highest GLIBC_ version the executable requires ---"
+          objdump -T "$bin" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -5
+          echo "--- and across every bundled .so ---"
+          find squashfs-root -name '*.so*' -type f -print0 \
+            | xargs -0 -r objdump -T 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -5
+          echo "--- Ubuntu 22.04 LTS ships glibc 2.35 ---"
+          top="$( { objdump -T "$bin" 2>/dev/null; find squashfs-root -name '*.so*' -type f -print0 | xargs -0 -r objdump -T 2>/dev/null; } | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "highest required: glibc $top"
+          if [ "$(printf '%s\n2.35\n' "$top" | sort -V | tail -1)" != "2.35" ]; then
+            echo "REPRODUCED: needs glibc $top, but Ubuntu 22.04 has 2.35 — it cannot start there"
           else
-            echo "::error::the repacked AppImage did not mount either"
-            kill $pid 2>/dev/null || true; exit 1
+            echo "NOT REPRODUCED: glibc $top runs on 22.04; the cause is something else"
           fi
-          kill $pid 2>/dev/null || true
