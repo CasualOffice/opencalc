@@ -304,3 +304,52 @@ mod chart_frame_payload {
         assert_eq!(session_chart_frames(7), "[]");
     }
 }
+
+/// Supply the clock and the random seed the volatile functions read
+/// (`CALC-VOL-01`).
+///
+/// `TODAY`, `NOW`, `RAND` and `RANDBETWEEN` read `Workbook::volatile_now` and
+/// `volatile_seed`, which the engine never sets: a calc engine that reaches for
+/// the wall clock cannot be tested or replayed, and `AGENTS.md` puts time and
+/// I/O in the host. The engine has always been right about that — and **no host
+/// ever supplied either value**, so `TODAY()` returned 0 and `RAND()` returned
+/// the same sequence in every session, in every host, since the functions were
+/// written.
+///
+/// `now` is an Excel serial: whole days since 1899-12-30, with the time of day
+/// as the fraction. It is **local** time, because that is what `TODAY` means to
+/// a person — a spreadsheet that rolls over at midnight UTC is wrong for most
+/// of the world for part of every day.
+///
+/// The host calls this before recalculating rather than once at load, which is
+/// what makes `NOW()` current and `RAND()` reroll the way Excel's does.
+#[wasm_bindgen]
+pub fn session_set_volatile(now: f64, seed: f64) {
+    // Remembered before it is applied, so a session created *later* — `File ▸
+    // New`, an open — starts with a clock rather than at 1899-12-30.
+    if now.is_finite() && seed.is_finite() && seed >= 0.0 {
+        crate::VOLATILE.with(|v| v.set((now, seed as u64)));
+    }
+    let _ = with_session_mut(|s| {
+        let wb = s.workbook_mut();
+        // A non-finite serial would poison every date formula in the sheet with
+        // a value no format can render, so it is refused rather than stored.
+        if now.is_finite() {
+            wb.volatile_now = now;
+        }
+        // `f64` because a `u64` crosses into JavaScript as a `BigInt`; the seed
+        // only has to differ between passes, and 2^53 distinct values is more
+        // recalculations than a session performs.
+        if seed.is_finite() && seed >= 0.0 {
+            wb.volatile_seed = seed as u64;
+        }
+        Ok(())
+    });
+}
+
+/// What the volatile clock currently reads, for a host that wants to check.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_volatile_now() -> f64 {
+    with_session(|s| s.workbook().volatile_now).unwrap_or(0.0)
+}
