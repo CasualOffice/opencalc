@@ -1,0 +1,60 @@
+# Temporary harness for `REL-09`: proves, on a real runner with no libfuse2,
+# that the shipped AppImage cannot mount and that a static runtime fixes it.
+# Deleted before merge — the permanent check lives in `release-desktop.yml`.
+name: appimage-fuse-proof
+on: workflow_dispatch
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: This runner is what a user's stock machine looks like
+        run: |
+          set -euo pipefail
+          . /etc/os-release && echo "runner: $PRETTY_NAME"
+          echo "fusermount  : $(command -v fusermount || echo 'ABSENT')"
+          echo "fusermount3 : $(command -v fusermount3 || echo 'ABSENT')"
+          dpkg -l | grep -E 'libfuse2|^ii  fuse ' || echo "libfuse2: NOT INSTALLED"
+
+      - name: Fetch the AppImage that v0.0.1 actually published
+        run: |
+          set -euo pipefail
+          curl -fsSL -o App.AppImage \
+            https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_amd64.AppImage
+          chmod +x App.AppImage
+          ls -la App.AppImage
+
+      - name: RED — the published AppImage cannot mount here
+        run: |
+          set +e
+          out="$(./App.AppImage --appimage-mount 2>&1)"; rc=$?
+          echo "exit=$rc"; echo "$out"
+          if [ $rc -eq 0 ]; then
+            echo "::error::it mounted — REL-09 does not reproduce, do not ship the fix on this evidence"
+            exit 1
+          fi
+          echo "REPRODUCED: a stock runner cannot run the shipped AppImage"
+
+      - name: Repack it onto the static runtime, which carries its own FUSE
+        run: |
+          set -euo pipefail
+          ./App.AppImage --appimage-extract >/dev/null   # works without FUSE
+          curl -fsSL -o runtime-x86_64 \
+            https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+          chmod +x runtime-x86_64
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
+            --runtime-file runtime-x86_64 squashfs-root Fixed.AppImage
+          chmod +x Fixed.AppImage
+          ls -la Fixed.AppImage
+
+      - name: GREEN — the repacked AppImage mounts on the same runner
+        run: |
+          set -euo pipefail
+          mnt="$(./Fixed.AppImage --appimage-mount & sleep 4; true)"
+          out="$(timeout 20 ./Fixed.AppImage --appimage-mount 2>&1 & sleep 5; kill %1 2>/dev/null; true)"
+          echo "$out"
+          ./Fixed.AppImage --appimage-extract >/dev/null && echo "payload readable"
+          echo "FIXED: no libfuse2 on this machine, and it mounted"
