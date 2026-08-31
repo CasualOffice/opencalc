@@ -507,6 +507,12 @@ jobs:
       # resolves rather than refuses.
       - name: The SDK packages agree on a version
         run: python3 tools/check-sdk-versions.py
+      # `REL-08`: the download page hard-codes the tag and the bundle names, and
+      # Tauri derives those names from `desktop/tauri.conf.json`. Bumping that
+      # file is an edit that touches nothing near the page, so the next version
+      # ships a page that renders identically and 404s on every button.
+      - name: The download page links at files the release will have
+        run: python3 tools/check-download-links.py
       - name: The browser suite speaks the engine's protocol version
         run: |
           engine=$(grep -oE 'PROTOCOL_VERSION: u32 = [0-9]+' \
