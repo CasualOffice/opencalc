@@ -1,6 +1,6 @@
 {
   "name": "@opencalc/sheet",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "An embeddable spreadsheet that reads and writes real .xlsx \u2014 347 worksheet functions, pivot tables and charts, running entirely in the browser as one custom element.",
   "keywords": [
