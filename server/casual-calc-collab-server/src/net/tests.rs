@@ -420,6 +420,7 @@ fn cell_edit(value: f64) -> WireOperation {
         styles: Default::default(),
         strings: Default::default(),
         runs: Default::default(),
+        author: None,
     }
 }
 
@@ -435,6 +436,7 @@ fn cell_at(row: u32, value: f64) -> WireOperation {
         styles: Default::default(),
         strings: Default::default(),
         runs: Default::default(),
+        author: None,
     }
 }
 
@@ -450,6 +452,7 @@ fn comment_change() -> WireOperation {
         styles: Default::default(),
         strings: Default::default(),
         runs: Default::default(),
+        author: None,
     }
 }
 
@@ -4118,6 +4121,7 @@ async fn an_edit_that_could_not_be_merged_is_not_a_save_failure() {
                 styles: Default::default(),
                 strings: Default::default(),
                 runs: Default::default(),
+                author: None,
             }],
         }),
     )
