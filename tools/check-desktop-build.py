@@ -50,6 +50,7 @@ import sys
 
 WORKFLOWS = pathlib.Path(".github/workflows")
 CONFIG = pathlib.Path("desktop/tauri.conf.json")
+MANIFEST = pathlib.Path("desktop/Cargo.toml")
 
 # The job name is the contract (docs/15 publishes the job list as one), so it is
 # named here rather than discovered by searching for whatever happens to run
@@ -282,7 +283,42 @@ def main():
         )
         return 1
 
-    print(f"desktop build: the `{JOB}` job bundles on {', '.join(PLATFORMS)}")
+    # **The version is stated twice, and nothing compared them** (`REL-04`).
+    #
+    # `desktop/tauri.conf.json` names the version the installer and the release
+    # notes carry; `desktop/Cargo.toml` names the one the binary reports. They
+    # are the same fact written down in two places, which is the shape this
+    # repository keeps being bitten by — `UX-CHR-03` found a hand-written
+    # `v0.0.0` in the About dialog that was right only by coincidence.
+    #
+    # A mismatch is invisible until somebody compares an installer's name with
+    # what the application says about itself, which is exactly when a bug report
+    # becomes impossible to place.
+    try:
+        conf_version = json.loads(CONFIG.read_text())["version"]
+    except (OSError, ValueError, KeyError) as why:
+        print(f"::error::could not read a version from {CONFIG}: {why}")
+        return 1
+    manifest_version = None
+    for line in MANIFEST.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("version") and "=" in stripped:
+            manifest_version = stripped.split("=", 1)[1].strip().strip('"')
+            break
+    if manifest_version is None:
+        print(f"::error::{MANIFEST} states no version")
+        return 1
+    if manifest_version != conf_version:
+        print(
+            f"the desktop version is stated twice and the two disagree:\n"
+            f"  {CONFIG}: {conf_version}\n"
+            f"  {MANIFEST}: {manifest_version}\n\n"
+            f"The first names the installer and the release notes; the second is what\n"
+            f"the binary reports about itself. Bump both, in the same commit."
+        )
+        return 1
+
+    print(f"desktop build: the `{JOB}` job bundles on {', '.join(PLATFORMS)}, and both versions say {conf_version}")
     return 0
 
 
