@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "casual-calc-desktop"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "casual-calc-layout",
  "casual-calc-model",
