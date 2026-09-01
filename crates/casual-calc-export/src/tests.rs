@@ -5312,3 +5312,55 @@ xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
         assert!(quiet.is_empty(), "{quiet:?}");
     }
 }
+
+/// **A percentage measure round-trips with its format** (`PIV-12`).
+///
+/// `<dataField>` was written with no `numFmtId` at all, so every measure came
+/// out as Excel's General. A `0.00%` measure therefore showed as a percentage
+/// in our own report and as a raw ratio in Excel's rebuild — one file giving
+/// two answers, which is the failure the slice-B row exists to prevent.
+///
+/// The assertion is on **both parts**: the id the pivot writes, and the code
+/// `styles.xml` defines for that id. Checking only the first would pass against
+/// a writer naming a format the package never defines, which is a worse file
+/// than the one with no format at all — Excel repairs that, silently.
+#[test]
+fn a_measure_carries_its_number_format_into_the_package() {
+    let (mut wb, data_id) = pivot_workbook(&["Region", "Share"]);
+    let mut pivot = pivot_over(data_id, 2);
+    pivot.rows.push(axis(0));
+    let mut measure = value(1, "Share");
+    measure.number_format = Some("0.00%".to_owned());
+    pivot.values.push(measure);
+    wb.sheets[1].pivots.push(pivot);
+
+    let written = write_workbook(&wb).unwrap();
+    let names = entry_names(&written);
+    let table_path = names
+        .iter()
+        .find(|n| n.starts_with("xl/pivotTables/pivotTable"))
+        .unwrap_or_else(|| panic!("no pivot table part was written at all: {names:?}"))
+        .clone();
+    assert!(
+        names.iter().any(|n| n == "xl/styles.xml"),
+        "no styles part: {names:?}"
+    );
+    let table = xml_of(&written, &table_path);
+    let styles = xml_of(&written, "xl/styles.xml");
+
+    let id = table
+        .split("<dataField ") // the space matters: `<dataFields` is the wrapper
+        .nth(1)
+        .and_then(|f| f.split("numFmtId=\"").nth(1))
+        .and_then(|f| f.split('"').next())
+        .map(str::to_owned);
+    let id = id.unwrap_or_else(|| {
+        panic!("the measure was written with no numFmtId, so Excel shows General:\n{table}")
+    });
+
+    assert!(
+        styles.contains(&format!("numFmtId=\"{id}\" formatCode=\"0.00%\"")),
+        "the pivot names numFmtId={id} and styles.xml does not define it as 0.00%. \
+         A format the package does not define is the file Excel repairs silently:\n{styles}"
+    );
+}
