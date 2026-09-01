@@ -7295,6 +7295,29 @@ export function openColumnPickList() {
   positionMenu(menu, rect.left + x, rect.top + y + (rowHAt(state.sel.row) ?? 0));
 }
 
+/// One sheet to a PDF file (`IO-14`).
+///
+/// The sheet is `state.sheet` rather than every sheet: the engine's page
+/// pipeline paginates one sheet, and a "whole workbook" button that silently
+/// exported one of them would be the more confusing answer. Naming the visible
+/// sheet is at least the thing the user is looking at.
+///
+/// The loss report is fetched and shown rather than discarded — the PDF backend
+/// draws no pictures, so a sheet with images is the ordinary case for it saying
+/// something, and a printout quietly missing a logo is exactly the silent loss
+/// this repository refuses.
+async function exportPdf() {
+  try {
+    const bytes = wasm.session_export_pdf(state.sheet);
+    const loss = wasm.session_export_pdf_loss(state.sheet);
+    const base = (documentName() || "workbook").replace(/\.[^.]+$/, "");
+    await download(bytes, `${base}.pdf`, "application/pdf");
+    status.textContent = loss ? `exported PDF — ${loss}` : "exported PDF";
+  } catch (e) {
+    status.textContent = `PDF export failed: ${(e && e.message) || e}`;
+  }
+}
+
 function wireEvents() {
   // The real paste event, which is the only place `clipboardData` exists.
   //
@@ -9665,6 +9688,17 @@ function wireEvents() {
           tryEdit(() => wasm.session_toggle_page_break(state.sheet, rowAt, colAt));
         }],
         ["Print…", () => printSheet(), "Ctrl+P"],
+        // **The printout, as a file** (`IO-14`). The paginator and the PDF
+        // writer have been finished since `IO-03`/`IO-10` and reached nobody:
+        // the crate that exposes them is `publish = false`, and this editor —
+        // which compiles them into every build — never offered them. Beside
+        // Print because it is the same page: the same print area, titles,
+        // headers and footers, and the same pagination.
+        //
+        // `download()` routes through the shell's native save panel when there
+        // is one, so this is a Save dialog on the desktop and a download in a
+        // tab, without either being written twice.
+        ["Export as PDF…", () => exportPdf()],
         "sep",
         // Where every spreadsheet puts it, and where somebody looking for "who
         // wrote this" will look first (`UX-META-01`).
