@@ -358,6 +358,53 @@ pub fn session_save_loss_for(ext: &str) -> String {
 /// Shared by [`session_save_loss`] and [`session_save_loss_for`] so the two
 /// cannot phrase the same loss differently — the second was written as a copy
 /// of the first exactly once, in the draft of this change.
+/// One sheet as a PDF, laid out the way it would print.
+///
+/// `IO-14`. The paginator and the PDF writer have been finished and tested
+/// since `IO-03`/`IO-10` — print area, print titles, headers and footers, the
+/// field-code language, repeated rows — and **none of it reached anybody**.
+/// `casual-calc-sdk` is `publish = false`, the server has no PDF route, and
+/// this crate, which already compiles `export_pdf` into every build because it
+/// depends on that crate, never exposed it. Work that is done and unreachable
+/// is indistinguishable from work that was never done, from where a user
+/// stands.
+///
+/// The sheet index is explicit rather than "the active one": a host exporting
+/// in the background has no active sheet, and the editor knows which one it
+/// means.
+///
+/// # Errors
+///
+/// When there is no session, when `sheet_index` is out of range, or when the
+/// writer refuses the page — each carried through as the SDK worded it, since
+/// this layer knows nothing the SDK does not.
+#[wasm_bindgen]
+pub fn session_export_pdf(sheet_index: usize) -> Result<Vec<u8>, JsError> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let session = guard.as_ref().ok_or_else(|| JsError::new("no session"))?;
+        session.export_pdf(sheet_index).map_err(js)
+    })
+}
+
+/// What the printout could not carry, as one sentence, or empty when it carried
+/// everything.
+///
+/// Deliberately a second call rather than a tuple (`IO-14`). Every other loss in
+/// this module is asked for the same way — `session_save_loss`,
+/// `session_loss_for` — and a host that shows loss has one place to read it
+/// from. The PDF backend draws no pictures, so a sheet with images is the
+/// ordinary case for this returning something.
+#[wasm_bindgen]
+pub fn session_export_pdf_loss(sheet_index: usize) -> String {
+    with_session(|s| {
+        s.export_pdf_with_report(sheet_index)
+            .map(|(_, report)| describe_loss(&report))
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
 fn describe_loss(loss: &casual_calc_sdk::CompatibilityReport) -> String {
     if loss.is_empty() {
         return String::new();
