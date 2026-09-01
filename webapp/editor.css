@@ -850,7 +850,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .popmenu {
   position: fixed; z-index: 60; min-width: 178px;
   background: var(--oc-popover-background-color); border: 1px solid var(--oc-control-border-color); border-radius: 12px;
-  padding: 5px; display: flex; flex-direction: column; gap: 2px;
+  padding: 4px; display: flex; flex-direction: column; gap: 1px;
   box-shadow: var(--oc-popover-shadow);
 }
 .popmenu[hidden] { display: none; }
@@ -861,8 +861,16 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
    exactly as tall as the space below the button overflowed the viewport by
    precisely that much. */
 .popmenu { overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box; }
+/* **A menu row is 25px with a mouse, not 33** (`UX-CHR-13`).
+   At `8px 10px` the cell context menu's 41 rows made a 638px panel — taller
+   than the window on a laptop, and every one of those rows was half padding.
+   Excel's own context menu row is ~24px and macOS's is ~22, so 33 was not a
+   house style, it was a control sized for a finger and then shown to a mouse.
+   The finger keeps its size: the `pointer: coarse` block below pins these same
+   rows to `min-height: 44px`, which is the constraint that actually has a
+   reason. This is the other half of that split. */
 .popmenu button {
-  width: 100%; text-align: left; padding: 8px 10px; border: 1px solid transparent;
+  width: 100%; text-align: left; padding: 4px 10px; border: 1px solid transparent;
   border-radius: 6px; background: transparent; color: var(--oc-text-color);
   font-size: 13px; font-weight: 500; cursor: pointer;
 }
@@ -884,7 +892,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .swatch-menu button:hover { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 .swatch-menu .no-fill { background: var(--oc-background-color); color: var(--oc-muted-text-color); }
 .popmenu button.danger { color: var(--oc-danger-color); }
-.menu-sep { height: 1px; background: var(--oc-border-color); margin: 4px 2px; }
+.menu-sep { height: 1px; background: var(--oc-border-color); margin: 3px 2px; }
 .ctx-menu { position: fixed; min-width: 168px; }
 /* Submenu row: a › affordance; its child popmenu is fixed-positioned by JS. */
 .popmenu button.has-sub { position: relative; padding-right: 24px; }
