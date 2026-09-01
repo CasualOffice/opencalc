@@ -1073,6 +1073,28 @@ jobs:
           fi
           du -sh "$dir"/* || true
           echo "bundled ${{ matrix.bundles }} for ${{ matrix.os }}"
+      # `TAURI-020`: **the built binary is run, not merely produced.**
+      #
+      # Every defect this shell has shipped lived in the gap between the Rust
+      # side and the webview — a bridge method the editor never called
+      # (`TAURI-018`), a clipboard the webview is not allowed to touch
+      # (`TAURI-019`), a desktop entry the launcher would not use
+      # (`TAURI-017`). None is reachable by a browser test, because there is no
+      # shell; none by a Rust test, because there is no page; and this job has
+      # built the bundle three platforms wide without ever starting it.
+      #
+      # `xvfb` on Linux only. macOS and Windows runners have no session a GUI
+      # process can attach to from a job step, and a check that silently does
+      # nothing on two of three platforms is worse than one that runs on one
+      # and says so.
+      - name: The built shell starts and its bridge works
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xvfb
+          bin="$(find desktop/target/release -maxdepth 1 -name 'opencalc-desktop' -perm -u+x -print -quit)"
+          [ -n "$bin" ] || { echo "::error::no desktop binary to run"; exit 1; }
+          xvfb-run -a "$bin" --self-check
       # `TAURI-017`: a desktop entry that declares `MimeType=` and whose `Exec=`
       # takes no field code cannot be handed a file. The freedesktop
       # specification says so, and file managers filter such an entry out of

@@ -212,6 +212,38 @@ fn append_nodes(
 /// HTML is written alongside the text when there is any, because that is the
 /// flavour a paste into Excel or a browser picks up; without it every copy out
 /// of this application would be plain text.
+/// The result of `--self-check`, reported from inside the webview.
+///
+/// `TAURI-020`. Every defect this shell has shipped lived in the gap between
+/// the Rust side and the webview — a bridge method the editor never called, a
+/// clipboard the webview is not allowed to touch, a desktop entry the launcher
+/// would not use. None of them is reachable by a browser test, because there
+/// is no shell; none by a Rust test, because there is no page; and the CI job
+/// that builds the bundle has never once *run* it. So the binary checks itself.
+#[tauri::command]
+fn self_check_report(app: tauri::AppHandle, failures: Vec<String>) {
+    // **`std::process::exit`, not `app.exit`.** The first version of this used
+    // `AppHandle::exit(1)`, which unwinds the event loop but leaves the process
+    // status at 0 — so the check printed `SELF-CHECK FAILED …` and the shell
+    // that ran it saw success. A gate that reports a failure it cannot fail on
+    // is the shape this repository keeps rediscovering (`CI-032`), and it was
+    // caught here only by regressing the clipboard on purpose and reading the
+    // exit code rather than the message.
+    use std::io::Write;
+    let code = if failures.is_empty() {
+        println!("SELF-CHECK ok");
+        0
+    } else {
+        for f in &failures {
+            println!("SELF-CHECK FAILED {f}");
+        }
+        1
+    };
+    let _ = std::io::stdout().flush();
+    let _ = &app; // the handle is the command's, and the process is leaving
+    std::process::exit(code);
+}
+
 #[tauri::command]
 fn clipboard_write(app: tauri::AppHandle, text: String, html: Option<String>) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -666,6 +698,49 @@ async fn native_save_target(app: AppHandle, force: bool) -> Result<SavedToTarget
 /// anything that navigates — replaces `window`, and a bridge installed once
 /// leaves the second page with a menu bar that dispatches into nothing and an
 /// Open that does not exist. This is idempotent, so re-running it is the fix.
+/// What `--self-check` runs in the page (`TAURI-020`).
+///
+/// Deliberately about the **bridge**, not about the spreadsheet: the editor has
+/// 470 browser tests and needs no help here. What has no coverage at all is
+/// whether the two halves are joined in the built binary — so every assertion
+/// is one that can only fail in a shell.
+///
+/// The clipboard round-trip is the one that matters most. `TAURI-019` shipped
+/// a build where `navigator.clipboard` was refused in both directions, and the
+/// paste path read that refusal as "use our own snapshot" — so a copy from
+/// another application pasted the wrong cells with no error anywhere. A
+/// round-trip through the platform is the smallest thing that would have
+/// caught it.
+const SELF_CHECK: &str = r#"setTimeout(async () => {
+  const fail = [];
+  const invoke = window.__TAURI__.core.invoke;
+  try {
+    const n = window.__opencalcNative;
+    if (!n) fail.push("window.__opencalcNative is absent: BOOTSTRAP did not run");
+    else {
+      for (const m of ["setEditing", "publishMenu", "setDocument", "clipboardWrite", "clipboardRead"]) {
+        if (typeof n[m] !== "function") fail.push("the bridge has no " + m + "()");
+      }
+      if (typeof n.clipboardWrite === "function" && typeof n.clipboardRead === "function") {
+        const sentinel = "opencalc-self-check-" + Date.now();
+        await n.clipboardWrite(sentinel, "");
+        const back = await n.clipboardRead();
+        if (back !== sentinel) {
+          fail.push("clipboard round-trip: wrote " + JSON.stringify(sentinel)
+                    + " and read back " + JSON.stringify(back));
+        }
+      }
+    }
+    if (!window.opencalcEditor) fail.push("window.opencalcEditor is absent: the editor did not load");
+    else if (typeof window.opencalcEditor.runCommand !== "function") {
+      fail.push("the editor exposes no runCommand(), which is the whole of the menu dispatch");
+    }
+  } catch (e) {
+    fail.push("threw: " + (e && e.message ? e.message : String(e)));
+  }
+  await invoke("self_check_report", { failures: fail });
+}, 4000)"#;
+
 const BOOTSTRAP: &str = r#"(function () {
   const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
   if (!invoke) return;
@@ -907,6 +982,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             clipboard_write,
             clipboard_read,
+            self_check_report,
             publish_menu,
             set_editing,
             set_capabilities,
@@ -989,6 +1065,9 @@ fn main() {
             // and nothing on the page looks for it before then.
             if payload.event() == PageLoadEvent::Finished {
                 let _ = webview.eval(BOOTSTRAP);
+                if std::env::args().any(|a| a == "--self-check") {
+                    let _ = webview.eval(SELF_CHECK);
+                }
             }
         })
         .setup(|app| {
