@@ -687,6 +687,24 @@ test.describe("collaboration", () => {
     expect(
       await one.evaluate(() => window.__collab.documents.find((d) => d.reason === "lost").why),
     ).toBe("desynced");
+
+    // **And the status line says which of the two happened** (`COL-58`).
+    //
+    // It used to read "reconnected to a *different server*" for every loss.
+    // That is true of an unresumed session and false of this one: the client
+    // reconnected to the same server and abandoned its own state. The cause
+    // arrives on the document event rather than the status event, so the test
+    // is that the sentence the user is left with is the desync one.
+    await expect
+      .poll(() => one.evaluate(() => document.getElementById("tb-status").textContent), {
+        message: "the loss notice never took the cause the document event carried",
+        timeout: 15_000,
+      })
+      .toContain("lost the shared history");
+    expect(
+      await one.evaluate(() => document.getElementById("tb-status").textContent),
+      "a desync is not a different server, and saying so was the defect",
+    ).not.toContain("different server");
     expect(await one.evaluate(() => window.__sockets)).toBeGreaterThan(0);
 
     // And it is a participant again rather than a page that reconnected: the
