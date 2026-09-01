@@ -164,6 +164,49 @@ code { font-family: var(--mono); font-size: .88em; }
   transform: rotate(-45deg);
 }
 .io-note { margin-top: 26px; font-size: 14.5px; color: var(--muted); }
+
+/* The nav is sticky, so an anchor jump puts the target under it. Scoped to the
+   sections that are actually linked to rather than applied to every `id`. */
+#choose { scroll-margin-top: 84px; }
+
+/* The three-product matrix. A real table, because it is one: the columns are
+   products, the rows are questions somebody is choosing between, and a reader
+   comparing two cells wants them on the same line. */
+.matrix-scroll { margin-top: 48px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.matrix {
+  width: 100%; min-width: 720px; border-collapse: collapse;
+  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+  background: var(--panel); font-size: 15px;
+}
+.matrix th, .matrix td {
+  text-align: left; vertical-align: top; padding: 16px 18px;
+  border-top: 1px solid var(--line);
+}
+.matrix thead th {
+  border-top: 0; background: var(--note-bg); color: var(--fg);
+  font-size: 15px; font-weight: 650; line-height: 1.35;
+}
+/* The row labels are questions, not headings shouted at the reader. */
+.matrix tbody th {
+  font-weight: 550; color: var(--fg); width: 26%;
+}
+.matrix td { color: var(--muted); }
+.matrix .matrix-sub {
+  display: block; margin-top: 4px; font-family: var(--mono);
+  font-size: 12.5px; font-weight: 400; color: var(--faint); letter-spacing: 0;
+}
+.matrix code { font-family: var(--mono); font-size: 13px; background: var(--code-bg); color: var(--code-fg); padding: 2px 6px; border-radius: 5px; }
+/* Yes and no are said in words as well as in colour: colour alone is not an
+   answer to a reader who cannot see the difference. */
+.matrix td.yes { color: var(--fg); }
+.matrix td.yes::before,
+.matrix td.no::before,
+.matrix td.na::before { font-weight: 700; margin-right: 8px; }
+.matrix td.yes::before { content: "✓"; color: var(--ok); }
+.matrix td.no::before { content: "✕"; color: var(--faint); }
+.matrix td.na::before { content: "–"; color: var(--faint); }
+.matrix tbody tr:last-child th, .matrix tbody tr:last-child td { font-size: 14px; }
+@media (max-width: 720px) { .matrix { min-width: 640px; } }
 .io-note b { color: var(--fg); font-weight: 600; }
 
 /* Engine pipeline + hosts + code */
