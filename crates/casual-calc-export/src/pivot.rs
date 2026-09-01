@@ -203,6 +203,33 @@ pub fn build(workbook: &Workbook, sheet: &Sheet, first: usize, first_rel: usize)
 /// entry is [`PivotDerived::default`], is written exactly as [`build`] writes
 /// it. It exists so the writer can be exercised — and handed to a foreign
 /// reader — before slices C, D and E give [`PivotTable`] somewhere to hold this.
+/// Every number-format code a pivot measure asks for, in a fixed order.
+///
+/// `PIV-12`. `styles_xml` seeds its `<numFmts>` table with exactly this list
+/// before it adds the codes cell styles need, and `table_xml` resolves a
+/// measure's `numFmtId` as a position in it. **One function, called twice**, so
+/// the id a pivot writes and the id the styles part defines cannot drift — the
+/// alternative is two orderings that agree until somebody adds a sheet.
+///
+/// Deterministic by construction: sheets in order, pivots in order, values in
+/// order, first occurrence wins. Not a `BTreeSet`, because sorting the codes
+/// would make the ids depend on their spelling rather than on the document.
+pub fn number_formats(workbook: &Workbook) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sheet in &workbook.sheets {
+        for pivot in authored(sheet) {
+            for value in &pivot.values {
+                if let Some(code) = value.number_format.as_deref()
+                    && !out.iter().any(|c| c == code)
+                {
+                    out.push(code.to_owned());
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn build_with(
     workbook: &Workbook,
     sheet: &Sheet,
@@ -211,6 +238,10 @@ pub fn build_with(
     derived: &[PivotDerived],
 ) -> SheetPivots {
     let mut out = SheetPivots::default();
+    // Computed once for the workbook rather than per pivot: the ids are
+    // positions in a single table and must not depend on which sheet is being
+    // written (`PIV-12`).
+    let num_fmts = number_formats(workbook);
     for (i, pivot) in authored(sheet).iter().enumerate() {
         let n = first + i;
         let table_path = format!("xl/pivotTables/pivotTable{n}.xml");
@@ -229,8 +260,10 @@ pub fn build_with(
             cache_path.clone(),
             cache_xml(workbook, pivot, &layout, derivation),
         ));
-        out.parts
-            .push((table_path.clone(), table_xml(pivot, &layout, derivation)));
+        out.parts.push((
+            table_path.clone(),
+            table_xml(pivot, &layout, derivation, &num_fmts),
+        ));
         // The table names its cache, which is how a reader gets from one to the
         // other; without it Excel reports the pivot as unreadable.
         out.rels.push((
@@ -581,7 +614,12 @@ fn field_group_xml(base: u32, group: &PivotGroup) -> String {
 /// vendored schema; it is a defect of `PIV-02`'s writer rather than of this
 /// slice, and it is fixed here because a document that fails to validate is a
 /// worse place to put new attributes than one that validates.
-fn table_xml(pivot: &PivotTable, layout: &CacheLayout, derived: &PivotDerived) -> String {
+fn table_xml(
+    pivot: &PivotTable,
+    layout: &CacheLayout,
+    derived: &PivotDerived,
+    num_fmts: &[String],
+) -> String {
     // The extent the last refresh wrote, when there is one — a reader needs
     // somewhere to put the report before it has refreshed.
     let location = pivot.output.unwrap_or(casual_calc_model::CellRange::new(
@@ -669,8 +707,25 @@ rowGrandTotals=\"{}\" colGrandTotals=\"{}\">\
             // aggregate, so the model's `aggregate` is not what the file means
             // and `sum` — the schema's default — is what it writes.
             let subtotal = if calculated { "sum" } else { subtotal_token(f) };
+            // **The measure's format, as an id the styles part will define**
+            // (`PIV-12`). This was absent, so every measure came out with
+            // Excel's General: a `0.00%` measure showed as a percentage in our
+            // own report and as a raw ratio in Excel's rebuild — one file, two
+            // answers, which is the failure the whole slice-B row exists to
+            // prevent.
+            //
+            // The id is a position in the table `styles_xml` is seeded with, so
+            // the two parts cannot disagree: a code that is not in that table
+            // has no id to write and falls back to General rather than naming a
+            // format the package does not define.
+            let num_fmt = f
+                .number_format
+                .as_deref()
+                .and_then(|code| num_fmts.iter().position(|c| c == code))
+                .map(|idx| format!(" numFmtId=\"{}\"", crate::FIRST_CUSTOM_NUM_FMT + idx as u32))
+                .unwrap_or_default();
             s.push_str(&format!(
-                "<dataField name=\"{}\" fld=\"{field}\" subtotal=\"{subtotal}\"{}/>",
+                "<dataField name=\"{}\" fld=\"{field}\" subtotal=\"{subtotal}\"{num_fmt}{}/>",
                 escape_attr(&name),
                 show_data_as_attrs(derived.values.get(&i), layout.width)
             ));

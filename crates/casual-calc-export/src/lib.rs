@@ -52,7 +52,7 @@ const DEFAULT_AUTHOR: &str = "";
 /// The timestamp written for a thread that has none. Threaded comments require
 /// `dT`, and inventing "now" here would make two saves of one workbook differ.
 const EPOCH_STAMP: &str = "1970-01-01T00:00:00.00";
-const FIRST_CUSTOM_NUM_FMT: u32 = 164;
+pub(crate) const FIRST_CUSTOM_NUM_FMT: u32 = 164;
 const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 
 /// The content type of `xl/workbook.xml` in a plain workbook package.
@@ -232,7 +232,13 @@ pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u
     // with the worksheet `<cfRule>`s — so styles.xml is written when there are
     // dxfs even if no cell carries a style.
     let dxfs = collect_dxfs(workbook);
-    let has_styles = !workbook.styles.is_empty() || !dxfs.is_empty();
+    // A pivot measure's format is a third reason, and the one that bites
+    // hardest (`PIV-12`): the measure names a `numFmtId` and the package would
+    // not define it. A pivot table pointing at a format that does not exist is
+    // worse than one with no format — Excel repairs that file, silently, and a
+    // repaired file is `IO-12`'s whole subject.
+    let pivot_num_fmts = pivot::number_formats(workbook);
+    let has_styles = !workbook.styles.is_empty() || !dxfs.is_empty() || !pivot_num_fmts.is_empty();
 
     // Charts made here, before anything that has to reference them: a worksheet
     // names its drawing, the content types declare both parts, and neither can
@@ -1748,6 +1754,12 @@ fn write_xf(s: &mut String, ids: &StyleIds, xf_id: Option<usize>) {
 }
 
 fn styles_xml(workbook: &Workbook, dxfs: &[Dxf]) -> String {
+    // **Seeded with what the pivots need, before anything else** (`PIV-12`).
+    // A measure's `numFmtId` is a position in this table, and `pivot.rs`
+    // computes it from `pivot::number_formats` — the same call, so the id it
+    // writes is the id defined here. Seeding rather than appending is what
+    // makes the position stable: a code the cell styles also use is found at
+    // its pivot index instead of being added a second time.
     let styles: Vec<_> = workbook.styles.iter().collect();
 
     // Deduplicate fonts, solid fills, and custom number formats, and record the
@@ -1756,7 +1768,7 @@ fn styles_xml(workbook: &Workbook, dxfs: &[Dxf]) -> String {
     // Font key: (bold, italic, underline, strike, color, name, size_hp).
     let mut fonts: Vec<FontKey> = vec![FontKey::default()];
     let mut fills: Vec<FillKey> = Vec::new();
-    let mut num_codes: Vec<String> = Vec::new();
+    let mut num_codes: Vec<String> = pivot::number_formats(workbook);
     // Border id 0 is reserved for the empty border; interned borders start at 1.
     let mut borders: Vec<Borders> = Vec::new();
     let mut per_style: Vec<StyleIds> = Vec::with_capacity(styles.len());
