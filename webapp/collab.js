@@ -124,6 +124,9 @@ export function collaborate({
   /// `onclose`, so a second desync after a successful rejoin is answered the
   /// same way — under the ordinary backoff, which is what stops a document that
   /// desyncs every time from spinning.
+  /// Which connection is the live one, so a socket that has been replaced can
+  /// tell that it has been (`COL-60`).
+  let generation = 0;
   let rejoining = false;
   /// Set when the join now being made is the recovery from a desync, so the
   /// `welcome` that answers it can say *why* the unacknowledged work is gone.
@@ -165,6 +168,21 @@ export function collaborate({
 
   function open() {
     if (closed) return;
+    // **Which socket this is** (`COL-60`).
+    //
+    // `close()` is safe because it sets `closed` first, and every handler
+    // checks it. `redirect()` sets nothing: it calls `socket.close()` and then
+    // `open()` in the same breath, so by the time the *old* socket's `onclose`
+    // runs — a task later — `socket` is already the new one and `closed` is
+    // still false. That closure then ran against the replacement: `stopTimers()`
+    // killing the new socket's timers, `joined = false`, and a
+    // `setTimeout(open, wait)` opening a third.
+    //
+    // A generation is enough, and is per socket rather than per session for the
+    // same reason `rejoining` is: the question is "is this still the connection
+    // anyone is listening to", and only the socket knows which one it is.
+    const mine = ++generation;
+    const current = () => mine === generation;
     const target = new URL(endpoint);
     target.searchParams.set("doc", documentKey);
     socket = new WebSocket(target);
@@ -218,6 +236,11 @@ export function collaborate({
     };
 
     socket.onclose = () => {
+      // Superseded: `redirect()` replaced this socket while it was closing, so
+      // everything below belongs to a connection that is not this one
+      // (`COL-60`). Returning first — before `stopTimers()` — because the
+      // timers running now are the new socket's.
+      if (!current()) return;
       stopTimers();
       joined = false;
       // Per socket, not per session: the guard exists to collapse a burst of
