@@ -1,0 +1,50 @@
+# The gates, on main, within a minute of a merge.
+#
+# `CI-031`. Main went red with **both parents green**: two branches each
+# inserted tracker rows, `check-tracker-ids.py` passed on both, and the merge
+# kept both copies because a moved row and an edited row are not the same line
+# to git. Every gate in this repository runs on a commit somebody wrote. The
+# merge commit is written by GitHub, and nothing looked at it.
+#
+# `ci.yml` already tests a merge result on pull requests — `actions/checkout`
+# resolves `refs/pull/N/merge` — but against main *as it was when that run
+# started. Nothing re-tests when main moves underneath, which is exactly the
+# case that produced the clash.
+#
+# Two things close that, and only one of them is a file:
+#
+#   1. This job, which is detection. `ci.yml` also runs on push to main, but
+#      `CI-030` measured it reporting **about two hours** after a merge under
+#      queue saturation, and a two-hour-old answer about main is not one anybody
+#      acts on. All 24 gates take 2.3s and need no cargo build, so the whole
+#      answer arrives in well under a minute.
+#
+#   2. A merge queue, which is prevention, and which is a repository setting
+#      rather than a workflow. `ci.yml` now accepts `merge_group`, so enabling
+#      it in Settings makes the gates run on the queued merge result before it
+#      becomes main. Until that is switched on this job is the only half that
+#      exists, and `CI-031` stays Partial for exactly that reason.
+name: post-merge
+on:
+  push:
+    branches: [main]
+
+# **Every commit on main keeps its own run**, and `check-workflow-concurrency.py`
+# is what said so — the first draft of this file used one group for all of main
+# with `cancel-in-progress: true`, on the reasoning that a newer merge makes an
+# older answer irrelevant. It does not: each merge's result is the record of
+# whether main was releasable *at that commit*, and cancelling discards the
+# answer this job exists to produce. A queued run is discarded by a newer
+# request joining the group even when cancellation is off, so the commit goes
+# in the group name too.
+concurrency:
+  group: post-merge-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every gate, against the tree that is now main
+        run: python3 tools/check-all.py

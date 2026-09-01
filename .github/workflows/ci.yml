@@ -3,6 +3,11 @@ name: ci
 on:
   push:
     branches: [main]
+  # `CI-031`: the merge queue tests the *queued merge result*, which is the one
+  # tree nothing here has ever checked before it became main. Inert until a
+  # merge queue is enabled in the repository settings; harmless meanwhile, and
+  # present so that enabling it is a switch rather than a change to this file.
+  merge_group:
   pull_request:
 
 # A pull-request run is superseded the moment its branch moves, so cancelling it
