@@ -1526,6 +1526,89 @@ fn undoing_the_removal_restores_the_broken_series() {
     );
 }
 
+/// **A column delete on another sheet is undoable for the chart too** (`CHT-12`).
+///
+/// `delete` snapshots its own sheet's metadata, and `rewrite_chart_series`
+/// rewrites series across the *whole workbook* — so a chart living on `S` and
+/// plotting `Other` was rewritten by a delete on `Other` that never captured
+/// `S`. Undo re-opened the band and left the series broken, permanently. The
+/// same shape as `PIV-06`, which `sheets_sourcing` already fixed for pivots one
+/// function away; charts never got the counterpart, and `sheets_charting` — the
+/// helper this needs — was sitting there for the `RemoveSheet` path.
+#[test]
+fn undoing_a_column_delete_restores_a_chart_on_another_sheet() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    let before = series_text(&wb);
+
+    // Column B of `Other`, which is what the second series plots.
+    let inverse = apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 1,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+
+    assert_ne!(
+        series_text(&wb),
+        before,
+        "the premise is gone: the delete no longer touches this series at all"
+    );
+
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(
+        series_text(&wb),
+        before,
+        "undo must put the chart's series back, not only the column"
+    );
+}
+
+/// The neighbouring path, probed rather than assumed — and it is **sound**
+/// (`CHT-12`).
+///
+/// `move_lines` snapshots its own sheet only and then calls the same
+/// workbook-wide `rewrite_chart_series`, with neither `sheets_sourcing` nor
+/// `sheets_charting` anywhere in it. By the shape of the delete defect it
+/// should have been broken too. It is not, and the reason is worth keeping:
+/// **a move is a permutation and a delete is lossy.** The reverse move shifts
+/// a cross-sheet reference back exactly, so no snapshot is needed; a delete
+/// collapses one to `#REF!`, and nothing can un-shift that.
+///
+/// Kept as a guard rather than deleted for passing. The day `move_lines`
+/// gains a lossy case — a band dragged out of a span, which its own comment
+/// already names — this is the test that says the snapshot has to come with
+/// it.
+#[test]
+fn undoing_a_column_move_restores_a_chart_on_another_sheet() {
+    let mut wb = workbook_with_a_cross_sheet_chart();
+    let before = series_text(&wb);
+
+    let inverse = apply(
+        &mut wb,
+        Operation::MoveColumns {
+            sheet: 1,
+            at: 1,
+            count: 1,
+            before: 4,
+        },
+    )
+    .unwrap();
+
+    assert_ne!(
+        series_text(&wb),
+        before,
+        "the premise is gone: the move no longer touches this series"
+    );
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(
+        series_text(&wb),
+        before,
+        "undo must put the chart's series back after a move too"
+    );
+}
+
 #[test]
 fn remove_missing_sheet_errors() {
     let mut wb = workbook();

@@ -155,7 +155,26 @@ pub(crate) fn delete(
     // inverse could not restore the source rectangle it had just shrunk, let
     // alone the fields it now renumbers. Snapshotted before mutation, like
     // everything else here.
-    let sourcing_restores: Vec<Operation> = sheets_sourcing(workbook, sheet)
+    // A chart plotting this sheet usually lives on another one too (`CHT-12`),
+    // and `rewrite_chart_series` below rewrites series across the *whole*
+    // workbook. Until this, a delete on `Data` broke a chart on `Report` and the
+    // inverse could not put it back: undo re-opened the band and left the series
+    // at `#REF!`, permanently. Exactly the shape `PIV-06` fixed for pivots one
+    // line above — and `sheets_charting` already existed for the `RemoveSheet`
+    // path, so what was missing was the call, not the machinery.
+    //
+    // One list, deduplicated: a sheet holding both a pivot and a chart on this
+    // data would otherwise be snapshotted twice, and the second restore would
+    // be applied over the first for no gain.
+    let mut others = sheets_sourcing(workbook, sheet);
+    others.extend(
+        sheets_charting(workbook, &target)
+            .into_iter()
+            .filter(|other| *other != sheet),
+    );
+    others.sort_unstable();
+    others.dedup();
+    let sourcing_restores: Vec<Operation> = others
         .into_iter()
         .map(|other| snapshot_metadata(workbook, other))
         .collect();
